@@ -6,7 +6,7 @@
 //! lets through — every other variable of tarae's removed by name (`sandbox::from_run_env`; never `env_clear`:
 //! `spawn::setsid` can't see a clear, and std drops the removals made after one) — from `Here`:
 //! - the core's floor (`FLOOR`, `FLOOR_FAMILIES`): where things are and how text reads — no tool's name but
-//!   git's, which is tarae's own; the proxies only while the network is open (`PROXIES`);
+//!   git's, which is tarae's own — never the user's proxies (`PROXIES`: tarae's own, with the network open);
 //! - every variable the policy itself reads to place things (`Packs::env_names`: the toolchains' homes, their
 //!   settings' and caches' variables) — a run that saw another `CARGO_HOME` than the policy would look where
 //!   nothing was opened;
@@ -54,8 +54,8 @@ const FLOOR: [&str; 21] = [
 /// The floor's families: the locale's parts (`LC_CTYPE` alone is common on macOS — no `LANG`).
 const FLOOR_FAMILIES: [&str; 1] = ["LC_"];
 
-/// While the network is open (`llm.sandbox-network`): where it goes through. A proxy with a password in it is
-/// left out as any token is. (Linux: tarae's egress proxy's own take their place — `proxy::run_env`.)
+/// The user's proxies: never passed — while the network is open (`llm.sandbox-network`) tarae's egress proxy's
+/// own take their place (`proxy::run_env`), and those aren't said as left out.
 pub(crate) const PROXIES: [&str; 8] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -144,23 +144,13 @@ fn token_like(name: &str, value: &OsString) -> bool {
     crate::tokens::token_like(&format!("{name}={}", value.to_string_lossy()))
 }
 
-/// What a run gets of `here`'s variables: the floor, the proxies while `network` is open, what the policy reads
-/// (`policy`), the packs' `pass`, the user's `yours` — no token-like one but a name of `yours` written whole.
-/// `set`: what tarae sets on top (not said as left out).
-pub fn of(
-    here: &Here,
-    network: bool,
-    policy: &[&str],
-    pass: &[String],
-    yours: &[String],
-    set: &[&str],
-) -> RunEnv {
+/// What a run gets of `here`'s variables: the floor, what the policy reads (`policy`), the packs' `pass`, the
+/// user's `yours` — no token-like one but a name of `yours` written whole. `set`: what tarae sets on top (not
+/// said as left out).
+pub fn of(here: &Here, policy: &[&str], pass: &[String], yours: &[String], set: &[&str]) -> RunEnv {
     let yours: Vec<&String> = yours.iter().filter(|e| entry_ok(e)).collect();
     let by = |name: &str| -> Option<By> {
-        if FLOOR.contains(&name)
-            || FLOOR_FAMILIES.iter().any(|f| name.starts_with(f))
-            || (network && PROXIES.contains(&name))
-        {
+        if FLOOR.contains(&name) || FLOOR_FAMILIES.iter().any(|f| name.starts_with(f)) {
             Some(By::Floor)
         } else if policy.contains(&name) {
             Some(By::Policy)
@@ -338,7 +328,7 @@ mod tests {
         ]);
         let pass = vec!["CARGO_*".to_string(), "RUST*".to_string()];
         let yours = vec!["DATABASE_URL".to_string(), "MY_API_KEY".to_string()];
-        let e = of(&h, false, &["CARGO_HOME"], &pass, &yours, &["NO_COLOR"]);
+        let e = of(&h, &["CARGO_HOME"], &pass, &yours, &["NO_COLOR"]);
         assert_eq!(
             names(&e),
             ["CARGO_HOME", "DATABASE_URL", "HOME", "LC_CTYPE", "MY_API_KEY", "PATH", "RUSTFLAGS"]
@@ -358,11 +348,9 @@ mod tests {
             "PWD and NO_COLOR: set anyway"
         );
         assert!(!format!("{e:?}").contains(FAKE) && !format!("{e:?}").contains("/usr/bin"), "{e:?}");
-        // The network open: the proxies — but not one with a password
-        let open = of(&h, true, &[], &[], &[], &[]);
-        assert!(names(&open).contains(&"NO_PROXY") && open.tokens.contains(&"HTTPS_PROXY".to_string()));
+        // (the user's proxies never pass: with the network open tarae's own take their place — `run_env_of`)
         // A family of the user's carries no token-like name; a bare `*` is no family
-        let fam = of(&h, false, &[], &[], &["MY_*".into(), "*".into()], &[]);
+        let fam = of(&h, &[], &[], &["MY_*".into(), "*".into()], &[]);
         assert!(fam.tokens.contains(&"MY_API_KEY".to_string()) && !names(&fam).contains(&"CLAUDE_PID"));
     }
 
@@ -381,7 +369,7 @@ mod tests {
             ("GRADLE_OPTS", "-Xmx2g -Dfile.encoding=UTF-8"),
         ]);
         let pass = ["YARN_*", "JAVA_OPTS", "MAVEN_OPTS", "GRADLE_*"].map(String::from);
-        let e = of(&h, false, &[], &pass, &[], &[]);
+        let e = of(&h, &[], &pass, &[], &[]);
         assert_eq!(names(&e), ["GIT_AUTHOR_EMAIL", "GIT_AUTHOR_NAME", "GRADLE_OPTS", "YARN_ENABLE_COLORS"]);
         assert_eq!(e.tokens, ["JAVA_OPTS", "MAVEN_OPTS", "YARN_NPM_AUTH_IDENT"]);
         assert!(!format!("{e:?}").contains(FAKE));

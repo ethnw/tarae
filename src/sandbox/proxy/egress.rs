@@ -188,33 +188,34 @@ fn dial(a: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
 /// Tests: whether `ip` is one of this machine's own addresses (`getifaddrs`).
 #[cfg(test)]
 fn this_machines(ip: IpAddr) -> bool {
-    let mut found = false;
+    addresses().is_ok_and(|a| a.contains(&ip))
+}
+
+/// The addresses of this machine's network (Linux: tarae's own namespace's), every interface's (`getifaddrs`).
+pub fn addresses() -> io::Result<Vec<IpAddr>> {
+    let mut addrs = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: the list the call makes is walked while it's there, read only, then freed once.
+    // SAFETY: the list getifaddrs makes, walked while it lives, read only, freed once after.
     unsafe {
         if libc::getifaddrs(&mut list) != 0 {
-            return false;
+            return Err(io::Error::last_os_error());
         }
         let mut at = list;
         while !at.is_null() {
-            let sa = (*at).ifa_addr;
-            if !sa.is_null() {
-                let mine = match i32::from((*sa).sa_family) {
-                    libc::AF_INET => {
-                        let sin = &*sa.cast::<libc::sockaddr_in>();
-                        IpAddr::from(u32::from_be(sin.sin_addr.s_addr).to_be_bytes())
+            let a = (*at).ifa_addr;
+            if !a.is_null() {
+                match i32::from((*a).sa_family) {
+                    libc::AF_INET => addrs
+                        .push(IpAddr::from((*a.cast::<libc::sockaddr_in>()).sin_addr.s_addr.to_ne_bytes())),
+                    libc::AF_INET6 => {
+                        addrs.push(IpAddr::from((*a.cast::<libc::sockaddr_in6>()).sin6_addr.s6_addr))
                     }
-                    libc::AF_INET6 => IpAddr::from((*sa.cast::<libc::sockaddr_in6>()).sin6_addr.s6_addr),
-                    _ => {
-                        at = (*at).ifa_next;
-                        continue;
-                    }
-                };
-                found |= mine == ip;
+                    _ => {}
+                }
             }
             at = (*at).ifa_next;
         }
         libc::freeifaddrs(list);
     }
-    found
+    Ok(addrs)
 }

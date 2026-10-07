@@ -314,12 +314,7 @@ pub fn serve(
 ) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
     static RUNS: AtomicU64 = AtomicU64::new(1);
-    let session = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        policy.root.hash(&mut h);
-        h.finish()
-    };
+    let session = super::proxy::session_of(&policy.root);
     // (5c: any host through the proxy with the network open — the hosts' list and the user's answers are 5e's)
     let egress = Arc::new(super::proxy::egress::Egress {
         any: policy.network,

@@ -111,9 +111,10 @@ pub struct LlmConfig {
     /// Paths in the project the sandbox keeps as they are, besides the names it always keeps
     /// (`sandbox::protected_names`).
     pub sandbox_protect: Vec<String>,
-    /// Ports on this machine the sandbox lets Claude's commands connect to (the network closed: none else).
+    /// Ports on this machine the sandbox lets Claude's commands connect to (none else, the network open or not).
     pub sandbox_ports: Vec<u16>,
-    /// Every port on this machine open to them — the risky ones too (Seatbelt can't leave some out).
+    /// Every port on this machine open to them — the risky ones too (Seatbelt can't leave some out), and on
+    /// macOS other runs' ports to tarae's proxy.
     pub sandbox_localhost: bool,
     /// More of tarae's environment their commands get (`sandbox::runenv`): names, or `PREFIX*` families — a
     /// token-like one only by its whole name.

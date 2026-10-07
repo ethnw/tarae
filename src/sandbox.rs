@@ -34,10 +34,8 @@ mod golden;
 pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
-// (the egress proxy: Linux's runs reach it through their supervisors; macOS's with step 5d)
-#[cfg(any(target_os = "linux", test))]
+// (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
-#[cfg(any(target_os = "linux", test))]
 pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
@@ -258,8 +256,8 @@ impl Guard {
                     w if w.starts_with("connecting to port")
                         && refused_port.iter().any(|(n, _)| *n == d.process) =>
                     {
-                        // (Linux: the open network isn't this machine's ports)
-                        let closed = !p.localhost && !(p.network && p.linux_said().is_none());
+                        // (the open network isn't this machine's ports: it goes through tarae's proxy)
+                        let closed = !p.localhost;
                         let of = refused_port.iter().position(|(n, _)| *n == d.process);
                         ports.extend(of.filter(|i| closed && !ports.contains(i)));
                         all = false;
@@ -369,13 +367,22 @@ impl Guard {
                 let ports = p.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
                 let linux = p.linux_said();
                 // (Linux: served, the open network is routed out — this machine's ports only as opened; not
-                // served, no socket at all, said in its notes)
-                let routed = linux.as_ref().is_some_and(|(no_socket, _)| no_socket.is_none());
+                // served, no socket at all, said in its notes. macOS: out through the run's own proxy port)
+                let routed = match &linux {
+                    Some((no_socket, _)) => no_socket.is_none(),
+                    None => cfg!(not(target_os = "linux")),
+                };
                 let beyond = p.network && (linux.is_none() || routed);
+                // (Q3a, macOS: every port of this machine is every other run's way to tarae's proxy too)
+                let every = match cfg!(target_os = "linux") {
+                    true => "",
+                    false => " — llm.sandbox-localhost opens other runs' ports to tarae's proxy too",
+                };
                 // (Linux, served, but this machine's addresses unread or no socket of tarae's can take a run's
-                // place: nothing but loopback — `route` and the supervisor refuse the rest)
+                // place: nothing but loopback — `route` and the supervisor refuse the rest; macOS: no port of
+                // the run's own to the proxy)
                 let lo = match (p.localhost, ports.is_empty()) {
-                    (true, _) => "every port of it".to_string(),
+                    (true, _) => format!("every port of it{every}"),
                     (false, false) => format!("its ports {ports} only (llm.sandbox-ports)"),
                     (false, true) => {
                         "none of its ports (llm.sandbox-ports opens some, llm.sandbox-localhost all)"
@@ -389,27 +396,22 @@ impl Guard {
                         loopback_only.as_deref().unwrap_or_default(),
                         if p.network { ", llm.sandbox-network notwithstanding" } else { "" }
                     ),
-                    // (step 5: the open network goes through tarae's proxy, a direct connect is `network-direct`)
-                    (true, here, none) if routed => format!(
+                    // (step 5: the open network goes through tarae's proxy — Linux: a direct connect is
+                    // `network-direct`; macOS: Seatbelt opens loopback's ports only, the proxy's among them)
+                    (true, here, none) => format!(
                         ", and reach the network beyond this machine (its loopback and its own addresses) only \
                          through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it (ssh, a \
                          database client, Node's fetch without NODE_USE_ENV_PROXY) can't go out; never link-local \
                          addresses, the cloud metadata servers tarae knows of, multicast or broadcast — {}",
                         match (here, none) {
-                            (true, _) => "and every port of this machine's".to_string(),
+                            (true, _) => format!("and every port of this machine's{every}"),
                             (false, false) => format!("and this machine's ports {ports} only (llm.sandbox-ports)"),
                             (false, true) => "but none of this machine's ports (llm.sandbox-ports opens some, \
                                               llm.sandbox-localhost all)"
                                 .to_string(),
                         }
                     ),
-                    // (macOS: Seatbelt names loopback only — `localhost:<port>` — so this machine's own addresses
-                    // beyond it go as the network does)
-                    (true, ..) => ", and reach the network — but not the risky ports (Docker, Jupyter, debuggers…) \
-                                   on this machine's loopback; on its other addresses (its LAN's) they're reached as \
-                                   the network is"
-                        .to_string(),
-                    (false, true, _) => ", and connect to nothing over the network but this machine".into(),
+                    (false, true, _) => format!(", and connect to nothing over the network but this machine{every}"),
                     (false, false, true) => ", and connect to nothing over the network, this machine's ports \
                                              included (llm.sandbox-ports opens some, llm.sandbox-localhost all)"
                         .into(),
@@ -547,6 +549,11 @@ pub struct Policy {
     /// This run's tag: every deny carries it (`(with message …)`), so the kernel's report of a denial says
     /// whose it is — by the time it arrives the process is mostly gone (measured), so its pid can't.
     pub tag: Option<String>,
+    /// macOS, the network open: this run's own way to tarae's proxy (`proxy::RunPort`) — its port the only one
+    /// beyond the opened ones its profile opens. None with the network closed, or where it couldn't be made:
+    /// then nothing goes beyond this machine (`loopback_only` says so). None on Linux (the supervisor hands its
+    /// connections over); made for a macOS `Here` on any system, so both systems' policies pin alike (`golden`).
+    pub proxy: Option<std::sync::Arc<proxy::RunPort>>,
     /// What the sandbox denied this run, watched while it goes (`Watch`).
     pub watch: Option<std::sync::Arc<Watch>>,
     /// What the user let Claude's commands do besides (`allow.rs`) — as the result says it.
@@ -1620,10 +1627,9 @@ fn earlier_owners(root: &Path) -> Vec<linux::Owner> {
     ran.iter().filter(|r| r.root == root).filter_map(|r| r.owner.clone()).collect()
 }
 
-/// A refusal of something run `p` started (Linux's supervisor): its own run's watch while that run goes;
-/// after it, the newest run of its project still going — what a run left is the session's current run's to
-/// say now; none going: kept for the next (`PENDING`).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// A refusal of something run `p` started (Linux's supervisor, the proxy): its own run's watch while that run
+/// goes; after it, the newest run of its project still going — what a run left is the session's current run's
+/// to say now; none going: kept for the next (`PENDING`).
 pub(crate) fn tell(p: &Policy, d: Denial) {
     if let Some(w) = p.watch.as_ref().filter(|w| !w.ended()) {
         return w.record(d);
@@ -1713,9 +1719,8 @@ fn end_left(which: impl Fn(&Ran) -> bool) -> Vec<u32> {
     ended
 }
 
-/// Linux: where a run's supervisor says its refusals (`Refused`) — a thread saying each in the run's report
-/// (`tell`) until the supervisor is done.
-#[cfg(target_os = "linux")]
+/// Where a run's supervisor (Linux) or tarae's proxy (macOS) says its refusals — a thread saying each in the
+/// run's report (`tell`) until the sender is dropped.
 pub(crate) fn told(p: std::sync::Arc<Policy>) -> std::sync::mpsc::Sender<Denial> {
     let (tx, rx) = std::sync::mpsc::channel::<Denial>();
     crate::event::thread("tarae-refused", move || {
@@ -1773,7 +1778,7 @@ fn end_tagged(root: Option<&Path>) -> Vec<u32> {
 /// daemon lives from is the key's own (`with_kept`).
 pub fn policy_key(p: &Policy) -> String {
     let mut q = p.clone();
-    (q.run, q.tag, q.watch, q.env) = (None, None, None, Vec::new());
+    (q.run, q.tag, q.proxy, q.watch, q.env) = (None, None, None, None, Vec::new());
     // (the kept homes are the project's and the key's — granted by them, not part of what's compared)
     q.write.retain(|w| !p.kept.iter().any(|k| k.home == *w));
     q.kept = Vec::new();
@@ -2049,8 +2054,8 @@ static DEVICE_PLACES: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| linux::DEVICES.iter().map(|(d, _)| *d).collect());
 
 /// Ports on this machine where what listens runs what it's asked to, outside the sandbox. The network
-/// closed (the default), every port on this machine is closed but `llm.sandbox-ports` — these included;
-/// open (`llm.sandbox-network`), these stay closed unless listed. `llm.sandbox-localhost` opens them too:
+/// closed (the default) or open (`llm.sandbox-network`: beyond this machine through tarae's proxy), every port
+/// on this machine is closed but `llm.sandbox-ports` — these included. `llm.sandbox-localhost` opens them too:
 /// once `localhost:*` is allowed no port's deny wins over it, before or after, by any filter (measured by
 /// the user, 2026-10-02) — so "localhost but these" can't be written. `docs/claude-integration.md` lists
 /// them (a test checks).
@@ -2169,26 +2174,18 @@ impl Policy {
             ));
         }
         p.push_str(&devices_rule());
-        let open: String = self.ports.iter().map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
-        if !self.network {
-            // Listening stays open (a test's own server); connecting, only where it's allowed
-            p.push_str(&deny("network*"));
-            p.push_str("(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
-            if self.localhost {
-                p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
-            } else if !open.is_empty() {
-                p.push_str(&format!("(allow network-outbound{open})\n"));
-            }
-        } else {
-            // Under the open network a port's deny does win (measured)
-            let risky: String = RISKY_PORTS
-                .iter()
-                .filter(|(n, _)| !self.ports.contains(n))
-                .map(|(n, _)| format!(" (remote ip \"localhost:{n}\")"))
-                .collect();
-            if !risky.is_empty() {
-                p.push_str(&deny(&format!("network-outbound{risky}")));
-            }
+        // The network open goes beyond this machine only through tarae's proxy, at the run's own port (step 5d:
+        // another run's isn't reached — M3d); the port is a number tarae made, never text from outside
+        let proxied = self.proxy.as_ref().filter(|_| self.network).map(|r| r.port);
+        let open: String =
+            self.ports.iter().chain(&proxied).map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
+        // Listening stays open (a test's own server); connecting, only where it's allowed
+        p.push_str(&deny("network*"));
+        p.push_str("(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
+        if self.localhost {
+            p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+        } else if !open.is_empty() {
+            p.push_str(&format!("(allow network-outbound{open})\n"));
         }
         // Unix sockets — made or reached — only in the project and the run's own folder (`RunDir`), the
         // network open or not: the ones elsewhere are servers outside (tmux, zellij, ssh-agent). Last, so
@@ -2242,7 +2239,8 @@ impl Policy {
     /// Linux, a served run: why it reaches nothing but this machine's loopback, where it doesn't — this
     /// machine's own addresses couldn't be read when the policy was made (`own_addresses`: `route` refuses every
     /// other address), or no socket of tarae's can take a run's place on this kernel (`swap_missing`: the
-    /// supervisor refuses what would need one). None elsewhere.
+    /// supervisor refuses what would need one). macOS, the network open: the run has no port of its own to tarae's
+    /// proxy, or the proxy can't tell this machine's own addresses from the network's. None elsewhere.
     pub fn loopback_only(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
@@ -2256,7 +2254,16 @@ impl Policy {
             self.swap_missing().map(|why| format!("{why}, so nothing goes beyond it"))
         }
         #[cfg(not(target_os = "linux"))]
-        None
+        match &self.proxy {
+            _ if !self.network => None,
+            None => Some("tarae couldn't open this run a port to its proxy, so nothing goes beyond it".into()),
+            Some(r) if r.own_addresses.is_none() => Some(
+                "tarae couldn't read this machine's own addresses, so its proxy can't tell them from the network's \
+                 and reaches no address"
+                    .into(),
+            ),
+            Some(_) => None,
+        }
     }
 
     /// Linux: why tarae can't put a socket of its own in a run's place here (`supervisor::swap_unavailable`) —
@@ -2698,6 +2705,7 @@ impl Policy {
             localhost: env.localhost,
             run: None,
             tag: None,
+            proxy: None,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -3076,6 +3084,12 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
         env.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &above);
     }
     let mut p = Policy { run, tag, ..Policy::for_project(&env) };
+    // (macOS: the network open goes out through tarae's proxy, at a port of the run's own)
+    if p.network && here.os == Os::Mac {
+        p.proxy = proxy::RunPort::new()
+            .inspect_err(|e| crate::log::line("sandbox", "warning", &format!("a run's proxy port: {e}")))
+            .ok();
+    }
     with_kept(&mut p, &env);
     // The kept homes held (their stamps, before they're made: a prune can't take one between) — one that can't
     // be is no kept home for this run: the run's own, and its folder not written (`policy_key` leaves the
@@ -3563,19 +3577,22 @@ const SET_IN_RUNS: [&str; 5] =
     [MARK, "GIT_OPTIONAL_LOCKS", "npm_config_update_notifier", "NO_COLOR", "TARAE_UI"];
 
 /// What a run in a policy made with these settings gets of `here`'s environment (`runenv::of`): the floor,
-/// the proxies with the network open, what the packs' places read, the packs' `pass`, `llm.sandbox-env`.
+/// what the packs' places read, the packs' `pass`, `llm.sandbox-env`.
 pub fn run_env_of(here: &Here, llm: &crate::llm::LlmConfig) -> runenv::RunEnv {
     let packs = crate::sandboxpack::get();
     let policy: Vec<&str> = packs.env_names().collect();
     let colors = &crate::languages::get().color_off;
     let mut set: Vec<&str> = SET_IN_RUNS.to_vec();
     set.extend(colors.iter().map(|(k, _)| k.as_str()));
-    // (Linux: the network open goes through tarae's proxy — its variables take the user's own proxies' place)
-    let proxies_passed = llm.sandbox_network && !cfg!(target_os = "linux");
-    if cfg!(target_os = "linux") && llm.sandbox_network {
+    // (the network open goes through tarae's proxy — its variables take the user's own proxies' place, neither
+    // passed nor said; macOS: git's setting for it too)
+    if llm.sandbox_network {
         set.extend(runenv::PROXIES);
+        if cfg!(not(target_os = "linux")) {
+            set.push("GIT_CONFIG_COUNT");
+        }
     }
-    runenv::of(here, proxies_passed, &policy, &packs.pass, &llm.sandbox_env, &set)
+    runenv::of(here, &policy, &packs.pass, &llm.sandbox_env, &set)
 }
 
 /// A sandboxed command's environment: tarae's own isn't inherited — only what `run_env` passes of it. Every
@@ -3687,13 +3704,41 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
         }
         return Ok(spawned);
     }
+    let spawned = crate::spawn::setsid(cmd)?;
+    // (macOS, the network open: the run's own port goes to tarae's proxy — its end comes with `after_run`)
+    #[cfg(not(target_os = "linux"))]
+    if let Some((p, r)) = policy.and_then(|p| Some((p, p.proxy.as_ref()?))) {
+        r.started(&p.root, program_of(cmd), told(std::sync::Arc::new(p.clone())));
+    }
+    #[cfg(target_os = "linux")]
     let _ = policy;
-    crate::spawn::setsid(cmd)
+    Ok(spawned)
+}
+
+/// What a sandboxed command runs (`command`'s: the program after `sandbox-exec`'s own arguments), by its file
+/// name — what the proxy's refusals name (macOS: no supervisor knows the process that connected).
+#[cfg(not(target_os = "linux"))]
+fn program_of(cmd: &Command) -> String {
+    let mut args = cmd.get_args();
+    let program = match cmd.get_program() == SANDBOX_EXEC {
+        true => loop {
+            match args.next() {
+                Some(a) if a == "-p" || a == "-D" => {
+                    args.next();
+                }
+                other => break other,
+            }
+        },
+        false => Some(cmd.get_program()),
+    };
+    let name = program.map(|p| Path::new(p).file_name().unwrap_or(p).to_string_lossy().into_owned());
+    name.unwrap_or_default()
 }
 
 /// What a run in `policy` needs done once it's over, before its end is told (the run's own thread, after it's
 /// reaped): on Linux, the folders it could remove inside protected ones made again (`linux::Kept`) — the
-/// report says which. Nothing elsewhere.
+/// report says which; on macOS, its port to tarae's proxy closed (`proxy::RunPort::ended`) — what it left
+/// running loses its way out, closed.
 pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
     #[cfg(target_os = "linux")]
     let kept = match policy.map(|p| &p.confine) {
@@ -3701,11 +3746,15 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
         _ => None,
     };
     #[cfg(not(target_os = "linux"))]
-    let _ = policy;
+    let proxied = policy.and_then(|p| p.proxy.as_ref()).map(|r| r.run);
     move || {
         #[cfg(target_os = "linux")]
         if let Some(k) = kept {
             k.restore();
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(run) = proxied {
+            proxy::RunPort::ended(run);
         }
     }
 }
@@ -3736,10 +3785,18 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             for (var, copy) in &p.reads.copies.env {
                 c.env(var, copy);
             }
-            // (Linux: the network open goes through tarae's egress proxy — step 5)
+            // The network open goes through tarae's egress proxy (step 5) — Linux: its address, which the
+            // supervisor hands over; macOS: the run's own port and token, and git told to send the token at once
             #[cfg(target_os = "linux")]
             if p.network {
-                c.envs(proxy::run_env());
+                c.envs(proxy::run_env(&format!("http://{}", route::PROXY)));
+            }
+            #[cfg(not(target_os = "linux"))]
+            if let Some(r) = p.proxy.as_ref().filter(|_| p.network) {
+                c.envs(proxy::run_env(&r.url()));
+                // (after the settings the run's own environment holds — `llm.sandbox-env` may pass git's)
+                let count = p.run_env.var("GIT_CONFIG_COUNT").and_then(|n| n.parse().ok());
+                c.envs(proxy::git_basic(count.unwrap_or(0)));
             }
             c
         }
@@ -3942,7 +3999,7 @@ mod tests {
         Env { caches: vec![said], files, builder, ..Env::default() }
     }
 
-    fn env(root: &Path) -> Env {
+    pub(super) fn env(root: &Path) -> Env {
         let cargo = cargo_at(Path::new("/Users/u/.cargo"));
         let lock = "/Users/u/.gradle/wrapper/dists/gradle-9.7.1-bin/h1/gradle-9.7.1-bin.zip.lck";
         Env {
@@ -4669,7 +4726,8 @@ mod tests {
         let open = Policy::for_project(&Env { network: true, ..env(root) });
         let text = open.profile();
         assert!(!text.contains("(param \"C0\")"), "{text}");
-        assert!(!text.contains("(deny network*)"), "{text}");
+        // (the open network goes out through tarae's proxy: every connect but the opened ones denied — step 5d)
+        assert!(text.contains("(deny network*)"), "{text}");
         assert!(
             text.contains("(deny network-outbound (remote unix-socket))"),
             "sockets stay guarded: {text}"
@@ -5061,7 +5119,8 @@ mod tests {
 
     /// What Claude reads about Gradle (Java under P2): its writes in the user's Gradle home — the read-only
     /// dependency cache's index, measured in every build — are expected and said so, not offered to open; a
-    /// JVM refused a port on this machine says Gradle needs this machine's ports, only while they're closed.
+    /// JVM refused a port on this machine says Gradle needs this machine's ports, only while they're closed — the
+    /// network open doesn't open them (it goes through tarae's proxy).
     #[test]
     fn what_a_run_is_told_about_gradle() {
         let p = Policy::for_project(&env(Path::new("/Users/u/p")));
@@ -5092,9 +5151,10 @@ mod tests {
                 && r.contains("llm.sandbox-localhost"),
             "{r}"
         );
-        for open in [Policy { localhost: true, ..p.clone() }, Policy { network: true, ..p.clone() }] {
-            assert!(!report(&open, std::slice::from_ref(&port)).contains("Gradle build can't run"));
-        }
+        let open = Policy { localhost: true, ..p.clone() };
+        assert!(!report(&open, std::slice::from_ref(&port)).contains("Gradle build can't run"));
+        let network = Policy { network: true, ..p.clone() };
+        assert!(report(&network, std::slice::from_ref(&port)).contains("Gradle build can't run"));
         let other = Denial { process: "curl".into(), ..port };
         assert!(!report(&p, &[other]).contains("Gradle build can't run"));
     }
@@ -5378,8 +5438,9 @@ mod tests {
         assert!(!open.report(&[]).contains("Cargo's caches") && !open.report(&[]).contains("cargo's caches"));
     }
 
-    /// Connecting on this machine: the network closed, only the listed ports (`localhost:*` only when
-    /// asked — its port denies can't win, measured); open, all but the risky ports not listed.
+    /// Connecting on this machine: only the listed ports (`localhost:*` only when asked — its port denies can't
+    /// win, measured), the network closed or open — open, the run's own port to tarae's proxy too (macOS, step
+    /// 5d: the network goes out through it), and without one of its own none more.
     #[test]
     fn local_ports_in_the_profile() {
         let p = Policy::for_project(&env(Path::new("/Users/u/p")));
@@ -5400,13 +5461,22 @@ mod tests {
         let all = Policy { localhost: true, ..listed.clone() };
         assert_eq!(outbound(&all), ["(allow network-outbound (remote ip \"localhost:*\"))"]);
         let open = Policy { network: true, ports: vec![6379], ..p.clone() };
-        let deny = outbound(&open);
-        assert_eq!(deny.len(), 1);
-        assert!(
-            deny[0].starts_with("(deny network-outbound") && deny[0].contains("localhost:2375"),
-            "{deny:?}"
+        let listed_only = ["(allow network-outbound (remote ip \"localhost:6379\"))"];
+        assert_eq!(outbound(&open), listed_only, "no port of its own to the proxy: nothing more");
+        let port = proxy::RunPort::new().unwrap();
+        let proxied = Policy { proxy: Some(port.clone()), ..open.clone() };
+        assert_eq!(
+            outbound(&proxied),
+            [format!(
+                "(allow network-outbound (remote ip \"localhost:6379\") (remote ip \"localhost:{}\"))",
+                port.port
+            )]
         );
-        assert!(!deny[0].contains("localhost:6379"), "a listed risky port stays reachable: {deny:?}");
+        let closed = Policy { network: false, ..proxied };
+        assert!(
+            outbound(&closed).iter().all(|l| !l.contains(&port.port.to_string())),
+            "closed: not the proxy's"
+        );
         // Ports in the env are sorted, once each, and at most PORTS_MAX
         let many = Env { ports: (1..=500).rev().chain([7, 7]).collect(), ..env(Path::new("/Users/u/p")) };
         let ports = Policy::for_project(&many).ports;
@@ -5690,19 +5760,42 @@ mod tests {
         assert!(!quiet(&out("remote:127.0.0.1:10")) && !quiet(&out("remote:169.254.169.254:53")));
     }
 
-    /// macOS with the network open: the risky ports are closed on this machine's loopback only — Seatbelt names
-    /// ports by `localhost` — and the report says its other addresses aren't covered.
+    /// macOS with the network open (step 5d): the report says what Linux's does — beyond this machine only
+    /// through tarae's proxy, this machine's ports only as opened. With `llm.sandbox-localhost` it says that
+    /// other runs' ports to the proxy open too (Q3a); without a port of its own to the proxy, that nothing goes
+    /// beyond.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_report_says_macos_closes_risky_ports_on_loopback_only() {
-        let p = Policy { network: true, ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
-        let r = Guard::In(Box::new(p)).report(&[]);
-        let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
+    fn the_report_says_macos_goes_out_only_through_the_proxy() {
+        let said = |p: Policy| {
+            let r = Guard::In(Box::new(p)).report(&[]);
+            r.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let base = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let open = Policy { network: true, proxy: Some(proxy::RunPort::new().unwrap()), ..base.clone() };
+        let r = said(Policy { ports: vec![3000], ..open.clone() });
         assert!(
             r.contains(
-                "reach the network — but not the risky ports (Docker, Jupyter, debuggers…) on this machine's \
-                 loopback; on its other addresses (its LAN's) they're reached as the network is"
+                "reach the network beyond this machine (its loopback and its own addresses) only through tarae's \
+                 proxy (HTTPS_PROXY, set for every run) — a tool that ignores it (ssh, a database client, Node's \
+                 fetch without NODE_USE_ENV_PROXY) can't go out; never link-local addresses, the cloud metadata \
+                 servers tarae knows of, multicast or broadcast — and this machine's ports 3000 only \
+                 (llm.sandbox-ports)"
             ),
+            "{r}"
+        );
+        let other_runs = "llm.sandbox-localhost opens other runs' ports to tarae's proxy too";
+        assert!(!r.contains(other_runs), "{r}");
+        let r = said(Policy { localhost: true, ..open.clone() });
+        assert!(r.contains(&format!("and every port of this machine's — {other_runs}")), "{r}");
+        let r = said(Policy { localhost: true, ..base.clone() });
+        assert!(
+            r.contains(&format!("connect to nothing over the network but this machine — {other_runs}")),
+            "{r}"
+        );
+        let r = said(Policy { proxy: None, ..open });
+        assert!(
+            r.contains("tarae couldn't open this run a port to its proxy, so nothing goes beyond it"),
             "{r}"
         );
     }
@@ -5876,6 +5969,7 @@ mod tests {
             localhost: false,
             run: None,
             tag: None,
+            proxy: None,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -5949,6 +6043,7 @@ mod tests {
                 localhost: false,
                 run: Some(run.clone()),
                 tag: None,
+                proxy: None,
                 watch: None,
                 granted: Vec::new(),
                 sockets: Vec::new(),
@@ -5989,7 +6084,7 @@ mod tests {
 
     /// A folder of this test's own under `target/` (real path), made fresh.
     #[cfg(target_os = "macos")]
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         let t = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&t).ok();
         std::fs::create_dir_all(&t).unwrap();
@@ -6022,6 +6117,7 @@ mod tests {
             localhost: false,
             run: None,
             tag: Some(tag.to_string()),
+            proxy: None,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -6082,6 +6178,7 @@ mod tests {
             localhost: false,
             run: None,
             tag: None,
+            proxy: None,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -7089,7 +7186,8 @@ mod tests {
     /// - the network closed (the default): an ordinary port isn't reached, a listed one
     ///   (`llm.sandbox-ports`) is;
     /// - `llm.sandbox-localhost`: both are, and a risky one too (it can't be left out — measured);
-    /// - the network open: an ordinary port is reached, a risky one (`RISKY_PORTS`) only when listed.
+    /// - the network open (step 5d: beyond goes through tarae's proxy): as closed — an ordinary port isn't
+    ///   reached, a risky one (`RISKY_PORTS`) only when listed.
     ///
     /// Harmless: the listeners are this test's own, on 127.0.0.1, and only `nc -z` knocks.
     #[cfg(target_os = "macos")]
@@ -7124,6 +7222,7 @@ mod tests {
             localhost,
             run: None,
             tag: None,
+            proxy: None,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -7151,7 +7250,7 @@ mod tests {
         assert!(reached(&localhost, &listed), "sandbox-localhost: the listed one");
         assert!(reached(&localhost, &risky), "sandbox-localhost: port {} (opens them all)", port(&risky));
         let open = policy(true, false, Vec::new());
-        assert!(reached(&open, &ordinary), "network open: an ordinary port");
+        assert!(!reached(&open, &ordinary), "network open: an ordinary port");
         assert!(!reached(&open, &risky), "network open: port {}, not listed", port(&risky));
         let open_listed = policy(true, false, vec![port(&risky)]);
         assert!(reached(&open_listed, &risky), "network open: port {}, listed", port(&risky));

@@ -305,6 +305,12 @@ fn the_never_reached_are_refused_by_the_proxy() {
     assert_eq!(trap.accepted.load(Ordering::SeqCst), 0, "nothing connected");
     let (mut c, _) = connection(&f.proxy, 1, 1, rules(&["*.test"]));
     assert_eq!(ask(&mut c, &connect_head("mixed.test:443")), 200);
+    // (the 200 comes once the proxy's connect is made; the outside's own thread counts its accept after — waited
+    // for: read once, the count lost the race on the Debian VM)
+    let by = Instant::now() + WAIT;
+    while good.accepted.load(Ordering::SeqCst) == 0 && Instant::now() < by {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(good.accepted.load(Ordering::SeqCst), 1, "its one reachable address");
 }
 
@@ -729,6 +735,52 @@ fn no_token_or_a_wrong_one_is_407() {
         assert!(Instant::now() < gone, "the run's port still takes connections");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// A run's port goes on past a failed accept (the reviewer, 5d): one connection's failure — it reset before it
+/// was taken, `ECONNABORTED` — is skipped at once; a want of descriptors (`EMFILE`) is waited out; the next
+/// connection is taken, so the run keeps its only way out. The kernel's own aborted connection can't be made at
+/// will (macOS hands one reset before its accept over as accepted — measured), so the accepts here are the
+/// test's: those two errors, then the listener's real one. The listener the loop holds is non-blocking (a
+/// connection gone between `poll` and `accept` would block it past its stop), and what it takes is blocking
+/// (BSD's accepted sockets inherit the listener's `O_NONBLOCK`; the proxy reads with timeouts). An error of the
+/// listener itself stops the loop, and the dispatcher says it on the run's sender.
+#[test]
+fn a_runs_port_goes_on_past_a_failed_accept() {
+    let l = port_listener(TcpListener::bind((LO, 0)).unwrap().into()).unwrap();
+    // SAFETY: the flags of a descriptor of ours.
+    let nonblocking = |fd: i32| unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0;
+    assert!(nonblocking(l.as_raw_fd()), "the loop's listener is non-blocking");
+    let (stop, _held) = io::pipe().unwrap();
+    let _waiting = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    // (popped from the end: the aborted one first)
+    let mut failing =
+        vec![io::Error::from_raw_os_error(libc::EMFILE), io::ErrorKind::ConnectionAborted.into()];
+    let (t, mut taken) = (Instant::now(), None);
+    let next = || match failing.pop() {
+        Some(e) => Err(e),
+        None => l.accept().map(|(s, _)| s),
+    };
+    let stopped = accepting(&l, &stop, next, |s| {
+        taken = Some(s);
+        false
+    });
+    assert!(stopped.is_none(), "stopped at a passing error: {stopped:?}");
+    let s = taken.expect("the next connection taken");
+    assert!(!nonblocking(s.as_raw_fd()), "what's taken is blocking");
+    assert!(t.elapsed() >= Duration::from_millis(100), "EMFILE waited out: {:?}", t.elapsed());
+    // The listener's own error: the loop stops, saying why
+    let _another = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    let stopped = accepting(&l, &stop, || Err(io::Error::from_raw_os_error(libc::EBADF)), |_| true);
+    assert_eq!(stopped.and_then(|e| e.raw_os_error()), Some(libc::EBADF));
+    let f = start(resolver(vec![]).0, limits());
+    let (told, d) = mpsc::channel();
+    let listener = TcpListener::bind((LO, 0)).unwrap().into();
+    let (token, rules) = ("tarae-fake-token-7".to_string(), Arc::new(rules(&[])));
+    let process = "curl".to_string();
+    assert!(f.proxy.send(ToProxy::RunStarts { run: 7, session: 1, process, listener, token, rules, told }));
+    let _ = f.proxy.tx.send(In::PortStopped { run: 7, why: "Bad file descriptor".into() });
+    assert!(said(&d).contains("its port to tarae's proxy stopped taking connections"));
 }
 
 /// The pair a run's connection to the proxy is made of (Linux's `supervisor::proxied`) holds only the run's

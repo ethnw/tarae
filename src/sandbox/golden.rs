@@ -199,7 +199,11 @@ fn policy_said(f: &Fixture, p: &Policy) -> String {
     let mut s = String::from("profile:\n");
     // (the names' regexes start with as many path parts as the project's path has: the machine's)
     let depth = p.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
-    let profile = p.profile().replace(&format!("^{}/", "/[^/]+".repeat(depth)), "^$ROOT-PARTS/");
+    let mut profile = p.profile().replace(&format!("^{}/", "/[^/]+".repeat(depth)), "^$ROOT-PARTS/");
+    // (macOS, the network open: the run's own port to tarae's proxy, a new one each time)
+    if let Some(r) = &p.proxy {
+        profile = profile.replace(&format!("\"localhost:{}\"", r.port), "\"localhost:$PROXY\"");
+    }
     s.push_str(&f.named(&profile, run));
     s.push_str("params:\n");
     let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();

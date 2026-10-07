@@ -37,6 +37,7 @@ pub const OP: &str = "network-proxy";
 
 /// A run's connection, as the supervisor hands it (Linux): the proxy's end of the TCP pair whose other end is
 /// in the run's place.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct Connection {
     pub fd: OwnedFd,
     pub run: u64,
@@ -62,7 +63,7 @@ pub enum Scope {
 }
 
 /// What comes in.
-#[cfg_attr(not(test), allow(dead_code))] // (macOS's runs come with step 5d, the main loop's answers with 5e)
+#[cfg_attr(not(test), allow(dead_code))] // (the main loop's answers come with 5e; each system sends its own runs')
 pub enum ToProxy {
     /// Linux: a run's connection, from the supervisor.
     Connection(Connection),
@@ -165,6 +166,11 @@ enum In {
     Accepted {
         run: u64,
         stream: TcpStream,
+    },
+    /// A run's listener stopped taking connections for good (macOS): said on the run's sender.
+    PortStopped {
+        run: u64,
+        why: String,
     },
 }
 
@@ -317,6 +323,12 @@ impl State {
                         *n = n.saturating_sub(1);
                     }
                 }
+                In::PortStopped { run, why } => {
+                    let Some(r) = self.runs.get(&run) else { continue };
+                    let target = format!("its port to tarae's proxy stopped taking connections: {why}");
+                    crate::log::line("sandbox", "warning", &format!("run {run}: {target}"));
+                    let _ = r.told.send(Denial { process: r.process.clone(), op: OP.into(), target });
+                }
                 In::Accepted { run, stream } => {
                     let Some(r) = self.runs.get(&run) else { continue };
                     let conn = Conn {
@@ -418,9 +430,45 @@ impl State {
     }
 }
 
-/// A run's listener's connections (macOS), each to the dispatcher, until its stop's other end is dropped.
+/// A run's listener's connections (macOS), each to the dispatcher, until its stop's other end is dropped. A port
+/// that stops for good (an accept error that isn't one connection's or a passing want of descriptors) is said on
+/// the run's sender (`In::PortStopped`).
 fn accept(run: u64, listener: OwnedFd, stop: io::PipeReader, tx: Sender<In>) {
-    let listener = std::net::TcpListener::from(listener);
+    let listener = match port_listener(listener) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = tx.send(In::PortStopped { run, why: e.to_string() });
+            return;
+        }
+    };
+    let stopped = accepting(
+        &listener,
+        &stop,
+        || listener.accept().map(|(s, _)| s),
+        |stream| tx.send(In::Accepted { run, stream }).is_ok(),
+    );
+    if let Some(e) = stopped {
+        let _ = tx.send(In::PortStopped { run, why: e.to_string() });
+    }
+}
+
+/// A run's listener as its accept loop holds it: non-blocking — a connection gone between `poll` and `accept`
+/// would leave a blocking accept waiting past the stop, and the run's port open after its end.
+fn port_listener(fd: OwnedFd) -> io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::from(fd);
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
+/// The accept loop of a run's port: `next` (the listener's accept) whenever `poll` says it's ready, each
+/// connection made blocking and given to `took` (false: the proxy's gone, the loop ends), until `stop` is
+/// readable — or an error that stops it for good, returned (`after_accept_error`).
+fn accepting(
+    listener: &std::net::TcpListener,
+    stop: &io::PipeReader,
+    mut next: impl FnMut() -> io::Result<TcpStream>,
+    mut took: impl FnMut(TcpStream) -> bool,
+) -> Option<io::Error> {
     let mut fds = [
         libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
@@ -432,20 +480,40 @@ fn accept(run: u64, listener: OwnedFd, stop: io::PipeReader, tx: Sender<In>) {
             continue;
         }
         if r < 0 || fds[1].revents != 0 {
-            return;
+            return None;
         }
         if fds[0].revents != 0 {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    if tx.send(In::Accepted { run, stream }).is_err() {
-                        return;
+            match next() {
+                Ok(stream) => {
+                    // (BSD's accepted sockets take the listener's O_NONBLOCK; `serve` reads with timeouts)
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
+                    if !took(stream) {
+                        return None;
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted || e.kind() == io::ErrorKind::WouldBlock => {
-                }
-                Err(_) => return,
+                Err(e) => match after_accept_error(&e) {
+                    Some(pause) => std::thread::sleep(pause),
+                    None => return Some(e),
+                },
             }
         }
+    }
+}
+
+/// What a failed accept means for a run's port: go on — at once for what was one connection's (it reset before
+/// it was taken: `ECONNABORTED`) or nothing (`EINTR`, `EWOULDBLOCK`); after a pause while descriptors or buffers
+/// run short (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM` — the connection waits in the queue meanwhile) — or stop
+/// for good (None: the listener itself is wrong).
+fn after_accept_error(e: &io::Error) -> Option<Duration> {
+    use io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted, WouldBlock};
+    match e.kind() {
+        Interrupted | WouldBlock | ConnectionAborted | ConnectionReset => Some(Duration::ZERO),
+        _ if matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)) => {
+            Some(Duration::from_millis(100))
+        }
+        _ => None,
     }
 }
 
@@ -534,10 +602,17 @@ fn serve(c: Conn, shared: &Shared) {
         Err(false) => return,
     };
     if let Some(token) = &c.token {
+        let (host, port) = match &h.request {
+            Request::Connect { host, port } | Request::Plain { host, port, .. } => (host, port),
+        };
+        let at = match host {
+            Host::Name(n) => format!("{n}:{port}"),
+            Host::Addr(a) => std::net::SocketAddr::new(*a, *port).to_string(),
+        };
         let wrong = match &h.auth {
             Auth::Basic { password, .. } if same_token(password, token.as_bytes()) => None,
             Auth::None => Some(None),
-            _ => Some(Some("a wrong proxy password")),
+            _ => Some(Some(format!("{at}: a wrong proxy password — not its run's (HTTPS_PROXY)"))),
         };
         if let Some(said) = wrong {
             answer(
@@ -547,7 +622,7 @@ fn serve(c: Conn, shared: &Shared) {
                 "Proxy-Authenticate: Basic realm=\"tarae\"\r\n",
             );
             if let Some(why) = said {
-                tell(&c, why);
+                tell(&c, &why);
             }
             return;
         }
@@ -649,26 +724,144 @@ fn relay_send(mut up: &TcpStream, bytes: &[u8]) -> io::Result<()> {
     up.write_all(bytes)
 }
 
-/// What a run's environment gets while its network goes through the proxy (Linux): every proxy variable naming
-/// `route::PROXY` — the supervisor hands a connect there to the proxy, so no credential is needed — and this
-/// machine's loopback left direct (a test's own server). In place of the user's own (`runenv`).
-#[cfg(target_os = "linux")]
-pub fn run_env() -> Vec<(&'static str, String)> {
-    let url = format!("http://{}", super::route::PROXY);
+/// What a run's environment gets while its network goes through the proxy: every proxy variable naming `url` —
+/// Linux: `route::PROXY`, whose connects the supervisor hands to the proxy, so no credential is needed; macOS:
+/// the run's own port with its token (`RunPort::url`) — and this machine's loopback left direct (a test's own
+/// server). In place of the user's own (`runenv`).
+pub fn run_env(url: &str) -> Vec<(&'static str, String)> {
     let direct = "localhost,127.0.0.1,::1".to_string();
     let mut env: Vec<(&str, String)> =
         ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
             .into_iter()
-            .map(|k| (k, url.clone()))
+            .map(|k| (k, url.to_string()))
             .collect();
     env.extend([("NO_PROXY", direct.clone()), ("no_proxy", direct)]);
     env
 }
 
-/// The proxy of this tarae (Linux: the runs' connections come to it from their supervisors), started on first
-/// use — on a supervisor's thread, never the main loop. Names are looked up by the system's resolver. The
-/// user's answers come with step 5e: until then a host no rule names waits out its hold and is refused.
-#[cfg(target_os = "linux")]
+/// What git gets on top (macOS): `http.proxyAuthMethod=basic` as the setting after the `count` the run's own
+/// environment already holds (`GIT_CONFIG_COUNT`) — git's default (`anyauth`) sends the password only after a
+/// 407 (M1), one round trip more on every connection.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub fn git_basic(count: usize) -> [(String, String); 3] {
+    [
+        ("GIT_CONFIG_COUNT".into(), (count + 1).to_string()),
+        (format!("GIT_CONFIG_KEY_{count}"), "http.proxyAuthMethod".into()),
+        (format!("GIT_CONFIG_VALUE_{count}"), "basic".into()),
+    ]
+}
+
+/// A session as the proxy knows it: its project's root, hashed (the answers a session gets are kept by it).
+pub fn session_of(root: &std::path::Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    h.finish()
+}
+
+/// A macOS run's own way to the proxy (§macOS flow): a listener on `127.0.0.1:0` — the one port beyond the
+/// opened ones its profile opens, so another session's run can't reach it (M3d) — and the token its proxy URL
+/// carries as the password, 32 bytes from `getentropy` in hex: what can reach the port but not read the run's
+/// environment (outside Seatbelt) still can't use it. Made with the run's policy; the listener goes to the proxy
+/// once, at spawn (`take`) — no copy of the policy keeps the port taking connections once the run is gone.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub struct RunPort {
+    /// The run, as the proxy knows it (`RunStarts`, `RunEnded`).
+    pub run: u64,
+    pub port: u16,
+    token: String,
+    listener: std::sync::Mutex<Option<OwnedFd>>,
+    /// This machine's own addresses beyond loopback, read with the policy (`egress::addresses`) — None where
+    /// they couldn't be: the proxy then reaches no address at all.
+    pub own_addresses: Option<Vec<std::net::IpAddr>>,
+}
+
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+impl RunPort {
+    pub fn new() -> io::Result<Arc<RunPort>> {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let port = listener.local_addr()?.port();
+        let mut raw = [0u8; 32];
+        // SAFETY: a buffer of ours, its length (≤ 256, getentropy's most).
+        if unsafe { libc::getentropy(raw.as_mut_ptr().cast(), raw.len()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = raw.iter().map(|b| format!("{b:02x}")).collect();
+        static RUNS: AtomicU64 = AtomicU64::new(1);
+        Ok(Arc::new(RunPort {
+            run: RUNS.fetch_add(1, Ordering::Relaxed),
+            port,
+            token,
+            listener: std::sync::Mutex::new(Some(listener.into())),
+            // (loopback is `route::this_machine`'s: the own addresses are the others — a LAN's, a bridge's)
+            own_addresses: egress::addresses()
+                .ok()
+                .map(|a| a.into_iter().filter(|ip| !ip.to_canonical().is_loopback()).collect()),
+        }))
+    }
+
+    /// The URL its run's proxy variables name: the token as the password (`run:` the user — git and pip send
+    /// nothing with a user alone, M1), the address as a literal (a JVM's default socket reaches `127.0.0.1`
+    /// where Seatbelt's `localhost` doesn't match `::ffff:127.0.0.1` — M3d).
+    pub fn url(&self) -> String {
+        format!("http://run:{}@127.0.0.1:{}", self.token, self.port)
+    }
+
+    #[cfg(test)]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// The listener, once: the spawn's, for the proxy.
+    pub fn take(&self) -> Option<OwnedFd> {
+        self.listener.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Its run started (`sandbox::spawn`): the listener to the proxy, with what each of its connections gets —
+    /// the session (`root`'s), the rules (any host, as Linux's until 5e's list; this machine's own addresses as
+    /// read with the policy), where its refusals are said (`told`), and what they name (`process`).
+    pub fn started(&self, root: &std::path::Path, process: String, told: Sender<Denial>) {
+        let Some(listener) = self.take() else { return };
+        #[cfg(all(test, not(target_os = "linux")))]
+        let beyond = TEST_BEYOND.lock().unwrap_or_else(|e| e.into_inner());
+        let rules = Egress {
+            any: true,
+            own_addresses: self.own_addresses.clone(),
+            #[cfg(all(test, not(target_os = "linux")))]
+            beyond: beyond.iter().filter(|(r, _)| r == root).map(|(_, ip)| *ip).collect(),
+            ..Default::default()
+        };
+        let session = session_of(root);
+        let token = self.token.clone();
+        let (run, rules) = (self.run, Arc::new(rules));
+        get().send(ToProxy::RunStarts { run, session, process, listener, token, rules, told });
+    }
+
+    /// Its run ended (reaped — `sandbox::after_run`): its port closes, its token is gone.
+    pub fn ended(run: u64) {
+        get().send(ToProxy::RunEnded { run });
+    }
+}
+
+/// Its port only: a policy's `Debug` is its key (`policy_key`) and goes in logs — never the token.
+impl std::fmt::Debug for RunPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunPort").field("port", &self.port).finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RunPort {
+    fn eq(&self, other: &RunPort) -> bool {
+        self.port == other.port && self.token == other.token
+    }
+}
+
+impl Eq for RunPort {}
+
+/// The proxy of this tarae, started on first use — never on the main loop's key path (Linux: a supervisor's
+/// thread; macOS: a run's spawn, whose first one starts a thread). Names are looked up by the system's
+/// resolver. The user's answers come with step 5e: until then a host no rule names waits out its hold and is
+/// refused.
 pub fn get() -> &'static Proxy {
     static PROXY: std::sync::OnceLock<Proxy> = std::sync::OnceLock::new();
     PROXY.get_or_init(|| {
@@ -688,10 +881,17 @@ pub fn get() -> &'static Proxy {
     })
 }
 
-/// Tests (Linux): names the proxy `get` gives looks up here first — a listener of the test's on this machine's
-/// own address standing for the outside (a name, as the proxy takes no address).
-#[cfg(all(test, target_os = "linux"))]
+/// Tests: names the proxy `get` gives looks up here first — a listener of the test's standing for the outside
+/// (Linux: on this machine's own address; macOS: on loopback, taken for beyond by `TEST_BEYOND`) — a name, as
+/// the proxy takes no address.
+#[cfg(test)]
 pub static TEST_NAMES: std::sync::Mutex<Vec<(String, std::net::SocketAddr)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Tests (macOS): loopback taken for beyond in the rules of the runs of the project at the root given
+/// (`Egress::beyond`) — the test's own listeners stand for the outside.
+#[cfg(all(test, not(target_os = "linux")))]
+pub static TEST_BEYOND: std::sync::Mutex<Vec<(std::path::PathBuf, std::net::IpAddr)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// A connected loopback TCP pair for a run's connection to the proxy (Linux, `supervisor::proxied`): the run's
@@ -699,6 +899,7 @@ pub static TEST_NAMES: std::sync::Mutex<Vec<(String, std::net::SocketAddr)>> =
 /// proxy's, accepted on a listener made for this pair alone and closed at once. An accepted peer that isn't the
 /// run's end (another connect to the listener in that window) is closed, and the next one taken. `between`:
 /// called with the listener's address before the run's end connects (tests stand an intruder in the window).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn pair(
     domain: i32,
     ready: impl FnOnce(&OwnedFd) -> io::Result<()>,
@@ -759,6 +960,7 @@ pub fn pair(
 }
 
 /// `a` as the kernel takes it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn raw_addr(a: std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     // SAFETY: an all-zero sockaddr_storage is valid; each arm writes the family's own struct, which fits in it.
     unsafe {
@@ -792,3 +994,9 @@ fn raw_addr(a: std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t
 
 #[cfg(test)]
 mod tests;
+// (macOS's runs through the real path: a run's port, its profile, its environment, its spawn and end)
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests;
+// (step 5d's measurements, Q4 and Q3b — `#[ignore]`d, by hand outside a sandbox)
+#[cfg(all(test, target_os = "macos"))]
+mod macos_measure;

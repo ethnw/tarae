@@ -916,31 +916,7 @@ impl Families {
 
 /// The addresses of tarae's own network namespace, every interface's (`getifaddrs`).
 pub fn addresses() -> io::Result<Vec<std::net::IpAddr>> {
-    let mut addrs = Vec::new();
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: the list getifaddrs makes, walked while it lives, freed after.
-    unsafe {
-        if libc::getifaddrs(&mut list) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut at = list;
-        while !at.is_null() {
-            let a = (*at).ifa_addr;
-            if !a.is_null() {
-                match i32::from((*a).sa_family) {
-                    libc::AF_INET => addrs.push(std::net::IpAddr::from(
-                        (*(a as *const libc::sockaddr_in)).sin_addr.s_addr.to_ne_bytes(),
-                    )),
-                    libc::AF_INET6 => addrs
-                        .push(std::net::IpAddr::from((*(a as *const libc::sockaddr_in6)).sin6_addr.s6_addr)),
-                    _ => {}
-                }
-            }
-            at = (*at).ifa_next;
-        }
-        libc::freeifaddrs(list);
-    }
-    Ok(addrs)
+    super::proxy::egress::addresses()
 }
 
 /// `struct in6_ifreq` as `SIOCSIFADDR` takes it on an IPv6 socket: the address, its prefix, the device's index.

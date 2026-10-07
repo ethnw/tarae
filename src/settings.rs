@@ -443,7 +443,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-network",
         kind: Kind::Bool,
-        doc: "Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports; on macOS that's its loopback only, its own LAN addresses aren't covered. On Linux never link-local addresses or the cloud metadata servers tarae knows of, multicast or broadcast, and this machine's ports — on loopback or its own addresses — only as llm.sandbox-ports and -localhost open them",
+        doc: "Chat: the sandbox lets Claude's commands reach the network beyond this machine, only through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it can't go out; never link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast. This machine's ports — on loopback or its own addresses — only as llm.sandbox-ports and -localhost open them",
         get: |c| Value::from(c.llm.sandbox_network),
         set: |c, v| c.llm.sandbox_network = b(v),
     },
@@ -464,7 +464,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-localhost",
         kind: Kind::Bool,
-        doc: "Chat: every port on this machine open to Claude's commands (tests that talk to their own servers) — the risky ones too (Docker, Jupyter…): the sandbox can't leave some out",
+        doc: "Chat: every port on this machine open to Claude's commands (tests that talk to their own servers) — the risky ones too (Docker, Jupyter…): the sandbox can't leave some out. On macOS that opens other runs' ports to tarae's proxy too, which then only their tokens guard",
         get: |c| Value::from(c.llm.sandbox_localhost),
         set: |c, v| c.llm.sandbox_localhost = b(v),
     },

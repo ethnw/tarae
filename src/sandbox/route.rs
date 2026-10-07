@@ -12,6 +12,9 @@
 //! knows of (most are link-local; `never` lists the others), multicast or broadcast (D-d); refused with it closed. The resolvers `resolv.conf` names are reached
 //! on port 53 only, with the network open (D-c): a loopback one (systemd-resolved's `127.0.0.53`) on this
 //! machine, another (GCP's `169.254.169.254`) out.
+//!
+//! (macOS has no supervisor: only the address checks — `never`, `this_machine` — serve there, its proxy's)
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
