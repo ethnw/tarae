@@ -163,6 +163,9 @@ reads = ["~/.pip/pip.conf", "~/.config/pip/pip.conf", "~/Library/Application Sup
 # What of the user's environment a run gets for Python (measured: `PYTHON*`, ~50 names), its environments
 # (venv, conda, pyenv) and installers (pip, uv) — an index URL with a password left out as a token
 pass = ["PYTHON*", "VIRTUAL_ENV", "CONDA_*", "PYENV*", "PIP_*", "UV_*"]
+# Where pip and uv fetch from by default (the index, the files) — words on the card that asks for a host, never
+# a grant
+registries = ["pypi.org", "files.pythonhosted.org"]
 
 # pip's can hold a token (an `index-url` with `user:pass@`): a copy without it, the files merged as pip reads
 # them — `PIP_CONFIG_FILE` when that file is there (pip then reads no user file), else `~/.pip/pip.conf`, then

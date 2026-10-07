@@ -291,6 +291,46 @@ fn a_project_opened_through_a_link_is_one_session_to_both() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A host a built-in pack names among its registries is said so on its card — words only (Q6): the card asks
+/// the same, its answers and the capability model's decision are those of a host no pack names, whose card says
+/// nothing more. (`static.crates.io`: the rust pack's `*.crates.io`.) Only at the registry's port — 443 where the
+/// pack names none: the same name on another port (`:22`) is no registry, and the card mustn't make that
+/// connection look trusted while the user decides.
+#[test]
+fn a_registry_is_named_on_the_hosts_card() {
+    let card_at = |host: &str, port: u16| {
+        card(Ask {
+            session: 1,
+            run: 2,
+            host: host.into(),
+            port,
+            process: "cargo".into(),
+            label: "cargo build".into(),
+            users: false,
+            left: false,
+        })
+    };
+    let (named, plain) = (card_at("static.crates.io", 443), card_at(HOST, 443));
+    assert!(
+        named.question.contains("\nstatic.crates.io is the rust pack's registry\n"),
+        "{}",
+        named.question
+    );
+    assert!(!plain.question.contains("registry"), "{}", plain.question);
+    let odd = card_at("static.crates.io", 22);
+    assert!(!odd.question.contains("registry"), "another port is no registry: {}", odd.question);
+    // (a registry a pack lists at a port of its own: that port, and only it)
+    let own =
+        [("x".to_string(), crate::sandbox::proxy::egress::Pattern::parse("r.example.invalid:8443").unwrap())];
+    assert_eq!(registry_of(&own, "r.example.invalid", 8443).as_deref(), Some("x"));
+    assert_eq!(registry_of(&own, "r.example.invalid", 443), None);
+    let decided = |o: &Offer| {
+        let a = o.asked.clone().unwrap();
+        (a.why, crate::cards::decide(&a.request), o.answers(false))
+    };
+    assert_eq!(decided(&named), decided(&plain));
+}
+
 /// Its run reaped, the card for it goes, and the proxy is told (`RunEnded`): whoever else still waits on that
 /// host — another run's connection, a process it left — is asked about again, so a card for that one comes
 /// (`proxy::tests::a_run_ended_hands_its_question_to_whoever_still_waits`). Another run's card stays.

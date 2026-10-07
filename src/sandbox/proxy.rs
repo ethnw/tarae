@@ -845,26 +845,94 @@ fn relay_send(mut up: &TcpStream, bytes: &[u8]) -> io::Result<()> {
     up.write_all(bytes)
 }
 
-/// What a run's environment gets while its network goes through the proxy: every proxy variable naming `url` —
-/// Linux: `route::PROXY`, whose connects the supervisor hands to the proxy, so no credential is needed; macOS:
-/// the run's own port with its token (`RunPort::url`) — and this machine's loopback left direct (a test's own
-/// server). In place of the user's own (`runenv`).
-pub fn run_env(url: &str) -> Vec<(&'static str, String)> {
+/// A run's proxy URL (`Policy::proxy_url`): the one thing the core decides about a run's way to the proxy, and
+/// all the packs' proxy lines hang on (`sandboxpack`'s `[sandbox.proxy]`, `run-home.*.proxy`) — never the
+/// system or the tier a run is on (step 5f). Its `Debug` never shows the password.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProxyUrl {
+    pub host: String,
+    pub port: u16,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    /// Its values are this run's alone (a port and a token of its own): never written where another run reads
+    /// (a kept home — `sandbox::run_homes_made`).
+    pub per_run: bool,
+}
+
+impl std::fmt::Debug for ProxyUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyUrl")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("per_run", &self.per_run)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The values a pack's proxy lines take (`{proxy.<name>}`).
+pub const URL_VALUES: [&str; 5] = ["host", "port", "user", "password", "url"];
+
+impl ProxyUrl {
+    /// As the proxy variables name it: the password after the user (git and pip send nothing with a user alone,
+    /// M1).
+    pub fn url(&self) -> String {
+        let credentials = match (&self.user, &self.password) {
+            (Some(u), Some(p)) => format!("{u}:{p}@"),
+            (Some(u), None) => format!("{u}@"),
+            _ => String::new(),
+        };
+        format!("http://{credentials}{}:{}", self.host, self.port)
+    }
+
+    /// `{proxy.<name>}`'s value (`URL_VALUES`) — None: empty for this run (no user, no password), or no such
+    /// value, or one holding a character outside `[A-Za-z0-9.:-]` (the URL's own `:/@` aside), which no
+    /// line takes: a value can't break a line nor add one (none such is made — the token is hex, the host a
+    /// literal).
+    pub fn value(&self, name: &str) -> Option<String> {
+        let v = match name {
+            "host" => self.host.clone(),
+            "port" => self.port.to_string(),
+            "user" => self.user.clone()?,
+            "password" => self.password.clone()?,
+            "url" => self.url(),
+            _ => return None,
+        };
+        let plain =
+            |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || b".:-".contains(&c));
+        let ok = match name {
+            "url" => {
+                let rest = v.strip_prefix("http://").unwrap_or("");
+                rest.split(['@', ':']).all(plain)
+            }
+            _ => plain(&v),
+        };
+        ok.then_some(v)
+    }
+}
+
+/// What a run's environment gets while it has a proxy URL (`Policy::proxy_url`): every proxy variable naming it
+/// — and this machine's loopback left direct (a test's own server) — in place of the user's own (`runenv`); and
+/// with a password, git told to send it at once (`git_basic`: after the settings the run's own environment holds
+/// — `count`, its `GIT_CONFIG_COUNT`).
+pub fn run_env(url: &ProxyUrl, count: usize) -> Vec<(String, String)> {
     let direct = "localhost,127.0.0.1,::1".to_string();
-    let mut env: Vec<(&str, String)> =
+    let mut env: Vec<(String, String)> =
         ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
             .into_iter()
-            .map(|k| (k, url.to_string()))
+            .map(|k| (k.to_string(), url.url()))
             .collect();
-    env.extend([("NO_PROXY", direct.clone()), ("no_proxy", direct)]);
+    env.extend([("NO_PROXY".to_string(), direct.clone()), ("no_proxy".to_string(), direct)]);
+    if url.password.is_some() {
+        env.extend(git_basic(count));
+    }
     env
 }
 
-/// What git gets on top (macOS): `http.proxyAuthMethod=basic` as the setting after the `count` the run's own
-/// environment already holds (`GIT_CONFIG_COUNT`) — git's default (`anyauth`) sends the password only after a
-/// 407 (M1), one round trip more on every connection.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-pub fn git_basic(count: usize) -> [(String, String); 3] {
+/// What git gets on top of a URL with a password: `http.proxyAuthMethod=basic` as the setting after the `count`
+/// the run's own environment already holds (`GIT_CONFIG_COUNT`) — git's default (`anyauth`) sends the password
+/// only after a 407 (M1), one round trip more on every connection.
+fn git_basic(count: usize) -> [(String, String); 3] {
     [
         ("GIT_CONFIG_COUNT".into(), (count + 1).to_string()),
         (format!("GIT_CONFIG_KEY_{count}"), "http.proxyAuthMethod".into()),
@@ -926,9 +994,15 @@ impl RunPort {
 
     /// The URL its run's proxy variables name: the token as the password (`run:` the user — git and pip send
     /// nothing with a user alone, M1), the address as a literal (a JVM's default socket reaches `127.0.0.1`
-    /// where Seatbelt's `localhost` doesn't match `::ffff:127.0.0.1` — M3d).
-    pub fn url(&self) -> String {
-        format!("http://run:{}@127.0.0.1:{}", self.token, self.port)
+    /// where Seatbelt's `localhost` doesn't match `::ffff:127.0.0.1` — M3d) — this run's alone.
+    pub fn url(&self) -> ProxyUrl {
+        ProxyUrl {
+            host: "127.0.0.1".into(),
+            port: self.port,
+            user: Some("run".into()),
+            password: Some(self.token.clone()),
+            per_run: true,
+        }
     }
 
     #[cfg(test)]
@@ -1153,6 +1227,9 @@ fn raw_addr(a: std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t
 
 #[cfg(test)]
 mod tests;
+// (the packs' proxy lines through the real path, both systems — and the tests' run time limit)
+#[cfg(test)]
+mod packs_tests;
 // (macOS's runs through the real path: a run's port, its profile, its environment, its spawn and end)
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests;

@@ -76,6 +76,14 @@ env = { npm_config_logs_dir = "{run}" }
 # nvm, corepack, pnpm, yarn) — `npm_config__authToken`, `NODE_AUTH_TOKEN` left out as tokens. Measured: npm hands
 # its whole environment on to the scripts it runs, so what isn't passed here doesn't reach them either
 pass = ["npm_config_*", "NPM_CONFIG_*", "NODE_*", "NVM_*", "COREPACK_*", "PNPM_HOME", "YARN_*"]
+# Where npm fetches from by default — words on the card that asks for a host, never a grant
+registries = ["registry.npmjs.org"]
+
+# Node's fetch and https ignore the proxy variables unless told (measured, `target/sb/step5-plan.md` M1: without
+# it, `ENOTFOUND` — it tried to go direct; Node 26 measured). A Node too old to read it can't go out: it fails
+# closed. npm itself reads the proxy variables
+[sandbox.proxy]
+env = { NODE_USE_ENV_PROXY = "1" }
 
 # npm's home, wherever its cache setting moves it (npm reads `npm_config_*` in any case — both forms people
 # set): what `npx` fetched runs from its `_npx/` later, outside the sandbox, so no grant or asked folder opens

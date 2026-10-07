@@ -216,6 +216,10 @@ write-files = ["{gradle}/wrapper/dists/{a}/{b}/{a}.zip.lck"]
 # loaded into every JVM). An options variable giving one of those as an option (`GRADLE_OPTS=-Dorg.gradle.project.
 # signingPassword=…`, `-Dpassword=…` in `MAVEN_OPTS`) is token-like and left out whole (`tokens::option_secret`)
 pass =["JAVA_HOME", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "GRADLE_*", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_HOME", "M2_HOME"]
+# Where Maven and Gradle fetch from by default — words on the card that asks for a host, never a grant
+registries = [
+    "repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "services.gradle.org", "downloads.gradle.org",
+]
 # A JVM refused a port on this machine: Gradle's client and its daemon
 refused-port = { process = "java", said = """Java was refused a port on this machine: Gradle's client talks to \
 its build daemon and test workers over this machine's ports, so a Gradle build can't run while they're closed. \
@@ -257,6 +261,44 @@ said = """{home}: the user's Gradle home stays as it is — their own builds run
 a Gradle home of their own and read the downloaded dependencies and the wrapper's distributions from theirs: \
 Gradle trying to write there is expected, and the build goes on. A dependency or distribution not downloaded \
 yet fails here — tell the user; a build of theirs fetches it."""
+
+# The JVM reads no HTTPS_PROXY: Gradle takes the proxy from its home's gradle.properties — dependency resolution
+# (its own HTTP client, after a 407) and the wrapper's download (the JDK's, which sends Basic on a tunnel only
+# with `disabledSchemes` cleared) — measured, `target/sb/step5/m2-gradle.sh`. Written for each run with a proxy
+# URL, removed for one without; the file is tarae's whole (a line a run wrote there is gone at the next run).
+# A run whose URL is its own alone (a port and a token of its own: macOS, Linux's fallback tier) never gets the
+# kept home with its daemon — another run reads it, and the daemon serves later runs — but one of its own: its
+# build pays a daemon's start and a cold home (`target/sb/subreaper.md`: +411% for a test run without a warm
+# daemon). Its user and password lines are left out where the URL has none (Linux's supervised runs)
+[sandbox.run-home.gradle.proxy]
+file = "gradle.properties"
+lines = [
+    "systemProp.https.proxyHost={proxy.host}",
+    "systemProp.https.proxyPort={proxy.port}",
+    "systemProp.https.proxyUser={proxy.user}",
+    "systemProp.https.proxyPassword={proxy.password}",
+    "systemProp.http.proxyHost={proxy.host}",
+    "systemProp.http.proxyPort={proxy.port}",
+    "systemProp.http.proxyUser={proxy.user}",
+    "systemProp.http.proxyPassword={proxy.password}",
+    "systemProp.http.nonProxyHosts=localhost|127.0.0.1|[::1]",
+    "systemProp.jdk.http.auth.tunneling.disabledSchemes=",
+]
+
+# Maven 3.9+ takes the proxy from a settings file's <proxy> (measured, `target/sb/step5/l2-maven-auth.sh`) — given
+# in `MAVEN_ARGS` as the user settings (`-s`): runs never read the user's own `~/.m2/settings.xml` (repository
+# passwords live there), while `-gs` would replace the installation's `conf/settings.xml`, which they do read (an
+# admin's mirrors). Not measured: Maven 4's JDK transport (it would need `disabledSchemes` cleared in
+# `MAVEN_OPTS`), `mvnw`'s own download, an older Maven (no `MAVEN_ARGS`: it can't go out)
+[sandbox.proxy.files."maven-settings.xml"]
+lines = [
+    "<settings><proxies><proxy><id>tarae</id><active>true</active><protocol>https</protocol>",
+    "<host>{proxy.host}</host><port>{proxy.port}</port>",
+    "<username>{proxy.user}</username>",
+    "<password>{proxy.password}</password>",
+    "<nonProxyHosts>localhost|127.0.0.1</nonProxyHosts></proxy></proxies></settings>",
+]
+append = { MAVEN_ARGS = "-s {file}" }
 
 [claude]
 builders = ["gradle", "mvn"]

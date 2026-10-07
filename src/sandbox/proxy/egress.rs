@@ -62,7 +62,7 @@ impl Pattern {
     }
 
     /// Whether it names `host` (as `parse::name` makes it) at `port`, `default` the request's own.
-    fn matches(&self, host: &str, port: u16, default: u16) -> bool {
+    pub(crate) fn matches(&self, host: &str, port: u16, default: u16) -> bool {
         let (named, at) = match self {
             Pattern::Name(n, at) => (host == n, at),
             Pattern::Under(d, at) => (

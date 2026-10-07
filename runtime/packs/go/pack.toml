@@ -167,6 +167,9 @@ pass = [
     "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOWASM", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK",
     "GCCGO", "CGO_*",
 ]
+# Where go fetches modules and checks their sums by default — words on the card that asks for a host, never a
+# grant
+registries = ["proxy.golang.org", "sum.golang.org"]
 
 # GOPATH may be a list (`/a:/b`): Go puts the module cache and `bin` in the first; every one is a home
 [sandbox.homes]

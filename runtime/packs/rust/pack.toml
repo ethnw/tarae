@@ -217,6 +217,9 @@ bins = ["{cargo}/bin"]
 # as tokens), rustup's, rustc's and the flags (`RUST*`: RUSTFLAGS, RUSTUP_TOOLCHAIN, RUST_BACKTRACE…), clippy's
 # config folder. The user's own builds see the same flags, so a run doesn't rebuild what theirs built
 pass = ["CARGO_*", "RUST*", "CLIPPY_CONF_DIR"]
+# Where cargo fetches from by default (the index, the crates) — words on the card that asks for a host, never a
+# grant
+registries = ["crates.io", "*.crates.io"]
 # How the sandbox names the folders `[builds]` asks cargo for (#20: the checkout's cargo config names them)
 builds-said = { who = "cargo", target = "target-dir", build = "build-dir" }
 

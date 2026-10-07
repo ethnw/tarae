@@ -124,16 +124,33 @@ pub fn card(a: Ask) -> Offer {
         (false, false) => format!("asked by {} in `{}`, Claude's command", a.process, a.label),
     };
     let hold = crate::sandbox::proxy::Limits::default().hold.as_secs();
+    let named = registry_of(&crate::sandboxpack::get().registries, &a.host, a.port)
+        .map(|pack| format!("\n{} is the {pack} pack's registry", a.host))
+        .unwrap_or_default();
     let question = format!(
-        "on port {}, through tarae's proxy\n{by}\n\nIts connection waits up to {hold} s for your answer; after \
-         that it's refused, and your answer counts from its next try. llm.sandbox-hosts lists the hosts reached \
-         without asking.",
+        "on port {}, through tarae's proxy\n{by}{named}\n\nIts connection waits up to {hold} s for your answer; \
+         after that it's refused, and your answer counts from its next try. llm.sandbox-hosts lists the hosts \
+         reached without asking.",
         a.port
     );
     let asked = Asked::new(Why::Host, Request::Host(a.at()));
     let title = format!("{TITLE} {}?", a.host);
     Offer::new(title, &question, "", String::new(), What::Host(Box::new(a))).deciding(0..2).asked(asked)
 }
+
+/// The pack whose `registries` name `host:port` (Q6: words on the card, never a grant) — at the port a registry
+/// lists, else 443 (`REGISTRY_PORT`): the same name on another port is no registry — None: none does.
+fn registry_of(
+    registries: &[(String, crate::sandbox::proxy::egress::Pattern)],
+    host: &str,
+    port: u16,
+) -> Option<String> {
+    let named = |p: &crate::sandbox::proxy::egress::Pattern| p.matches(host, port, REGISTRY_PORT);
+    registries.iter().find(|(_, p)| named(p)).map(|(pack, _)| pack.clone())
+}
+
+/// A registry's port where its pack lists none: HTTPS's.
+const REGISTRY_PORT: u16 = 443;
 
 /// The user's answer on `a`'s card (`id`): to the proxy for the card's session and run, kept as far as it
 /// reaches, said — and Claude hears it with the next message (but a run's own `y`).

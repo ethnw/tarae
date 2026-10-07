@@ -556,6 +556,10 @@ pub struct Policy {
     /// then nothing goes beyond this machine (`loopback_only` says so). None on Linux (the supervisor hands its
     /// connections over); made for a macOS `Here` on any system, so both systems' policies pin alike (`golden`).
     pub proxy: Option<std::sync::Arc<proxy::RunPort>>,
+    /// Linux: its supervisor hands its connections to tarae's proxy — reached at `route::PROXY`, no credential (the
+    /// supervisor knows the run). Made for the `Here` a policy is made for (`policy_in`), so both systems'
+    /// policies pin alike on either (`golden`); `for_project`: this system's.
+    pub supervised: bool,
     /// The hosts its network reaches through the proxy, as its rules there hold them (`llm.sandbox-hosts`, and
     /// what the user answered for the project and for this run alone — `tools::with_allowed`). Not part of its key
     /// (`policy_key`): an answer mustn't end what an earlier run left (a daemon) — the proxy's newer answers go
@@ -1799,7 +1803,8 @@ fn end_tagged(root: Option<&Path>) -> Vec<u32> {
 pub fn policy_key(p: &Policy) -> String {
     let mut q = p.clone();
     (q.run, q.tag, q.proxy, q.watch, q.env) = (None, None, None, None, Vec::new());
-    (q.egress, q.run_id) = (Default::default(), 0);
+    // (`supervised` as the proxy URL it gives, below)
+    (q.egress, q.run_id, q.supervised) = (Default::default(), 0, false);
     // (the kept homes are the project's and the key's — granted by them, not part of what's compared)
     q.write.retain(|w| !p.kept.iter().any(|k| k.home == *w));
     q.kept = Vec::new();
@@ -1808,6 +1813,11 @@ pub fn policy_key(p: &Policy) -> String {
         q.confine = None;
     }
     let mut text = format!("{q:?}");
+    // (a proxy URL that's the same for every run is the policy's: a home a daemon lives from never gets runs
+    // whose proxy lines differ from those its daemon started with — a per-run one is never in a kept home)
+    if let Some(url) = p.proxy_url().filter(|u| !u.per_run) {
+        text.push_str(&format!(" proxy {}", url.url()));
+    }
     if let Some(r) = &p.run {
         text = text.replace(&r.path().display().to_string(), "$RUN");
     }
@@ -2117,6 +2127,27 @@ const NO_WAY_OUT: [&str; 2] = [
 ];
 
 impl Policy {
+    /// Its run's proxy URL — the one thing the packs' proxy lines and the proxy variables hang on (step 5f): a
+    /// port and token of the run's own where it has one (`proxy`: macOS), else, where its supervisor hands its
+    /// connections over (`supervised`: Linux), that address (`route::PROXY` — no credential: the supervisor
+    /// knows the run). None: the network closed, or no way to the proxy was made — nothing goes beyond this
+    /// machine. (Step 6 changes only this: no URL where the session's network redirects, a run's own one in tier
+    /// C.)
+    pub fn proxy_url(&self) -> Option<proxy::ProxyUrl> {
+        match (&self.proxy, self.supervised) {
+            _ if !self.network => None,
+            (Some(r), _) => Some(r.url()),
+            (None, true) => Some(proxy::ProxyUrl {
+                host: route::PROXY.ip().to_string(),
+                port: route::PROXY.port(),
+                user: None,
+                password: None,
+                per_run: false,
+            }),
+            (None, false) => None,
+        }
+    }
+
     /// The Seatbelt profile. Paths aren't in it: they're `-D` parameters (`params`), so no path can change
     /// what it says. Every deny carries the run's tag (`tag`) — the only text from outside, and tarae's own.
     #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
@@ -2728,6 +2759,7 @@ impl Policy {
             run: None,
             tag: None,
             proxy: None,
+            supervised: Os::HOST == Os::Linux,
             // (with the network off no host is reached, whatever the list says)
             egress: proxy::egress::Egress {
                 any: env.network && env.hosts.is_none(),
@@ -3130,7 +3162,10 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
             .inspect_err(|e| crate::log::line("sandbox", "warning", &format!("a run's proxy port: {e}")))
             .ok();
     }
+    // (Linux: the supervisor hands the run's connections over)
+    p.supervised = here.os == Os::Linux;
     with_kept(&mut p, &env);
+    let url = p.proxy_url();
     // The kept homes held (their stamps, before they're made: a prune can't take one between) — one that can't
     // be is no kept home for this run: the run's own, and its folder not written (`policy_key` leaves the
     // kept homes out of `write`: gone from both, the key is the same — the same policy's daemon isn't ended)
@@ -3154,10 +3189,17 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
         run: p.run.as_ref().map(|r| r.path().to_path_buf()),
         ..vars_in(h, here)
     });
-    let made =
-        p.run.as_ref().zip(vars.as_ref()).map(|(r, v)| run_homes_made(r.path(), v, &p.run_env, &p.kept));
+    let made = p
+        .run
+        .as_ref()
+        .zip(vars.as_ref())
+        .map(|(r, v)| run_homes_made(r.path(), v, &p.run_env, &p.kept, url.as_ref()));
     p.env = made.unwrap_or_default();
     p.env.extend(vars.as_ref().map(packs_env).unwrap_or_default());
+    // What a run with a proxy URL gets of the packs besides (`[sandbox.proxy]`)
+    let mut env = std::mem::take(&mut p.env);
+    proxy_made(p.run.as_ref().map(|r| r.path()), url.as_ref(), &mut env, &p.run_env);
+    p.env = env;
     p
 }
 
@@ -3211,19 +3253,22 @@ pub fn confined(mut p: Policy) -> Policy {
 /// the tool there — its variable, what's set (when its `if` place is there), what's appended to the user's own
 /// value as the run gets it (`run_env`'s: a token-like one is left out, and gets only what's appended — never
 /// tarae's own value, which goes in after `from_run_env`; `{home}` in it: the home's folder) — and, a home a
-/// daemon lives from, its `daemon`'s folders and appends; a home of the run's own, its `fresh` appends. Gone
-/// with the run's folder, but a kept one. What's made in a home goes through no link (`Unlinked`): a kept one
-/// is a folder earlier runs wrote in, and tarae isn't sandboxed. Blocks (a worker's).
+/// daemon lives from, its `daemon`'s folders and appends; a home of the run's own, its `fresh` appends; its
+/// `proxy` file with `url`'s values, removed without one (a kept home's, from an earlier run) — and a home with
+/// one is the run's own when the URL is (`kept_takes`). Gone with the run's folder, but a kept one. What's made
+/// in a home goes through no link (`Unlinked`): a kept one is a folder earlier runs wrote in, and tarae isn't
+/// sandboxed. Blocks (a worker's).
 fn run_homes_made(
     run: &Path,
     vars: &crate::sandboxpack::Vars,
     run_env: &runenv::RunEnv,
     kept: &[Kept],
+    url: Option<&proxy::ProxyUrl>,
 ) -> Vec<(String, String)> {
     let at = |p: &str| vars.place(p).map(|p| profile_path(&p));
     let mut env: Vec<(String, String)> = Vec::new();
     for h in &crate::sandboxpack::get().run_homes {
-        let kept = kept.iter().find(|k| k.name == h.name);
+        let kept = kept.iter().find(|k| k.name == h.name).filter(|_| kept_takes(h, url));
         // (no kept one, or one that's a link: the run's own, as before)
         let made = kept.and_then(|k| Some((k.home.clone(), k.daemon, Unlinked::made(&k.home).ok()?)));
         let fresh = made.is_none();
@@ -3262,21 +3307,97 @@ fn run_homes_made(
         }
         let fresh = fresh.then_some(&h.fresh).into_iter().flatten();
         for (var, more) in h.append.iter().chain(daemon.iter().flat_map(|d| &d.append)).chain(fresh) {
-            let more = more.replace("{home}", &home.display().to_string());
-            // (after what's appended already — the user's own value first, as the run gets it)
-            let i = env.iter().position(|(k, _)| k == var);
-            let theirs = match i {
-                Some(i) => Some(env.remove(i).1),
-                None => run_env.var(var),
+            appended(&mut env, run_env, var, &more.replace("{home}", &home.display().to_string()));
+        }
+        // Its proxy file: this run's values, or none (a kept home's from an earlier run removed)
+        if let (Some(lines), Ok(dir)) = (&h.proxy, &dir) {
+            let done = match url {
+                Some(url) => dir.write_file(&lines.file, proxy_text(&lines.lines, url).as_bytes()),
+                None => dir.remove_file(&lines.file),
             };
-            let value = match theirs.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
-                Some(o) => format!("{o} {more}"),
-                None => more,
-            };
-            env.push((var.clone(), value));
+            if let Err(e) = done {
+                crate::log::line("tarae", "warning", &format!("a run's {} home: {e}", h.name));
+            }
         }
     }
     env
+}
+
+/// `more` after `var`'s value as the run gets it: what's appended already, else the user's own (`run_env` — a
+/// token-like one is left out, and gets only what's appended).
+fn appended(env: &mut Vec<(String, String)>, run_env: &runenv::RunEnv, var: &str, more: &str) {
+    let i = env.iter().position(|(k, _)| k == var);
+    let theirs = match i {
+        Some(i) => Some(env.remove(i).1),
+        None => run_env.var(var),
+    };
+    let value = match theirs.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        Some(o) => format!("{o} {more}"),
+        None => more.to_string(),
+    };
+    env.push((var.to_string(), value));
+}
+
+/// Whether a kept home may stand for run home `h` with this proxy URL: not when `h` has proxy lines and the
+/// URL's values are the run's alone (its own port and token) — another run reads a kept home, and a daemon
+/// serves later runs from it (step 5f, the user's decision 2026-10-07: the run's own home instead, the warm
+/// daemon given up).
+fn kept_takes(h: &crate::sandboxpack::RunHome, url: Option<&proxy::ProxyUrl>) -> bool {
+    h.proxy.is_none() || !url.is_some_and(|u| u.per_run)
+}
+
+/// `lines` with `url`'s values filled in (`{proxy.<value>}`), as a file's text — a line naming a value that's
+/// empty for this run (no user, no password) left out whole.
+fn proxy_text(lines: &[String], url: &proxy::ProxyUrl) -> String {
+    let mut text = String::new();
+    'line: for line in lines {
+        let mut l = line.clone();
+        for v in proxy::URL_VALUES {
+            let named = format!("{{proxy.{v}}}");
+            if l.contains(&named) {
+                let Some(value) = url.value(v) else { continue 'line };
+                l = l.replace(&named, &value);
+            }
+        }
+        text.push_str(&l);
+        text.push('\n');
+    }
+    text
+}
+
+/// What the packs' `[sandbox.proxy]` gives a run with a proxy URL (none without one): variables set, appended to
+/// the run's own (`env` holds what's set so far — the run homes'), and files written in its own folder `run` —
+/// their `append` naming them (`{file}`). Blocks (a worker's).
+fn proxy_made(
+    run: Option<&Path>,
+    url: Option<&proxy::ProxyUrl>,
+    env: &mut Vec<(String, String)>,
+    run_env: &runenv::RunEnv,
+) {
+    let Some(url) = url else { return };
+    let p = &crate::sandboxpack::get().proxy;
+    env.extend(p.env.iter().cloned());
+    for (var, more) in &p.append {
+        appended(env, run_env, var, more);
+    }
+    if p.files.is_empty() {
+        return;
+    }
+    let dir = run.ok_or_else(|| "no folder of the run's own".to_string()).and_then(Unlinked::made);
+    for f in &p.files {
+        let written = dir.as_ref().map_err(Clone::clone).and_then(|d| {
+            d.write_file(&f.file, proxy_text(&f.lines, url).as_bytes())?;
+            Ok(d.at.join(&f.file))
+        });
+        match written {
+            Ok(at) => {
+                for (var, more) in &f.append {
+                    appended(env, run_env, var, &more.replace("{file}", &at.display().to_string()));
+                }
+            }
+            Err(e) => crate::log::line("tarae", "warning", &format!("a run's proxy file {}: {e}", f.file)),
+        }
+    }
 }
 
 /// A run home's folder, opened through no link — what's made in it goes from it a step at a time, each
@@ -3357,6 +3478,54 @@ impl Unlinked {
             }
         }
         Err(format!("{}: a link came back", at.display()))
+    }
+
+    /// File `name` (a plain name) in it holding `text`, written whole (0600): a file of its own made through no
+    /// link (`O_EXCL | O_NOFOLLOW`), then renamed over the name — a link there is replaced, never gone through.
+    fn write_file(&self, name: &str, text: &[u8]) -> Result<(), String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let at = self.at.join(name);
+        let said = |e: io::Error| format!("{}: {e}", at.display());
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let temp = c_name(format!(".{name}.tarae-{}-{n}", std::process::id()).as_ref())?;
+        let c = c_name(name.as_ref())?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.fd);
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: a folder descriptor of ours and a name, live for the call.
+        let got = unsafe { libc::openat(fd, temp.as_ptr(), flags, 0o600 as libc::c_uint) };
+        if got < 0 {
+            return Err(said(io::Error::last_os_error()));
+        }
+        // SAFETY: just made, ours.
+        let mut file: std::fs::File = unsafe { std::os::fd::FromRawFd::from_raw_fd(got) };
+        let written = io::Write::write_all(&mut file, text);
+        drop(file);
+        // SAFETY: a folder descriptor of ours and two names, live for the call.
+        let renamed =
+            written.and_then(|()| match unsafe { libc::renameat(fd, temp.as_ptr(), fd, c.as_ptr()) } {
+                0 => Ok(()),
+                _ => Err(io::Error::last_os_error()),
+            });
+        if renamed.is_err() {
+            // SAFETY: as above.
+            unsafe { libc::unlinkat(fd, temp.as_ptr(), 0) };
+        }
+        renamed.map_err(said)
+    }
+
+    /// File `name` in it removed — a link there the link itself; none there is fine.
+    fn remove_file(&self, name: &str) -> Result<(), String> {
+        let c = c_name(name.as_ref())?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.fd);
+        // SAFETY: a folder descriptor of ours and a name, live for the call.
+        match unsafe { libc::unlinkat(fd, c.as_ptr(), 0) } {
+            0 => Ok(()),
+            _ => match io::Error::last_os_error() {
+                e if e.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+                e => Err(format!("{}: {e}", self.at.join(name).display())),
+            },
+        }
     }
 
     /// Whether `c` in it was a link, now removed (said in `gone`).
@@ -3825,18 +3994,11 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             for (var, copy) in &p.reads.copies.env {
                 c.env(var, copy);
             }
-            // The network open goes through tarae's egress proxy (step 5) — Linux: its address, which the
-            // supervisor hands over; macOS: the run's own port and token, and git told to send the token at once
-            #[cfg(target_os = "linux")]
-            if p.network {
-                c.envs(proxy::run_env(&format!("http://{}", route::PROXY)));
-            }
-            #[cfg(not(target_os = "linux"))]
-            if let Some(r) = p.proxy.as_ref().filter(|_| p.network) {
-                c.envs(proxy::run_env(&r.url()));
+            // The network open goes through tarae's egress proxy (step 5), as the run's proxy URL says
+            if let Some(url) = p.proxy_url() {
                 // (after the settings the run's own environment holds — `llm.sandbox-env` may pass git's)
                 let count = p.run_env.var("GIT_CONFIG_COUNT").and_then(|n| n.parse().ok());
-                c.envs(proxy::git_basic(count.unwrap_or(0)));
+                c.envs(proxy::run_env(&url, count.unwrap_or(0)));
             }
             c
         }
@@ -4090,7 +4252,7 @@ mod tests {
         env.extend(opts.map(|o| ("GRADLE_OPTS".to_string(), o.into())));
         let here = Here { env, ..Here::default() };
         let run_env = run_env_of(&here, &crate::llm::LlmConfig::default());
-        run_homes_made(run, &vars_in(&user.join("no-home"), &here), &run_env, &[])
+        run_homes_made(run, &vars_in(&user.join("no-home"), &here), &run_env, &[], None)
     }
 
     /// The multiplexers' socket folders, where they put them by default and where the environment says.
@@ -5104,7 +5266,7 @@ mod tests {
         let made = |kept: &Path| {
             // (as a home a daemon lives from: its own folders too)
             let k = Kept { name: "gradle".into(), home: kept.into(), daemon: true, held: Default::default() };
-            let env = run_homes_made(&run, &vars, &Default::default(), &[k]);
+            let env = run_homes_made(&run, &vars, &Default::default(), &[k], None);
             env.into_iter().find(|(k, _)| k == "GRADLE_USER_HOME").map(|(_, v)| PathBuf::from(v))
         };
         let symlink = |to: &Path, at: &Path| std::os::unix::fs::symlink(to, at).unwrap();
@@ -5140,6 +5302,155 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// A proxy URL as a run gets it: its own port and token (`per_run` — macOS's, Linux C's after step 6), or the
+    /// supervisor's address with no credential (Linux's today). Fake tokens only.
+    fn stand_in_url(per_run: bool) -> proxy::ProxyUrl {
+        proxy::ProxyUrl {
+            host: if per_run { "127.0.0.1" } else { "192.0.2.1" }.into(),
+            port: if per_run { 40001 } else { 3128 },
+            user: per_run.then(|| "run".into()),
+            password: per_run.then(|| "tarae-fake-token-5".into()),
+            per_run,
+        }
+    }
+
+    /// What the built-in packs give a run with `url` (or none): its run homes made in `run` — `kept` standing in
+    /// where a kept home may — then `[sandbox.proxy]`'s; the user's Gradle home at `t/user/.gradle`.
+    fn proxied(t: &Path, run: &Path, kept: &[Kept], url: Option<&proxy::ProxyUrl>) -> Vec<(String, String)> {
+        let env = HashMap::from([("GRADLE_USER_HOME".to_string(), t.join("user/.gradle").into())]);
+        let vars = vars_in(&t.join("no-home"), &Here { env, ..Here::default() });
+        let mut env = run_homes_made(run, &vars, &Default::default(), kept, url);
+        proxy_made(Some(run), url, &mut env, &Default::default());
+        env
+    }
+
+    fn gradle_kept(home: &Path) -> Kept {
+        Kept { name: "gradle".into(), home: home.into(), daemon: true, held: Default::default() }
+    }
+
+    /// The JVM reads no HTTPS_PROXY (step 5f, M2): the Java pack's lines are written with this run's own values —
+    /// Gradle's in the run's Gradle home, Maven's in a settings file of the run's folder that `MAVEN_ARGS` names
+    /// (`-s`, the user's decision 2026-10-07) — 0600, no `{proxy.…}` left; where the URL has no user or password
+    /// (Linux's supervised runs) their lines are left out. And Node is told to read the proxy variables.
+    #[test]
+    fn the_java_pack_writes_its_proxy_lines() {
+        let t =
+            profile_path(&std::env::temp_dir()).join(format!("tarae-sb-proxy-lines-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let run = t.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let env = proxied(&t, &run, &[], Some(&stand_in_url(true)));
+        let get =
+            |env: &[(String, String)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let gradle = std::fs::read_to_string(run.join("gradle/gradle.properties")).unwrap();
+        for line in [
+            "systemProp.https.proxyHost=127.0.0.1",
+            "systemProp.https.proxyPort=40001",
+            "systemProp.https.proxyUser=run",
+            "systemProp.https.proxyPassword=tarae-fake-token-5",
+            "systemProp.http.proxyPassword=tarae-fake-token-5",
+            "systemProp.jdk.http.auth.tunneling.disabledSchemes=",
+        ] {
+            assert!(gradle.lines().any(|l| l == line), "{line}:\n{gradle}");
+        }
+        assert!(!gradle.contains("{proxy."), "{gradle}");
+        let mode =
+            |p: &Path| std::os::unix::fs::PermissionsExt::mode(&p.metadata().unwrap().permissions()) & 0o777;
+        assert_eq!(mode(&run.join("gradle/gradle.properties")), 0o600);
+        let maven = run.join("maven-settings.xml");
+        let xml = std::fs::read_to_string(&maven).unwrap();
+        assert!(
+            xml.contains("<port>40001</port>") && xml.contains("<password>tarae-fake-token-5</password>"),
+            "{xml}"
+        );
+        assert_eq!(mode(&maven), 0o600);
+        assert_eq!(get(&env, "MAVEN_ARGS"), Some(format!("-s {}", maven.display())));
+        assert_eq!(get(&env, "NODE_USE_ENV_PROXY").as_deref(), Some("1"));
+        // No user, no password: their lines left out, the rest written
+        let run2 = t.join("run2");
+        std::fs::create_dir_all(&run2).unwrap();
+        proxied(&t, &run2, &[], Some(&stand_in_url(false)));
+        let gradle = std::fs::read_to_string(run2.join("gradle/gradle.properties")).unwrap();
+        assert!(
+            gradle.contains("systemProp.https.proxyHost=192.0.2.1\n") && gradle.contains("proxyPort=3128\n")
+        );
+        assert!(!gradle.contains("proxyUser") && !gradle.contains("proxyPassword"), "{gradle}");
+        let xml = std::fs::read_to_string(run2.join("maven-settings.xml")).unwrap();
+        assert!(!xml.contains("<username>") && !xml.contains("<password>"), "{xml}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A run with no proxy URL (the network closed — and after step 6, a session whose network redirects) gets
+    /// none of the packs' proxy lines: no file, no variable — and a kept home holding a file from an earlier
+    /// run with one loses it (the file is tarae's whole; Gradle would read a proxy that isn't there).
+    #[test]
+    fn a_run_without_a_proxy_gets_no_proxy_lines() {
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-no-proxy-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (run, kept) = (t.join("run"), t.join("kept"));
+        for d in [&run, &kept] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(kept.join("gradle.properties"), "systemProp.https.proxyPort=40001\n").unwrap();
+        let env = proxied(&t, &run, &[gradle_kept(&kept)], None);
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!names.contains(&"NODE_USE_ENV_PROXY") && !names.contains(&"MAVEN_ARGS"), "{names:?}");
+        assert!(!kept.join("gradle.properties").exists(), "an earlier run's file stays");
+        assert!(!run.join("maven-settings.xml").exists() && !run.join("gradle/gradle.properties").exists());
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A run whose proxy URL is its own alone (a port and a token of its own) never gets a kept home that has
+    /// proxy lines (step 5f, the user's decision 2026-10-07): another run reads that home, and its daemon serves
+    /// later runs — the run's own home holds its lines, the kept one is left untouched. A URL the same for every
+    /// run keeps the kept home, its lines written there.
+    #[test]
+    fn per_run_values_never_go_in_a_shared_home() {
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-per-run-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (run, kept) = (t.join("run"), t.join("kept"));
+        for d in [&run, &kept] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let home = |env: &[(String, String)]| {
+            env.iter().find(|(k, _)| k == "GRADLE_USER_HOME").map(|(_, v)| PathBuf::from(v))
+        };
+        let env = proxied(&t, &run, &[gradle_kept(&kept)], Some(&stand_in_url(true)));
+        assert_eq!(home(&env), Some(run.join("gradle")), "the run's own");
+        let own = std::fs::read_to_string(run.join("gradle/gradle.properties")).unwrap();
+        assert!(own.contains("tarae-fake-token-5"), "{own}");
+        assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 0, "the kept home untouched");
+        let env = proxied(&t, &t.join("run2"), &[gradle_kept(&kept)], Some(&stand_in_url(false)));
+        assert_eq!(home(&env), Some(kept.clone()), "the same for every run: kept");
+        assert!(
+            std::fs::read_to_string(kept.join("gradle.properties")).unwrap().contains("proxyPort=3128\n")
+        );
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A kept home is a folder earlier runs wrote in, and tarae isn't sandboxed: its proxy file goes in through
+    /// no link a run left there — a link planted where the file goes is replaced by the file, and what it pointed
+    /// at (a marker in the test's own folder) stays as it was.
+    #[test]
+    fn a_proxy_file_is_written_through_no_link() {
+        let t =
+            profile_path(&std::env::temp_dir()).join(format!("tarae-sb-proxy-link-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (run, kept) = (t.join("run"), t.join("kept"));
+        for d in [&run, &kept] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let marker = t.join("marker");
+        std::fs::write(&marker, "the marker").unwrap();
+        std::os::unix::fs::symlink(&marker, kept.join("gradle.properties")).unwrap();
+        proxied(&t, &run, &[gradle_kept(&kept)], Some(&stand_in_url(false)));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "the marker", "written through the link");
+        let file = kept.join("gradle.properties");
+        assert!(file.symlink_metadata().unwrap().file_type().is_file(), "the link replaced by the file");
+        assert!(std::fs::read_to_string(&file).unwrap().contains("proxyPort=3128\n"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// A policy's key (`policy_key`): the same project, grants and settings give the same key, whatever is a
     /// run's own (its folder, its tag); a port opened since gives another.
     #[test]
@@ -5155,6 +5466,60 @@ mod tests {
         assert_eq!(policy_key(&a), policy_key(&b), "a run's own isn't in it");
         assert_ne!(policy_key(&a), policy_key(&p(root, vec![8080])), "a port opened");
         assert_ne!(policy_key(&a), policy_key(&p(Path::new("/w/q"), Vec::new())), "another project");
+    }
+
+    /// A policy made for each system (`policy_in`, a stand-in `Here` and a project in the test's own temp
+    /// folder), with the network as `network` says.
+    fn made_for(os: Os, network: bool, name: &str) -> (Policy, PathBuf) {
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(t.join("p")).unwrap();
+        let here = Here { tmp: Some(t.clone()), uid: 501, os, ..Here::default() };
+        let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
+        (policy_in(&t.join("p"), &llm, &[], &here), t)
+    }
+
+    /// A run's proxy URL is the one decision every proxy line hangs on (step 5f), made from the policy alone —
+    /// never the system the test runs on: the network closed, none; made for macOS, the run's own port and its
+    /// token as the password (`per_run`: never in a kept home); made for Linux, the supervisor's address with no
+    /// credential, the same for every run.
+    #[test]
+    fn a_policys_proxy_url_is_its_own() {
+        let (closed, t) = made_for(Os::Mac, false, "url-closed");
+        assert_eq!(closed.proxy_url(), None);
+        std::fs::remove_dir_all(&t).ok();
+        let (mac, t) = made_for(Os::Mac, true, "url-mac");
+        let port = mac.proxy.clone().expect("a port of the run's own");
+        let url = mac.proxy_url().unwrap();
+        assert_eq!(
+            (url.host.as_str(), url.port, url.user.as_deref(), url.password.as_deref(), url.per_run),
+            ("127.0.0.1", port.port, Some("run"), Some(port.token()), true)
+        );
+        std::fs::remove_dir_all(&t).ok();
+        let (linux, t) = made_for(Os::Linux, true, "url-linux");
+        let url = linux.proxy_url().unwrap();
+        assert_eq!(
+            (url.host.as_str(), url.port, url.user, url.password, url.per_run),
+            ("192.0.2.1", 3128, None, None, false)
+        );
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A proxy URL that's the same for every run is part of a policy's key (step 5f): a home a daemon lives from
+    /// is the key's, so a daemon is never reused by runs whose proxy lines differ from those it started with.
+    /// A run's own URL (its port, its token) is not — every run would be a key of its own, and the token would be
+    /// in what the key is made from.
+    #[test]
+    fn a_policys_key_holds_a_shared_proxy_url_never_a_runs_own() {
+        let root = Path::new("/w/p");
+        let open = Policy::for_project(&Env { network: true, ..env(root) });
+        let shared = Policy { proxy: None, supervised: true, ..open.clone() };
+        let none = Policy { proxy: None, supervised: false, ..open.clone() };
+        assert_ne!(policy_key(&shared), policy_key(&none), "a shared URL or none: two keys");
+        let own = |p: &Policy| Policy { proxy: Some(proxy::RunPort::new(p.run_id).unwrap()), ..p.clone() };
+        let (a, b) = (own(&none), own(&none));
+        assert_ne!(a.proxy_url().unwrap().password, b.proxy_url().unwrap().password);
+        assert_eq!(policy_key(&a), policy_key(&b), "a run's own port and token aren't in the key");
     }
 
     /// A run's rules for the proxy (`Policy.egress`) are the setting's as the network has them — off: no host,
@@ -6070,6 +6435,7 @@ mod tests {
             run: None,
             tag: None,
             proxy: None,
+            supervised: Os::HOST == Os::Linux,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -6147,6 +6513,7 @@ mod tests {
                 run: Some(run.clone()),
                 tag: None,
                 proxy: None,
+                supervised: Os::HOST == Os::Linux,
                 egress: Default::default(),
                 run_id: 0,
                 session: 0,
@@ -6224,6 +6591,7 @@ mod tests {
             run: None,
             tag: Some(tag.to_string()),
             proxy: None,
+            supervised: Os::HOST == Os::Linux,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -6288,6 +6656,7 @@ mod tests {
             run: None,
             tag: None,
             proxy: None,
+            supervised: Os::HOST == Os::Linux,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -7335,6 +7704,7 @@ mod tests {
             run: None,
             tag: None,
             proxy: None,
+            supervised: Os::HOST == Os::Linux,
             egress: Default::default(),
             run_id: 0,
             session: 0,

@@ -317,6 +317,124 @@ fresh = { append = { D_OPTS = "-Ddaemon=off" } }
     }
 }
 
+/// What a run with a proxy URL gets from a pack (step 5f) reads as written — a run home's file, variables, a file
+/// in the run's folder and what's appended naming it, the registries' hosts — and each wrong entry is left out
+/// in the parser's own words, the rest of its key kept: a value of the proxy's only in a file's lines (a variable
+/// can end up on a command line), only the proxy's values there, no newline in a line, a file's name and no
+/// path, none of the core's proxy variables, `{file}` only in a file's `append`, a registry a host's name.
+#[test]
+fn the_proxy_keys_are_said_in_the_parsers_words() {
+    let good = r#"
+[sandbox]
+registries = ["registry.example.invalid", "*.example.invalid"]
+[sandbox.proxy]
+env = { T_USE_PROXY = "1" }
+append = { T_OPTS = "-Dproxied" }
+[sandbox.proxy.files."t-settings.xml"]
+lines = ["<host>{proxy.host}</host>", "<password>{proxy.password}</password>"]
+append = { T_ARGS = "-s {file}" }
+[sandbox.run-home.t]
+env = "T_HOME"
+proxy = { file = "t.properties", lines = ["port={proxy.port}", "url={proxy.url}"] }
+"#;
+    let t = table(&[("t", good)], &[]);
+    assert_eq!(t.problems, Vec::<String>::new());
+    assert_eq!(
+        (&t.proxy.env[..], &t.proxy.append[..]),
+        (&[pair("T_USE_PROXY", "1")][..], &[pair("T_OPTS", "-Dproxied")][..])
+    );
+    let [f] = t.proxy.files.as_slice() else { panic!("{:?}", t.proxy) };
+    assert_eq!(
+        (f.file.as_str(), f.lines.len(), &f.append[..]),
+        ("t-settings.xml", 2, &[pair("T_ARGS", "-s {file}")][..])
+    );
+    let p = t.run_homes[0].proxy.as_ref().expect("the run home's file");
+    assert_eq!(
+        (p.file.as_str(), &p.lines[..]),
+        ("t.properties", &["port={proxy.port}".to_string(), "url={proxy.url}".to_string()][..])
+    );
+    let hosts: Vec<String> = t.registries.iter().map(|(pack, h)| format!("{pack}: {h}")).collect();
+    assert_eq!(hosts, ["t: registry.example.invalid", "t: *.example.invalid"]);
+    assert!(t.env_names().any(|n| n == "T_ARGS") && t.env_names().any(|n| n == "T_USE_PROXY"));
+    let home = |proxy: &str| format!("[sandbox.run-home.x]\nenv = \"X_HOME\"\nproxy = {proxy}\n");
+    let cases = [
+        (
+            home(r#"{ file = "x", lines = ["s={proxy.secret}"] }"#),
+            "`run-home.x.proxy`: `{proxy.secret}` isn't a value tarae fills in (`{proxy.host}`, `{proxy.port}`, \
+             `{proxy.user}`, `{proxy.password}`, `{proxy.url}`)",
+        ),
+        (home(r#"{ file = "../x", lines = [] }"#), "`run-home.x.proxy`: `file` is a file's name in the home"),
+        (home(r#"{ file = "a/b", lines = [] }"#), "`run-home.x.proxy`: `file` is a file's name in the home"),
+        (home(r#"{ file = "x", lines = ["a=1\nb=2"] }"#), "`run-home.x.proxy`: a line holds no newline"),
+        (
+            "[sandbox.proxy]\nenv = { X = \"{proxy.password}\" }\n".into(),
+            "`env.X` holds `{proxy.password}` — the proxy's values go only in a file's lines",
+        ),
+        (
+            "[sandbox.proxy]\nappend = { X = \"-Dp={proxy.port}\" }\n".into(),
+            "`append.X` holds `{proxy.port}` — the proxy's values go only in a file's lines",
+        ),
+        ("[sandbox.proxy]\nenv = { HTTPS_PROXY = \"x\" }\n".into(), "`HTTPS_PROXY` is the core's own"),
+        ("[sandbox.proxy]\nenv = { no_proxy = \"x\" }\n".into(), "`no_proxy` is the core's own"),
+        (
+            "[sandbox.proxy]\nenv = { RUSTC_WRAPPER = \"x\" }\n".into(),
+            "`RUSTC_WRAPPER` is a variable a pack may not set",
+        ),
+        (
+            "[sandbox.proxy]\nenv = { X = \"{file}\" }\n".into(),
+            "`{file}` names a `proxy.files` entry's path — only in its `append`",
+        ),
+        (
+            "[sandbox.proxy.files.\"a/b\"]\nlines = []\n".into(),
+            "`files.\"a/b\"`: a file's name in the run's folder",
+        ),
+        ("[sandbox]\nregistries = [\"1.2.3.4\"]\n".into(), "`1.2.3.4` an address — a rule names hosts"),
+        ("[sandbox]\nregistries = [\"*\"]\n".into(), "`*` "),
+        ("[sandbox.proxy]\nlines = []\n".into(), "`proxy`"),
+    ];
+    for (text, said) in &cases {
+        let t = table(&[("x", text)], &[]);
+        assert!(
+            t.problems.iter().any(|p| p.starts_with("the x pack") && p.contains(said)),
+            "{text}: {:?}",
+            t.problems
+        );
+        assert!(t.proxy == Proxy::default() && t.registries.is_empty(), "{text}: {:?}", t.proxy);
+        assert!(t.run_homes.iter().all(|h| h.proxy.is_none()), "{text}: {:?}", t.run_homes);
+    }
+    // (one wrong entry goes alone: the rest of its key stays)
+    let mixed = "[sandbox]\nregistries = [\"a.example.invalid\", \"1.2.3.4\"]\n\
+                 [sandbox.proxy]\nenv = { OK_ONE = \"1\", HTTP_PROXY = \"x\" }\n";
+    let t = table(&[("x", mixed)], &[]);
+    assert_eq!((t.proxy.env.len(), t.registries.len()), (1, 1), "{:?}", t.problems);
+}
+
+/// Only tarae's own packs tell a run with a proxy URL anything (step 5f: built-in packs only may widen runs —
+/// these carry the run's password into files and set variables its tools obey): a runtime folder's
+/// `[sandbox.proxy]`, a run home's `proxy` and `registries` (the card's words) are left out, and said.
+#[test]
+fn only_tarae_s_packs_set_a_proxy() {
+    let mine = r#"
+[sandbox]
+registries = ["evil.example.invalid"]
+[sandbox.proxy]
+env = { T_USE_PROXY = "1" }
+[sandbox.proxy.files."t.xml"]
+lines = ["{proxy.password}"]
+[sandbox.run-home.t]
+env = "T_HOME"
+proxy = { file = "t.properties", lines = ["p={proxy.password}"] }
+"#;
+    let base = ours();
+    let with = build(crate::packs::builtin_manifests(), &[("rust".into(), mine.into())]);
+    assert_eq!((&with.proxy, &with.registries), (&base.proxy, &base.registries));
+    assert_eq!(with.run_homes, base.run_homes);
+    for key in ["sandbox.proxy", "sandbox.registries", "sandbox.run-home"] {
+        let said = format!("your rust pack: `{key}` is read from tarae's own packs only");
+        assert!(with.problems.contains(&said), "{key}: {:?}", with.problems);
+    }
+}
+
 fn pair(k: &str, v: &str) -> (String, String) {
     (k.into(), v.into())
 }

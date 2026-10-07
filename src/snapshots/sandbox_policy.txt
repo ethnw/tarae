@@ -603,6 +603,8 @@ run env:
     GRADLE_OPTS=-Dorg.gradle.daemon=false
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
+    MAVEN_ARGS=-s $RUN/maven-settings.xml
+    NODE_USE_ENV_PROXY=1
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $HOME/.gradle
@@ -1211,6 +1213,8 @@ run env:
     GRADLE_OPTS=-Dorg.gradle.daemon=false
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
+    MAVEN_ARGS=-s $RUN/maven-settings.xml
+    NODE_USE_ENV_PROXY=1
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $HOME/.gradle

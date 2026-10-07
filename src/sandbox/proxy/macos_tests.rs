@@ -41,56 +41,7 @@ pub(super) fn head(mut s: &TcpStream) -> Vec<u8> {
     buf
 }
 
-/// A run's time limit: past `secs`, its process group — the run's own, a session of its own (`spawn::setsid`)
-/// that this test started — is killed, so its output ends and a run that hangs fails its test instead of
-/// hanging it. Dropped once the run is reaped.
-pub(super) struct Deadline(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Deadline {
-    pub(super) fn new(pid: u32, secs: u64) -> Deadline {
-        use std::sync::atomic::Ordering::SeqCst;
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let seen = done.clone();
-        crate::event::thread("tarae-5d-test", move || {
-            let by = Instant::now() + Duration::from_secs(secs);
-            while !seen.load(SeqCst) && Instant::now() < by {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if !seen.load(SeqCst) {
-                eprintln!("the run (pid {pid}) passed its {secs} s: its process group killed");
-                // SAFETY: a signal to the process group of a run this test started, not reaped yet.
-                unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
-            }
-        });
-        Deadline(done)
-    }
-}
-
-impl Drop for Deadline {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// What a process started in a session of its own (`spawn::setsid`, `sandbox::spawn`) printed, both streams, and
-/// how it ended — read to its end within `secs` (`Deadline`).
-pub(super) fn finish(
-    s: crate::spawn::Spawned,
-    secs: u64,
-) -> (Option<std::process::ExitStatus>, String, String) {
-    let limit = Deadline::new(s.pid, secs);
-    let mut err = s.stderr.expect("its stderr");
-    let errs = crate::event::thread("tarae-5d-test", move || {
-        let mut e = String::new();
-        let _ = err.read_to_string(&mut e);
-        e
-    });
-    let mut out = String::new();
-    let _ = s.stdout.expect("its stdout").read_to_string(&mut out);
-    let status = crate::spawn::wait(s.pid).ok();
-    drop(limit);
-    (status, out, errs.join().unwrap_or_default())
-}
+pub(super) use super::packs_tests::finish;
 
 /// The tests' own time limit holds: a run past it is ended (`Deadline` — its process group, the run's own), so
 /// the test fails instead of hanging. The stand-in run is a `sleep` this test started.

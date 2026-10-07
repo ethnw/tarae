@@ -39,6 +39,16 @@
 //!   project *and policy* where tarae ends what runs leave (Linux; elsewhere the run's own), and that made and
 //!   appended then; `fresh = { append }`: appended only to a home of the run's own; `said` what Claude reads
 //!   when a write in the user's home of the tool was kept.
+//!   `proxy = { file, lines }`: a file in the home that's tarae's whole, written for a run with a proxy URL
+//!   (`sandbox::Policy::proxy_url`) and removed for one without — `{proxy.<value>}` in its lines
+//!   (`proxy::URL_VALUES`; a line whose value is empty for the run is left out). A run whose URL is its own
+//!   alone (a port and token of its own) gets the run's own home, never a kept one (step 5f).
+//! - `proxy = { env, append, files }`: what a run with a proxy URL gets besides the core's proxy variables —
+//!   variables set and appended to the run's own (no `{proxy.…}`: a variable may end up on a command line), and
+//!   `files."<name>" = { lines, append }`: a file in the run's own folder, `{proxy.<value>}` in its lines, `{file}`
+//!   (its path) in its `append`.
+//! - `registries`: the hosts the pack's tools fetch from, as `llm.sandbox-hosts` writes them — words only, never
+//!   a grant: the host card names them (Q6).
 //! - `env`: variables in every run's environment (`{run}`: the run's own folder).
 //! - `pass`: what of the user's environment a run gets besides the core's floor (`sandbox::runenv`) — the
 //!   toolchain's own variables: names, or `PREFIX*` families (two characters at least before the `*`); never
@@ -103,6 +113,10 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     ("settings", Reach::BuiltIn),
     // (what Claude reads)
     ("refused-port", Reach::BuiltIn),
+    // (what a run with a proxy URL is told: where its tools go out)
+    ("proxy", Reach::BuiltIn),
+    // (what the user reads on the host card)
+    ("registries", Reach::BuiltIn),
 ];
 
 /// `[claude]`'s keys and how a runtime folder's pack counts for each.
@@ -188,7 +202,28 @@ pub struct RunHome {
     pub daemon: Option<Daemon>,
     /// Appended only to a home of the run's own (`fresh` — not kept).
     pub fresh: Vec<(String, String)>,
+    /// A file in it that's tarae's whole, its lines for a run with a proxy URL (`proxy`).
+    pub proxy: Option<ProxyLines>,
     pub said: String,
+}
+
+/// A file's lines for a run with a proxy URL: `{proxy.<value>}` in them (`proxy::URL_VALUES`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProxyLines {
+    /// Its name, in a run home or in the run's own folder.
+    pub file: String,
+    pub lines: Vec<String>,
+    /// Appended to the run's own value (`{file}`: its path) — a file in the run's own folder's.
+    pub append: Vec<(String, String)>,
+}
+
+/// What a run with a proxy URL gets besides the core's proxy variables (`[sandbox.proxy]`, every pack's).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Proxy {
+    pub env: Vec<(String, String)>,
+    pub append: Vec<(String, String)>,
+    /// Files in the run's own folder.
+    pub files: Vec<ProxyLines>,
 }
 
 /// What a home a daemon lives from gets besides (`run-home`'s `daemon`).
@@ -259,6 +294,9 @@ pub struct Packs {
     pub quiet_writes: Vec<String>,
     pub settings: Vec<Setting>,
     pub refused_port: Vec<(String, String)>,
+    pub proxy: Proxy,
+    /// The hosts each pack's tools fetch from: (pack, the hosts) — words on the host card, never a grant.
+    pub registries: Vec<(String, crate::sandbox::proxy::egress::Pattern)>,
     pub run_allow: Vec<String>,
     pub code_trees: Vec<String>,
     pub expand: Vec<Expand>,
@@ -271,7 +309,7 @@ pub struct Packs {
 
 impl Packs {
     /// The variables the packs set or read for a run: their homes', their run homes' (and what those set and
-    /// append to), their `env`, their settings', their caches' `var`, what their `ask` reads (a toolchain's
+    /// append to), their `env` (and their `proxy`'s), their settings', their caches' `var`, what their `ask` reads (a toolchain's
     /// variable of the same name moves that folder) — no command of Claude's sets one unasked
     /// (`readonly::env_allowed`).
     pub fn env_names(&self) -> impl Iterator<Item = &str> {
@@ -282,7 +320,9 @@ impl Packs {
             let set = r.set.iter().map(|(k, ..)| k.as_str()).chain(appended);
             std::iter::once(r.env.as_str()).chain(set)
         });
-        let env = self.env.iter().map(|(k, _)| k.as_str());
+        let proxy = self.proxy.env.iter().chain(&self.proxy.append);
+        let proxy = proxy.chain(self.proxy.files.iter().flat_map(|f| &f.append));
+        let env = self.env.iter().chain(proxy).map(|(k, _)| k.as_str());
         let settings = self.settings.iter().flat_map(|s| s.var.iter().chain(&s.var_also).map(String::as_str));
         let caches = self.caches.iter().filter_map(|c| c.var.as_deref());
         let asked = self.ask.iter().flat_map(Ask::keys).map(String::as_str);
@@ -528,6 +568,35 @@ fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> R
                 out.settings.push(setting(&tab(s)?, &homes)?);
             }
         }
+        ("sandbox", "proxy") => {
+            let p = tab(v)?;
+            known(&p, &["env", "append", "files"], "`proxy`")?;
+            for key in ["env", "append"] {
+                for (k, val) in p.get(key).map_or(Ok(Vec::new()), |e| pairs(e, key))? {
+                    match check_proxy_var(&k).and_then(|()| check_braces(&val, &[], &format!("`{key}.{k}`")))
+                    {
+                        Ok(()) if key == "env" => out.proxy.env.push((k, val)),
+                        Ok(()) => out.proxy.append.push((k, val)),
+                        Err(e) => wrong.push(e),
+                    }
+                }
+            }
+            for (name, f) in p.get("files").map_or(Ok(Table::new()), tab)? {
+                match proxy_file(&name, &f) {
+                    Ok(f) if !out.proxy.files.iter().any(|o| o.file == f.file) => out.proxy.files.push(f),
+                    Ok(f) => wrong.push(format!("`files.\"{}\"` is named twice", f.file)),
+                    Err(e) => wrong.push(e),
+                }
+            }
+        }
+        ("sandbox", "registries") => {
+            for r in list(v)? {
+                match crate::sandbox::proxy::egress::Pattern::parse(&r) {
+                    Ok(p) => out.registries.push((pack.to_string(), p)),
+                    Err(e) => wrong.push(format!("`{r}` {e}")),
+                }
+            }
+        }
         ("sandbox", "refused-port") => {
             let r = tab(v)?;
             known(&r, &["process", "said"], "`refused-port`")?;
@@ -588,8 +657,78 @@ fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> R
     }
 }
 
+/// The proxy's values a line may name: `{proxy.host}`, … (`proxy::URL_VALUES`).
+fn proxy_values() -> Vec<String> {
+    crate::sandbox::proxy::URL_VALUES.iter().map(|v| format!("proxy.{v}")).collect()
+}
+
+/// Every `{…}` in `s` is one of `allowed` — Err in `what`'s words: a value of the proxy's where none goes, or a
+/// name that's no value.
+fn check_braces(s: &str, allowed: &[String], what: &str) -> Result<(), String> {
+    let mut rest = s;
+    while let Some(start) = rest.find('{') {
+        let end = rest[start..].find('}').ok_or(format!("{what} has an unclosed `{{`"))? + start;
+        let name = &rest[start + 1..end];
+        if !allowed.iter().any(|a| a == name) {
+            let values = proxy_values().iter().map(|v| format!("`{{{v}}}`")).collect::<Vec<_>>().join(", ");
+            return Err(match name {
+                "file" => {
+                    format!("{what}: `{{file}}` names a `proxy.files` entry's path — only in its `append`")
+                }
+                _ if name.starts_with("proxy.") && allowed.is_empty() => format!(
+                    "{what} holds `{{{name}}}` — the proxy's values go only in a file's lines (a variable can end \
+                     up on a command line)"
+                ),
+                _ => format!("{what}: `{{{name}}}` isn't a value tarae fills in ({values})"),
+            });
+        }
+        rest = &rest[end + 1..];
+    }
+    Ok(())
+}
+
+/// A variable a pack's proxy part may set: one a pack may set, and none of the core's proxy variables (any
+/// case — `runenv::PROXIES`).
+fn check_proxy_var(name: &str) -> Result<(), String> {
+    check_var(name)?;
+    match crate::sandbox::runenv::PROXIES.iter().any(|p| p.eq_ignore_ascii_case(name)) {
+        true => Err(format!("`{name}` is the core's own: tarae sets the proxy's variables")),
+        false => Ok(()),
+    }
+}
+
+/// A file's lines for a run with a proxy URL — `what` names it in what's said: plain lines, `{proxy.<value>}` in
+/// them.
+fn proxy_lines(lines: &[String], what: &str) -> Result<Vec<String>, String> {
+    let allowed = proxy_values();
+    for l in lines {
+        if l.contains(['\n', '\r']) {
+            return Err(format!("{what}: a line holds no newline"));
+        }
+        check_braces(l, &allowed, what)?;
+    }
+    Ok(lines.to_vec())
+}
+
+/// `[sandbox.proxy.files."<name>"]`: a file in the run's own folder.
+fn proxy_file(name: &str, f: &Value) -> Result<ProxyLines, String> {
+    let what = format!("`files.\"{name}\"`");
+    let f = f.as_table().ok_or(format!("{what} isn't a table"))?;
+    known(f, &["lines", "append"], &what)?;
+    if !plain_word(name) {
+        return Err(format!("{what}: a file's name in the run's folder"));
+    }
+    let lines = proxy_lines(&list_in(f, "lines")?, &what)?;
+    let append = f.get("append").map_or(Ok(Vec::new()), |a| pairs(a, "append"))?;
+    for (k, v) in &append {
+        check_proxy_var(k)?;
+        check_braces(v, &["file".to_string()], &format!("{what}'s `append.{k}`"))?;
+    }
+    Ok(ProxyLines { file: name.to_string(), lines, append })
+}
+
 fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
-    let keys = ["env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "said"];
+    let keys = ["env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "proxy", "said"];
     known(h, &keys, &format!("`run-home.{name}`"))?;
     if !plain_word(name) {
         return Err(format!("`run-home.{name}`: a home's name is a folder's"));
@@ -644,6 +783,17 @@ fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
     let daemon_made = r.daemon.iter().flat_map(|d| &d.make);
     if r.make.iter().chain(daemon_made).chain(r.link.iter().map(|(k, _)| k)).any(|p| !plain(p)) {
         return Err(format!("`run-home.{name}`: what's made in it is a path of plain names"));
+    }
+    if let Some(p) = h.get("proxy") {
+        let what = format!("`run-home.{name}.proxy`");
+        let p = p.as_table().ok_or(format!("{what} isn't a table"))?;
+        known(p, &["file", "lines"], &what)?;
+        let file = need(p, "file", &what)?;
+        if !plain_word(&file) {
+            return Err(format!("{what}: `file` is a file's name in the home"));
+        }
+        let lines = proxy_lines(&list_in(p, "lines")?, &what)?;
+        r.proxy = Some(ProxyLines { file, lines, append: Vec::new() });
     }
     r.said = string(h, "said")?.unwrap_or_default();
     Ok(r)

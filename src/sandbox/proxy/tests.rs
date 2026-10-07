@@ -1718,3 +1718,50 @@ fn a_rule_names_hosts_and_their_ports() {
     }
     assert!(Egress { any: true, ..Egress::default() }.allows("anything.test", 1, 443));
 }
+
+/// A run's proxy variables come from its proxy URL alone, never from the system it's on (step 5f: Linux's tiers
+/// will differ in having one, and a run's own port and token reach Linux C) — git's `proxyAuthMethod=basic` comes
+/// with a password and only then, after the settings the run's own environment holds.
+#[test]
+fn the_runs_proxy_url_is_the_one_decision() {
+    let url = |password: Option<&str>| ProxyUrl {
+        host: "192.0.2.1".into(),
+        port: 3128,
+        user: password.map(|_| "run".into()),
+        password: password.map(String::from),
+        per_run: password.is_some(),
+    };
+    let get = |env: &[(String, String)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let bare = run_env(&url(None), 2);
+    assert_eq!(get(&bare, "HTTPS_PROXY").as_deref(), Some("http://192.0.2.1:3128"));
+    assert_eq!(get(&bare, "no_proxy").as_deref(), Some("localhost,127.0.0.1,::1"));
+    assert!(!bare.iter().any(|(k, _)| k.starts_with("GIT_CONFIG")), "no password, no git line: {bare:?}");
+    let with = run_env(&url(Some("tarae-fake-token-1")), 2);
+    assert_eq!(get(&with, "https_proxy").as_deref(), Some("http://run:tarae-fake-token-1@192.0.2.1:3128"));
+    assert_eq!(
+        [get(&with, "GIT_CONFIG_COUNT"), get(&with, "GIT_CONFIG_KEY_2"), get(&with, "GIT_CONFIG_VALUE_2")],
+        [Some("3".into()), Some("http.proxyAuthMethod".into()), Some("basic".into())]
+    );
+}
+
+/// A URL's value fills a pack's line only when it can't break one (step 5f: `{proxy.*}` goes into files a tool
+/// reads as lines — a newline would add a line of its own); an empty one fills nothing (the line is left out);
+/// `Debug` never shows the password.
+#[test]
+fn a_proxy_value_never_breaks_a_line() {
+    let mut u = ProxyUrl {
+        host: "127.0.0.1".into(),
+        port: 40001,
+        user: Some("run".into()),
+        password: Some("tarae-fake-token-2".into()),
+        per_run: true,
+    };
+    assert_eq!(u.value("port").as_deref(), Some("40001"));
+    assert_eq!(u.value("url").as_deref(), Some("http://run:tarae-fake-token-2@127.0.0.1:40001"));
+    assert_eq!(u.value("secret"), None);
+    assert!(!format!("{u:?}").contains("tarae-fake-token"), "{u:?}");
+    u.password = Some("x\nsystemProp.a=b".into());
+    assert_eq!((u.value("password"), u.value("url")), (None, None));
+    u.user = None;
+    assert_eq!(u.value("user"), None, "empty: its line left out");
+}
