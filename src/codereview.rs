@@ -118,9 +118,9 @@ pub struct CodeReview {
     live: std::cell::RefCell<std::collections::HashMap<DocId, (u64, Graded)>>,
     /// The rules it's graded by (the packs', the project's from the checkout tarae started in).
     pub rules: crate::risk::Rules,
-    /// A binary file the rail opened (it shows nothing: the code stays on the document then in front) — the
-    /// file in hand while that document is (`in_hand`).
-    binary_shown: Option<(usize, DocId)>,
+    /// The buffer of the binary file shown last (`show_binary`) — that file is in hand while it's in front
+    /// (`in_hand`).
+    binary_shown: Option<BinaryView>,
     /// A turn's review: how many other files differ from HEAD (changed before the turn, or by you) and the
     /// key that reviews them all (`space v v`) — the rail says so under its head (frictions 13: a turn's
     /// review read as the whole change).
@@ -176,11 +176,11 @@ impl CodeReview {
         self.moved.values().sum::<usize>() / 2
     }
 
-    /// The file in hand: a binary one the rail just opened (while the code is where it was), else the one
-    /// being read — what `space v m` marks.
+    /// The file in hand: a binary one whose buffer is in front (`show_binary`), else the one being read — what
+    /// `space v m` marks.
     pub fn in_hand(&self, ed: &Editor) -> Option<usize> {
-        match self.binary_shown {
-            Some((i, doc)) if doc == ed.doc().id => Some(i),
+        match &self.binary_shown {
+            Some(v) if v.doc == ed.doc().id => Some(v.file),
             _ => self.current(ed),
         }
     }
@@ -555,17 +555,10 @@ fn grade_files(
     for (i, f) in files.iter().enumerate() {
         let raw = raws.get(&f.rel);
         let hunks = if by_id.contains(&f.rel) {
-            // (gone: as a bring says a file it deletes — a turn's file may be in no repository at all; one git
-            // can't read is that file's, said, not the review's end)
-            let hash = || git(root, &["hash-object", "--", &f.rel]).map(|b| b.trim().to_string());
-            let blob = match (f.gone, rev) {
-                (true, _) => "gone".to_string(),
-                (false, Some(_)) => hash().unwrap_or_else(|e| {
-                    unread.push((f.rel.clone(), e));
-                    format!("unread {}", f.rel)
-                }),
-                (false, None) => hash().unwrap_or_else(|_| "gone".into()),
-            };
+            let (blob, why) = blob_of(root, f, rev);
+            if let Some(e) = why {
+                unread.push((f.rel.clone(), e));
+            }
             let mut h = vec![crate::risk::binary(&blob)];
             h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
             h
@@ -589,6 +582,22 @@ fn grade_files(
     }
     let whole = files.iter().filter(|f| whole.contains(&f.rel)).map(|f| f.path.clone()).collect();
     Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread })
+}
+
+/// What a file graded by id (binary, converted) is graded as — its key's blob (a worker's: git): git's id of
+/// the working tree's file; `gone` for a deleted one (as a bring says a file it deletes — a turn's file may
+/// be in no repository at all); `unread <rel>` when git can't read it, and why (that file's, said, not the
+/// review's end). The review's grading and a binary file's buffer (`show_binary`) both take it from here.
+fn blob_of(root: &Path, f: &File, rev: Option<&str>) -> (String, Option<String>) {
+    let hash = || git(root, &["hash-object", "--", &f.rel]).map(|b| b.trim().to_string());
+    match (f.gone, rev) {
+        (true, _) => ("gone".to_string(), None),
+        (false, Some(_)) => match hash() {
+            Ok(b) => (b, None),
+            Err(e) => (format!("unread {}", f.rel), Some(e)),
+        },
+        (false, None) => (hash().unwrap_or_else(|_| "gone".into()), None),
+    }
 }
 
 /// How many of each file's changed lines moved, by path (files with none left out).
@@ -1247,8 +1256,34 @@ pub fn highs_between(
         for h in &hunks {
             let g = graded(&r.rel, lang, h, rules, false);
             if g.grade == Grade::High {
-                out.push(Held::of(&r.rel, g, h));
+                let mut held = Held::of(&r.rel, g, h);
+                // (a binary one's blob, to be sized below)
+                if h.mode.is_none() && binary.contains(&r.rel) && !none(&r.new) {
+                    held.size = Some(u64::MAX);
+                }
+                out.push(held);
             }
+        }
+    }
+    // A binary one's size, beside its blob where it's shown (one `cat-file --batch-check`)
+    let ids: Vec<&str> =
+        raws.iter().filter(|r| binary.contains(&r.rel) && !none(&r.new)).map(|r| r.new.as_str()).collect();
+    if !ids.is_empty() {
+        let input = ids.iter().map(|id| format!("{id}\n")).collect::<String>();
+        let sizes: std::collections::HashMap<String, u64> = crate::gitrepo::git(
+            root,
+            &["cat-file", "--batch-check=%(objectname) %(objectsize)"],
+            Some(&input),
+        )?
+        .lines()
+        .filter_map(|l| {
+            let (id, n) = l.split_once(' ')?;
+            Some((id.to_string(), n.parse().ok()?))
+        })
+        .collect();
+        for h in out.iter_mut().filter(|h| h.size.is_some()) {
+            let blob = raws.iter().find(|r| r.rel == h.rel).map(|r| r.new.as_str()).unwrap_or_default();
+            h.size = sizes.get(blob).copied();
         }
     }
     Ok(out)
@@ -1267,6 +1302,8 @@ pub struct Held {
     pub added: Vec<String>,
     pub mode: Option<(String, String)>,
     pub keys: Vec<crate::risk::Key>,
+    /// A binary file's size in the commits (its blob's), said beside its blob where it's shown.
+    pub size: Option<u64>,
 }
 
 impl Held {
@@ -1281,6 +1318,7 @@ impl Held {
             added,
             mode,
             keys: g.keys,
+            size: None,
         }
     }
 
@@ -1433,12 +1471,10 @@ pub struct HeldView {
 /// long line's tail past the pane's edge is never "drawn".
 fn line_ends(ed: &Editor, doc: DocId) -> std::collections::HashMap<usize, (bool, bool)> {
     let mut out: std::collections::HashMap<usize, (bool, bool)> = Default::default();
-    for p in ed.screen.panes.iter().filter(|p| ed.session.views.iter().any(|w| w.id == p.0 && w.doc == doc)) {
-        for &(line, col, _, end) in &p.3 {
-            let e = out.entry(line).or_default();
-            e.0 |= col == 0;
-            e.1 |= end == usize::MAX;
-        }
+    for &(line, col, _, end) in ed.screen.rows_of(doc) {
+        let e = out.entry(line).or_default();
+        e.0 |= col == 0;
+        e.1 |= end == usize::MAX;
     }
     out
 }
@@ -1465,7 +1501,12 @@ fn show_as_brought(ed: &mut Editor, card: u64, missing: Vec<Held>) {
             text.push_str(&format!("-{l}\n"));
         }
         for l in &h.added {
-            text.push_str(&format!("+{l}\n"));
+            // (a binary file's line is its blob: its size beside it)
+            match h.size {
+                Some(1) => text.push_str(&format!("+{l} — 1 byte\n")),
+                Some(n) => text.push_str(&format!("+{l} — {n} bytes\n")),
+                None => text.push_str(&format!("+{l}\n")),
+            }
         }
         blocks.push((from..text.lines().count(), h.keys.clone()));
     }
@@ -1546,6 +1587,27 @@ fn held_seen(ed: &mut Editor) -> bool {
 /// Why a yes is held while `n` high-risk changes wait for a person's look.
 pub fn held_said(n: usize) -> String {
     format!("{} not looked at — space v h on each, in a review", crate::nav::count(n, "high-risk change"))
+}
+
+/// `lines` (0-based, ascending) as the runs a person reads, 1-based — `212–229, 301` — the first `most` of
+/// them, the rest counted.
+fn line_ranges(lines: &[usize], most: usize) -> String {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &l in lines {
+        match runs.last_mut() {
+            Some((_, end)) if *end + 1 == l => *end = l,
+            _ => runs.push((l, l)),
+        }
+    }
+    let mut s: Vec<String> = runs
+        .iter()
+        .take(most)
+        .map(|&(a, b)| if a == b { format!("line {}", a + 1) } else { format!("lines {}–{}", a + 1, b + 1) })
+        .collect();
+    if runs.len() > most {
+        s.push(format!("… {} more", runs.len() - most));
+    }
+    s.join(", ")
 }
 
 /// The places a card names at most.
@@ -1650,6 +1712,10 @@ pub fn hunk_seen(ed: &mut Editor) {
     if held_seen(ed) {
         return;
     }
+    // (a binary file's buffer: what it is, its size and blob)
+    if binary_seen(ed) {
+        return;
+    }
     let Some(r) = ed.session.code_review.as_ref() else {
         return ed.set_status("no review here — space v v starts one");
     };
@@ -1674,13 +1740,7 @@ pub fn hunk_seen(ed: &mut Editor) {
         })
         .collect();
     // (the lines the last frame drew of this document — what was on screen as the key was pressed)
-    let drawn: std::collections::HashSet<usize> = ed
-        .screen
-        .panes
-        .iter()
-        .filter(|p| ed.session.views.iter().any(|v| v.id == p.0 && v.doc == doc.id))
-        .flat_map(|p| p.3.iter().map(|row| row.0))
-        .collect();
+    let drawn: std::collections::HashSet<usize> = ed.screen.rows_of(doc.id).map(|row| row.0).collect();
     // (the pane's text rows — its size, not what the last frame drew there: a short file, or another file
     // drawn in it, is no measure — and every line drawn since the text changed)
     let rows = ed.viewport.0;
@@ -1721,11 +1781,35 @@ pub fn hunk_seen(ed: &mut Editor) {
         if let [g] = unshown[..]
             && tall(g)
         {
+            // (which lines, said and logged: what was drawn of which text, in a pane how tall)
+            let lines: Vec<usize> =
+                (g.at..g.at + g.lines).filter(|l| !ever.is_some_and(|e| e.contains(l))).collect();
+            let (seen, version) = r.drawn.get(&doc.id).map_or((0, None), |(v, e)| (e.len(), Some(*v)));
+            let since = match version {
+                Some(v) if v != doc.version() => {
+                    format!("drawn lines were of version {v}, now {}", doc.version())
+                }
+                Some(v) => format!("{seen} lines drawn of version {v}"),
+                None => "none drawn".into(),
+            };
+            crate::log::line(
+                "review",
+                "unread",
+                &format!(
+                    "{}: {} of the {} lines of the high-risk change at line {} not drawn ({}) — pane {rows} rows, {since}",
+                    f.rel,
+                    lines.len(),
+                    g.lines,
+                    g.at + 1,
+                    line_ranges(&lines, usize::MAX)
+                ),
+            );
             return ed.set_status(format!(
-                "this high-risk change is taller than the pane — {} of its {} lines not on screen yet: scroll \
-                 through it, then space v h with the cursor in it",
-                unread(g),
-                g.lines
+                "this high-risk change is taller than the pane — {} of its {} lines not on screen yet ({}): \
+                 scroll through them, then space v h with the cursor in it",
+                lines.len(),
+                g.lines,
+                line_ranges(&lines, 3)
             ));
         }
         return ed.set_status(format!(
@@ -1742,7 +1826,19 @@ pub fn hunk_seen(ed: &mut Editor) {
                 None => "no high-risk change left in this review".into(),
             });
         }
+        // (going on to where it is already would say again what was said — a dead end, in silence: said)
+        let before = (ed.doc().id, ed.doc().selection().clone());
         high_step(ed, true);
+        let pending = ed.session.code_review.as_ref().is_some_and(|r| r.land.is_some())
+            || ed.toasts.iter().any(|t| t.step == Some("review-binary"));
+        if !pending && (ed.doc().id, ed.doc().selection().clone()) == before {
+            let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+            crate::log::line("review", "stuck", &format!("space v h went on to where it was: {said}"));
+            ed.set_warning(
+                "space v h can't take the high-risk change here — it isn't under the cursor as graded \
+                 (the log says where): mark the file viewed with space v m and tell us",
+            );
+        }
         return;
     }
     let fresh = high.iter().filter(|g| !g.looked_at(&ed.session.looked)).count();
@@ -1892,6 +1988,10 @@ pub fn close(ed: &mut Editor) {
 /// The review ends (closed, or another one taking its place).
 fn end(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.take() else { return };
+    // (a binary file's buffer is the review's: it goes with it)
+    if let Some(v) = &r.binary_shown {
+        ed.close_doc(v.doc);
+    }
     for id in r.docs {
         if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) {
             d.review_base = None;
@@ -1925,13 +2025,9 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
         ),
         base => From::Git(r.root.clone(), base.rev().unwrap_or("HEAD").to_string()),
     };
-    // A binary file shows nothing: the code stays, the file is in hand (`space v m` marks it)
-    let doc = ed.doc().id;
-    if let Some(r) = ed.session.code_review.as_mut() {
-        r.binary_shown = f.binary.then_some((i, doc));
-    }
+    // A binary file has no lines: a buffer says what it is — its size and blob, its bytes (`show_binary`)
     if f.binary {
-        return ed.set_status(format!("review: {} is binary — space v m marks it viewed", f.rel));
+        return show_binary(ed, i, f);
     }
     ed.push_jump();
     let id = if f.gone {
@@ -1961,6 +2057,294 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
         return land(ed);
     }
     load_base(ed, id, from, f);
+}
+
+/// The buffer of a binary file of the review (`show_binary`): what it is — its size and blob (what its grade's
+/// key is made of, what a bring takes), its bytes — where `space v h` is the look at it (`binary_seen`).
+#[derive(Clone, Debug)]
+pub struct BinaryView {
+    /// The file's index in the review · the buffer · its text's version when made.
+    pub file: usize,
+    pub doc: DocId,
+    version: u64,
+    /// Its first lines — what it is: the look takes them whole on screen.
+    head: usize,
+    /// The file's high-risk changes' keys (its blob's, a change of mode's) — what a look takes.
+    keys: Vec<crate::risk::Key>,
+    /// Said with the look: `binary · new · 532 bytes · blob 1a2b3c4d5e6f`.
+    said: String,
+    /// The file isn't what the review graded (changed since it opened): nothing to take here.
+    stale: bool,
+}
+
+/// The bytes of a binary file a buffer shows at most (as a hex dump); the rest counted.
+const HEX_MAX: usize = 4096;
+
+/// What a worker read of a binary file for its buffer: its blob as graded (`blob_of`; why git couldn't), its
+/// first bytes and its size (`read_head`), its base's blob and size (a git base's, when it was there), a change
+/// of mode that matters.
+struct BinaryRead {
+    blob: String,
+    why: Option<String>,
+    bytes: Result<(Vec<u8>, u64), String>,
+    was: Option<(String, u64)>,
+    mode: Option<crate::risk::Hunk>,
+}
+
+/// What a file type is called when it isn't a regular file (`read_head` says so instead of reading it).
+fn not_regular(t: std::fs::FileType) -> Option<&'static str> {
+    use std::os::unix::fs::FileTypeExt;
+    match t {
+        t if t.is_file() => None,
+        t if t.is_fifo() => Some("a FIFO"),
+        t if t.is_socket() => Some("a socket"),
+        t if t.is_char_device() || t.is_block_device() => Some("a device"),
+        t if t.is_dir() => Some("a folder"),
+        _ => Some("not a regular file"),
+    }
+}
+
+/// The first `HEX_MAX` bytes of the file at `path` and its size (from its metadata) — what its buffer shows,
+/// never the rest (a capture can be gigabytes). A regular file only: anything else (a FIFO would hold the
+/// worker) is said, never opened for reading — and one swapped in since, opened without waiting, is refused
+/// on the handle.
+fn read_head(path: &Path) -> Result<(Vec<u8>, u64), String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let kind = std::fs::metadata(path).map_err(|e| e.to_string())?.file_type();
+    if let Some(what) = not_regular(kind) {
+        return Err(format!("{what}, not a regular file — not read"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    // (what was opened, not what the path names now)
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if not_regular(meta.file_type()).is_some() {
+        return Err("changed into something other than a regular file while read — not read".into());
+    }
+    let mut head = Vec::new();
+    file.take(HEX_MAX as u64).read_to_end(&mut head).map_err(|e| e.to_string())?;
+    Ok((head, meta.len()))
+}
+
+/// File `i` of the review is binary: read on a worker (no disk or git on the key), then a buffer of its own in
+/// front — what it is, its bytes — where `space v h` looks at it and `space v m` marks it viewed.
+fn show_binary(ed: &mut Editor, i: usize, f: File) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let (root, rev, started) = (r.root.clone(), r.base.rev().map(str::to_string), r.started);
+    let jobs = ed.events.jobs();
+    let what = format!("review: reading {}…", f.rel);
+    let file = f.clone();
+    let work = move || {
+        let (blob, why) = blob_of(&root, &file, rev.as_deref());
+        let bytes = match file.gone {
+            true => Ok((Vec::new(), 0)),
+            false => read_head(&file.path),
+        };
+        let (mut was, mut mode) = (None, None);
+        if let Some(rev) = rev.as_deref() {
+            let spec = format!("{rev}:{}", file.rel);
+            was = git(&root, &["rev-parse", "--verify", "-q", &spec]).ok().and_then(|id| {
+                let id = id.trim().to_string();
+                let size = git(&root, &["cat-file", "-s", &id]).ok()?.trim().parse().ok()?;
+                Some((id, size))
+            });
+            // (as grading reads it: the listing's modes — `grade_files`)
+            let args: Vec<&str> = ["diff-index", "--raw", "-z"]
+                .into_iter()
+                .chain(LISTED)
+                .chain([rev, "--", &file.rel])
+                .collect();
+            mode = git(&root, &args).ok().and_then(|out| {
+                let r = parse_raw(&out).into_iter().find(|r| r.rel == file.rel)?;
+                crate::risk::mode_change(&r.old_mode, &r.new_mode)
+            });
+        }
+        BinaryRead { blob, why, bytes, was, mode }
+    };
+    ed.step(jobs, "review-binary", what, work, move |ed, read| {
+        // (the same review, still open)
+        if ed.session.code_review.as_ref().is_none_or(|r| r.started != started) {
+            return;
+        }
+        binary_open(ed, i, &f, read);
+    });
+}
+
+/// `show_binary`'s buffer, in front once read.
+fn binary_open(ed: &mut Editor, i: usize, f: &File, read: BinaryRead) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    // (rows of 16 bytes where they fit the pane, else of 8 — a dump's rows don't wrap)
+    let per = if ed.viewport.1 >= HEX_WIDE { 16 } else { 8 };
+    let (text, head, said) = binary_text(f, &read, per);
+    // (what it is now against what the review graded: its blob's key and its mode's — not the same file: stale)
+    let graded = r.graded(ed, f);
+    let mut fresh: Vec<crate::risk::Key> = crate::risk::keys(&f.rel, &crate::risk::binary(&read.blob));
+    fresh.extend(read.mode.iter().flat_map(|m| crate::risk::keys(&f.rel, m)));
+    let mut was: Vec<crate::risk::Key> = graded.iter().flat_map(|g| g.keys.iter().copied()).collect();
+    fresh.sort_unstable();
+    was.sort_unstable();
+    let stale = !graded.is_empty() && fresh != was;
+    let keys: Vec<crate::risk::Key> =
+        graded.iter().filter(|g| g.grade == Grade::High).flat_map(|g| g.keys.iter().copied()).collect();
+    // (one at a time: the one before goes)
+    let title = format!("{} · binary", f.rel);
+    let old: Vec<DocId> = ed
+        .docs
+        .iter()
+        .filter(|d| {
+            d.throwaway
+                && (d.title.as_deref() == Some(&title)
+                    || r.binary_shown.as_ref().is_some_and(|v| v.doc == d.id))
+        })
+        .map(|d| d.id)
+        .collect();
+    ed.push_jump();
+    for d in old {
+        ed.close_doc(d);
+    }
+    let doc = ed.open_virtual(&title, &text);
+    // (wrapped: its lines are looked at whole — `line_ends`)
+    if let Some(d) = ed.docs.iter_mut().find(|d| d.id == doc) {
+        d.wrap = Some(true);
+    }
+    let version = ed.docs.iter().find(|d| d.id == doc).map_or(0, |d| d.version());
+    if let Some(r) = ed.session.code_review.as_mut() {
+        r.binary_shown = Some(BinaryView { file: i, doc, version, head, keys, said, stale });
+        r.focus = false;
+    }
+    if stale {
+        ed.set_warning(format!(
+            "{} isn't what the review graded — changed since it opened: a new review (space v v) grades it again",
+            f.rel
+        ));
+    }
+}
+
+/// A binary file's buffer (its path is the path bar's): what it is — new, changed or deleted, its size and
+/// blob (and its base's, a change of mode); what to do; its bytes as a hex dump, rows of `per`. And how many
+/// lines head it (what a look takes), and what the look says.
+fn binary_text(f: &File, read: &BinaryRead, per: usize) -> (String, usize, String) {
+    let n = |k: u64| match k {
+        1 => "1 byte".to_string(),
+        k => format!("{k} bytes"),
+    };
+    let short = |b: &str| b.chars().take(12).collect::<String>();
+    let mut head = Vec::new();
+    let size = read.bytes.as_ref().ok().map(|b| b.1);
+    let said = match (&read.was, f.gone) {
+        (Some((old, k)), true) => {
+            head.push(format!("binary · deleted · was {}", n(*k)));
+            head.push(format!("blob {old}"));
+            format!("binary · deleted · was {} · blob {}", n(*k), short(old))
+        }
+        (None, true) => {
+            head.push("binary · deleted".into());
+            "binary · deleted".into()
+        }
+        (was, false) => {
+            // (the review's word for it — a turn's review has no git base to size it against)
+            let kind = if f.new { "new" } else { "changed" };
+            let size = size.map_or("size unknown".into(), n);
+            head.push(format!("binary · {kind} · {size}"));
+            head.push(format!("blob {}", read.blob));
+            if let Some((old, k)) = was {
+                head.push(format!("before: {} · blob {old}", n(*k)));
+            }
+            format!("binary · {kind} · {size} · blob {}", short(&read.blob))
+        }
+    };
+    if let Some(why) = &read.why {
+        head.push(format!("git couldn't read it ({why}) — graded as unread"));
+    }
+    if let Some((old, new)) = read.mode.as_ref().and_then(|m| m.mode.as_ref()) {
+        head.push(format!("mode {old} → {new}"));
+    }
+    let lines = head.len();
+    let mut text = head.join("\n");
+    text.push_str("\n\nspace v h looks at it · space v m marks it viewed\n\n");
+    match &read.bytes {
+        Ok((b, _)) if b.is_empty() => {}
+        Ok((b, size)) => text.push_str(&hex_dump(b, *size, per)),
+        Err(e) => text.push_str(&format!("(its bytes can't be read: {e})\n")),
+    }
+    (text, lines, said)
+}
+
+/// The columns a hex dump's rows of 16 take (`hex_dump`): a narrower pane gets rows of 8.
+const HEX_WIDE: usize = 76;
+
+/// `bytes` — the first of a file of `size` — as rows of `per` (16, or 8 for a narrow pane): offset, hex in
+/// groups of 8, the printable ones — at most `HEX_MAX`, the rest counted.
+fn hex_dump(bytes: &[u8], size: u64, per: usize) -> String {
+    let mut s = String::new();
+    for (k, row) in bytes.chunks(per).take(HEX_MAX / per).enumerate() {
+        let hex: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
+        let groups: Vec<String> = hex.chunks(8).map(|g| g.join(" ")).collect();
+        // (a short last row keeps its printable column where the others have it)
+        let groups = format!("{:<w$}", groups.join("  "), w = per / 8 * 25 - 2);
+        let shown: String =
+            row.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+        s.push_str(&format!("{:08x}  {groups}  {shown}\n", k * per));
+    }
+    let shown = bytes.len().min(HEX_MAX) as u64;
+    if size > shown {
+        s.push_str(&format!("… {} more bytes\n", size - shown));
+    }
+    s
+}
+
+/// `space v h` in a binary file's buffer (`BinaryView`): its high-risk changes looked at — what it is (its
+/// first lines: its size and blob) whole on screen in the frame the key was pressed over — by you, a key (no
+/// tool of Claude's can). True if the buffer is in front (the key was its).
+fn binary_seen(ed: &mut Editor) -> bool {
+    let Some(r) = ed.session.code_review.as_ref() else { return false };
+    let Some(v) = r.binary_shown.clone().filter(|v| v.doc == ed.doc().id) else { return false };
+    let rel = r.files.get(v.file).map(|f| f.rel.clone()).unwrap_or_default();
+    if ed.doc().version() != v.version {
+        ed.set_status("this buffer was changed since — the rail opens the file again");
+        return true;
+    }
+    if v.stale {
+        ed.set_warning(format!(
+            "{rel} isn't what the review graded — a new review (space v v) grades it again"
+        ));
+        return true;
+    }
+    if v.keys.is_empty() {
+        ed.set_status(format!("{rel} has no high-risk change — space v m marks it viewed"));
+        return true;
+    }
+    if ed.doc().wrap != Some(true) {
+        ed.set_status(
+            "not looked at — wrap the buffer again (z w): what it is is looked at with its lines whole",
+        );
+        return true;
+    }
+    let now = line_ends(ed, v.doc);
+    if !(0..v.head).all(|l| now.get(&l).is_some_and(|e| e.0 && e.1)) {
+        ed.set_status(
+            "what it is isn't on screen whole — not looked at: its top in sight (gg), then space v h",
+        );
+        return true;
+    }
+    ed.session.looked.extend(v.keys.iter().copied());
+    let left = ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+    held_sync(ed);
+    match left {
+        0 => {
+            ed.set_success(format!("looked at — {rel}, {} — no high-risk change left in this review", v.said))
+        }
+        n => ed.set_status(format!(
+            "looked at — {rel}, {} — {} left · ]h goes to the next",
+            v.said,
+            crate::nav::count(n, "high-risk change")
+        )),
+    }
+    true
 }
 
 /// Where a file's base text comes from: git (the root, the revision) · the text itself (a turn's — None: the
@@ -2032,11 +2416,13 @@ fn select_from_top(ed: &mut Editor, h: &crate::git::Hunk) {
     ed.align_view(crate::viewalign::Place::Center);
 }
 
-/// The change at `line` of the document in front selected as `land` does (its diff not there: the line).
+/// The change at `line` of the document in front selected as `land` does; no change of its diff there (its
+/// diff not there yet, a change graded without one — a file git converts, graded whole; a change of mode):
+/// the line, never the next change (`space v h` there would go on to the same place again).
 fn land_on(ed: &mut Editor, line: usize) {
     let hunks = &ed.doc().git_hunks;
     let at = |h: &&crate::git::Hunk| h.lines.start <= line && line < h.lines.end.max(h.lines.start + 1);
-    match hunks.iter().find(at).or_else(|| hunks.iter().find(|h| h.lines.start >= line)).cloned() {
+    match hunks.iter().find(at).cloned() {
         Some(h) => select_from_top(ed, &h),
         None => {
             ed.goto_line(line);
@@ -2067,10 +2453,14 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
     let rank = |i: usize| order.iter().position(|&k| k == i).unwrap_or(usize::MAX);
     // (from the file in hand and the selection's end going on, its start going back; from none of them: the
     // first · the last)
-    let here = r.current(ed).map(|i| {
-        let (doc, sel) = (ed.doc(), ed.doc().selection().primary());
-        let pos = if forward { sel.cursor(&doc.text) } else { sel.from() };
-        (rank(i), crate::movement::line_of(&doc.text, pos))
+    // (a binary file's buffer: at its one change, the file's top — on from it, never to it again)
+    let here = r.in_hand(ed).map(|i| match r.current(ed) == Some(i) {
+        true => {
+            let (doc, sel) = (ed.doc(), ed.doc().selection().primary());
+            let pos = if forward { sel.cursor(&doc.text) } else { sel.from() };
+            (rank(i), crate::movement::line_of(&doc.text, pos))
+        }
+        false => (rank(i), 0),
     });
     let highs = highs_in_order(ed);
     let n = highs.len();
@@ -2102,6 +2492,21 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
     true
 }
 
+/// Whether each key gets a frame of its own (`term::handle_batch`): the file in front is one of the review's
+/// with a high-risk change taller than the pane no one has looked at — it's looked at once every line of it
+/// was drawn, and keys handled together (a held `C-d`, a wheel burst) scroll past lines no frame showed.
+/// Only then: everywhere else a burst stays one frame.
+pub fn frame_per_key(ed: &Editor) -> bool {
+    let Some(r) = ed.session.code_review.as_ref() else { return false };
+    let rows = ed.viewport.0;
+    if rows == 0 || ed.doc().review_base.is_none() {
+        return false;
+    }
+    let Some(i) = r.current(ed) else { return false };
+    let looked = &ed.session.looked;
+    r.graded(ed, &r.files[i]).iter().any(|g| g.grade == Grade::High && g.lines > rows && !g.looked_at(looked))
+}
+
 /// After a frame: the lines it drew of the review's documents (`CodeReview.drawn`), kept while each one's
 /// text stays as it is.
 pub fn drawn_sync(ed: &mut Editor) {
@@ -2118,11 +2523,10 @@ pub fn drawn_sync(ed: &mut Editor) {
         }
     }
     let Some(r) = ed.session.code_review.as_mut() else { return };
-    for (view, _, _, rows) in &ed.screen.panes {
-        let Some(v) = ed.session.views.iter().find(|v| v.id == *view) else { continue };
+    for ((_, _, _, rows), doc) in ed.screen.panes.iter().zip(&ed.screen.pane_docs) {
         // (one of its files — as `current` finds them, by path)
         let of_review = |d: &&crate::document::Document| {
-            d.id == v.doc && d.path.as_ref().is_some_and(|p| r.files.iter().any(|f| f.path == *p))
+            d.id == *doc && d.path.as_ref().is_some_and(|p| r.files.iter().any(|f| f.path == *p))
         };
         let Some(d) = ed.docs.iter().find(of_review) else { continue };
         let e = r.drawn.entry(d.id).or_default();
@@ -2769,9 +3173,11 @@ mod tests {
         );
         feed(&mut ed, "<space>vh");
         assert_eq!(left(&ed), 1, "not all of it was on screen");
+        // (which lines: the change's end, past the pane's foot — named, so they can be found)
         assert!(
             status(&ed).contains("this high-risk change is taller than the pane —")
-                && status(&ed).contains("of its 20 lines not on screen yet: scroll through it"),
+                && status(&ed).contains("of its 20 lines not on screen yet (lines ")
+                && status(&ed).contains("–25): scroll through them"),
             "{}",
             status(&ed)
         );
@@ -2816,8 +3222,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A binary file opened from the rail shows nothing in the code: `space v m` after it marks that file — not
-    /// the one still in the code (it took that one's mark back, unsaid) — and says which it marked.
+    /// A binary file opened from the rail shows in a buffer of its own: `space v m` there marks that file — not
+    /// the one read before (it took that one's mark back, unsaid) — and says which it marked.
     #[test]
     fn space_v_m_marks_the_binary_file_the_rail_opened() {
         let dir = std::env::temp_dir().join(format!("tarae-review-binary-{}", std::process::id()));
@@ -2849,9 +3255,9 @@ mod tests {
             r.files.iter().map(|f| r.viewed(ed, f)).collect::<Vec<_>>()
         };
         assert_eq!(viewed(&ed), [true, false]);
-        // The rail opens the binary file (what a click on its name does): the code stays on a.rs
+        // The rail opens the binary file (what a click on its name does): its buffer, once read
         show(&mut ed, 1, false);
-        assert_eq!(ed.doc().path.as_deref(), Some(dir.join("a.rs").as_path()));
+        settle_until(&mut ed, |ed| ed.doc().title.as_deref() == Some("logo.png · binary"));
         feed(&mut ed, "<space>vm");
         assert_eq!(viewed(&ed), [true, true], "logo.png marked, a.rs's mark kept");
         assert!(ed.toasts.iter().any(|t| t.text.starts_with("logo.png viewed")), "said which, in sight");
@@ -2860,6 +3266,406 @@ mod tests {
         feed(&mut ed, "<space>vm");
         assert_eq!(viewed(&ed), [false, true]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gatefix #1 (2026-10-07, f82837d's `captured/*.raw`): a new binary file graded high-risk can be looked
+    /// at. `]h` puts it in hand; `space v h` then takes it — before, it went "to the next" (the binary again),
+    /// said what was already said, and the review's end and the bring held for good.
+    #[test]
+    fn space_v_h_looks_at_a_high_risk_binary_in_hand() {
+        let binary = "\0\u{1}\u{2} captured bytes\n".to_string();
+        let dir = bring_repo(
+            "binary-high",
+            &[("a.rs", "fn a() {}\n".into())],
+            &[("a.rs", "fn a() {}\nfn b() {}\n".into()), ("sandbox.raw", binary)],
+        );
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["sandbox*".into()];
+        let mut ed = Editor::new(config);
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(left(&ed), 1, "the binary, high");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "]h");
+        let went = status(&ed);
+        assert!(went.contains("sandbox.raw"), "{went}");
+        // Its buffer in front, once read: what it is — new, its size, its blob (git's id) — then its bytes
+        let shown = |ed: &Editor| ed.doc().title.as_deref() == Some("sandbox.raw · binary");
+        settle_until(&mut ed, shown);
+        let blob = git(&dir, &["hash-object", "--", "sandbox.raw"]).unwrap().trim().to_string();
+        let text = ed.doc().text.to_string();
+        assert!(text.starts_with(&format!("binary · new · 19 bytes\nblob {blob}\n")), "{text}");
+        // (the pane narrower than a row of 16: rows of 8, none wrapped; a short last row keeps its column)
+        assert!(text.contains("\n00000000  00 01 02 20 63 61 70 74  ... capt\n"), "{text}");
+        assert!(text.contains(&format!("\n00000010  {:<23}  es.\n", "65 73 0a")), "{text}");
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert_eq!(r.in_hand(&ed).map(|i| r.files[i].rel.as_str()), Some("sandbox.raw"), "in hand");
+        // Not drawn yet: not taken, said
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "taken unseen");
+        assert!(status(&ed).contains("isn't on screen whole — not looked at"), "{}", status(&ed));
+        // On screen: the look, said with what it is
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "not taken — before: {went:?} · after: {:?}", status(&ed));
+        let short: String = blob.chars().take(12).collect();
+        assert!(
+            status(&ed).contains(&format!("looked at — sandbox.raw, binary · new · 19 bytes · blob {short}")),
+            "{}",
+            status(&ed)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gatefix: no dead end — every kind of high-risk change a review grades can be looked at by a person's
+    /// keys alone (`]h`, the frame it draws, `space v h`): lines changed, lines only removed, a file made
+    /// executable, binary files new, changed and deleted, a text file deleted, a file git converts. Walked so,
+    /// none is left, and the bring card that held for them has its yes back.
+    #[test]
+    fn every_kind_of_high_risk_change_can_be_looked_at() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-kinds-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git_ok = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        let write = |rel: &str, bytes: &[u8]| std::fs::write(dir.join(rel), bytes).unwrap();
+        write("sandbox_lines.rs", b"fn a() {}\nfn b() {}\n");
+        write("sandbox_del.txt", b"one\ntwo\nthree\n");
+        write("sandbox_exec.txt", b"plain words\n");
+        write("sandbox_changed.bin", b"\0\x01\x02a");
+        write("sandbox_gone.bin", b"\0\x09\x09");
+        write("sandbox_gone.txt", b"bye\n");
+        write(".gitattributes", b"*.id ident\n");
+        write("sandbox.id", b"$Id$\none\n");
+        git_ok(&["init", "-q", "-b", "main"]);
+        git_ok(&["add", "-A"]);
+        git_ok(&["commit", "-qm", "base"]);
+        git_ok(&["checkout", "-qb", "work"]);
+        write("sandbox_lines.rs", b"fn a() {}\nfn b() { x() }\n");
+        write("sandbox_del.txt", b"one\nthree\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("sandbox_exec.txt"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        write("sandbox_changed.bin", b"\0\x01\x02b");
+        write("sandbox_new.bin", b"\0\x07");
+        std::fs::remove_file(dir.join("sandbox_gone.bin")).unwrap();
+        std::fs::remove_file(dir.join("sandbox_gone.txt")).unwrap();
+        write("sandbox.id", b"$Id$\none\ntwo\n");
+        git_ok(&["add", "-A"]);
+        git_ok(&["commit", "-qm", "the change"]);
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["sandbox*".into()];
+        let mut ed = Editor::new(config);
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 30).unwrap();
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        let unseen = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.high_unseen(ed)
+                .iter()
+                .map(|&(i, at)| format!("{}:{}", r.files[i].rel, at + 1))
+                .collect::<Vec<_>>()
+        };
+        let kinds = unseen(&ed);
+        assert!(kinds.len() >= 8, "each kind graded high: {kinds:?}");
+        // The bring card holds for them; its `h` steps aside — the keys are the review's
+        bring_card_up(&mut ed, &dir);
+        assert!(ed.offers.first().is_some_and(|o| o.held.is_some()));
+        feed(&mut ed, "<C-q>h");
+        // (where a key went is there once read: a file's base, a binary's buffer)
+        let there = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            let binary = ed.doc().title.as_deref().is_some_and(|t| t.ends_with(" · binary"));
+            r.land.is_none()
+                && !ed.toasts.iter().any(|t| t.step == Some("review-binary"))
+                && (landed(ed) || binary)
+        };
+        let mut walked = Vec::new();
+        for _ in 0..kinds.len() * 2 {
+            if unseen(&ed).is_empty() {
+                break;
+            }
+            feed(&mut ed, "]h");
+            settle_until(&mut ed, there);
+            frame(&mut ed);
+            let before = unseen(&ed).len();
+            feed(&mut ed, "<space>vh");
+            walked.push(format!("{} → {}", before, status(&ed)));
+        }
+        assert!(unseen(&ed).is_empty(), "left {:?} — walked:\n{}", unseen(&ed), walked.join("\n"));
+        let o = ed.offers.first().expect("the bring card");
+        assert!(o.held.is_none(), "its yes back: {}", o.question);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reviewer finding 1: a binary file's buffer says new or changed by the review's own word for the file —
+    /// a turn's review has no git base (no blob or size before), and a file the turn changed was said `new`.
+    #[test]
+    fn a_binary_files_buffer_says_changed_without_a_git_base() {
+        let file = |new: bool| File {
+            rel: "logo.png".into(),
+            path: "/nowhere/logo.png".into(),
+            added: 0,
+            removed: 0,
+            new,
+            gone: false,
+            binary: true,
+        };
+        // (as a turn's review reads it: no base blob, no mode — `rev` None)
+        let read = || BinaryRead {
+            blob: "abc123".into(),
+            why: None,
+            bytes: Ok((vec![0, 1, 2], 3)),
+            was: None,
+            mode: None,
+        };
+        let (text, head, said) = binary_text(&file(false), &read(), 8);
+        assert!(text.starts_with("binary · changed · 3 bytes\nblob abc123\n"), "{text}");
+        assert_eq!((head, said.as_str()), (2, "binary · changed · 3 bytes · blob abc123"));
+        let (_, _, said) = binary_text(&file(true), &read(), 8);
+        assert_eq!(said, "binary · new · 3 bytes · blob abc123");
+    }
+
+    /// Reviewer finding 2: a binary file's buffer reads only what it shows — its first `HEX_MAX` bytes, the
+    /// size from its metadata — and a FIFO or a folder where the file was is said, never opened for reading.
+    #[test]
+    fn a_binary_files_buffer_reads_only_its_head_and_never_waits_on_a_fifo() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-head-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.raw");
+        std::fs::write(&big, vec![7u8; HEX_MAX * 3]).unwrap();
+        let (head, size) = read_head(&big).unwrap();
+        assert_eq!((head.len(), size), (HEX_MAX, (HEX_MAX * 3) as u64));
+        assert!(hex_dump(&head, size, 16).ends_with(&format!("… {} more bytes\n", HEX_MAX * 2)));
+        let fifo = dir.join("pipe.raw");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a NUL-terminated path in the test's own temp folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        // (said for what it is, from its metadata — never opened for reading)
+        assert_eq!(read_head(&fifo), Err("a FIFO, not a regular file — not read".to_string()));
+        assert_eq!(read_head(&dir), Err("a folder, not a regular file — not read".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A binary file's buffer is the review's: ending the review (`space v q`, its card's yes) closes it.
+    #[test]
+    fn ending_the_review_closes_the_binary_files_buffer() {
+        let dir = bring_repo(
+            "binary-end",
+            &[("a.rs", "fn a() {}\n".into())],
+            &[("a.rs", "fn a() {}\nfn b() {}\n".into()), ("logo.png", "\0\u{1} logo\n".into())],
+        );
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        let title = "logo.png · binary";
+        let open = |ed: &Editor| ed.docs.iter().any(|d| d.title.as_deref() == Some(title));
+        let r = ed.session.code_review.as_ref().unwrap();
+        let i = r.files.iter().position(|f| f.rel == "logo.png").unwrap();
+        show(&mut ed, i, false);
+        settle_until(&mut ed, |ed| ed.doc().title.as_deref() == Some(title));
+        // (every file viewed: `space v q` ends it without asking)
+        feed(&mut ed, "<space>vm");
+        let a = ed.session.code_review.as_ref().unwrap().files.iter().position(|f| f.rel == "a.rs").unwrap();
+        show(&mut ed, a, false);
+        settle_until(&mut ed, landed);
+        feed(&mut ed, "<space>vm<space>vq");
+        let ended = |ed: &Editor| ed.session.code_review.is_none();
+        if !ended(&ed) {
+            // (asked anyway: its yes)
+            crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+            feed(&mut ed, "y");
+        }
+        assert!(ended(&ed), "the review ended: {:?}", ed.status);
+        assert!(!open(&ed), "its binary buffer went with it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reviewer finding 3: a binary file changed on disk after the review graded it isn't the file graded —
+    /// its buffer says so and `space v h` there takes nothing (the look would be at other bytes); the review
+    /// begun again grades it anew, and then it's taken.
+    #[test]
+    fn a_binary_changed_since_the_review_graded_it_isnt_taken() {
+        let dir = bring_repo(
+            "binary-stale",
+            &[("a.rs", "fn a() {}\n".into())],
+            &[("a.rs", "fn a() {}\nfn b() {}\n".into()), ("sandbox.raw", "\0\u{1} graded\n".into())],
+        );
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["sandbox*".into()];
+        let mut ed = Editor::new(config);
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        let shown = |ed: &Editor| ed.doc().title.as_deref() == Some("sandbox.raw · binary");
+        // Changed after the review graded it
+        std::fs::write(dir.join("sandbox.raw"), "\0\u{1} other bytes\n").unwrap();
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "]h");
+        settle_until(&mut ed, shown);
+        assert!(status(&ed).contains("sandbox.raw isn't what the review graded"), "{}", status(&ed));
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "the bytes looked at aren't the ones graded: {}", status(&ed));
+        assert!(status(&ed).contains("a new review (space v v) grades it again"), "{}", status(&ed));
+        // A new review: graded as it is now — taken
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "]h");
+        settle_until(&mut ed, shown);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "{}", status(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A binary file the bring takes that the review can't show as the commits have it (changed since): the
+    /// card's `h` shows it as the bring takes it — its blob and its size — where `space v h` frees the card.
+    #[test]
+    fn a_binary_the_review_cant_show_is_shown_as_the_bring_takes_it() {
+        let dir = bring_repo(
+            "binary-brought",
+            &[("a.rs", "fn a() {}\n".into())],
+            &[("sandbox.raw", "\0\u{1} committed\n".into())],
+        );
+        std::fs::write(dir.join("sandbox.raw"), "\0\u{1} changed since\n").unwrap();
+        let blob = git(&dir, &["rev-parse", "HEAD:sandbox.raw"]).unwrap().trim().to_string();
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["sandbox*".into()];
+        let mut ed = Editor::new(config);
+        bring_card_up(&mut ed, &dir);
+        assert!(ed.offers.first().is_some_and(|o| o.held.is_some()));
+        feed(&mut ed, "<C-q>h");
+        let shown =
+            |ed: &Editor| ed.doc().title.as_deref().is_some_and(|t| t.ends_with("as the bring takes them"));
+        settle_until(&mut ed, shown);
+        let text = ed.doc().text.to_string();
+        assert!(text.contains(&format!("+(binary {blob}) — 13 bytes")), "{text}");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(ed.offers.first().is_some_and(|o| o.held.is_none()), "{status}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `space v h` that would go on to the very place it is (a change it can't take there — a stand-in here: a
+    /// grade past the file's end) says so, never the same words again in silence.
+    #[test]
+    fn space_v_h_stuck_in_place_says_so() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-stuck-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "one\ntwo\n").unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.open(&dir.join("a.rs")).unwrap();
+        let d = ed.doc_mut();
+        d.review_base = Some(ropey::Rope::from_str("one\ntwo\n"));
+        d.git_version = d.version();
+        let f = File {
+            rel: "a.rs".into(),
+            path: dir.join("a.rs"),
+            added: 1,
+            removed: 0,
+            new: false,
+            gone: false,
+            binary: false,
+        };
+        let mut r = CodeReview::for_test(Base::Head, dir.clone(), vec![f]);
+        // (the file's text has no line 51: whatever its diff, the grade stands where no cursor goes)
+        r.whole.insert(dir.join("a.rs"));
+        let g = crate::risk::Graded {
+            grade: Grade::High,
+            why: String::new(),
+            at: 50,
+            lines: 1,
+            keys: vec![7],
+            mode: false,
+        };
+        r.grades.insert(dir.join("a.rs"), Arc::from(vec![g]));
+        ed.session.code_review = Some(r);
+        feed(&mut ed, "]h<space>vh");
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status.contains("space v h can't take the high-risk change here"), "{status}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gatefix #2: keys that come together (a held `C-d`) are handled as the main loop does — a batch, then a
+    /// frame (`term::handle_batch`). While a high-risk change taller than the pane waits for a look, each key
+    /// gets its frame: scrolled through in one burst, every line of it was drawn and `space v h` takes it.
+    /// Once looked at, a burst is one batch again.
+    #[test]
+    fn a_tall_change_scrolled_through_in_a_key_burst_is_taken() {
+        let fns: Vec<String> = (0..40).map(|i| format!("fn f{i}() {{}}")).collect();
+        let mut with: Vec<String> = fns.clone();
+        with.splice(5..5, (0..30).map(|i| format!("fn g{i}() {{ unsafe {{ x() }} }}")));
+        let dir =
+            bring_repo("burst", &[("a.rs", fns.join("\n") + "\n")], &[("a.rs", with.join("\n") + "\n")]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        // (keys queued at once, then the loop: a batch, a frame — until none is left)
+        let burst = |ed: &mut Editor, keys: &[&str]| {
+            let tx = ed.events.shared_sender();
+            for k in keys {
+                tx.send(crate::event::Event::Key(k.parse().unwrap())).unwrap();
+            }
+            let mut frames = 0;
+            // (no frame's time running out: what's one batch is the rule's, not the machine's speed)
+            let never = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            while let Some(ev) = ed.events.try_recv() {
+                crate::term::handle_batch(ed, ev, never);
+                frame(ed);
+                frames += 1;
+            }
+            frames
+        };
+        frame(&mut ed);
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        assert!(frame_per_key(&ed), "a tall change not looked at, in front");
+        let frames = burst(&mut ed, &["C-d"; 12]);
+        feed(&mut ed, "G");
+        frame(&mut ed);
+        ed.goto_line(10);
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "{}", status(&ed));
+        // (jobs landing meanwhile — a parse — are events too: a frame at least per key)
+        assert!(frames >= 12, "a frame each: {frames}");
+        // Looked at: a burst is one batch again
+        assert!(!frame_per_key(&ed));
+        feed(&mut ed, "gg");
+        let frames = burst(&mut ed, &["C-d"; 12]);
+        assert!(frames < 12, "the burst batched again: {frames} frames");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unread lines said as runs, 1-based, the first few — the rest counted.
+    #[test]
+    fn unread_lines_are_said_as_runs() {
+        assert_eq!(line_ranges(&[211, 212, 213, 300], 3), "lines 212–214, line 301");
+        assert_eq!(line_ranges(&[0, 2, 4, 6, 7], 2), "line 1, line 3, … 2 more");
+        assert_eq!(line_ranges(&[], 3), "");
     }
 
     /// Frictions 13, #2: lines that left one file for another count as moved in both, one to one; short lines
@@ -3166,7 +3972,8 @@ mod tests {
         for (rel, text) in changed {
             std::fs::write(dir.join(rel), text).unwrap();
         }
-        run(&["commit", "-qam", "the change"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "the change"]);
         dir
     }
 

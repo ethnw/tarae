@@ -191,28 +191,41 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
             let Some(ev) = editor.events.recv() else { break };
             ev
         };
-        if matches!(ev, Event::Resize | Event::Focus(true)) {
-            screen.invalidate();
-        }
-        // Drawn unless every event of the batch said it changed nothing
-        let mut unchanged = handle_noting(editor, ev);
-        // Process all queued events (pastes, key bursts, job results), then draw only once — or after a
-        // frame's time, so a flood of them can't keep the screen from updating.
         let until = std::time::Instant::now() + std::time::Duration::from_millis(16);
-        while !editor.should_quit
-            && std::time::Instant::now() < until
-            && let Some(ev) = editor.events.try_recv()
-        {
-            if matches!(ev, Event::Resize | Event::Focus(true)) {
-                screen.invalidate();
-            }
-            unchanged &= handle_noting(editor, ev);
+        let (unchanged, whole) = handle_batch(editor, ev, until);
+        if whole {
+            screen.invalidate();
         }
         draw = editor.frame_due(unchanged);
     }
     // (quitting waited for them already — this covers any other way out)
     editor.flush_saves();
     Ok(())
+}
+
+/// Handles `ev` and the events queued behind it (pastes, key bursts, job results) — what the next frame shows
+/// at once — for at most a frame's time, so a flood of them can't keep the screen from updating. A key or the
+/// wheel ends the batch while the review waits on a high-risk change taller than the pane
+/// (`codereview::frame_per_key`): what it scrolled past is drawn before the next key moves on. Whether every
+/// event said it changed nothing, and whether the screen goes whole (a resize, focus back). `until`: the
+/// batch's end (a frame's time from now).
+pub(crate) fn handle_batch(editor: &mut Editor, ev: Event, until: std::time::Instant) -> (bool, bool) {
+    let mut whole = false;
+    let mut next = Some(ev);
+    let mut unchanged = true;
+    while let Some(ev) = next.take() {
+        whole |= matches!(ev, Event::Resize | Event::Focus(true));
+        let input = matches!(ev, Event::Key(_) | Event::Mouse(_));
+        unchanged &= handle_noting(editor, ev);
+        if editor.should_quit
+            || std::time::Instant::now() >= until
+            || (input && crate::codereview::frame_per_key(editor))
+        {
+            break;
+        }
+        next = editor.events.try_recv();
+    }
+    (unchanged, whole)
 }
 
 /// Handles `ev` — whether it said it changed nothing on screen.
@@ -392,6 +405,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     let terminal_shown = editor.slot() == Some(crate::sizes::Slot::Terminal);
     editor.screen = crate::editor::Screen {
         panes: Vec::new(),
+        pane_docs: Vec::new(),
         chat_x: (lay.chat_w > 0).then_some(lay.edit_w),
         picker_list: editor.picker.as_ref().map(|p| {
             let b = PickerBox::new(&lay, p);
@@ -497,15 +511,17 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         review_rows = Some(rows);
     }
     // Per pane, screen row → doc line (for the mouse); the focused pane's also goes into editor.view
-    let mut screen_panes = Vec::new();
+    let (mut screen_panes, mut pane_docs) = (Vec::new(), Vec::new());
     for (id, r, pl, idx, top, left, focused) in panes(editor, &lay) {
         let view = build_view(editor, &editor.docs[idx], top, left, &pl);
         screen_panes.push((id, r, pl.gutter, view.iter().map(|v| v.origin(left)).collect()));
+        pane_docs.push(editor.docs[idx].id);
         if focused {
             editor.view = view;
         }
     }
     editor.screen.panes = screen_panes;
+    editor.screen.pane_docs = pane_docs;
     crate::codereview::drawn_sync(editor);
     // A cut card's whole text (`v`) counts as seen once its buffer's last line is on screen
     if let Some((id, rev, doc)) = editor.offer_view.get()

@@ -1713,14 +1713,15 @@ fn space_n_in_a_review_opens_a_comment() {
     assert!(screen(&mut s).contains("ask claude: "));
 }
 
-/// #135: the rail's `m` marks the file on its row — a deleted binary file too, which opens nothing in the
+/// #135: the rail's `m` marks the file on its row — a deleted binary file too, whose buffer shows no lines of
 /// code (it marked the file the code showed, or nothing: the review never reached N of N).
 #[test]
 fn the_rail_marks_a_deleted_binary_file_viewed() {
     use crate::codereview::{Base, CodeReview, File};
     let mut s = Shot::new(112, 30);
+    // (a folder of its own: the binary file's buffer asks git about it — never tarae's own repository)
+    let cwd = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
-    let cwd = std::env::current_dir().unwrap();
     let files = vec![
         File {
             rel: "assets/logo.png".into(),

@@ -252,12 +252,23 @@ pub fn started_in() -> PathBuf {
     std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
+impl Screen {
+    /// The rows the last frame drew of document `doc` (`ViewRow::origin`s) — of every pane that drew it; a
+    /// pane switched to it since drew another's lines, not its.
+    pub fn rows_of(&self, doc: DocId) -> impl Iterator<Item = &(usize, usize, usize, usize)> {
+        self.panes.iter().zip(&self.pane_docs).filter(move |(_, d)| **d == doc).flat_map(|(p, _)| p.3.iter())
+    }
+}
+
 /// Screen layout of the last frame (term.rs fills it on every draw).
 #[derive(Clone, Debug, Default)]
 pub struct Screen {
     /// Per pane: (view, pane rect, line-number gutter width, per screen row `ViewRow::origin`).
     #[allow(clippy::type_complexity)]
     pub panes: Vec<(crate::split::ViewId, crate::split::Rect, usize, Vec<(usize, usize, usize, usize)>)>,
+    /// The document each of `panes` drew (in their order) — its rows are that one's lines, whatever the pane
+    /// shows since (`rows_of`).
+    pub pane_docs: Vec<DocId>,
     /// Column where the chat pane starts.
     pub chat_x: Option<usize>,
     /// First row and row count of the picker list.

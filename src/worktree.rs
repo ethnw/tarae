@@ -4069,6 +4069,8 @@ mod tests {
         assert_eq!(ed.cursor_line(), 0, "on the change");
         assert!(ed.session.looked.is_empty(), "going is no look");
         assert!(card(&ed, title).is_some(), "the card stays");
+        // (on screen: the frame after the key that went there — the one before drew another file)
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
         feed(&mut ed, "<space>vh");
         assert!(!ed.session.looked.is_empty(), "{}", said(&ed));
         assert!(card(&ed, title).is_some_and(|o| o.held.is_none()), "its yes is back");

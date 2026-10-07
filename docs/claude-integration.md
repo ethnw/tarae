@@ -960,7 +960,9 @@ A person looks at each high-risk change: `space v h` on it, in review mode — o
 touches that is on screen (all its lines, or the whole pane); one scrolled past isn't taken (`%` scrolls to the
 file's end, so `%` then `space v h` takes the ones in sight there, not the whole file), and the status line says how many were left. One taller than the
 pane is taken — under the cursor or a selection — only once every line of it has been on screen, scrolled through
-since its text last changed; `]h` and `space v h` say so, and how many lines are left. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
+since its text last changed; `]h` and `space v h` say so, and which lines are left (`lines 212–229`). While one
+waits in the file in front, each key gets a frame of its own, so a held `C-d` can't scroll past lines no frame
+drew. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
 the review's files; `space v h` with none under the cursor goes to the next one (going there is no look — press
 it again). Until each has had a look:
 
@@ -986,6 +988,16 @@ counts as looked at already.
 
 A file made executable or turned into a symlink is a high-risk change too, shown on its first line. It's kept
 by its modes, so `space v h` there takes it.
+
+A binary file has no lines: it's one change, kept by its blob (git's id of its content, the same in the review
+and in the commits a bring takes). Opened from the rail or by `]h`, it gets a buffer of its own: new, changed or
+deleted, its size and its blob at the top, then its bytes as a hex dump. `space v h` there, with those top lines
+on screen, is the look, and the status line says what was looked at (`binary · new · 532 bytes · blob
+b478b3b95845`). `space v m` there marks the file viewed. A bring whose binary file differs in the working tree
+shows its blob and size in the buffer of the changes as the commits have them.
+
+If `space v h` ever can't take the change it's on and would only go back to the same place, it says so instead
+of repeating itself, and the log says where.
 
 ![End the review? — 2 high-risk changes not looked at, named; the only answer is n Keep reviewing](screenshots/review-end-held.png)
 
