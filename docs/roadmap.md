@@ -160,6 +160,17 @@ On test machines:
   viewer in the core.
 - **A remote split**: the interface here, the work on a remote host. The egress proxy is designed to live with the
   runs, wherever they are.
+- **Working together**: two or more at one tarae — a person and a person, a person and a shuttle, two shuttles
+  (pair or mob programming). Builds on the remote split (one host process, several interfaces attached) and on
+  shuttle keys.
+  - Each participant's chat stays their own; a shared room chat sits beside them — people's messages, and what an
+    agent hands over only when its person sends it.
+  - A session belongs to one person: only its owner answers its cards, never a peer or a shuttle. Everyone sees
+    who is where (presence, following someone), and each card's record says who answered.
+  - Work stays in sessions and their checkouts: a peer reviews another's session live in review mode (driver and
+    navigator); bring is where the work meets.
+  - Open: how one joins and is let in (over SSH?), two people typing in one file, how agents in the room are
+    paced. A plan first.
 - **ACP**: hosting other agents inside tarae. Claude is the only agent tarae runs today.
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
