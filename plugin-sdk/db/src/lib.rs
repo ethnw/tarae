@@ -1,8 +1,8 @@
 //! Databases in the code: PostgreSQL, MySQL and Redis — what the live database says beside the statements and
-//! keys your code holds (db-plan.md). This is step 1: the connections, found where the project already says them
-//! — `.tarae/db.toml`, your own git-ignored `.tarae/db.local.toml` (it wins by name), its compose files' database
+//! keys your code holds (db-plan.md). So far: the connections, found where the project already says them —
+//! `.tarae/db.toml`, your own git-ignored `.tarae/db.local.toml` (it wins by name), its compose files' database
 //! services, the variables tarae started with — and shown in the side panel's `db` tab and the status line, never a
-//! password. Nothing is connected to yet.
+//! password; and the one in use connected to and signed in (`live`), its server's version said.
 //!
 //! `:db` turns it on (the tab opens the first time) and, once on, asks which to use when there are several;
 //! `:db-off` turns it off. A connection whose `paths` cover the file in front is that file's.
@@ -14,6 +14,8 @@ mod conn;
 mod driver;
 mod env;
 mod glob;
+mod live;
+mod pgpass;
 mod secret;
 mod url;
 
@@ -23,8 +25,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use tarae::plugin::types::{Pick, Side, SideRow, Tone};
 
 use conn::Connection;
+use live::{Live, Status};
 
 // ── Ids ────────────────────────────────────────────────────────────────────
+// (8, 9 and from 1 000 000: the live connection's — `live.rs`)
 
 const FIND_CONFIG: u64 = 1;
 const FIND_COMPOSE: u64 = 2;
@@ -68,6 +72,10 @@ struct State {
     side: Option<Side>,
     side_opened: bool,
     badge: Option<(String, Tone)>,
+    /// The connection in use, connected to.
+    live: Option<Live>,
+    /// Tests' fixed random bytes (a nonce a captured exchange used); else each session's are drawn fresh.
+    seed: Option<[u8; 32]>,
 }
 
 thread_local! {
@@ -78,8 +86,8 @@ impl State {
     // ── On and off ──
 
     fn start(&mut self) -> Vec<Action> {
-        let (front, chosen, side_opened) = (self.front.take(), self.chosen.take(), self.side_opened);
-        *self = State { on: true, front, chosen, side_opened, ..State::default() };
+        let (front, chosen, side_opened, seed) = (self.front.take(), self.chosen.take(), self.side_opened, self.seed);
+        *self = State { on: true, front, chosen, side_opened, seed, ..State::default() };
         let mut out = vec![
             Action::Find((FIND_CONFIG, CONFIG_FILE.into())),
             Action::Find((FIND_COMPOSE, "**/*compose*.y*ml".into())),
@@ -95,15 +103,30 @@ impl State {
     }
 
     fn stop(&mut self) -> Vec<Action> {
-        let side_opened = self.side_opened;
-        *self = State { side_opened, ..State::default() };
-        vec![Action::Side(None), Action::Badge(None)]
+        let mut out = self.live.take().map(|mut l| l.close()).unwrap_or_default();
+        let (side_opened, seed) = (self.side_opened, self.seed);
+        *self = State { side_opened, seed, ..State::default() };
+        out.extend([Action::Side(None), Action::Badge(None)]);
+        out
     }
 
     // ── What came back ──
 
     fn event(&mut self, ev: HostEvent) -> Vec<Action> {
+        if let Some(l) = &mut self.live {
+            let fixed = self.seed;
+            let mut seed = move || fixed.or_else(fresh_seed);
+            if let Some(out) = l.event(&ev, &mut live::Ctx { vars: &self.vars, seed: &mut seed }) {
+                return out;
+            }
+        }
         match ev {
+            // (a connection's, after it was closed — the arms below are discovery's)
+            HostEvent::Failed((id, _)) | HostEvent::Data((id, _)) | HostEvent::Closed((id, _)) | HostEvent::Connected(id)
+                if id >= live::CONNECT =>
+            {
+                Vec::new()
+            }
             HostEvent::Found((FIND_CONFIG, paths)) => {
                 self.waiting.remove(&FIND_CONFIG);
                 let Some(path) = paths.into_iter().find(|p| p.ends_with(&format!("/{CONFIG_FILE}"))) else {
@@ -303,11 +326,39 @@ impl State {
 
     // ── What's shown ──
 
+    /// The live connection follows the one in use: opened when there is one, closed and opened again when it
+    /// changes (another chosen, another file in front, found again different), closed when there's none.
+    fn follow(&mut self) -> Vec<Action> {
+        if !self.waiting.is_empty() {
+            return Vec::new();
+        }
+        let want = self.current().cloned();
+        if let (Some(l), Some(c)) = (&self.live, &want)
+            && &l.conn == c
+        {
+            return Vec::new();
+        }
+        let mut out = self.live.take().map(|mut l| l.close()).unwrap_or_default();
+        if let Some(c) = want {
+            let mut l = Live::new(c);
+            let fixed = self.seed;
+            let mut seed = move || fixed.or_else(fresh_seed);
+            out.extend(l.open(&mut live::Ctx { vars: &self.vars, seed: &mut seed }));
+            self.live = Some(l);
+        }
+        out
+    }
+
+    /// How the connection in use stands, if it's live.
+    fn live_status(&self, name: &str) -> Option<&Status> {
+        self.live.as_ref().filter(|l| l.conn.name == name).map(|l| &l.status)
+    }
+
     fn show(&mut self) -> Vec<Action> {
         if !self.on {
             return Vec::new();
         }
-        let mut out = Vec::new();
+        let mut out = self.follow();
         let side = self.side_now();
         if self.side.as_ref() != Some(&side) {
             self.side = Some(side.clone());
@@ -327,9 +378,26 @@ impl State {
         if !self.waiting.is_empty() {
             return ("db …".into(), Tone::Info);
         }
+        // Connected: the server's version beside the name; down: said (the tab says why); else the name alone —
+        // a connection being made doesn't make the status line jump
+        let state = |c: &Connection| {
+            let (mut said, mut fine) = match self.live_status(&c.name) {
+                Some(Status::Ready { version }) => (format!(" · {}", with_version(c.kind.driver().short(), version)), true),
+                Some(Status::Down { .. }) => (" · not connected".to_string(), false),
+                _ => (String::new(), true),
+            };
+            // Encryption with nobody checked at the other end: said wherever the connection is
+            if c.tls() == conn::TlsMode::Unverified {
+                (said, fine) = (format!("{said} · TLS not verified"), false);
+            }
+            (said, fine)
+        };
         match self.current() {
-            Some(c) if c.production() => (format!("db {} · production", c.name), Tone::Error),
-            Some(c) => (format!("db {}", c.name), Tone::Ok),
+            Some(c) if c.production() => (format!("db {}{} · production", c.name, state(c).0), Tone::Error),
+            Some(c) => match state(c) {
+                (said, true) => (format!("db {}{said}", c.name), Tone::Ok),
+                (said, false) => (format!("db {}{said}", c.name), Tone::Warning),
+            },
             None if self.connections.is_empty() => ("db · none found".into(), Tone::Warning),
             None => (format!("db · {} found — :db to choose", self.connections.len()), Tone::Info),
         }
@@ -376,13 +444,30 @@ impl State {
             if let conn::Password::Unknown(w) = &c.password {
                 rows.push(why(1, w.clone(), Tone::Info));
             }
+            // libpq ignores a `.pgpass` others may read; a plugin isn't told a file's mode until API 0.3 (§6 #8)
+            if let conn::Password::File(_) = &c.password {
+                rows.push(why(1, "its mode can't be checked yet".into(), Tone::Info));
+            }
             // Encryption without the certificate checked is had only by naming it — and said every time it's shown
             if c.tls() == conn::TlsMode::Unverified {
                 rows.push(why(1, "TLS not verified".into(), Tone::Warning));
             }
-            // libpq ignores a `.pgpass` others may read; a plugin isn't told a file's mode until API 0.3 (§6 #8)
-            if let conn::Password::File(_) = &c.password {
-                rows.push(why(1, "its mode can't be checked yet".into(), Tone::Info));
+            // The one in use: how its connection stands
+            let live = |text: &str, tone| row(format!("conn:{}:live", c.name), 1, text.to_string(), String::new(), tone, None);
+            match self.live_status(&c.name) {
+                Some(Status::Ready { version }) => {
+                    rows.push(live(&format!("connected · {}", with_version(c.kind.driver().short(), version)), Tone::Ok));
+                }
+                Some(Status::Connecting | Status::SigningIn | Status::Reading) => rows.push(live("connecting…", Tone::Info)),
+                Some(Status::Down { why: w, again }) => {
+                    rows.push(live(if *again { "not connected — trying again" } else { "not connected" }, Tone::Warning));
+                    rows.push(why(1, w.clone(), Tone::Warning));
+                }
+                Some(Status::Cannot(w)) => {
+                    rows.push(live("not connected", Tone::Info));
+                    rows.push(why(1, w.clone(), Tone::Info));
+                }
+                None => {}
             }
             rows.extend(c.problems.iter().map(|p| why(1, p.clone(), Tone::Warning)));
         }
@@ -410,6 +495,22 @@ impl State {
     }
 }
 
+/// `pg 17.6 (Debian 17.6-1.pgdg120+1)` → `pg 17.6`; a version the server didn't say (a Redis before 6, without
+/// HELLO) → `redis`.
+fn with_version(short: &str, v: &str) -> String {
+    match v.split_whitespace().next() {
+        Some(v) => format!("{short} {v}"),
+        None => short.to_string(),
+    }
+}
+
+/// Random bytes from the SDK's generator (stirred by every call's entropy) — none before any call handed entropy
+/// over: then nothing is signed in (a fixed nonce, fixed padding would be weaker than not connecting).
+fn fresh_seed() -> Option<[u8; 32]> {
+    let mut b = [0; 32];
+    tarae_plugin::now::fill(&mut b).ok().map(|()| b)
+}
+
 // ── The plugin ─────────────────────────────────────────────────────────────
 
 struct Plugin;
@@ -432,8 +533,10 @@ impl Guest for Plugin {
     }
 
     fn permissions() -> Vec<Permission> {
-        let mut p = vec![Permission::Project];
+        // (each database's host:port is asked about the first time it's connected to)
+        let mut p = vec![Permission::Project, Permission::Network];
         p.extend(driver::env_names().iter().map(|n| Permission::Env(n.to_string())));
+        p.extend(config::PASSWORD_FILES.iter().map(|f| Permission::Read(f.to_string())));
         p
     }
 

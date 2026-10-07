@@ -109,7 +109,7 @@ fn describe_runs_nothing() {
     assert!(tags.contains(&b'P') && tags.contains(&b'D') && tags.contains(&b'S'), "{tags:?}");
     assert!(!tags.contains(&b'E') && !tags.contains(&b'B'), "nothing bound or executed: {tags:?}");
     // pg_class is table 1259; oid is type 26, name type 19
-    let col = |name: &str, type_oid| Column { name: name.into(), type_oid, table_oid: 1259 };
+    let col = |name: &str, type_id| Column { name: name.into(), type_id, table: Table::Oid(1259) };
     assert_eq!(events[1], Event::Described { params: vec![19], columns: vec![col("oid", 26), col("relname", 19)] });
 }
 
@@ -130,6 +130,21 @@ fn rows_come_back_as_text_with_their_columns() {
     assert_eq!(columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["n", "s"]);
     assert_eq!(rows, &[vec![Some("1".into()), Some("x".into())], vec![Some("2".into()), None]]);
     assert_eq!(tag, "SELECT 2");
+    assert_eq!(columns[0].table, Table::None, "an expression's column is no table's");
+}
+
+/// A row that doesn't read (a cell running past the message) means the stream can't be trusted further: the
+/// session ends saying so — not an empty row shown as if the table held one.
+#[test]
+fn a_row_that_doesnt_read_ends_the_session() {
+    let (_, server) = captured("signin");
+    let (mut s, _) = Session::start(params("tarae-fake-pg"), NONCE);
+    s.feed(&server);
+    s.query("select 1");
+    // RowDescription for one text column, then a DataRow whose one cell claims 99 bytes and has 1
+    let row_description = msg(b'T', &[&[0, 1][..], b"n\0", &[0; 6], &[0, 0, 0, 25], &[0xff, 0xff], &[0xff; 4], &[0, 0]].concat());
+    let out = s.feed(&[row_description, msg(b'D', &[0, 1, 0, 0, 0, 99, b'x'])].concat());
+    assert!(matches!(&out[..], [Event::Failed(w)] if w.contains("row")), "{out:?}");
 }
 
 /// Read-only is asked for at the start, so a write is the server's refusal (25006) — a guard, not a boundary
@@ -183,7 +198,7 @@ fn an_answer_before_tls_is_never_shown() {
     let tls = || Params { tls: Some((tarae_plugin::tls::config(b"", None).unwrap(), "db.internal".into())), loopback: false, ..params("pw") };
     let (mut s, out) = Session::start(tls(), NONCE);
     assert_eq!(sent(&out), [0, 0, 0, 8, 4, 210, 22, 47], "SSLRequest first");
-    let evil = [&[b'E'][..], &msg(b'E', b"SFATAL\0Mtarae-fake-evil: run this\0\0")[1..]].concat();
+    let evil = [&b"E"[..], &msg(b'E', b"SFATAL\0Mtarae-fake-evil: run this\0\0")[1..]].concat();
     let failed = s.feed(&evil);
     assert!(matches!(&failed[..], [Event::Failed(w)] if !w.contains("tarae-fake-evil")), "{failed:?}");
     let (mut s, _) = Session::start(tls(), NONCE);

@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 wit-bindgen = "=0.62.0"
 # (getrandom04: postgres-protocol's rand needs a source in wasm — .cargo/config.toml sets the cfg)
-tarae-plugin = { path = "../sdk", features = ["getrandom04", "tls"] }
+tarae-plugin = { path = "../sdk", features = ["getrandom04", "tls", "public-roots"] }
 # PostgreSQL: the wire's messages and md5_hash (SCRAM is ours: its nonce must be ours to give)
 postgres-protocol = "0.6.12"
 bytes = "1"
@@ -22,6 +22,14 @@ hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 stringprep = "0.1"
+# MySQL (by hand, §7): native passwords' SHA-1; caching_sha2's RSA-OAEP to this machine without TLS — its random
+# bytes from a generator the caller seeds (a captured exchange replays)
+sha1 = "0.10"
+rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
+rand_chacha = "0.3"
+rand_core = "0.6"
+# Redis: RESP2's frames read (§7: measured, not written by hand; its resp2 doesn't build without resp3)
+redis-protocol = { version = "6", default-features = false, features = ["std", "resp2", "resp3"] }
 serde = { version = "1", features = ["derive"] }
 # compose files
 serde_yaml = "0.9"

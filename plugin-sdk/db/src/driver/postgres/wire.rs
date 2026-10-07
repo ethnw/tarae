@@ -6,11 +6,7 @@
 //! (with `default_transaction_read_only=on`), then trust, a plain-text password (only over TLS or to this machine),
 //! MD5, or SCRAM-SHA-256 — ours, so the nonce is the caller's to give (db-plan.md §11).
 
-// (the plugin's connection plumbing that uses it is the next round — db-plan.md §11 "Next")
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -21,56 +17,14 @@ use postgres_protocol::authentication::md5_hash;
 use postgres_protocol::message::backend::{ErrorResponseBody, Message};
 use postgres_protocol::message::frontend;
 use sha2::{Digest, Sha256};
-use tarae_plugin::tls::{Config, Tls};
+use tarae_plugin::tls::Tls;
 
+use crate::driver::wire::{Column, Event, Params, Refusal, Table};
 use crate::secret::Secret;
 
 /// The most SCRAM iterations computed in one call: step 0 measured ~21 000 fitting the interpreter's fuel
 /// (~85 000 the JIT's); PostgreSQL's default is 4096. More is refused, said why.
 pub const SCRAM_MAX_ITERATIONS: u32 = 16_384;
-
-pub struct Params {
-    pub user: String,
-    pub database: Option<String>,
-    pub password: Option<Secret>,
-    /// TLS: the client's configuration and the name the server's certificate must carry.
-    pub tls: Option<(Arc<Config>, String)>,
-    /// The server is this machine: a plain-text password may go to it without TLS.
-    pub loopback: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Column {
-    pub name: String,
-    pub type_oid: u32,
-    /// The table it comes from (0: none — an expression).
-    pub table_oid: u32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PgError {
-    /// SQLSTATE (`42703`).
-    pub code: String,
-    pub message: String,
-    /// Where in the statement, in characters from 1.
-    pub position: Option<u32>,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Event {
-    /// Bytes to send on the connection.
-    Send(Vec<u8>),
-    /// Signed in, ready for statements: the server's version.
-    Ready { version: String },
-    /// A statement described, not run: its parameters' types, its columns (none: it returns no rows).
-    Described { params: Vec<u32>, columns: Vec<Column> },
-    /// A statement's answer: its columns, its rows as text, the command's tag (`SELECT 2`).
-    Rows { columns: Vec<Column>, rows: Vec<Vec<Option<String>>>, tag: String },
-    /// The server refused a statement; the session goes on.
-    Refused(PgError),
-    /// The connection is over — why, in words that hold no secret.
-    Failed(String),
-}
 
 enum State {
     /// `SSLRequest` sent: one byte answers it.
@@ -140,23 +94,28 @@ impl Session {
     }
 
     /// Describes `sql` without running it (Parse + Describe + Sync — never Execute).
+    // (step 4's verdicts and step 6's runs are what call these four)
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn describe(&mut self, sql: &str) -> Vec<Event> {
         self.queue.push_back(Request::Describe(sql.to_string()));
         self.next()
     }
 
     /// Runs `sql` (the simple protocol: its rows come back as text).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn query(&mut self, sql: &str) -> Vec<Event> {
         self.queue.push_back(Request::Query(sql.to_string()));
         self.next()
     }
 
     /// Signed in and nothing in flight.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn idle(&self) -> bool {
         matches!(self.state, State::Idle) && self.queue.is_empty()
     }
 
     /// The bytes that cancel what this session runs — sent on a connection of their own.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cancel_request(&self) -> Option<Vec<u8>> {
         let (pid, key) = self.backend_key?;
         let mut b = BytesMut::new();
@@ -222,7 +181,7 @@ impl Session {
         match (std::mem::replace(&mut self.state, State::Over), msg) {
             (State::Auth, Message::AuthenticationOk) => self.go(State::Starting),
             (State::Auth, Message::AuthenticationCleartextPassword) => {
-                if self.tls.is_none() && !self.params.loopback {
+                if !self.params.may_send_password() {
                     return self.fail("the server asks for the password in plain text, without TLS, off this machine — not sent".into());
                 }
                 let Some(pw) = self.params.password.clone() else { return self.no_password() };
@@ -232,7 +191,7 @@ impl Session {
             (State::Auth, Message::AuthenticationMd5Password(body)) => {
                 // Guarded as plain text is: in the clear off this machine, whoever is in the way picks the salt and
                 // takes the answer away to crack
-                if self.tls.is_none() && !self.params.loopback {
+                if !self.params.may_send_password() {
                     return self.fail("the server asks for an MD5 password, without TLS, off this machine — not sent".into());
                 }
                 let Some(pw) = self.params.password.clone() else { return self.no_password() };
@@ -321,7 +280,11 @@ impl Session {
                 let buf = body.buffer();
                 let cells: Result<Vec<Option<String>>, _> =
                     body.ranges().map(|r| Ok(r.map(|r| String::from_utf8_lossy(&buf[r]).into_owned()))).collect();
-                rows.push(cells.unwrap_or_default());
+                // A row that doesn't read is a stream that can't be trusted further — not an empty row
+                let Ok(cells) = cells else {
+                    return self.fail("the server sent a row that doesn't read".into());
+                };
+                rows.push(cells);
                 next(self, Answer::Query { columns, rows, tag })
             }
             (Answer::Query { columns, rows, .. }, Message::CommandComplete(body)) => {
@@ -357,27 +320,27 @@ impl Session {
             return Vec::new();
         }
         let Some(r) = self.queue.pop_front() else { return Vec::new() };
-        let (answer, write): (Answer, Box<dyn Fn(&mut BytesMut) -> std::io::Result<()>>) = match r {
+        let mut b = BytesMut::new();
+        let (answer, written) = match r {
             Request::Describe(sql) => (
                 Answer::Describe { params: Vec::new(), columns: Vec::new() },
-                Box::new(move |b| {
-                    frontend::parse("", &sql, std::iter::empty(), b)?;
-                    frontend::describe(b'S', "", b)?;
-                    frontend::sync(b);
+                frontend::parse("", &sql, std::iter::empty(), &mut b).and_then(|()| {
+                    frontend::describe(b'S', "", &mut b)?;
+                    frontend::sync(&mut b);
                     Ok(())
                 }),
             ),
             Request::Query(sql) => (
                 Answer::Query { columns: Vec::new(), rows: Vec::new(), tag: String::new() },
-                Box::new(move |b| frontend::query(&sql, b)),
+                frontend::query(&sql, &mut b),
             ),
         };
         self.state = State::Busy(answer);
-        let mut b = BytesMut::new();
-        if write(&mut b).is_err() {
+        if written.is_err() {
             // (a NUL in the statement: the wire can't carry it)
             self.state = State::Idle;
-            let mut out = vec![Event::Refused(PgError { code: String::new(), message: "the statement holds a NUL".into(), position: None })];
+            let refusal = Refusal { code: String::new(), sqlstate: None, message: "the statement holds a NUL".into(), position: None };
+            let mut out = vec![Event::Refused(refusal)];
             out.extend(self.next());
             return out;
         }
@@ -432,20 +395,30 @@ impl Session {
     }
 }
 
+impl crate::driver::wire::Session for Session {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
+        Session::feed(self, bytes)
+    }
+}
+
 fn columns(body: &postgres_protocol::message::backend::RowDescriptionBody) -> Vec<Column> {
     body.fields()
-        .map(|f| Ok(Column { name: f.name().to_string(), type_oid: f.type_oid(), table_oid: f.table_oid() }))
+        .map(|f| {
+            // (table OID 0: not a table's column — an expression)
+            let table = if f.table_oid() == 0 { Table::None } else { Table::Oid(f.table_oid()) };
+            Ok(Column { name: f.name().to_string(), type_id: f.type_oid(), table })
+        })
         .collect()
         .unwrap_or_default()
 }
 
-fn error(body: &ErrorResponseBody) -> PgError {
-    let mut e = PgError { code: String::new(), message: String::new(), position: None };
+fn error(body: &ErrorResponseBody) -> Refusal {
+    let mut e = Refusal { code: String::new(), sqlstate: None, message: String::new(), position: None };
     let mut fields = body.fields();
     while let Ok(Some(f)) = fields.next() {
         let v = String::from_utf8_lossy(f.value_bytes()).into_owned();
         match f.type_() {
-            b'C' => e.code = v,
+            b'C' => (e.code, e.sqlstate) = (v.clone(), Some(v)),
             b'M' => e.message = v,
             b'P' => e.position = v.parse().ok(),
             _ => {}

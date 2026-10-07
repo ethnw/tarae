@@ -1,6 +1,9 @@
 //! Redis (and Valkey: one wire). Step 1: its names (`rediss` asks for TLS), the compose images that run it and
 //! their password (`--requirepass`, or bitnami's `REDIS_PASSWORD` — INFERRED until step 9's container),
-//! `REDIS_URL`, and `REDISCLI_AUTH` (VERIFIED `redis-cli`) for one that has none.
+//! `REDIS_URL`, and `REDISCLI_AUTH` (VERIFIED `redis-cli`) for one that has none. The wire: `wire.rs` (step 9).
+
+mod commands;
+pub mod wire;
 
 use std::collections::BTreeMap;
 
@@ -49,6 +52,15 @@ impl Driver for Redis {
 
     fn password_var(&self) -> Option<&'static str> {
         Some("REDISCLI_AUTH")
+    }
+
+    fn default_user(&self) -> Option<&'static str> {
+        Some("default")
+    }
+
+    fn session(&self, params: super::wire::Params, seed: [u8; 32]) -> Option<(Box<dyn super::wire::Session>, Vec<super::wire::Event>)> {
+        let (s, out) = wire::Session::start(params, seed);
+        Some((Box::new(s), out))
     }
 }
 

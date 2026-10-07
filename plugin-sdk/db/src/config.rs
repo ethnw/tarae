@@ -11,7 +11,8 @@
 //! paths = ["migrations/**", "src/db/**"]        # the files it's for (from the project's folder)
 //! production = true                             # or dev = true (unmarked: production unless on this machine)
 //! tls = "verify"                                # off · verify (the default off this machine) · require-unverified
-//! ```
+//! ca-file = "certs/db-ca.pem"                   # verify against this CA (from the project's folder, or ~/…, /…)
+//! ```                                           #   — none: the public CAs
 
 use serde::Deserialize;
 use toml::Spanned;
@@ -47,6 +48,7 @@ struct Entry {
     #[serde(default)]
     ask: bool,
     tls: Option<String>,
+    ca_file: Option<String>,
     #[serde(default)]
     production: bool,
     #[serde(default)]
@@ -169,6 +171,15 @@ pub fn read(path: &str, root: &str, text: &str) -> Result<Read, String> {
                 None => problems.push("its tls isn't off, verify or require-unverified".into()),
             }
         }
+        if let Some(ca) = e.ca_file {
+            // A CA checks the server's certificate: with TLS off, or asked not to check, it would do nothing — said,
+            // not left to look as if it did
+            if matches!(c.tls, Some(TlsMode::Off | TlsMode::Unverified)) {
+                problems.push("ca-file goes with tls = \"verify\" — it checks nothing otherwise".into());
+            }
+            let absolute = ca.starts_with('/') || ca.starts_with("~/");
+            c.ca_file = Some(if absolute { ca } else { format!("{}/{}", root.trim_end_matches('/'), ca.trim_start_matches("./")) });
+        }
         c.mark = match (e.production, e.dev) {
             (true, true) => {
                 problems.push("production and dev both — taken as production".into());
@@ -256,6 +267,20 @@ mod tests {
         assert_eq!(r.named, ["DATABASE_URL"], "still that connection's, not the environment's");
         let r = read("/p/.tarae/db.toml", "/p", "[[connection]]\nname = \"a\"\nurl-env = \"DATABASE_URL\"\ntls = \"verify\"\n").unwrap();
         assert!(r.connections[0].problems.is_empty() && r.url_env.len() == 1, "tls isn't where to");
+    }
+
+    /// A CA file checks the server's certificate: from the project's folder unless written from `/` or `~/` — and
+    /// beside `tls = "off"` or `require-unverified`, where it would check nothing, that's said.
+    #[test]
+    fn a_ca_file_is_the_projects_and_goes_with_verify() {
+        let pg = "[[connection]]\nname = \"a\"\nkind = \"postgres\"\n";
+        let c = one(&format!("{pg}ca-file = \"./certs/ca.pem\"\n"));
+        assert_eq!((c.ca_file.as_deref(), c.problems.len()), (Some("/p/certs/ca.pem"), 0));
+        assert_eq!(one(&format!("{pg}ca-file = \"~/ca.pem\"\n")).ca_file.as_deref(), Some("~/ca.pem"));
+        for tls in ["off", "require-unverified"] {
+            let c = one(&format!("{pg}tls = \"{tls}\"\nca-file = \"ca.pem\"\n"));
+            assert_eq!(c.problems, ["ca-file goes with tls = \"verify\" — it checks nothing otherwise"], "{tls}");
+        }
     }
 
     /// The plugin reads only the variables and files you approved for it: a config naming another is told so,

@@ -110,6 +110,8 @@ pub struct Connection {
     pub password: Password,
     /// As asked; `None` = the default (`tls()`).
     pub tls: Option<TlsMode>,
+    /// The CA its server's certificate is checked against (a PEM file); none: the public CAs.
+    pub ca_file: Option<String>,
     pub mark: Option<Mark>,
     pub origin: Origin,
     /// The files it's for (absolute globs: `*` a name, `**` any folders) — `.tarae/db.toml`'s `paths`.
@@ -129,6 +131,7 @@ impl Connection {
             user: None,
             password: Password::None,
             tls: None,
+            ca_file: None,
             mark: None,
             origin,
             paths: Vec::new(),

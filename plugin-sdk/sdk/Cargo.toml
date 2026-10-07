@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 
 [features]
 tls = ["dep:rustls", "dep:rustls-rustcrypto"]
+# The public CAs (Mozilla's list, webpki-roots — its data CDLA-Permissive-2.0) compiled in: `tls::config_public`
+public-roots = ["tls", "dep:webpki-roots"]
 # getrandom 0.3 and 0.4's custom backend too (rand 0.9 and later — postgres-protocol's SCRAM, for one). The
 # plugin's build then needs `--cfg getrandom_backend="custom"` for wasm32 (rustflags in its .cargo/config.toml)
 getrandom04 = ["dep:getrandom04"]
@@ -21,6 +23,7 @@ rand_core = "0.6"
 httparse = "1"
 rustls = { version = "0.23", default-features = false, features = ["tls12"], optional = true }
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 # (getrandom's backend cfg: a plugin's build sets it; a test runs only with it)
 [lints.rust]

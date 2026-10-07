@@ -79,6 +79,13 @@ impl Driver for Postgres {
     fn password_var(&self) -> Option<&'static str> {
         Some("PGPASSWORD")
     }
+
+    fn session(&self, params: super::wire::Params, seed: [u8; 32]) -> Option<(Box<dyn super::wire::Session>, Vec<super::wire::Event>)> {
+        let mut nonce = [0; 18];
+        nonce.copy_from_slice(&seed[..18]);
+        let (s, out) = wire::Session::start(params, nonce);
+        Some((Box::new(s), out))
+    }
 }
 
 #[cfg(test)]

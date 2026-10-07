@@ -1,5 +1,9 @@
-//! MySQL and MariaDB (one wire). Step 1: their names and the compose images that run them, and how one says its
-//! account — the official images' `MYSQL_*`/`MARIADB_*` (INFERRED until step 8's container).
+//! MySQL and MariaDB (one wire). Their names and the compose images that run them, and how one says its account —
+//! the official images' `MYSQL_*` (checked against step 2's container; `MARIADB_*` INFERRED); the wire (`wire.rs`,
+//! step 8).
+
+mod sql;
+pub mod wire;
 
 use super::{Driver, Kind};
 use crate::compose::Service;
@@ -50,6 +54,11 @@ impl Driver for Mysql {
             (_, Some(Ok(true))) => Password::None,
             _ => Service::as_password(either("MYSQL_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD")),
         };
+    }
+
+    fn session(&self, params: super::wire::Params, seed: [u8; 32]) -> Option<(Box<dyn super::wire::Session>, Vec<super::wire::Event>)> {
+        let (s, out) = wire::Session::start(params, seed);
+        Some((Box::new(s), out))
     }
 }
 

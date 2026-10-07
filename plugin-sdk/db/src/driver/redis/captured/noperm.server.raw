@@ -1,0 +1,29 @@
++OK
+*14
+$6
+server
+$5
+redis
+$7
+version
+$6
+7.4.11
+$5
+proto
+:2
+$2
+id
+:10
+$4
+mode
+$10
+standalone
+$4
+role
+$6
+master
+$7
+modules
+*0
+-NOPERM User ro has no permissions to run the 'command|info' command
+-NOPERM User ro has no permissions to run the 'sort_ro' command

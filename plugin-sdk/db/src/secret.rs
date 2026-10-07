@@ -12,7 +12,6 @@ impl Secret {
     }
 
     /// The text itself — only to send it to the database it's for.
-    #[cfg_attr(not(test), allow(dead_code))] // (connecting is step 2's)
     pub fn expose(&self) -> &str {
         &self.0
     }

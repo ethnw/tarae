@@ -31,9 +31,79 @@ pub fn config(ca_pem: &[u8], client: Option<(&[u8], &[u8])>) -> Result<Arc<Clien
     for c in CertificateDer::pem_slice_iter(ca_pem) {
         roots.add(c.map_err(|e| format!("a CA certificate: {e}"))?).map_err(|e| e.to_string())?;
     }
+    with_roots(roots, client)
+}
+
+/// A client configuration trusting the public CAs — Mozilla's list, compiled in (webpki-roots) — for servers
+/// whose certificate a public CA signed (a cloud database's endpoint, often).
+#[cfg(feature = "public-roots")]
+pub fn config_public(client: Option<(&[u8], &[u8])>) -> Result<Arc<ClientConfig>, String> {
+    let roots = RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    with_roots(roots, client)
+}
+
+/// Encryption without checking who's at the other end: **the server's certificate isn't verified** — anyone in
+/// the way can stand in for it. Its handshake signature is still checked against the certificate it shows. Only
+/// for a configuration that asks for exactly this, in so many words.
+pub fn config_unverified() -> Result<Arc<ClientConfig>, String> {
+    let provider = provider();
+    let verifier = Arc::new(Unverified(provider.clone()));
+    let config = ClientConfig::builder_with_details(provider, Arc::new(Clock))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     let mut provider = rustls_rustcrypto::provider();
     provider.cipher_suites.sort_by_key(|s| !format!("{:?}", s.suite()).contains("CHACHA20"));
-    let builder = ClientConfig::builder_with_details(Arc::new(provider), Arc::new(Clock))
+    Arc::new(provider)
+}
+
+/// Takes any certificate; checks only that the handshake is signed by the key in it.
+#[derive(Debug)]
+struct Unverified(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for Unverified {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+fn with_roots(roots: RootCertStore, client: Option<(&[u8], &[u8])>) -> Result<Arc<ClientConfig>, String> {
+    let builder = ClientConfig::builder_with_details(provider(), Arc::new(Clock))
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
         .with_root_certificates(roots);

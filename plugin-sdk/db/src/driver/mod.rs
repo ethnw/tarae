@@ -2,13 +2,15 @@
 //! driver could become a plugin of its own sharing this crate — the rest of the plugin names no database. This is
 //! the only list of them.
 //!
-//! What the trait holds is what the plugin does today — finding connections. Each later step adds its part, with
-//! the code and the tests behind it: connect and authenticate, check or describe a statement or a name, run it page
-//! by page, read-only enforcement and whether something is a write, the side tab's objects.
+//! What the trait holds is what the plugin does today — finding connections, and signing in to the one in use
+//! (`session`). Each later step adds its part, with the code and the tests behind it: check or describe a
+//! statement or a name, run it page by page, read-only enforcement and whether something is a write, the side
+//! tab's objects.
 
 mod mysql;
 mod postgres;
 mod redis;
+pub mod wire;
 
 use std::collections::BTreeMap;
 
@@ -37,6 +39,15 @@ pub trait Driver: Sync {
     }
     /// The variable whose value is the password for one of its connections that has none (`PGPASSWORD`).
     fn password_var(&self) -> Option<&'static str> {
+        None
+    }
+    /// The user a connection that names none signs in as (Redis: `default`); none: one must be named.
+    fn default_user(&self) -> Option<&'static str> {
+        None
+    }
+    /// A session signing in over a connection just opened, and the bytes that start it — `None` while the plugin
+    /// doesn't speak this database yet. `seed`: fresh random bytes, for the nonces signing in needs.
+    fn session(&self, _params: wire::Params, _seed: [u8; 32]) -> Option<(Box<dyn wire::Session>, Vec<wire::Event>)> {
         None
     }
 }

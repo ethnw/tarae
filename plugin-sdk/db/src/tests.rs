@@ -5,6 +5,9 @@ use crate::conn::Password;
 /// says `local`, the compose files say theirs and the environment has `vars` — every action the plugin answered
 /// with, in order.
 fn drive(s: &mut State, config: Option<&str>, local: Option<&str>, compose: &[(&str, &str)], vars: &[(&str, &str)]) -> Vec<Action> {
+    // (tarae hands every call fresh entropy; here the state is given its random bytes, else the connection in use
+    // would wait for some — `live::tests::no_randomness_no_sign_in`)
+    s.seed.get_or_insert([1; 32]);
     let mut out = s.run("db", Some("/p/src/main.rs".into()));
     let config_found = config.map(|_| vec!["/p/.tarae/db.toml".to_string()]).unwrap_or_default();
     let compose_found = compose.iter().map(|(p, _)| p.to_string()).collect();
@@ -178,10 +181,326 @@ fn unverified_tls_is_said_in_the_tab() {
     assert_eq!(owner.text, "a");
 }
 
+// ── The connection in use, live ──
+
+/// The test server's connection (target/sb/db/testdb — fake), its password from `$PGPASSWORD`.
+const LIVE_CONFIG: &str = "[[connection]]\nname = \"dev\"\nurl = \"postgres://app@127.0.0.1:55432/shop\"\npassword-env = \"PGPASSWORD\"\n";
+/// What the captured exchange's nonce was made of (`driver/postgres/wire/tests.rs`: 18 sevens).
+const SEED: [u8; 32] = [7; 32];
+
+/// `:db` with `config`'s connections, `PGPASSWORD` set: (the state, what it answered).
+fn live_drive(config: &str, vars: &[(&str, &str)]) -> (State, Vec<Action>) {
+    let mut s = State { seed: Some(SEED), ..State::default() };
+    let out = drive(&mut s, Some(config), None, &[], vars);
+    (s, out)
+}
+
+fn captured(name: &str) -> (Vec<u8>, Vec<u8>) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/driver/postgres/captured");
+    let read = |side: &str| std::fs::read(dir.join(format!("{name}.{side}.raw"))).unwrap();
+    (read("client"), read("server"))
+}
+
+/// The connections opened: their ids, hosts, ports.
+fn connects(out: &[Action]) -> Vec<(u64, String, u64)> {
+    out.iter().filter_map(|a| if let Action::Connect(c) = a { Some((c.id, c.host.clone(), c.port)) } else { None }).collect()
+}
+
+fn sent_on(out: &[Action], id: u64) -> Vec<u8> {
+    out.iter().filter_map(|a| if let Action::Send((i, b)) = a { (*i == id).then(|| b.clone()) } else { None }).flatten().collect()
+}
+
+/// A PostgreSQL message as the server frames one.
+fn pg_msg(tag: u8, body: &[u8]) -> Vec<u8> {
+    [&[tag][..], &((body.len() + 4) as u32).to_be_bytes(), body].concat()
+}
+
+/// The tab's rows under a connection: (text, tone).
+fn rows_of(s: &State, name: &str) -> Vec<(String, Tone)> {
+    let rows = &s.side.as_ref().unwrap().rows;
+    let at = rows.iter().position(|r| r.id == format!("conn:{name}")).unwrap();
+    rows[at + 1..].iter().take_while(|r| r.depth > 0).map(|r| (r.text.clone(), r.tone)).collect()
+}
+
+/// The connection in use is opened, and what goes on it is its session's own bytes — the whole SCRAM exchange
+/// PostgreSQL 17 accepted, byte for byte — so the badge and the tab say the server's version once it's signed in.
+#[test]
+fn the_connection_in_use_signs_in_and_says_its_servers_version() {
+    let (mut s, out) = live_drive(LIVE_CONFIG, &[("PGPASSWORD", "tarae-fake-pg")]);
+    let id = live::CONNECT + 1;
+    assert_eq!(connects(&out), [(id, "127.0.0.1".into(), 55432)]);
+    assert_eq!(rows_of(&s, "dev").last(), Some(&("connecting…".to_string(), Tone::Info)));
+    let (client, server) = captured("signin");
+    let mut out = s.on_events(vec![HostEvent::Connected(id)]);
+    out.extend(s.on_events(vec![HostEvent::Data((id, server))]));
+    assert_eq!(sent_on(&out, id), client, "the session's bytes, all of them, on its connection");
+    let (text, tone) = badge(&out).unwrap();
+    assert!(text.starts_with("db dev · pg 17.") && tone == Tone::Ok, "{text}");
+    assert!(rows_of(&s, "dev").iter().any(|(t, tone)| t.starts_with("connected · pg 17.") && *tone == Tone::Ok));
+}
+
+/// A server that turns it away (a wrong password: 28P01) is said with its words, and the connection isn't tried
+/// again — knocking again and again would only lock the account.
+#[test]
+fn a_server_that_turns_it_away_isnt_asked_again() {
+    let (mut s, _) = live_drive(LIVE_CONFIG, &[("PGPASSWORD", "tarae-fake-wrong")]);
+    let id = live::CONNECT + 1;
+    s.on_events(vec![HostEvent::Connected(id)]);
+    let refused = pg_msg(b'E', b"SFATAL\0C28P01\0Mpassword authentication failed for user \"app\"\0\0");
+    let out = s.on_events(vec![HostEvent::Data((id, refused))]);
+    assert!(out.contains(&Action::Stop(id)), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::Timer(_))), "not tried again: {out:?}");
+    assert_eq!(
+        rows_of(&s, "dev")[2..],
+        [("not connected".into(), Tone::Warning), ("password authentication failed for user \"app\" (28P01)".into(), Tone::Warning)]
+    );
+    assert_eq!(badge(&out), Some(("db dev · not connected".into(), Tone::Warning)));
+}
+
+/// The plumbing is the same for every database the plugin speaks: a MySQL connection in use is opened, MySQL
+/// speaks first (nothing sent on `connected`), and what goes out is its session's bytes — the sign-in MySQL 8.4
+/// accepted, byte for byte — so the badge says its version.
+#[test]
+fn a_mysql_connection_signs_in_through_the_same_plumbing() {
+    let config = "[[connection]]\nname = \"dev\"\nurl = \"mysql://app@127.0.0.1:53306/shop\"\npassword-env = \"PGPASSWORD\"\n";
+    let (mut s, out) = live_drive(config, &[("PGPASSWORD", "tarae-fake-my")]);
+    let id = live::CONNECT + 1;
+    assert_eq!(connects(&out), [(id, "127.0.0.1".into(), 53306)]);
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/driver/mysql/captured");
+    let (client, server) = (std::fs::read(dir.join("signin-fast.client.raw")).unwrap(), std::fs::read(dir.join("signin-fast.server.raw")).unwrap());
+    let mut out = s.on_events(vec![HostEvent::Connected(id)]);
+    assert!(sent_on(&out, id).is_empty(), "MySQL speaks first");
+    out.extend(s.on_events(vec![HostEvent::Data((id, server))]));
+    assert_eq!(sent_on(&out, id), client);
+    assert_eq!(badge(&out).map(|b| b.0), Some("db dev · mysql 8.4.11".into()));
+}
+
+/// Redis through the same plumbing: the client speaks first (AUTH goes on `connected`), as the ACL user the URL
+/// names — byte for byte what Redis took — and the badge says its version.
+#[test]
+fn a_redis_connection_signs_in_as_its_acl_user() {
+    let config = "[[connection]]\nname = \"cache\"\nurl = \"redis://ro@127.0.0.1:56379\"\npassword-env = \"REDISCLI_AUTH\"\n";
+    let (mut s, out) = live_drive(config, &[("REDISCLI_AUTH", "tarae-fake-redis-ro")]);
+    let id = live::CONNECT + 1;
+    assert_eq!(connects(&out), [(id, "127.0.0.1".into(), 56379)]);
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/driver/redis/captured");
+    let (client, server) = (std::fs::read(dir.join("signin-ro.client.raw")).unwrap(), std::fs::read(dir.join("signin-ro.server.raw")).unwrap());
+    let mut out = s.on_events(vec![HostEvent::Connected(id)]);
+    out.extend(s.on_events(vec![HostEvent::Data((id, server))]));
+    assert_eq!(sent_on(&out, id), client);
+    assert_eq!(badge(&out), Some(("db cache · redis 7.4.11".into(), Tone::Ok)));
+}
+
+/// One that drops, or can't be reached, is tried again after a pause that doubles — a server restarting is met
+/// when it's back, a server that's gone isn't hammered — and a sign-in that works starts the pauses over.
+#[test]
+fn a_dropped_connection_is_tried_again_after_a_pause_that_grows() {
+    let (mut s, _) = live_drive(LIVE_CONFIG, &[("PGPASSWORD", "tarae-fake-pg")]);
+    let id = live::CONNECT + 1;
+    s.on_events(vec![HostEvent::Connected(id)]);
+    s.on_events(vec![HostEvent::Data((id, captured("signin").1))]);
+    let out = s.on_events(vec![HostEvent::Closed((id, String::new()))]);
+    assert!(out.contains(&Action::Timer((live::RETRY, 2_000))), "{out:?}");
+    assert_eq!(rows_of(&s, "dev")[2].0, "not connected — trying again");
+    let out = s.on_events(vec![HostEvent::Tick(live::RETRY)]);
+    assert_eq!(connects(&out), [(id + 1, "127.0.0.1".into(), 55432)], "the next attempt, its own id");
+    let out = s.on_events(vec![HostEvent::Failed((id + 1, "127.0.0.1:55432: Connection refused".into()))]);
+    assert!(out.contains(&Action::Timer((live::RETRY, 4_000))), "longer: {out:?}");
+    // A late word from the first attempt changes nothing
+    assert!(s.on_events(vec![HostEvent::Data((id, vec![b'Z', 0, 0, 0, 5, b'I']))]).iter().all(|a| !matches!(a, Action::Send(_))));
+    s.on_events(vec![HostEvent::Tick(live::RETRY)]);
+    s.on_events(vec![HostEvent::Connected(id + 2)]);
+    s.on_events(vec![HostEvent::Data((id + 2, captured("signin").1))]);
+    let out = s.on_events(vec![HostEvent::Closed((id + 2, String::new()))]);
+    assert!(out.contains(&Action::Timer((live::RETRY, 2_000))), "signed in: the pauses start over — {out:?}");
+}
+
+/// The password comes from where the connection says, at the moment of connecting: a variable (unset: said), a
+/// `~/.pgpass` line (read then, as libpq does), or asked — which waits for API 0.3's masked prompt, said so.
+/// Without one at hand, nothing is opened.
+#[test]
+fn the_password_comes_from_where_the_connection_says() {
+    let (s, out) = live_drive(LIVE_CONFIG, &[]);
+    assert!(connects(&out).is_empty());
+    assert_eq!(rows_of(&s, "dev")[2..], [("not connected".into(), Tone::Info), ("$PGPASSWORD isn't set".into(), Tone::Info)]);
+    let asked = LIVE_CONFIG.replace("password-env = \"PGPASSWORD\"", "ask = true");
+    let (s, out) = live_drive(&asked, &[]);
+    assert!(connects(&out).is_empty());
+    assert!(rows_of(&s, "dev").iter().any(|(t, _)| t.contains("masked prompt comes with plugin API 0.3")));
+    let file = LIVE_CONFIG.replace("password-env = \"PGPASSWORD\"", "password-file = \"~/.pgpass\"");
+    let (mut s, out) = live_drive(&file, &[]);
+    assert!(out.contains(&Action::ReadFile((live::PASSWORD_FILE, "~/.pgpass".into()))), "{out:?}");
+    let out = s.on_events(vec![HostEvent::File((live::PASSWORD_FILE, b"127.0.0.1:55432:shop:app:tarae-fake-pg\n".to_vec()))]);
+    assert_eq!(connects(&out).len(), 1, "its line found: connected");
+    let (mut s, _) = live_drive(&file, &[]);
+    let out = s.on_events(vec![HostEvent::File((live::PASSWORD_FILE, b"other:5432:*:*:tarae-fake-pg\n".to_vec()))]);
+    assert!(connects(&out).is_empty());
+    assert!(rows_of(&s, "dev").iter().any(|(t, _)| t == "no line of ~/.pgpass is for it"));
+    // A connection naming no database is looked up as libpq does: its database is the user's name
+    let (mut s, _) = live_drive(&file.replace("55432/shop", "55432"), &[]);
+    let out = s.on_events(vec![HostEvent::File((live::PASSWORD_FILE, b"127.0.0.1:55432:app:app:tarae-fake-pg\n".to_vec()))]);
+    assert_eq!(connects(&out).len(), 1, "the line psql would use");
+}
+
+/// The live connection is the one in use: choosing another closes it and opens that; `:db-off` closes it — no
+/// connection is left open to a database nobody's using.
+#[test]
+fn the_live_connection_follows_the_one_in_use() {
+    let two = format!("{LIVE_CONFIG}\n[[connection]]\nname = \"other\"\nurl = \"postgres://app@localhost:55433/shop\"\npassword-env = \"PGPASSWORD\"\n");
+    let (mut s, out) = live_drive(&two, &[("PGPASSWORD", "tarae-fake-pg")]);
+    assert!(connects(&out).is_empty(), "two and none chosen: none opened");
+    let out = s.on_events(vec![HostEvent::Answer((PICK, Some("dev".into())))]);
+    assert_eq!(connects(&out), [(live::CONNECT + 1, "127.0.0.1".into(), 55432)]);
+    let out = s.on_events(vec![HostEvent::Answer((PICK, Some("other".into())))]);
+    assert!(out.contains(&Action::Stop(live::CONNECT + 1)), "{out:?}");
+    assert_eq!(connects(&out), [(live::CONNECT + 1, "localhost".into(), 55433)], "a new connection, its own attempt count");
+    let out = s.run("db-off", None);
+    assert!(out.contains(&Action::Stop(live::CONNECT + 1)) && out.contains(&Action::Stop(live::RETRY)), "{out:?}");
+}
+
+/// The password goes on the wire to the server it's for — and nowhere else: whatever it holds, no other action
+/// carries it, also when the server asks for it in plain text and then turns it away.
+#[test]
+fn the_password_goes_only_to_the_wire() {
+    for secret in fake_secrets(40) {
+        let (mut s, mut out) = live_drive(LIVE_CONFIG, &[("PGPASSWORD", &secret)]);
+        let id = live::CONNECT + 1;
+        out.extend(s.on_events(vec![HostEvent::Connected(id)]));
+        out.extend(s.on_events(vec![HostEvent::Data((id, pg_msg(b'R', &[0, 0, 0, 3])))]));
+        assert!(sent_on(&out, id).windows(secret.len()).any(|w| w == secret.as_bytes()), "it was sent — else this proves nothing");
+        let refused = pg_msg(b'E', b"SFATAL\0C28P01\0Mpassword authentication failed for user \"app\"\0\0");
+        out.extend(s.on_events(vec![HostEvent::Data((id, refused))]));
+        out.extend(s.run("db", None));
+        for a in out.iter().filter(|a| !matches!(a, Action::Send((i, _)) if *i == id)) {
+            assert!(!format!("{a:?}").contains(&secret), "{secret:?} reached {a:?}");
+        }
+    }
+}
+
+/// TLS as the connection says, before a byte of the account goes out: `require-unverified` and verify (public CAs,
+/// or a `ca-file` read first) open with PostgreSQL's TLS request; off on this machine, with the startup message. A
+/// CA file that holds no certificate is said, not taken as "trust nothing" and failed later in a riddle.
+#[test]
+fn tls_is_asked_as_the_connection_says() {
+    let ssl_request: &[u8] = &[0, 0, 0, 8, 4, 210, 22, 47];
+    let first_sent = |config: &str| {
+        let (mut s, out) = live_drive(config, &[("PGPASSWORD", "tarae-fake-pg")]);
+        let id = connects(&out).first().map(|c| c.0).expect("connected");
+        sent_on(&s.on_events(vec![HostEvent::Connected(id)]), id)
+    };
+    let tls = |mode: &str| LIVE_CONFIG.replace("password-env", &format!("tls = \"{mode}\"\npassword-env"));
+    assert_eq!(first_sent(&tls("require-unverified")), ssl_request);
+    assert_eq!(first_sent(&tls("verify")), ssl_request, "verified against the public CAs");
+    assert_ne!(first_sent(LIVE_CONFIG), ssl_request, "off on this machine");
+    let with_ca = format!("{}ca-file = \"certs/ca.pem\"\n", tls("verify"));
+    let (mut s, out) = live_drive(&with_ca, &[("PGPASSWORD", "tarae-fake-pg")]);
+    assert!(out.contains(&Action::ReadFile((live::CA_FILE, "/p/certs/ca.pem".into()))) && connects(&out).is_empty(), "{out:?}");
+    s.on_events(vec![HostEvent::File((live::CA_FILE, b"not a certificate\n".to_vec()))]);
+    assert!(rows_of(&s, "dev").iter().any(|(t, _)| t.starts_with("its ca-file: ")), "{:?}", rows_of(&s, "dev"));
+}
+
+/// Encryption with nobody checked at the other end is said on the status line too, in the warning tone — on every
+/// buffer, not only in the tab.
+#[test]
+fn unverified_tls_is_said_on_the_badge_too() {
+    let config = LIVE_CONFIG.replace("password-env", "tls = \"require-unverified\"\npassword-env");
+    let (_, out) = live_drive(&config, &[("PGPASSWORD", "tarae-fake-pg")]);
+    assert_eq!(badge(&out), Some(("db dev · TLS not verified".into(), Tone::Warning)));
+}
+
+// ── Live, against the test server (#[ignore]: round11.sh) ──
+
+/// The test databases' fake CA, and another that signed nothing (target/sb/db/testdb/certs.sh).
+fn test_ca(name: &str) -> String {
+    // (up from the crate — round5.sh's broken copies live elsewhere in the checkout)
+    let found = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .map(|a| a.join(format!("target/sb/db/testdb/certs/{name}.pem")))
+        .find(|p| p.exists());
+    found.expect("the test certificates (testdb/certs.sh)").to_string_lossy().into_owned()
+}
+
+/// Does what the plugin asks over real TCP and files, until `done` or 10 s: the actions, all of them.
+fn over_tcp(s: &mut State, out: Vec<Action>, done: impl Fn(&State) -> bool) -> Vec<Action> {
+    use std::io::{Read, Write};
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    tarae_plugin::now::set(ms, &[0x5a; 32]);
+    let (mut all, mut todo) = (Vec::new(), out);
+    let mut socks: BTreeMap<u64, std::net::TcpStream> = BTreeMap::new();
+    let start = std::time::Instant::now();
+    while !done(s) && start.elapsed().as_secs() < 10 {
+        let mut came = Vec::new();
+        for a in std::mem::take(&mut todo) {
+            match &a {
+                Action::Connect(c) => match std::net::TcpStream::connect((c.host.as_str(), c.port as u16)) {
+                    Ok(t) => {
+                        t.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
+                        socks.insert(c.id, t);
+                        came.push(HostEvent::Connected(c.id));
+                    }
+                    Err(e) => came.push(HostEvent::Failed((c.id, e.to_string()))),
+                },
+                Action::Send((id, b)) => socks.get_mut(id).unwrap().write_all(b).unwrap(),
+                Action::Stop(id) => drop(socks.remove(id)),
+                Action::ReadFile((id, path)) => came.push(match std::fs::read(path) {
+                    Ok(b) => HostEvent::File((*id, b)),
+                    Err(e) => HostEvent::Failed((*id, e.to_string())),
+                }),
+                _ => {}
+            }
+            all.push(a);
+        }
+        for (id, t) in &mut socks {
+            let mut buf = [0u8; 16384];
+            match t.read(&mut buf) {
+                Ok(0) => came.push(HostEvent::Closed((*id, String::new()))),
+                Ok(n) => came.push(HostEvent::Data((*id, buf[..n].to_vec()))),
+                Err(_) => {}
+            }
+        }
+        if !came.is_empty() {
+            todo = s.on_events(came);
+        }
+    }
+    all.extend(todo);
+    all
+}
+
+fn signed_in_or_down(s: &State) -> bool {
+    matches!(s.live.as_ref().map(|l| &l.status), Some(Status::Ready { .. } | Status::Down { .. } | Status::Cannot(_)))
+}
+
+/// The plugin, as tarae drives it, signs in to PostgreSQL 17 — in the clear on this machine, and over TLS
+/// verified against the server's CA; a certificate another CA signed is refused (and not tried again: it won't
+/// change by waiting), and only `require-unverified` takes it, said so.
+#[test]
+#[ignore]
+fn live_the_plugin_signs_in_plain_and_over_verified_tls() {
+    let tls = |mode: &str, ca: Option<&str>| {
+        let ca = ca.map(|c| format!("ca-file = \"{}\"\n", test_ca(c))).unwrap_or_default();
+        LIVE_CONFIG.replace("password-env", &format!("tls = \"{mode}\"\n{ca}password-env"))
+    };
+    for (config, ok) in [
+        (LIVE_CONFIG.to_string(), true),
+        (tls("verify", Some("ca")), true),
+        (tls("verify", Some("other-ca")), false),
+        (tls("require-unverified", None), true),
+    ] {
+        let mut s = State::default();
+        let out = drive(&mut s, Some(&config), None, &[], &[("PGPASSWORD", "tarae-fake-pg")]);
+        over_tcp(&mut s, out, signed_in_or_down);
+        let status = s.live.as_ref().map(|l| l.status.clone());
+        match ok {
+            true => assert!(matches!(&status, Some(Status::Ready { version }) if version.starts_with("17.")), "{config}: {status:?}"),
+            false => assert!(matches!(&status, Some(Status::Down { why, again: false }) if why.contains("UnknownIssuer")), "{config}: {status:?}"),
+        }
+    }
+}
+
 // ── No secret reaches any action ──
 
 /// Passwords made of what breaks quoting and URLs, from a fixed seed.
-fn fake_secrets(n: usize) -> Vec<String> {
+pub(crate) fn fake_secrets(n: usize) -> Vec<String> {
     let chars: Vec<char> = "abcXYZ019:@/%?#&=$\"'\\ !~-_.+é".chars().collect();
     let mut x: u64 = 0x2545_f491_4f6c_dd1d;
     (0..n)
