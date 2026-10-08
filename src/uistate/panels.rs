@@ -217,7 +217,7 @@ impl Editor {
                     let state = match v.state {
                         crate::reviewer::State::Reading => "reading",
                         crate::reviewer::State::Done => "done",
-                        crate::reviewer::State::Failed(_) => "stopped",
+                        crate::reviewer::State::Failed(_) | crate::reviewer::State::Stopped => "stopped",
                     };
                     (state, crate::reviewer::review_tally(self).unwrap_or_default())
                 }),

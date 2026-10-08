@@ -42,6 +42,8 @@ struct Summary {
     cards: Vec<(String, u64, &'static str, String, String, String)>,
     /// (id, name, doing, its reviewer's)
     sessions: Vec<(String, String, String, Option<&'static str>)>,
+    /// (session id, its name, its reviewer's last run) — a `reviewer` event when it starts, ends or stops.
+    reviewers: Vec<(String, String, super::ReviewerState)>,
     /// (id, kind, text)
     toasts: Vec<(String, &'static str, String)>,
 }
@@ -91,6 +93,11 @@ fn summary(s: &super::UiState) -> Summary {
             .iter()
             .map(|x| (x.id.clone(), x.name.clone(), x.doing.clone(), x.reviewer))
             .collect(),
+        reviewers: s
+            .sessions
+            .iter()
+            .filter_map(|x| Some((x.id.clone(), x.name.clone(), x.reviewer_run.clone()?)))
+            .collect(),
         toasts: s.toasts.iter().map(|t| (t.id.clone(), t.kind, t.text.clone())).collect(),
     }
 }
@@ -134,6 +141,18 @@ fn diff(old: &Summary, new: &Summary) -> Vec<Value> {
             let was = before.map(|b| b.2.as_str());
             out.push(json!({ "event": "session", "id": id, "doing": doing, "was": was, "reviewer": reviewer,
                              "said": said }));
+        }
+    }
+    // (its state only: every read or finding would be an event — the end carries the counts)
+    for (id, name, r) in &new.reviewers {
+        let before = old.reviewers.iter().find(|x| &x.0 == id).map(|x| x.2.state);
+        if before != Some(r.state) {
+            let mut ev = r.json();
+            ev["event"] = json!("reviewer");
+            ev["session"] = json!(id);
+            ev["was"] = json!(before);
+            ev["said"] = json!(format!("{id} {name}: reviewer {}", r.text()));
+            out.push(ev);
         }
     }
     for (id, kind, text) in &new.toasts {

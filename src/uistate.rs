@@ -718,6 +718,9 @@ pub struct SessionState {
     /// `doing`: the two are at work apart, often at once, and a driver waiting for `doing` to be `idle` waits
     /// for the chat's turn, not a review it didn't ask for (#195).
     pub reviewer: Option<&'static str>,
+    /// Its reviewer's last run, how it went (`ReviewerState`) — while it reads and after, whether or not its
+    /// review is open (cardburden 7: a driver read the findings off the rail).
+    pub reviewer_run: Option<ReviewerState>,
     pub cards: usize,
     pub rebasing: Option<String>,
     pub reloaded: usize,
@@ -726,6 +729,96 @@ pub struct SessionState {
     pub usage: Option<UsageState>,
     /// Its Claude's conversation compacted since tarae started (`compaction.rs`) — None: never.
     pub compacted: Option<crate::compaction::Compacted>,
+}
+
+/// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
+/// what it found so far.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewerState {
+    /// `reading` · `done` · `stopped`.
+    pub state: &'static str,
+    /// How long it read — so far, while it reads.
+    pub ms: u64,
+    pub reads: usize,
+    /// Its findings still pinned, and those answered (by you or the author).
+    pub findings: usize,
+    pub answered: usize,
+    /// Those on a high-risk change — None when its review isn't the one open (the grades are the open
+    /// review's).
+    pub high: Option<usize>,
+    /// Its verdict's first line (empty while it reads, or none came).
+    pub verdict: String,
+    /// Why it stopped (`stopped` only, not by you).
+    pub why: Option<String>,
+    /// You stopped it (`:reviewer-stop`, `:procs`).
+    pub by_you: bool,
+    /// What its review was of (`Base::label`: `uncommitted`, `since main` …).
+    pub of: String,
+    /// It ended while its session was behind, and that session hasn't been in front since (its inbox item).
+    pub news: bool,
+}
+
+impl ReviewerState {
+    /// Session `l`'s reviewer — None: it never had one since tarae started.
+    pub fn of(ed: &Editor, l: &crate::session::Session) -> Option<ReviewerState> {
+        use crate::reviewer::State;
+        let r = l.reviewer.as_ref()?;
+        let t = crate::reviewer::review_tally_in(ed, l).unwrap_or_default();
+        let open = l.code_review.as_ref().is_some_and(|c| c.started == r.of);
+        let (state, why) = match &r.state {
+            State::Reading => ("reading", None),
+            State::Done => ("done", None),
+            State::Failed(why) => ("stopped", Some(why.clone())),
+            State::Stopped => ("stopped", None),
+        };
+        Some(ReviewerState {
+            state,
+            ms: ms(r.took.unwrap_or_else(|| r.started.elapsed())),
+            reads: r.reads,
+            findings: t.findings,
+            answered: t.answered,
+            high: open.then_some(t.high),
+            verdict: r.verdict.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string(),
+            why,
+            by_you: r.state == State::Stopped,
+            of: r.label.clone(),
+            news: r.unseen,
+        })
+    }
+
+    pub fn json(&self) -> Value {
+        json!({
+            "state": self.state, "ms": self.ms, "reads": self.reads, "findings": self.findings,
+            "answered": self.answered, "high": self.high, "verdict": self.verdict, "why": self.why,
+            "by_you": self.by_you, "of": self.of, "news": self.news,
+        })
+    }
+
+    /// One line: `done in 1m 20s · 14 reads · 2 findings ▲1 · 1 answered — <verdict>`.
+    pub fn text(&self) -> String {
+        let took = crate::term::duration(self.ms as f32 / 1000.0);
+        let how = match (self.state, &self.why) {
+            ("reading", _) => format!("reading {took}"),
+            ("stopped", _) if self.by_you => format!("stopped by you after {took}"),
+            ("stopped", Some(why)) => format!("stopped after {took}: {why}"),
+            ("stopped", None) => format!("stopped after {took}"),
+            _ => format!("done in {took}"),
+        };
+        let high = self.high.filter(|&h| h > 0).map(|h| format!(" ▲{h}")).unwrap_or_default();
+        let answered = match self.answered {
+            0 => String::new(),
+            n => format!(" · {n} answered"),
+        };
+        let verdict = match self.verdict.is_empty() {
+            true => String::new(),
+            false => format!(" — {}", self.verdict),
+        };
+        format!(
+            "{how} · {} · {}{high}{answered}{verdict}",
+            crate::nav::count(self.reads, "read"),
+            crate::nav::count(self.findings, "finding")
+        )
+    }
 }
 
 /// A session's usage as the state says it — None in a field: not reported.
@@ -913,6 +1006,7 @@ impl Editor {
                 d @ crate::session::Doing::Queued { .. } => d.said(),
             },
             reviewer: l.reviewing().then_some("reviewing"),
+            reviewer_run: ReviewerState::of(self, l),
             cards: if is_front { self.offers.len() + l.parked.len() } else { l.parked.len() },
             rebasing: l.rebase.as_ref().map(|r| r.said()),
             reloaded: l.reloaded,
@@ -1078,6 +1172,9 @@ impl UiState {
                 if let Some(r) = s.reviewer {
                     v["reviewer"] = json!(r);
                 }
+                if let Some(r) = &s.reviewer_run {
+                    v["reviewer_run"] = r.json();
+                }
                 if let Some(r) = &s.rebasing {
                     v["rebasing"] = json!(r);
                 }
@@ -1169,6 +1266,9 @@ impl UiState {
             }
             if let Some(c) = &s.compacted {
                 out.push(format!("compacted {}: {}", s.id, c.text()));
+            }
+            if let Some(r) = &s.reviewer_run {
+                out.push(format!("reviewer {}: {}", s.id, r.text()));
             }
         }
         out.extend(self.card_lines());

@@ -64,6 +64,13 @@ impl Editor {
             l.rebasing = None;
             l.compacted = None;
         }
+        // A reviewer — its own session's too — is how it goes and its counts, never its words: nothing of it
+        // goes to the author until you send its findings (`space v s`), and its verdict never does
+        for r in s.sessions.iter_mut().filter_map(|l| l.reviewer_run.as_mut()) {
+            r.verdict.clear();
+            r.why = None;
+            r.of.clear();
+        }
         s.cards.retain(|c| c.session == own);
         // (a toast that's news of another session — its turn ended, it waits: theirs, a count here)
         let others: Vec<String> = self
@@ -131,6 +138,12 @@ impl UiState {
                 })
                 .collect();
             out.push(format!("sessions: {}", s.join("   ")));
+        }
+        // (its own session's reviewer, how it went and its counts — the others' are their `· reviewing` above)
+        if let Some(r) =
+            self.sessions.iter().find(|s| s.id == self.front).and_then(|s| s.reviewer_run.as_ref())
+        {
+            out.push(format!("reviewer: {}", r.text()));
         }
         out.extend(self.card_lines());
         for p in &self.panels.code {

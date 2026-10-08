@@ -1720,6 +1720,7 @@ fn reviewer_said(ed: &Editor, root: &Path, highs: &[Held], head: &str) -> Option
     let mut s = match &rv.state {
         State::Reading => "reviewer: still reading".to_string(),
         State::Failed(why) => format!("reviewer: stopped — {why}"),
+        State::Stopped => "reviewer: stopped by you".to_string(),
         State::Done if t.findings == 0 => "reviewer: no findings".to_string(),
         State::Done if t.high > 0 => {
             format!("reviewer: {} ▲ of {}", t.high, crate::nav::count(t.findings, "finding"))

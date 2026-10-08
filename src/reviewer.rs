@@ -56,12 +56,13 @@ const CHECKLIST: &str = "Look in particular for:
 - every change of behaviour: is there a test that would fail without it? Name each one missing.
 - what does each new test explain? Name any that mirror the implementation or don't say what they pin.";
 
-/// Reading · done · failed (why).
+/// Reading · done · failed (why) · stopped by you (`:reviewer-stop`, `:procs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     Reading,
     Done,
     Failed(String),
+    Stopped,
 }
 
 pub struct Reviewer {
@@ -346,7 +347,8 @@ pub fn ended(r: &Reviewer, n: usize) -> (crate::editor::ToastKind, String) {
     use crate::editor::ToastKind;
     match &r.state {
         State::Failed(why) => (ToastKind::Warning, format!("the reviewer stopped: {why}")),
-        _ => {
+        State::Stopped => (ToastKind::Warning, "the reviewer was stopped by you".into()),
+        State::Reading | State::Done => {
             let found = match n {
                 0 => "no findings".to_string(),
                 n => format!("{} — space v s sends them on", crate::nav::count(n, "finding")),
@@ -363,7 +365,8 @@ pub fn news(l: &crate::session::Session) -> Option<(String, Instant)> {
     let at = r.started + r.took.unwrap_or_default();
     let said = match &r.state {
         State::Failed(why) => format!("the reviewer stopped: {why}"),
-        _ => {
+        State::Stopped => "the reviewer was stopped by you".to_string(),
+        State::Reading | State::Done => {
             let n = r.findings.iter().filter(|id| l.notes.list.iter().any(|n| n.id == **id)).count();
             match n {
                 0 => "the reviewer is done: no findings — space v r reads its verdict".to_string(),
@@ -516,9 +519,17 @@ pub struct Tally {
 /// The tally of the reviewer's findings still here; `high` says whether a finding's lines (path, 0-based)
 /// touch a high-risk change.
 pub fn tally(ed: &Editor, high: impl Fn(&std::path::Path, &std::ops::Range<usize>) -> bool) -> Option<Tally> {
-    let r = ed.session.reviewer.as_ref()?;
+    tally_in(&ed.session, high)
+}
+
+/// `tally` of session `l`'s reviewer — in front or behind.
+fn tally_in(
+    l: &crate::session::Session,
+    high: impl Fn(&std::path::Path, &std::ops::Range<usize>) -> bool,
+) -> Option<Tally> {
+    let r = l.reviewer.as_ref()?;
     let mut t = Tally::default();
-    for n in r.findings.iter().filter_map(|id| ed.session.notes.list.iter().find(|n| n.id == *id)) {
+    for n in r.findings.iter().filter_map(|id| l.notes.list.iter().find(|n| n.id == *id)) {
         t.findings += 1;
         t.high += usize::from(high(&n.path, &n.lines));
         t.answered += usize::from(n.thread.iter().skip(1).any(|e| e.by != crate::notes::By::Reviewer));
@@ -528,8 +539,13 @@ pub fn tally(ed: &Editor, high: impl Fn(&std::path::Path, &std::ops::Range<usize
 
 /// The tally against the open review's grades (no review open: no finding counts as high).
 pub fn review_tally(ed: &Editor) -> Option<Tally> {
-    let r = ed.session.code_review.as_ref();
-    tally(ed, |path, lines| {
+    review_tally_in(ed, &ed.session)
+}
+
+/// `review_tally` of session `l` — its own review's grades (the documents are the editor's, any session's).
+pub fn review_tally_in(ed: &Editor, l: &crate::session::Session) -> Option<Tally> {
+    let r = l.code_review.as_ref();
+    tally_in(l, |path, lines| {
         let Some((r, f)) = r.and_then(|r| Some((r, r.files.iter().find(|f| f.path == path)?))) else {
             return false;
         };
@@ -544,7 +560,7 @@ pub fn stop(ed: &mut Editor) {
     match ed.session.reviewer.as_mut().filter(|r| r.reading()) {
         Some(r) => {
             r.kill();
-            r.state = State::Failed("stopped".into());
+            r.state = State::Stopped;
             r.took = Some(r.started.elapsed());
             ed.set_status("the reviewer stopped — its findings so far stay");
         }
@@ -573,6 +589,7 @@ fn report(ed: &Editor) -> Option<String> {
         State::Reading => format!("Reading… {took} so far, {}.\n", reads(r.reads)),
         State::Done => format!("Done in {took}, {}{cost}.\n", reads(r.reads)),
         State::Failed(why) => format!("Stopped after {took}: {why}\n"),
+        State::Stopped => format!("Stopped by you after {took}, {}.\n", reads(r.reads)),
     };
     if !r.verdict.is_empty() {
         out += &format!("\n## Verdict\n\n{}\n", r.verdict);
@@ -889,6 +906,243 @@ mod tests {
         assert_eq!(inbox.len(), 1, "{inbox:?}");
         assert!(inbox[0].asks.contains("stopped: Reached the maximum turns (60)"), "{}", inbox[0].asks);
         assert!(tabs(&mut ed).contains("author • │ other │ +"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A fake reviewer of `repo` with one finding on `a.txt`'s new line, its verdict two paragraphs.
+    fn one_finding(ed: &mut Editor, dir: &Path) {
+        let args = json!({"path": "a.txt", "line": 2, "text": "This line is new; is it tested?"});
+        let note = mcp_call("p1", 1, "tools/call", json!({"name": "note", "arguments": args}));
+        fake(ed, dir, &[note, result("One finding: the new line in a.txt.\n\nThe rest reads fine.")]);
+    }
+
+    /// The session's reviewer as the state's JSON says it (`reviewer_run`).
+    fn run_of(ed: &Editor, session: usize) -> Value {
+        ed.ui_state().json()["sessions"][session]["reviewer_run"].clone()
+    }
+
+    /// cardburden 7: how the reviewer went is in the state as long as the session had one — reading, then
+    /// done with its findings and its verdict's first line — whether or not its review is still open, in front
+    /// or behind: a driver reads it there, never off the rail. On a high-risk change: counted only against the
+    /// review it read (closed, the grades are gone — null, not 0).
+    #[test]
+    fn a_reviewer_done_is_in_the_state_without_its_review_open() {
+        let (dir, repo) = place("run");
+        let mut ed = Editor::new(crate::config::Config::default());
+        assert!(run_of(&ed, 0).is_null(), "no reviewer yet: nothing said");
+        one_finding(&mut ed, &dir);
+        reading(&mut ed, &repo);
+        let r = run_of(&ed, 0);
+        assert_eq!(
+            (&r["state"], &r["verdict"], &r["why"]),
+            (&json!("reading"), &json!(""), &Value::Null),
+            "{r}"
+        );
+        settle_until(&mut ed, |ed| !ed.session.reviewer.as_ref().unwrap().reading());
+        let r = run_of(&ed, 0);
+        assert_eq!(r["state"], "done", "{r}");
+        assert_eq!((&r["findings"], &r["high"], &r["answered"]), (&json!(1), &json!(0), &json!(0)), "{r}");
+        assert_eq!(r["verdict"], "One finding: the new line in a.txt.", "its first line: {r}");
+        assert_eq!(r["of"], json!(ed.session.reviewer.as_ref().unwrap().label), "{r}");
+        // The review ends: still there, its high-risk count unknown
+        crate::codereview::close(&mut ed);
+        assert!(ed.session.code_review.is_none());
+        let r = run_of(&ed, 0);
+        assert_eq!(
+            (&r["state"], &r["findings"], &r["high"]),
+            (&json!("done"), &json!(1), &Value::Null),
+            "{r}"
+        );
+        let text = ed.ui_state().text();
+        assert!(
+            text.contains("reviewer s0: done in ") && text.contains(" · 1 finding — One finding"),
+            "{text}"
+        );
+        // Behind: the same
+        let other = other_session(&mut ed, &dir);
+        assert!(ed.session_switch(other));
+        let st = ed.ui_state().json();
+        let author = st["sessions"].as_array().unwrap().iter().find(|s| s["id"] == "s0").unwrap().clone();
+        assert_eq!(
+            (&author["reviewer_run"]["state"], &author["reviewer_run"]["findings"]),
+            (&json!("done"), &json!(1))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 7: a watcher of `reviewer` hears it start and end — once each, the end with its counts —
+    /// and nothing in between (its reads and findings aren't events of their own).
+    #[test]
+    fn the_watch_says_when_the_reviewer_ends() {
+        let (dir, repo) = place("watch");
+        let mut ed = Editor::new(crate::config::Config::default());
+        one_finding(&mut ed, &dir);
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::uistate::watch::UNREAD);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kinds = vec!["reviewer".into()];
+        ed.ui_watch_add(crate::uistate::watch::Watcher { tx, kinds, overflowed: flag });
+        let heard = |ed: &mut Editor| -> Vec<Value> {
+            crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();
+            rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
+        };
+        reading(&mut ed, &repo);
+        let e = heard(&mut ed);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(
+            (&e[0]["event"], &e[0]["state"], &e[0]["was"]),
+            (&json!("reviewer"), &json!("reading"), &Value::Null)
+        );
+        assert_eq!(e[0]["session"], "s0");
+        assert!(heard(&mut ed).is_empty(), "still reading: nothing new");
+        settle_until(&mut ed, |ed| !ed.session.reviewer.as_ref().unwrap().reading());
+        let e = heard(&mut ed);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(
+            (&e[0]["state"], &e[0]["was"], &e[0]["findings"]),
+            (&json!("done"), &json!("reading"), &json!(1))
+        );
+        let said = e[0]["said"].as_str().unwrap();
+        assert!(said.starts_with("s0 author: reviewer done in ") && said.contains("1 finding"), "{said}");
+        assert!(heard(&mut ed).is_empty(), "said once");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 7: at Claude's level a reviewer is how it went and its counts, never its words (its
+    /// verdict, why it stopped, what its review was of) — its own session's neither. Nothing of the reviewer
+    /// reaches the author until you send its findings (`space v s`), and its verdict never does: not through
+    /// its `ui` tool, nor what's attached when you point (both read `text_claude`).
+    #[test]
+    fn claudes_level_holds_back_the_reviewers_words() {
+        let (dir, repo) = place("claude");
+        let mut ed = Editor::new(crate::config::Config::default());
+        one_finding(&mut ed, &dir);
+        reviewed(&mut ed, &repo);
+        ed.session.name = "author".into();
+        // The author's own Claude, through its `ui` tool: the counts, not the verdict
+        let text = crate::uistate::claude::tool_call(&mut ed).unwrap();
+        assert!(text.contains("\nreviewer: done in ") && text.contains(" · 1 finding"), "{text}");
+        assert!(!text.contains("One finding"), "the verdict, unsent: {text}");
+        let st = ed.ui_state_claude();
+        let r = st.sessions[0].reviewer_run.as_ref().expect("its counts");
+        assert_eq!((r.state, r.findings), ("done", 1));
+        assert!(r.verdict.is_empty() && r.why.is_none() && r.of.is_empty(), "{r:?}");
+        // Another session's Claude: the same counts, and no line of its own
+        let other = other_session(&mut ed, &dir);
+        assert!(ed.session_switch(other));
+        let st = ed.ui_state_claude();
+        let author = st.sessions.iter().find(|s| s.id == "s0").unwrap();
+        let r = author.reviewer_run.as_ref().expect("its counts stay");
+        assert_eq!((r.state, r.findings), ("done", 1));
+        assert!(r.verdict.is_empty() && r.why.is_none() && r.of.is_empty(), "{r:?}");
+        let text = st.text_claude(false);
+        assert!(!text.contains("One finding") && !text.contains("\nreviewer:"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A watcher of `reviewer` events on `ed`, and what it heard by the next frame.
+    fn reviewer_watch(ed: &mut Editor) -> impl FnMut(&mut Editor) -> Vec<Value> + use<> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::uistate::watch::UNREAD);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kinds = vec!["reviewer".into()];
+        ed.ui_watch_add(crate::uistate::watch::Watcher { tx, kinds, overflowed: flag });
+        move |ed: &mut Editor| {
+            crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();
+            rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
+        }
+    }
+
+    /// cardburden 7: a run that stopped says why — in the state (`why`), on its line (`stopped after …:
+    /// <why>`), and to a watcher, `reading` → `stopped`.
+    #[test]
+    fn a_stopped_reviewer_says_why() {
+        let (dir, repo) = place("why");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let failed = json!({"type": "result", "is_error": true, "result": "Reached the maximum turns (60)"});
+        fake(&mut ed, &dir, &[failed]);
+        let mut heard = reviewer_watch(&mut ed);
+        reading(&mut ed, &repo);
+        assert_eq!(heard(&mut ed)[0]["state"], "reading");
+        settle_until(&mut ed, |ed| !ed.session.reviewer.as_ref().unwrap().reading());
+        let e = heard(&mut ed);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!((&e[0]["state"], &e[0]["was"]), (&json!("stopped"), &json!("reading")), "{e:?}");
+        assert_eq!(e[0]["why"], "Reached the maximum turns (60)");
+        let r = run_of(&ed, 0);
+        assert_eq!(
+            (&r["why"], &r["by_you"]),
+            (&json!("Reached the maximum turns (60)"), &json!(false)),
+            "{r}"
+        );
+        let text = ed.ui_state().text();
+        assert!(
+            text.contains("reviewer s0: stopped after ") && text.contains(": Reached the maximum turns (60)")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 7: one you stopped (`:reviewer-stop`) says so in plain words — `stopped by you after 3s` —
+    /// never as a reason of its own (it read `stopped after 3s: stopped`); its report and its line alike.
+    #[test]
+    fn a_reviewer_you_stopped_says_so() {
+        let (dir, repo) = place("byyou");
+        let mut ed = Editor::new(crate::config::Config::default());
+        // (a fake that reads on and never answers)
+        fake(&mut ed, &dir, &[]);
+        reading(&mut ed, &repo);
+        stop(&mut ed);
+        let r = run_of(&ed, 0);
+        assert_eq!(
+            (&r["state"], &r["by_you"], &r["why"]),
+            (&json!("stopped"), &json!(true), &Value::Null),
+            "{r}"
+        );
+        let text = ed.ui_state().text();
+        let line = text.lines().find(|l| l.starts_with("reviewer s0:")).expect("its line");
+        // (how long, and no reason after it)
+        let how = line.split(" · ").next().unwrap();
+        let took = how.strip_prefix("reviewer s0: stopped by you after ");
+        assert!(took.is_some_and(|t| !t.contains(':')), "{line}");
+        let report = report(&ed).unwrap();
+        assert!(report.contains("Stopped by you after ") && !report.contains(": stopped"), "{report}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 7: a run that ended while its session was behind is `news` there — its inbox item, its
+    /// tab's `•` — until the session comes to the front.
+    #[test]
+    fn a_reviewer_ending_behind_is_news_in_the_state() {
+        let (dir, repo) = place("news");
+        let mut ed = Editor::new(crate::config::Config::default());
+        one_finding(&mut ed, &dir);
+        reading(&mut ed, &repo);
+        let other = other_session(&mut ed, &dir);
+        assert!(ed.session_switch(other));
+        settle_until(&mut ed, |ed| !author(ed).reviewer.as_ref().unwrap().reading());
+        let author_run = |ed: &Editor| {
+            let st = ed.ui_state().json();
+            st["sessions"].as_array().unwrap().iter().find(|s| s["id"] == "s0").unwrap()["reviewer_run"]
+                .clone()
+        };
+        assert_eq!((&author_run(&ed)["state"], &author_run(&ed)["news"]), (&json!("done"), &json!(true)));
+        assert!(ed.session_switch(0));
+        assert_eq!(author_run(&ed)["news"], false, "in front: no longer news");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 7: findings on a high-risk change are counted in `high` against the review's grades (here
+    /// `a.txt` is in `review.risky`), and said on its line as `▲1`.
+    #[test]
+    fn findings_on_a_high_risk_change_are_counted() {
+        let (dir, repo) = place("high");
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["a.txt".into()];
+        let mut ed = Editor::new(config);
+        one_finding(&mut ed, &dir);
+        reviewed(&mut ed, &repo);
+        let r = run_of(&ed, 0);
+        assert_eq!((&r["findings"], &r["high"]), (&json!(1), &json!(1)), "{r}");
+        let text = ed.ui_state().text();
+        assert!(text.contains(" · 1 finding ▲1 — One finding"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

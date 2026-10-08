@@ -170,7 +170,8 @@ fn peer(stream: UnixStream, tx: crate::event::Tx) {
 }
 
 /// The kinds of events a watcher may ask for (`{"watch":[…]}`; none: all).
-const KINDS: [&str; 8] = ["keys", "cards", "sessions", "turns", "runs", "toasts", "usage", "procs"];
+const KINDS: [&str; 9] =
+    ["keys", "cards", "sessions", "reviewer", "turns", "runs", "toasts", "usage", "procs"];
 
 /// `{"watch":["keys","cards",…]}`: this connection is told what changes, a JSON line an event, from the frame
 /// after it's registered on (`uistate/watch.rs`). It ends when the reader goes — or reads too slowly: then its
@@ -335,8 +336,8 @@ usage: tarae state [--json] [--pid PID] [--after-input N] [--watch [KINDS]]
   --json            as JSON (the schema: docs/design/ui-state.md)
   --pid PID         that tarae (else $TARAE_UI's, or the one whose session holds this folder)
   --after-input N   once N keys and clicks were handled and drawn (read `input` first, add what you send)
-  --watch [KINDS]   what changes, a line an event, until interrupted — KINDS: keys,cards,sessions,turns,
-                    runs,toasts,usage,procs (all when left out)";
+  --watch [KINDS]   what changes, a line an event, until interrupted — KINDS: keys,cards,sessions,reviewer,
+                    turns,runs,toasts,usage,procs (all when left out)";
 
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
     let (mut json, mut pid, mut after, mut watching) = (false, None, 0u64, None::<Vec<String>>);

@@ -138,8 +138,19 @@ side git · 4 rows · in hand git:src/term.rs
 - **`sessions`** — id, name, branch, `doing` (`Doing`: `idle` · `working` · `waiting` · `done` ·
   `stuck {tool, secs}` — its chat's Claude), `reviewer: "reviewing"` while its reviewer reads (`reviewer.rs`,
   #195; absent else — a field of its own, not a `doing`: the two work apart and often at once, and a driver
-  waiting for `doing: idle` waits for the chat's turn, not a review), cards waiting, `rebasing n/m`, the
-  reloaded `•`, and once its Claude compacted its
+  waiting for `doing: idle` waits for the chat's turn, not a review), and `reviewer_run`, how its reviewer's
+  last run went, from its start until the next one, whether or not its review is open:
+  - `state`: `reading` · `done` · `stopped`; `ms`: how long it read (so far, while it reads); `reads`.
+  - `findings`: those still pinned; `answered`: those you or the author answered.
+  - `high`: those on a high-risk change, `null` when its review isn't the one open.
+  - `verdict`: its first line; `why`: why it stopped; `by_you`: you stopped it (`:reviewer-stop`); `of`: what
+    its review was of.
+  - `news`: it ended behind, and the session hasn't been in front since.
+
+  Claude's level keeps every session's state and counts, its own session's too, and never the reviewer's
+  words (`verdict`, `why`, `of`). Nothing of the reviewer reaches the author until you send its findings
+  (`space v s`), and its verdict never does. Then come
+  cards waiting, `rebasing n/m`, the reloaded `•`, and once its Claude compacted its
   conversation (`compaction.rs`), `compacted`: `count` since tarae started, the `last` one's `at_ms`, `trigger`
   (`auto` · `manual`), `pre_tokens`, `post_tokens`, and `unseen` (it came behind, not in front since). Claude's
   level has only its own session's.
@@ -301,6 +312,7 @@ A snapshot is one question. An event stream tells you about change without polli
 | `card-up` | the card | diff |
 | `card-gone` | id, how: `answered y` · `declined` · `lost` · `replaced` · `turn-ended` | explicit, at `offer_finished`/`offer_dismiss`/`asking_sync`/`drop_cards` (a diff can't tell how) |
 | `session` | id, doing old → new, `reviewer` (its reviewer reading: `idle → idle · reviewing`) | diff |
+| `reviewer` | session, `reviewer_run` (above), `was`: its state before (`reading` → `done`); only when it starts, ends or stops | diff |
 | `turn` | session, `started` / `ended` (`chat` Done), calls, edits | explicit |
 | `run` | id, `queued` · `started` · `waiting <what>` · `ended <how> <took>` | explicit, beside the `RunTrace` steps phase 0 already logs (and `Waiting::line`) |
 | `toast` | the toast | diff |

@@ -8500,6 +8500,7 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
             }
         }
         State::Failed(_) => row.push((Tone::Warn, "  stopped".into())),
+        State::Stopped => row.push((Tone::Dim, "  stopped by you".into())),
     }
     rows.push(row);
     if let Some(first) = rv.verdict.lines().map(str::trim).find(|l| !l.is_empty()) {
