@@ -163,7 +163,7 @@ fn run_through(
     });
     let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
     #[allow(unused_mut)]
-    let mut p = crate::sandbox::policy(&root, &llm, &[]);
+    let mut p = crate::sandbox::policy(&root, &llm, &[]).unwrap();
     // (as tarae's environment names it — a test's own `Here` keeps no proxy variable: `Here::now`)
     let vars = named(at).into_iter().map(|(k, v)| (k.to_string(), v.into())).collect();
     p.egress.upstream = upstream::of(&vars, upstream::Setting::Env);

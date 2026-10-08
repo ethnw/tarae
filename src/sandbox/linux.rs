@@ -2442,7 +2442,7 @@ mod tests {
             let run = |sandboxed: bool| {
                 let t = Instant::now();
                 let p = sandboxed.then(|| {
-                    let mut p = crate::sandbox::policy(&root, &llm, &[]);
+                    let mut p = crate::sandbox::policy(&root, &llm, &[]).unwrap();
                     p.watch = crate::sandbox::watch_for(&p);
                     p
                 });

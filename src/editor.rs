@@ -582,6 +582,9 @@ pub struct Editor {
     pub read_temp: bool,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
     pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
+    /// What a run's policy reads of tarae's surroundings (`sandbox::Here`, on its worker) — `Here::now` unless a
+    /// test says (`tools::guard_then_go`).
+    pub(crate) sandbox_here: Option<std::sync::Arc<dyn Fn() -> crate::sandbox::Here + Send + Sync>>,
     /// The user's config file, where a toggle that's kept is written (`space v a`) — None in tests (they
     /// set a temp file).
     pub config_file: Option<std::path::PathBuf>,
@@ -773,6 +776,7 @@ impl Editor {
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
             run_clock: None,
+            sandbox_here: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
             last_frame: None,
             term_out: Vec::new(),

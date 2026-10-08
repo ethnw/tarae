@@ -137,8 +137,9 @@ impl Fixture {
         out
     }
 
+    /// A run's (`run_policy_in`: its own folder in the stand-in home's cache).
     fn policy(&self, llm: &crate::llm::LlmConfig) -> Policy {
-        policy_in(&self.root, llm, &[], &self.here)
+        run_policy_in(&self.root, llm, &[], &self.here).expect("a run's policy")
     }
 }
 
@@ -268,19 +269,15 @@ fn the_policy_is_pinned() {
     pinned("sandbox_policy.txt", &out);
 }
 
-/// Where a run may write (`write_places` — gitescape's git launcher reads it), but the devices and runs'
-/// folders, which no pack names (each said present).
+/// Where a run may write (`write_places` — gitescape's git launcher reads it), runs' folders among it (in
+/// tarae's cache, as the home says: `runs`), but the devices, which no pack names (each said present).
 #[test]
 fn the_write_places_are_pinned() {
     let f = Fixture::new("write-places", Os::HOST, &[]);
     let llm = crate::llm::LlmConfig::default();
     let all = Policy::for_project(&env_in(&f.root, &llm, &[], &f.here).0).write_places();
-    let base = RunDir::base();
-    assert!(all.contains(&base), "{all:?}");
     assert!(DEVICE_PLACES.iter().all(|d| all.iter().any(|w| w == Path::new(d))), "{all:?}");
-    // (runs' folders are `$TMPDIR`'s: on Linux that's `/tmp`, which the policy names itself)
-    let runs = |w: &PathBuf| *w == base && *w != Path::new(TMP);
-    let ours = all.iter().filter(|w| !runs(w) && !DEVICE_PLACES.iter().any(|d| *w == Path::new(d)));
+    let ours = all.iter().filter(|w| !DEVICE_PLACES.iter().any(|d| *w == Path::new(d)));
     pinned("sandbox_write_places.txt", &lines(&f, None, ours.map(|w| shown(w))));
 }
 

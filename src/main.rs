@@ -302,6 +302,8 @@ fn main() -> Result<()> {
     // Kept run homes no run needs any more — unused, replaced, their project gone (`runhomes.rs`; a worker's)
     let days = editor.config.llm.sandbox_kept_days;
     editor.events.jobs().background(move || runhomes::prune_now(days));
+    // Run folders a tarae that's gone left in tarae's cache (`sandbox::prune_runs`; a worker's)
+    editor.events.jobs().background(sandbox::prune_runs);
     if !files.is_empty() {
         editor.current = 0;
     }

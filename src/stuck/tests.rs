@@ -212,7 +212,7 @@ fn a_quiet_run_let_out_to_a_socket_is_asked_as_maybe_working_elsewhere() {
     ed.session.root = dir.clone();
     let task = crate::task::Task { name: "builds".into(), cmd: "sleep 30".into(), cwd: dir.clone() };
     assert!(ed.task_start_for(task, crate::tools::For::User("b".into()), None, Default::default()).is_ok());
-    let mut policy = crate::sandbox::policy(&dir, &ed.config.llm, &[]);
+    let mut policy = crate::sandbox::policy(&dir, &ed.config.llm, &[]).unwrap();
     policy.sockets = vec![dir.join("engine.sock")];
     let ago = |m: u32| Instant::now().checked_sub(MIN * m).unwrap();
     let r = ed.session.task_run.as_mut().unwrap();

@@ -324,7 +324,7 @@ fn gradle_resolves_through_the_proxy() {
         ..Default::default()
     };
     #[allow(unused_mut)]
-    let mut p = crate::sandbox::policy(&root, &llm, &[]);
+    let mut p = crate::sandbox::policy(&root, &llm, &[]).unwrap();
     #[cfg(target_os = "linux")]
     {
         // (this machine's own address stands for the outside: a policy that knows none)

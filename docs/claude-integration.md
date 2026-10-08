@@ -634,8 +634,17 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   report says so as the proxy's (`network-upstream`), not the sandbox's. An `https://` or SOCKS4 proxy, or one
   asking for Negotiate/NTLM, isn't spoken to yet: nothing goes that way, and the report says why.
   `llm.sandbox-upstream = "none"` sends the commands straight out, with every check
-- Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
-  `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
+- Each command gets a folder of its own as `TMPDIR`, in tarae's cache (`~/.cache/tarae/runs/`, or under
+  `$XDG_CACHE_HOME`) — not in a temp folder, which every command writes: no other command, this session's or
+  another's, can put a file there (tools' homes are in it, Gradle's among them). A tarae that's gone leaves its
+  folders behind; the next start removes them. Each tarae keeps its commands' folders in a folder of its own
+  there and holds a lock in it while it runs. The next start removes only folders whose lock nobody holds, so
+  a reused pid or a tarae in a container never loses its folders. A folder with no lock in it is left, and
+  the log says so. What this can't see: a home shared over the network between machines, where a lock may
+  not reach the other machine. When a command's own folder can't be made, the command doesn't run, and you're
+  told why and what to do. The same happens when tarae's cache is somewhere every command writes:
+  `XDG_CACHE_HOME` in `/tmp`, your temp folder or the project, or an `llm.sandbox-write` that reaches into it.
+- Unix sockets work only in the project and in the command's own folder. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket
   folders (`$TMUX_TMPDIR` or `/tmp`, then `tmux-<uid>`; `$ZELLIJ_SOCKET_DIR` or `$TMPDIR/zellij-<uid>`) can't
   be written either, so a command can't delete or replace the multiplexer you work in

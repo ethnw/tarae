@@ -3066,7 +3066,7 @@ mod tests {
         // (a fresh clone: no `.gradle/` nor `build/` — the policy makes them first, from the Java pack's outputs)
         let build = |localhost: bool| {
             let llm = crate::llm::LlmConfig { sandbox_localhost: localhost, ..Default::default() };
-            let mut p = super::super::policy(&s.root, &llm, &[]);
+            let mut p = super::super::policy(&s.root, &llm, &[]).unwrap();
             p.watch = super::super::watch_for(&p);
             let args = ["--offline", "--console=plain", "build"].map(String::from);
             let mut cmd = super::super::command(Some(&p), &gradle.to_string_lossy(), &args);
@@ -3122,7 +3122,7 @@ mod tests {
         llm: &crate::llm::LlmConfig,
         change: impl FnOnce(&mut Policy),
     ) -> (u128, bool, String) {
-        let mut p = super::super::policy(root, llm, &[]);
+        let mut p = super::super::policy(root, llm, &[]).unwrap();
         change(&mut p);
         p.watch = super::super::watch_for(&p);
         let at = std::time::Instant::now();
@@ -3189,7 +3189,7 @@ mod tests {
         use super::super::linux;
         let localhost = !matches!(variant, "v2" | "v5");
         let llm = crate::llm::LlmConfig { sandbox_localhost: localhost, ..Default::default() };
-        let mut p = super::super::policy(root, &llm, &[]);
+        let mut p = super::super::policy(root, &llm, &[]).unwrap();
         let abi = crate::landlock::abi().ok()?;
         match variant {
             "v6" => {

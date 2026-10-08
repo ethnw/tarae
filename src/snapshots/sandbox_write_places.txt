@@ -1,5 +1,6 @@
     $BASE/tmp
     $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cache/tarae/runs
     $HOME/.cargo/.global-cache
     $HOME/.cargo/.global-cache-journal
     $HOME/.cargo/.global-cache-shm

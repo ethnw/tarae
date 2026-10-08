@@ -1696,7 +1696,7 @@ mod tests {
         (ed.session.root, ed.session.name) = (here.clone(), "here".into());
         ed.session_open(&there).unwrap();
         let leave = |root: &Path| -> u32 {
-            let p = crate::sandbox::policy(root, &crate::llm::LlmConfig::default(), &[]);
+            let p = crate::sandbox::policy(root, &crate::llm::LlmConfig::default(), &[]).unwrap();
             let file = root.join("left.pid");
             let script = format!("(setsid sleep 60 & echo $! > '{}')", file.display());
             let cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script]);

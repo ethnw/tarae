@@ -1945,6 +1945,21 @@ fn fail(ed: &mut Editor, who: For, joined: Vec<crate::queued::Joined>, e: String
     crate::queued::run_next(ed);
 }
 
+/// A run the sandbox couldn't set up (`sandbox::policy`'s why, with what to do) doesn't start: never in the
+/// sandbox with less of its own (F1). Said to the user whoever asked — Claude can't mend tarae's cache — and
+/// to Claude, who's asked not to go round it.
+fn not_started(ed: &mut Editor, who: For, joined: Vec<crate::queued::Joined>, why: String) {
+    let said = match who {
+        For::Claude(_) => {
+            ed.set_error(format!("Claude's command didn't run. {why}"));
+            format!("It didn't run. {why} Tell the user; don't work around it.")
+        }
+        // (`fail` says it to the user)
+        For::User(_) => format!("The command didn't run. {why}"),
+    };
+    fail(ed, who, joined, said)
+}
+
 /// A run the user started again ended: Claude reads how with the next message — the panel shows it now.
 fn told(ed: &mut Editor, head: String, report: String) {
     ed.session.checkpoints.tell.push(format!("{head}\n{report}"));
@@ -2229,6 +2244,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     let grant = ride.extra.grant.clone();
     let said = ed.tokens_said.clone();
+    let here = ed.sandbox_here.clone();
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
@@ -2238,14 +2254,15 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         let policy = matches!(found, Availability::Ready | Availability::Partial(_)).then(|| {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
             let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
-            let mut p = crate::sandbox::policy(&root, &w.llm, &w.reads);
+            let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
+            let mut p = crate::sandbox::policy_from(&root, &w.llm, &w.reads, &here)?;
             w.onto(&mut p);
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
             told = crate::tokens::to_tell(&p.reads.copies.told, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)
             p.watch = crate::sandbox::watch_for(&p);
             std::thread::sleep(crate::sandbox::watch_wait(&p));
-            p
+            Ok(p)
         });
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
@@ -2260,6 +2277,10 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
                 return crate::queued::run_next(ed);
             }
             let agreed = ride.unprotected || ed.session.chat.as_ref().is_some_and(|c| c.unprotected);
+            let policy = match policy {
+                Some(Err(why)) => return not_started(ed, who, ride.joined, why),
+                p => p.and_then(Result::ok),
+            };
             match (policy, found, who) {
                 (Some(_), Availability::Partial(why), For::Claude(call)) if !agreed => {
                     ask_unprotected(ed, call, job, Unsandboxed::Partial(why), ride)
@@ -4709,6 +4730,82 @@ mod tests {
         assert!(many.contains("60 more failed") && many.contains("  t59\n"), "{many}");
         assert!(!many.contains("  t60\n") && many.ends_with("  … and 10 more\n"), "{many}");
         assert!(super::failures(elsewhere(), &cases, &[]).is_empty());
+    }
+
+    /// A run the sandbox couldn't set up — no folder of its own (F1, `sandbox::run_policy_in`'s why, with what to
+    /// do) — doesn't start. Claude hears it, and not to go round it; the user sees it as an error whoever asked
+    /// (Claude can't mend tarae's cache); one the user started again is said to the user. Nothing runs — never
+    /// outside the sandbox for want of a policy. (`guard_then_go` itself, its policy's surroundings a test's own:
+    /// tarae's cache where a file of the test's is in the way; a stand-in command that would leave a marker in
+    /// the test's folder; calls of no chat process.)
+    #[test]
+    fn a_run_the_sandbox_couldnt_set_up_doesnt_start() {
+        use std::time::{Duration, Instant};
+        // (out of tarae's repository — a run that started would take its snapshot with git — and out of the
+        // shared temp folder, which every run writes: on Linux that's `/tmp`)
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with("/tmp") { std::path::PathBuf::from("/var/tmp") } else { tmp };
+        let t = tmp.join(format!("tarae-not-started-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(t.join("p")).unwrap();
+        std::fs::create_dir_all(t.join("tmp")).unwrap();
+        let t = crate::sandbox::profile_path(&t);
+        std::fs::write(t.join("cache"), "a file where tarae's cache would be").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        (ed.config.llm.sandbox, ed.sandbox) = (true, crate::sandbox::Availability::Ready);
+        ed.session.root = t.join("p");
+        let (cache, own_tmp) = (t.join("cache"), t.join("tmp"));
+        ed.sandbox_here = Some(std::sync::Arc::new(move || {
+            let mut here = crate::sandbox::Here::now();
+            // (a temp folder of its own: the test's folder may be in the one this run writes)
+            (here.runs, here.tmp) = (None, Some(own_tmp.clone()));
+            here.env.insert("XDG_CACHE_HOME".into(), cache.clone().into());
+            here
+        }));
+        let job = || super::Job::Command("touch ran".into(), t.join("p"));
+        let ran = |ed: &crate::editor::Editor| {
+            ed.session.task_run.is_some() || ed.session.test_run.is_some() || t.join("p/ran").exists()
+        };
+        let pump =
+            |ed: &mut crate::editor::Editor, what: &str, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+                let end = Instant::now() + Duration::from_secs(20);
+                while !done(ed) {
+                    assert!(Instant::now() < end, "{what}");
+                    if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                        ed.handle_event(ev);
+                    }
+                }
+            };
+        let errors = |ed: &crate::editor::Editor| {
+            let errors = ed.toasts.iter().filter(|t| t.kind == crate::editor::ToastKind::Error);
+            errors.map(|t| t.text.clone()).collect::<Vec<_>>()
+        };
+        let id = serde_json::json!(71);
+        let answered = || super::ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| *i == id).cloned());
+        let claude = super::For::Claude(super::Call::test(71));
+        super::guard_then_go(&mut ed, claude, job(), Default::default());
+        pump(&mut ed, "Claude answered", &|_| answered().is_some());
+        let answer = answered().unwrap().1.expect_err("not run");
+        let at = crate::sandbox::home_shown(&t.join("cache/tarae/runs").display().to_string());
+        let why = format!(
+            "The sandbox gives each command a folder of its own, and its own folder couldn't be made in {at} ("
+        );
+        assert!(answer.contains(&why) && answer.contains("then run it again."), "{answer}");
+        assert!(answer.contains("Tell the user; don't work around it."), "{answer}");
+        assert!(!ran(&ed), "nothing ran");
+        let said = errors(&ed);
+        assert!(
+            said.iter().any(|e| e.starts_with("Claude's command didn't run.") && e.contains(&why)),
+            "{said:?}"
+        );
+        let user = super::For::User("again".into());
+        super::guard_then_go(&mut ed, user, job(), Default::default());
+        let to_user = |ed: &crate::editor::Editor| {
+            errors(ed).iter().any(|e| e.starts_with("The command didn't run.") && e.contains(&why))
+        };
+        pump(&mut ed, "the user told", &to_user);
+        assert!(!ran(&ed), "nothing ran");
+        std::fs::remove_dir_all(&t).ok();
     }
 
     /// A sandboxed run's report says what its environment left out once a conversation — another conversation

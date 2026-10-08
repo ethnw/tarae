@@ -584,6 +584,9 @@ pub struct Policy {
     /// This run's own temp folder — its `TMPDIR`, and with the project the only place it may make or reach
     /// a unix socket (`RunDir`).
     pub run: Option<std::sync::Arc<RunDir>>,
+    /// Where runs' own folders are made (`runs_root`, real) — every run's, so where runs write
+    /// (`write_places`); a run's rules open only its own.
+    pub runs: Option<PathBuf>,
     /// This run's tag: every deny carries it (`(with message …)`), so the kernel's report of a denial says
     /// whose it is — by the time it arrives the process is mostly gone (measured), so its pid can't.
     pub tag: Option<String>,
@@ -744,6 +747,11 @@ pub struct Here {
     /// (`every_variable_the_policy_reads_reaches_the_run`).
     #[cfg(test)]
     pub asked: std::sync::Arc<Mutex<Vec<String>>>,
+    /// Tests: where runs' own folders are made instead of tarae's cache (`runs_root`) — `now` gives the test's
+    /// own temp folder: a `cargo test` run in tarae's sandbox can't write tarae's cache (no run can: F1). None:
+    /// as the variables say.
+    #[cfg(test)]
+    pub runs: Option<PathBuf>,
 }
 
 impl Here {
@@ -773,6 +781,8 @@ impl Here {
                 .ok(),
             #[cfg(test)]
             asked: Default::default(),
+            #[cfg(test)]
+            runs: Some(profile_path(&std::env::temp_dir())),
         }
     }
 
@@ -1019,37 +1029,147 @@ pub fn path_dirs_in(here: &Here) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// A run's own temp folder. Unix sockets anywhere else stay out of reach: in `/private/tmp` and `$TMPDIR`
-/// live tmux's, zellij's and ssh-agent's — servers outside the sandbox that run what they're told
+/// A run's own temp folder (its `TMPDIR`). Unix sockets anywhere else stay out of reach: in `/private/tmp` and
+/// `$TMPDIR` live tmux's, zellij's and ssh-agent's — servers outside the sandbox that run what they're told
 /// (reproduced: `tmux -S /private/tmp/tmux-501/default run-shell "touch ~/marker"` from inside made the
-/// marker when temp sockets were allowed). Removed, on a thread of its own, once the run is gone.
+/// marker when temp sockets were allowed). Made in tarae's cache (`runs_root`), where no run writes but in its
+/// own: in the temp folders, which every run writes, one run could put a file in another's — tools' homes are
+/// there (`GRADLE_USER_HOME`: an init script runs in that run's build, with its session's grants — F1).
+/// Removed, on a thread of its own, once the run is gone; a gone tarae's at the next start (`prune_runs`).
+/// `<base>/<instance>/<n>`: in this tarae's own folder (`Instance`), whose lock says whose they are.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RunDir(PathBuf);
 
-impl RunDir {
-    /// Where runs' own folders are made: `$TMPDIR`, real.
-    pub fn base() -> PathBuf {
-        profile_path(&std::env::temp_dir())
+/// The lock file in an instance's folder.
+const INSTANCE_LOCK: &str = "lock";
+
+/// This tarae's folder for its runs' folders in one base — `<pid>-<ms it was made>` (a later ms while that's
+/// taken: another tarae with this pid, one in a container, made its folder in the same ms) — and the lock in it
+/// (`INSTANCE_LOCK`): an flock held until this tarae ends, the kernel letting go however it ends (`:restart`'s
+/// exec too: its runs are ended first, and the next start's prune takes what's left). Whose a run folder is
+/// isn't its pid: a gone tarae's pid is often the next start's after a reboot, and a pid means nothing in
+/// another pid namespace; a held lock is held for every process on this machine whatever its namespace.
+///
+/// What it can't see: a home shared over the network between machines. Locks there may not reach the other
+/// machine (or reach it as something else), so another machine's tarae can look gone from here and its run
+/// folders be pruned under it. tarae's cache is taken to be this machine's.
+struct Instance {
+    dir: PathBuf,
+    lock: std::fs::File,
+}
+
+/// Each base's instance (in tarae one, the cache's; tests have their own).
+static INSTANCES: Mutex<Vec<(PathBuf, Instance)>> = Mutex::new(Vec::new());
+
+impl Instance {
+    /// This tarae's (`pid`) folder in `base`, made new (named for `ms`, or the next free ms) and its lock taken.
+    /// A prune can take a lock between its making and its taking — before it's held — and remove the folder:
+    /// then it's made again under the next name. Blocks (a worker's).
+    fn make(base: &Path, pid: u32, ms: u128) -> io::Result<Instance> {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut last = None;
+        for k in 0..8 {
+            let dir = base.join(format!("{pid}-{}", ms + k));
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+            match lock_taken(&dir.join(INSTANCE_LOCK)) {
+                Ok(Some(lock)) => return Ok(Instance { dir, lock }),
+                // (a prune holds it: the folder is going)
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = std::fs::remove_file(dir.join(INSTANCE_LOCK));
+                    let _ = std::fs::remove_dir(&dir);
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("every name it tried for its folder was taken")))
     }
 
-    /// A new folder under `$TMPDIR` (real path; short — a socket's path has 104 bytes at most), only ours.
-    pub fn new() -> std::io::Result<std::sync::Arc<RunDir>> {
+    /// Whether its folder and lock are still where they were (a cache cleared under tarae: not — a run folder
+    /// can't be made there, and a lock no longer there protects nothing).
+    fn still_there(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let at = std::fs::symlink_metadata(self.dir.join(INSTANCE_LOCK));
+        match (self.lock.metadata(), at) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+}
+
+/// The lock at `path` (made where there's none, through no link), taken — None while someone holds it, or
+/// when it was removed or replaced before it was taken (a prune let it go): not to use.
+fn lock_taken(path: &Path) -> io::Result<Option<std::fs::File>> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    match f.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e),
+    }
+    let (ours, there) = (f.metadata()?, std::fs::symlink_metadata(path));
+    Ok(there.ok().filter(|t| t.dev() == ours.dev() && t.ino() == ours.ino()).map(|_| f))
+}
+
+/// Whether `name` is an instance folder's (`<pid>-<ms>`, the pid not 0).
+fn instance_name(name: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    name.split_once('-')
+        .is_some_and(|(pid, ms)| digits(pid) && digits(ms) && pid.parse::<u32>().is_ok_and(|p| p > 0))
+}
+
+impl RunDir {
+    /// A new folder in this tarae's `Instance` in `base` (`runs_root`, real; made where it isn't, only
+    /// tarae's) — the instance made the first time, and again when it's gone — only ours. Short — a socket's
+    /// path has 104 bytes at most. Blocks (a worker's).
+    pub fn new_in(base: &Path) -> std::io::Result<std::sync::Arc<RunDir>> {
         use std::os::unix::fs::DirBuilderExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let base = RunDir::base();
-        let dir = base.join(format!("tarae-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(base)?;
+        let mut instances = INSTANCES.lock().unwrap_or_else(|e| e.into_inner());
+        instances.retain(|(b, i)| b != base || i.still_there());
+        let instance = match instances.iter().position(|(b, _)| b == base) {
+            Some(i) => &instances[i].1,
+            None => {
+                let ms =
+                    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis();
+                instances.push((base.to_path_buf(), Instance::make(base, std::process::id(), ms)?));
+                &instances[instances.len() - 1].1
+            }
+        };
+        let dir = instance.dir.join(SEQ.fetch_add(1, Ordering::Relaxed).to_string());
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         Ok(std::sync::Arc::new(RunDir(dir)))
+    }
+
+    /// Tests: a new folder in the test's own temp folder (as `Here::now` says runs' are made).
+    #[cfg(test)]
+    pub fn new() -> std::io::Result<std::sync::Arc<RunDir>> {
+        RunDir::new_in(&profile_path(&std::env::temp_dir()))
     }
 
     pub fn path(&self) -> &Path {
         &self.0
     }
 
-    /// The run's tag: its folder's name, closed with a dot (so `…-1.` isn't found in `…-10.`).
+    /// The run's tag: `tarae-<instance>-<n>.` — its instance's name and its own, closed with a dot (so `…-1.`
+    /// isn't found in `…-10.`); `tarae-<pid>-` first, as `ours` reads it.
     pub fn tag(&self) -> String {
-        format!("{}.", self.0.file_name().unwrap_or_default().to_string_lossy())
+        let name =
+            |p: Option<&Path>| p.and_then(Path::file_name).unwrap_or_default().to_string_lossy().into_owned();
+        format!("tarae-{}-{}.", name(self.0.parent()), name(Some(&self.0)))
     }
 }
 
@@ -1058,6 +1178,84 @@ impl Drop for RunDir {
         let dir = std::mem::take(&mut self.0);
         crate::event::thread("tarae-tidy", move || std::fs::remove_dir_all(dir));
     }
+}
+
+/// The prune at tarae's start: the run folders a tarae that's gone left in tarae's cache (`runs_pruned`) — a
+/// crash's, a kill's; the temp folders were the system's to clear, tarae's cache is tarae's. Said in the log.
+/// Blocks (a worker's).
+pub fn prune_runs() {
+    prune_runs_in(&Here::now());
+}
+
+/// `prune_runs` where `here` says tarae's cache is, said in the log: what went, and what was left and why.
+fn prune_runs_in(here: &Here) -> Pruned {
+    let home = here.path("HOME").and_then(|h| std::fs::canonicalize(h).ok());
+    let Some(base) = runs_root(home.as_deref(), here) else { return Pruned::default() };
+    let pruned = runs_pruned(&base);
+    if !pruned.gone.is_empty() {
+        let line =
+            format!("removed the run folders of {} gone taraes in {}", pruned.gone.len(), base.display());
+        crate::log::line("sandbox", "info", &line);
+    }
+    for (dir, why) in &pruned.left {
+        crate::log::line("sandbox", "warning", &format!("left {}: {why}", dir.display()));
+    }
+    pruned
+}
+
+/// What a prune of runs' folders did: the instances' folders that went, and those left though no tarae holds
+/// them, each with why.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Pruned {
+    gone: Vec<PathBuf>,
+    left: Vec<(PathBuf, String)>,
+}
+
+/// The instances' folders in `base` (`Instance`) whose tarae is gone — their lock taken here, so nobody holds
+/// it — removed with what's in them; `remove_dir_all` follows no link inside, and the folder itself is one
+/// (not a link to one). A running tarae's stay, this one's too (a lock taken twice in one process isn't: flock
+/// is per open file). Left and said: one with no lock in it (a tarae that ended between making it and its lock,
+/// or something not tarae's), an instance's name on what isn't a folder; what isn't an instance's name stays
+/// unsaid. Blocks (a worker's).
+fn runs_pruned(base: &Path) -> Pruned {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut pruned = Pruned::default();
+    for e in std::fs::read_dir(base).into_iter().flatten().flatten() {
+        if !e.file_name().to_str().is_some_and(instance_name) {
+            continue;
+        }
+        let dir = e.path();
+        // (the entry's own type: a link isn't followed)
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            pruned.left.push((dir, "not a folder, so not a tarae's".into()));
+            continue;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(dir.join(INSTANCE_LOCK));
+        let lock = match lock {
+            Ok(l) => l,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                pruned.left.push((dir, "no lock in it, so whose it is can't be told".into()));
+                continue;
+            }
+            Err(e) => {
+                pruned.left.push((dir, format!("its lock: {e}")));
+                continue;
+            }
+        };
+        match lock.try_lock() {
+            Ok(()) => match std::fs::remove_dir_all(&dir) {
+                Ok(()) => pruned.gone.push(dir),
+                Err(e) => pruned.left.push((dir, format!("removing it: {e}"))),
+            },
+            // (its tarae is running)
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(e)) => pruned.left.push((dir, format!("its lock: {e}"))),
+        }
+    }
+    pruned
 }
 
 /// One denial the kernel reported: the process, what it tried (`file-write-create`, `network-outbound`…)
@@ -1733,7 +1931,8 @@ pub struct Left {
     pub root: Option<PathBuf>,
 }
 
-/// Whether `tag` is one of this tarae's runs' (`RunDir::tag`: `tarae-<pid>-<n>.`).
+/// Whether `tag` is one of this tarae's runs' (`RunDir::tag`: `tarae-<pid>-<ms>-<n>.` — its instances' since it
+/// started, a `:restart`'s too: the same pid).
 fn ours(tag: &str) -> bool {
     tag.strip_prefix(&format!("tarae-{}-", std::process::id())).is_some_and(|n| n.ends_with('.'))
 }
@@ -2523,14 +2722,14 @@ impl Policy {
 
     /// Every place a run under this policy may write, folders and files — what its rules open, from the fields
     /// the profile (`args`) and Landlock's rules (`linux::confine`) are made from: the project, `write`, `files`,
-    /// a run's own folder (any run's: where `RunDir` makes them), the devices (`DEVICE_PLACES`). What's kept
-    /// inside them (`protect`, `keep`, `caches`) counts as written too. Real paths.
+    /// a run's own folder (any run's: where `RunDir` makes them — `runs`), the devices (`DEVICE_PLACES`).
+    /// What's kept inside them (`protect`, `keep`, `caches`) counts as written too. Real paths.
     pub fn write_places(&self) -> Vec<PathBuf> {
         let run = self.run.as_ref().map(|r| r.path().to_path_buf());
         let mut all: Vec<PathBuf> = std::iter::once(self.root.clone())
             .chain(self.write.iter().cloned())
             .chain(self.files.iter().cloned())
-            .chain([RunDir::base()])
+            .chain(self.runs.clone())
             .chain(run)
             .chain(DEVICE_PLACES.iter().map(PathBuf::from))
             .collect();
@@ -2805,6 +3004,7 @@ impl Policy {
             ports,
             localhost: env.localhost,
             run: None,
+            runs: env.runs.clone(),
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
@@ -2885,6 +3085,8 @@ pub struct Env {
     /// The tools' homes kept across the project's runs (the packs' `run-home` with `keep` — `kept_homes`): the
     /// tool's name, the folder (real; made by the run that needs it).
     pub kept_homes: Vec<(String, PathBuf)>,
+    /// Where runs' own folders are made (`runs_root`, real).
+    pub runs: Option<PathBuf>,
     /// The homes a tool's daemon lives from (`run-home`'s `daemon`), kept per project and policy: the tool's
     /// name, the folder but the policy's key (`with_kept` puts it after a `-`).
     pub daemon_homes: Vec<(String, PathBuf)>,
@@ -3041,6 +3243,7 @@ pub(crate) fn env_in(
         runs_later: runs_later.unwrap_or_default(),
         kept_homes: kept_homes(root, real_home.as_deref(), here, false),
         daemon_homes: kept_homes(root, real_home.as_deref(), here, true),
+        runs: runs_root(real_home.as_deref(), here),
         run_homes: vars.as_ref().map(run_homes_said).unwrap_or_default(),
         reads: reads.unwrap_or_default(),
         root: profile_path(root),
@@ -3121,12 +3324,33 @@ fn kept_homes(root: &Path, home: Option<&Path>, here: &Here, daemon: bool) -> Ve
     kept.map(|h| (h.name.clone(), cache.join(&h.name).join(&key))).collect()
 }
 
-/// Where kept run homes are: tarae's cache folder's `run-homes` (`$XDG_CACHE_HOME`, else `~/.cache` — as `here`
-/// says), real.
+/// Where kept run homes are: tarae's cache folder's `run-homes` (`taraes_cache`), real.
 pub(crate) fn kept_root(home: Option<&Path>, here: &Here) -> Option<PathBuf> {
+    taraes_cache(home, here).map(|c| profile_path(&c.join("run-homes")))
+}
+
+/// Where runs' own folders are made (`RunDir`): tarae's cache folder's `runs` (`taraes_cache`), real — beside
+/// `run-homes`, out of every place a run may write (F1; a cache moved into one is refused: `runs_written`).
+pub(crate) fn runs_root(home: Option<&Path>, here: &Here) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(runs) = &here.runs {
+        return Some(runs.clone());
+    }
+    taraes_cache(home, here).map(|c| profile_path(&c.join("runs")))
+}
+
+/// The place every run under `p` may write (the project, `write`) that holds runs' folders' `base` or is in it:
+/// there one run could put a file in another's folder (F1) — `XDG_CACHE_HOME` in `/tmp`, `$TMPDIR` or the
+/// project, `llm.sandbox-write` naming tarae's cache.
+fn runs_written<'a>(p: &'a Policy, base: &Path) -> Option<&'a Path> {
+    let open = std::iter::once(&p.root).chain(&p.write);
+    open.map(PathBuf::as_path).find(|w| base.starts_with(w) || w.starts_with(base))
+}
+
+/// tarae's cache folder: `$XDG_CACHE_HOME/tarae`, else `~/.cache/tarae` — as `here` says (`home` real).
+fn taraes_cache(home: Option<&Path>, here: &Here) -> Option<PathBuf> {
     let xdg = here.path("XDG_CACHE_HOME").filter(|p| p.is_absolute()).map(PathBuf::into_os_string);
-    let cache = crate::runtime::cache_dir_of(xdg, home.map(|h| h.as_os_str().to_owned()));
-    cache.map(|c| profile_path(&c.join("run-homes")))
+    crate::runtime::cache_dir_of(xdg, home.map(|h| h.as_os_str().to_owned()))
 }
 
 /// `p`'s kept homes (`Policy::kept`, not held yet): the project's (`env.kept_homes`, written already), then
@@ -3198,25 +3422,46 @@ fn caches_in(c: &crate::sandboxpack::Caches, home: &Path) -> (CachesSaid, Vec<Pa
 
 /// The policy for the run about to start in the project at `root` with these settings and the places in home
 /// the user let Claude read (`reads`, real) — the toolchain's folders found, and what the run needs there
-/// before it starts (`run_policy_in`). Blocks (a worker's).
-pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
-    let p = run_policy_in(root, llm, reads, &Here::now());
-    #[cfg(target_os = "linux")]
-    let p = confined(p);
-    p
+/// before it starts (`run_policy_in`) — or why it can't start. Blocks (a worker's). (Tests; tarae's runs read
+/// `Editor.sandbox_here`: `policy_from`.)
+#[cfg(test)]
+pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Result<Policy, String> {
+    policy_from(root, llm, reads, &Here::now())
 }
 
-/// `policy_in`, for a run about to start: the checkout's own build folder in its tool's home, opened to its
-/// runs, made where it isn't yet — a run can't make it beside other checkouts' (`own_build_made`). Only here,
-/// on a run's way: making a policy (`policy_in`, its tests, the goldens) writes nothing in the user's homes.
+/// `policy` with what `here` says of tarae's surroundings (`Editor.sandbox_here`: a test's own).
+pub fn policy_from(
+    root: &Path,
+    llm: &crate::llm::LlmConfig,
+    reads: &[PathBuf],
+    here: &Here,
+) -> Result<Policy, String> {
+    let p = run_policy_in(root, llm, reads, here)?;
+    #[cfg(target_os = "linux")]
+    let p = confined(p);
+    Ok(p)
+}
+
+/// `policy_in`, for a run about to start — only here, on a run's way, is anything made for it: its own folder
+/// (`RunDir`) in tarae's cache and what's in it (`for_its_run`), and the checkout's own build folder in its
+/// tool's home, opened to its runs, where it isn't yet — a run can't make it beside other checkouts'
+/// (`own_build_made`). Computing a policy (`policy_computed`, `policy_in`; `write_places`) writes nothing in
+/// the user's homes. A run whose own folder can't be made doesn't start: why, and what to do.
 pub(crate) fn run_policy_in(
     root: &Path,
     llm: &crate::llm::LlmConfig,
     reads: &[PathBuf],
     here: &Here,
-) -> Policy {
-    let (p, own) = policy_and_own_build(root, llm, reads, here);
-    if let Some((own, tool)) = own {
+) -> Result<Policy, String> {
+    let (mut p, found) = policy_computed(root, llm, reads, here);
+    // (a run without its own folder would have the temp folders, which every run writes, as its `TMPDIR` and
+    // tools' homes, and no tag its denials are watched by: it doesn't start)
+    let run = run_folder(&p, here).map_err(|why| {
+        crate::log::line("sandbox", "warning", &why);
+        format!("The sandbox gives each command a folder of its own, and {why}, then run it again.")
+    })?;
+    for_its_run(&mut p, Some(run), reads, here, &found);
+    if let Some((own, tool)) = found.own {
         match own_build_made(&own, &tool) {
             Ok(true) => {
                 crate::log::line("sandbox", "info", &format!("made {} for its first build", own.display()))
@@ -3227,38 +3472,39 @@ pub(crate) fn run_policy_in(
             }
         }
     }
+    Ok(p)
+}
+
+/// `policy` with what `here` says, computed — its Landlock rules not made yet (`confined`), and nothing made
+/// for a run (`run_policy_in`): no folder of its own, so no sockets but the project's, `TMPDIR` as it was, no
+/// tag to watch by, no tools' homes of its own.
+#[cfg(test)]
+pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf], here: &Here) -> Policy {
+    let (mut p, found) = policy_computed(root, llm, reads, here);
+    for_its_run(&mut p, None, reads, here, &found);
     p
 }
 
-/// `policy` with what `here` says — its Landlock rules not made yet (`confined`), nothing made for its run
-/// (`run_policy_in`).
-#[cfg(test)]
-pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf], here: &Here) -> Policy {
-    policy_and_own_build(root, llm, reads, here).0
+/// What computing a policy found that its run is made from (`for_its_run`): the real home, cargo's configs
+/// above the project (`env_in`), and the checkout's own build folder in its tool's home when the policy opens
+/// it to its runs (the folder, and the tool that keeps it).
+struct Found {
+    real_home: Option<PathBuf>,
+    above: Vec<PathBuf>,
+    own: Option<(PathBuf, Builder)>,
 }
 
-/// `policy_in`, and the checkout's own build folder in its tool's home when the policy opens it to its runs:
-/// the folder, and the tool that keeps it.
-fn policy_and_own_build(
+/// The policy for the project at `root`, computed — nothing made in the user's homes: no run's folder, no kept
+/// home stamped, no build folder (those are a run's way's, `run_policy_in`).
+fn policy_computed(
     root: &Path,
     llm: &crate::llm::LlmConfig,
     reads: &[PathBuf],
     here: &Here,
-) -> (Policy, Option<(PathBuf, Builder)>) {
-    let (mut env, above) = env_in(root, llm, reads, here);
+) -> (Policy, Found) {
+    let (env, above) = env_in(root, llm, reads, here);
     let real_home = env.home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
-    // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
-    let run = RunDir::new().ok();
-    let tag = run.as_ref().map(|r| r.tag());
-    // Settings that hold a token: copies without it in the run's folder (`tokens.rs`) — while reads are
-    // confined; what the user let Claude read stays readable
-    if let Some(h) = &real_home {
-        let sources = crate::tokens::sources_on(h, &|name| here.var(name), here.os);
-        let dir = run.as_ref().map(|r| r.path());
-        env.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &env.reads.kept);
-        env.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &above);
-    }
-    let mut p = Policy { run, tag, ..Policy::for_project(&env) };
+    let mut p = Policy::for_project(&env);
     let own = env.own_build.clone().filter(|o| p.write.contains(o)).map(|o| (o, env.builder.clone()));
     // (macOS: the network open goes out through tarae's proxy, at a port of the run's own)
     if p.network && here.os == Os::Mac {
@@ -3269,6 +3515,54 @@ fn policy_and_own_build(
     // (Linux: the supervisor hands the run's connections over)
     p.supervised = here.os == Os::Linux;
     with_kept(&mut p, &env);
+    (p, Found { real_home, above, own })
+}
+
+/// A run's own folder, made in tarae's cache (`p.runs`) — or why there's none: no cache folder, one that
+/// can't be made, or one where every run may write (`runs_written`: F1 quietly lost — refused, never warned),
+/// each with what to do.
+fn run_folder(p: &Policy, here: &Here) -> Result<std::sync::Arc<RunDir>, String> {
+    // (tests: a runs folder of the test's own, in its temp folder — `Here::runs`)
+    #[cfg(test)]
+    let given = here.runs.is_some();
+    #[cfg(not(test))]
+    let (given, _) = (false, here);
+    let Some(base) = p.runs.as_deref() else {
+        let why =
+            "tarae has no cache folder to make it in (neither XDG_CACHE_HOME nor HOME is set for tarae)";
+        return Err(format!("{why}. Start tarae with HOME set"));
+    };
+    let at = home_shown(&base.display().to_string());
+    if let Some(w) = runs_written(p, base).filter(|_| !given) {
+        let w = home_shown(&w.display().to_string());
+        let why = format!("its own folder would be made in {at}, where every run may write ({w})");
+        return Err(format!("{why}. Set XDG_CACHE_HOME for tarae to a folder no run writes"));
+    }
+    RunDir::new_in(base).map_err(|e| {
+        let why = format!("its own folder couldn't be made in {at} ({e})");
+        format!("{why}. Check that {at} can be written — its permissions, the disk's free space")
+    })
+}
+
+/// What `p`'s run gets in its own folder `run` (none: a policy only, `policy_in`): its tag, the copies of
+/// settings that hold a token, its kept homes held, its tools' homes and the packs' variables, its proxy files.
+fn for_its_run(
+    p: &mut Policy,
+    run: Option<std::sync::Arc<RunDir>>,
+    reads: &[PathBuf],
+    here: &Here,
+    found: &Found,
+) {
+    (p.tag, p.run) = (run.as_ref().map(|r| r.tag()), run);
+    let real_home = &found.real_home;
+    // Settings that hold a token: copies without it in the run's folder (`tokens.rs`) — while reads are
+    // confined; what the user let Claude read stays readable
+    if let Some(h) = real_home {
+        let sources = crate::tokens::sources_on(h, &|name| here.var(name), here.os);
+        let dir = p.run.as_ref().map(|r| r.path());
+        p.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &p.reads.kept);
+        p.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &found.above);
+    }
     let url = p.proxy_url();
     // The kept homes held (their stamps, before they're made: a prune can't take one between) — one that can't
     // be is no kept home for this run: the run's own, and its folder not written (`policy_key` leaves the
@@ -3304,7 +3598,6 @@ fn policy_and_own_build(
     let mut env = std::mem::take(&mut p.env);
     proxy_made(p.run.as_ref().map(|r| r.path()), url.as_ref(), &mut env, &p.run_env);
     p.env = env;
-    (p, own)
 }
 
 /// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
@@ -4257,11 +4550,13 @@ mod tests {
         let w = write_places(&root, &llm);
         let devices =
             if cfg!(target_os = "linux") { ["/dev/shm", "/dev/pts"] } else { ["/dev/fd", "/dev/null"] };
-        let named = [&root, &cache, Path::new("/opt/tarae-granted"), &RunDir::base()];
+        // (runs' folders: in a test, its own temp folder — `Here::now`)
+        let runs = profile_path(&std::env::temp_dir());
+        let named = [&root, &cache, Path::new("/opt/tarae-granted"), &runs];
         for p in named.into_iter().chain(devices.iter().map(Path::new)) {
             assert!(w.iter().any(|x| x == p), "{} in {w:?}", p.display());
         }
-        let p = policy(&root, &llm, &[]);
+        let p = policy(&root, &llm, &[]).unwrap();
         let run = p.run.as_ref().map(|r| r.path().to_path_buf());
         let of_policy: Vec<PathBuf> =
             p.write_places().into_iter().filter(|x| Some(x) != run.as_ref()).collect();
@@ -4685,7 +4980,7 @@ mod tests {
         // Making a policy writes nothing in cargo's home: only a run's way does
         let made = policy_in(&p_root, &llm, &[], &here);
         assert!(made.write.contains(&own) && !own.exists(), "made by a policy alone");
-        let p = run_policy_in(&p_root, &llm, &[], &here);
+        let p = run_policy_in(&p_root, &llm, &[], &here).unwrap();
         #[cfg(target_os = "linux")]
         let p = confined(p);
         assert!(p.write.contains(&own), "its own build folder opened: {:?} · {:?}", p.write, p.refused);
@@ -4727,6 +5022,362 @@ mod tests {
         let beside: Vec<_> =
             beside.filter(|n| n.to_string_lossy().starts_with(&name) && *n != *name).collect();
         assert!(beside.is_empty(), "{beside:?}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// F1: a run writes only its own run folder — never another run's, its session's or another's. tarae points
+    /// tools' homes there (`GRADLE_USER_HOME`, Maven's settings, npm's logs): a file put in another run's
+    /// `gradle/init.d/` would run inside that run's build, with its session's grants. Two sessions' runs (two
+    /// projects' policies, each with its folder where tarae makes them): the first makes, changes or removes
+    /// nothing in the second's folder, makes no folder beside it (where a later run's would be) and doesn't
+    /// touch the lock that says its tarae runs (`Instance`); its own it writes. (Projects of the test's own.)
+    #[test]
+    fn a_run_writes_only_its_own_run_folder() {
+        let test = "sandbox::tests::a_run_writes_only_its_own_run_folder";
+        #[cfg(target_os = "macos")]
+        if skipped_inside(test) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if crate::landlock::abi().is_err() {
+            let why = format!("{}{test} — needs Landlock\n", crate::test_results::SELF_SKIP);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), why.as_bytes());
+            return;
+        }
+        // (not in a temp folder: a policy never opens one holding its project, and a checkout isn't in one)
+        let t = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/sb-run-folders-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&t).ok();
+        let (p_root, q_root) = (t.join("p"), t.join("q"));
+        for root in [&p_root, &q_root] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let (p_root, q_root) = (profile_path(&p_root), profile_path(&q_root));
+        // Runs' folders where tarae makes them: its cache's `runs`, as the variables say (a cache of the test's
+        // own — not the test's temp folder, `Here::now`'s for tests)
+        let mut here = Here::now();
+        here.runs = None;
+        here.env.insert("XDG_CACHE_HOME".into(), t.join("cache").into());
+        let llm = crate::llm::LlmConfig::default();
+        let run = |root: &Path| run_policy_in(root, &llm, &[], &here).expect("a run's policy");
+        let (p, q) = (run(&p_root), run(&q_root));
+        #[cfg(target_os = "linux")]
+        let p = confined(p);
+        let theirs = q.run.as_ref().expect("the other run's folder").path().to_path_buf();
+        assert!(theirs.starts_with(t.join("cache/tarae/runs")), "{}", theirs.display());
+        std::fs::write(theirs.join("marker"), "kept").unwrap();
+        let script = r#"
+            w() { if ( eval "$2" ) 2>/dev/null; then echo "$1 ok"; else echo "$1 no"; fi; }
+            w own 'printf x > "$TMPDIR/mine"'
+            w make 'printf x > "$Q/made"'
+            w change 'printf y >> "$Q/marker"'
+            w remove 'rm "$Q/marker"'
+            w beside 'mkdir "${Q}0"'
+            w lock 'printf x >> "${Q%/*}/lock"'
+        "#;
+        let mut cmd = command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.current_dir(&p_root).env("Q", &theirs).stdin(Stdio::null());
+        let spawned = spawn(Some(&p), &cmd).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        after_run(Some(&p))();
+        let beside = PathBuf::from(format!("{}0", theirs.display()));
+        let (marker, made, beside_made) =
+            (std::fs::read_to_string(theirs.join("marker")), theirs.join("made").exists(), beside.exists());
+        std::fs::remove_dir(&beside).ok();
+        drop((p, q));
+        std::fs::remove_dir_all(&t).ok();
+        let got: Vec<&str> = out.lines().collect();
+        assert_eq!(got, ["own ok", "make no", "change no", "remove no", "beside no", "lock no"], "{out}");
+        assert_eq!((marker.ok().as_deref(), made, beside_made), (Some("kept"), false, false));
+    }
+
+    /// A tarae that's gone (a crash, a kill) leaves its run folders in tarae's cache, which nothing else clears
+    /// (the temp folders were the system's): the next start removes them — where tarae's cache is, as the
+    /// variables say. Whose they are is the lock in each tarae's own folder (`Instance`), never a pid: one a
+    /// process holds stays — another process's (a tarae running beside this one, or in a container: its pid
+    /// means nothing here) or this one's own — and goes once that process lets go; a free one's goes, a live
+    /// pid's too (one reused after a reboot). Removed through no link: neither one inside it nor one standing
+    /// for it is followed. Left and said: a folder with no lock in it (whose can't be told), an instance's name
+    /// on a link. What isn't an instance's name stays, unsaid. (A cache of the test's own; the other process is
+    /// this test binary again, holding a lock until its stdin ends.)
+    #[test]
+    fn a_gone_taraes_run_folders_are_pruned() {
+        let t = std::env::temp_dir().join(format!("tarae-runs-prune-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(&t).unwrap();
+        let t = profile_path(&t);
+        let (base, outside) = (t.join("cache/tarae/runs"), t.join("outside"));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep-me"), "x").unwrap();
+        // An instance's folder: its lock, a run folder in it
+        let instance = |name: &str| {
+            let dir = base.join(name);
+            std::fs::create_dir_all(dir.join("0")).unwrap();
+            std::fs::write(dir.join(INSTANCE_LOCK), "").unwrap();
+            dir
+        };
+        // Held by another process
+        let held = instance("4000001-1");
+        let mut holder = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox::tests::holds_a_lock_in_its_own_process", "--ignored", "--nocapture"])
+            .env("TARAE_LOCK_HOLD", held.join(INSTANCE_LOCK))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut said = io::BufRead::lines(io::BufReader::new(holder.stdout.take().unwrap()));
+        assert!(said.any(|l| l.is_ok_and(|l| l.contains(HELD))), "the other process holds its lock");
+        // Gone: its lock free — a link inside, and a run folder that's a link
+        let gone = instance("4000002-1");
+        std::os::unix::fs::symlink(&outside, gone.join("0/link")).unwrap();
+        std::os::unix::fs::symlink(&outside, gone.join("1")).unwrap();
+        // A live pid's (this test's), its lock free: gone all the same
+        let reused = instance(&format!("{}-1", std::process::id()));
+        // This tarae's own, held here
+        let mine = RunDir::new_in(&base).unwrap();
+        // No lock in it; an instance's name on a link
+        let no_lock = base.join("4000003-1");
+        std::fs::create_dir_all(no_lock.join("0")).unwrap();
+        let link = base.join("4000004-1");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        // Not an instance's name
+        let others = ["other", "4000005", "0-1", "4000006-x", "tarae-4000002-0"];
+        for o in others {
+            std::fs::create_dir_all(base.join(o)).unwrap();
+        }
+        let mut here = Here::now();
+        here.runs = None;
+        here.env.insert("XDG_CACHE_HOME".into(), t.join("cache").into());
+        let sorted = |mut p: Pruned| {
+            p.gone.sort();
+            p.left.sort();
+            p
+        };
+        let pruned = sorted(prune_runs_in(&here));
+        let mut gone_too = vec![gone.clone(), reused.clone()];
+        gone_too.sort();
+        assert_eq!(pruned.gone, gone_too);
+        let left: Vec<_> =
+            pruned.left.iter().map(|(p, why)| (p.clone(), why.split(',').next().unwrap())).collect();
+        assert_eq!(left, [(no_lock.clone(), "no lock in it"), (link.clone(), "not a folder")]);
+        assert!(held.join("0").is_dir() && mine.path().is_dir(), "a held lock's folder stays");
+        assert!(no_lock.join("0").is_dir() && std::fs::symlink_metadata(&link).is_ok());
+        assert!(outside.join("keep-me").exists(), "gone through a link");
+        for o in others {
+            assert!(base.join(o).is_dir(), "{o} removed");
+        }
+        // The other process lets go: its folder goes
+        drop(holder.stdin.take());
+        assert!(holder.wait().unwrap().success());
+        let pruned = sorted(prune_runs_in(&here));
+        assert_eq!(pruned.gone, std::slice::from_ref(&held));
+        assert_eq!(pruned.left.len(), 2, "{:?}", pruned.left);
+        assert!(mine.path().is_dir(), "this tarae's own stays");
+        drop(mine);
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// What `holds_a_lock_in_its_own_process` says once it holds the lock.
+    const HELD: &str = "tarae-test-lock-held";
+
+    /// The other process of `a_gone_taraes_run_folders_are_pruned`: holds the lock at `TARAE_LOCK_HOLD`, says
+    /// so (`HELD`), and lets go when its stdin ends.
+    #[test]
+    #[ignore = "run by a_gone_taraes_run_folders_are_pruned in a process of its own"]
+    fn holds_a_lock_in_its_own_process() {
+        let Some(at) = std::env::var_os("TARAE_LOCK_HOLD") else { return };
+        let lock = std::fs::File::open(at).unwrap();
+        lock.lock().unwrap();
+        let mut out = io::stdout();
+        io::Write::write_all(&mut out, format!("{HELD}\n").as_bytes()).unwrap();
+        io::Write::flush(&mut out).unwrap();
+        io::Read::read_to_end(&mut io::stdin(), &mut Vec::new()).unwrap();
+        drop(lock);
+    }
+
+    /// A tarae makes its run folders in a folder of its own (`Instance`) whose lock it holds while it runs —
+    /// named for its pid and the ms it was made in, so a gone tarae's folders never have the names a new one's
+    /// would (a reused pid's after a reboot); another tarae with that pid that made its folder in the same ms (in
+    /// another pid namespace) has it, and this one takes the next ms. A run's tag still starts with this
+    /// tarae's pid (`ours`). A cache cleared under tarae: the next run folder makes its folder again, its lock
+    /// held. (A cache of the test's own.)
+    #[test]
+    fn a_tarae_makes_its_run_folders_in_a_folder_it_holds() {
+        let t = std::env::temp_dir().join(format!("tarae-runs-instance-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let base = t.join("runs");
+        std::fs::create_dir_all(&base).unwrap();
+        let held = |dir: &Path| lock_taken(&dir.join(INSTANCE_LOCK)).unwrap().is_none();
+        let first = Instance::make(&base, 777, 5000).unwrap();
+        assert_eq!(first.dir, base.join("777-5000"));
+        assert!(held(&first.dir), "its lock is held");
+        let same_ms = Instance::make(&base, 777, 5000).unwrap();
+        assert_eq!(same_ms.dir, base.join("777-5001"), "the next ms");
+        assert!(held(&same_ms.dir));
+        // A gone one's folder of that name, its lock free: never taken over — its leftovers are the prune's
+        let gone = base.join("778-5000");
+        std::fs::create_dir_all(gone.join("0")).unwrap();
+        std::fs::write(gone.join(INSTANCE_LOCK), "").unwrap();
+        let after_gone = Instance::make(&base, 778, 5000).unwrap();
+        assert_eq!(after_gone.dir, base.join("778-5001"));
+        assert!(gone.join("0").is_dir());
+        // This tarae's run folders
+        let run = RunDir::new_in(&base).unwrap();
+        let own = run.path().parent().unwrap().to_path_buf();
+        assert_eq!(own.parent(), Some(base.as_path()));
+        assert!(own.file_name().unwrap().to_string_lossy().starts_with(&format!("{}-", std::process::id())));
+        assert!(held(&own), "its lock is held");
+        let other = RunDir::new_in(&base).unwrap();
+        assert_eq!(other.path().parent(), Some(own.as_path()), "one folder of its own for all its runs");
+        assert!(ours(&run.tag()) && ours(&other.tag()) && run.tag() != other.tag(), "{}", run.tag());
+        assert!(run.tag().ends_with('.'));
+        // The cache cleared
+        drop((run, other));
+        std::fs::remove_dir_all(&base).unwrap();
+        let again = RunDir::new_in(&base).unwrap();
+        assert!(again.path().is_dir() && held(again.path().parent().unwrap()), "made again, held");
+        drop((again, first, same_ms, after_gone));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A run whose own folder can't be made doesn't start: it would have the temp folders, which every run
+    /// writes, as its `TMPDIR` and tools' homes (F1), and no tag its denials are watched by. Why is said, and what
+    /// to do. (A cache where no folder can be made: a file of the test's own in its way.)
+    #[test]
+    fn a_run_without_its_own_folder_doesnt_start() {
+        let t = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/sb-no-run-folder-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(t.join("p")).unwrap();
+        std::fs::write(t.join("cache"), "a file where the cache's folder would be").unwrap();
+        let mut here = Here::now();
+        here.runs = None;
+        here.env.insert("XDG_CACHE_HOME".into(), t.join("cache").into());
+        let llm = crate::llm::LlmConfig::default();
+        let why = run_policy_in(&t.join("p"), &llm, &[], &here).map(|_| ()).unwrap_err();
+        let at = home_shown(&t.join("cache/tarae/runs").display().to_string());
+        assert!(why.contains(&format!("its own folder couldn't be made in {at} (")), "why: {why}");
+        assert!(why.contains(&format!("Check that {at} can be written")), "what to do: {why}");
+        // No cache folder at all
+        let mut nowhere = Here::now();
+        nowhere.runs = None;
+        nowhere.env.clear();
+        let why = run_policy_in(&t.join("p"), &llm, &[], &nowhere).map(|_| ()).unwrap_err();
+        assert!(why.contains("no cache folder") && why.contains("Start tarae with HOME set"), "{why}");
+        // (a policy alone, for what it would allow: no folder of its own)
+        assert!(policy_in(&t.join("p"), &llm, &[], &here).run.is_none());
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Runs' folders in a place every run may write are no run's own — one run could put a file in another's
+    /// (F1): tarae's cache moved into the project or a temp folder (`XDG_CACHE_HOME`), or a write grant reaching
+    /// into it, and the run doesn't start, saying where and what to do; no folder is made there. tarae's cache
+    /// out of them, it starts. (Caches of the test's own.)
+    #[test]
+    fn runs_folders_where_every_run_writes_are_refused() {
+        let t = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/sb-runs-written-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(t.join("p")).unwrap();
+        std::fs::create_dir_all(t.join("tmp")).unwrap();
+        let start = |cache: &Path, llm: &crate::llm::LlmConfig| {
+            let mut here = Here::now();
+            (here.runs, here.tmp) = (None, Some(t.join("tmp")));
+            here.env.insert("XDG_CACHE_HOME".into(), cache.into());
+            run_policy_in(&t.join("p"), llm, &[], &here)
+        };
+        let plain = crate::llm::LlmConfig::default();
+        let into_cache = crate::llm::LlmConfig {
+            sandbox_write: vec![t.join("cache/tarae/runs/x").display().to_string()],
+            ..Default::default()
+        };
+        for (cache, llm, written) in [
+            (t.join("p/.cache"), &plain, t.join("p")),
+            (t.join("tmp/cache"), &plain, t.join("tmp")),
+            (t.join("cache"), &into_cache, t.join("cache/tarae/runs/x")),
+        ] {
+            let why = start(&cache, llm).map(|_| ()).unwrap_err();
+            let (at, w) = (cache.join("tarae/runs"), home_shown(&written.display().to_string()));
+            let at = home_shown(&at.display().to_string());
+            assert!(why.contains(&format!("made in {at}, where every run may write ({w})")), "{why}");
+            assert!(why.contains("Set XDG_CACHE_HOME for tarae to a folder no run writes"), "{why}");
+            assert!(!cache.join("tarae/runs").exists(), "nothing made there: {}", cache.display());
+        }
+        let p = start(&t.join("cache"), &plain).expect("tarae's cache out of every write place");
+        assert!(runs_written(&p, &t.join("cache/tarae/runs")).is_none());
+        assert!(
+            p.run.as_ref().is_some_and(|r| r.path().starts_with(t.join("cache/tarae/runs"))),
+            "{:?}",
+            p.run
+        );
+        drop(p);
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Computing a policy — for what it would allow (`policy_in`), or where runs write (`write_places`' way:
+    /// gitescape reads it for every file) — writes nothing in the user's home: no run's folder in tarae's
+    /// cache, no kept home stamped, no build folder. Only a run's way makes them (`run_policy_in`), which the
+    /// same look sees. (A stand-in home: a Go module for a kept home, a checkout's own cargo build folder.)
+    #[test]
+    fn computing_a_policy_writes_nothing_in_the_home() {
+        let t = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/sb-computed-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&t).ok();
+        let (home, root) = (t.join("home"), t.join("home/work/p"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(t.join("tmp")).unwrap();
+        std::fs::write(root.join("go.mod"), "module p\n").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        let env = HashMap::from([("HOME".to_string(), std::ffi::OsString::from(&home))]);
+        let here = Here { env, tmp: Some(t.join("tmp")), uid: 501, os: Os::HOST, ..Here::default() };
+        let own = home.join(".cargo/build/ab/cdef0123");
+        let named = vec![(own.clone(), "build-dir".to_string())];
+        toolchain_found_in(
+            &root,
+            ToolDirs { named, own_build: Some(own.clone()), ..ToolDirs::default() },
+            &here,
+        );
+        // Every path in the home, as it is
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                out.push(e.path());
+                if e.file_type().is_ok_and(|f| f.is_dir()) {
+                    walk(&e.path(), out);
+                }
+            }
+        }
+        let in_home = || {
+            let mut all = Vec::new();
+            walk(&home, &mut all);
+            all.sort();
+            all
+        };
+        let before = in_home();
+        let llm = crate::llm::LlmConfig::default();
+        let p = policy_in(&root, &llm, &[], &here);
+        let places = Policy::for_project(&env_in(&root, &llm, &[], &here).0).write_places();
+        assert!(p.run.is_none() && p.tag.is_none(), "no run's folder: {:?}", p.run);
+        assert!(p.write.contains(&own) && !p.kept.is_empty(), "what it would open: {:?}", p.write);
+        assert!(places.iter().any(|w| w.starts_with(home.join(".cache/tarae/runs"))), "{places:?}");
+        assert_eq!(in_home(), before, "computing wrote in the home");
+        // A run's way makes them, and the look above sees it
+        let run = run_policy_in(&root, &llm, &[], &here).expect("a run's policy");
+        let made = in_home();
+        let runs = run.run.as_ref().expect("its own folder").path().to_path_buf();
+        assert!(runs.starts_with(home.join(".cache/tarae/runs")) && made.contains(&runs), "{runs:?}");
+        assert!(made.contains(&own), "its build folder made: {made:?}");
+        drop((run, p));
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -4835,7 +5486,7 @@ mod tests {
             let named = vec![(own.to_path_buf(), "build-dir".to_string())];
             let found = ToolDirs { named, own_build: Some(own.to_path_buf()), ..ToolDirs::default() };
             toolchain_found_in(&root, found, &here);
-            run_policy_in(&root, &llm, &[], &here)
+            run_policy_in(&root, &llm, &[], &here).unwrap()
         };
         for bad in [
             cargo.join("registry/ab/cd1234"),
@@ -5196,7 +5847,7 @@ mod tests {
         let policy = |root: &Path, os: Os, ports: Vec<u16>| {
             toolchain_found_in(root, ToolDirs::default(), &here(os));
             let llm = crate::llm::LlmConfig { sandbox_ports: ports, ..Default::default() };
-            policy_in(root, &llm, &[], &here(os))
+            run_policy_in(root, &llm, &[], &here(os)).expect("a run's policy")
         };
         let var = |p: &Policy, k: &str| p.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         let kept = home.join(".cache/tarae/run-homes/gradle");
@@ -5279,7 +5930,7 @@ mod tests {
             let env = env.map(|(k, v): (&str, std::ffi::OsString)| (k.to_string(), v)).into();
             let here = Here { env, os, ..Here::default() };
             toolchain_found_in(&g, ToolDirs::default(), &here);
-            let p = policy_in(&g, &crate::llm::LlmConfig::default(), &[], &here);
+            let p = run_policy_in(&g, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
             let c = command(Some(&p), "/bin/sh", &["-c".into(), "true".into()]);
             let opts = c.get_envs().find(|(k, _)| *k == "GRADLE_OPTS").and_then(|(_, v)| v);
             opts.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
@@ -5336,7 +5987,7 @@ mod tests {
             };
             toolchain_found_in(&root, found, &here);
             // (the user let Claude read their caches folder: the build cache in it stays kept)
-            policy_in(&root, &llm, &[home.join("Library/Caches")], &here)
+            run_policy_in(&root, &llm, &[home.join("Library/Caches")], &here).expect("a run's policy")
         };
         let var = |p: &Policy, k: &str| p.env.iter().find(|(n, _)| n == k).map(|(_, v)| PathBuf::from(v));
         let (a, b) = (policy("a"), policy("b"));
@@ -7014,6 +7665,7 @@ mod tests {
             ports: vec![port],
             localhost: false,
             run: None,
+            runs: None,
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
@@ -7092,6 +7744,7 @@ mod tests {
                 ports: Vec::new(),
                 localhost: false,
                 run: Some(run.clone()),
+                runs: None,
                 tag: None,
                 proxy: None,
                 supervised: Os::HOST == Os::Linux,
@@ -7170,6 +7823,7 @@ mod tests {
             ports: Vec::new(),
             localhost: false,
             run: None,
+            runs: None,
             tag: Some(tag.to_string()),
             proxy: None,
             supervised: Os::HOST == Os::Linux,
@@ -7235,6 +7889,7 @@ mod tests {
             ports: Vec::new(),
             localhost: false,
             run: None,
+            runs: None,
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
@@ -7932,7 +8587,7 @@ mod tests {
         // (as a real run's: your config and trust answers — run by hand, never in the suite)
         let mut llm = crate::config::load(&root, &crate::config::Sources::own()).0.editor.llm;
         llm.sandbox_localhost |= std::env::var_os("TARAE_PROFILE_LOCALHOST").is_some();
-        let p = policy(&root, &llm, &[]);
+        let p = policy(&root, &llm, &[]).unwrap();
         let quote = |a: &str| format!("'{}'", a.replace('\n', " ").replace('\'', "'\\''"));
         let args: Vec<String> = p.args().iter().map(|a| quote(a)).collect();
         println!("TAG: {}", p.tag.clone().unwrap_or_default());
@@ -8283,6 +8938,7 @@ mod tests {
             ports,
             localhost,
             run: None,
+            runs: None,
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
@@ -8441,7 +9097,7 @@ mod tests {
     fn env_in_its_own_process() {
         let Some(dir) = std::env::var_os("TARAE_ENV_PROBE").map(PathBuf::from) else { return };
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let p = policy(root, &crate::llm::LlmConfig::default(), &[]);
+        let p = policy(root, &crate::llm::LlmConfig::default(), &[]).unwrap();
         let exe = std::env::current_exe().unwrap();
         let args = ["--exact", "sandbox::tests::names_of_its_environment", "--ignored", "--nocapture"];
         let mut cmd = command(Some(&p), &exe.to_string_lossy(), &args.map(String::from));

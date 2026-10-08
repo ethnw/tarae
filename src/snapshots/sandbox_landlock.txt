@@ -17,6 +17,7 @@ ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
     0x000d $ROOT
+    0x000d $RUN
     0x000d $TMP
     0x000d /dev
     0x0010 $ROOT
@@ -52,6 +53,7 @@ ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
     0x000d $ROOT
+    0x000d $RUN
     0x000d $TMP
     0x000d /dev
     0x0010 $ROOT
@@ -87,6 +89,7 @@ ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
     0x000d $ROOT
+    0x000d $RUN
     0x000d $TMP
     0x000d /dev
     0x0010 $ROOT
@@ -122,6 +125,7 @@ ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
     0x000d $ROOT
+    0x000d $RUN
     0x000d $TMP
     0x000d /dev
     0x0010 $ROOT
@@ -157,6 +161,7 @@ ABI 10: handles files 0x1ffff · network 0xf · scopes 0x3
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
     0x000d $ROOT
+    0x000d $RUN
     0x000d $TMP
     0x000d /dev
     0x0010 $ROOT
