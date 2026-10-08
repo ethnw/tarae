@@ -1121,7 +1121,17 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let chat = ed.session.chat.as_ref();
     let allowed_again =
         !whole && chat.is_some_and(|c| c.run_again.iter().any(|r| r.covers(&cwd, socket.as_deref(), cmd)));
-    if let Some(judge) = judged(cmd).filter(|_| allowed_again) {
+    // (D2: a warning doesn't take `a` back — but one whose data says `asks`, it does: reaching beyond this
+    // machine, publishing — its card comes, each time)
+    let asks: Vec<String> = match allowed_again {
+        true => {
+            let on =
+                WarnOn { cmd, cwd: &cwd, scripts: &[], reads: &[], script_changed: false, outside: false };
+            warned(ed, on).into_iter().filter(|w| w.asks).map(|w| w.id).collect()
+        }
+        false => Vec::new(),
+    };
+    if let Some(judge) = judged(cmd).filter(|_| allowed_again && asks.is_empty()) {
         let pins = chat.map(|c| c.run_scripts.clone()).unwrap_or_default();
         return read_only(ed, call, cmd.to_string(), cwd, Some(pins), (judge, outside));
     }
@@ -1140,6 +1150,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let why = match &outside {
         Some(Beyond { socket: Some(_), .. }) => crate::cards::Why::Socket,
         Some(_) => crate::cards::Why::Outside,
+        None if !asks.is_empty() => crate::cards::Why::Asks(asks.join(",")),
         None => why_asked(cmd, &extra),
     };
     card(ed, call, cmd.to_string(), cwd, outside, why)
@@ -1580,6 +1591,49 @@ pub fn runs_unasked(cmd: &str, extra: &[String]) -> bool {
         || crate::readonly::read_only(cmd)
 }
 
+/// What a command of Claude's is judged on for its warnings (`warned`): the line, where it runs, the scripts it
+/// runs (shown name, text — none read here: the card's worker read them), where it reads outside the project,
+/// whether a script it runs changed since it was seen, whether it runs outside the sandbox.
+pub(crate) struct WarnOn<'a> {
+    pub cmd: &'a str,
+    pub cwd: &'a Path,
+    pub scripts: &'a [(String, String)],
+    pub reads: &'a [PathBuf],
+    pub script_changed: bool,
+    pub outside: bool,
+}
+
+/// The warnings that hold for a command (`cardwarn.rs`): the packs' and the project's (`[[cards.warn]]`). What
+/// the run's environment sets: outside the sandbox, tarae's own; in it, what the packs set and what's passed of
+/// tarae's (`llm.sandbox-env`, the packs' `pass` — `runenv`). No disk read: the main thread's.
+pub(crate) fn warned(ed: &Editor, on: WarnOn) -> Vec<crate::cardwarn::Warned> {
+    let packs = crate::sandboxpack::get();
+    let llm = &ed.config.llm;
+    let env = |n: &str| match on.outside {
+        true => std::env::var_os(n).is_some(),
+        false => {
+            let passed = |e: &String| crate::sandbox::runenv::matches(e, n);
+            packs.env.iter().any(|(k, _)| k == n)
+                || ((llm.sandbox_env.iter().any(passed) || packs.pass.iter().any(passed))
+                    && std::env::var_os(n).is_some())
+        }
+    };
+    let root = &ed.session.root;
+    let in_outputs = |w: &str| crate::cardwarn::in_outputs(root, on.cwd, w, crate::sandbox::outputs());
+    let facts = crate::cardwarn::Facts {
+        cmd: on.cmd,
+        scripts: on.scripts,
+        env: &env,
+        wrappers: &packs.wrappers,
+        reads: on.reads,
+        script_changed: on.script_changed,
+        edit_protected: false,
+        outside: on.outside,
+        in_outputs: &in_outputs,
+    };
+    crate::cardwarn::judge(packs.warn.iter().chain(&ed.config.cards_warn), &facts)
+}
+
 pub const OUTSIDE_RUN_TITLE: &str = "Claude wants to run — outside the sandbox";
 pub const SOCKET_RUN_TITLE: &str = "Claude wants to run — with one socket";
 
@@ -1612,6 +1666,27 @@ fn ask_with(
     if !folders.is_empty() {
         question.push_str(&format!("\n  in {}", folders.join(", ")));
         decided.end += 1;
+    }
+    // What it warns of (cardburden 4, `cardwarn.rs`): right under what it asks, in the warning color, each
+    // saying whose — from the line, the scripts it runs and the facts; it answers nothing, holds nothing back
+    let texts: Vec<(String, String)> = scripts
+        .iter()
+        .filter_map(|s| {
+            s.text.as_ref().ok().map(|t| (crate::chat::shown(&ed.session.root, &s.path), t.clone()))
+        })
+        .collect();
+    let script_changed =
+        matches!(why, crate::cards::Why::ScriptChanged) || since.as_ref().is_some_and(|s| s.script_changed);
+    let whole = outside.as_ref().is_some_and(|b| b.socket.is_none());
+    let on = WarnOn { cmd: &cmd, cwd: &cwd, scripts: &texts, reads: &reads, script_changed, outside: whole };
+    let warned = warned(ed, on);
+    let mut warnings = Vec::new();
+    if !warned.is_empty() {
+        let at = question.split('\n').count() + 1;
+        let lines: Vec<String> = warned.iter().map(|w| format!("▲ {}", w.line())).collect();
+        question.push_str("\n\n");
+        question.push_str(&lines.join("\n"));
+        warnings.push(at..at + lines.len());
     }
     // Why it asks, where nothing below says it (#164: `cd ~/…/*/x && grep …` asked in silence)
     if let Some(said) = why.said() {
@@ -1668,12 +1743,12 @@ fn ask_with(
             }
         }
     }
+    // (where it reads; what that means — it goes to Claude — is the `reads-outside` warning's, above)
     if !reads.is_empty() {
         question.push_str("\n\nIt reads outside the project:");
         for p in &reads {
             question.push_str(&format!("\n  {}", p.display()));
         }
-        question.push_str("\n\nWhat it reads goes to Claude.");
         decided.end += 2 + reads.len();
     }
     let home = crate::allow::home();
@@ -1699,7 +1774,10 @@ fn ask_with(
     // (nor where it reads can't be told — a `cd` into no folder: it would ask again anyway)
     let docker = outside.as_ref().is_some_and(|b| b.socket.as_deref().is_some_and(outside_socket));
     let judged_reads = reads.is_empty() && !matches!(why, crate::cards::Why::CdUnknown(_));
-    let offered = again(&cmd).filter(|_| (outside.is_none() || docker) && judged_reads);
+    // (D2: not when a warning of it asks — from its line or a script it runs, read for this card: `a` would let
+    // the same run through unasked next time, the script's `git push` with it)
+    let asks = warned.iter().any(|w| w.asks);
+    let offered = again(&cmd).filter(|_| (outside.is_none() || docker) && judged_reads && !asks);
     if let Some(a) = offered.as_ref().filter(|_| outside.is_none()) {
         question
             .push_str(&format!("\n\na — this exact command{} again unasked, this chat", a.scripts_said()));
@@ -1770,9 +1848,12 @@ fn ask_with(
         Some(s) => asked.same_as(s.card, s.unchanged),
         None => asked,
     };
+    let asked = asked.warned(warned.iter().map(|w| w.id.clone()).collect());
     call.step("card up");
     let card = RunCard {
         same,
+        reason: outside.as_ref().map(|b| b.reason.clone()),
+        warned,
         cmd,
         cwd,
         call,
@@ -1788,7 +1869,7 @@ fn ask_with(
     let what = crate::offer::What::Run(Box::new(card));
     let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
     let mut o = o.deciding(decided).asked(asked);
-    o.diff = diff;
+    (o.diff, o.warnings) = (diff, warnings);
     ed.push_offer(match warning {
         Some(lines) => o.warning(lines),
         None => o,
@@ -2063,8 +2144,22 @@ pub fn with_allowed(
 /// run if one changed since — `a`/`A` too, and what it reads outside stays allowed (this chat · always);
 /// None tells Claude no. `unprotected`: the card said there's no sandbox.
 pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::allow::Scope>) {
-    let RunCard { cmd, cwd, call, shown, unprotected, reads, grants, keep, outside, socket, again, .. } =
-        what;
+    let RunCard {
+        cmd,
+        cwd,
+        call,
+        shown,
+        unprotected,
+        reads,
+        grants,
+        keep,
+        outside,
+        socket,
+        again,
+        reason,
+        warned,
+        ..
+    } = what;
     ed.offer_finished(id, Ok(()));
     // Every answer is kept in the session until you quit, with what the command runs as it is now — the same
     // run asked again says which card and what changed since (`sinceyes.rs`, cardburden 3); one that only
@@ -2144,8 +2239,18 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
             a.scripts_said()
         ));
     }
+    // (what rides along: the answer kept, the card's id, Claude's reason there, what it warned of)
+    let ride = Ride {
+        unprotected,
+        extra: outside,
+        answered: yes,
+        card: Some(id),
+        reason,
+        warned: Some(warned),
+        ..Default::default()
+    };
     if shown.is_empty() && !pin {
-        return run_now(ed, (cmd, cwd), call, unprotected, outside, yes);
+        return run_now(ed, (cmd, cwd), call, ride);
     }
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
@@ -2179,7 +2284,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
                          them what's there now"
                     )),
                 ),
-                None => run_now(ed, (cmd, cwd), call, unprotected, outside, yes),
+                None => run_now(ed, (cmd, cwd), call, ride),
             }
         }
     });
@@ -2193,17 +2298,9 @@ fn keep_answer(ed: &mut Editor, a: crate::sinceyes::Answered) {
 }
 
 /// A yes on its card: it runs — or, another command running (two cards answered one after the other), it
-/// waits in line and runs next (#5, `queued.rs`). Its answer (`answered`) rides with it, kept once what it
-/// runs is taken (`go`).
-fn run_now(
-    ed: &mut Editor,
-    (cmd, cwd): (String, PathBuf),
-    call: Call,
-    unprotected: bool,
-    extra: Extra,
-    answered: Option<Box<crate::sinceyes::Answered>>,
-) {
-    let ride = Ride { unprotected, extra, answered, ..Default::default() };
+/// waits in line and runs next (#5, `queued.rs`). What rides with it (`ride`): its answer, kept once what it
+/// runs is taken (`go`); its card, reason and warnings, said with where it ran.
+fn run_now(ed: &mut Editor, (cmd, cwd): (String, PathBuf), call: Call, ride: Ride) {
     guard_and_go_riding(ed, For::Claude(call), Job::Command(cmd, cwd), ride);
 }
 
@@ -2229,6 +2326,10 @@ pub struct RunCard {
     pub again: Option<Again>,
     /// The card answered before for the same run, how, and whether anything changed since (`sinceyes`).
     pub same: Option<crate::sinceyes::SameAs>,
+    /// Claude's reason for running it past the sandbox (outside it, or with a socket) — where it ran says it.
+    pub reason: Option<String>,
+    /// What it warned of (`cardwarn.rs`) — its run's chat row says it too.
+    pub warned: Vec<crate::cardwarn::Warned>,
 }
 
 // ── The sandbox ─────────────────────────────────────────────────────────────
@@ -2663,6 +2764,10 @@ pub fn run_done(ed: &mut Editor) {
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let (label, cmd) = (r.task.name.clone(), r.task.cmd.clone());
     let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
+    // (its chat row says where it ran, and what it warned of — the run's own record, cardburden 4)
+    if let Some(ran) = r.ran.clone() {
+        crate::chat::mark_ran(ed, &cmd, ran);
+    }
     crate::reads::run_ended(ed);
     let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;

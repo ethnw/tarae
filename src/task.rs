@@ -300,6 +300,9 @@ pub struct Run {
     pub by_claude: bool,
     /// How Claude's command ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
     pub guard: Option<crate::sandbox::Guard>,
+    /// Claude's command: where it ran and what it warned of, as its chat row and `tarae state` say it
+    /// (`chat::Ran`, from `guard` and the card it ran from — cardburden 4).
+    pub ran: Option<crate::chat::Ran>,
     /// When it last printed (a sandboxed run quiet after a denial may be waiting on it — the panel says so).
     pub last_output: Instant,
     /// The tallest its panel has been (`term::task_panel_h`) — it never shrinks while the run is up; a run of
@@ -427,6 +430,7 @@ impl Run {
             tell: None,
             by_claude: false,
             guard: None,
+            ran: None,
             last_output: Instant::now(),
             tall: Default::default(),
             scroll: None,
@@ -618,6 +622,26 @@ impl Editor {
             _ => None,
         };
         let feeds = crate::tools::is_check(&task.cmd);
+        // Where it runs, and what it warns of: its card's warnings — none, judged on its line now (it ran
+        // unasked: said only on its chat row and in the log — D2)
+        let ran = guard.as_ref().map(|g| {
+            let warned = ride.warned.clone().unwrap_or_else(|| {
+                let cwd = self.session.root.join(&task.cwd);
+                let outside = matches!(g, crate::sandbox::Guard::Outside);
+                let on = crate::tools::WarnOn {
+                    cmd: &task.cmd,
+                    cwd: &cwd,
+                    scripts: &[],
+                    reads: &[],
+                    script_changed: false,
+                    outside,
+                };
+                let warned = crate::tools::warned(self, on);
+                crate::cards::ran_warned(&self.session.name, &task.cmd, &warned);
+                warned
+            });
+            crate::chat::Ran::of(g, ride.card, ride.reason.as_deref(), warned)
+        });
         self.task_spawn(task, None, policy, feeds, true, &[], trace);
         match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
@@ -627,6 +651,7 @@ impl Editor {
                 }
                 r.by_claude = true;
                 r.guard = guard;
+                r.ran = ran;
                 (r.key, r.joined, r.queued, r.snap) = (ride.key, ride.joined, ride.queued, ride.snap);
                 Ok(())
             }
@@ -931,6 +956,7 @@ impl Editor {
             tell: None,
             by_claude: false,
             guard: None,
+            ran: None,
             last_output: Instant::now(),
             tall: std::cell::Cell::new(tall),
             scroll: None,

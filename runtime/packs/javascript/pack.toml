@@ -107,3 +107,5 @@ copy = "npmrc"
 [claude]
 builders = ["npm", "npx", "pnpm", "yarn"]
 said = { rank = 50, protect = "package.json" }
+# What a run card warns of (`cardwarn.rs`): a package published can't be taken back — asked each time (D2)
+warn = [{ id = "npm-publish", run = ["npm publish", "pnpm publish", "yarn publish", "yarn npm publish"], asks = true, say = "It publishes the package to its registry — a version published can't be taken back. Asked each time, whatever `a` said before." }]

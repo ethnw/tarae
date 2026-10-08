@@ -37,6 +37,9 @@ pub struct Offer {
     /// The question's lines that warn what saying yes means — drawn in the warning color (the run-outside
     /// card's "with all your permissions").
     pub warning: Option<std::ops::Range<usize>>,
+    /// More of its lines in the warning color: the warnings its data says (`cardwarn.rs` — a run card's, under
+    /// what it asks, apart from `warning`).
+    pub warnings: Vec<std::ops::Range<usize>>,
     /// The question's lines that are a diff (`sinceyes.rs`): `+` and `-` lines in the diff's colours, `@@`
     /// faint.
     pub diff: Option<std::ops::Range<usize>>,
@@ -336,6 +339,7 @@ impl Offer {
             rev: 0,
             decided: None,
             warning: None,
+            warnings: Vec::new(),
             diff: None,
             since: Instant::now(),
             drawn: Default::default(),
@@ -832,6 +836,7 @@ impl crate::editor::Editor {
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
                 (old.decided, old.warning, old.asked, old.diff) = (o.decided, o.warning, o.asked, o.diff);
+                old.warnings = o.warnings;
                 (old.held, old.gate, old.held_changes, old.aside) = (o.held, o.gate, o.held_changes, false);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;

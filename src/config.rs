@@ -99,6 +99,10 @@ pub struct EditorConfig {
     /// that are tests, docs or snapshots — names anywhere, paths from the root.
     pub review_risky: Vec<String>,
     pub review_quiet: Vec<String>,
+    /// What a run card of Claude's warns of besides the packs' (`[[cards.warn]]`, `cardwarn.rs`) — said as the
+    /// file's (`.tarae.toml`). Not held back for trust: it can only add words, and with `asks` a card — an id
+    /// a pack or yours has is refused (`read_cards`).
+    pub cards_warn: Vec<crate::cardwarn::Warn>,
 }
 
 impl Default for EditorConfig {
@@ -144,6 +148,7 @@ impl Default for EditorConfig {
             preflight_local: Vec::new(),
             review_risky: Vec::new(),
             review_quiet: Vec::new(),
+            cards_warn: Vec::new(),
         }
     }
 }
@@ -381,6 +386,8 @@ fn apply_source(
     warnings: &mut Vec<String>,
     mut gate: Option<&mut crate::trust::Gate>,
 ) {
+    // (a layer with no gate is yours: your config, `.tarae.local.toml` — the project's goes through `trust.rs`)
+    let yours = gate.is_none();
     let mut pass = |key: String, v: &Value| gate.as_deref_mut().is_none_or(|g| g.pass(key, v));
     let table: toml::Table = match toml::from_str(src) {
         Ok(t) => t,
@@ -483,11 +490,46 @@ fn apply_source(
             config.editor.attach.push(t);
         }
     }
+    if let Some(cards) = table.get("cards") {
+        read_cards(config, cards, file, warnings, yours);
+    }
     if let Some(Value::Table(keys)) = table.get("keys") {
         // A key bound to a `:` command (`:sh …`) runs it when pressed
         let mut keys = keys.clone();
         drop_typed(&mut keys, "keys", &mut pass);
         config.keymaps.merge_user(&keys, warnings);
+    }
+}
+
+/// `[cards]`: `[[cards.warn]]`, what a run card warns of besides the packs' (`cardwarn.rs`) — said as this
+/// file's (`.tarae.toml`). It only adds: an id a pack has, or an earlier layer, is left out and said — a cloned
+/// project's file, read with no trust asked, can't drop or weaken a pack's warning nor yours (an `asks` made
+/// one that never fires). Only yours (`yours`: your config, `.tarae.local.toml`) takes a project's id.
+fn read_cards(config: &mut Config, cards: &Value, file: &str, warnings: &mut Vec<String>, yours: bool) {
+    let Some(t) = cards.as_table() else {
+        return warnings.push(format!("{file}: [cards] isn't a table"));
+    };
+    for k in t.keys().filter(|k| *k != "warn") {
+        warnings.push(format!("{file}: unknown setting 'cards.{k}'"));
+    }
+    let Some(v) = t.get("warn") else { return };
+    let whose = Path::new(file).file_name().map_or(file.to_string(), |n| n.to_string_lossy().into_owned());
+    let mut problems = Vec::new();
+    let new = crate::cardwarn::read(v, &whose, &mut problems);
+    warnings.extend(problems.into_iter().map(|p| format!("{file}: cards.warn: {p}")));
+    let packs = &crate::sandboxpack::get().warn;
+    let mine = &mut config.editor.cards_warn;
+    for w in new {
+        let left_out = |whose: &str| format!("{file}: cards.warn: left out: id `{}` is the {whose}'s", w.id);
+        if let Some(p) = packs.iter().find(|p| p.id == w.id) {
+            warnings.push(left_out(&p.whose));
+            continue;
+        }
+        match mine.iter().position(|o| o.id == w.id) {
+            Some(i) if yours && !mine[i].yours => mine[i] = crate::cardwarn::Warn { yours, ..w },
+            Some(i) => warnings.push(left_out(&mine[i].whose)),
+            None => mine.push(crate::cardwarn::Warn { yours, ..w }),
+        }
     }
 }
 

@@ -65,6 +65,11 @@ pub struct Ride {
     /// Its card's answer, kept in the session with what it runs as that snapshot found it (`tools::go`,
     /// `sinceyes.rs`) — no second snapshot, and the run takes its place in line as the answer comes.
     pub answered: Option<Box<crate::sinceyes::Answered>>,
+    /// The card it ran from (its id), Claude's reason there for going past the sandbox, and what it warned of
+    /// (`cardwarn.rs`) — said with where it ran (`chat::Ran`). `warned` None: no card — judged as it starts.
+    pub card: Option<u64>,
+    pub reason: Option<String>,
+    pub warned: Option<Vec<crate::cardwarn::Warned>>,
 }
 
 /// A run waiting for its slot.

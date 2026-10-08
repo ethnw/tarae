@@ -196,6 +196,8 @@ pub struct Msg {
     pub call: String,
     /// A user message's copy of the screen that went with it (`C-s`) — its chip row opens it.
     pub attached: Option<Link>,
+    /// A command's row (`run`): where it ran, and what it warned of — from the run's own record, at its end.
+    pub ran: Option<Ran>,
     /// Wrapped lines (text length, width, lines) — only changed messages are rewrapped, even while streaming.
     pub cache: RefCell<Rendered>,
 }
@@ -220,6 +222,7 @@ impl Msg {
             look: None,
             call: String::new(),
             attached: None,
+            ran: None,
             cache: RefCell::new(None),
         }
     }
@@ -324,6 +327,47 @@ pub struct Chat {
     /// The variables its runs' reports have said were left out of their environment, in the conversation named
     /// (`sandbox::runenv`): each said once a conversation.
     pub env_said: (Option<String>, Vec<String>),
+}
+
+/// Where a command of Claude's ran (cardburden 4), from its run's own record — its guard (`Guard::where_ran`),
+/// the card it ran from, Claude's reason there: the mark its row ends with (`sandbox`, `sandbox A+ + Docker
+/// socket`, `outside`), whether that's past the sandbox (drawn in the warning color), why in words, and what it
+/// warned of (`cardwarn.rs`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ran {
+    pub mark: String,
+    pub past: bool,
+    pub why: String,
+    pub warned: Vec<crate::cardwarn::Warned>,
+}
+
+impl Ran {
+    /// Of a run under `guard`, from card `card` with Claude's `reason` (None: none asked), that warned of `warned`.
+    pub fn of(
+        guard: &crate::sandbox::Guard,
+        card: Option<u64>,
+        reason: Option<&str>,
+        warned: Vec<crate::cardwarn::Warned>,
+    ) -> Ran {
+        let (mark, past, mut why) = guard.where_ran();
+        if let Some(c) = card {
+            why.push_str(&format!(" From card#{c}"));
+            why.push_str(&reason.map(|r| format!(" — Claude's reason: {r}")).unwrap_or_default());
+            why.push('.');
+        }
+        Ran { mark, past, why, warned }
+    }
+}
+
+/// The command `cmd` Claude asked to run ended: its row (the newest `run` row of that command whose call is
+/// still waiting, not marked yet) says where it ran (`ran`).
+pub fn mark_ran(ed: &mut Editor, cmd: &str, ran: Ran) {
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    let calls: Vec<String> = c.calls.iter().filter(|k| k.runs(cmd.trim())).map(|k| k.id.clone()).collect();
+    if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.ran.is_none() && calls.contains(&m.call)) {
+        m.ran = Some(ran);
+        m.cache.replace(None);
+    }
 }
 
 /// A tool call claude made (a `tool_use` block) — its id, tool and input.
@@ -2016,6 +2060,41 @@ pub fn apply_code(ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cardburden 4: where a command ran is its guard's — the run's own record, nothing guessed: the sandbox
+    /// (Seatbelt; Linux's tier from its confinement), a socket granted (Docker's: past the sandbox, as outside),
+    /// the network open; outside, no sandbox, the sandbox off — and the card it ran from with Claude's reason.
+    #[test]
+    fn where_a_command_ran_is_its_guards() {
+        use crate::sandbox::{Env, Guard, Policy};
+        let base = || Policy::for_project(&Env::default());
+        let ran = |g: Guard| Ran::of(&g, None, None, Vec::new());
+        let inside = ran(Guard::In(Box::new(base())));
+        assert_eq!((inside.mark.as_str(), inside.past), ("sandbox", false));
+        let how = if cfg!(target_os = "linux") { "Landlock" } else { "Seatbelt" };
+        assert!(inside.why.starts_with(&format!("In tarae's sandbox ({how}")), "{}", inside.why);
+        let docker =
+            ran(Guard::In(Box::new(Policy { sockets: vec!["/x/.colima/docker.sock".into()], ..base() })));
+        assert_eq!((docker.mark.as_str(), docker.past), ("sandbox + Docker socket", true));
+        assert!(docker.why.contains("Docker's: as much as outside the sandbox"), "{}", docker.why);
+        let other =
+            ran(Guard::In(Box::new(Policy { sockets: vec!["/x/app.sock".into()], network: true, ..base() })));
+        assert_eq!((other.mark.as_str(), other.past), ("sandbox + app.sock + network", false));
+        for (g, mark) in [
+            (Guard::Outside, "outside"),
+            (Guard::Without("no Landlock".into()), "no sandbox"),
+            (Guard::Off, "sandbox off"),
+        ] {
+            let r = ran(g);
+            assert_eq!((r.mark.as_str(), r.past), (mark, true));
+        }
+        let carded = Ran::of(&Guard::Outside, Some(12), Some("it needs the network"), Vec::new());
+        assert!(
+            carded.why.ends_with(" From card#12 — Claude's reason: it needs the network."),
+            "{}",
+            carded.why
+        );
+    }
 
     fn editor(text: &str) -> Editor {
         let mut ed = Editor::new(crate::config::Config::default());

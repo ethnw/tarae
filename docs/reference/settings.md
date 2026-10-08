@@ -104,3 +104,4 @@ These are read alongside the settings above; see the [configuration guide](../co
 | `[lsp.<name>]` | A language server: `command`, `args`, `except` (features it's not asked for) |
 | `[lang.<language>]` | Per language: `lsp = ["name", …]` — which server to try, in order; `also = […]` — servers that run beside it |
 | `[[attach]]` | A named debugger attach target: `name`, `lang`, `host`, `port` or `pid`, `before`, `remote-root`, `program` |
+| `[[cards.warn]]` | What a card for one of Claude's commands warns of, besides the language packs' — only adds (an id a pack or your config has is left out): `id`, `run`, `options`, `option-values`, `missing`, `unless-part`, `unless-all`, `same`, `unless-in`, `fact`, `say`, `asks` — see [Claude integration](../claude-integration.md) |

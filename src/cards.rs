@@ -124,6 +124,8 @@ pub enum Why {
     Blocked,
     /// A host a run's rules don't name, held by tarae's proxy (`hosts.rs`).
     Host,
+    /// `a` allowed it before, but a warning of it asks each time (`cardwarn.rs`, `asks` — D2): its ids.
+    Asks(String),
 }
 
 impl Why {
@@ -147,6 +149,7 @@ impl Why {
             Why::Screen => "screen".into(),
             Why::Blocked => "blocked".into(),
             Why::Host => "host".into(),
+            Why::Asks(ids) => format!("asks:{ids}"),
         }
     }
 
@@ -169,6 +172,10 @@ impl Why {
             Why::CdUnknown(why) => format!("Where it reads can't be told — {why}."),
             Why::RunsOutside => {
                 "It runs a check or git outside the project — that folder's code runs.".into()
+            }
+            Why::Asks(_) => {
+                "`a` let this command run unasked in this chat — but what it warns of, above, is asked each time."
+                    .into()
             }
             Why::ReadsOutside(_)
             | Why::Socket
@@ -280,11 +287,18 @@ pub struct Asked {
     /// A run card the same as one answered before (`sinceyes`): that card, and whether anything changed since
     /// — `same=#41`, `same=#41:changed` in the line, so its drawn → answered time can be set against the rest.
     pub same: Option<(u64, bool)>,
+    /// The warnings it said (`cardwarn.rs`), by id — `warn=docker-own-config,outward` in the line.
+    pub warn: Vec<String>,
 }
 
 impl Asked {
     pub fn new(why: Why, request: Request) -> Asked {
-        Asked { why, request, same: None }
+        Asked { why, request, same: None, warn: Vec::new() }
+    }
+
+    /// It said these warnings (ids).
+    pub fn warned(self, warn: Vec<String>) -> Asked {
+        Asked { warn, ..self }
     }
 
     /// The same as card `card`, answered before — `unchanged`: nothing changed since.
@@ -308,9 +322,10 @@ fn kind(w: &What) -> &'static str {
     }
 }
 
-/// The `card` line: `<session> · card#<id> · <kind> · why=… · class=… · shadow=… · same=#41 · <answer> ·
-/// <drawn → answered> · up <asked → answered>` (`class` only for reads; `same` only for a run card the same as
-/// one answered before — that card's id, `same=#41:changed` when something changed since).
+/// The `card` line: `<session> · card#<id> · <kind> · why=… · class=… · shadow=… · same=#41 · warn=… ·
+/// <answer> · <drawn → answered> · up <asked → answered>` (`class` only for reads; `same` only for a run card
+/// the same as one answered before — that card's id, `same=#41:changed` when something changed since; `warn`
+/// the warnings it said, by id).
 pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
     let classes: Vec<Class> = match &asked.request {
         Request::Run { reads, .. } => reads.clone(),
@@ -327,6 +342,10 @@ pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant)
         Some((card, true)) => format!(" · same=#{card}"),
         Some((card, false)) => format!(" · same=#{card}:changed"),
         None => String::new(),
+    };
+    let same = match asked.warn.is_empty() {
+        true => same,
+        false => format!("{same} · warn={}", asked.warn.join(",")),
     };
     let took = |at: Instant| crate::term::duration(now.saturating_duration_since(at).as_secs_f32());
     let drawn = o.drawn.get().map_or_else(|| "not drawn".to_string(), took);
@@ -345,6 +364,16 @@ pub fn said(session: &str, o: &Offer, answer: &str) {
     if let Some(asked) = &o.asked {
         logged("card", &line(session, o, asked, answer, Instant::now()));
     }
+}
+
+/// A command of Claude's that ran with no card (a check, an `a` before) and warns of something (`cardwarn.rs`):
+/// a `warned` line — `<session> · <command> · warn=<ids>` — as its chat row says it (D2: a warning doesn't ask).
+pub fn ran_warned(session: &str, cmd: &str, warned: &[crate::cardwarn::Warned]) {
+    if warned.is_empty() {
+        return;
+    }
+    let ids: Vec<&str> = warned.iter().map(|w| w.id.as_str()).collect();
+    logged("warned", &format!("{session} · {} · warn={}", cmd.trim().replace('\n', " "), ids.join(",")));
 }
 
 /// The `denied` line for a run the sandbox denied something: `<session> · <what ran> · N things, M times:
@@ -473,6 +502,10 @@ mod tests {
         let same = |unchanged| line("size", &o, &a.clone().same_as(9, unchanged), "y", at(4200));
         assert!(same(true).contains(" · shadow=none · same=#9 · y · "), "{}", same(true));
         assert!(same(false).contains(" · shadow=none · same=#9:changed · y · "), "{}", same(false));
+        // (cardburden 4: the warnings it said, by id)
+        let warned = a.clone().warned(vec!["docker-own-config".into(), "outward".into()]);
+        let l = line("size", &o, &warned, "y", at(4200));
+        assert!(l.contains(" · shadow=none · warn=docker-own-config,outward · y · "), "{l}");
     }
 
     /// A run's denials as one line — the distinct ones as Claude reads them, past what's kept counted.

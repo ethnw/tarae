@@ -171,6 +171,7 @@
       "kind": "task",
       "label": "check",
       "of": "user",
+      "ran": null,
       "session": "s0",
       "silent": null,
       "since_ms": 0,

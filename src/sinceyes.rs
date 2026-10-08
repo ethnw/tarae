@@ -77,6 +77,8 @@ pub struct Since {
     pub changed: Changed,
     /// Nothing changed since — what it runs, nor any other file of the project it compared.
     pub unchanged: bool,
+    /// A script it runs changed since (its own text) — a card warns of it (`cardwarn`, `script-changed`).
+    pub script_changed: bool,
 }
 
 /// A card's word of the one before it (`tarae state`'s `same_as`): that card, its answer and when, and whether
@@ -194,8 +196,9 @@ impl Answered {
         }
         let entry = entry_files(cmd);
         let mut said = Vec::new();
-        // (a file of the project changed, whether it's shown or named)
+        // (a file of the project changed, whether it's shown or named; a script it runs, its own text)
         let mut touched = false;
+        let mut script_changed = false;
         let changed = match (&self.kept, take(root, cwd, cmd)) {
             (Kept::Not(why), _) => Changed::Unknown(format!("what it ran then wasn't kept ({why})")),
             (Kept::Reads, _) => Changed::Unknown("it only read then, and runs more now".into()),
@@ -219,6 +222,7 @@ impl Answered {
             },
             (Kept::Scripts { scripts: then, project: kept }, Kept::Scripts { scripts: now, project }) => {
                 let own = scripts_changed(root, then, &now);
+                script_changed = matches!(own, Changed::Lines { .. });
                 let names: Vec<String> = now.iter().map(|(p, _)| crate::chat::shown(root, p)).collect();
                 said.push(match &own {
                     Changed::Lines { .. } => format!("script changed: {}", listed(&names)),
@@ -249,7 +253,7 @@ impl Answered {
             // (it runs a script now and didn't then, or the other way: not the same command's files)
             _ => Changed::Unknown("it runs other files than it did".into()),
         };
-        self.said(cmd, said, changed, !touched)
+        Since { script_changed, ..self.said(cmd, said, changed, !touched) }
     }
 
     /// `since` with no git (the main thread's): the answer was to a command that only reads, and `cmd` only
@@ -263,7 +267,16 @@ impl Answered {
         let was = (self.cmd.trim() != cmd.trim()).then(|| self.cmd.clone());
         let unchanged = changed == Changed::Nothing && quiet;
         let at = crate::log::clock(self.at);
-        Since { card: self.card, answer: self.answer, at, was, said, changed, unchanged }
+        Since {
+            card: self.card,
+            answer: self.answer,
+            at,
+            was,
+            said,
+            changed,
+            unchanged,
+            script_changed: false,
+        }
     }
 }
 

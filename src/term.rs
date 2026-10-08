@@ -6866,11 +6866,17 @@ impl OfferCard {
         // A paragraph wrapped to the card, up to `n` lines (a command to run is shown whole)
         let wrapped = |text: &str, n: usize| -> Vec<(String, bool)> {
             // An indented line (a setting, a command) goes on hanging 4 cells under its own start — its
-            // value never wraps back to the card's edge as if it were a line of its own
+            // value never wraps back to the card's edge as if it were a line of its own; a warning (`▲ …`,
+            // `cardwarn.rs`) under its words, past its mark
             let lead = text.len() - text.trim_start_matches(' ').len();
+            let indent = match (lead, text.starts_with("▲ ")) {
+                (0, true) => 2,
+                (0, false) => 0,
+                (lead, _) => lead + 4,
+            };
             let para = [crate::markdown::Line::Text {
                 spans: vec![crate::markdown::Span { text: text.to_string(), style: Style::default() }],
-                indent: if lead > 0 { lead + 4 } else { 0 },
+                indent,
             }];
             let mut all: Vec<(String, bool)> = crate::markdown::wrap(&para, max_inner, Style::default())
                 .into_iter()
@@ -6903,7 +6909,7 @@ impl OfferCard {
                     if decided.contains(&k) {
                         rows.iter_mut().for_each(|r| r.1 = false);
                     }
-                    if warning.contains(&k) {
+                    if warning.contains(&k) || o.warnings.iter().any(|w| w.contains(&k)) {
                         warn.extend(v.len()..v.len() + rows.len());
                     }
                     // (a wrapped line's rows keep its sign's colour; `f` a file's path)
@@ -9136,9 +9142,9 @@ fn draw_chat(
                 if i == 0 || c.msgs[i - 1].role != Role::Tool {
                     lines.push(Vec::new());
                 }
-                let styles = TrailStyles { faint, dim, string, accent };
+                let styles = TrailStyles { faint, dim, string, accent, warn: warn_fg };
                 let live = exploring && i + 1 == n;
-                lines.push(trail_row(look, live, w, false, &styles));
+                lines.push(trail_row(look, m.ran.as_ref(), live, w, false, &styles));
                 row_links.resize(lines.len(), None);
                 *row_links.last_mut().expect("just pushed") = look.link.clone();
                 row_calls.push((lines.len() - 1, m.call.as_str()));
@@ -9712,6 +9718,8 @@ struct TrailStyles {
     dim: Style,
     string: Style,
     accent: Style,
+    /// Where a command ran past the sandbox, and its warnings (`chat::Ran`).
+    warn: Style,
 }
 
 /// Most rows the chat's plan takes (its title and steps).
@@ -9796,9 +9804,12 @@ fn plan_now(
 }
 
 /// One lookup as a row: `◦ read  src/lib.rs  L10–49`. `slim` (the minimized chat) drops the verb and keeps
-/// only the file name — patterns stand apart in string color. `live` = the one in progress (`●`).
+/// only the file name — patterns stand apart in string color. `live` = the one in progress (`●`). A command's
+/// row ends with where it ran (`ran` — cardburden 4): `ok · sandbox`, `ok · outside` in the warning color, and
+/// `▲2` for what it warned of — whole where it fits, after the verdict; the command gives way first.
 fn trail_row(
     look: &crate::chat::Look,
+    ran: Option<&crate::chat::Ran>,
     live: bool,
     w: usize,
     slim: bool,
@@ -9817,14 +9828,29 @@ fn trail_row(
     if slim && w.saturating_sub(1 + head.width() + name.width()) < range.width() {
         range.clear();
     }
-    // The target first; the suffix (line range, a note's words) keeps at most 10 cells of its room
-    let room = w.saturating_sub(1 + head.width() + range.width().min(10)).max(4);
+    // (where a command ran, and its warnings — not in the minimized chat)
+    let mut tail: Vec<crate::markdown::Span> = Vec::new();
+    if let Some(r) = ran.filter(|_| !slim) {
+        let sep = if range.is_empty() { "  " } else { " · " };
+        tail.push(sp(format!("{sep}{}", r.mark), if r.past { st.warn } else { st.faint }));
+        if !r.warned.is_empty() {
+            tail.push(sp(format!(" ▲{}", r.warned.len()), st.warn));
+        }
+    }
+    let tail_w: usize = tail.iter().map(|s| s.text.width()).sum();
+    // The target first; the suffix (line range, a note's words) keeps at most 10 cells of its room — and where
+    // it ran, its own
+    let room = w.saturating_sub(1 + head.width() + range.width().min(10) + tail_w).max(4);
     let what = if look.pattern { fit_ellipsis(&name, room) } else { fit_left(&name, room) };
     let mut row = vec![glyph, sp(head, st.faint), sp(what, if look.pattern { st.string } else { st.dim })];
     let used: usize = row.iter().map(|s| s.text.width()).sum();
     // (a short suffix — a command's `ok` — whenever it fits whole)
-    if w.saturating_sub(used) >= range.width().min(6) && !range.is_empty() {
-        row.push(sp(fit_ellipsis(&range, w - used), st.faint));
+    if w.saturating_sub(used + tail_w) >= range.width().min(6) && !range.is_empty() {
+        row.push(sp(fit_ellipsis(&range, w - used - tail_w), st.faint));
+    }
+    let used: usize = row.iter().map(|s| s.text.width()).sum();
+    if used + tail_w <= w {
+        row.extend(tail);
     }
     row
 }
@@ -10976,6 +11002,7 @@ mod tests {
             dim: Style::default(),
             string: Style::default(),
             accent: Style::default(),
+            warn: Style::default(),
         };
         let look = |range: &str| crate::chat::Look {
             verb: "run",
@@ -10985,7 +11012,7 @@ mod tests {
             link: None,
         };
         let text = |l: &crate::chat::Look, slim| -> String {
-            trail_row(l, false, 30, slim, &st).into_iter().map(|s| s.text).collect()
+            trail_row(l, None, false, 30, slim, &st).into_iter().map(|s| s.text).collect()
         };
         let row = text(&look("ok"), false);
         assert!(row.ends_with("  ok") && row.contains("git commit"), "{row:?}");
@@ -10994,6 +11021,60 @@ mod tests {
         assert!(row.ends_with("  exit 101"), "{row:?}");
         // (the minimized chat keeps the name instead — its rows are slim)
         assert!(!text(&look("ok"), true).ends_with("ok"));
+    }
+
+    /// cardburden 4: a command's row ends with where it ran, from its run's record — after its verdict, the
+    /// command giving way for it; past the sandbox in the warning color; what it warned of counted (`▲1`).
+    /// Too narrow for it whole: left out, never cut into something else.
+    #[test]
+    fn a_commands_row_says_where_it_ran() {
+        let warn = Style { fg: Some(Color::Red), ..Style::default() };
+        let st = TrailStyles {
+            faint: Style::default(),
+            dim: Style::default(),
+            string: Style::default(),
+            accent: Style::default(),
+            warn,
+        };
+        let look = crate::chat::Look {
+            verb: "run",
+            what: "DOCKER_HOST=x timeout 600 docker run alpine true".into(),
+            pattern: true,
+            range: "ok".into(),
+            link: None,
+        };
+        let warned = crate::cardwarn::Warned {
+            id: "docker-own-config".into(),
+            said: "Docker: no DOCKER_CONFIG.".into(),
+            whose: "tools pack".into(),
+            asks: false,
+        };
+        let ran = |mark: &str, past: bool, warned: Vec<crate::cardwarn::Warned>| crate::chat::Ran {
+            mark: mark.into(),
+            past,
+            why: String::new(),
+            warned,
+        };
+        let row = |r: &crate::chat::Ran, w| trail_row(&look, Some(r), false, w, false, &st);
+        let text = |s: &[crate::markdown::Span]| s.iter().map(|s| s.text.as_str()).collect::<String>();
+        let inside = row(&ran("sandbox", false, Vec::new()), 50);
+        assert!(
+            text(&inside).ends_with("  ok · sandbox") && text(&inside).width() <= 50,
+            "{}",
+            text(&inside)
+        );
+        assert_ne!(inside.last().unwrap().style, warn, "in the sandbox: quiet");
+        let out = row(&ran("sandbox + Docker socket", true, vec![warned]), 60);
+        let t = text(&out);
+        assert!(t.ends_with("  ok · sandbox + Docker socket ▲1") && t.contains("DOCKER_HOST=x tim…"), "{t}");
+        assert!(
+            out.iter().rev().take(2).all(|s| s.style == warn),
+            "past the sandbox, and warned: warning color"
+        );
+        assert!(t.width() <= 60, "{t}");
+        // Too narrow: the mark left out whole, the verdict kept
+        let narrow = text(&row(&ran("sandbox + Docker socket", true, Vec::new()), 24));
+        assert!(!narrow.contains("Docker") && narrow.width() <= 24, "{narrow}");
     }
 
     /// The notification card takes the top right, else the bottom right, never over another card; with
@@ -11383,6 +11464,7 @@ mod tests {
                 rev: 0,
                 decided: None,
                 warning: None,
+                warnings: Vec::new(),
                 diff: None,
                 since: std::time::Instant::now(),
                 drawn: Default::default(),

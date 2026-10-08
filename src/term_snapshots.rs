@@ -956,6 +956,7 @@ fn snapshot_chat_explore() {
         look,
         call: String::new(),
         attached: None,
+        ran: None,
         cache: Default::default(),
     };
     let look = |verb, what: &str, pattern, range: &str, link: Option<Link>| {
@@ -1008,6 +1009,7 @@ fn snapshot_chat_table() {
         look: None,
         call: String::new(),
         attached: None,
+        ran: None,
         cache: Default::default(),
     };
     let answer = "Two ways to draw a cell that doesn't fit:\n\n\
@@ -1682,6 +1684,7 @@ fn floating_cards_never_overlap() {
             look: None,
             call: String::new(),
             attached: None,
+            ran: None,
             cache: Default::default(),
         });
         let look = Look {
@@ -1698,6 +1701,7 @@ fn floating_cards_never_overlap() {
             look: Some(look.clone()),
             call: String::new(),
             attached: None,
+            ran: None,
             cache: Default::default(),
         });
         c.follow.gaze = Some(crate::follow::Gaze::new(look, Some(path.clone()), Some(39..60)));

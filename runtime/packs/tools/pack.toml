@@ -8,3 +8,76 @@
 
 [sandbox]
 pass = ["MISE_*", "ASDF_*", "VOLTA_*", "SDKMAN_*"]
+
+# What a run card of Claude's warns of (`cardwarn.rs`, cardburden 4) — the tools no one language has. Each is a
+# line in the warning colour under what the card asks, said as this pack's; `asks = true`: `a` on an earlier card
+# doesn't let it run unasked.
+[claude]
+# Programs that run what follows their words: a warning's command is found after one (`timeout 600 docker …`)
+wrappers = ["timeout", "gtimeout", "env", "nice", "nohup", "time", "stdbuf", "caffeinate", "sudo", "doas"]
+
+# Docker without its own settings: `DOCKER_CONFIG` unset, it reads the user's ~/.docker (whose credential
+# helpers run); `DOCKER_HOST` unset, whichever engine is current; no timeout, a hung container holds the run
+[[claude.warn]]
+id = "docker-own-config"
+run = ["docker", "docker-compose"]
+missing = [
+    { env = "DOCKER_CONFIG", say = "no DOCKER_CONFIG — it reads your ~/.docker, and its credential helpers run" },
+    { env = "DOCKER_HOST", say = "no DOCKER_HOST — it uses whichever engine is current" },
+    { wrapper = ["timeout", "gtimeout"], say = "no timeout — a hung container holds the run" },
+]
+say = "Docker: {missing}."
+
+# What a read outside the project goes to
+[[claude.warn]]
+id = "reads-outside"
+fact = "reads-outside"
+say = "What it reads outside the project goes to Claude."
+
+# Other processes' details: a command line or an environment holds tokens at times
+[[claude.warn]]
+id = "process-details"
+run = ["pgrep", "lsof"]
+options = ["-f", "-a", "--full", "--list-full", "-p"]
+option-values = ["-u", "-U", "-g", "-G", "-t", "-s", "-P", "-c", "-d"]
+say = "It reads other processes' details — a command line can hold a token, and what it reads goes to Claude."
+[[claude.warn]]
+id = "process-env"
+run = ["ps"]
+options = ["-E", "e"]
+# (their next word is their value: `ps -o user`)
+option-values = ["-o", "-O", "-p", "-q", "-u", "-U", "-g", "-G", "-t", "-k", "-s"]
+say = "It reads other processes' environments — tokens among them go to Claude."
+
+# A script it runs changed since a card showed it, or since the last answer to this run (`sinceyes.rs`)
+[[claude.warn]]
+id = "script-changed"
+fact = "script-changed"
+say = "A script it runs changed since you last saw it — read what changed before you answer."
+
+# Beyond this machine: never let through by `a` (D2)
+[[claude.warn]]
+id = "outward"
+run = ["git push", "gh", "curl", "wget", "ssh", "scp", "rsync", "sftp", "nc", "ncat"]
+asks = true
+say = "It reaches beyond this machine — what it sends or fetches isn't on this card. Asked each time, whatever `a` said before."
+
+# History rewritten, the working tree reset: what's lost may not come back
+[[claude.warn]]
+id = "history"
+run = ["git rebase", "git reset", "git filter-branch", "git filter-repo", "git clean"]
+say = "It rewrites git history or resets files — what it drops may not come back with space u."
+
+# A command of Claude's can't gain privileges: no terminal to type a password in; and on Linux, under tarae's
+# AppArmor profile, a command of Claude's outside the sandbox runs with no_new_privs (step 6h)
+[[claude.warn]]
+id = "privileges"
+run = ["sudo", "su", "pkexec", "doas"]
+say = "It can't gain privileges: there's no terminal for a password, and on Linux tarae's AppArmor profile runs Claude's commands outside the sandbox with no_new_privs. If it's needed, run it yourself in tarae's terminal (space T) — your own tools keep their privileges."
+
+# An edit of Claude's to a file that runs later outside the sandbox (`sandbox::protected_names`) — the edit
+# review's header
+[[claude.warn]]
+id = "edit-protected"
+fact = "edit-protected"
+say = "It changes a file that runs later outside the sandbox (a build file, a hook, settings) — read all of it."

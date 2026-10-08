@@ -5,6 +5,7 @@ mod attach;
 mod blocked;
 mod builds;
 mod cards;
+mod cardwarn;
 mod chat;
 mod chats;
 mod checkpoint;

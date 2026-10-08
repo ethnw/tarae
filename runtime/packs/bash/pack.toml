@@ -33,3 +33,24 @@ risky = [
     '\bdd\b.*\bof=', '\bmkfs', '\bshred\b', '>\s*/dev/(sd|nvme|disk)', '\bLD_PRELOAD\b',
     '\bgit\s+(push\s.*(-f\b|--force)|reset\s+--hard|clean\s+-[a-zA-Z]*f)',
 ]
+
+# What a run card of Claude's warns of (`cardwarn.rs`): `rm -r` of anything but a scratch folder in the checked
+# form (D5, 2026-10-08) — `set -eu`; one fresh `mktemp -d /private/tmp/<prefix>.XXXXXX` folder; checked non-empty
+# and by `case` against that prefix before its `rm -rf` — or a build's scratch below a pack's `outputs` folder
+# (`target/sb/…`). The regexes say the form's parts, matched before the `rm` in their order; `same`: the variable
+# and the prefix one in all of them. The `rm` itself names that folder, or a path in it — no `..` part, none
+# with `.` alone (`"$T/.."` leaves it).
+[[claude.warn]]
+id = "rm-r-unchecked"
+run = ["rm"]
+options = ["-r", "-R", "--recursive"]
+unless-in = "outputs"
+unless-part = '^rm\s+-[a-zA-Z]+\s+"?\$\{?(?P<v>[A-Za-z_][A-Za-z0-9_]*)\}?(/([A-Za-z0-9_-][A-Za-z0-9._-]*|\.[A-Za-z0-9_-][A-Za-z0-9._-]*))*/?"?$'
+unless-all = [
+    '(?m)(^|;)\s*set\s+-([a-z]*e[a-z]*u|[a-z]*u[a-z]*e)',
+    '(?P<v>[A-Za-z_][A-Za-z0-9_]*)="?\$\(mktemp\s+-d\s+/private/tmp/(?P<p>[A-Za-z0-9._-]+)\.X+\)"?',
+    '(\[\[?|test)\s+-n\s+"\$\{?(?P<v>[A-Za-z_][A-Za-z0-9_]*)\}?"',
+    'case\s+"\$\{?(?P<v>[A-Za-z_][A-Za-z0-9_]*)\}?"\s+in\s+/private/tmp/(?P<p>[A-Za-z0-9._-]+)\.\*\)',
+]
+same = ["v", "p"]
+say = "It removes folders whole (rm -r), not in the checked form — set -eu, one `mktemp -d /private/tmp/<name>.XXXXXX` folder checked non-empty and by `case` before its `rm -rf` — read what it removes."

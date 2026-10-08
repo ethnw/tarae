@@ -28,3 +28,16 @@ steps = [
   { name = "test bundled", cmd = "cargo test --workspace --features bundled-grammars", full = true },
   { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER", full = true },
 ]
+
+# What a card for one of Claude's commands warns of besides the packs' (`cardwarn.rs`): `cargo xtask linux` runs
+# Docker — without its own settings it reads your ~/.docker and whichever engine is current, and a hung container
+# holds the run
+[[cards.warn]]
+id = "xtask-linux-docker"
+run = ["cargo xtask linux"]
+missing = [
+  { env = "DOCKER_CONFIG", say = "no DOCKER_CONFIG — it reads your ~/.docker, and its credential helpers run" },
+  { env = "DOCKER_HOST", say = "no DOCKER_HOST — it uses whichever engine is current" },
+  { wrapper = ["timeout", "gtimeout"], say = "no timeout — a hung container holds the run" },
+]
+say = "cargo xtask linux runs Docker: {missing}."

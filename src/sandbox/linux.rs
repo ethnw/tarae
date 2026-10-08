@@ -98,6 +98,9 @@ pub struct Confine {
     pub net: RunNet,
     /// Its runs make no user namespace (`tier::runs_refuse_userns`, the keeper's filter) — for the report to say.
     pub no_userns: bool,
+    /// The tier its runs go at (`tier::Tier`: the keeper's namespaces, served or not — `A+` … `D`), as `confine`
+    /// decided it — what a run's chat row says it ran in (cardburden 4). Empty: no keeper's (a probe's rules).
+    pub tier: &'static str,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
@@ -495,14 +498,19 @@ pub fn confine(
     keeper: Option<&super::keeper::Keeper>,
     serve: Result<(), String>,
 ) -> io::Result<Confine> {
-    let net = keeper.map_or(super::tier::Ns::NONE, |k| k.ns).run_net(serve.is_ok());
+    let ns = keeper.map_or(super::tier::Ns::NONE, |k| k.ns);
+    let net = ns.run_net(serve.is_ok());
+    let tier = match keeper {
+        Some(_) => super::tier::Tier::of(ns, serve.is_ok()).said(),
+        None => "",
+    };
     let mut r = ruleset_for(net, abi)?;
     if let Some(k) = keeper.filter(|k| k.ns.user) {
         session_devices(&mut r, &k.devices, k.ns.shm)?;
     }
     // (what the keeper's runs take for their filter — the same once-read answer `Keeper::start` gives them)
     let no_userns = super::tier::runs_refuse_userns();
-    confine_in(r, p, audit, make_first, serve, net).map(|c| Confine { no_userns, ..c })
+    confine_in(r, p, audit, make_first, serve, net).map(|c| Confine { no_userns, tier, ..c })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
@@ -630,6 +638,7 @@ pub(super) fn confine_in(
         serve,
         net,
         no_userns: false,
+        tier: "",
         made: Arc::new(made),
         closed,
         kept: Arc::new(kept),

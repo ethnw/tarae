@@ -287,6 +287,8 @@ builders = ["cargo", "rustc"]
 # What runs that the words don't name: `cargo xtask` is the project's own `xtask/` crate (an alias in
 # `.cargo/config.toml`) — the card for it again says whether that changed since its last answer
 entry = [{ run = "cargo xtask", files = ["xtask/"] }]
+# What a run card warns of (`cardwarn.rs`): a crate published can't be taken back — asked each time (D2)
+warn = [{ id = "cargo-publish", run = ["cargo publish"], asks = true, say = "It publishes the crate to its registry — a version published can't be taken back. Asked each time, whatever `a` said before." }]
 said = { rank = 10, run = "cargo build/check/test/clippy/fmt/tree/metadata", code = "the Rust toolchain's sources ($(rustc --print sysroot)/lib/rustlib/src) or cargo's downloaded crates", tests = "Rust (cargo test)", protect = "build.rs, Cargo.toml, .cargo" }
 
 # The sysroot `$(rustc --print sysroot)` gives where a command runs, as rustup says it (it reads the toolchain

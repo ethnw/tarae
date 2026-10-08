@@ -144,6 +144,54 @@ impl Guard {
         }
     }
 
+    /// Where a run under this guard ran, from its own record (cardburden 4): the mark its chat row ends with
+    /// (`sandbox` — Linux: its tier, `sandbox A+`, and `partial` below Landlock ABI 3 —, `+ Docker socket` or the
+    /// socket's name, `+ network`; `outside`, `no sandbox`, `sandbox off`), whether that's past the sandbox (a
+    /// Docker socket is as much as outside — `allow::Grant::as_outside`), and in words.
+    pub fn where_ran(&self) -> (String, bool, String) {
+        match self {
+            Guard::In(p) => {
+                let (tier, how) = match p.tier_said() {
+                    Some(t) if !t.is_empty() => (format!(" {t}"), format!("Landlock, tier {t}")),
+                    Some(_) => (String::new(), "Landlock".to_string()),
+                    None => (String::new(), "Seatbelt".to_string()),
+                };
+                let mut mark = format!("sandbox{tier}");
+                let mut words = format!("In tarae's sandbox ({how})");
+                let mut past = false;
+                for s in &p.sockets {
+                    let docker = crate::allow::Grant::Socket(s.clone()).as_outside();
+                    past |= docker;
+                    let name =
+                        s.file_name().map_or_else(|| s.display().to_string(), |n| n.to_string_lossy().into());
+                    mark.push_str(&if docker {
+                        " + Docker socket".to_string()
+                    } else {
+                        format!(" + {name}")
+                    });
+                    words.push_str(&format!(", let connect to {}", crate::allow::tilde(s)));
+                    if docker {
+                        words.push_str(" — Docker's: as much as outside the sandbox");
+                    }
+                }
+                if p.network {
+                    mark.push_str(" + network");
+                    words.push_str(", the network open (llm.sandbox-network)");
+                }
+                (mark, past, format!("{words}."))
+            }
+            Guard::Outside => (
+                "outside".into(),
+                true,
+                "Outside the sandbox, with all your permissions — said yes to.".into(),
+            ),
+            Guard::Without(why) => {
+                ("no sandbox".into(), true, format!("Without a sandbox ({why}) — you agreed."))
+            }
+            Guard::Off => ("sandbox off".into(), true, "Without a sandbox — llm.sandbox is off.".into()),
+        }
+    }
+
     /// What the run got of tarae's environment, when it ran in the sandbox.
     pub fn run_env(&self) -> Option<&runenv::RunEnv> {
         match self {
@@ -2690,6 +2738,20 @@ impl Policy {
             return Some(why.clone());
         }
         supervisor::swap_unavailable()
+    }
+
+    /// Linux: the tier its runs go at, `partial` below Landlock ABI 3 (`linux::Confine.tier`, as `confine`
+    /// decided it — empty for a probe's rules); None elsewhere (Seatbelt has no tiers).
+    pub fn tier_said(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        return Some(match &self.confine {
+            Some(Ok(c)) => {
+                format!("{}{}", c.tier, if c.abi < 3 { " partial" } else { "" }).trim().to_string()
+            }
+            _ => String::new(),
+        });
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     /// Linux: how the report says the network where it differs from macOS's words — tarae's supervisor

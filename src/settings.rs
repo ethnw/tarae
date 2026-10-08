@@ -652,7 +652,7 @@ fn walk(
         // Free-form-named tables (keymap, language servers, per-language settings, `[[attach]]`, `:preflight`'s
         // steps) are read by config.rs.
         if prefix.is_empty()
-            && matches!(path.as_str(), "keys" | "lsp" | "lang" | "attach" | "task" | "preflight")
+            && matches!(path.as_str(), "keys" | "lsp" | "lang" | "attach" | "task" | "preflight" | "cards")
         {
             continue;
         }
@@ -799,7 +799,11 @@ mod tests {
              | `[lang.<language>]` | Per language: `lsp = [\"name\", …]` — which server to try, in order; `also = […]` — \
              servers that run beside it |\n\
              | `[[attach]]` | A named debugger attach target: `name`, `lang`, `host`, `port` or `pid`, \
-             `before`, `remote-root`, `program` |\n",
+             `before`, `remote-root`, `program` |\n\
+             | `[[cards.warn]]` | What a card for one of Claude's commands warns of, besides the language packs' — \
+             only adds (an id a pack or your config has is left out): `id`, `run`, `options`, `option-values`, \
+             `missing`, `unless-part`, `unless-all`, `same`, `unless-in`, `fact`, `say`, `asks` — see \
+             [Claude integration](../claude-integration.md) |\n",
         );
         out
     }

@@ -768,6 +768,49 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   `:chat-new` the same run's card still says which card it's the same as. The `card` log line names each
   card (`card#41`) and says `same=#41` (nothing changed since) or `same=#41:changed`, and `tarae state` the
   card's `same_as`
+- **Warnings.** Right under the command, a run card says in plain words, in the warning color, what to look at
+  before you answer — each saying whose it is (`(tools pack)`, `(.tarae.toml)`):
+
+  ```
+  docker ps && cargo xtask linux clippy
+  ▲ Docker: no DOCKER_CONFIG — it reads your ~/.docker, and its credential helpers run; no
+    DOCKER_HOST — it uses whichever engine is current; no timeout — a hung container holds the run.
+    (tools pack)
+  ▲ cargo xtask linux runs Docker: no timeout. (.tarae.toml)
+  ```
+
+  Each is data: a language pack's `[[claude.warn]]` or a `[[cards.warn]]` in your config or the project's
+  `.tarae.toml` (read from the checkout tarae started in). They only add: an id is the first's to say it — a
+  pack's, then yours — and one a project's file says that's taken is left out and said (`left out: id
+  outward is the tools pack's`), so a cloned repository can't drop or weaken a warning, nor make an `asks` one
+  that never fires; one of a runtime folder's pack is said as `your … pack`. A warning's words are one line of
+  text, at most 300 characters — no control character or mark of the card's in them — and whose it is tarae
+  says after them. tarae decides only facts: the command's words and the scripts it runs — what's in them runs
+  too — the options it passes, what's set in front of it, before it or in the run's environment, a wrapper
+  around it (`timeout 600 docker …`), where it reads outside the project, whether a script it runs changed since
+  you saw it, whether it runs outside the sandbox. The built-in ones: Docker without its own settings; what a read
+  outside the project goes to; reading other processes' details (`pgrep -f`, `ps -E`, `lsof -p`); `rm -r` of
+  anything but a build's scratch (`target/…`) outside the checked form (`set -eu`, one `mktemp -d
+  /private/tmp/<name>.XXXXXX` folder checked non-empty and by `case` before its `rm -rf`); a script changed since
+  you saw it; reaching beyond this machine (`git push`, `curl`, `ssh` …); git history rewritten (`rebase`,
+  `reset`, `filter-branch`); a crate or package published; and `sudo`, `su`, `pkexec`, `doas` — a command of
+  Claude's can't gain privileges (no terminal for a password; on Linux, outside the sandbox, tarae's AppArmor
+  profile runs it with no_new_privs), so run it yourself in tarae's terminal (`space T`), where your own tools
+  keep theirs. A warning never answers a card nor holds one back. `a` on an earlier card still lets the same
+  command run unasked — its warning then said on its chat row and in the log (`warned`) — except for one whose
+  data says `asks = true` (reaching beyond this machine, publishing): a card with one, from its line or a script
+  it runs, offers no `a`, and an `a` given before it asked doesn't let the command through — its card comes each
+  time. The `card` log line says `warn=<ids>`. Writing one: `id`, `run` (a command's leading words), `options`
+  (BSD's dashless form only as the first word) with `option-values` (options whose next word is their value:
+  `ps -o user`), `missing` (`{ env, say }` or `{ wrapper, say }`, `{missing}` in `say`), `unless-part` +
+  `unless-all` + `same` (regexes for a checked form: the command's own text, then its guards before it in the
+  line or script, in order — the named groups equal in all), `unless-in = "outputs"`, `fact` (`reads-outside`,
+  `script-changed`, `edit-protected`, `outside-sandbox`; `{paths}` with the first), `say`, `asks`
+- **Where it ran.** Each of Claude's commands' rows in the chat ends with where it ran, from the run's own
+  record: `ok · sandbox` (on Linux its tier, `sandbox A+`, and `partial` below Landlock ABI 3), `+ Docker socket`
+  or the socket granted, `+ network`; `outside`, `no sandbox`, `sandbox off` — past the sandbox (a Docker socket
+  counts) in the warning color — and `▲2` for what it warned of. `tarae state` gives each run's `ran`: where, why
+  (the card it ran from, Claude's reason there) and the warnings
 
 - git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
   in `.git` (a write the sandbox would deny and report)

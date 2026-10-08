@@ -111,6 +111,9 @@ pub struct Run {
     pub silent: Option<String>,
     pub since_ms: u64,
     pub took_ms: Option<u64>,
+    /// Claude's command: where it ran, from its run's record, and what it warned of (`chat::Ran` — cardburden
+    /// 4); None for another's, or one in line.
+    pub ran: Option<crate::chat::Ran>,
 }
 
 fn rel(ed: &Editor, p: &std::path::Path) -> String {
@@ -320,6 +323,7 @@ impl Editor {
                     silent: (r.state == S::Running).then(|| r.wait.silent(r.last_output, now)).flatten(),
                     since_ms: ms(now.saturating_duration_since(r.started)),
                     took_ms: r.took.map(ms),
+                    ran: r.ran.clone(),
                 });
             }
             if let Some(r) = &l.test_run {
@@ -343,6 +347,7 @@ impl Editor {
                     silent: (r.state == S::Running).then(|| r.wait.silent(r.last_output, now)).flatten(),
                     since_ms: ms(now.saturating_duration_since(r.started)),
                     took_ms: r.took.map(ms),
+                    ran: None,
                 });
             }
             for slot in [crate::queued::Slot::Task, crate::queued::Slot::Tests] {
@@ -363,6 +368,7 @@ impl Editor {
                         silent: None,
                         since_ms: ms(now.saturating_duration_since(n.queued.since)),
                         took_ms: None,
+                        ran: None,
                     });
                 }
             }
@@ -478,11 +484,17 @@ impl Run {
             "id": self.id, "session": self.session, "of": self.of, "kind": self.kind, "label": self.label,
             "state": self.state, "waiting": self.waiting, "silent": self.silent, "since_ms": self.since_ms,
             "took_ms": self.took_ms,
+            "ran": self.ran.as_ref().map(|r| json!({
+                "where": r.mark, "past": r.past, "why": r.why,
+                "warned": r.warned.iter().map(|w| json!({ "id": w.id, "said": w.said, "whose": w.whose }))
+                    .collect::<Vec<_>>(),
+            })),
         })
     }
 
     pub fn text(&self) -> String {
         let waiting = self.waiting.iter().chain(&self.silent).map(|w| format!(" · {w}")).collect::<String>();
-        format!("{} {} · {} · {}{waiting}", self.id, self.of, self.label, self.state)
+        let ran = self.ran.as_ref().map(|r| format!(" · in {}", r.mark)).unwrap_or_default();
+        format!("{} {} · {} · {}{waiting}{ran}", self.id, self.of, self.label, self.state)
     }
 }

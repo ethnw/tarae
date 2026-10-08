@@ -71,6 +71,8 @@
 //! - `expand.<word> = { run, env, first-word-in }`: a `$(…)` a command line may hold, filled in where it's
 //!   judged with the folder `run`'s first word names directly in `first-word-in`.
 //! - `builders`: programs that build or test the project (a script calling one runs its code).
+//! - `[[claude.warn]]`: what a run card warns of, in the pack's words (`cardwarn.rs`); `wrappers`: programs that
+//!   run what follows their words (`timeout`), a warning's command found after one.
 //! - `entry = [{ run, files }]`: what a command runs that its words don't name — a line with `run`'s words in
 //!   a row (after a wrapper too: `timeout 1800 cargo xtask`) runs the project's `files` (folders end in `/`):
 //!   the card for it again says whether they changed since its last answer, and shows how (`sinceyes.rs`).
@@ -131,6 +133,9 @@ pub(crate) const CLAUDE_KEYS: &[(&str, Reach)] = &[
     ("builders", Reach::Added),
     // (narrows: more of what a command runs is shown on its card again)
     ("entry", Reach::Added),
+    // (narrows: a card says more — and with `asks`, `a` lets less through; never less said)
+    ("warn", Reach::Added),
+    ("wrappers", Reach::Added),
     // (Claude's prompt)
     ("said", Reach::BuiltIn),
 ];
@@ -315,6 +320,11 @@ pub struct Packs {
     pub expand: Vec<Expand>,
     pub builders: Vec<String>,
     pub entry: Vec<Entry>,
+    /// What a run card warns of (`cardwarn.rs`), every pack's — a runtime folder's adds.
+    pub warn: Vec<crate::cardwarn::Warn>,
+    /// Programs that run what follows their words (`timeout 600 docker …`) — a warning's command is found after
+    /// one, and `missing`'s wrappers are among them.
+    pub wrappers: Vec<String>,
     pub said: Vec<Said>,
     /// What was wrong: a built-in pack's entry left out (a mistake in tarae's pack — a test fails), a runtime
     /// folder's key that's the built-in packs' only.
@@ -421,7 +431,7 @@ fn read_into(out: &mut Packs, pack: &str, t: &Table, builtin: bool) {
                 continue; // (read first, `build`)
             }
             let whose = if builtin { format!("the {pack} pack") } else { format!("your {pack} pack") };
-            if let Err(e) = read_key(out, pack, table, key, value) {
+            if let Err(e) = read_key_of(out, pack, builtin, table, key, value) {
                 out.problems.push(format!("{whose}: `{table}.{key}`: {e}"));
             }
         }
@@ -430,6 +440,18 @@ fn read_into(out: &mut Packs, pack: &str, t: &Table, builtin: bool) {
 
 /// One key's value into `out`; Err why it (or an entry of it, the rest kept) was left out.
 fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> Result<(), String> {
+    read_key_of(out, pack, true, table, key, v)
+}
+
+/// `read_key`, for a built-in pack's table or a runtime folder's (`builtin`) — a warning says whose it is.
+fn read_key_of(
+    out: &mut Packs,
+    pack: &str,
+    builtin: bool,
+    table: &str,
+    key: &str,
+    v: &Value,
+) -> Result<(), String> {
     let list = |v: &Value| strings(Some(v), key).map(Option::unwrap_or_default);
     let tab = |v: &Value| v.as_table().cloned().ok_or(format!("`{key}` isn't a table"));
     // (every built-in pack's homes, read first — `build`)
@@ -664,6 +686,19 @@ fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> R
                     (_, Some(f), _) => wrong.push(format!("`{f}` isn't a path in the project")),
                     (_, _, true) => wrong.push(format!("`{}` names no files", run.join(" "))),
                     _ => out.entry.push(Entry { run, files }),
+                }
+            }
+        }
+        ("claude", "warn") => {
+            let whose = if builtin { format!("{pack} pack") } else { format!("your {pack} pack") };
+            out.warn.extend(crate::cardwarn::read(v, &whose, &mut wrong));
+        }
+        ("claude", "wrappers") => {
+            for w in list(v)? {
+                match plain_word(&w) {
+                    true if !out.wrappers.contains(&w) => out.wrappers.push(w),
+                    true => {}
+                    false => wrong.push(format!("`{w}` isn't a program's name")),
                 }
             }
         }

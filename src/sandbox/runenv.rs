@@ -122,7 +122,7 @@ impl std::fmt::Debug for RunEnv {
 }
 
 /// Whether `name` is one `entry` says: the name itself, or a `PREFIX*` family's.
-fn matches(entry: &str, name: &str) -> bool {
+pub(crate) fn matches(entry: &str, name: &str) -> bool {
     match entry.strip_suffix('*') {
         Some(prefix) => name.starts_with(prefix),
         None => name == entry,
