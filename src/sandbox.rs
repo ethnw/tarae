@@ -38,6 +38,8 @@ pub mod keeper;
 pub mod linux;
 // (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
+// (the session's transparent proxy: its ruleset built everywhere — its golden runs on macOS too —, sent on Linux)
+pub mod redirect;
 pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]

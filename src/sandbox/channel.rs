@@ -108,6 +108,12 @@ pub enum Msg {
     AskUsage,
     /// End every run and what they left, then exit (as EOF does).
     End,
+    /// Make the sockets the session's network is made with (`redirect::Kind::wanted`): its `lo` carries `v4`'s
+    /// and `v6`'s addresses. Asked once, by the birth, before any run.
+    Plant {
+        v4: bool,
+        v6: bool,
+    },
     // keeper → tarae
     /// It's there; with an `O_PATH` handle of each device place it has (`places`, the names — the fds in their
     /// order), opened in its own mount namespace before any run (`keeper::DEVICE_HANDLES`).
@@ -139,6 +145,12 @@ pub enum Msg {
         rss_kb: u64,
         pss_kb: u64,
     },
+    /// `Plant`'s answer: the sockets made, each its kind (`redirect::Kind::code`; each once) and its descriptor in
+    /// that order — and `errno`, 0 or what failed the next one (then those made so far).
+    Planted {
+        kinds: Vec<u8>,
+        errno: i32,
+    },
 }
 
 impl Msg {
@@ -148,12 +160,14 @@ impl Msg {
             Msg::Signal { .. } => 2,
             Msg::AskUsage => 3,
             Msg::End => 4,
+            Msg::Plant { .. } => 5,
             Msg::Ready { .. } => 64,
             Msg::Started { .. } => 65,
             Msg::Failed { .. } => 66,
             Msg::Exited { .. } => 67,
             Msg::Reaped { .. } => 68,
             Msg::Usage { .. } => 69,
+            Msg::Planted { .. } => 70,
         }
     }
 
@@ -163,6 +177,7 @@ impl Msg {
             Msg::Run(r) => 4 + (r.served() || r.held) as usize,
             Msg::Ready { places, .. } => places.len(),
             Msg::Started { .. } => 1,
+            Msg::Planted { kinds, .. } => kinds.len(),
             _ => 0,
         }
     }
@@ -198,6 +213,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(sig.to_le_bytes());
         }
         Msg::AskUsage | Msg::End => {}
+        Msg::Plant { v4, v6 } => b.extend([*v4 as u8, *v6 as u8]),
         Msg::Ready { pid, places } => {
             if places.len() > FDS_MAX {
                 return Err(Refused("more places than a message takes descriptors"));
@@ -223,6 +239,11 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(rss_kb.to_le_bytes());
             b.extend(pss_kb.to_le_bytes());
         }
+        Msg::Planted { kinds, errno } => {
+            valid_kinds(kinds)?;
+            bytes(&mut b, kinds);
+            b.extend(errno.to_le_bytes());
+        }
     }
     if b.len() > MSG_MAX {
         return Err(Refused("past the longest record"));
@@ -242,6 +263,22 @@ fn list(b: &mut Vec<u8>, items: &[Vec<u8>]) -> Result<(), Refused> {
     b.extend((items.len() as u32).to_le_bytes());
     for s in items {
         bytes(b, s);
+    }
+    Ok(())
+}
+
+/// What makes `Planted`'s kinds ones tarae takes: at most `FDS_MAX`, each a kind (`redirect::Kind`), none twice.
+fn valid_kinds(kinds: &[u8]) -> Result<(), Refused> {
+    if kinds.len() > FDS_MAX {
+        return Err(Refused("more sockets than a message takes descriptors"));
+    }
+    for (i, k) in kinds.iter().enumerate() {
+        if super::redirect::Kind::from_code(*k).is_none() {
+            return Err(Refused("a socket kind that isn't one"));
+        }
+        if kinds[..i].contains(k) {
+            return Err(Refused("a socket kind twice"));
+        }
     }
     Ok(())
 }
@@ -357,6 +394,7 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
         2 => Msg::Signal { id: r.u64()?, sig: r.i32()? },
         3 => Msg::AskUsage,
         4 => Msg::End,
+        5 => Msg::Plant { v4: r.flag()?, v6: r.flag()? },
         64 => {
             let pid = r.u32()?;
             let places = r.list()?;
@@ -374,6 +412,11 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
         67 => Msg::Exited { id: r.u64()?, status: r.i32()? },
         68 => Msg::Reaped { n: r.u32()? },
         69 => Msg::Usage { rss_kb: r.u64()?, pss_kb: r.u64()? },
+        70 => {
+            let kinds = r.bytes()?;
+            valid_kinds(&kinds)?;
+            Msg::Planted { kinds, errno: r.i32()? }
+        }
         _ => return Err(Refused("a kind that isn't one")),
     };
     r.done()?;
@@ -522,7 +565,33 @@ mod tests {
             Msg::Exited { id: 7, status: 3 << 8 },
             Msg::Reaped { n: 2 },
             Msg::Usage { rss_kb: 3100, pss_kb: 900 },
+            Msg::Plant { v4: true, v6: false },
+            Msg::Plant { v4: true, v6: true },
+            Msg::Planted { kinds: vec![0, 1, 2, 4], errno: 0 },
+            Msg::Planted { kinds: vec![0, 1, 2, 3, 4, 5, 6], errno: 0 },
+            Msg::Planted { kinds: vec![0], errno: libc::EMFILE },
         ]
+    }
+
+    /// `Planted` names each socket by a kind tarae knows, once, and carries exactly as many descriptors: a kind
+    /// that isn't one, one twice, or more than a message takes is a refusal — tarae never guesses what a descriptor
+    /// is.
+    #[test]
+    fn planted_takes_only_known_kinds_once() {
+        let record = |kinds: &[u8]| {
+            let mut b = vec![70u8];
+            b.extend((kinds.len() as u32).to_le_bytes());
+            b.extend(kinds);
+            b.extend(0i32.to_le_bytes());
+            b
+        };
+        assert_eq!(decode(&record(&[0, 1, 5]), 3), Ok(Msg::Planted { kinds: vec![0, 1, 5], errno: 0 }));
+        assert_eq!(decode(&record(&[0, 1, 5]), 2), Err(Refused("descriptors its kind doesn't take")));
+        assert_eq!(decode(&record(&[0, 7]), 2), Err(Refused("a socket kind that isn't one")));
+        assert_eq!(decode(&record(&[0, 2, 2]), 3), Err(Refused("a socket kind twice")));
+        let nine = [0u8; 9];
+        assert!(decode(&record(&nine), 9).is_err(), "past FDS_MAX");
+        assert!(encode(&Msg::Planted { kinds: vec![7], errno: 0 }).is_err(), "tarae's side refuses it too");
     }
 
     /// A small fixed-seed generator: the loop is the same every run.

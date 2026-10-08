@@ -4,40 +4,15 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::answer::{Owed, Reading};
+use crate::fixture::{without_acks, without_seqs};
 use crate::nft::{self, Base, ChainKind, Expr, Hook, MetaKey, Reg, SocketKey, Transaction, Verdict};
 use crate::route::{self, Changes, RouteKind};
-use crate::{ACK, Batch, Error, Family, HEADER, fixture, reply};
+use crate::{Batch, Error, Family, fixture, reply};
 
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 const SESSION_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
 const SESSION_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
-
-/// `b`'s messages with the ack flag taken off each — the one thing the crate sends that nft doesn't (it asks every
-/// change's ack); nothing else is changed.
-fn without_acks(b: &[u8]) -> Vec<u8> {
-    let mut b = b.to_vec();
-    let mut at = 0;
-    while at + HEADER <= b.len() {
-        let len = u32::from_ne_bytes(b[at..at + 4].try_into().unwrap()) as usize;
-        let flags = u16::from_ne_bytes(b[at + 6..at + 8].try_into().unwrap()) & !ACK;
-        b[at + 6..at + 8].copy_from_slice(&flags.to_ne_bytes());
-        at += len.max(HEADER);
-    }
-    b
-}
-
-/// `b`'s messages with their sequence numbers set to 0 — ip numbers its by the clock.
-fn without_seqs(b: &[u8]) -> Vec<u8> {
-    let mut b = b.to_vec();
-    let mut at = 0;
-    while at + HEADER <= b.len() {
-        let len = u32::from_ne_bytes(b[at..at + 4].try_into().unwrap()) as usize;
-        b[at + 8..at + 12].fill(0);
-        at += len.max(HEADER);
-    }
-    b
-}
 
 fn assert_bytes(ours: &[u8], theirs: &[u8], what: &str) {
     if ours != theirs {

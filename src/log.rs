@@ -61,20 +61,80 @@ fn sender() -> Option<&'static Sender<String>> {
     .as_ref()
 }
 
-/// Tests: the lines `line` was given (every thread's) while a test captures them — tests write no log, so what a
-/// line would carry is read here (`capture`).
+/// Tests: the lines `line` was given (every thread's) while any test captures them — tests write no log, so what a
+/// line would carry is read here (`capture`) — and the captures under way, each its id and where its lines start.
 #[cfg(test)]
-static CAPTURED: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+struct Captured {
+    lines: Vec<String>,
+    live: Vec<(u64, usize)>,
+    next: u64,
+}
 
-/// Tests: `on` starts capturing every line (an earlier capture's dropped); off stops and gives back what came.
 #[cfg(test)]
-pub fn capture(on: bool) -> Vec<String> {
-    let mut c = CAPTURED.lock().unwrap_or_else(|e| e.into_inner());
-    let got = c.take().unwrap_or_default();
-    if on {
-        *c = Some(Vec::new());
+static CAPTURED: std::sync::Mutex<Captured> =
+    std::sync::Mutex::new(Captured { lines: Vec::new(), live: Vec::new(), next: 0 });
+
+#[cfg(test)]
+fn captured() -> std::sync::MutexGuard<'static, Captured> {
+    CAPTURED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Tests: every line from here on, until the capture is dropped — a test that panics ends its capture as it
+/// unwinds, so none is left under way to keep every later line. Tests running at once share the lines: each reads
+/// those since its own start (`Capture::lines`) and picks out its own; with none under way, none are kept.
+#[cfg(test)]
+pub fn capture() -> Capture {
+    let mut c = captured();
+    // (with none under way, none are kept — the last to end cleared them: this one starts at the first line)
+    let (id, from) = (c.next, c.lines.len());
+    c.next += 1;
+    c.live.push((id, from));
+    Capture { id, from }
+}
+
+/// A capture under way (`capture`).
+#[cfg(test)]
+pub struct Capture {
+    id: u64,
+    from: usize,
+}
+
+#[cfg(test)]
+impl Capture {
+    /// The lines since it started.
+    pub fn lines(&self) -> Vec<String> {
+        captured().lines.get(self.from..).unwrap_or_default().to_vec()
     }
-    got
+
+    /// Its id — `is_capturing` tells whether it's still under way.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+#[cfg(test)]
+impl Drop for Capture {
+    fn drop(&mut self) {
+        let mut c = captured();
+        c.live.retain(|(id, _)| *id != self.id);
+        if c.live.is_empty() {
+            c.lines.clear();
+        }
+    }
+}
+
+/// Tests: whether capture `id` is still under way.
+#[cfg(test)]
+pub fn is_capturing(id: u64) -> bool {
+    captured().live.iter().any(|(i, _)| *i == id)
+}
+
+/// Tests: how many lines are kept with no capture under way (none, when the last to end cleared them) — None:
+/// one is under way.
+#[cfg(test)]
+fn kept_while_idle() -> Option<usize> {
+    let c = captured();
+    c.live.is_empty().then_some(c.lines.len())
 }
 
 /// Local (year, month, day, hour, minute, second).
@@ -109,11 +169,63 @@ fn local(at: std::time::SystemTime) -> (i32, i32, i32, i32, i32, i32) {
 /// One line: `12:03:04  rust-analyzer  error  message` (multi-line text is indented under it).
 pub fn line(source: &str, level: &str, text: &str) {
     #[cfg(test)]
-    if let Some(lines) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        lines.push(format!("{source}  {level}  {text}"));
+    {
+        let mut c = captured();
+        if !c.live.is_empty() {
+            c.lines.push(format!("{source}  {level}  {text}"));
+        }
     }
     let Some(tx) = sender() else { return };
     let (.., h, m, sec) = now();
     let text = text.trim_end().replace('\n', &format!("\n{:36}", ""));
     let _ = tx.send(format!("{h:02}:{m:02}:{sec:02}  {source:<16} {level:<8} {text}\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Captures under way at once each read their own lines — those since each began — and a test that panics
+    /// mid-capture ends its capture as it unwinds: none is left under way keeping every later line, and with none
+    /// under way none are kept. (Other tests capture alongside: this one reads only its own tagged lines.)
+    #[test]
+    fn captures_end_with_their_test_even_one_that_panics() {
+        let tag = format!("log-capture-test-{}", std::process::id());
+        let mine = |c: &Capture| -> Vec<String> {
+            c.lines()
+                .into_iter()
+                .filter_map(|l| l.split_once(&tag).map(|(_, w)| w.trim().to_string()))
+                .collect()
+        };
+        let a = capture();
+        line("test", "info", &format!("{tag} one"));
+        let b = capture();
+        line("test", "info", &format!("{tag} two"));
+        assert_eq!(mine(&a), ["one", "two"], "a: every line since it began");
+        assert_eq!(mine(&b), ["two"], "b: only those since it began");
+        drop(b);
+        line("test", "info", &format!("{tag} three"));
+        assert_eq!(mine(&a), ["one", "two", "three"], "b's end isn't a's");
+        drop(a);
+        let mut id = u64::MAX;
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let c = capture();
+            id = c.id();
+            line("test", "info", &format!("{tag} panicked"));
+            panic!("a test failing mid-capture (expected here)");
+        }));
+        assert!(failed.is_err());
+        assert!(!is_capturing(id), "ended as its test unwound");
+        // (with none under way, none kept — what this test's captures saw went with the last to end; unless another
+        // test captures right now: then its lines are rightly kept, and this can't be seen)
+        match kept_while_idle() {
+            Some(kept) => assert_eq!(kept, 0, "lines kept with no capture under way: stale for the next"),
+            None => eprintln!(
+                "captures_end_with_their_test_even_one_that_panics: another test captures — not seen"
+            ),
+        }
+        let next = capture();
+        line("test", "info", &format!("{tag} four"));
+        assert_eq!(mine(&next), ["four"], "the next starts with its own");
+    }
 }

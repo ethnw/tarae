@@ -63,6 +63,33 @@ pub fn received(name: &str) -> Vec<Vec<u8>> {
 }
 
 /// Every datagram the kernel answered in every case kept.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn every_reply() -> Vec<Vec<u8>> {
     cases().into_iter().flat_map(|c| c.received).collect()
+}
+
+/// `b`'s messages with the ack flag taken off each — the one thing the crate sends that nft doesn't (it asks every
+/// change's ack); nothing else is changed.
+pub fn without_acks(b: &[u8]) -> Vec<u8> {
+    let mut b = b.to_vec();
+    let mut at = 0;
+    while at + crate::HEADER <= b.len() {
+        let len = u32::from_ne_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+        let flags = u16::from_ne_bytes(b[at + 6..at + 8].try_into().unwrap()) & !crate::ACK;
+        b[at + 6..at + 8].copy_from_slice(&flags.to_ne_bytes());
+        at += len.max(crate::HEADER);
+    }
+    b
+}
+
+/// `b`'s messages with their sequence numbers set to 0 — ip numbers its by the clock.
+pub fn without_seqs(b: &[u8]) -> Vec<u8> {
+    let mut b = b.to_vec();
+    let mut at = 0;
+    while at + crate::HEADER <= b.len() {
+        let len = u32::from_ne_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+        b[at + 8..at + 12].fill(0);
+        at += len.max(crate::HEADER);
+    }
+    b
 }

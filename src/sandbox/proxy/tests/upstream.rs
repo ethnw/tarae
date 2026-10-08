@@ -536,7 +536,7 @@ fn upstream_credentials_go_only_to_the_upstream() {
     let mut rng = Rng(0x5ec2_e75e_ed00_0005);
     let mut seen: Vec<String> = Vec::new();
     let mut forms: Vec<String> = Vec::new();
-    let _ = crate::log::capture(true);
+    let captured = crate::log::capture();
     for _ in 0..6 {
         let (u, p) = (format!("{:016x}", rng.next()), format!("{:016x}", rng.next()));
         let user = format!("tarae-fake-user-{u}{}", rng.awkward(3, b"@%/?# "));
@@ -606,7 +606,8 @@ fn upstream_credentials_go_only_to_the_upstream() {
         // (each whole, and its random part alone: a part of it anywhere is a leak too)
         forms.extend([user.clone(), password.clone(), pct(&user), pct(&password), value, u, p]);
     }
-    seen.extend(crate::log::capture(false));
+    seen.extend(captured.lines());
+    drop(captured);
     assert!(seen.iter().any(|s| s.contains("the upstream proxy 127.0.0.1:")), "the log says where it is");
     for form in &forms {
         for s in &seen {

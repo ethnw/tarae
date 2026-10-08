@@ -845,6 +845,7 @@ dependencies = [
  "serde_json",
  "streaming-iterator",
  "tar",
+ "tarae-netlink",
  "toml",
  "toml_edit",
  "tree-sitter",

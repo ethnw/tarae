@@ -37,6 +37,9 @@ use super::tier::{BirthError, BirthStep, Ns, RunNet};
 pub const FLAG: &str = "--sandbox-keeper";
 /// The keeper's end of its channel, as the keeper has it.
 const CHANNEL_FD: RawFd = 3;
+/// Where the birth leaves the raw ICMP socket it made for the session's network (`Birth::child`), for the keeper to
+/// hand tarae with `Planted` (`birth_raw`).
+const RAW_FD: RawFd = 4;
 /// How long a new keeper has to say it's there.
 const READY_WITHIN: Duration = Duration::from_secs(2);
 /// How long a run's start may take — the main loop waits for it.
@@ -66,6 +69,9 @@ pub struct Keeper {
     pub devices: Vec<(&'static str, OwnedFd)>,
     /// The families whose address its `lo` was to carry (`Families`) but couldn't take — said with it (`said`).
     pub lo_missing: Families,
+    /// Its session's network (`redirect`), where it was born with one: let go when it's gone — the owned table
+    /// with tarae's socket (P4), and its netns with the sockets that hold it.
+    pub network: Mutex<Option<super::redirect::Made>>,
     chan: OwnedFd,
     pidfd: OwnedFd,
     state: Mutex<State>,
@@ -84,6 +90,8 @@ struct State {
     key: Option<String>,
     next: u64,
     runs: HashMap<u64, Slot>,
+    /// `Planted` as it came — its kinds, its errno, its sockets — for `plant`, which asked.
+    planted: Option<(Vec<u8>, i32, Vec<OwnedFd>)>,
     /// Tests (M3): what it said it uses.
     #[cfg(test)]
     usage: Option<(u64, u64)>,
@@ -179,9 +187,44 @@ pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, Stri
     Ok(k)
 }
 
-/// A keeper for the probe (`tier.rs`): born with `ns`, kept by nobody but the caller.
-pub(super) fn born_for_probe(root: &Path, ns: Ns) -> io::Result<Arc<Keeper>> {
-    Keeper::born(root, None, ns)
+/// A keeper for the probe (`tier.rs`): born with `ns` — and the session's network, `redirect` (the probe can't ask
+/// itself whether there is one) — kept by nobody but the caller.
+pub(super) fn born_for_probe(root: &Path, ns: Ns, redirect: bool) -> io::Result<Arc<Keeper>> {
+    let network = (redirect && ns.netns()).then_some(NetworkFor::Session);
+    Keeper::born_lo(root, None, ns, Families::here(), false, network)
+}
+
+/// The network a keeper born with `ns` gets: the session's, where it has a netns and the probe's landed (`probed`,
+/// D-b: decided once — `tier::Probed.redirect`) — else none (until 6f its runs go out by the swap).
+fn network_for(ns: Ns, probed: &Result<(), String>) -> Option<NetworkFor> {
+    (ns.netns() && probed.is_ok()).then_some(NetworkFor::Session)
+}
+
+/// What network a keeper's birth makes: the session's — for the families its `lo` carries, known once it's ready
+/// (`redirect::Network::session`) — or, tests, one given whole.
+enum NetworkFor {
+    Session,
+    #[cfg(test)]
+    Given(super::redirect::Network),
+}
+
+/// What a keeper's `Planted` (`kinds`, `errno`) gives for a `Plant` of `families`: each socket's kind, exactly
+/// `redirect::Kind::wanted`'s in its order — and the raw ICMP socket besides, once, where the birth made one — else
+/// why not, as an errno: the keeper's own, or `EPROTO` (a kind missing, one extra, one twice). tarae never takes a
+/// socket for a kind it wasn't asked as.
+fn planted_kinds(families: Families, kinds: &[u8], errno: i32) -> Result<Vec<super::redirect::Kind>, i32> {
+    use super::redirect::Kind;
+    if errno != 0 {
+        return Err(errno);
+    }
+    let got: Vec<Kind> =
+        kinds.iter().map(|k| Kind::from_code(*k).ok_or(libc::EPROTO)).collect::<Result<_, _>>()?;
+    let asked: Vec<Kind> = got.iter().copied().filter(|k| *k != Kind::Icmp4).collect();
+    let raw = got.len() - asked.len();
+    if asked != Kind::wanted(families.v4, families.v6) || raw > 1 {
+        return Err(libc::EPROTO);
+    }
+    Ok(got)
 }
 
 /// The keepers of the session at `root` (None: every session's).
@@ -244,28 +287,32 @@ impl Keeper {
     /// (so through the exec: no thread of the new process takes it before its `signalfd` does) — then the exec
     /// of tarae's own binary, with an empty environment. Ready once it says so (`READY_WITHIN`); a step that
     /// failed before is the error (`BirthError` inside it). Its `lo` mirrors tarae's network's families
-    /// (`Families::here`).
+    /// (`Families::here`). With a network namespace, where the probe's network landed (`tier::Probed.redirect`), it
+    /// gets the session's network before it's ready (`redirect`): its sockets planted, checked and sent on — any
+    /// refusal its birth's error, the keeper and its netns thrown away.
     fn born(root: &Path, key: Option<&str>, ns: Ns) -> io::Result<Arc<Keeper>> {
         Keeper::born_with(root, key, ns, Families::here())
     }
 
     /// `born`, its `lo` carrying `families`' addresses.
     fn born_with(root: &Path, key: Option<&str>, ns: Ns, families: Families) -> io::Result<Arc<Keeper>> {
-        Keeper::born_lo(root, key, ns, families, false)
+        Keeper::born_lo(root, key, ns, families, false, network_for(ns, &super::tier::get().redirect))
     }
 
-    /// `born_with` — tests: the mirrors put on a device that isn't there (`off_lo`).
+    /// `born_with` — tests: the mirrors put on a device that isn't there (`off_lo`), the network another one
+    /// (None: none).
     fn born_lo(
         root: &Path,
         key: Option<&str>,
         ns: Ns,
         families: Families,
         off_lo: bool,
+        network: Option<NetworkFor>,
     ) -> io::Result<Arc<Keeper>> {
         let exe = exe()?;
         let (ours, theirs) = seqpacket()?;
         let null = open_null(libc::O_RDWR)?;
-        let birth = Birth::new(families, off_lo)?;
+        let birth = Birth::new(families, off_lo, network.is_some() && ns.netns())?;
         let mut lo_missing = Families::default();
         let argv: Vec<CString> = keeper_argv();
         let argv_p: Vec<*const libc::c_char> =
@@ -281,7 +328,7 @@ impl Keeper {
         if pid == 0 {
             // SAFETY: as above — async-signal-safe calls only.
             unsafe {
-                birth.child(ns);
+                let raw = birth.child(ns);
                 for fd in 0..3 {
                     libc::dup2(null.as_raw_fd(), fd);
                 }
@@ -289,6 +336,11 @@ impl Keeper {
                     libc::fcntl(CHANNEL_FD, libc::F_SETFD, 0);
                 } else {
                     libc::dup2(theirs.as_raw_fd(), CHANNEL_FD);
+                }
+                // (after the channel's: whatever sat at 4 — its old place among them — isn't needed past here)
+                if raw >= 0 {
+                    libc::dup2(raw, RAW_FD);
+                    libc::close(raw);
                 }
                 let mut mask: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut mask);
@@ -332,6 +384,7 @@ impl Keeper {
             ns,
             devices,
             lo_missing,
+            network: Mutex::new(None),
             chan: ours,
             pidfd,
             state: Mutex::new(State { key: key.map(str::to_string), ..State::default() }),
@@ -347,6 +400,39 @@ impl Keeper {
         }
         let reading = k.clone();
         crate::event::thread("tarae-keeper", move || reading.read());
+        if let Some(network) = network {
+            let carried =
+                Families { v4: families.v4 && !k.lo_missing.v4, v6: families.v6 && !k.lo_missing.v6 };
+            let network = match network {
+                NetworkFor::Session => super::redirect::Network::session(carried.v4, carried.v6),
+                #[cfg(test)]
+                NetworkFor::Given(network) => network,
+            };
+            let made = k.plant(carried).and_then(|handed| {
+                let session = super::redirect::netns_of_pid(k.pid).map_err(|e| BirthError {
+                    step: BirthStep::Netns,
+                    errno: e.raw_os_error().unwrap_or(libc::EIO),
+                })?;
+                super::redirect::make(session, handed, &network)
+            });
+            match made {
+                Ok(made) => *lock(&k.network) = Some(made),
+                // (never a retry: a half-made network is never a session's — `redirect.rs`)
+                Err(e) => {
+                    crate::log::line(
+                        "sandbox",
+                        "warn",
+                        &format!(
+                            "a keeper for {}: its network failed ({e}) — keeper {} killed, its netns with it",
+                            root.display(),
+                            k.pid
+                        ),
+                    );
+                    k.thrown_away();
+                    return Err(e.into());
+                }
+            }
+        }
         crate::log::line(
             "sandbox",
             "info",
@@ -471,6 +557,14 @@ impl Keeper {
             }
             #[cfg(test)]
             Msg::Usage { rss_kb, pss_kb } => s.usage = Some((rss_kb, pss_kb)),
+            // (handed before any run, or not taken: a socket of the session's network comes from its keeper
+            // before a run could be in it — P5)
+            Msg::Planted { kinds, errno } if s.next == 0 => s.planted = Some((kinds, errno, fds)),
+            Msg::Planted { .. } => crate::log::line(
+                "sandbox",
+                "warn",
+                &format!("keeper {} handed sockets after a run — refused", self.pid),
+            ),
             other => crate::log::line("sandbox", "warn", &format!("its keeper said {other:?}")),
         }
         drop(s);
@@ -484,6 +578,45 @@ impl Keeper {
             return pid_in_fdinfo(info);
         }
         pid_of(pidfd)
+    }
+
+    /// The keeper killed (`SIGKILL` through its pidfd: no other process can be it) — its going no death (`ending`),
+    /// its netns gone with the last socket in it.
+    fn thrown_away(&self) {
+        lock(&self.state).ending = true;
+        // SAFETY: a signal through the pidfd of the keeper we made.
+        unsafe { libc::syscall(libc::SYS_pidfd_send_signal, self.pidfd.as_raw_fd(), libc::SIGKILL, 0, 0) };
+    }
+
+    /// Asks the keeper for the sockets its session's network is made with (`Msg::Plant`: its `lo` carrying
+    /// `families`' addresses) and waits for them (`READY_WITHIN`): each its kind, exactly `redirect::Kind::wanted`'s
+    /// (and the birth's raw ICMP socket, the first time, where it made one), or the birth's error (`Planted`, with
+    /// the keeper's errno). Before any run: `heard` takes none after.
+    pub(super) fn plant(
+        &self,
+        families: Families,
+    ) -> Result<Vec<(super::redirect::Kind, OwnedFd)>, BirthError> {
+        let failed = |errno| BirthError { step: BirthStep::Planted, errno };
+        lock(&self.state).planted = None;
+        let ask = Msg::Plant { v4: families.v4, v6: families.v6 };
+        channel::send(self.chan.as_fd(), &ask, &[])
+            .map_err(|e| failed(e.raw_os_error().unwrap_or(libc::EIO)))?;
+        let deadline = Instant::now() + READY_WITHIN;
+        let mut s = lock(&self.state);
+        let (kinds, errno, fds) = loop {
+            if let Some(p) = s.planted.take() {
+                break p;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match (s.gone.is_some(), left.is_zero()) {
+                (true, _) => return Err(failed(libc::ECHILD)),
+                (_, true) => return Err(failed(libc::ETIMEDOUT)),
+                _ => s = self.changed.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0,
+            }
+        };
+        drop(s);
+        let got = planted_kinds(families, &kinds, errno).map_err(failed)?;
+        Ok(got.into_iter().zip(fds).collect())
     }
 
     /// Waits for the keeper's process to end (and reaps it).
@@ -532,14 +665,19 @@ impl Keeper {
                 }
             }
         }
+        // (a death counted before it's seen gone: the next `ready` can't come between and miss it — D11)
+        if !asked {
+            lock(&DEATHS).push((self.root.clone(), Instant::now()));
+        }
         s.gone = Some(why);
         drop(s);
         self.changed.notify_all();
+        // (its owned table goes with tarae's socket, its netns with the last socket in it)
+        drop(lock(&self.network).take());
         for (pid, pidfd) in &runs {
             kill_run(*pid, pidfd);
         }
         if !asked {
-            lock(&DEATHS).push((self.root.clone(), Instant::now()));
             crate::log::line(
                 "sandbox",
                 "warn",
@@ -883,6 +1021,9 @@ struct Birth {
     families: Families,
     /// Tests: the mirrors put on a device that isn't there, to see them fail.
     off_lo: bool,
+    /// The session's network is made (`redirect`): a raw ICMP socket is made in its netns too, while the child still
+    /// has the capability that takes (`CAP_NET_RAW`) — `Taken` answers refused datagrams on it.
+    icmp: bool,
 }
 
 /// What a birth's child says on its birth pipe of a mirror it couldn't make (`Families`): IPv4's, IPv6's —
@@ -946,18 +1087,12 @@ struct IfAddr {
     rest: [u8; 8],
 }
 
-/// The address the session's `lo` carries beside `127.0.0.1` where tarae's network has IPv4 (`Families`; as
-/// `lo:1`, a /32): a documentation address, local to the session's netns. Without an IPv4 address other than
-/// loopback, glibc's `AI_ADDRCONFIG` reads "no IPv4 here" and an IPv4-only lookup comes back empty (M5,
-/// `target/sb/step4-notes.md`). Nothing is reached through it: a run's binds and connects go to tarae, whose
-/// routing knows only loopback as the session's.
-pub const SESSION_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 1);
-
-/// `SESSION_V4`'s IPv6 twin (a /128 on `lo`), where tarae's network has IPv6 beyond loopback and link-local.
-pub const SESSION_V6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+/// The addresses the session's `lo` carries beside loopback (`redirect.rs` says why — and its planted sockets are at
+/// them).
+pub use super::redirect::{SESSION_V4, SESSION_V6};
 
 impl Birth {
-    fn new(families: Families, off_lo: bool) -> io::Result<Birth> {
+    fn new(families: Families, off_lo: bool, icmp: bool) -> io::Result<Birth> {
         let pipe = || -> io::Result<(OwnedFd, OwnedFd)> {
             let (r, w) = io::pipe()?;
             Ok((high(r.into())?, high(w.into())?))
@@ -966,7 +1101,7 @@ impl Birth {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(63);
-        Ok(Birth { go: pipe()?, told: pipe()?, last_cap, families, off_lo })
+        Ok(Birth { go: pipe()?, told: pipe()?, last_cap, families, off_lo, icmp })
     }
 
     /// tarae's ends, the child's closed: the go pipe's writer, the birth pipe's reader.
@@ -1003,10 +1138,12 @@ impl Birth {
     /// tarae gave up — it exits), then, with namespaces: its mounts slaved to the system's (nothing it mounts
     /// goes out), a fresh `/proc` with a PID namespace, its own `devpts` with its `ptmx` over `/dev/ptmx`, its
     /// own `/dev/shm` (D10), `lo` up, and every capability dropped — each checked; a failure said and it exits.
+    /// With the session's network (`icmp`), a raw ICMP socket made in its netns before the drop: where it is (above
+    /// the descriptors the child moves, not close-on-exec), else -1 — a socket that can't be made is done without.
     ///
     /// # Safety
     /// The birth's child's: raw calls only (a copy of a multithreaded process).
-    unsafe fn child(&self, ns: Ns) {
+    unsafe fn child(&self, ns: Ns) -> libc::c_int {
         let null = std::ptr::null::<libc::c_char>();
         // SAFETY: raw calls on this process's own descriptors, static strings and buffers on its stack.
         unsafe {
@@ -1023,8 +1160,9 @@ impl Birth {
             }
             libc::close(self.go.0.as_raw_fd());
             if !ns.user {
-                return;
+                return -1;
             }
+            let mut raw = -1;
             let mount = |src: *const libc::c_char,
                          at: &std::ffi::CStr,
                          fs: *const libc::c_char,
@@ -1116,10 +1254,18 @@ impl Birth {
                         libc::close(s6);
                     }
                 }
+                if self.icmp {
+                    let r = libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
+                    if r >= 0 {
+                        raw = libc::fcntl(r, libc::F_DUPFD, 10);
+                        libc::close(r);
+                    }
+                }
             }
             if let Err(e) = capabilities_dropped(self.last_cap) {
                 self.failed(BirthStep::Caps, e);
             }
+            raw
         }
     }
 }
@@ -1384,6 +1530,8 @@ pub fn main() -> ! {
         (OwnedFd::from_raw_fd(CHANNEL_FD), OwnedFd::from_raw_fd(sfd))
     };
     let mut k = Kept { chan, signals, children: HashMap::new(), reaped: 0 };
+    // (handed with the first `Planted`, never to a run: close-on-exec from here)
+    let mut raw = birth_raw();
     // SAFETY: getpid has no preconditions.
     let me = unsafe { libc::getpid() } as u32;
     // Its device places, as its own mount namespace has them, opened now — before any run exists — and handed
@@ -1432,12 +1580,57 @@ pub fn main() -> ! {
                     let (rss_kb, pss_kb) = own_usage();
                     let _ = k.say(&Msg::Usage { rss_kb, pss_kb }, &[]);
                 }
+                // The sockets the session's network is made with, made here — in its netns — each in
+                // `Kind::wanted`'s order, until one fails (its errno said with those made)
+                Ok(Some((Ok(Msg::Plant { v4, v6 }), _))) => {
+                    let mut made: Vec<(super::redirect::Kind, OwnedFd)> = Vec::new();
+                    let mut errno = 0;
+                    for kind in super::redirect::Kind::wanted(v4, v6) {
+                        match super::redirect::open(kind) {
+                            Ok(fd) => made.push((kind, fd)),
+                            Err(e) => {
+                                errno = e.raw_os_error().unwrap_or(libc::EIO);
+                                break;
+                            }
+                        }
+                    }
+                    if errno == 0
+                        && let Some(r) = raw.take()
+                    {
+                        made.push((super::redirect::Kind::Icmp4, r));
+                    }
+                    let kinds = made.iter().map(|(kind, _)| kind.code()).collect();
+                    let fds: Vec<BorrowedFd> = made.iter().map(|(_, fd)| fd.as_fd()).collect();
+                    let _ = k.say(&Msg::Planted { kinds, errno }, &fds);
+                }
                 // (a keeper's own kinds, or a malformed record: refused, and it goes on)
                 Ok(Some((Ok(_), _))) | Ok(Some((Err(_), _))) => {
                     let _ = k.say(&Msg::Failed { id: 0, errno: libc::EINVAL, step: Step::Request }, &[]);
                 }
             }
         }
+    }
+}
+
+/// The raw ICMP socket its birth left at `RAW_FD` (`Birth::child`), made close-on-exec — None: nothing there, or what
+/// is there isn't one (left as it is).
+fn birth_raw() -> Option<OwnedFd> {
+    let opt = |name: i32| {
+        let (mut v, mut len) = (0i32, size_of::<i32>() as libc::socklen_t);
+        // SAFETY: an int and its length, ours for the call, on a descriptor that may not be a socket (then -1).
+        let r = unsafe { libc::getsockopt(RAW_FD, libc::SOL_SOCKET, name, (&raw mut v).cast(), &mut len) };
+        (r == 0).then_some(v)
+    };
+    let raw = opt(libc::SO_DOMAIN) == Some(libc::AF_INET)
+        && opt(libc::SO_TYPE) == Some(libc::SOCK_RAW)
+        && opt(libc::SO_PROTOCOL) == Some(libc::IPPROTO_ICMP);
+    if !raw {
+        return None;
+    }
+    // SAFETY: the descriptor checked above is this process's, its birth's to hand on: ours from here.
+    unsafe {
+        libc::fcntl(RAW_FD, libc::F_SETFD, libc::FD_CLOEXEC);
+        Some(OwnedFd::from_raw_fd(RAW_FD))
     }
 }
 
@@ -2632,6 +2825,20 @@ mod tests {
             "foreign" => helper_foreign(),
             "protocols" => helper_protocols(),
             "udp" => helper_udp(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "within" => helper_within(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "asked" => helper_asked(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "lookup_timed" => {
+                let name = std::env::var("TARAE_NAME").unwrap_or_default();
+                let t0 = Instant::now();
+                let found = lookup_in(&name, libc::AF_INET);
+                format!("lookup={found} ms={}", t0.elapsed().as_millis())
+            }
+            "datagram" => {
+                let to = std::env::var("TARAE_TO").unwrap_or_default();
+                let sent = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.send_to(b"x", to.as_str()));
+                format!("datagram={}", tried(sent))
+            }
+            "nlchanges" => helper_nl_changes(),
             "lookup4" => format!("v4={} lookup4={}", ipv4_addresses().join(","), lookup4_own_name()),
             "lookup6" => {
                 let name = std::env::var("TARAE_NAME").unwrap_or_default();
@@ -2671,6 +2878,103 @@ mod tests {
         let mut line = String::new();
         let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
         format!("reached {}", line.trim())
+    }
+
+    /// `within`: `$TARAE_TO` reached within 2 s, and what it does with a connection that says nothing — `reached
+    /// closed` (it closed it), `reached reset`, `reached <data>`, `reached open` (still open 2 s on) — or the errno,
+    /// `timed out`.
+    fn helper_within(to: &str) -> String {
+        let Ok(to) = to.parse::<std::net::SocketAddr>() else { return format!("not an address: {to}") };
+        let s = match std::net::TcpStream::connect_timeout(&to, Duration::from_secs(2)) {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => return "timed out".into(),
+            // (a reset quick enough to land before the connect is seen through: reached all the same)
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => return "reached reset".into(),
+            Err(e) => return tried::<()>(Err(e)),
+        };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut b = [0u8; 64];
+        match io::Read::read(&mut &s, &mut b) {
+            Ok(0) => "reached closed".into(),
+            Ok(n) => format!("reached {}", String::from_utf8_lossy(&b[..n]).trim()),
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reached reset".into(),
+            Err(_) => "reached open".into(),
+        }
+    }
+
+    /// `asked`: a datagram to `$TARAE_TO` on a connected UDP socket — as glibc's resolver sends its questions — and
+    /// its answer waited for 2 s: `answered`, or the errno (`EAGAIN`: none came) and how long that took, `ms=<n>`.
+    fn helper_asked(to: &str) -> String {
+        let s = match std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect(to).map(|()| s)) {
+            Ok(s) => s,
+            Err(e) => return tried::<()>(Err(e)),
+        };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        let t0 = Instant::now();
+        let mut b = [0u8; 512];
+        let got = s.send(b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00").and_then(|_| s.recv(&mut b));
+        match got {
+            Ok(_) => "answered".into(),
+            Err(e) => format!("{} ms={}", tried::<()>(Err(e)), t0.elapsed().as_millis()),
+        }
+    }
+
+    /// `nlchanges`: what changing the session's network takes, tried by a run on its own routing socket, each sent
+    /// to the kernel's address as ip sends it — the policy rule tarae added deleted (`RTM_DELRULE`, table 100), the
+    /// main table's default route deleted and added again (`RTM_DELROUTE`, `RTM_NEWROUTE`), and a netfilter socket
+    /// (what nf_tables changes take): each `ok` or its errno.
+    fn helper_nl_changes() -> String {
+        // SAFETY: plain call; a descriptor made is ours.
+        let fd = unsafe {
+            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE)
+        };
+        if fd < 0 {
+            return format!("route={}", errno_now());
+        }
+        // SAFETY: just made.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let send = |kind: u16, flags: i32, body: &[u8]| -> String {
+            let mut m = Vec::new();
+            m.extend((16 + body.len() as u32).to_ne_bytes());
+            m.extend(kind.to_ne_bytes());
+            m.extend(((libc::NLM_F_REQUEST | libc::NLM_F_ACK | flags) as u16).to_ne_bytes());
+            m.extend(1u32.to_ne_bytes());
+            m.extend(0u32.to_ne_bytes());
+            m.extend(body);
+            // SAFETY: all zeros is the kernel's address; a send of our buffer on our socket.
+            unsafe {
+                let mut to: libc::sockaddr_nl = std::mem::zeroed();
+                to.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+                let n = libc::sendto(
+                    fd.as_raw_fd(),
+                    m.as_ptr().cast(),
+                    m.len(),
+                    0,
+                    (&raw const to).cast(),
+                    size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+                );
+                if n < 0 { errno_now().to_string() } else { "ok".into() }
+            }
+        };
+        // `struct fib_rule_hdr`: AF_INET, table 100, FR_ACT_TO_TBL; `struct rtmsg`: AF_INET, main, unicast
+        let rule = [libc::AF_INET as u8, 0, 0, 0, 100, 0, 0, 1, 0, 0, 0, 0];
+        let route = [libc::AF_INET as u8, 0, 0, 0, 254, 0, 0, 1, 0, 0, 0, 0];
+        let delrule = send(libc::RTM_DELRULE, 0, &rule);
+        let delroute = send(libc::RTM_DELROUTE, 0, &route);
+        let newroute = send(libc::RTM_NEWROUTE, libc::NLM_F_CREATE, &route);
+        // SAFETY: plain call; a descriptor it makes is closed at once.
+        let nf = unsafe {
+            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_NETFILTER)
+        };
+        let netfilter = match nf {
+            n if n < 0 => errno_now().to_string(),
+            n => {
+                // SAFETY: ours, just made.
+                unsafe { libc::close(n) };
+                "ok".into()
+            }
+        };
+        format!("delrule={delrule} delroute={delroute} newroute={newroute} netfilter={netfilter}")
     }
 
     /// This process's netns's IPv4 addresses (`getifaddrs`), as `a.b.c.d`.
@@ -4304,7 +4608,15 @@ mod tests {
         let Some(rules) = open_rules(test) else { return };
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-offlo", std::process::id()));
         let both = Families { v4: true, v6: true };
-        let k = Keeper::born_lo(&root, None, ns(), both, true).expect("born, without its mirrors");
+        let k = Keeper::born_lo(
+            &root,
+            None,
+            ns(),
+            both,
+            true,
+            network_for(ns(), &super::super::tier::get().redirect),
+        )
+        .expect("born, without its mirrors");
         assert_eq!(k.lo_missing, both, "neither carried");
         assert!(k.said().contains("its lo without an IPv4 or IPv6 address"), "{}", k.said());
         let said =
@@ -4313,7 +4625,15 @@ mod tests {
         let said = helper_through(&k, rules.fd(), RunNet::Own, "lookup4", &[], None);
         assert!(said.starts_with("v4=127.0.0.1 "), "{said}");
         k.end();
-        let k = Keeper::born_lo(&root, None, ns(), both, false).expect("a keeper starts");
+        let k = Keeper::born_lo(
+            &root,
+            None,
+            ns(),
+            both,
+            false,
+            network_for(ns(), &super::super::tier::get().redirect),
+        )
+        .expect("a keeper starts");
         assert_eq!(k.lo_missing, Families::default(), "both carried where they can be");
         assert!(!k.said().contains("its lo"), "{}", k.said());
         k.end();
@@ -4424,5 +4744,561 @@ mod tests {
             return;
         }
         assert_eq!(super::super::supervisor::swap_unavailable(), None);
+    }
+
+    // ── step 6c: the session's network, made at its keeper's birth ─────────────────────────────────────────
+
+    /// Whether this system's keepers are born with the session's network (a netns, and the probe's landed) — else
+    /// says the test skips itself, and why. A machine said to give it (`TARAE_EXPECT_NETWORK=tproxy`) fails instead:
+    /// a network broken there isn't a skip.
+    fn network_here(test: &str) -> bool {
+        if !namespaced(test) {
+            return false;
+        }
+        match (&super::super::tier::get().redirect, ns().netns()) {
+            (Ok(()), true) => true,
+            (r, _) => {
+                let why = r.as_ref().err().cloned().unwrap_or_else(|| "no network namespace".into());
+                if std::env::var("TARAE_EXPECT_NETWORK").is_ok_and(|n| n == "tproxy") {
+                    panic!("{test}: TPROXY expected here (TARAE_EXPECT_NETWORK), none — {why}");
+                }
+                let line = format!(
+                    "{}sandbox::keeper::tests::{test} — no TPROXY here: {why}\n",
+                    crate::test_results::SELF_SKIP
+                );
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+                false
+            }
+        }
+    }
+
+    /// The session's network as tarae reads it back over its own sockets: nf_tables' generation, each chain's
+    /// rule count, the routes and the policy rules (v4 and v6) — as text, to compare.
+    fn network_state(k: &Keeper) -> String {
+        use tarae_netlink::{Family, nft, route};
+        let mut net = lock(&k.network);
+        let made = net.as_mut().expect("its network");
+        let by = || Instant::now() + Duration::from_secs(2);
+        let generation = nft::generation(&mut made.nf, by()).unwrap();
+        let rules = nft::rules(&mut made.nf, by()).unwrap();
+        let count = |chain: &str| rules.iter().filter(|r| r.table == "tarae" && r.chain == chain).count();
+        let mut said = format!("generation {generation}, out {}, pre {}", count("out"), count("pre"));
+        for f in [Family::V4, Family::V6] {
+            said += &format!("\n{f:?} routes {:?}", route::routes(&mut made.route, f, by()).unwrap());
+            said += &format!("\n{f:?} rules {:?}", route::rules(&mut made.route, f, by()).unwrap());
+        }
+        said
+    }
+
+    /// A keeper is born with the session's network before any run: its owned table holds the session's ruleset
+    /// (3 rules leaving and 3 coming in for both families, and 2 and 5 more for each its `lo` carries — 7 and 13
+    /// with both), its routes and policy rule are there, and a run's own connect beyond the session — on its own
+    /// socket, no supervisor — lands on a planted socket, which refuses it until 6d (accepted, reset, counted).
+    #[test]
+    fn the_session_has_its_network_before_any_run() {
+        let test = "the_session_has_its_network_before_any_run";
+        if !network_here(test) {
+            return;
+        }
+        let k = keeper("network");
+        let here = Families::here();
+        let carried = [here.v4 && !k.lo_missing.v4, here.v6 && !k.lo_missing.v6].map(usize::from);
+        let (out, pre) = (3 + 2 * (carried[0] + carried[1]), 3 + 5 * (carried[0] + carried[1]));
+        let state = network_state(&k);
+        assert!(
+            state.starts_with("generation ") && state.contains(&format!(", out {out}, pre {pre}")),
+            "{state}"
+        );
+        assert!(state.contains("table: 100") && state.contains("fwmark: Some(1)"), "{state}");
+        let (_, c, root) = project_served("network-own", vec![], Some(&k), &[], Err("not served".into()));
+        assert_eq!(c.net, RunNet::Own);
+        let said = helper_through(
+            &k,
+            c.rules_fd(),
+            c.net,
+            "within",
+            &[("TARAE_TO", "203.0.113.7:443")],
+            Some(&root),
+        );
+        assert_eq!(said, "reached reset", "taken to the planted socket, refused there");
+        let taken = lock(&k.network).as_ref().map(|m| (m.taken.count(), m.taken.last()));
+        assert_eq!(
+            taken,
+            Some((1, Some("203.0.113.7:443".parse().unwrap()))),
+            "counted, its destination kept"
+        );
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A UDP datagram a run sends beyond the session lands on the planted UDP socket with where it was going
+    /// (`RECVORIGDSTADDR`): what 6e answers DNS with. (IPv4: these machines' containers have no IPv6 of their own.)
+    #[test]
+    fn a_datagram_beyond_lands_with_its_original_destination() {
+        let test = "a_datagram_beyond_lands_with_its_original_destination";
+        if !network_here(test) {
+            return;
+        }
+        let k = keeper("datagram");
+        let (_, c, root) = project_served("datagram-own", vec![], Some(&k), &[], Err("not served".into()));
+        let said = helper_through(
+            &k,
+            c.rules_fd(),
+            c.net,
+            "datagram",
+            &[("TARAE_TO", "203.0.113.7:5000")],
+            Some(&root),
+        );
+        assert_eq!(said, "datagram=ok");
+        let seen = || lock(&k.network).as_ref().map(|m| (m.taken.count(), m.taken.last()));
+        let by = Instant::now() + Duration::from_secs(1);
+        while seen().is_some_and(|(n, _)| n == 0) && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            seen(),
+            Some((1, Some("203.0.113.7:5000".parse().unwrap()))),
+            "taken, its destination read"
+        );
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// P5's "before any run": sockets a keeper hands once a run was asked of it aren't taken — they could be a
+    /// run's — so a later ask goes unanswered (refused, said in the log) and fails at its time limit.
+    #[test]
+    fn sockets_handed_after_a_run_are_refused() {
+        let test = "sockets_handed_after_a_run_are_refused";
+        if !network_here(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let k = keeper("after-a-run");
+        assert!(k.plant(Families::default()).is_ok(), "before any run: taken");
+        let (_, status) = sh_through(&k, &rules, "true");
+        assert!(status.success());
+        match k.plant(Families::default()) {
+            Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Planted, libc::ETIMEDOUT), "{e}"),
+            Ok(_) => panic!("sockets taken after a run"),
+        }
+        k.end();
+    }
+
+    /// P4: without tarae's netfilter socket the session reaches nothing — the owned table goes with it (tarae's
+    /// crash stood in for by closing it): a run's own connect beyond, taken to the planted socket while the table is
+    /// there, isn't once it's gone.
+    #[test]
+    fn without_taraes_netlink_socket_the_session_reaches_nothing() {
+        let test = "without_taraes_netlink_socket_the_session_reaches_nothing";
+        if !network_here(test) {
+            return;
+        }
+        let k = keeper("p4");
+        let (_, c, root) = project_served("p4-own", vec![], Some(&k), &[], Err("not served".into()));
+        let beyond = [("TARAE_TO", "203.0.113.7:443")];
+        let said = helper_through(&k, c.rules_fd(), c.net, "within", &beyond, Some(&root));
+        assert_eq!(said, "reached reset", "taken while the table is there");
+        let super::super::redirect::Made { nf, taken, route, .. } =
+            lock(&k.network).take().expect("its network");
+        drop(nf);
+        // (the table goes as its socket is released: asked again until it has, within a second)
+        let by = Instant::now() + Duration::from_secs(1);
+        let said = loop {
+            let said = helper_through(&k, c.rules_fd(), c.net, "within", &beyond, Some(&root));
+            if said != "reached reset" || Instant::now() > by {
+                break said;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_ne!(said, "reached reset", "taken with tarae's socket gone");
+        assert_eq!(taken.count(), 1, "nothing more reached the planted socket");
+        drop((route, taken));
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// P5: tarae sends netlink only on sockets of the session's netns — the one its keeper (its runs) is in. Another
+    /// keeper's sockets, of a netns tarae owns too (so the lookup answers), handed in the session's keeper's place,
+    /// are refused before anything is sent: that netns has no table and no route after. Its own keeper's are taken.
+    #[test]
+    fn a_socket_of_another_netns_is_refused_before_anything_is_sent() {
+        use tarae_netlink::{Family, Protocol, Socket, nft, route};
+        let test = "a_socket_of_another_netns_is_refused_before_anything_is_sent";
+        if !network_here(test) {
+            return;
+        }
+        let session = keeper("p5-session");
+        let other_root = std::env::temp_dir().join(format!("tarae-keeper-{}-p5-other", std::process::id()));
+        let other = Keeper::born_lo(&other_root, None, ns(), Families::here(), false, None)
+            .expect("born, no network");
+        let carried = Families {
+            v4: Families::here().v4 && !other.lo_missing.v4,
+            v6: Families::here().v6 && !other.lo_missing.v6,
+        };
+        let handed = other.plant(carried).expect("its sockets");
+        let theirs = super::super::redirect::netns_of_pid(other.pid).unwrap();
+        let ours = super::super::redirect::netns_of_pid(session.pid).unwrap();
+        assert_ne!(theirs, ours, "two sessions, two netns");
+        let made = super::super::redirect::make(
+            ours,
+            handed,
+            &super::super::redirect::Network::session(carried.v4, carried.v6),
+        );
+        // (what's in the other netns now, read over its own fresh sockets)
+        // (its netlink sockets only: no planted ones to bind where the first set's may still be)
+        let mut look = other.plant(Families::default()).expect("its netlink sockets");
+        let by = || Instant::now() + Duration::from_secs(2);
+        let fd = |k: super::super::redirect::Kind, h: &mut Vec<(super::super::redirect::Kind, OwnedFd)>| {
+            let at = h.iter().position(|(kind, _)| *kind == k).unwrap();
+            h.remove(at).1
+        };
+        let mut nf =
+            Socket::from_fd(fd(super::super::redirect::Kind::Netfilter, &mut look), Protocol::Netfilter)
+                .unwrap();
+        let mut rt =
+            Socket::from_fd(fd(super::super::redirect::Kind::Route, &mut look), Protocol::Route).unwrap();
+        assert!(nft::tables(&mut nf, by()).unwrap().is_empty(), "no table landed there");
+        let routes = route::routes(&mut rt, Family::V4, by()).unwrap();
+        assert!(!routes.iter().any(|r| r.table == 100), "no route landed there: {routes:?}");
+        match made {
+            Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Netns, libc::EPERM), "{e}"),
+            Ok(_) => panic!("another netns's sockets taken as the session's"),
+        }
+        drop((look, nf, rt));
+        let own = super::super::redirect::make(
+            theirs,
+            look_again(&other, carried),
+            &super::super::redirect::Network::session(carried.v4, carried.v6),
+        );
+        assert!(own.is_ok(), "its own keeper's sockets are the session's: {:?}", own.err());
+        drop(own);
+        other.end();
+        session.end();
+    }
+
+    /// `plant`, again: a fresh set of the keeper's sockets (it has run nothing).
+    fn look_again(k: &Keeper, carried: Families) -> Vec<(super::super::redirect::Kind, OwnedFd)> {
+        k.plant(carried).expect("its sockets")
+    }
+
+    /// P1, for the birth's state: nothing a run does changes the session's rules or routes. A served run's own
+    /// routing socket deleting the policy rule and the main table's default route, adding one, and asking for a
+    /// netfilter socket — each refused — and the generation, the rule counts, the routes and the policy rules read
+    /// back the same. (tarae makes a served run's netlink sends, with its own capability over the netns: what
+    /// nlguard lets through lands.)
+    #[test]
+    fn a_run_changes_none_of_the_sessions_rules_or_routes() {
+        let test = "a_run_changes_none_of_the_sessions_rules_or_routes";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let k = keeper("p1");
+        let before = network_state(&k);
+        let (p, c, root) = routed_project("p1", &k, |_| {});
+        let (said, refused) = served_said(&k, (&p, &c, &root), "nlchanges", &[]);
+        let each: HashMap<&str, &str> = said.split(' ').filter_map(|w| w.split_once('=')).collect();
+        let eperm = libc::EPERM.to_string();
+        for change in ["delrule", "delroute", "newroute"] {
+            assert_eq!(each.get(change), Some(&eperm.as_str()), "{change}: {said} — {refused:?}");
+        }
+        assert!(each.get("netfilter").is_some_and(|n| *n != "ok"), "{said}");
+        assert_eq!(network_state(&k), before, "the session's network as it was");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A refusal while making the session's network fails the birth, said with its step and errno — the keeper
+    /// and its netns thrown away (the keeper gone within a second), never a session with half its network: a route
+    /// on a device that isn't there (`ENODEV` at the routes), a rule for a chain that isn't there (`ENOENT` at the
+    /// rules).
+    #[test]
+    fn the_birth_says_which_part_failed() {
+        use tarae_netlink::nft::{Expr, Transaction, Verdict};
+        use tarae_netlink::route::{Changes, RouteKind};
+        use tarae_netlink::{Family, route};
+        let test = "the_birth_says_which_part_failed";
+        if !network_here(test) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-failed", std::process::id()));
+        let mut no_device = Changes::new();
+        no_device.default_route(Family::V4, route::MAIN, RouteKind::Unicast, 4242);
+        let routes = super::super::redirect::Network {
+            routes: vec![no_device.end()],
+            ..super::super::redirect::Network::session(true, true)
+        };
+        let mut no_chain = Transaction::new();
+        no_chain.table("tarae", true);
+        no_chain.rule("tarae", "nosuch", &[Expr::Verdict(Verdict::Accept)]);
+        let rules = super::super::redirect::Network {
+            rules: no_chain.end(),
+            ..super::super::redirect::Network::session(true, true)
+        };
+        for (network, step, errno) in
+            [(routes, BirthStep::Routes, libc::ENODEV), (rules, BirthStep::Rules, libc::ENOENT)]
+        {
+            let captured = crate::log::capture();
+            let given = Some(NetworkFor::Given(network));
+            let e = match Keeper::born_lo(&root, None, ns(), Families::here(), false, given) {
+                Ok(k) => {
+                    k.end();
+                    panic!("born with half its network ({step:?})");
+                }
+                Err(e) => e,
+            };
+            assert_eq!(BirthError::of(&e), Some(BirthError { step, errno }), "{e}");
+            assert!(e.to_string().starts_with(step.said()), "said with its step: {e}");
+            // (and thrown away: the keeper — the last thing in its netns but tarae's sockets, gone with the error —
+            // gone within a second)
+            let ours = format!("a keeper for {}: its network failed", root.display());
+            let said = captured.lines().into_iter().find(|l| l.contains(&ours)).expect("its failure said");
+            let pid: u32 = said
+                .split(" — keeper ")
+                .nth(1)
+                .and_then(|r| r.split(' ').next()?.parse().ok())
+                .unwrap_or_else(|| panic!("its pid: {said}"));
+            let by = Instant::now() + Duration::from_secs(1);
+            while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < by {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!Path::new(&format!("/proc/{pid}")).exists(), "keeper {pid} still there ({step:?})");
+        }
+    }
+
+    /// The interim until 6d and 6e (`redirect.rs`): a run tarae doesn't serve, beyond the session — where it used to
+    /// get `ENETUNREACH` at once — is refused as quickly and as plainly as by a closed port, never left to its own
+    /// time limits: its connect reset (`ECONNRESET` on its first read), a datagram it asks on a connected UDP socket
+    /// answered port unreachable (`ECONNREFUSED`), and so its name lookup gives up at once — glibc asks on connected
+    /// sockets (`RES_OPTIONS` keeps one that would wait to 2 s). 6e flips the lookup half: names answered by tarae.
+    #[test]
+    fn an_unserved_runs_way_out_fails_fast() {
+        let test = "an_unserved_runs_way_out_fails_fast";
+        if !network_here(test) {
+            return;
+        }
+        let k = keeper("unserved");
+        let (_, c, root) = project_served("unserved-own", vec![], Some(&k), &[], Err("not served".into()));
+        let run = |what: &str, env: &[(&str, &str)]| {
+            helper_through(&k, c.rules_fd(), c.net, what, env, Some(&root))
+        };
+        let ms = |said: &str| {
+            said.rsplit_once("ms=").and_then(|(_, n)| n.parse::<u128>().ok()).unwrap_or(u128::MAX)
+        };
+        assert_eq!(run("within", &[("TARAE_TO", "203.0.113.7:443")]), "reached reset", "the connect");
+        let asked = run("asked", &[("TARAE_TO", "203.0.113.53:53")]);
+        assert!(
+            asked.starts_with(&format!("{} ", libc::ECONNREFUSED)) && ms(&asked) < 500,
+            "the datagram: {asked}"
+        );
+        let env = [("TARAE_NAME", "tarae-6c.example"), ("RES_OPTIONS", "timeout:2 attempts:1")];
+        let lookup = run("lookup_timed", &env);
+        assert!(lookup.starts_with("lookup=getaddrinfo ") && ms(&lookup) < 1000, "the lookup: {lookup}");
+        eprintln!("{test}: {asked}; {lookup}");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A family the session's `lo` doesn't carry gets no routes and no rules: a run's connect beyond in that family
+    /// fails at once, as before 6c (`ENETUNREACH`: no route) — never its SYN meeting the final drop and waiting out
+    /// TCP's time limit. A session born as for a network without IPv6 (`born_with`); IPv4, carried, still lands on
+    /// its planted socket.
+    #[test]
+    fn a_family_not_carried_fails_at_once_as_before() {
+        let test = "a_family_not_carried_fails_at_once_as_before";
+        if !network_here(test) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-v6off", std::process::id()));
+        let k =
+            Keeper::born_with(&root, None, ns(), Families { v4: true, v6: false }).expect("a keeper starts");
+        let (_, c, project) = project_served("v6off-own", vec![], Some(&k), &[], Err("not served".into()));
+        let run =
+            |to: &str| helper_through(&k, c.rules_fd(), c.net, "within", &[("TARAE_TO", to)], Some(&project));
+        assert_eq!(run("[2001:db8::7]:443"), libc::ENETUNREACH.to_string(), "IPv6, not carried: no route");
+        assert_eq!(run("203.0.113.7:443"), "reached reset", "IPv4, carried: taken");
+        k.end();
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    /// P2's second line, the ruleset's last rule: what no rule took — neither TCP nor UDP — is dropped. Its stand-in
+    /// sender is the raw ICMP socket the birth made in the session's netns (runs make TCP and UDP sockets only —
+    /// `a_run_makes_tcp_and_udp_sockets_only`), marked as the output chain marks what leaves (`SO_MARK`: tarae has
+    /// `CAP_NET_ADMIN` over the netns), so routing takes what it sends as this machine's (table 100): an echo to the
+    /// session's own address arrives — the sender works — and one beyond the session meets the drop: it never
+    /// arrives, where without the rule it would be delivered here as this machine's own. (Unmarked, it would die
+    /// anyway: the netns forwards nothing, and `ip_error` says nothing then — so only the marked one shows the rule.)
+    #[test]
+    fn what_isnt_tcp_or_udp_meets_the_final_drop() {
+        let test = "what_isnt_tcp_or_udp_meets_the_final_drop";
+        if !network_here(test) {
+            return;
+        }
+        let k = keeper("drop");
+        let icmp =
+            lock(&k.network).as_ref().and_then(|m| m.icmp.clone()).expect("the birth's raw ICMP socket");
+        let mark = |m: u32| {
+            // SAFETY: an int, ours for the call, on a socket we hold.
+            unsafe {
+                libc::setsockopt(icmp.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, (&raw const m).cast(), 4)
+            }
+        };
+        assert_eq!(mark(1), 0, "{}", io::Error::last_os_error());
+        // (it only sends as made — `the_raw_icmp_socket_only_sends`: given every type while this test watches)
+        super::super::redirect::icmp_filter(icmp.as_fd(), 0).unwrap();
+        let beyond = std::net::Ipv4Addr::new(203, 0, 113, 7);
+        assert!(
+            echo(icmp.as_fd(), SESSION_V4, 0x6c01),
+            "to the session's own address it arrives: the sender works"
+        );
+        assert!(!echo(icmp.as_fd(), beyond, 0x6c02), "beyond the session, untaken: dropped");
+        mark(0);
+        super::super::redirect::icmp_filter(icmp.as_fd(), u32::MAX).unwrap();
+        k.end();
+    }
+
+    /// An ICMP echo to `to` (its `id`) on raw socket `fd`, and whether it got anywhere within a second: delivered in
+    /// this netns (a raw ICMP socket sees every ICMP packet delivered here — the request itself, as it arrives), its
+    /// reply, or an error quoting it. (Taken as this machine's beyond the session, the request is delivered but its
+    /// reply can't leave: its source, `to`, is no local address once unmarked — so the arrival is what shows it.)
+    fn echo(fd: BorrowedFd, to: std::net::Ipv4Addr, id: u16) -> bool {
+        send_echo(fd, to, id);
+        let ours = |icmp: &[u8]| icmp.len() >= 6 && icmp[4..6] == id.to_be_bytes();
+        let by = Instant::now() + Duration::from_secs(1);
+        let mut b = [0u8; 2048];
+        while let Some(left) = by.checked_duration_since(Instant::now()) {
+            if !readable(fd, left).unwrap_or(false) {
+                break;
+            }
+            // SAFETY: a receive into a buffer of its size, on a socket we hold.
+            let n = unsafe { libc::recv(fd.as_raw_fd(), b.as_mut_ptr().cast(), b.len(), libc::MSG_DONTWAIT) };
+            let Ok(n) = usize::try_from(n) else { continue };
+            let packet = &b[..n];
+            let Some(icmp) = packet.get(usize::from(packet.first().unwrap_or(&0) & 0xf) * 4..) else {
+                continue;
+            };
+            let quoted = icmp.get(8..).and_then(|inner| inner.get(usize::from(inner.first()? & 0xf) * 4..));
+            match icmp.first() {
+                Some(0 | 8) if ours(icmp) => return true,
+                Some(3 | 11) if quoted.is_some_and(|q| q.first() == Some(&8) && ours(q)) => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// An ICMP echo request to `to` (its `id`) sent on raw socket `fd`.
+    fn send_echo(fd: BorrowedFd, to: std::net::Ipv4Addr, id: u16) {
+        let mut p = vec![8u8, 0, 0, 0];
+        p.extend(id.to_be_bytes());
+        p.extend(1u16.to_be_bytes());
+        p.extend(b"tarae 6c");
+        let sum = super::super::redirect::checksum(&p);
+        p[2..4].copy_from_slice(&sum.to_be_bytes());
+        let to = std::net::SocketAddr::new(to.into(), 0);
+        let (sa, len) = super::super::redirect::socket_address(to);
+        // SAFETY: a send of our buffer to an address of ours, on a socket we hold.
+        let n = unsafe {
+            libc::sendto(fd.as_raw_fd(), p.as_ptr().cast(), p.len(), 0, (&raw const sa).cast(), len)
+        };
+        assert_eq!(n, p.len() as isize, "the echo: {}", io::Error::last_os_error());
+    }
+
+    /// The bytes waiting on socket `fd` (`FIONREAD`: a raw socket's next packet's).
+    fn queued(fd: BorrowedFd) -> i32 {
+        let mut n: libc::c_int = 0;
+        // SAFETY: an int, ours for the call, on a socket we hold.
+        let r = unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONREAD, &mut n) };
+        assert_eq!(r, 0, "FIONREAD: {}", io::Error::last_os_error());
+        n
+    }
+
+    /// The birth's raw ICMP socket only sends: a raw socket gets a copy of every ICMP packet delivered in its netns,
+    /// and nothing reads this one, so every type it can be given is filtered (`ICMP_FILTER`) — its queue would fill
+    /// and stay full. After an echo to the session's own address, nothing waits on it; with the filter lifted, the
+    /// same echo's request and reply do (the control: the echo is delivered).
+    #[test]
+    fn the_raw_icmp_socket_only_sends() {
+        let test = "the_raw_icmp_socket_only_sends";
+        if !network_here(test) {
+            return;
+        }
+        let k = keeper("raw-sends");
+        let icmp =
+            lock(&k.network).as_ref().and_then(|m| m.icmp.clone()).expect("the birth's raw ICMP socket");
+        send_echo(icmp.as_fd(), SESSION_V4, 0x6c11);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(queued(icmp.as_fd()), 0, "as made: nothing kept");
+        super::super::redirect::icmp_filter(icmp.as_fd(), 0).unwrap();
+        send_echo(icmp.as_fd(), SESSION_V4, 0x6c12);
+        let by = Instant::now() + Duration::from_secs(1);
+        while queued(icmp.as_fd()) == 0 && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(queued(icmp.as_fd()) > 0, "unfiltered, the echo's copies would wait there");
+        k.end();
+    }
+
+    /// tarae takes a keeper's sockets only as the kinds it asked: exactly `Kind::wanted`'s, in order, and the raw
+    /// ICMP socket besides at most once. A kind missing, one extra, one twice, one unknown — `EPROTO`; the keeper's
+    /// own failure — its errno. Each fails the birth at `Planted` (`plant`).
+    #[test]
+    fn a_keepers_sockets_are_taken_only_as_the_kinds_asked() {
+        use super::super::redirect::Kind;
+        let v4 = Families { v4: true, v6: false };
+        let codes = |k: &[Kind]| k.iter().map(|k| k.code()).collect::<Vec<u8>>();
+        let asked = [Kind::Route, Kind::Netfilter, Kind::Tcp4, Kind::Udp4];
+        assert_eq!(planted_kinds(v4, &codes(&asked), 0), Ok(asked.to_vec()));
+        let with_raw = [&asked[..], &[Kind::Icmp4]].concat();
+        assert_eq!(planted_kinds(v4, &codes(&with_raw), 0), Ok(with_raw.clone()), "the raw socket besides");
+        assert_eq!(
+            planted_kinds(v4, &codes(&asked), libc::EADDRNOTAVAIL),
+            Err(libc::EADDRNOTAVAIL),
+            "its errno"
+        );
+        let wrong: [(&str, Vec<u8>); 6] = [
+            ("one missing", codes(&asked[..3])),
+            ("one extra", codes(&[&asked[..], &[Kind::Tcp6]].concat())),
+            ("one twice", codes(&[&asked[..], &[Kind::Udp4]].concat())),
+            ("out of order", codes(&[Kind::Netfilter, Kind::Route, Kind::Tcp4, Kind::Udp4])),
+            ("the raw socket twice", codes(&[&with_raw[..], &[Kind::Icmp4]].concat())),
+            ("a kind that isn't one", [codes(&asked), vec![9]].concat()),
+        ];
+        for (what, kinds) in wrong {
+            assert_eq!(planted_kinds(v4, &kinds, 0), Err(libc::EPROTO), "{what}");
+        }
+    }
+
+    /// The keeper's own failure to make a socket fails the birth at `Planted` with its errno: a keeper whose `lo`
+    /// couldn't take the session's IPv4 address (`born_lo`'s `off_lo`) asked for IPv4's planted sockets — their bind
+    /// refused (`EADDRNOTAVAIL`), nothing taken.
+    #[test]
+    fn a_socket_the_keeper_cant_make_fails_its_plant() {
+        let test = "a_socket_the_keeper_cant_make_fails_its_plant";
+        if !namespaced(test) || !ns().netns() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-badplant", std::process::id()));
+        let k =
+            Keeper::born_lo(&root, None, ns(), Families { v4: true, v6: false }, true, None).expect("born");
+        assert!(k.lo_missing.v4, "its lo without the session's IPv4 address");
+        match k.plant(Families { v4: true, v6: false }) {
+            Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Planted, libc::EADDRNOTAVAIL), "{e}"),
+            Ok(_) => panic!("sockets taken that couldn't be made"),
+        }
+        k.end();
+    }
+
+    /// A keeper gets the session's network only where it has a netns of its own and the probe's network landed
+    /// (D-b): none without a netns (tier C; a policy that opens something where tarae can't swap; `net` without a user
+    /// namespace makes none), none where the probe's batch didn't land — whatever the other says.
+    #[test]
+    fn a_keeper_gets_the_network_only_with_a_netns_and_the_probes_yes() {
+        let (yes, no): (Result<(), String>, Result<(), String>) = (Ok(()), Err("no NFT_TPROXY here".into()));
+        assert!(network_for(Ns::session(true, true), &yes).is_some(), "A+");
+        assert!(network_for(Ns::session(true, false), &yes).is_some(), "A: no PID namespace, its netns");
+        assert!(network_for(Ns::NONE, &yes).is_none(), "no namespaces");
+        assert!(network_for(Ns::session(false, true), &yes).is_none(), "the session's, without its netns");
+        assert!(network_for(Ns { net: true, ..Ns::NONE }, &yes).is_none(), "net without user makes none");
+        assert!(network_for(Ns::session(true, true), &no).is_none(), "the probe's didn't land");
     }
 }

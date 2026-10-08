@@ -22,8 +22,8 @@ pub mod route;
 #[cfg(target_os = "linux")]
 mod socket;
 
-#[cfg(test)]
-mod fixture;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
 #[cfg(all(test, target_os = "linux"))]
 mod live;
 #[cfg(test)]

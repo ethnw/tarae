@@ -9,3 +9,7 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+
+[features]
+# `fixture`: what nft and ip sent the kernel (fixtures/netlink.txt), for a caller's own goldens (tarae's tests)
+fixtures = []
