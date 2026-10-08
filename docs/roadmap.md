@@ -77,7 +77,9 @@ from each other. Daemons such as Gradle's stay warm between runs.
    enforcing it on Linux; where even the supervisor can't run, the network is closed. Inside it: netlink, the
    session's rules at birth, accepting and checking, DNS, the supervisor slimmed, telling runs apart.
 7. **Sessions kept apart** — tests that one session can't reach another's processes, sockets or files. Also: the
-   keepers' memory with many sessions, and tarae's log holding every session's activity.
+   keepers' memory with many sessions, and tarae's log holding every session's activity. Also: a run asks before
+   it reads a file named like a key inside the project (`.env`, `*.pem`, `id_*` — the names in
+   runtime/secret-names.txt), with the sandbox's policy moved to its own module.
 8. **The loopback rule** where sessions share one loopback (tiers without a network namespace): a session reaches
    only its own listeners. It now matters mostly in the per-run proxy's tier.
 9. **Showing the tier** — what the sandbox guarantees for a run, said in its report, the sandbox panel, `tarae
@@ -111,6 +113,8 @@ Small fixes found while using tarae every day:
 - The same safe command asks every time — for example, a card for the Docker socket that can be answered only for
   one run at a time.
 - `tarae state` cuts a card's question short; it should show the whole command.
+- Each of Claude's commands says where it ran: in the sandbox (its tier), outside it, or with a socket granted — a
+  mark on its row in the chat, with the reason on hover or `K`.
 
 **IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
 nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like
@@ -176,8 +180,15 @@ approve, merge — every write on a card.
 
 ### 8. Publishing
 
-One draft pull request, then the homepage: an animation that feels like several agents working at once, and the
-README's demo from the same scripted recording.
+One draft pull request.
+
+### 9. The homepage
+
+tarae.sinabro.io. An animation that feels like several agents working at once, and the README's demo, both from
+one scripted recording: `cargo xtask shot` extended to record frames, Claude's parts played by the tests' fake
+claude, so it can be recorded again when the UI changes. To do: the recording script, the scenes, the site, the
+domain. The scenes are picked with the user: a chat edit and its card, the end-of-turn review, a commit from the
+git tab, search, a short Kubernetes one.
 
 ## Alongside, not ordered
 
@@ -204,7 +215,9 @@ README's demo from the same scripted recording.
 
 - **The lineup** ([design/async.md](design/async.md) phases 2–4): one scheduler for heavy runs across sessions,
   exclusive runs (perf) on a quiet machine, the queue position shown, resources declared by language packs, and
-  language-server work that holds a resource.
+  language-server work that holds a resource. Measured again after sandbox validation. As of 2026-10-08, build
+  folders of each checkout's own cut the waits for cargo's lock to seconds (5.8 s in a quick preflight, three
+  sessions at work). What's left is CPU contention and showing the wait. It's scheduled then if that shows.
 - **Core audit**: a session's own build folders. (Sandbox rules as pack data are done.)
 - **Image viewing** — undecided: an external viewer, a canvas in the core with a WebAssembly decoder plugin, or a
   viewer in the core.
