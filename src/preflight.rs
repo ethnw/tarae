@@ -787,6 +787,31 @@ mod tests {
         assert_eq!(set(ran), expected, "CI's checks and .tarae.toml's [preflight] (perf aside)");
     }
 
+    /// Clippy in the checks lints the whole workspace: without `--workspace`, cargo in a workspace with a root
+    /// package lints only that package — tarae's `netlink/` and `xtask/` went unlinted by `:preflight` and CI
+    /// alike. Here (`.tarae.toml`, which CONTRIBUTING and CI follow — the test above) and in the Rust pack's
+    /// defaults, for any project shaped so.
+    #[test]
+    fn clippy_in_the_checks_lints_every_package_of_the_workspace() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap();
+        let tarae: toml::Table = read(".tarae.toml").parse().unwrap();
+        let ours = parse_config(&tarae["preflight"], ".tarae.toml", &mut Vec::new());
+        let pack: toml::Table = read("runtime/packs/rust/pack.toml").parse().unwrap();
+        let defaults = pack["preflight"].as_array().unwrap()[0].clone();
+        let defaults = parse_config(&defaults, "rust pack", &mut Vec::new());
+        let clippy: Vec<String> = ours
+            .iter()
+            .chain(&defaults)
+            .map(|s| s.cmd.clone())
+            .filter(|c| c.starts_with("cargo clippy"))
+            .collect();
+        assert!(clippy.len() >= 3, "{clippy:?}");
+        for c in &clippy {
+            assert!(c.split_whitespace().any(|w| w == "--workspace"), "{c}: lints only the root package");
+        }
+    }
+
     /// The card before pack defaults run: each source's steps under it, a pack's said to be tarae's own.
     #[test]
     fn the_card_says_what_runs_and_whose_it_is() {

@@ -1134,6 +1134,7 @@ dependencies = [
  "fontdue",
  "libc",
  "png",
+ "serde_json",
  "tar",
  "toml",
  "vt100",

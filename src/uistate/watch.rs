@@ -107,7 +107,7 @@ fn diff(old: &Summary, new: &Summary) -> Vec<Value> {
     let mut out = Vec::new();
     if old.keys != new.keys {
         let (to, region, takes, drawn, held) = &new.keys;
-        let mut said = format!("keys → {to} ({takes})");
+        let mut said = format!("keys → {} ({takes})", super::keys_place(to));
         if !drawn {
             said += " — not on screen";
         }

@@ -652,7 +652,7 @@ impl Layout {
         // (a review read wide — `space v z` — gives the rail's and the chat's columns to the code)
         let wide = editor.review_wide();
         let review = editor.review_rail_up() && !wide;
-        let chat_open = editor.session.chat.as_ref().is_some_and(|c| !c.compact());
+        let chat_open = editor.chat_panel(w as usize);
         let side_open = !review && editor.session.sidebar.is_some();
         let widths = match zoom {
             None if wide => crate::sizes::Widths { chat: 0, side: 0 },
@@ -4497,7 +4497,11 @@ fn draw_review(
             RRow::Diff { text: line, .. } if wrapping => {
                 crate::wrap::rows(&ropey::Rope::from_str(line), 0, code_w, tab)
             }
-            _ => vec![crate::wrap::Row::whole(0)],
+            // (not wrapped: from the column it's scrolled to sideways — `h`/`l`)
+            RRow::Doc(_) | RRow::Diff { .. } => {
+                vec![crate::wrap::Row { col: rev.left, ..crate::wrap::Row::whole(0) }]
+            }
+            RRow::Header(_) => vec![crate::wrap::Row::whole(0)],
         }
     };
     // Each row shown: where it starts below the title, and its parts that fit
@@ -7514,11 +7518,18 @@ fn draw_ask_stream(
         .map(|s| s.lang.name.clone());
     let preview = crate::llm::preview(&rev.streamed, ROWS);
     let code = crate::markdown::code_lines(&preview.join("\n"), lang.as_deref(), &editor.theme);
+    // (how to stop it, when Esc does — `llm::esc_stops`: a row of its own under the text)
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let stop = match crate::llm::esc_stops(editor) {
+        true => hint_spans(&[("esc", "stop")], Style { fg: ui.virt.fg, ..card }, faint),
+        false => Vec::new(),
+    };
     // (the code's room: from the rail's edge — a cell of it kept — to the code's right edge)
     let room = lay.edit_w.saturating_sub(lay.rail_w + 1);
     let inner = (lay.edit_w / 2).clamp(30, 72).min(room.saturating_sub(5));
     let body = if rev.streamed.is_empty() { 0 } else { code.len().min(ROWS) };
-    let h = 1 + body + 2 * pad;
+    let hint = usize::from(!stop.is_empty());
+    let h = 1 + body + hint + 2 * pad;
     if lay.text_rows < h + 1 || inner < 24 {
         return Ok(None);
     }
@@ -7545,7 +7556,7 @@ fn draw_ask_stream(
     queue!(out, Print(&instr))?;
     let used = 2 + 3 + 8 + phase.len() + instr.width();
     queue!(out, Spaces((inner + 4).saturating_sub(used + secs.len() + 2)))?;
-    apply(out, Style { fg: ui.linenr.fg, ..card })?;
+    apply(out, faint)?;
     queue!(out, Print(&secs), Print("  "))?;
     for (i, line) in code.iter().take(body).enumerate() {
         queue!(out, MoveTo(x0 as u16, (y + 1 + i) as u16))?;
@@ -7569,7 +7580,15 @@ fn draw_ask_stream(
         apply(out, card)?;
         queue!(out, Spaces(inner - used + 2))?;
     }
-    card_edge(out, ui, card, x0, y + 1 + body, width, pad, false)?;
+    if hint > 0 {
+        queue!(out, MoveTo(x0 as u16, (y + 1 + body) as u16))?;
+        apply(out, card)?;
+        queue!(out, Print("  "))?;
+        let used = chat_spans(out, &stop, card, inner)?;
+        apply(out, card)?;
+        queue!(out, Spaces(inner + 2 - used))?;
+    }
+    card_edge(out, ui, card, x0, y + 1 + body + hint, width, pad, false)?;
     Ok(Some((x0, y0, width, h)))
 }
 

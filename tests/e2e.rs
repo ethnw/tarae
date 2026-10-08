@@ -38,7 +38,11 @@ fn version_and_help_print_without_a_terminal() {
 /// A thread names itself as it starts (Rust's `Builder::name`: from inside it, first thing), so for its first
 /// moments it shows its creator's name — the main thread's `tarae`. One caught then and gone before the next look
 /// (a short job; seen on Debian in A+, where the start makes more of them) is no unnamed thread: one counts only
-/// once two looks, 20 ms apart, find it still `tarae`.
+/// once two looks, 20 ms apart, find it still `tarae` — and past its start: it had a CPU since the first look
+/// (its `schedstat` time grew) or waits in a call. On a busy VM a thread just made can wait for a CPU longer
+/// than that, still in its first slice (deb12, frictions16: `schedstat 11680 18509 1` — 12 µs run, one
+/// slice — on both looks, runnable, in no call): not yet named, not unnamed. A kernel without schedstat: the
+/// two looks alone, as before.
 #[cfg(target_os = "linux")]
 #[test]
 fn every_thread_tarae_starts_has_a_name() {
@@ -49,22 +53,35 @@ fn every_thread_tarae_starts_has_a_name() {
     let mut t = sb.spawn(&["a.rs"]);
     t.wait_text("fn main");
     let pid = t.pid();
-    // (each thread's latest name, and how many looks found it `tarae`)
-    let mut seen: BTreeMap<u32, (String, u32)> = BTreeMap::new();
-    // (an unnamed one's whereabouts too, as first seen: where it waits, the call it's in)
+    // (each thread's latest name, how many looks found it `tarae`, whether one found it past its start, and its
+    // time on a CPU at the first look that found it `tarae`)
+    type Seen = BTreeMap<u32, (String, u32, bool, Option<u64>)>;
+    let mut seen: Seen = BTreeMap::new();
+    // (an unnamed one's whereabouts too, each look: where it waits, the call it's in, its time on a CPU)
     let mut whereabouts: BTreeMap<u32, String> = BTreeMap::new();
-    let mut look = |seen: &mut BTreeMap<u32, (String, u32)>| {
+    let mut look = |seen: &mut Seen| {
         for e in fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
             let tid: u32 = e.file_name().to_string_lossy().parse().unwrap_or(0);
             if let Ok(name) = fs::read_to_string(e.path().join("comm")) {
                 let name = name.trim().to_string();
-                if name == "tarae" && tid != pid && !whereabouts.contains_key(&tid) {
+                let entry = seen.entry(tid).or_insert((String::new(), 0, false, None));
+                if name == "tarae" && tid != pid {
                     let read = |f: &str| fs::read_to_string(e.path().join(f)).unwrap_or_default();
-                    let at = format!("wchan {} · syscall {}", read("wchan").trim(), read("syscall").trim());
-                    whereabouts.insert(tid, at);
+                    let (syscall, sched) = (read("syscall"), read("schedstat"));
+                    // (schedstat: its time on a CPU so far, ns — the time waiting for one, ns — its slices)
+                    let ran: Option<u64> = sched.split_whitespace().next().and_then(|n| n.parse().ok());
+                    let at = format!(
+                        "wchan {} · syscall {} · schedstat {}",
+                        read("wchan").trim(),
+                        syscall.trim(),
+                        sched.trim()
+                    );
+                    whereabouts.entry(tid).or_default().push_str(&format!("[{at}] "));
+                    let first = *entry.3.get_or_insert(ran.unwrap_or(0));
+                    let in_a_call = syscall.trim() != "running";
+                    entry.2 |= ran.is_none_or(|r| r > first) || in_a_call;
+                    entry.1 += 1;
                 }
-                let entry = seen.entry(tid).or_insert((String::new(), 0));
-                entry.1 += u32::from(name == "tarae");
                 entry.0 = name;
             }
         }
@@ -79,14 +96,16 @@ fn every_thread_tarae_starts_has_a_name() {
     }
     let unnamed: Vec<_> = seen
         .iter()
-        .filter(|(tid, (name, looks))| **tid != pid && name.as_str() == "tarae" && *looks >= 2)
+        .filter(|(tid, (name, looks, past_start, _))| {
+            **tid != pid && name.as_str() == "tarae" && *looks >= 2 && *past_start
+        })
         .collect();
     assert!(
         unnamed.is_empty(),
         "threads without a name of their own: {unnamed:?} — {whereabouts:?}\nall: {seen:?}"
     );
     assert!(
-        seen.values().any(|(n, _)| n == "tarae-input") && seen.values().any(|(n, _)| n == "tarae-signals"),
+        seen.values().any(|(n, ..)| n == "tarae-input") && seen.values().any(|(n, ..)| n == "tarae-signals"),
         "{seen:?}"
     );
 }

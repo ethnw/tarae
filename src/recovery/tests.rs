@@ -326,6 +326,7 @@ fn skip_entries_match_names_and_paths() {
     assert!(s("/p/private/a.rs") && !s("/q/private/a.rs"), "a path is from a root");
     assert!(s("/abs/x/y") && s("/h/n/a") && !s("/h/m/a"));
     assert!(!s("/p/a.rs"), "a blank entry matches nothing");
+    let wild = crate::secretnames::wild;
     assert!(wild(".env.*", ".env.local") && !wild(".env.*", ".envrc") && wild("*.pem", "a.pem"));
 }
 

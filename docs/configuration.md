@@ -166,7 +166,7 @@ summary at the end (`5 of 6 passed — clippy failed · 4m 12s`).
 [preflight]
 steps = [
   { name = "fmt", cmd = "cargo fmt --all --check" },
-  { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
+  { name = "clippy", cmd = "cargo clippy --workspace --all-targets -- -D warnings" },
   { name = "test", cmd = "cargo test" },
   # a line matching `note` (a regex) makes the pass one with a note; `full = true`: only before publishing
   { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER", full = true },
@@ -185,8 +185,8 @@ Where the steps come from:
 - **The project's** `[preflight]` in `.tarae.toml` — run once you've trusted the project. (In your own config
   it's for every project.)
 - **Else the language packs' defaults**, by the files that mark the project — only where the language's own
-  toolchain defines the check: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
-  warnings`, `cargo test`), Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`) and
+  toolchain defines the check: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings` — every package of a workspace, not only the root's —, `cargo test`), Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`) and
   Java with the Gradle or Maven installed here (`build.gradle(.kts)` or `settings.gradle(.kts)`: `gradle test
   --console=plain`; `pom.xml`: `mvn -B test`), together in a project that is several. The commands are
   tarae's, but what they run is the project's code — its tests and build scripts — so the first run in a

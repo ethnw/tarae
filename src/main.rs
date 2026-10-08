@@ -101,6 +101,7 @@ mod screen;
 mod search;
 #[cfg(target_os = "linux")]
 mod seccomp;
+mod secretnames;
 mod seeing;
 mod selection;
 mod session;

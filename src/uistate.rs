@@ -246,6 +246,15 @@ impl KeysTo {
     }
 }
 
+/// Where the keys go, as the text forms name it: a pane with what it is — `pane#29, the code (commands)`;
+/// bare, `pane#29 (commands)` was read as a pane called "commands" that nothing on screen showed.
+pub fn keys_place(to: &str) -> String {
+    match to.starts_with("pane#") {
+        true => format!("{to}, the code"),
+        false => to.to_string(),
+    }
+}
+
 fn ch(c: char) -> Key {
     Key::plain(Code::Char(c))
 }
@@ -314,6 +323,10 @@ impl Editor {
                 true => shortcut(Region::EditReview, Filter::Only(vec![ctrl('q')])),
                 false => layer(Region::EditReview, Filter::Except(vec![ch(' '), ch(':'), ctrl('w')])),
             });
+        }
+        // …still waiting for its answer: Esc stops it
+        if crate::llm::esc_stops(self) {
+            v.push(shortcut(Region::EditReview, Filter::Only(vec![Key::plain(Code::Esc)])));
         }
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
@@ -488,7 +501,9 @@ impl Editor {
     fn drawn(&self, r: Region) -> bool {
         let s = &self.screen;
         match r {
-            Region::Code => !s.panes.is_empty() || self.welcome(),
+            // (its focused pane — the one the keys go to — with room: a chat filling a narrow screen leaves
+            // the code's panes laid out zero wide)
+            Region::Code => s.panes.iter().any(|p| p.0 == self.session.focus && p.1.w > 0) || self.welcome(),
             Region::Prompt => s.width.is_some(),
             Region::Picker => s.picker_list.is_some(),
             Region::Chat => s.chat_w > 0,
@@ -1284,7 +1299,7 @@ impl UiState {
     /// Where the keys go, as the text forms say it.
     fn keys_line(&self) -> Option<String> {
         let k = &self.keys;
-        let mut keys = format!("keys → {} ({}", k.to, k.takes.name());
+        let mut keys = format!("keys → {} ({}", keys_place(&k.to), k.takes.name());
         if !k.answers.is_empty() {
             let a: Vec<String> = k.answers.iter().map(char::to_string).collect();
             keys += &format!(" {}", a.join(" "));

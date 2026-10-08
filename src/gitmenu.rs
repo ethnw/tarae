@@ -112,7 +112,11 @@ fn changed(cwd: &Path) -> Result<Vec<Changed>, String> {
     Ok(std::thread::scope(|s| {
         let handles: Vec<_> = files
             .chunks(files.len().div_ceil(parts).max(1))
-            .map(|c| s.spawn(move || c.iter().map(|(i, (letter, rel))| one(top, *i, *letter, rel)).collect()))
+            .map(|c| {
+                crate::event::scoped(s, "tarae-gitdiff", move || {
+                    c.iter().map(|(i, (letter, rel))| one(top, *i, *letter, rel)).collect()
+                })
+            })
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap_or_else(|_| Vec::new())).collect()
     }))

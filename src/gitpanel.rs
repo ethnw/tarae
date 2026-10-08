@@ -842,6 +842,14 @@ impl Editor {
         let Some(st) = self.session.git_status.as_ref() else {
             return self.set_warning("not a git repository");
         };
+        // A code review open keeps every buffer in its REVIEW keys: the message couldn't be typed, and a
+        // draft landed as an edit waiting there — ended first, said
+        if self.session.code_review.is_some() {
+            let key = if draft { "C" } else { "c" };
+            return self.set_warning(format!(
+                "a code review is open — end it first (space v q), then {key} writes the commit message"
+            ));
+        }
         let (top, branch) = (st.top.clone(), st.branch.clone());
         if amend {
             // (read now, before the amend makes a new HEAD — said as the buffer opens)
@@ -981,6 +989,9 @@ impl Editor {
                 .set_status("open a commit message first — c in the git tab (or C: Claude drafts it)");
         };
         let (top, amend, id) = (c.top.clone(), c.amend, c.doc);
+        if self.session.code_review.is_some() {
+            return self.set_warning("a code review is open — end it first (space v q), then :commit-draft");
+        }
         let said = "Claude is drafting the commit message…";
         // (once it's read, the draft streams into its review)
         let work = move || commit_prompt(&top, amend);

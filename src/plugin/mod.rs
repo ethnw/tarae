@@ -1329,6 +1329,46 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// `project` reads the project's files — not ones named like keys and tokens (`.env`, `*.pem`, `id_rsa` —
+    /// `secretnames`, data): `find` leaves them out and a read of one is asked about, as a file outside it is.
+    /// It read them unasked (the DB plugin's `.env` beside its queries).
+    #[test]
+    fn the_project_permission_leaves_out_files_named_like_keys() {
+        let (mut ed, dir) = setup("project-secrets", "");
+        answer(&mut ed, approval, true);
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("deploy")).unwrap();
+        for f in ["Cargo.toml", ".env", "deploy/server.pem", "deploy/id_ed25519"] {
+            std::fs::write(project.join(f), "x = 1\n").unwrap();
+        }
+        let project = std::fs::canonicalize(&project).unwrap();
+        for args in [&["init", "-q"][..], &["add", "-A"]] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&project).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
+        ed.session.root = project.clone();
+        ed.plugin_run("find", "**").unwrap();
+        until_said(&mut ed, r#"found 50 ["#);
+        let said = toasts(&ed);
+        assert!(said.contains("Cargo.toml"), "{said}");
+        for secret in [".env", "server.pem", "id_ed25519"] {
+            assert!(!said.contains(secret), "{secret} found: {said}");
+        }
+        // Read: asked about (a card), not read
+        ed.plugin_run("fetch", &project.join(".env").display().to_string()).unwrap();
+        settle_until(&mut ed, |ed| {
+            ed.offers
+                .iter()
+                .any(|o| matches!(&o.what, crate::offer::What::PluginAsk { plugin, .. } if plugin == "demo"))
+        });
+        assert!(!toasts(&ed).contains("file 10 "), "not read: {}", toasts(&ed));
+        // …a file of the project's, read unasked as before
+        ed.offers.clear();
+        ed.plugin_run("fetch", &project.join("Cargo.toml").display().to_string()).unwrap();
+        until_said(&mut ed, "file 10 ");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn the_project_s_files_found_and_read_its_own_files_written_tools_offered() {
         let (mut ed, dir) = setup("project", "");

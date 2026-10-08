@@ -183,12 +183,12 @@ fn filter(
         score(candidates, matcher)
     } else {
         let config = matcher.config.clone();
-        std::thread::scope(|sc| {
+        std::thread::scope(|s| {
             let parts: Vec<_> = candidates
                 .chunks(candidates.len().div_ceil(threads))
                 .map(|part| {
                     let config = config.clone();
-                    sc.spawn(move || score(part, &mut Matcher::new(config)))
+                    crate::event::scoped(s, "tarae-score", move || score(part, &mut Matcher::new(config)))
                 })
                 .collect();
             parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
@@ -1064,7 +1064,11 @@ pub fn list_files(root: &Path) -> Vec<PathBuf> {
         let keep: Vec<Vec<bool>> = std::thread::scope(|s| {
             let handles: Vec<_> = listed
                 .chunks(chunk)
-                .map(|c| s.spawn(move || c.iter().map(|p| root.join(p).is_file()).collect::<Vec<bool>>()))
+                .map(|c| {
+                    crate::event::scoped(s, "tarae-stat", move || {
+                        c.iter().map(|p| root.join(p).is_file()).collect::<Vec<bool>>()
+                    })
+                })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
         });

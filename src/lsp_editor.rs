@@ -1268,8 +1268,10 @@ impl Editor {
             },
             Kind::FormatSave { quit } => {
                 let edits = result.as_array().cloned().unwrap_or_default();
-                let why =
-                    self.apply_text_edits(p.doc, enc, &edits).err().map(|e| format!("not formatted: {e}"));
+                let why = self
+                    .apply_format_on_save(p.doc, enc, &edits)
+                    .err()
+                    .map(|e| format!("not formatted: {e}"));
                 self.format_save_done(p.doc, quit, why.as_deref());
             }
             Kind::Format => {
@@ -1913,18 +1915,7 @@ impl Editor {
         if doc.loading {
             return Err("still loading".into());
         }
-        let changes = edits
-            .iter()
-            .filter_map(|e| {
-                let from = lsp::from_position(&doc.text, &e["range"]["start"], enc)?;
-                let to = lsp::from_position(&doc.text, &e["range"]["end"], enc)?;
-                Some(crate::transaction::Change {
-                    from,
-                    to: to.max(from),
-                    insert: e["newText"].as_str()?.to_string(),
-                })
-            })
-            .collect();
+        let changes = text_edit_changes(&doc.text, enc, edits);
         let before = doc.snapshot();
         doc.apply(&crate::transaction::Transaction::new(changes));
         doc.commit_undo(before);
@@ -2551,10 +2542,9 @@ impl Editor {
             return false;
         }
         self.lsp_flush();
-        let tab = self.config.tab_width;
         let params = json!({
             "textDocument": { "uri": lsp::uri(&path) },
-            "options": { "tabSize": tab, "insertSpaces": true },
+            "options": self.format_options(doc_id),
         });
         let Some(id) =
             self.lsp_send_for(doc_id, cid, Kind::FormatSave { quit }, "textDocument/formatting", params)
@@ -2571,6 +2561,40 @@ impl Editor {
             }
         });
         true
+    }
+
+    /// A format request's options: the file's own indent (`indent::detect`), not `editor.tab-width` — a YAML
+    /// file in 2-space indent was re-indented to 4 by its server on every `:w`.
+    pub fn format_options(&self, doc_id: DocId) -> Value {
+        let tab = self.config.tab_width;
+        let Some(doc) = self.docs.iter().find(|d| d.id == doc_id) else {
+            return json!({ "tabSize": tab, "insertSpaces": true });
+        };
+        let unit = crate::indent::detect(&doc.text, tab, crate::syntax::tabs_by_default(doc.lang_name()));
+        let size = if unit.tabs { unit.tab } else { unit.width };
+        json!({ "tabSize": size, "insertSpaces": !unit.tabs })
+    }
+
+    /// Format-on-save's edits: only on the lines changed since the file was saved
+    /// (`editdiff::format_only_touched`) — the rest of the file stays as it is. One transaction, one undo.
+    fn apply_format_on_save(&mut self, doc_id: DocId, enc: Encoding, edits: &[Value]) -> Result<(), String> {
+        let doc = self.docs.iter_mut().find(|d| d.id == doc_id).ok_or("buffer closed")?;
+        // (the saved text gone from the undo history: the formatter's edits as they are)
+        let Some(saved) = doc.saved_text().filter(|_| !doc.loading) else {
+            return self.apply_text_edits(doc_id, enc, edits);
+        };
+        let mut formatted = doc.text.clone();
+        crate::transaction::Transaction::new(text_edit_changes(&doc.text, enc, edits))
+            .apply(&mut formatted, false);
+        let now = doc.text.to_string();
+        let kept = crate::editdiff::format_only_touched(&saved.to_string(), &now, &formatted.to_string());
+        let Some(change) = crate::disk::minimal_change(&doc.text, &ropey::Rope::from_str(&kept)) else {
+            return Ok(());
+        };
+        let before = doc.snapshot();
+        doc.apply(&crate::transaction::Transaction::new(vec![change]));
+        doc.commit_undo(before);
+        Ok(())
     }
 
     /// Formatting settled (or gave up with `why`): save the document, then quit for `:wq`.
@@ -3362,6 +3386,22 @@ fn send_changes(
         "textDocument/didChange",
         json!({ "textDocument": { "uri": uri, "version": version }, "contentChanges": content }),
     );
+}
+
+/// TextEdit[] → changes of `text` (ranges in the server's position encoding; one it can't place is left out).
+fn text_edit_changes(text: &ropey::Rope, enc: Encoding, edits: &[Value]) -> Vec<crate::transaction::Change> {
+    edits
+        .iter()
+        .filter_map(|e| {
+            let from = lsp::from_position(text, &e["range"]["start"], enc)?;
+            let to = lsp::from_position(text, &e["range"]["end"], enc)?;
+            Some(crate::transaction::Change {
+                from,
+                to: to.max(from),
+                insert: e["newText"].as_str()?.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Picker glyph for a severity — the same marks as at the line end, in the theme's severity colors.
@@ -5756,8 +5796,9 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
-    /// `:w` formats first, then saves; a server error or an edit made meanwhile still saves (as is); a
-    /// server that can't format saves right away.
+    /// `:w` formats first (the line you edited — `format_on_save_keeps_the_lines_you_didnt_touch`), then
+    /// saves; a server error or an edit made meanwhile still saves (as is); a server that can't format saves
+    /// right away.
     #[test]
     fn format_on_save() {
         let (mut ed, file, log) = setup("fmtsave", "fn main() {\n    let x = 1;\n}\n");
@@ -5770,31 +5811,78 @@ mod tests {
             std::fs::read_to_string(&file).unwrap()
         };
         let two = json!([{ "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 4 } }, "newText": "  " }]);
-        feed(&mut ed, "ggA//<esc>:w<ret>");
+        feed(&mut ed, "ggjA//<esc>:w<ret>");
         assert!(sent_has(&log, r#""method":"textDocument/formatting""#));
         assert_eq!(disk(&mut ed), "fn main() {\n    let x = 1;\n}\n", "not saved before the answer");
         ed.on_lsp_message(
             cid,
             json!({ "id": pending_of(&ed, Kind::FormatSave { quit: false }), "result": two }),
         );
-        assert_eq!(disk(&mut ed), "fn main() {//\n  let x = 1;\n}\n", "formatted, then saved");
+        assert_eq!(disk(&mut ed), "fn main() {\n  let x = 1;//\n}\n", "formatted, then saved");
         assert!(!ed.doc().is_modified());
         // Server error → saved as is
         feed(&mut ed, "A!<esc>:w<ret>");
         let id = pending_of(&ed, Kind::FormatSave { quit: false });
         ed.on_lsp_message(cid, json!({ "id": id, "error": { "message": "no" } }));
-        assert_eq!(disk(&mut ed), "fn main() {//!\n  let x = 1;\n}\n");
+        assert_eq!(disk(&mut ed), "fn main() {\n  let x = 1;//!\n}\n");
         // Typed on while formatting → the reply is stale, what's there is saved
         feed(&mut ed, "A?<esc>:w<ret>A#<esc>");
         let id = pending_of(&ed, Kind::FormatSave { quit: false });
         ed.on_lsp_message(cid, json!({ "id": id, "result": two }));
-        assert_eq!(disk(&mut ed), "fn main() {//!?#\n  let x = 1;\n}\n");
+        assert_eq!(disk(&mut ed), "fn main() {\n  let x = 1;//!?#\n}\n");
         // No formatter → saved right away
         let caps = json!({ "positionEncoding": "utf-8" });
         ed.lsp.clients[0].caps = caps;
         feed(&mut ed, "A%<esc>:w<ret>");
-        assert_eq!(disk(&mut ed), "fn main() {//!?#%\n  let x = 1;\n}\n");
+        assert_eq!(disk(&mut ed), "fn main() {\n  let x = 1;//!?#%\n}\n");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// A save formats only what you changed: a YAML file in 2-space indent, one line edited, `:w` — the
+    /// server is asked with the file's own indent (2 spaces, not `tab-width`'s 4: yaml-language-server
+    /// re-indented a whole workflow file to 4, +57 −57, for a two-line edit), and of its answer (one edit
+    /// over the whole file, as that server sends) only the edited line's change is kept; every other line
+    /// stays byte for byte, its own oddities too.
+    #[test]
+    fn format_on_save_keeps_the_lines_you_didnt_touch() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-fmt-yaml-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ci.yml");
+        let yaml = "jobs:\n  clippy:\n    steps:\n      - uses: a   \n      - run:   cargo clippy\n      - run:   cargo test\n";
+        std::fs::write(&file, yaml).unwrap();
+        let log = dir.join("sent.log");
+        let cfg = format!(
+            "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.yaml]\nlsp = [\"fake\"]\n",
+            log.display()
+        );
+        let (config, w) = crate::config::parse(&cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.open(&file).unwrap();
+        let cid = ed.doc().lsp.client.expect("the stand-in server");
+        let caps = json!({ "positionEncoding": "utf-8", "documentFormattingProvider": true });
+        ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
+        // The edit: the clippy line gets `--workspace`
+        feed(&mut ed, "5GA --workspace<esc>:w<ret>");
+        let sent = sent_until(&log, &[r#""method":"textDocument/formatting""#]);
+        let ask = sent.lines().find(|l| l.contains("textDocument/formatting")).unwrap_or_default();
+        assert!(ask.contains(r#""tabSize":2"#) && ask.contains(r#""insertSpaces":true"#), "{ask}");
+        // The server's answer: every line tidied — trailing blanks gone, one space after `run:`
+        let tidy = "jobs:\n  clippy:\n    steps:\n      - uses: a\n      - run: cargo clippy --workspace\n      - run: cargo test\n";
+        let whole = json!([{ "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 6, "character": 0 } }, "newText": tidy }]);
+        ed.on_lsp_message(
+            cid,
+            json!({ "id": pending_of(&ed, Kind::FormatSave { quit: false }), "result": whole }),
+        );
+        ed.flush_saves();
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            saved,
+            "jobs:\n  clippy:\n    steps:\n      - uses: a   \n      - run: cargo clippy --workspace\n      - run:   cargo test\n",
+            "only the edited line formatted"
+        );
+        assert!(!ed.doc().is_modified());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `:wa` formats every modified file like `:w` — also one that isn't the current buffer — and each
@@ -5807,9 +5895,10 @@ mod tests {
         let cid = ed.doc().lsp.client.unwrap();
         let caps = json!({ "positionEncoding": "utf-8", "documentFormattingProvider": true });
         ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
-        feed(&mut ed, "ggA//<esc>");
+        // (each edit on the line the formatter changes: a save formats only what was edited)
+        feed(&mut ed, "ggjA//<esc>");
         ed.open(&other).unwrap();
-        feed(&mut ed, "ggA!!<esc>:wa<ret>");
+        feed(&mut ed, "ggjA!!<esc>:wa<ret>");
         let asks: Vec<(u64, DocId)> = ed
             .lsp
             .pending
@@ -5823,8 +5912,8 @@ mod tests {
             ed.on_lsp_message(cid, json!({ "id": id, "result": indent }));
         }
         ed.flush_saves();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {//\n  let x = 1;\n}\n");
-        assert_eq!(std::fs::read_to_string(&other).unwrap(), "fn o() {!!\n  let y = 2;\n}\n");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {\n  let x = 1;//\n}\n");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "fn o() {\n  let y = 2;!!\n}\n");
         assert!(ed.docs.iter().all(|d| !d.is_modified()));
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }

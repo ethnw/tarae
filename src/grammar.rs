@@ -199,9 +199,9 @@ pub fn install(names: &[String], force: bool, report: impl Fn(Progress) + Sync) 
     sweep(&src_dir, &out_dir, &all);
     let queue = Mutex::new(groups);
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
-    std::thread::scope(|scope| {
+    std::thread::scope(|s| {
         for _ in 0..workers {
-            scope.spawn(|| {
+            crate::event::scoped(s, "tarae-grammar", || {
                 loop {
                     let Some((git_url, rev, grammars)) = queue.lock().unwrap().pop() else { return };
                     let dir = source_dir(&src_dir, &git_url, &rev);

@@ -727,6 +727,7 @@ impl Editor {
 
     /// A plugin's `find`: the project's files `pattern` matches (from its folder; `**` any folders, `*` any
     /// name) — listed on a worker (as the file picker lists them: what git ignores, left out), up to 2000.
+    /// Not ones named like keys and tokens (`secretnames`): `project` doesn't read them.
     pub(super) fn plugin_find(&mut self, plugin: &str, id: u64, pattern: &str) {
         let why = match self.plugin_may(plugin, &Permission::Project) {
             Err(why) => Some(why),
@@ -751,7 +752,7 @@ impl Editor {
             let found: Vec<String> = crate::picker::list_files(&root)
                 .into_iter()
                 .map(|rel| root.join(rel))
-                .filter(|p| super::perm::path_matches(&whole, p))
+                .filter(|p| super::perm::path_matches(&whole, p) && !crate::secretnames::named_secret(p))
                 .take(2000)
                 .map(|p| p.display().to_string())
                 .collect();

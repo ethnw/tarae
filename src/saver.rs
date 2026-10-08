@@ -9,7 +9,7 @@
 //! stamp, "Saved", the language server's didSave …) — one message for a batch. Quitting waits for what's
 //! still being written (`Editor::flush_saves`), as Helix's quit commands do.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -36,6 +36,21 @@ struct Job {
     text: Rope,
     version: u64,
     then: Then,
+    /// A new file of Claude's: its missing folders are made first, inside this project (`Document::make_folders`).
+    folders: Option<PathBuf>,
+}
+
+/// The folders `path` needs, for a new file of Claude's (`Document::make_folders`): made when they're inside
+/// `root`, else why not — never outside the project, where tarae doesn't write unasked.
+fn make_folders(root: &Path, path: &Path) -> Result<(), String> {
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty() && !d.exists()) else { return Ok(()) };
+    if crate::paths::inside(root, dir).is_none() {
+        return Err(format!(
+            "writing {}: its folder isn't there, and tarae makes folders only inside the project",
+            path.display()
+        ));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("making {}: {e}", dir.display()))
 }
 
 /// A written (or failed) save, for the main loop.
@@ -105,9 +120,14 @@ impl Saver {
                         std::thread::sleep(slow);
                         job.text.write_to(w)
                     };
-                    let result = crate::disk::write_atomic(&job.path, write)
-                        .map(|()| crate::disk::stamp(&job.path))
-                        .map_err(|e| format!("writing {}: {e}", job.path.display()));
+                    let result =
+                        job.folders.as_deref().map_or(Ok(()), |root| make_folders(root, &job.path)).and_then(
+                            |()| {
+                                crate::disk::write_atomic(&job.path, write)
+                                    .map(|()| crate::disk::stamp(&job.path))
+                                    .map_err(|e| format!("writing {}: {e}", job.path.display()))
+                            },
+                        );
                     let (lock, cv) = &*shared;
                     let idle = {
                         let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -170,7 +190,8 @@ impl Editor {
         let doc = self.docs.iter_mut().find(|d| d.id == id).ok_or("the buffer was closed")?;
         let path = doc.check_save(force).map_err(|e| format!("{e:#}"))?;
         doc.saving += 1;
-        let job = Job { id, path, text: doc.text.clone(), version: doc.version(), then };
+        let folders = doc.make_folders.clone();
+        let job = Job { id, path, text: doc.text.clone(), version: doc.version(), then, folders };
         self.saver.push(job);
         Ok(())
     }

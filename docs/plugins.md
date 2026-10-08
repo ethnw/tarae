@@ -171,7 +171,7 @@ fn permissions() -> Vec<Permission> {
 | `read(pattern)` | `read-file` what the pattern covers (up to 16 MB) | a file outside the patterns, once — `..` and symlinks don't lead out |
 | `env(name)` | `read-env` that variable | — |
 | `network` | `connect` over TCP | each new host:port, once |
-| `project` | `read-file` in the project tarae started in, and `find` there (`"**/kustomization.yaml"`: absolute paths back, as the file picker lists them) | — |
+| `project` | `read-file` in the project tarae started in, and `find` there (`"**/kustomization.yaml"`: absolute paths back, as the file picker lists them) — not files named like keys and tokens (`.env`, `*.pem`, `id_rsa` …, the list in `runtime/secret-names.txt`): `find` leaves them out | reading one of those, once |
 
 Requests are actions, and what they bring comes back later to `on-events(events, now)`, in the order it happened:
 

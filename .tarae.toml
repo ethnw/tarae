@@ -22,8 +22,8 @@ sandbox-localhost = true
 [preflight]
 steps = [
   { name = "fmt", cmd = "cargo fmt --all --check" },
-  { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
-  { name = "clippy bundled", cmd = "cargo clippy --all-targets --features bundled-grammars -- -D warnings", full = true },
+  { name = "clippy", cmd = "cargo clippy --workspace --all-targets -- -D warnings" },
+  { name = "clippy bundled", cmd = "cargo clippy --workspace --all-targets --features bundled-grammars -- -D warnings", full = true },
   { name = "test", cmd = "cargo test --workspace" },
   { name = "test bundled", cmd = "cargo test --workspace --features bundled-grammars", full = true },
   { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER", full = true },

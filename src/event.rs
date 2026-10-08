@@ -192,6 +192,18 @@ pub fn thread<T: Send + 'static>(
     thread::Builder::new().name(name.into()).spawn(f).expect("failed to spawn thread")
 }
 
+/// A scoped thread of tarae's, by name, as `thread`. A scope's own `spawn` starts it unnamed: it shows its
+/// creator's name — `tarae` when that's the main thread or a thread still naming itself — and the e2e test
+/// (`every_thread_tarae_starts_has_a_name`) caught such ones now and then (1 run in 5 on Debian).
+pub fn scoped<'scope, T: Send + 'scope>(
+    s: &'scope thread::Scope<'scope, '_>,
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'scope,
+) -> thread::ScopedJoinHandle<'scope, T> {
+    check_thread_name(name);
+    thread::Builder::new().name(name.into()).spawn_scoped(s, f).expect("failed to spawn thread")
+}
+
 /// One copy of the thread-spawn machinery for every job, not one per job type.
 fn run(job: Box<dyn FnOnce() + Send>) {
     #[cfg(not(test))]
@@ -228,9 +240,10 @@ mod tests {
 
     /// Every thread tarae starts has a name: `thread(…)`, or a `Builder` given one — the e2e test
     /// (`every_thread_tarae_starts_has_a_name`, Linux) sees only the threads its scenario starts. A thread
-    /// started from the main thread without one is called `tarae` like it; from another, that one's name.
-    /// Scoped threads are left out (they end before their scope returns, inside a named thread's work). And
-    /// every name given as `thread("…")` fits `THREAD_NAME_MAX` — the assert only sees threads that start.
+    /// started from the main thread without one is called `tarae` like it; from another, that one's name —
+    /// but only once that one has named itself, so a scope's own `spawn` counts as unnamed too (`scoped`
+    /// names one: unnamed, they made the e2e test flake). And every name given as `thread("…")` or
+    /// `scoped(s, "…")` fits `THREAD_NAME_MAX` — the assert only sees threads that start.
     #[test]
     fn every_thread_in_the_code_is_named() {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -251,14 +264,23 @@ mod tests {
             let text = std::fs::read_to_string(&f).unwrap();
             // (a file's own tests start at its top-level `#[cfg(test)] mod`)
             let code = text.split("\n#[cfg(test)]\nmod ").next().unwrap_or_default();
+            // (the names `thread::scope(|s| …)` gives its scope in this file: `s.spawn(` is an unnamed thread)
+            let scopes: Vec<String> = code
+                .match_indices("thread::scope(|")
+                .filter_map(|(j, m)| {
+                    code[j + m.len()..].split('|').next().map(|s| format!("{}.spawn(", s.trim()))
+                })
+                .collect();
             for (i, line) in code.lines().enumerate() {
                 let at = || format!("{}:{}", f.strip_prefix(&src).unwrap().display(), i + 1);
                 let from = code.lines().skip(i).take(4).collect::<String>();
                 let builder = line.contains("thread::Builder::new()") && !from.contains(".name(");
-                if line.contains("thread::spawn(") || builder {
+                let scope_spawn = scopes.iter().any(|s| line.contains(s.as_str()));
+                if line.contains("thread::spawn(") || builder || scope_spawn {
                     unnamed.push(at());
                 }
-                for (_, rest) in line.match_indices("thread(\"").map(|(j, m)| line.split_at(j + m.len())) {
+                let given = line.match_indices("thread(\"").chain(line.match_indices("scoped(s, \""));
+                for (_, rest) in given.map(|(j, m)| line.split_at(j + m.len())) {
                     let name = rest.split('"').next().unwrap_or_default();
                     if name.len() > THREAD_NAME_MAX {
                         long.push(format!("{}: {name} ({} bytes)", at(), name.len()));

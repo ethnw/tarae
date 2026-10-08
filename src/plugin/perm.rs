@@ -90,7 +90,11 @@ fn describe(p: &Permission) -> String {
         }
         Permission::Env(name) => format!("read the environment variable {}", shown(name)),
         Permission::Network => "connect over the network (each new host is asked)".into(),
-        Permission::Project => "read the files of the project you opened, and find them by name".into(),
+        Permission::Project => {
+            "read the files of the project you opened, and find them by name — not ones named like keys \
+             (.env, *.pem …): those it asks for"
+                .into()
+        }
     }
 }
 
@@ -493,8 +497,11 @@ impl Editor {
                 .and_then(|p| p.approvals.get(plugin))
                 .is_some_and(|a| a.files.iter().any(|f| Path::new(f) == at))
         };
-        // The project's files, if it may read them — where they are, and where they lead
-        let in_project = project.is_some_and(|root| lexical.starts_with(&root) && real.starts_with(&root));
+        // The project's files, if it may read them — where they are, and where they lead; not ones named like
+        // keys and tokens (`.env`, `*.pem` — `secretnames`): those are asked about like any file outside it
+        let secret = crate::secretnames::named_secret(&lexical) || crate::secretnames::named_secret(&real);
+        let in_project =
+            !secret && project.is_some_and(|root| lexical.starts_with(&root) && real.starts_with(&root));
         if (covered(&lexical) && covered_real(&real)) || in_project || allowed_before(&real) {
             Ok(real)
         } else {

@@ -840,8 +840,32 @@ impl crate::editor::Editor {
             && let Some(c) = self.session.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
         {
             c.focused = false;
+            // (lent: back to the chat once it's answered — `chat_lent_sync`)
+            self.session.chat_lent.get_or_insert(o.id);
         }
         self.offers.push(o);
+    }
+
+    /// Every event: the keys a card took from the chat (`push_offer`) go back to it once that card is gone —
+    /// after the next one up here, if any, is answered too — when they're still where it left them (the code,
+    /// in normal mode): moved elsewhere since (a panel, insert mode, a review), they stay. They stayed in the
+    /// code: `keys → pane#29 (commands)` after an edit review's, the restart card's or a drafts card's `y`.
+    pub(crate) fn chat_lent_sync(&mut self) {
+        let Some(id) = self.session.chat_lent else { return };
+        if self.offers.iter().any(|o| o.id == id) {
+            return;
+        }
+        if let Some(next) = self.offers.first() {
+            self.session.chat_lent = Some(next.id);
+            return;
+        }
+        self.session.chat_lent = None;
+        let here = self.mode == crate::editor::Mode::Normal
+            && self.pending.is_empty()
+            && self.keys_to().region == crate::uistate::Region::Code;
+        if let Some(c) = self.session.chat.as_mut().filter(|_| here) {
+            c.focused = true;
+        }
     }
 
     /// A card's keys while it has them (`Editor::card_has_keys`) — true if handled (`y` yes · `n` no · `a`/`A`

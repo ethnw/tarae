@@ -28,10 +28,12 @@
 //! `cargo xtask linux` or `prune` of yours, or `session.ended`'s). A sandboxed run before then says so and
 //! makes its volume without one. A volume without the id — made so, or made before ids — is judged by its
 //! checkout's path alone, as this machine's, for as long as it lives (`docker volume create` leaves an existing
-//! volume's labels as they are, so it's never relabelled) — but only on a Docker that's this machine's alone, a
-//! unix socket (`local`); one reached over the network (`tcp://`, `ssh://`, from `DOCKER_HOST` or the current
-//! context) may hold other machines' volumes without an id, so there only volumes carrying this machine's id
-//! are dropped. `prune` says how many it judged by path, or kept.
+//! volume's labels as they are, so it's never relabelled) — but only with `prune --mine` (`local`): nothing a
+//! Docker says tells that it's this machine's alone (a unix socket may be forwarded from another machine, a
+//! host's name collides), so otherwise only volumes carrying this machine's id are dropped. `prune` says how
+//! many it judged by path, or kept. `prune --all` lists every volume and image of the repository's but live
+//! checkouts' targets (an open session's in the UI state, or a folder that's there), and drops them only with
+//! `--yes`.
 //! After the checks, past `VOLUMES_SAY` (30 GB), a line says what tarae's volumes take — the checkouts'
 //! targets, which ends and `prune` free, apart from the shared ones (colima's disk filled at 40 GB, 2026-10-06,
 //! with nothing said); a Docker that can't measure them is said so.
@@ -178,7 +180,8 @@ pub fn run(args: &[String]) -> Result<()> {
     let on = platform.map(|p| format!(", {p}")).unwrap_or_default();
     eprintln!("Linux checks on {} (Rust {pin}{on}) …", image(&pin));
     let machine = machine_id(&root);
-    prune_volumes(machine.as_deref().ok(), local(endpoint().as_deref()).is_ok(), false);
+    // (a run never judges a volume without a machine id: only `prune --mine` does — `local`)
+    prune_volumes(machine.as_deref().ok(), false, false);
     // (made here, not by `docker run`: only a volume made this way carries its labels)
     if let Err(why) = &machine {
         eprintln!("no machine id ({why}): a target volume made now carries none — judged by its path");
@@ -533,28 +536,86 @@ fn whose(v: &Volume, ours: Option<&str>) -> Whose {
     }
 }
 
-/// Where the Docker CLI talks to: `DOCKER_HOST`, else the current context's endpoint — None: it didn't say.
-fn endpoint() -> Option<String> {
-    if let Some(host) = std::env::var("DOCKER_HOST").ok().filter(|h| !h.is_empty()) {
-        return Some(host);
-    }
-    let out = Command::new("docker")
-        .args(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+/// What the Docker says of itself (`docker info`): the name of the host it runs on, and its id — None: it
+/// didn't say. Said beside `--mine`, never judged by.
+fn docker_self(docker: &std::ffi::OsStr) -> Option<(String, String)> {
+    let out = Command::new(docker)
+        .args(["info", "--format", "{{.Name}}\t{{.ID}}"])
         .stdin(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|h| !h.is_empty())
+    let said = String::from_utf8_lossy(&out.stdout);
+    let (name, id) = said.trim().split_once('\t')?;
+    Some((name.to_string(), id.to_string()))
 }
 
-/// Whether a Docker at `endpoint` is this machine's alone: a unix socket. Err: why it may not be — `tcp://`,
-/// `ssh://` reach a Docker other machines may use too, whose volumes without an id aren't ours to judge.
-fn local(endpoint: Option<&str>) -> std::result::Result<(), String> {
-    match endpoint {
-        Some(e) if e.starts_with("unix://") => Ok(()),
-        Some(e) => Err(format!("the Docker at {e} may be other machines' too")),
-        None => Err("Docker didn't say where it is".into()),
+/// Whether volumes without a machine id, and the images, are this machine's: only when you say so (`mine`,
+/// `--mine`). Nothing else tells it — a unix socket may be forwarded from another machine (frictions16:
+/// deb12's, through ssh), and a host's name collides (`ubuntu`, `debian`, `localhost` — the reviewer's
+/// finding: a same-named Docker elsewhere had every volume without an id judged ours). Err: what's said
+/// instead, naming the Docker (`docker`: its host's name and id) so `--mine` is said of a known one.
+fn local(mine: bool, docker: Option<(&str, &str)>) -> std::result::Result<(), String> {
+    if mine {
+        return Ok(());
     }
+    Err(match docker {
+        Some((name, id)) => format!("no machine id: kept — --mine takes them (this Docker: {name}, {id})"),
+        None => "no machine id: kept — --mine takes them".into(),
+    })
+}
+
+/// `local` for the Docker the CLI reaches.
+fn judged_local(mine: bool) -> std::result::Result<(), String> {
+    let docker = docker_self("docker".as_ref());
+    local(mine, docker.as_ref().map(|(n, i)| (n.as_str(), i.as_str())))
+}
+
+/// The checkouts of the sessions the tarae running this has open, as its UI state lists them (`tarae state
+/// --json`'s answer): asked of the socket tarae names in `TARAE_UI` — set for its terminal and your tasks —
+/// with the request `tarae state` sends. No binary is run: a `tarae` on PATH older than `state` took it for a
+/// file to open and started an editor (frictions16, `~/.cargo/bin/tarae` of 09-29). Err why not: not run from
+/// a tarae, or it didn't answer — then a checkout is live by its folder alone. (Claude's runs never get
+/// `TARAE_UI`.)
+fn tarae_sessions(ui: Option<std::ffi::OsString>) -> std::result::Result<Vec<PathBuf>, String> {
+    use std::io::{BufRead, Write};
+    let sock =
+        ui.ok_or("not run from a tarae — its terminal or a task of yours has TARAE_UI, the socket to ask")?;
+    let said = |e: std::io::Error| format!("{}: {e}", Path::new(&sock).display());
+    let mut s = std::os::unix::net::UnixStream::connect(&sock).map_err(said)?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5))).map_err(said)?;
+    writeln!(s, "{}", serde_json::json!({ "get": "state", "timeout_ms": 2000 })).map_err(said)?;
+    let mut line = String::new();
+    std::io::BufReader::new(&s).read_line(&mut line).map_err(said)?;
+    let v: serde_json::Value = serde_json::from_str(&line).map_err(|e| format!("its answer: {e}"))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(e.to_string());
+    }
+    Ok(sessions_in(&v))
+}
+
+/// The sessions' checkouts in `tarae state --json`'s answer.
+fn sessions_in(v: &serde_json::Value) -> Vec<PathBuf> {
+    v["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["root"].as_str())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Why a target volume's checkout is live — `prune --all` keeps it: a session of a running tarae has it open
+/// (`sessions`), or its folder is there (`there`: a worktree under tarae's worktrees, any checkout). None: gone.
+fn live(checkout: &str, sessions: &[PathBuf], there: impl Fn(&Path) -> bool) -> Option<&'static str> {
+    let at = Path::new(checkout);
+    if checkout.is_empty() {
+        return None;
+    }
+    if sessions.iter().any(|s| s == at) {
+        return Some("a session tarae has open");
+    }
+    there(at).then_some("its folder is there")
 }
 
 /// The target volumes to drop: this machine's (`ours`) whose checkout is gone (`is_dir` says) — its
@@ -618,11 +679,7 @@ fn prune_notes(
              as this machine's (not relabelled)",
             s(n)
         )),
-        (Err(why), n) => notes.push(format!(
-            "kept {n} target volume{} without a machine id: {why} — only those made with this machine's id \
-             are judged there",
-            s(n)
-        )),
+        (Err(why), n) => notes.push(format!("{n} target volume{} with {why}", s(n))),
     }
     notes
 }
@@ -667,7 +724,7 @@ fn gb(n: u64) -> String {
 
 /// The line saying what tarae's volumes take, once past `over`: the checkouts' targets — what a session's
 /// end and `prune` free, with how — apart from the shared ones (registry, toolchains, trace's target), which
-/// neither frees; each part's total and its three biggest (a target by its checkout's folder name).
+/// only `prune --all` frees; each part's total and its three biggest (a target by its checkout's folder name).
 fn size_line(volumes: &[(String, u64, String)], over: u64) -> Option<String> {
     let total: u64 = volumes.iter().map(|v| v.1).sum();
     if total < over {
@@ -697,7 +754,11 @@ fn size_line(volumes: &[(String, u64, String)], over: u64) -> Option<String> {
         ));
     }
     if !shared.is_empty() {
-        parts.push(format!("shared {} — neither frees these", part(shared)));
+        parts.push(format!(
+            "shared {} — only `cargo xtask linux prune --all` frees these (every gone target too; it lists, \
+             --yes drops)",
+            part(shared)
+        ));
     }
     Some(format!("tarae's Docker volumes take {} (past {}): {}", gb(total), gb(over), parts.join("; ")))
 }
@@ -732,14 +793,14 @@ fn say_sizes() {
     }
 }
 
-/// `cargo xtask linux prune`: the target volumes no checkout uses, the old shared one too.
-pub fn prune() -> Result<()> {
+/// `cargo xtask linux prune [--mine]`: the target volumes no checkout uses, the old shared one too.
+pub fn prune(mine: bool) -> Result<()> {
     if let Err(why) = reachable(&mut Command::new("docker")) {
         println!("{}", skipped(&why));
         return Ok(());
     }
     let machine = machine_id(&root());
-    let local = local(endpoint().as_deref());
+    let local = judged_local(mine);
     let (listed, gone) = prune_volumes(machine.as_deref().ok(), local.is_ok(), true);
     if gone.is_empty() {
         println!("no target volume to drop — each of this machine's is a checkout's that's there");
@@ -755,6 +816,181 @@ pub fn prune() -> Result<()> {
     }
     say_sizes();
     Ok(())
+}
+
+/// The images this repository builds: `trace.rs`'s (`tarae-trace:<minor>-<hash>`) and netlink's capture
+/// fixtures' (`tarae-redirect` — `netlink/fixtures/capture/vm.sh`). `rust:<minor>` isn't ours: pulled, maybe
+/// another project's too.
+const OWN_IMAGES: [&str; 2] = ["tarae-trace", "tarae-redirect"];
+
+/// One thing `prune --all` drops.
+#[derive(Debug, PartialEq)]
+struct Dropped {
+    /// `volume` or `image`
+    kind: &'static str,
+    name: String,
+    size: u64,
+    /// Its checkout, for a target volume (else empty)
+    checkout: String,
+}
+
+/// A label's value in `docker system df`'s `k=v,k=v` labels (empty: none).
+fn label<'a>(labels: &'a str, key: &str) -> &'a str {
+    labels.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')).unwrap_or("")
+}
+
+/// What `prune --all` drops of `listed` (`docker system df -v`'s volumes, `DF_FORMAT`) and `images` (`IMAGES_FORMAT`):
+/// every volume named `tarae-` that's this machine's — made with its id (`ours`), or without one on a Docker
+/// that's this machine's own (`local`: by what it says of itself, or `--mine`) — but a live checkout's target
+/// (`live`: an open session's, a folder that's there — kept, said why: removing a working session's target
+/// under it was the wrong default), and the images this repository builds (`OWN_IMAGES`, local only: a shared
+/// Docker's may be another machine's runs'). The rest is made again by the next run (the registry and
+/// toolchains fetched again). Never another's: a volume or image of any other name, another machine's id, one
+/// with an id when this run has none. What's dropped, and the lines saying what was kept as live.
+fn everything(
+    listed: &str,
+    images: &str,
+    ours: Option<&str>,
+    local: bool,
+    live: impl Fn(&str) -> Option<&'static str>,
+) -> (Vec<Dropped>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut v: Vec<Dropped> = listed
+        .lines()
+        .filter_map(|l| {
+            let mut cols = l.split('\t').map(str::trim);
+            let (name, size) = (cols.next()?, bytes(cols.next()?)?);
+            let labels = cols.next().unwrap_or("");
+            let machine = label(labels, MACHINE_LABEL);
+            let mine = match machine {
+                "" => local,
+                m => ours == Some(m),
+            };
+            if !(name.starts_with("tarae-") && mine) {
+                return None;
+            }
+            let checkout = label(labels, CHECKOUT_LABEL);
+            if let Some(why) = live(checkout) {
+                let of = Path::new(checkout).file_name().map_or(checkout.into(), |n| n.to_string_lossy());
+                kept.push(format!("  kept: live ({of} — {why}) volume {name}  {}", gb(size)));
+                return None;
+            }
+            Some(Dropped { kind: "volume", name: name.to_string(), size, checkout: checkout.to_string() })
+        })
+        .collect();
+    v.extend(images.lines().filter(|_| local).filter_map(|l| {
+        let mut cols = l.split('\t').map(str::trim);
+        let (name, size) = (cols.next()?, bytes(cols.next()?)?);
+        let repo = name.rsplit_once(':').map_or(name, |(r, _)| r);
+        OWN_IMAGES.contains(&repo).then(|| Dropped {
+            kind: "image",
+            name: name.to_string(),
+            size,
+            checkout: String::new(),
+        })
+    }));
+    (v, kept)
+}
+
+/// `docker image ls`'s rows as `everything` reads them: `repository:tag`, size.
+const IMAGES_FORMAT: &str = "{{.Repository}}:{{.Tag}}\t{{.Size}}";
+
+/// The list `prune --all` says before it drops anything: a line each, its size (a target with its checkout),
+/// and the total.
+fn dropped_list(all: &[Dropped]) -> Vec<String> {
+    let mut lines: Vec<String> = all
+        .iter()
+        .map(|d| match d.checkout.is_empty() {
+            true => format!("  {} {}  {}", d.kind, d.name, gb(d.size)),
+            false => format!("  {} {}  {}  ({})", d.kind, d.name, gb(d.size), d.checkout),
+        })
+        .collect();
+    lines.push(format!("  {} in all", gb(all.iter().map(|d| d.size).sum())));
+    lines
+}
+
+/// `cargo xtask linux prune --all [--yes] [--mine]`: every volume and image of this repository's on this
+/// machine but live checkouts' targets, listed with their sizes — and dropped only with `--yes`, after
+/// you've read the list (the reviewer: it dropped tens of GB right after printing them, no chance to stop).
+/// One in use (a run going) is kept, said.
+pub fn prune_all(yes: bool, mine: bool) -> Result<()> {
+    if let Err(why) = reachable(&mut Command::new("docker")) {
+        println!("{}", skipped(&why));
+        return Ok(());
+    }
+    prune_all_with("docker".as_ref(), machine_id(&root()), yes, mine, std::env::var_os("TARAE_UI"))
+}
+
+/// `prune_all` with the `docker` to run (a test's stand-in records what it's asked), this machine's id
+/// (`machine_id` — made where it isn't yet: a test passes none), and the UI-state socket to ask for open
+/// sessions (`tarae_sessions`).
+fn prune_all_with(
+    docker: &std::ffi::OsStr,
+    machine: std::result::Result<String, String>,
+    yes: bool,
+    mine: bool,
+    ui: Option<std::ffi::OsString>,
+) -> Result<()> {
+    let docker_is = docker_self(docker);
+    let local = local(mine, docker_is.as_ref().map(|(n, i)| (n.as_str(), i.as_str())));
+    let listed = df(&mut Command::new(docker))?;
+    let images = Command::new(docker)
+        .args(["image", "ls", "--format", IMAGES_FORMAT])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let sessions = tarae_sessions(ui);
+    if let Err(why) = &sessions {
+        println!("tarae's open sessions not asked ({why}): a checkout is live by its folder alone");
+    }
+    let open = sessions.unwrap_or_default();
+    let (all, kept) = everything(&listed, &images, machine.as_deref().ok(), local.is_ok(), |c| {
+        live(c, &open, checkout_there)
+    });
+    if let Err(why) = &local {
+        println!("volumes and images with {why}");
+    }
+    for line in &kept {
+        println!("{line}");
+    }
+    if all.is_empty() {
+        println!("nothing of this repository's to drop");
+        return Ok(());
+    }
+    println!("{} this repository's own:", if yes { "dropping" } else { "would drop" });
+    for line in dropped_list(&all) {
+        println!("{line}");
+    }
+    if !yes {
+        let total = gb(all.iter().map(|d| d.size).sum());
+        println!("run again with --yes to drop these {}, {total}", all.len());
+        return Ok(());
+    }
+    for d in &all {
+        let rm = Command::new(docker).args([d.kind, "rm", d.name.as_str()]).output();
+        match rm {
+            Ok(o) if o.status.success() => eprintln!("dropped {} {}", d.kind, d.name),
+            _ => eprintln!("kept {} {} for now: Docker didn't drop it (in use?)", d.kind, d.name),
+        }
+    }
+    Ok(())
+}
+
+/// `cargo xtask linux prune [--all [--yes]] [--mine]` — `--mine`: this Docker's volumes without a machine id
+/// (and the images) are this machine's (`local`); `--yes`: `--all` drops what it lists.
+pub fn prune_cmd(args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: cargo xtask linux prune [--all [--yes]] [--mine]";
+    let has = |f: &str| args.iter().any(|a| a == f);
+    if args.iter().any(|a| !["--all", "--yes", "--mine"].contains(&a.as_str()))
+        || (has("--yes") && !has("--all"))
+    {
+        return Err(USAGE.into());
+    }
+    match has("--all") {
+        true => prune_all(has("--yes"), has("--mine")),
+        false => prune(has("--mine")),
+    }
 }
 
 /// Whether a volume's checkout is there — or can't be told: only a folder that's surely not there is gone. A
@@ -827,8 +1063,11 @@ fn script(tree: Tree, what: &What) -> String {
     });
     s.push_str("echo \"toolchain: $(rustc --version)\"\n");
     if !matches!(what, What::Test { .. }) {
-        s.push_str("cargo clippy --locked --all-targets -- -D warnings\n");
-        s.push_str("cargo clippy --locked --all-targets --features bundled-grammars -- -D warnings\n");
+        // (every package: netlink/ is Linux code, linted only here)
+        s.push_str("cargo clippy --locked --workspace --all-targets -- -D warnings\n");
+        s.push_str(
+            "cargo clippy --locked --workspace --all-targets --features bundled-grammars -- -D warnings\n",
+        );
     }
     match what {
         What::Clippy => {}
@@ -1238,17 +1477,26 @@ mod tests {
         assert!(prune_notes(&listed[..1], Ok("me"), Ok(()), &[]).is_empty(), "nothing kept: nothing said");
     }
 
-    /// A Docker reached over the network (`tcp://`, `ssh://`) may be other machines' too: there only volumes
-    /// made with this machine's id are judged — one without an id, gone from here, may be another machine's
-    /// checkout that's there — and `prune` says it kept them. A unix socket is this machine's.
+    /// Volumes without a machine id (and the images) are this machine's only when `--mine` says so — nothing a
+    /// Docker says tells it: a unix socket may be forwarded from another machine (frictions16: deb12's, over
+    /// ssh, was taken for this machine's alone), and a host's name collides (the reviewer: `ubuntu`,
+    /// `debian`, `localhost` — a same-named Docker elsewhere had every such volume judged ours). Without
+    /// `--mine` they're kept, said so, naming the Docker.
     #[test]
-    fn a_remote_docker_judges_only_volumes_with_this_machines_id() {
-        assert_eq!(local(Some("unix:///Users/me/.colima/tarae-test/docker.sock")), Ok(()));
-        for remote in ["tcp://10.0.0.5:2376", "ssh://me@build"] {
-            let e = local(Some(remote)).unwrap_err();
-            assert!(e.contains(remote) && e.contains("other machines'"), "{e}");
+    fn only_mine_judges_volumes_without_an_id() {
+        // (this machine's own name, as a Docker running here — or a same-named one elsewhere — would say it)
+        let mut buf = [0u8; 256];
+        // SAFETY: a buffer of its own length; the name ends with a NUL.
+        assert_eq!(unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) }, 0);
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let here = String::from_utf8_lossy(&buf[..end]).into_owned();
+        for name in [here.as_str(), "ubuntu", "debian", "localhost", "deb12"] {
+            let e = local(false, Some((name, "EF01:2"))).unwrap_err();
+            assert_eq!(e, format!("no machine id: kept — --mine takes them (this Docker: {name}, EF01:2)"));
         }
-        assert!(local(None).is_err(), "not said where: not judged as ours");
+        assert_eq!(local(false, None).unwrap_err(), "no machine id: kept — --mine takes them");
+        assert_eq!(local(true, Some(("deb12", "EF01:2"))), Ok(()), "--mine says they are");
+        let e = local(false, Some(("deb12", "EF01:2"))).unwrap_err();
         let listed = volumes(
             "tarae-target-1.99.0-aaaa\t/w/gone\tme\n\
              tarae-target-1.99.0-cccc\t/w/old-label\t\n\
@@ -1257,16 +1505,149 @@ mod tests {
         let gone_here = |_: &Path| false;
         assert_eq!(prunable(&listed, Some("me"), false, gone_here, false), ["tarae-target-1.99.0-aaaa"]);
         assert!(prunable(&listed, None, false, gone_here, true).is_empty(), "no id of its own: nothing");
-        let why = local(Some("tcp://10.0.0.5:2376")).unwrap_err();
         assert_eq!(
-            prune_notes(&listed, Ok("me"), Err(&why), &["tarae-target-1.99.0-aaaa".to_string()]),
+            prunable(&listed, Some("me"), true, gone_here, false),
+            ["tarae-target-1.99.0-aaaa", "tarae-target-1.99.0-cccc"],
+            "--mine: the one without an id too"
+        );
+        assert_eq!(
+            prune_notes(&listed, Ok("me"), Err(&e), &["tarae-target-1.99.0-aaaa".to_string()])[1],
+            "1 target volume with no machine id: kept — --mine takes them (this Docker: deb12, EF01:2)"
+        );
+    }
+
+    /// `prune --all` only lists — what it would drop and how much — unless `--yes`: no `docker volume rm` or
+    /// `image rm` runs without it (the reviewer: it dropped right after printing, tens of GB with no chance to
+    /// stop). A stand-in `docker` here answers and writes down what it's asked.
+    #[test]
+    fn prune_all_drops_nothing_without_yes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-standin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (docker, log) = (dir.join("docker"), dir.join("asked"));
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1\" in\n\
+             version) echo 27.0 ;;\n\
+             info) printf 'standin\\tID:1\\n' ;;\n\
+             system) printf 'tarae-registry\\t800MB\\t\\n' ;;\n\
+             image) [ \"$2\" = ls ] && printf 'tarae-redirect:latest\\t1.1GB\\n' ;;\n\
+             esac\nexit 0\n",
+            log.display()
+        );
+        std::fs::write(&docker, script).unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let asked = || std::fs::read_to_string(&log).unwrap_or_default();
+        let drops = |a: &str| a.lines().filter(|l| l.contains(" rm ") || l.starts_with("rmi")).count();
+        let none = || Err("a test's: none".to_string());
+        prune_all_with(docker.as_os_str(), none(), false, true, None).unwrap();
+        assert!(asked().contains("system df"), "it listed: {}", asked());
+        assert_eq!(drops(&asked()), 0, "nothing dropped without --yes: {}", asked());
+        prune_all_with(docker.as_os_str(), none(), true, true, None).unwrap();
+        let a = asked();
+        assert!(
+            a.contains("volume rm tarae-registry") && a.contains("image rm tarae-redirect:latest"),
+            "{a}"
+        );
+        assert_eq!(drops(&a), 2, "{a}");
+        assert!(prune_cmd(&["--yes".to_string()]).unwrap_err().starts_with("usage:"), "--yes alone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `prune --all` drops only this repository's own: volumes named `tarae-` that are this machine's (its id,
+    /// or none on a Docker of its own) — gone checkouts' targets, toolchains, the registry, trace's — and the
+    /// images it builds; never another machine's volume, another project's (`k8s-data`, `rust:1.99`), nor,
+    /// on a shared Docker, one without an id or any image. A live checkout's target is kept, said which way
+    /// it's live — a folder that's there, or a session tarae has open: frictions16's list had every session's,
+    /// tproxy6's mid-work among them. It says each with its size, and the total, first.
+    #[test]
+    fn prune_all_drops_only_this_repositorys_own() {
+        let listed = "tarae-target-1.99.0-aaaa\t7.2GB\ttarae.checkout=/w/gone,tarae.machine=me\n\
+                      tarae-target-1.99.0-bbbb\t4.2GB\ttarae.checkout=/w/wt/tproxy6,tarae.machine=me\n\
+                      tarae-target-1.99.0-eeee\t2GB\ttarae.checkout=/w/wt/frictions16,tarae.machine=me\n\
+                      tarae-target-1.99.0-dddd\t6GB\ttarae.checkout=/elsewhere/wt,tarae.machine=them\n\
+                      tarae-target-1.98.0-cccc\t5GB\ttarae.checkout=/w/old\n\
+                      tarae-rustup-1.99.0\t1.5GB\t\n\
+                      tarae-registry\t800MB\t\n\
+                      tarae-trace-target-1.99.0\t2GB\t\n\
+                      k8s-data\t3GB\ttarae.machine=me\n";
+        let images = "tarae-trace:1.99-0a1b2c3d\t1.9GB\n\
+                      tarae-redirect:latest\t1.1GB\n\
+                      rust:1.99\t1.5GB\n\
+                      tarae-traced:x\t1MB\n";
+        let names = |d: &[Dropped]| d.iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+        // (tproxy6 a session tarae has open; frictions16's folder there; the rest gone)
+        let open = [PathBuf::from("/w/wt/tproxy6")];
+        let there = |p: &Path| p == Path::new("/w/wt/frictions16");
+        let is_live = |c: &str| live(c, &open, there);
+        let (here, kept) = everything(listed, images, Some("me"), true, is_live);
+        assert_eq!(
+            names(&here),
             [
-                "kept 1 target volume another machine made — theirs to judge".to_string(),
-                "kept 1 target volume without a machine id: the Docker at tcp://10.0.0.5:2376 may be other \
-                 machines' too — only those made with this machine's id are judged there"
-                    .to_string()
+                "tarae-target-1.99.0-aaaa",
+                "tarae-target-1.98.0-cccc",
+                "tarae-rustup-1.99.0",
+                "tarae-registry",
+                "tarae-trace-target-1.99.0",
+                "tarae-trace:1.99-0a1b2c3d",
+                "tarae-redirect:latest"
             ]
         );
+        assert_eq!(
+            kept,
+            [
+                "  kept: live (tproxy6 — a session tarae has open) volume tarae-target-1.99.0-bbbb  4.2 GB",
+                "  kept: live (frictions16 — its folder is there) volume tarae-target-1.99.0-eeee  2.0 GB"
+            ]
+        );
+        // A Docker other machines use too: only what carries this machine's id, no image
+        let (shared, _) = everything(listed, images, Some("me"), false, is_live);
+        assert_eq!(names(&shared), ["tarae-target-1.99.0-aaaa"]);
+        // No id of its own: nothing with one
+        let (none, _) = everything(listed, images, None, true, is_live);
+        assert!(!names(&none).contains(&"tarae-target-1.99.0-aaaa".into()));
+        // Said first: each with its size (a target with its checkout), and the total
+        let said = dropped_list(&here);
+        assert_eq!(said[0], "  volume tarae-target-1.99.0-aaaa  7.2 GB  (/w/gone)");
+        assert_eq!(said[5], "  image tarae-trace:1.99-0a1b2c3d  1.9 GB");
+        assert_eq!(said.last().unwrap(), "  19.5 GB in all");
+        // The open sessions: asked of the socket `TARAE_UI` names, as `tarae state` asks (a stand-in answers
+        // here) — never by running a `tarae`; not run from one, or one answering an error: said, none
+        assert!(tarae_sessions(None).unwrap_err().contains("not run from a tarae"));
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("ui.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let answers = [
+            r#"{"sessions":[{"id":"s0","root":"/w/wt/tproxy6"},{"id":"s1"}]}"#,
+            r#"{"error":"unknown request"}"#,
+        ];
+        let served = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for answer in answers {
+                use std::io::{BufRead, Write};
+                let (mut s, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&s).read_line(&mut line).unwrap();
+                asked.push(line);
+                writeln!(s, "{answer}").unwrap();
+            }
+            asked
+        });
+        assert_eq!(tarae_sessions(Some(sock.clone().into())), Ok(open.to_vec()));
+        assert_eq!(tarae_sessions(Some(sock.into())), Err("unknown request".to_string()));
+        let asked = served.join().unwrap();
+        let req: serde_json::Value = serde_json::from_str(&asked[0]).unwrap();
+        assert_eq!(req["get"], "state", "the request `tarae state` sends");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(prune_cmd(&["--list".to_string()]).unwrap_err().starts_with("usage:"), "--list: gone");
+        // The names are the ones this repository builds its images under
+        let trace = std::fs::read_to_string(root().join("xtask/src/trace.rs")).unwrap();
+        assert!(trace.contains("format!(\"tarae-trace:{}-{:08x}\""), "trace.rs's image name");
+        let vm = std::fs::read_to_string(root().join("netlink/fixtures/capture/vm.sh")).unwrap();
+        assert!(vm.lines().any(|l| l == "IMAGE=tarae-redirect"), "the capture fixtures' image name");
+        assert!(prune_cmd(&["--some".to_string()]).unwrap_err().starts_with("usage:"));
     }
 
     /// The template `say_sizes` asks for, run against the Docker that's there (skipped without one): Docker
@@ -1380,7 +1761,7 @@ mod tests {
     }
 
     /// Past 30 GB a run says what tarae's volumes take — the checkouts' targets (what ends and `prune` free,
-    /// the only part with advice) apart from the shared ones (neither frees them), each part's total and three
+    /// said so) apart from the shared ones (only `prune --all` frees them), each part's total and three
     /// biggest, a target by its checkout's folder — counting tarae's volumes only (k8s's and others' aren't
     /// ours); under it, nothing.
     #[test]
@@ -1413,13 +1794,14 @@ mod tests {
         assert_eq!(
             shared,
             "shared 10.4 GB (tarae-trace-target-1.99.0 9.5 GB, tarae-rustup-1.99.0 0.7 GB, tarae-registry \
-             0.1 GB) — neither frees these",
-            "no advice for what nothing frees"
+             0.1 GB) — only `cargo xtask linux prune --all` frees these (every gone target too; it lists, \
+             --yes drops)",
+            "what frees them: everything, said as that"
         );
-        // (only shared ones: no advice at all; more than three: counted)
+        // (only shared ones: only that advice; more than three: counted)
         let shared_only = sizes("tarae-trace-target-1.99.0\t40GB\t\n");
         let line = size_line(&shared_only, VOLUMES_SAY).unwrap();
-        assert!(!line.contains("prune") && line.contains("neither frees"), "{line}");
+        assert!(!line.contains("session.ended") && line.contains("prune --all"), "{line}");
         let many: Vec<_> =
             (0..5).map(|i| (format!("tarae-target-1.99.0-{i}"), 7_000_000_000, String::new())).collect();
         assert!(size_line(&many, VOLUMES_SAY).unwrap().contains(" and 2 more)"));

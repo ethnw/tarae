@@ -46,33 +46,7 @@ const COPY: &str = "txt";
 /// A compare buffer's title: this, then the file.
 const COMPARE: &str = "recovered · ";
 
-/// Files named like keys and tokens, anywhere (lowercase, one `*` at most) — never kept, whatever folder
-/// they're in.
-const KEY_NAMES: [&str; 21] = [
-    ".env",
-    ".env.*",
-    "*.pem",
-    "*.key",
-    "*.p12",
-    "*.pfx",
-    "*.jks",
-    "*.keystore",
-    "*.kdbx",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    ".netrc",
-    ".npmrc",
-    ".pypirc",
-    ".pgpass",
-    ".git-credentials",
-    "credentials",
-    "credentials.json",
-    "credentials.toml",
-];
-
-/// What decides, besides `KEY_NAMES` and the places that hold keys, that a file is never kept: the user's
+/// What decides, besides names like keys' (`secretnames`) and the places that hold keys, that a file is never kept: the user's
 /// `editor.recovery-skip`, the sessions' roots its relative entries are from, and home (`~/` entries, and
 /// where the key places are).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -86,12 +60,7 @@ pub struct Rules {
 /// `~/.ssh` counts), named like a key, or in `editor.recovery-skip`. On the keeper (it resolves the path).
 fn never(path: &Path, rules: &Rules, places: &[PathBuf]) -> bool {
     let real = crate::sandbox::profile_path(path);
-    let named = |p: &Path| {
-        p.file_name().is_some_and(|n| {
-            let n = n.to_string_lossy().to_lowercase();
-            KEY_NAMES.iter().any(|k| wild(k, &n))
-        })
-    };
+    let named = crate::secretnames::named_secret;
     places.iter().any(|p| real.starts_with(p)) || named(path) || named(&real) || skipped(&real, rules)
 }
 
@@ -119,16 +88,8 @@ fn skipped(real: &Path, rules: &Rules) -> bool {
             return rules.roots.iter().any(|r| real.strip_prefix(r).is_ok_and(|rel| rel.starts_with(s)));
         }
         let s = s.to_lowercase();
-        real.iter().any(|p| wild(&s, &p.to_string_lossy().to_lowercase()))
+        real.iter().any(|p| crate::secretnames::wild(&s, &p.to_string_lossy().to_lowercase()))
     })
-}
-
-/// `pat` (one `*` at most) matches all of `name`.
-fn wild(pat: &str, name: &str) -> bool {
-    match pat.split_once('*') {
-        Some((a, b)) => name.len() >= a.len() + b.len() && name.starts_with(a) && name.ends_with(b),
-        None => pat == name,
-    }
 }
 
 fn nanos(t: SystemTime) -> u64 {

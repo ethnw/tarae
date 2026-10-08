@@ -799,6 +799,9 @@ pub struct Review {
     pub ready: bool,
     pub current: usize,
     pub scroll: usize,
+    /// Columns scrolled sideways (`h`/`l`) — lines not wrapped: a long one was cut at the edge, readable only
+    /// with the chat panel closed.
+    pub left: usize,
     /// Whether the view follows the current change (off when scrolling directly with j/k).
     pub follow: bool,
     pub started: Instant,
@@ -843,7 +846,7 @@ pub fn close_review(ed: &mut Editor) {
 
 impl Review {
     /// Waiting for an answer (`ready: false`), proposed by Claude, nobody to call when done.
-    fn new(generation: u64, doc_id: DocId, instruction: &str, hunks: Vec<Hunk>) -> Self {
+    pub(crate) fn new(generation: u64, doc_id: DocId, instruction: &str, hunks: Vec<Hunk>) -> Self {
         Review {
             generation,
             doc_id,
@@ -852,6 +855,7 @@ impl Review {
             ready: false,
             current: 0,
             scroll: 0,
+            left: 0,
             follow: true,
             started: Instant::now(),
             asked: Instant::now(),
@@ -986,7 +990,47 @@ pub fn draft(
     let doc = ed.docs.iter().find(|d| d.id == doc_id).ok_or("the buffer is gone")?;
     let old = doc.text.byte_slice(from..to).to_string();
     let hunk = Hunk { from, to, old, new: String::new(), decision: Decision::Undecided, conflict: false };
-    start(ed, doc_id, label, prompt, vec![hunk])
+    start(ed, doc_id, label, prompt, vec![hunk])?;
+    // (its time limit: a draft still being written then is stopped, and said)
+    let generation = ed.llm_generation;
+    ed.events.jobs().spawn(move || {
+        std::thread::sleep(DRAFT_LIMIT);
+        move |ed: &mut Editor| stop_waiting(ed, Some(generation), DRAFT_LIMIT_SAID)
+    });
+    Ok(())
+}
+
+/// The longest a draft is waited for (a commit message takes seconds): one still being written then is
+/// stopped — one ran 6 minutes, its output going on, nothing on screen to stop it with.
+pub const DRAFT_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+const DRAFT_LIMIT_SAID: &str = "still writing after 2 minutes — stopped, nothing changed";
+
+/// Whether Esc now stops the answer being waited for (a draft, `space i`) — the code has the keys in normal
+/// mode (`review_key`; the waiting card says `esc stop` then).
+pub fn esc_stops(ed: &Editor) -> bool {
+    ed.session.review.as_ref().is_some_and(|r| !r.ready)
+        && ed.mode == crate::editor::Mode::Normal
+        && ed.picker.is_none()
+        && ed.prompt.is_none()
+        && ed.pending.is_empty()
+        && !ed.session.chat.as_ref().is_some_and(|c| c.focused)
+}
+
+/// The answer being waited for (of `generation`, or any) is stopped — its process killed, nothing applied —
+/// and `said` says why. Nothing waiting (it answered first): nothing happens.
+pub fn stop_waiting(ed: &mut Editor, generation: Option<u64>, said: &str) {
+    let waiting =
+        ed.session.review.as_ref().filter(|r| !r.ready && generation.is_none_or(|g| r.generation == g));
+    let Some(what) = waiting.map(|r| r.instruction.clone()) else {
+        ed.unchanged = true;
+        return;
+    };
+    if let Some(pid) = ed.llm_pid.take() {
+        kill(pid);
+    }
+    close_review(ed);
+    ed.llm_generation += 1;
+    ed.set_warning(format!("Claude's {what}: {said}"));
 }
 
 /// One answer for `hunks` of `doc_id` (the prompt asks for a `<r i="N">` each): the process, the review
@@ -1234,6 +1278,11 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
     }
     let page = ed.viewport.0.max(2) as isize;
     let chat = ed.session.chat.as_ref().map(|c| c.focused);
+    // Still waiting for the answer: Esc stops it (the card says so)
+    if key == Key::plain(Code::Esc) && esc_stops(ed) {
+        stop_waiting(ed, None, "stopped — nothing changed");
+        return true;
+    }
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
     let c_q = key.ctrl && !key.alt && key.code == Code::Char('q');
     // Back in the chat: its keys are the chat's until `C-q`
@@ -1287,8 +1336,14 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
     true
 }
 
-/// The review's own keys: `y` `n` `a` answer, `q` ends it, `j` `k` scroll, `tab` goes to the next change.
+/// Columns `h`/`l` scroll a review sideways.
+const SIDEWAYS: usize = 8;
+
+/// The review's own keys: `y` `n` `a` answer, `q` ends it, `j` `k` scroll, `h` `l` sideways (lines not
+/// wrapped), `tab` goes to the next change.
 fn review_answer(ed: &mut Editor, key: Key) -> bool {
+    let doc = ed.session.review.as_ref().and_then(|r| ed.docs.iter().find(|d| d.id == r.doc_id));
+    let wraps = doc.is_some_and(|d| ed.wraps(d));
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
     let decide = |rev: &mut Review, d: Decision| {
         rev.hunks[rev.current].decision = d;
@@ -1327,8 +1382,26 @@ fn review_answer(ed: &mut Editor, key: Key) -> bool {
             rev.follow = true;
             false
         }
+        // Sideways, where lines aren't wrapped (`editor.soft-wrap`, `z w`): a long one read to its end
+        (Code::Char('h') | Code::Left, false)
+        | (Code::Char('l') | Code::Right, false)
+        | (Code::Home, false)
+            if !wraps =>
+        {
+            rev.left = match key.code {
+                Code::Char('h') | Code::Left => rev.left.saturating_sub(SIDEWAYS),
+                Code::Home => 0,
+                _ => rev.left + SIDEWAYS,
+            };
+            false
+        }
         _ => {
-            let out = "y takes it, n leaves it, a takes all, q ends — esc goes back unanswered";
+            let out = match wraps {
+                true => "y takes it, n leaves it, a takes all, q ends — esc goes back unanswered",
+                false => {
+                    "y takes it, n leaves it, a takes all, q ends, h/l scroll sideways — esc goes back unanswered"
+                }
+            };
             ed.key_unused(key, "the review of this change", out);
             return true;
         }
@@ -1351,6 +1424,14 @@ fn finish(ed: &mut Editor) {
         }
     }
     let applied = apply_accepted(ed, &rev);
+    // Answered here, the keys go back to the chat it took them from — as its Esc gives them (they stayed in
+    // the code: `keys → pane#29 (commands)` after an edit review's `y`)
+    if rev.from_chat
+        && !rev.away
+        && let Some(c) = ed.session.chat.as_mut()
+    {
+        c.focused = true;
+    }
     // A step `space u` takes back on its own
     if applied
         && rev.own_turn

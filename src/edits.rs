@@ -360,7 +360,10 @@ fn show(ed: &mut Editor, p: Pending) {
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
         .map(|m| m.text.lines().next().unwrap_or_default().to_string())
         .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.session.root, &path)));
-    let (reason, since) = (p.reason.clone(), p.since);
+    let (mut reason, since) = (p.reason.clone(), p.since);
+    if let Some(note) = (!existed).then(|| folder_outside(&ed.session.root, &path)).flatten() {
+        reason = if reason.is_empty() { note } else { format!("{reason}\n\n{note}") };
+    }
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
     let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
@@ -390,6 +393,18 @@ fn show(ed: &mut Editor, p: Pending) {
     crate::follow::settle(ed);
 }
 
+/// A new file whose folder isn't there yet, outside the project: what the review says of it — tarae's save
+/// won't make that folder (`saver::make_folders`), only Claude's own write does. Inside: None, it's made.
+fn folder_outside(root: &Path, path: &Path) -> Option<String> {
+    let dir = path.parent().filter(|d| !d.exists())?;
+    crate::paths::inside(root, dir).is_none().then(|| {
+        format!(
+            "{}/ isn't there yet and is outside the project: tarae won't make it — only Claude's own write will.",
+            crate::allow::tilde(dir)
+        )
+    })
+}
+
 /// The review ended: tell claude what to write (or not).
 fn done(ed: &mut Editor, p: Pending, doc_id: DocId, base: String, dirty: bool, existed: bool, applied: bool) {
     if let Some(c) = &mut ed.session.chat {
@@ -397,6 +412,11 @@ fn done(ed: &mut Editor, p: Pending, doc_id: DocId, base: String, dirty: bool, e
     }
     if applied {
         crate::checkpoint::record(ed, doc_id, existed.then(|| ropey::Rope::from_str(&base)));
+        // (a new file: if tarae saves it before Claude writes it — or Claude never does — its folders are made)
+        let root = ed.session.root.clone();
+        if let Some(doc) = ed.docs.iter_mut().find(|d| d.id == doc_id).filter(|_| !existed) {
+            doc.make_folders = Some(root);
+        }
     }
     let applied_note = "The user accepted this change and tarae applied it to their open buffer, which has \
 unsaved edits — the file on disk changes when they save. Treat the edit as done.";
@@ -431,6 +451,8 @@ unsaved edits — the file on disk changes when they save. Treat the edit as don
         if let Some(real) = real {
             crate::follow::before_edit(ed, real, existed.then_some(base));
         }
+        // (a write that never comes — its turn cut short — and tarae saves it: `Editor::agent_write_missed`)
+        ed.agent_write_watch(doc_id);
     }
     answer(ed, &p.request_id, r);
     crate::follow::settle(ed);

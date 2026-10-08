@@ -121,6 +121,9 @@ pub struct Session {
     /// Cards that came while it was behind, and Claude's that were up when it left — up again when it's in
     /// front · Claude's waiting on one has been said (once while it's behind).
     pub parked: Vec<crate::offer::Offer>,
+    /// The card that took the keys from the chat as it came (`push_offer`): once it's gone and no other is up,
+    /// they go back to the chat (`Editor::chat_lent_sync`).
+    pub chat_lent: Option<u64>,
     pub waiting_told: bool,
     /// Its Claude ended a turn while it was behind, and it hasn't been in front since: when, and how (stopped
     /// or failed: its words) — its tab says `done` (#86: not the `▲` of a card waiting), a toast says it once,
@@ -258,6 +261,7 @@ impl Session {
             turn_review_back: None,
             restorable: None,
             parked: Vec::new(),
+            chat_lent: None,
             waiting_told: false,
             turn_end: None,
             asleep: Vec::new(),

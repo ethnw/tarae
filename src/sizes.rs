@@ -425,10 +425,19 @@ impl crate::editor::Editor {
     /// little (`widths`). Not before the first frame, not while a review's rail holds its place.
     pub fn side_folded(&self) -> bool {
         let Some(total) = self.screen.width else { return false };
-        let chat_open = self.session.chat.as_ref().is_some_and(|c| !c.compact());
+        let chat_open = self.chat_panel(total);
         self.session.sidebar.is_some()
             && !self.review_rail_up()
             && widths(total, chat_open, true, self.sizes).side == 0
+    }
+
+    /// The chat is a panel on a screen `total` wide: open, not minimized — and where it would take the whole
+    /// width (too narrow for it beside the code), only while it has the keys. Out of the chat (a card
+    /// answered, Esc, an edit's review) they went to a code pane with no room on screen: `keys → pane#29`,
+    /// typing landing unseen. What has the keys fills a narrow screen, the code too; `space l` brings the chat.
+    pub fn chat_panel(&self, total: usize) -> bool {
+        let Some(c) = self.session.chat.as_ref().filter(|c| !c.compact()) else { return false };
+        c.focused || widths(total, true, false, self.sizes).chat < total
     }
 
     /// `C-w =` — every size automatic again.
@@ -565,9 +574,11 @@ impl crate::editor::Editor {
         self.zoom = Some(z);
     }
 
-    /// Every key and event: the bottom slot's keys go when something else took them (or it emptied), and
-    /// `C-w z` ends once what it filled the screen with doesn't have them.
+    /// Every key and event: the bottom slot's keys go when something else took them (or it emptied),
+    /// `C-w z` ends once what it filled the screen with doesn't have them, and a card that took them from the
+    /// chat gives them back once it's gone (`chat_lent_sync`).
     pub fn focus_sync(&mut self) {
+        self.chat_lent_sync();
         self.slot_sync();
         if self.bottom_focus {
             let program = self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible);

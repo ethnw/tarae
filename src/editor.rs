@@ -4173,7 +4173,7 @@ mod tests {
         assert!(lines[say].contains("they build and run this project's code (its tests and build scripts)"));
         assert!(!q.contains("no trust"), "{q}");
         assert_eq!(ed.offers[0].warning, Some(say..say + 1), "the caution alone in the warning color");
-        assert!(q.contains("  clippy  cargo clippy --all-targets -- -D warnings"), "{q}");
+        assert!(q.contains("  clippy  cargo clippy --workspace --all-targets -- -D warnings"), "{q}");
         assert!(q.contains("Yours, from .tarae.local.toml:\n  mine    echo mine"), "{q}");
         assert!(ed.offers[0].weighty(), "it runs commands: y waits for it settled in sight");
         ed.offer_dismiss();
@@ -8630,6 +8630,140 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// An edit's review scrolls sideways where lines don't wrap: `l` brings a long line's end into sight, `h`
+    /// and Home take it back — they did nothing ("h does nothing in the review of this change"), and a line
+    /// past the edge could be read only by closing the chat panel. Wrapping, they're unused, said so.
+    #[test]
+    fn an_edit_review_scrolls_sideways_where_lines_dont_wrap() {
+        let mut ed = editor("short\n");
+        ed.config.soft_wrap = "never".into();
+        let id = ed.doc().id;
+        let long = format!("let x = {}; // THE END\n", "1 + ".repeat(30));
+        crate::llm::review_with(&mut ed, id, "x", vec![(0, 6, "short\n".into(), long)], None);
+        let shown = |ed: &mut Editor| {
+            let mut out = Vec::new();
+            crate::term::render(ed, &mut out, 80, 20).unwrap();
+            let mut vt = vt100::Parser::new(20, 80, 0);
+            vt.process(&out);
+            vt.screen().contents()
+        };
+        assert!(!shown(&mut ed).contains("THE END"), "past the edge");
+        for _ in 0..10 {
+            feed(&mut ed, "l");
+        }
+        let after = shown(&mut ed);
+        assert!(after.contains("THE END"), "its end in sight:\n{after}");
+        assert!(!after.contains("let x"), "its start scrolled off:\n{after}");
+        feed(&mut ed, "h");
+        assert_eq!(ed.session.review.as_ref().unwrap().left, 9 * 8);
+        feed(&mut ed, "<home>");
+        assert!(shown(&mut ed).contains("let x"), "back at its start");
+        assert!(ed.session.review.is_some(), "still under review: nothing answered");
+        // Wrapping: the line's end is on screen already, h/l are unused and said so
+        ed.config.soft_wrap = "always".into();
+        feed(&mut ed, "l");
+        assert_eq!(ed.session.review.as_ref().unwrap().left, 0);
+        let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(said.contains("does nothing") || said.contains("y takes it"), "{said}");
+    }
+
+    /// A new file of Claude's in a folder that isn't there yet, accepted, and Claude never writes it (its turn
+    /// stopped — the fake here writes nothing): tarae's own save makes the folders, inside the project. Every
+    /// save of such a file failed "No such file or directory" while the card had said accepted.
+    #[test]
+    fn an_accepted_new_file_in_a_new_folder_is_saved_inside_the_project() {
+        let (dir, ..) = follow_project("edit-new-folder");
+        let new = dir.join("src/fresh/deeper/new.rs");
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        let input = serde_json::json!({"file_path": new, "content": "pub fn new() {}\n"});
+        let log = fake_edit(&mut ed, &dir, "Write", input, false);
+        feed(&mut ed, "<space>lmake it<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.is_some());
+        assert!(
+            !ed.session.review.as_ref().unwrap().reason.contains("isn't there"),
+            "inside: nothing to say"
+        );
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer(&log)["behavior"], "allow");
+        crate::typed::execute(&mut ed, "write").unwrap();
+        assert!(ed.flush_saves());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "pub fn new() {}\n", "its folders were made");
+        assert!(!ed.doc().is_modified());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An accepted edit whose write from Claude never comes (its turn cut short; the fake writes nothing):
+    /// when the wait for it is over tarae saves the buffer itself — with auto-save at "focus", the default,
+    /// nothing else did, and the file stayed unsaved (•1) while the card had said accepted. Not once you've
+    /// typed in it since: then it's your unsaved text, auto-save's to judge.
+    #[test]
+    fn an_accepted_edit_claude_never_writes_is_saved_by_tarae() {
+        let (dir, main, ..) = follow_project("edit-never-written");
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        assert_eq!(ed.config.auto_save, "focus");
+        ed.open(&main).unwrap();
+        let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
+        let log = fake_edit(&mut ed, &dir, "Edit", input, false);
+        feed(&mut ed, "<space>lshout<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.is_some());
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer(&log)["behavior"], "allow");
+        let id = ed.doc().id;
+        let (_, version) = ed.doc().agent_writes.expect("waiting for Claude's write");
+        assert!(ed.doc().is_modified());
+        // (the wait's end, as its job brings it)
+        ed.agent_write_missed(id, version);
+        assert!(ed.flush_saves());
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "line 1\nLINE 2\nline 3\n");
+        assert!(!ed.doc().is_modified());
+        // Typed since: left to auto-save
+        let input = serde_json::json!({"file_path": main, "old_string": "line 3", "new_string": "LINE 3"});
+        crate::chat::close(&mut ed);
+        let log = fake_edit(&mut ed, &dir, "Edit", input, false);
+        feed(&mut ed, "<space>lagain<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.is_some());
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer(&log)["behavior"], "allow");
+        let (_, version) = ed.doc().agent_writes.expect("waiting for Claude's write");
+        ed.session.chat.as_mut().unwrap().focused = false;
+        feed(&mut ed, "ggiX<esc>");
+        ed.agent_write_missed(id, version);
+        assert!(ed.flush_saves());
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "line 1\nLINE 2\nline 3\n", "not saved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same outside the project: tarae doesn't make folders there — the review says so before you answer,
+    /// and a save of tarae's says why it can't write (only Claude's own write makes that folder).
+    #[test]
+    fn an_accepted_new_file_outside_the_project_says_its_folder_isnt_made() {
+        let (dir, ..) = follow_project("edit-new-folder-out");
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let new = dir.join("elsewhere/new.rs");
+        let mut ed = editor("");
+        ed.session.root = project.clone();
+        let input = serde_json::json!({"file_path": new, "content": "pub fn new() {}\n"});
+        let log = fake_edit(&mut ed, &dir, "Write", input, false);
+        feed(&mut ed, "<space>lmake it<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.is_some());
+        let reason = ed.session.review.as_ref().unwrap().reason.clone();
+        assert!(
+            reason.contains("elsewhere/ isn't there yet") && reason.contains("won't make it"),
+            "{reason}"
+        );
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer(&log)["behavior"], "allow");
+        crate::typed::execute(&mut ed, "write").unwrap();
+        assert!(ed.flush_saves());
+        assert!(!dir.join("elsewhere").exists(), "no folder made outside the project");
+        let said = ed.messages.iter().any(|m| m.2.contains("tarae makes folders only inside the project"));
+        assert!(said, "{:?}", ed.messages.iter().map(|m| &m.2).collect::<Vec<_>>());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Unsaved edits in the buffer: disk isn't what the user sees, so the change stays in the buffer and
     /// claude is told it's done there. And an edit whose turn ended (stopped) closes its review.
     #[test]
@@ -8731,7 +8865,10 @@ mod tests {
         feed(&mut ed, "<space>ltwo edits<ret>");
         settle_until(&mut ed, |ed| ed.session.review.is_some());
         feed(&mut ed, "y");
-        feed(&mut ed, "ggiX<esc>"); // (before p2 is read — events wait for settle_until)
+        // (the answer gave the keys back to the chat: Esc to the code, then typed — before p2 is read, events
+        // wait for settle_until)
+        assert!(ed.session.chat.as_ref().unwrap().focused, "back in the chat");
+        feed(&mut ed, "<esc>ggiX<esc>");
         settle_until(&mut ed, |ed| ed.session.review.is_some());
         feed(&mut ed, "y");
         let a = permission_answer_to(&log, "p2");
@@ -11256,6 +11393,68 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("Add two\n\n{wrapped}"));
         std::fs::remove_dir_all(&repo).ok();
         std::fs::remove_file(&log).ok();
+    }
+
+    /// A draft that runs on can be stopped, and stops by itself: the waiting card says `esc stop` and Esc does
+    /// (in normal mode, the code's keys), its process killed and nothing changed; one still writing at its
+    /// time limit (`llm::DRAFT_LIMIT`) is stopped the same way, said. One ran 6 minutes with nothing to stop it.
+    /// And with a code review open, `C` says to end it first (the message couldn't be typed there, the draft
+    /// landed as an edit waiting in it).
+    #[test]
+    fn a_commit_draft_that_runs_on_is_stopped() {
+        let repo = git_repo("commitdraft-stop", &[("a.txt", "one\n")]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        let mut ed = editor("");
+        // (a claude that never answers)
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "read -r line; sleep 30".into()];
+        ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        ed.sidebar_sync();
+        ed.session.sidebar.as_mut().unwrap().selected = 1;
+        feed(&mut ed, "s");
+        settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| !s.staged.is_empty()));
+        // A code review open: said, no message opened
+        ed.session.code_review = Some(crate::codereview::CodeReview::for_test(
+            crate::codereview::Base::Head,
+            repo.clone(),
+            Vec::new(),
+        ));
+        feed(&mut ed, "C");
+        let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(said.contains("a code review is open — end it first (space v q)"), "{said}");
+        ed.session.code_review = None;
+        // Esc stops it
+        feed(&mut ed, "C");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| !r.ready));
+        ed.session.sidebar.as_mut().unwrap().focus = false;
+        assert!(crate::llm::esc_stops(&ed), "Esc stops it, and the card says so");
+        let mut screen = Vec::new();
+        crate::term::render(&mut ed, &mut screen, 120, 40).unwrap();
+        let screen = String::from_utf8_lossy(&screen).into_owned();
+        assert!(screen.contains("esc") && screen.contains(" stop"), "the card's hint");
+        assert_eq!(ed.keys_to().route(Key::plain(crate::key::Code::Esc)), crate::uistate::Region::EditReview);
+        assert!(ed.llm_pid.is_some(), "its process");
+        feed(&mut ed, "<esc>");
+        assert!(ed.session.review.is_none() && ed.llm_pid.is_none(), "stopped, its process killed");
+        let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(said.contains("Claude's a commit message: stopped — nothing changed"), "{said}");
+        assert!(!ed.doc().text.to_string().starts_with("Add"), "nothing changed");
+        // Its time limit: the same, said why
+        feed(&mut ed, ":commit-draft<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| !r.ready));
+        let generation = ed.session.review.as_ref().unwrap().generation;
+        // (the limit's job, as it lands)
+        crate::llm::stop_waiting(
+            &mut ed,
+            Some(generation),
+            "still writing after 2 minutes — stopped, nothing changed",
+        );
+        assert!(ed.session.review.is_none() && ed.llm_pid.is_none());
+        let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(said.contains("after 2 minutes — stopped"), "{said}");
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     /// `space e` during a review gives the rail the keys: `j`/`k` over its files (in its order), Enter opens

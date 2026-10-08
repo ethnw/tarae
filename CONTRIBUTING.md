@@ -23,7 +23,7 @@ cargo perf                               # performance: budgets + real-use runs,
 cargo test --test e2e                    # just the end-to-end tests (the real binary in a pseudo-terminal)
 cargo live                               # live runs with the real rust-analyzer, cargo and claude (see Tests)
 cargo test --features bundled-grammars   # also exercises the bundled-grammar path
-cargo clippy --all-targets               # must stay at 0 warnings
+cargo clippy --workspace --all-targets   # must stay at 0 warnings (xtask, netlink too)
 cargo fmt                                # rustfmt.toml: max_width = 110
 ```
 
@@ -34,8 +34,8 @@ set: fmt, clippy and test (the bundled-grammars builds and perf are marked `full
 <!-- the checks: the same as .tarae.toml's [preflight] and CI's jobs — a test keeps them so (preflight.rs) -->
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --features bundled-grammars -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features bundled-grammars -- -D warnings
 cargo test --workspace
 cargo test --workspace --features bundled-grammars
 cargo perf
@@ -52,11 +52,19 @@ drops this machine's volumes whose checkout is gone — also when the whole repo
 another machine's (a Docker shared through `DOCKER_HOST`). A run of yours always labels the volume it makes; one
 of Claude's, in tarae's sandbox, reads only the git folder's copy, so it labels once a run of yours (or `prune`)
 has made that copy, and before then says it labels none. A volume without the id — made so, or made before ids —
-is judged by its checkout's path alone, as this machine's, and is never relabelled — on a Docker reached through
-a unix socket only: over the network (`tcp://`, `ssh://`) it may be another machine's, so there only volumes
-carrying this machine's id are dropped. `cargo xtask linux prune` says how many it judged by path, or kept. Past
+is judged by its checkout's path alone, as this machine's, and is never relabelled — only with `prune --mine`:
+nothing a Docker says tells it's this machine's alone (a socket may be forwarded from another machine, a host's
+name collides), so otherwise only volumes carrying this machine's id are dropped. `cargo xtask linux prune` says
+how many it judged by path, or kept. Past
 30 GB a run says what tarae's volumes take (or that Docker couldn't measure them), the
-checkouts' targets apart from the shared ones (registry, toolchains), which nothing here frees. To drop a
+checkouts' targets apart from the shared ones (registry, toolchains), which only `cargo xtask linux prune --all`
+frees: it lists every volume and image of this repository's on this machine — gone checkouts' targets,
+toolchains, the registry, trace's, the `tarae-trace` and `tarae-redirect` images (not `rust:<version>`, a pulled
+one; volumes without the machine id and the images only with `--mine`) — with their sizes, and drops them only
+when run again with `--yes`; the next run builds them again. A live checkout's target
+stays, said why — its folder is there, or the tarae it's run from has its session open (asked of its UI-state
+socket, `TARAE_UI`, set for tarae's terminal and your tasks; run elsewhere, or by Claude, the folders alone
+say). To drop a
 session's volume as the session ends, put `[session] ended = ["cargo", "xtask", "linux", "prune"]` in that
 `.tarae.local.toml`.
 
@@ -90,7 +98,7 @@ to a new stable release, as a change of its own:
 
 1. Set `channel` in `rust-toolchain.toml` to the new version (`1.100.0`), and `rust-version` in `Cargo.toml` to its
    `major.minor` (`1.100`).
-2. Run every check on it — `:preflight-full` in tarae, or `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
+2. Run every check on it — `:preflight-full` in tarae, or `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
    warnings` (and with `--features bundled-grammars`), `cargo test`, `cargo perf`. A new release brings new lints
    and deprecations: fix them in the same change (a deprecated call gets its replacement, not an `allow`).
    A new rustfmt may reformat — `cargo fmt` and commit that too.

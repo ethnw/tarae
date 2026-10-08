@@ -234,6 +234,24 @@ const SCENES: &[Scene] = &[
         edit_review(ed);
         feed(ed, &["<esc>"]);
     }),
+    // (Esc stops it — `llm::esc_stops`)
+    ("a draft being written", |ed| {
+        let id = ed.doc().id;
+        let hunk = crate::llm::Hunk {
+            from: 0,
+            to: 0,
+            old: String::new(),
+            new: String::new(),
+            decision: crate::llm::Decision::Undecided,
+            conflict: false,
+        };
+        ed.session.review = Some(crate::llm::Review::new(1, id, "a commit message", vec![hunk]));
+    }),
+    ("a draft being written, the chat's draft", |ed| {
+        chat(ed, "hello");
+        let id = ed.doc().id;
+        ed.session.review = Some(crate::llm::Review::new(1, id, "a commit message", Vec::new()));
+    }),
     ("an edit's review under the side panel", |ed| {
         edit_review(ed);
         ed.sidebar_show(crate::sidebar::Mode::Outline);
@@ -600,6 +618,89 @@ fn an_edit_review_under_a_side_panel_is_where_the_keys_go() {
     frame(&mut ed);
     assert_eq!(ed.keys_to().region, Region::EditReview);
     assert_eq!(ed.keys_at(), crate::chrome::Keys::Review);
+}
+
+/// On a screen too narrow for the chat beside the code, the chat takes it all — while it has the keys. Once
+/// they leave it (a card answered, Esc, an edit's review), the code they go to has the screen: they went to a
+/// pane with no room (`keys → pane#29 (commands)`, nothing of it in sight — typing landed unseen). And the
+/// state says the code is drawn only when its focused pane is.
+#[test]
+fn keys_out_of_a_chat_filling_a_narrow_screen_go_to_code_in_sight() {
+    let narrow = |ed: &mut Editor| {
+        ed.focus_sync();
+        crate::term::render(ed, &mut Vec::new(), 60, 30).unwrap();
+    };
+    let mut ed = editor();
+    chat(&mut ed, "");
+    narrow(&mut ed);
+    assert_eq!(ed.keys_to().region, Region::Chat);
+    assert_eq!(ed.screen.chat_w, 60, "the chat fills the narrow screen while it has the keys");
+    feed(&mut ed, &["<esc>"]);
+    narrow(&mut ed);
+    let k = ed.keys_to();
+    assert_eq!(k.region, Region::Code);
+    assert!(k.drawn, "the code the keys went to is on screen");
+    assert!(ed.screen.panes.iter().any(|p| p.0 == ed.session.focus && p.1.w > 0), "its focused pane drawn");
+    assert_eq!(ed.screen.chat_w, 0);
+    // `space l`: the chat again, filling it
+    feed(&mut ed, &[" ", "l"]);
+    narrow(&mut ed);
+    assert_eq!((ed.keys_to().region, ed.screen.chat_w), (Region::Chat, 60));
+}
+
+/// Right after a card is answered — one that took the keys from the chat (Claude asking mid-turn, its input
+/// empty): an edit review's `y`, the restart card's `y`, a drafts card's `y` — `tarae state` said
+/// `keys → pane#29 (commands)`: the code's normal-mode commands, while you'd been in the chat and nothing there
+/// had asked for the keys. They go back to the chat — as an edit review's Esc already gave them — unless
+/// another card up takes them, or they were moved elsewhere meanwhile.
+#[test]
+fn the_keys_go_back_to_the_chat_once_its_card_is_answered() {
+    // A weighty card (as the restart's is) while the chat has the keys, its input empty: the card takes them
+    let mut ed = editor();
+    chat(&mut ed, "");
+    weighty_card(&mut ed);
+    frame(&mut ed);
+    settle(&mut ed);
+    assert!(matches!(ed.keys_to().region, Region::Card(_)), "{:?}", ed.keys_to().region);
+    feed(&mut ed, &["n"]);
+    frame(&mut ed);
+    assert!(ed.offers.is_empty(), "answered");
+    assert_eq!(ed.keys_to().region, Region::Chat, "back where they were");
+    // (and where they go in the code, the state says it's the code — not a pane called "commands")
+    let mut code = editor();
+    code.focus_sync();
+    let said = code.ui_state().text();
+    assert!(said.contains(&format!("keys → pane#{}, the code (commands)", code.session.focus)), "{said}");
+    // Two stacked: the keys stay with the cards until the last is answered
+    weighty_card(&mut ed);
+    light_card(&mut ed);
+    frame(&mut ed);
+    settle(&mut ed);
+    feed(&mut ed, &["n"]);
+    frame(&mut ed);
+    assert!(matches!(ed.keys_to().region, Region::Card(_)), "the next card: {:?}", ed.keys_to().region);
+    feed(&mut ed, &["n"]);
+    frame(&mut ed);
+    assert_eq!(ed.keys_to().region, Region::Chat);
+    // Moved elsewhere meanwhile (the side panel): they stay there
+    weighty_card(&mut ed);
+    frame(&mut ed);
+    ed.sidebar_show(crate::sidebar::Mode::Outline);
+    ed.offer_dismiss();
+    frame(&mut ed);
+    assert!(matches!(ed.keys_to().region, Region::Side(_)), "{:?}", ed.keys_to().region);
+    // An edit's review that took them from the chat (`edits::show`): its `y` gives them back too
+    let mut ed = editor();
+    chat(&mut ed, "");
+    edit_review(&mut ed);
+    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.review.as_mut().unwrap().from_chat = true;
+    frame(&mut ed);
+    assert_eq!(ed.keys_to().region, Region::EditReview);
+    feed(&mut ed, &["y"]);
+    frame(&mut ed);
+    assert!(ed.session.review.is_none(), "answered");
+    assert_eq!(ed.keys_to().region, Region::Chat, "back where they were");
 }
 
 // ── The state ────────────────────────────────────────────────────────────

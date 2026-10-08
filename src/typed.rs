@@ -305,8 +305,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "format" | "fmt" => {
-            let tab = editor.config.tab_width;
-            let extra = serde_json::json!({ "options": { "tabSize": tab, "insertSpaces": true } });
+            let extra = serde_json::json!({ "options": editor.format_options(editor.doc().id) });
             editor.lsp_request(crate::lsp_editor::Kind::Format, "textDocument/formatting", extra);
             Ok(())
         }

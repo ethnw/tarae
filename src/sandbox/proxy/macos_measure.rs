@@ -898,7 +898,7 @@ fn measure_peer_check() {
     let checks = stand_in(listener, sid.clone());
     let quiet = with_rules(&p, "sleep 3", "", &env);
     let first = std::thread::scope(|s| {
-        let h = s.spawn(|| {
+        let h = crate::event::scoped(s, "tarae-measured", || {
             run_measured(&p, &quiet, |pid| {
                 let _ = sid.set(pid as i32);
             })

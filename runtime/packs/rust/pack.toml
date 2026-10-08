@@ -157,19 +157,20 @@ cmd = "cargo check --all-targets --message-format=short"
 
 [[tasks.task]]
 name = "cargo clippy"
-cmd = "cargo clippy --all-targets --message-format=short"
+cmd = "cargo clippy --workspace --all-targets --message-format=short"
 
 [[tasks.task]]
 name = "cargo build"
 cmd = "cargo build --message-format=short"
 
-# `:preflight` in a project with no steps of its own: formatted, clippy with warnings as errors, the tests
+# `:preflight` in a project with no steps of its own: formatted, clippy with warnings as errors, the tests.
+# Clippy with `--workspace`: in a workspace with a root package, cargo lints only that package without it
 [[preflight]]
 when = ["Cargo.toml"]
 rank = 10
 steps = [
   { name = "fmt", cmd = "cargo fmt --all --check" },
-  { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
+  { name = "clippy", cmd = "cargo clippy --workspace --all-targets -- -D warnings" },
   { name = "test", cmd = "cargo test" },
 ]
 

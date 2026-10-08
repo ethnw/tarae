@@ -182,6 +182,115 @@ pub fn line_changes(old: &str, new: &str) -> Vec<(usize, usize, String, String)>
     out
 }
 
+/// One change of a formatter's to the text it was given: that text's lines `old` become its lines `new`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormatHunk {
+    pub old: std::ops::Range<usize>,
+    pub new: std::ops::Range<usize>,
+}
+
+/// The formatter's changes `now` → `formatted`, by lines: the line diff's hunks, one that replaces as many
+/// lines as it puts in split into one-line replacements (each on its own line — a re-indented block is
+/// then a change per line, and the lines you touched can take theirs alone). Lines end with their `\n`.
+pub fn format_hunks(now: &[&str], formatted: &[&str]) -> Vec<FormatHunk> {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::{Algorithm, diff};
+    let (before, after) = (now.concat(), formatted.concat());
+    let input = InternedInput::new(before.as_str(), after.as_str());
+    let mut out = Vec::new();
+    diff(Algorithm::Histogram, &input, |b: std::ops::Range<u32>, a: std::ops::Range<u32>| {
+        let (old, new) = (b.start as usize..b.end as usize, a.start as usize..a.end as usize);
+        match old.len() == new.len() {
+            true => out.extend(old.zip(new).map(|(o, n)| FormatHunk { old: o..o + 1, new: n..n + 1 })),
+            false => out.push(FormatHunk { old, new }),
+        }
+    });
+    out
+}
+
+/// Which of `hunks` (`format_hunks`) a save keeps: one whose every line is among those changed since the
+/// save (`touched`, a flag a line of `now` — a line the formatter only adds, beside one) — and with it, all
+/// it moves a line with: a line one takes out that another puts back (by its text) ties the two, kept both
+/// or neither. Kept alone, the move's other half duplicated or lost a line of yours (the reviewer, sorting
+/// imports after a `use` was added).
+pub fn format_kept(hunks: &[FormatHunk], now: &[&str], formatted: &[&str], touched: &[bool]) -> Vec<bool> {
+    let at = |i: usize| touched.get(i).copied().unwrap_or(false);
+    let within = |h: &FormatHunk| match h.old.is_empty() {
+        true => at(h.old.start) || h.old.start.checked_sub(1).is_some_and(at),
+        false => h.old.clone().all(at),
+    };
+    // (tied hunks share a root: a line's text, the hunks putting it in)
+    let mut root: Vec<usize> = (0..hunks.len()).collect();
+    fn find(root: &mut [usize], mut i: usize) -> usize {
+        while root[i] != i {
+            root[i] = root[root[i]];
+            i = root[i];
+        }
+        i
+    }
+    let mut puts: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for (i, h) in hunks.iter().enumerate() {
+        for &line in &formatted[h.new.clone()] {
+            puts.entry(line).or_default().push(i);
+        }
+    }
+    for (i, h) in hunks.iter().enumerate() {
+        for line in &now[h.old.clone()] {
+            for &j in puts.get(line).into_iter().flatten() {
+                let (a, b) = (find(&mut root, i), find(&mut root, j));
+                root[a] = b;
+            }
+        }
+    }
+    let mut whole = vec![true; hunks.len()];
+    for (i, h) in hunks.iter().enumerate() {
+        if !within(h) {
+            let r = find(&mut root, i);
+            whole[r] = false;
+        }
+    }
+    (0..hunks.len()).map(|i| whole[find(&mut root, i)]).collect()
+}
+
+/// What a format-on-save keeps of the formatter's text: `now` with the formatter's changes (`format_hunks`)
+/// that lie within the lines changed since the file was saved (`saved` → `now`) applied whole, and with them
+/// all they move a line with (`format_kept`) — every other line as it is. Always your text with a subset of
+/// the formatter's changes, each whole: never a line of yours lost or doubled. A save doesn't re-format what
+/// you didn't touch (a YAML file in 2-space indent came back all in 4, +57 −57, for a two-line edit).
+pub fn format_only_touched(saved: &str, now: &str, formatted: &str) -> String {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::{Algorithm, diff};
+    let lines: Vec<&str> = now.split_inclusive('\n').collect();
+    let fresh: Vec<&str> = formatted.split_inclusive('\n').collect();
+    // (the lines of `now` changed since the save — a deletion marks the line after it)
+    let mut touched = vec![false; lines.len() + 1];
+    diff(Algorithm::Histogram, &InternedInput::new(saved, now), |_, a: std::ops::Range<u32>| {
+        match a.is_empty() {
+            true => touched[a.start as usize] = true,
+            false => a.for_each(|i| touched[i as usize] = true),
+        }
+    });
+    let hunks = format_hunks(&lines, &fresh);
+    let kept = format_kept(&hunks, &lines, &fresh, &touched);
+    format_apply(&lines, &fresh, &hunks, &kept)
+}
+
+/// `now` with the `kept` ones of `hunks` applied, each whole.
+pub fn format_apply(now: &[&str], formatted: &[&str], hunks: &[FormatHunk], kept: &[bool]) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    for (h, &keep) in hunks.iter().zip(kept) {
+        out.extend(now[at..h.old.start].iter().copied());
+        at = h.old.end;
+        match keep {
+            true => out.extend(formatted[h.new.clone()].iter().copied()),
+            false => out.extend(now[h.old.clone()].iter().copied()),
+        }
+    }
+    out.extend(now[at..].iter().copied());
+    out
+}
+
 /// One file: line diff + context + highlight + syntax colors.
 pub fn diff_file(path: PathBuf, op: FileOp, before: Rope, after: Rope) -> FileDiff {
     use imara_diff::intern::InternedInput;
@@ -344,6 +453,107 @@ mod tests {
         let c = line_changes("x\ny", "x\nz");
         assert_eq!(c, [(2, 3, "y".to_string(), "z".to_string())]);
         assert!(line_changes("same\n", "same\n").is_empty());
+    }
+
+    /// Format-on-save keeps the formatter's change only on lines changed since the save: line for line
+    /// where its change pairs up; whole where it lies within them; a line it adds beside one; and not at all
+    /// where it reaches untouched lines without pairing (joining an untouched line into a changed one).
+    #[test]
+    fn a_save_formats_only_the_lines_changed_since_it_was_saved() {
+        let saved = "a  \nb\nc  \n";
+        let now = "a  \nB  \nc  \n";
+        // (every line's trailing blanks gone: only the changed line's)
+        assert_eq!(format_only_touched(saved, now, "a\nB\nc\n"), "a  \nB\nc  \n");
+        // (a line added beside the changed one: kept)
+        assert_eq!(format_only_touched(saved, now, "a  \n\nB\nc  \n"), "a  \n\nB\nc  \n");
+        // (the changed line joined with an untouched one: left out)
+        assert_eq!(format_only_touched(saved, now, "a  B\nc  \n"), now);
+        // (nothing changed since the save: nothing formatted)
+        assert_eq!(format_only_touched(now, now, "a\nB\nc\n"), now);
+    }
+
+    /// The reviewer's case: a `use` added, the formatter sorts the imports — it moves the added line above
+    /// untouched ones. Its two halves (out where you put it, in where it sorts) are tied: kept both or neither,
+    /// and the move reaches untouched lines, so neither — the file is yours as you wrote it. Kept apart, the
+    /// line came twice (`use b; use a; use b;`) or was lost.
+    #[test]
+    fn a_save_never_doubles_or_loses_a_line_the_formatter_moves() {
+        let saved = "use b;\nuse c;\nfn main() {}\n";
+        let now = "use b;\nuse c;\nuse a;\nfn main() {}\n";
+        assert_eq!(format_only_touched(saved, now, "use a;\nuse b;\nuse c;\nfn main() {}\n"), now);
+        let (saved, now) = ("use b;\n", "use b;\nuse a;\n");
+        assert_eq!(format_only_touched(saved, now, "use a;\nuse b;\n"), now, "the reviewer's own example");
+        // A line moved into the lines you changed, from where you didn't: left out
+        let saved = "x\nm\nn\n";
+        let now = "x\nm\nN\nO\n";
+        assert_eq!(format_only_touched(saved, now, "m\nN\nx\nO\n"), now);
+        // …and one of yours moved out among untouched ones: left out
+        assert_eq!(format_only_touched(saved, now, "N\nx\nm\nO\n"), now);
+        // A move within your own lines: kept whole
+        let (saved, now) = ("x\ny\n", "x\ny\nB\nA\n");
+        assert_eq!(format_only_touched(saved, now, "x\ny\nA\nB\n"), "x\ny\nA\nB\n");
+    }
+
+    /// Over random saves, edits and formatter answers (lines shuffled, moved, sorted, added, dropped,
+    /// rewritten): what a save writes is always your text with a subset of the formatter's changes, each
+    /// whole, and never has a line more than both your text and the formatter's, nor fewer than both — no
+    /// line of yours doubled or lost.
+    #[test]
+    fn a_save_is_your_text_with_whole_changes_of_the_formatters() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        let words = ["a\n", "b\n", "c\n", "d\n", "  e\n", "\n"];
+        let edit = |v: &mut Vec<&str>, rand: &mut dyn FnMut(usize) -> usize, moves: bool| {
+            for _ in 0..1 + rand(3) {
+                let at = rand(v.len() + 1);
+                match rand(if moves { 7 } else { 3 }) {
+                    0 => v.insert(at, words[rand(words.len())]),
+                    1 if at < v.len() => drop(v.remove(at)),
+                    2 if at < v.len() => v[at] = words[rand(words.len())],
+                    3 if at < v.len() => {
+                        let l = v.remove(at);
+                        v.insert(rand(v.len() + 1), l);
+                    }
+                    4 => v.sort(),
+                    5 if v.len() > 1 => {
+                        let (i, j) = (at.min(v.len() - 1), rand(v.len()));
+                        v.swap(i, j);
+                    }
+                    _ => v.reverse(),
+                }
+            }
+        };
+        let count = |v: &[&str], l: &str| v.iter().filter(|x| **x == l).count();
+        let mut tried = 0;
+        for _ in 0..3000 {
+            let saved: Vec<&str> = (0..rand(8)).map(|_| words[rand(words.len())]).collect();
+            let mut now = saved.clone();
+            edit(&mut now, &mut rand, false);
+            let mut formatted = now.clone();
+            edit(&mut formatted, &mut rand, true);
+            let wrote = format_only_touched(&saved.concat(), &now.concat(), &formatted.concat());
+            let out: Vec<&str> = wrote.split_inclusive('\n').collect();
+            let case = format!("saved {saved:?} now {now:?} formatted {formatted:?} wrote {out:?}");
+            for l in words {
+                let (n, f, o) = (count(&now, l), count(&formatted, l), count(&out, l));
+                assert!(n.min(f) <= o && o <= n.max(f), "{l:?} {o} times — {case}");
+            }
+            let hunks = format_hunks(&now, &formatted);
+            if hunks.len() <= 10 {
+                tried += 1;
+                let subset = (0..1u32 << hunks.len()).any(|m| {
+                    let kept: Vec<bool> = (0..hunks.len()).map(|i| m & (1 << i) != 0).collect();
+                    format_apply(&now, &formatted, &hunks, &kept) == wrote
+                });
+                assert!(subset, "not your text with whole changes — {case}");
+            }
+        }
+        assert!(tried > 2000, "{tried}");
     }
     use serde_json::json;
 

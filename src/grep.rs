@@ -150,7 +150,8 @@ pub fn search(
     let ended = || quit.load(Ordering::Relaxed) || stop();
     let (tx, rx) = std::sync::mpsc::channel::<File>();
     std::thread::scope(|s| {
-        s.spawn(|| {
+        // (named: the walker's own threads, started from this one, take its name)
+        crate::event::scoped(s, "tarae-grep-walk", || {
             walk.run(|| {
                 let (tx, matcher) = (tx.clone(), matcher.clone());
                 let mut searcher = SearcherBuilder::new()

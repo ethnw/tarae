@@ -383,6 +383,38 @@ impl Editor {
         Ok(())
     }
 
+    /// Claude was allowed to write an accepted edit to `id` (`Document::agent_will_write`): if its write
+    /// hasn't landed when the wait is over, tarae saves the buffer itself, whatever `auto-save` is — at
+    /// "focus" (the default) nothing else would: an edit accepted as Claude's turn was cut short stayed
+    /// unsaved (•1) with the card saying accepted.
+    pub fn agent_write_watch(&mut self, id: DocId) {
+        let Some(version) = self.docs.iter().find(|d| d.id == id).and_then(|d| d.agent_writes).map(|w| w.1)
+        else {
+            return;
+        };
+        self.events.jobs().spawn(move || {
+            std::thread::sleep(AGENT_WRITE_WAIT);
+            move |ed: &mut Editor| ed.agent_write_missed(id, version)
+        });
+    }
+
+    /// `agent_write_watch`'s wait is over: still waiting for Claude's write of `version` (nothing typed since,
+    /// the watch hasn't seen it land) → saved as accepted.
+    pub(crate) fn agent_write_missed(&mut self, id: DocId, version: u64) {
+        let Some(d) = self.docs.iter_mut().find(|d| d.id == id) else { return self.unchanged = true };
+        let waiting = d.agent_writes.is_some_and(|w| w.1 == version) && d.version() == version;
+        if !waiting || !d.is_modified() {
+            self.unchanged = true;
+            return;
+        }
+        d.agent_writes = None;
+        if let Err(e) =
+            self.save_in_background(id, false, crate::saver::Then::Auto(" — Claude's write didn't come"))
+        {
+            self.set_error(format!("not saved — {e}"));
+        }
+    }
+
     /// Terminal focus: auto-save on loss, check disk right away on regain.
     pub fn on_focus(&mut self, gained: bool) {
         if gained {

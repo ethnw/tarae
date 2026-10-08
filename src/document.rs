@@ -179,6 +179,10 @@ pub struct Document {
     /// passes, auto-save leaves the file to Claude — saving first fails its edit ("changed since read").
     /// (until, the buffer's version Claude writes)
     pub agent_writes: Option<(std::time::Instant, u64)>,
+    /// A new file of Claude's you accepted, and the project it was accepted in: tarae's own save of it makes
+    /// its missing folders — inside that project only (`saver::make_folders`). Claude's write makes them
+    /// too, but one that never comes (its turn stopped) left every save failing "No such file or directory".
+    pub make_folders: Option<std::path::PathBuf>,
     /// Saves of this buffer the saver thread hasn't finished (`saver.rs`) — the disk changing meanwhile is
     /// that write, not someone else's.
     pub saving: u32,
@@ -239,6 +243,7 @@ impl Document {
             disk: None,
             disk_conflict: false,
             agent_writes: None,
+            make_folders: None,
             saving: 0,
             git_base: None,
             git_hunks: Vec::new(),
@@ -380,6 +385,15 @@ impl Document {
 
     pub fn is_modified(&self) -> bool {
         self.version != self.saved_version
+    }
+
+    /// The text as on disk (last read or saved), while the undo history still holds it — None once it
+    /// doesn't (a rope clone, sharing what didn't change).
+    pub fn saved_text(&self) -> Option<Rope> {
+        if !self.is_modified() {
+            return Some(self.text.clone());
+        }
+        self.undo.iter().chain(&self.redo).find(|s| s.version == self.saved_version).map(|s| s.text.clone())
     }
 
     /// The parse trees this document keeps alive, as distinct subtrees: (main tree's, injected layers'). Its
