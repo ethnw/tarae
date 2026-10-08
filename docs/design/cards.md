@@ -98,12 +98,15 @@ through (the review note at `readonly.rs:630`). A mistake in any of them is a wa
 One line per card, when it's answered or dropped (built in P0 — `src/cards.rs`):
 
 ```
-20:01:13  tarae  card  size · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s
-20:01:40  tarae  card  ra-policy · read · why=read · class=home · shadow=grant:read · y · 1.4s · up 1.9s
-20:02:02  tarae  card  frictions5 · run · why=socket · shadow=socket · y · 6.2s · up 6.3s
-20:02:30  tarae  card  size · run · why=reads-outside · class=temp,elsewhere · shadow=grant:read · n · not drawn · up 0.4s
+20:01:13  tarae  card  size · card#12 · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s
+20:01:40  tarae  card  ra-policy · card#13 · read · why=read · class=home · shadow=grant:read · y · 1.4s · up 1.9s
+20:02:02  tarae  card  frictions5 · card#14 · run · why=socket · shadow=socket · y · 6.2s · up 6.3s
+20:02:30  tarae  card  size · card#15 · run · why=reads-outside · class=temp,elsewhere · shadow=grant:read · n · not drawn · up 0.4s
+20:03:10  tarae  card  size · card#16 · run · why=not-a-check:awk · shadow=none · same=#12 · y · 1.1s · up 1.3s
 ```
 
+- `card#<id>`: the card (cardburden 3), so a later card's `same=#12` — a run card the same as one answered
+  before, `same=#12:changed` when what it runs changed since — names a line here.
 - The kind: `run`, `read`, `no-sandbox`, `protected-made` (Claude's next run, after one made a protected
   name Landlock couldn't refuse), `screen`, and the sandbox's own `grant` and `outside` (the user opening
   what it blocked).
@@ -484,9 +487,13 @@ hour, each time read whole:
   state's cards (`Editor::ui_cards`) so the two can't disagree; `UiState.inbox` is its order. `space I` lists it
   (a picker: it's empty most of the day, a moment's choice when it isn't); the status line counts it; `C-q` goes
   to its first, any session.
-- **Since your last y** (`src/sinceyes.rs`): an `outside_sandbox` run said yes to before in the chat shows only
-  what changed since in what it runs — the project's hunks (a git tree per `y`, staged into a temp index), or a
-  script's diff — or `Unchanged since your y at 01:12`. It still waits for `y`.
+- **Same as an earlier card** (`src/sinceyes.rs`; outside runs 2026-10-05, every run card cardburden 3): a run
+  whose card was answered before since tarae started (`Session.answered`, the same run asked the same way)
+  starts with `Same as card#41 — y at 18:02` and a row for each part of what it runs — scripts, a pack's
+  `[claude] entry` files, build files, the rest named — and shows what it runs that changed (past the
+  sandbox — outside it or with a socket — the project's whole hunks; a git tree per answer, the run's own
+  snapshot, staged into tarae's own index). Kept until tarae quits, not with the conversation. It still waits
+  for its key. The `card` line's `same=#41`/`same=#41:changed` counts it.
 
 **P2, as built (2026-10-05)** — measured first (`target/sb/p2-plan.md`, `p2-measured.md`, the scripts beside
 them):

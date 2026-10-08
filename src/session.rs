@@ -144,6 +144,10 @@ pub struct Session {
     /// Protected names Claude's runs made where none was (`snapshot::Found::protected`, from its root) — its
     /// next run waits on a card about them (`tools::ask_made`); a `y` there clears it.
     pub made_protected: Vec<String>,
+    /// The run cards of its Claude's answered until you quit — each the last for its run in its folder
+    /// (`sinceyes::Answered`): the same run asked again says `Same as card#41 — y at 18:02` and what changed
+    /// since in what it runs (cardburden 3).
+    pub answered: Vec<crate::sinceyes::Answered>,
     /// Its Claude's calls waiting on a card for the user's answer (`offer::Asking`) — each card must be up
     /// (in front) or parked (behind) until it's answered; one gone is told (`asking_sync`).
     pub asking: Vec<crate::offer::Asking>,
@@ -277,6 +281,7 @@ impl Session {
             runs_next: Default::default(),
             wrote: None,
             made_protected: Vec::new(),
+            answered: Vec::new(),
             asking: Vec::new(),
             spawned: Vec::new(),
             viewed: Default::default(),

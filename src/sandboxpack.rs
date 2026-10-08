@@ -71,6 +71,9 @@
 //! - `expand.<word> = { run, env, first-word-in }`: a `$(…)` a command line may hold, filled in where it's
 //!   judged with the folder `run`'s first word names directly in `first-word-in`.
 //! - `builders`: programs that build or test the project (a script calling one runs its code).
+//! - `entry = [{ run, files }]`: what a command runs that its words don't name — a line with `run`'s words in
+//!   a row (after a wrapper too: `timeout 1800 cargo xtask`) runs the project's `files` (folders end in `/`):
+//!   the card for it again says whether they changed since its last answer, and shows how (`sinceyes.rs`).
 //! - `said = { rank, run, code, tests, protect }`: the pack's words in Claude's prompt and tools, joined by
 //!   `rank` (lower first).
 //!
@@ -126,6 +129,8 @@ pub(crate) const CLAUDE_KEYS: &[(&str, Reach)] = &[
     ("expand", Reach::BuiltIn),
     // (narrows: a script calling one is said to run the project's code)
     ("builders", Reach::Added),
+    // (narrows: more of what a command runs is shown on its card again)
+    ("entry", Reach::Added),
     // (Claude's prompt)
     ("said", Reach::BuiltIn),
 ];
@@ -265,6 +270,14 @@ pub struct Expand {
     pub first_word_in: String,
 }
 
+/// What a command runs that its words don't name (`entry`): a line starting with `run`'s words runs the
+/// project's `files` (from its root; a folder ends in `/`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Entry {
+    pub run: Vec<String>,
+    pub files: Vec<String>,
+}
+
 /// A pack's words in Claude's prompt and tools (`said`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Said {
@@ -301,6 +314,7 @@ pub struct Packs {
     pub code_trees: Vec<String>,
     pub expand: Vec<Expand>,
     pub builders: Vec<String>,
+    pub entry: Vec<Entry>,
     pub said: Vec<Said>,
     /// What was wrong: a built-in pack's entry left out (a mistake in tarae's pack — a test fails), a runtime
     /// folder's key that's the built-in packs' only.
@@ -633,6 +647,23 @@ fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> R
                     true if !out.builders.contains(&b) => out.builders.push(b),
                     true => {}
                     false => wrong.push(format!("`{b}` isn't a program's name")),
+                }
+            }
+        }
+        ("claude", "entry") => {
+            let Some(entries) = v.as_array() else { return Err("`entry` isn't a list".into()) };
+            for e in entries {
+                let e = tab(e)?;
+                known(&e, &["run", "files"], "an `entry`")?;
+                let run: Vec<String> =
+                    need(&e, "run", "an `entry`")?.split_whitespace().map(String::from).collect();
+                let files = list_in(&e, "files")?;
+                let bad = files.iter().find(|f| !plain(f.strip_suffix('/').unwrap_or(f)));
+                match (run.iter().all(|w| plain_word(w)) && !run.is_empty(), bad, files.is_empty()) {
+                    (false, ..) => wrong.push(format!("`{}` isn't a command's words", run.join(" "))),
+                    (_, Some(f), _) => wrong.push(format!("`{f}` isn't a path in the project")),
+                    (_, _, true) => wrong.push(format!("`{}` names no files", run.join(" "))),
+                    _ => out.entry.push(Entry { run, files }),
                 }
             }
         }

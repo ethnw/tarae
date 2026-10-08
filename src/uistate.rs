@@ -964,6 +964,9 @@ pub struct CardState {
     /// The front card's whole text is open in its buffer (`v`).
     pub viewing: bool,
     pub at: Option<(usize, usize, usize, usize)>,
+    /// A run card the same as one answered before: that card, its answer and when, and whether anything changed
+    /// since (`sinceyes`, cardburden 3).
+    pub same_as: Option<crate::sinceyes::SameAs>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1121,6 +1124,10 @@ impl Editor {
                 cut: self.screen.offer_cut.filter(|_| is_front),
                 viewing: is_front && self.offer_viewing(),
                 at: self.screen.offer_card.filter(|_| is_front),
+                same_as: match &o.what {
+                    crate::offer::What::Run(r) => r.same.clone(),
+                    _ => None,
+                },
             }
         };
         let mut cards: Vec<CardState> = self
@@ -1218,6 +1225,10 @@ impl UiState {
                     "waited_ms": c.waited_ms, "in_sight_ms": c.in_sight_ms, "seen_whole": c.seen_whole,
                     "cut": c.cut, "viewing": c.viewing,
                     "at": c.at.map(|(x, y, w, h)| [x, y, w, h]),
+                    "same_as": c.same_as.as_ref().map(|s| json!({
+                        "card": format!("card#{}", s.card), "answer": s.answer.to_string(), "at": s.at,
+                        "unchanged": s.unchanged,
+                    })),
                 })
             })
             .collect();

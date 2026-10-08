@@ -1,5 +1,6 @@
-//! What changed since a yes: the project's hunks (never a file outside it), a script's diff, "unchanged" —
-//! and the card that says it, still waiting for `y`.
+//! What changed since a card's answer: the project's hunks outside the sandbox (never a file outside it), a
+//! script's diff, a pack's entry files' and the build files', the rest named, "unchanged" — and the card that
+//! says it first, still waiting for its key.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -36,14 +37,14 @@ fn repo(name: &str) -> (PathBuf, PathBuf) {
     (dir.clone(), dir.join("proj"))
 }
 
-fn yes(root: &Path, cmd: &str) -> Yes {
-    let kept = take(root, root, cmd);
-    Yes { cmd: cmd.into(), key: key(cmd), cwd: root.into(), at: SystemTime::now(), kept }
+fn yes(root: &Path, cmd: &str) -> Answered {
+    Answered::new((41, 'y'), (true, None), cmd, root, SystemTime::now(), take(root, root, cmd))
 }
 
-/// A command that runs the project's code: what changed since the yes is the project's hunks — a line
-/// changed, a file new — and nothing of a file outside the project; nothing changed, "unchanged". git's own
-/// index is left as it was (the tree is staged into a copy). A file a card can't show as it is: named only.
+/// Outside the sandbox, a command that runs the project's code: what changed since the yes is the project's
+/// hunks — a line changed, a file new — and nothing of a file outside the project; nothing changed, said so
+/// on the first line. git's own index is left as it was (the tree is staged into a copy). A file a card can't
+/// show as it is: named only.
 #[test]
 fn the_projects_changes_since_the_yes_and_nothing_outside_it() {
     let (dir, root) = repo("tree");
@@ -53,16 +54,16 @@ fn the_projects_changes_since_the_yes_and_nothing_outside_it() {
     let index = std::fs::read(dir.join(".git/index")).unwrap();
     let y = yes(&root, cmd);
     assert!(matches!(y.kept, Kept::Tree(_)), "{:?}", y.kept);
-    let s = y.since(&root, &root, cmd);
-    assert_eq!(s.changed, Changed::Nothing);
-    let (lines, diff) = s.card_lines();
-    assert_eq!(lines, [format!("Unchanged since your y at {} — the same as it ran then.", s.at)]);
-    assert!(diff.is_empty() && s.at.len() == 5 && s.at.as_bytes()[2] == b':', "{}", s.at);
+    let s = y.since(&root, &root, cmd, true);
+    assert!(s.changed == Changed::Nothing && s.unchanged, "{s:?}");
+    let same = format!("Same as card#41 — y at {}", s.at);
+    assert_eq!(s.head(), format!("{same}\n  build files unchanged\n  nothing else in the project changed"));
+    assert!(s.below().0.is_empty() && s.at.len() == 5 && s.at.as_bytes()[2] == b':', "{}", s.at);
     // A line changed, a file new — and the file outside the project changed too
     std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
     std::fs::write(root.join("src/new.rs"), "fn c() {}\n").unwrap();
     std::fs::write(dir.join("other.txt"), "outside-marker two\n").unwrap();
-    let s = y.since(&root, &root, cmd);
+    let s = y.since(&root, &root, cmd, true);
     let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
     assert_eq!(of, "the project");
     let has = |l: &str| lines.iter().any(|x| x == l);
@@ -73,13 +74,18 @@ fn the_projects_changes_since_the_yes_and_nothing_outside_it() {
         "nothing from outside the project: {lines:#?}"
     );
     assert!(lines.iter().any(|l| l.starts_with("@@ ")), "its hunks' headers: {lines:#?}");
-    let (card, diff) = s.card_lines();
-    assert_eq!(card[0], format!("Since your y at {}, changed in the project:", s.at));
+    assert!(
+        s.head().ends_with("2 other project files changed since: src/lib.rs, src/new.rs") && !s.unchanged,
+        "{}",
+        s.head()
+    );
+    let (card, diff) = s.below();
+    assert_eq!(card[0], "Changed since card#41, in the project:");
     assert_eq!(diff, 1..card.len(), "the diff's lines are drawn as one");
     assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), index, "git's own index untouched");
     // One a card can't show as it is (a bidi mark): named, not shown
     std::fs::write(root.join("src/new.rs"), "fn c() {}\n// \u{202E}reversed\n").unwrap();
-    let s = y.since(&root, &root, cmd);
+    let s = y.since(&root, &root, cmd, true);
     let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
     assert!(
         lines.iter().any(|l| l.starts_with("src/new.rs (new) has characters a card can't show")),
@@ -108,20 +114,31 @@ fn a_scripts_own_diff_and_one_outside_the_project_named_only() {
         "{:?}",
         y.kept
     );
-    assert_eq!(y.since(&root, &root, cmd).changed, Changed::Nothing);
+    let s = y.since(&root, &root, cmd, true);
+    assert!(s.changed == Changed::Nothing && s.unchanged, "{s:?}");
+    let outside = dir.join("outside.sh").display().to_string();
+    assert!(s.head().ends_with(&format!("\n  script unchanged (check.sh, {outside})")), "{}", s.head());
     std::fs::write(root.join("check.sh"), "echo one\necho three\n").unwrap();
     std::fs::write(dir.join("outside.sh"), "echo outside-marker changed\n").unwrap();
-    let s = y.since(&root, &root, cmd);
-    let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
-    assert!(of.starts_with("check.sh, "), "{of}");
-    assert_eq!(lines[..4], ["check.sh", "@@ line 2", "-echo two", "+echo three"], "{lines:#?}");
-    assert!(lines[4].ends_with("outside.sh — changed; outside the project, not shown here"), "{lines:#?}");
-    assert!(!lines.iter().any(|l| l.contains("outside-marker")), "{lines:#?}");
+    // (in the sandbox or outside it: a script's own changes are shown)
+    for whole in [true, false] {
+        let s = y.since(&root, &root, cmd, whole);
+        let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
+        assert!(of.starts_with("check.sh, "), "{of}");
+        assert_eq!(lines[..4], ["check.sh", "@@ line 2", "-echo two", "+echo three"], "{lines:#?}");
+        assert!(
+            lines[4].ends_with("outside.sh — changed; outside the project, not shown here"),
+            "{lines:#?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("outside-marker")), "{lines:#?}");
+        let said = format!("\n  script changed: check.sh, {outside}");
+        assert!(s.head().ends_with(&said) && !s.unchanged, "{}", s.head());
+    }
     // Not a script, not a git checkout: it can't tell
     let y = yes(&root, "make check");
-    let s = y.since(&root, &root, "make check");
+    let s = y.since(&root, &root, "make check", true);
     assert!(matches!(&s.changed, Changed::Unknown(w) if w.contains("not a git checkout")), "{s:?}");
-    assert!(s.card_lines().0[0].contains("read it as new"), "{:?}", s.card_lines());
+    assert!(s.head().contains("read it as new") && !s.unchanged, "{}", s.head());
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -160,13 +177,22 @@ fn a_script_that_runs_the_projects_code_shows_the_projects_changes_too() {
     let y = yes(&root, cmd);
     assert!(matches!(&y.kept, Kept::Scripts { project: Some(Ok(_)), .. }), "{:?}", y.kept);
     // Another argument, the same script: nothing changed
-    let s = y.since(&root, &root, "sh check.sh two");
+    let s = y.since(&root, &root, "sh check.sh two", true);
     assert_eq!(s.changed, Changed::Nothing);
     assert_eq!(s.was.as_deref(), Some(cmd));
-    assert!(s.card_lines().0[0].contains(" to `sh check.sh one` — what it runs is as it was then"), "{s:?}");
-    // The project changed, the script didn't: the project's diff
+    assert!(s.head().starts_with("Same as card#41 (`sh check.sh one`) — y at "), "{}", s.head());
+    // The project changed, the script didn't: outside the sandbox, the project's diff; in it, named
     std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
-    let s = y.since(&root, &root, cmd);
+    let s = y.since(&root, &root, cmd, false);
+    assert!(s.changed == Changed::Nothing && !s.unchanged, "{s:?}");
+    assert!(
+        s.head().ends_with(
+            "\n  script unchanged (check.sh)\n  build files unchanged\n  1 other project file changed since: src/lib.rs"
+        ),
+        "{}",
+        s.head()
+    );
+    let s = y.since(&root, &root, cmd, true);
     let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
     assert_eq!(of, "the project check.sh runs (check.sh itself unchanged)");
     assert!(
@@ -175,7 +201,7 @@ fn a_script_that_runs_the_projects_code_shows_the_projects_changes_too() {
     );
     // Both: the script's hunks, then the project's — the script not twice
     std::fs::write(root.join("check.sh"), "set -e\ncargo test lib_b\n").unwrap();
-    let s = y.since(&root, &root, cmd);
+    let s = y.since(&root, &root, cmd, true);
     let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
     assert_eq!(of, "check.sh, and the project it runs");
     assert_eq!(lines[0], "check.sh");
@@ -185,7 +211,7 @@ fn a_script_that_runs_the_projects_code_shows_the_projects_changes_too() {
     let y = yes(&root, "sh say.sh");
     assert!(matches!(&y.kept, Kept::Scripts { project: None, .. }), "{:?}", y.kept);
     std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 3 }\n").unwrap();
-    assert_eq!(y.since(&root, &root, "sh say.sh").changed, Changed::Nothing);
+    assert_eq!(y.since(&root, &root, "sh say.sh", true).changed, Changed::Nothing);
     // What reads as running the project's code, line by line
     for l in [
         "cargo test",
@@ -202,10 +228,11 @@ fn a_script_that_runs_the_projects_code_shows_the_projects_changes_too() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The card: Claude asks again to run, outside the sandbox, a command the user said yes to in this chat —
-/// it says when that yes was and shows what changed since in the project (the diff decided, in its
-/// colours' range); nothing since: "unchanged since your y at …". It still waits for `y` — never answered
-/// for the user. Another command: a first card, as ever.
+/// The card: Claude asks again to run, outside the sandbox, a command the user said yes to — its first line
+/// says which card and when (`Same as card#N — y at …`), and under the command what changed since in the
+/// project (the diff decided, in its colours' range); nothing since: said on that line. It still waits for
+/// its key — never answered for the user — weighty as before, its warning (what yes means outside the
+/// sandbox) still in the warning colour. Another command: a first card, as ever.
 #[test]
 fn the_card_says_what_changed_since_your_y() {
     let (dir, root) = repo("card");
@@ -244,45 +271,440 @@ fn the_card_says_what_changed_since_your_y() {
         pump(ed, &|_| answered(n).is_some(), "it ran");
         assert!(answered(n).is_some_and(|r| r.is_ok()), "{:?}", answered(n));
     };
-    // The first time: no word of an earlier yes
+    let warned = |ed: &crate::editor::Editor| {
+        let o = &ed.offers[0];
+        let lines: Vec<&str> = o.question.split('\n').collect();
+        let w =
+            lines.iter().position(|l| l.starts_with("Outside the sandbox it runs with all your")).unwrap();
+        (o.weighty(), o.warning.as_ref().is_some_and(|r| r.contains(&w)))
+    };
+    // The first time: no word of an earlier card
     let q = ask(&mut ed, 1, "true");
-    assert!(!q.contains("your y at"), "{q}");
+    assert!(!q.contains("Same as card#"), "{q}");
+    let first = (ed.offers[0].id, warned(&ed));
     yes(&mut ed, 1);
-    // A change in the project, then the same again: when that yes was, and the change
+    // A change in the project, then the same again: which card, when, and the change
     std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
     let q = ask(&mut ed, 2, "true");
-    assert!(q.contains("Since your y at ") && q.contains(", changed in the project:"), "{q}");
+    let same = format!("Same as card#{} — y at ", first.0);
+    assert!(q.starts_with(&same), "the first line: {q}");
+    assert!(q.contains("Changed since card#") && q.contains(", in the project:"), "{q}");
     assert!(q.contains("\n-fn b() {}\n+fn b() { 2 }"), "{q}");
+    assert_eq!(warned(&ed), first.1, "as weighty, its warning still in the warning colour");
     let o = &ed.offers[0];
     let lines: Vec<&str> = o.question.split('\n').collect();
     let plus = lines.iter().position(|l| *l == "+fn b() { 2 }").unwrap();
     assert!(o.diff.as_ref().is_some_and(|d| d.contains(&plus)), "the diff's colours: {:?}", o.diff);
-    assert!(o.decided_lines().contains(&plus), "what changed is what's decided");
+    assert!(o.decided_lines().contains(&plus) && o.decided_lines().contains(&0), "what's decided");
+    let second = o.id;
     // (drawn: its rows on the card)
     let mut bytes = Vec::new();
     crate::term::render(&mut ed, &mut bytes, 160, 50).unwrap();
     let mut vt = vt100::Parser::new(50, 160, 0);
     vt.process(&bytes);
     let s = vt.screen().contents();
-    assert!(s.contains("+fn b() { 2 }") && s.contains("Since your y at"), "{s}");
+    assert!(s.contains("+fn b() { 2 }") && s.contains("Same as card#"), "{s}");
     yes(&mut ed, 2);
     // Nothing since that yes: said — and the card still waits for its answer
     let q = ask(&mut ed, 3, "true");
-    assert!(q.contains("Unchanged since your y at "), "{q}");
+    assert!(q.starts_with(&format!("Same as card#{second} — y at ")), "{q}");
+    assert!(q.split("\n\n").next().unwrap().ends_with("\n  nothing else in the project changed"), "{q}");
     assert!(answered(3).is_none() && !ed.offers.is_empty(), "never answered for the user");
+    assert_eq!(warned(&ed), first.1);
+    let third = ed.offers[0].id;
     ed.offer_dismiss();
     pump(&mut ed, &|_| answered(3).is_some(), "told no");
+    // (a no is kept too, once what it would have run is taken — on a worker)
+    pump(&mut ed, &|ed| ed.session.answered.iter().any(|a| a.card == third), "the no kept");
     // Another command: a first card
     let q = ask(&mut ed, 4, "true && true");
-    assert!(!q.contains("your y at"), "{q}");
+    assert!(!q.contains("Same as card#"), "{q}");
     ed.offer_dismiss();
     pump(&mut ed, &|_| answered(4).is_some(), "told no");
-    // The same run through another filter (#158): the yes counts, and the card names the line it was to
+    // The same run through another filter (#158): the last answer counts — a no — and the card names the line
     let q = ask(&mut ed, 5, "true | head -1");
-    assert!(
-        q.contains("Unchanged since your y at ") && q.contains(" to `true` — what it runs is as it was"),
-        "{q}"
-    );
+    assert!(q.starts_with(&format!("Same as card#{third} (`true`) — n at ")), "{q}");
     ed.offer_dismiss();
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// cardburden 3, in the sandbox (step 6c: `cargo xtask linux clippy` carded 7 times, each read again by hand
+/// for "has anything it runs changed?"): the same run asked again — through another filter too — says which
+/// card and its answer first, then part by part what it runs: the pack's entry files (`xtask/`), the build
+/// files, the rest of the project named, not shown; what it runs that changed is shown under the command. The
+/// `card` line says `same=#N` or `same=#N:changed`, `tarae state` the card's `same_as`. Each card still waits
+/// for its key. (Every answer here is `n`: nothing runs.)
+#[test]
+fn the_same_run_in_the_sandbox_says_what_changed_in_what_it_runs() {
+    let (dir, root) = repo("insandbox");
+    std::fs::create_dir_all(root.join("xtask/src")).unwrap();
+    std::fs::write(root.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = root.clone();
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !done(ed) {
+            assert!(Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    let answered = |n: u64| crate::tools::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(n)));
+    let ask = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
+        let msg = json!({"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": "run",
+            "arguments": {"command": cmd}}});
+        assert!(crate::tools::mcp(ed, generation, &format!("r{n}"), &msg).is_none(), "it waits for the user");
+        pump(ed, &|ed| !ed.offers.is_empty(), "its card");
+        (ed.offers[0].id, ed.offers[0].question.clone())
+    };
+    // `n`, and the answer kept (what it would have run, taken on a worker)
+    let no = |ed: &mut crate::editor::Editor, n: u64, card: u64| {
+        assert!(!answered(n) && !ed.offers.is_empty(), "never answered for the user");
+        ed.offer_dismiss();
+        pump(ed, &|_| answered(n), "told no");
+        pump(ed, &|ed| ed.session.answered.iter().any(|a| a.card == card), "the no kept");
+    };
+    // (card `card`'s own `card` line, by its id)
+    let logged = |card: u64| {
+        let lines = crate::cards::logged_lines("card ");
+        let mine: Vec<String> =
+            lines.into_iter().filter(|l| l.contains(&format!(" · card#{card} · "))).collect();
+        assert_eq!(mine.len(), 1, "card#{card}'s one line: {mine:?}");
+        mine[0].clone()
+    };
+    let cmd = "cargo xtask linux clippy";
+    let (first, q) = ask(&mut ed, 1, cmd);
+    assert!(!q.contains("Same as card#"), "a first card: {q}");
+    no(&mut ed, 1, first);
+    assert!(!logged(first).contains("same="), "a first card: {}", logged(first));
+    // Only the project's own code changed, through another filter: named, nothing shown
+    std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
+    // (the card's top: up to the blank line before the command)
+    let top = |q: &str| q.split("\n\n").next().unwrap().to_string();
+    let (second, q) = ask(&mut ed, 2, "cargo xtask linux clippy 2>&1 | tail -3");
+    let head = top(&q);
+    assert!(head.starts_with(&format!("Same as card#{first} (`{cmd}`) — n at ")), "{q}");
+    assert!(
+        head.ends_with(
+            "\n  xtask/ unchanged\n  build files unchanged\n  1 other project file changed since: src/lib.rs"
+        ),
+        "{head}"
+    );
+    assert!(!q.contains("Changed since") && ed.offers[0].diff.is_none(), "nothing it runs changed: {q}");
+    let same = ed.ui_cards()[0].same_as.clone().unwrap();
+    assert_eq!((same.card, same.answer, same.unchanged), (first, 'n', false));
+    no(&mut ed, 2, second);
+    assert!(logged(second).contains(&format!(" · same=#{first}:changed · ")), "{}", logged(second));
+    // What it runs changed — the xtask and a build file: on the first line, and shown under the command
+    std::fs::write(root.join("xtask/src/main.rs"), "fn main() { linux() }\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"xtask\"]\n").unwrap();
+    let (third, q) = ask(&mut ed, 3, cmd);
+    let head = top(&q);
+    assert!(head.starts_with(&format!("Same as card#{second} (`cargo xtask linux clippy 2>&1 | tail -3`)")));
+    assert!(
+        head.ends_with(
+            "\n  xtask/ changed: xtask/src/main.rs\n  build files changed: Cargo.toml\n  nothing \
+             else in the project changed"
+        ),
+        "{head}"
+    );
+    assert!(q.contains(&format!("\nChanged since card#{second}, in the project:\n")), "{q}");
+    assert!(q.contains("\n+fn main() { linux() }") && q.contains("\n+members = [\"xtask\"]"), "{q}");
+    assert!(!q.contains("fn b() { 2 }"), "the rest isn't shown: {q}");
+    let o = &ed.offers[0];
+    let plus = o.question.split('\n').position(|l| l == "+fn main() { linux() }").unwrap();
+    assert!(o.diff.as_ref().is_some_and(|d| d.contains(&plus)) && o.decided_lines().contains(&plus));
+    no(&mut ed, 3, third);
+    // Nothing since: said, and the card still waits for its key
+    let (fourth, q) = ask(&mut ed, 4, cmd);
+    let head = top(&q);
+    assert!(head.starts_with(&format!("Same as card#{third} — n at ")), "{head}");
+    assert!(
+        head.ends_with(
+            "\n  xtask/ unchanged\n  build files unchanged\n  nothing else in the project changed"
+        )
+    );
+    assert!(ed.ui_cards()[0].same_as.as_ref().is_some_and(|s| s.unchanged));
+    no(&mut ed, 4, fourth);
+    assert!(logged(fourth).contains(&format!(" · same=#{third} · ")), "{}", logged(fourth));
+    // The same line asked outside the sandbox isn't the same card: an answer in it isn't one outside it
+    let msg = json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "run",
+        "arguments": {"command": cmd, "outside_sandbox": true, "reason": "it needs the network"}}});
+    assert!(crate::tools::mcp(&mut ed, generation, "r5", &msg).is_none());
+    pump(&mut ed, &|ed| !ed.offers.is_empty(), "its card");
+    assert!(!ed.offers[0].question.contains("Same as card#"), "{}", ed.offers[0].question);
+    ed.offer_dismiss();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// cardburden 3: a `y`'s run takes its place in line at once — what it runs is kept from the run's own
+/// snapshot, right before it starts (`tools::go`), not a second one first — so what the run itself made is a
+/// change since that answer. (The run: `touch` in the test's own temp folder.)
+#[test]
+fn what_a_run_made_is_a_change_since_its_answer() {
+    let (dir, root) = repo("ranmade");
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = root.clone();
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !done(ed) {
+            assert!(Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    let answered = |n: u64| crate::tools::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(n)));
+    let cmd = "touch made.txt && echo made";
+    let ask = |ed: &mut crate::editor::Editor, n: u64| {
+        let msg = json!({"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": "run",
+            "arguments": {"command": cmd}}});
+        assert!(crate::tools::mcp(ed, generation, &format!("r{n}"), &msg).is_none(), "it waits for the user");
+        pump(ed, &|ed| !ed.offers.is_empty(), "its card");
+        (ed.offers[0].id, ed.offers[0].question.clone())
+    };
+    let (first, q) = ask(&mut ed, 1);
+    assert!(!q.contains("Same as card#"), "{q}");
+    ed.offer_accept();
+    pump(&mut ed, &|_| answered(1), "it ran");
+    assert!(root.join("made.txt").exists());
+    let (_, q) = ask(&mut ed, 2);
+    let top = q.split("\n\n").next().unwrap();
+    assert!(top.starts_with(&format!("Same as card#{first} — y at ")), "{q}");
+    assert!(top.ends_with("\n  1 other project file changed since: made.txt"), "what the run made: {top}");
+    ed.offer_dismiss();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An editor in `root` with Claude's chat mid-turn (a stand-in claude that reads and says nothing) — and its
+/// chat's generation, what a call is Claude's by.
+fn chat_in(root: &Path) -> (crate::editor::Editor, u64) {
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = root.to_path_buf();
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    (ed, generation)
+}
+
+/// Events handled until `done` (at most 20 s — then `what` didn't happen).
+fn pump_until(ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while !done(ed) {
+        assert!(Instant::now() < end, "{what}");
+        if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+}
+
+/// Claude's `run` call `n` with `args`, waiting for its card: the card's id and text.
+fn ask_run(
+    ed: &mut crate::editor::Editor,
+    generation: u64,
+    n: u64,
+    args: serde_json::Value,
+) -> (u64, String) {
+    let msg = json!({"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": "run", "arguments": args}});
+    assert!(crate::tools::mcp(ed, generation, &format!("r{n}"), &msg).is_none(), "it waits for the user");
+    pump_until(ed, &|ed| !ed.offers.is_empty(), "its card");
+    (ed.offers[0].id, ed.offers[0].question.clone())
+}
+
+/// `n` on the front card for call `n`, and its answer kept (what it would have run, taken on a worker).
+fn no_to(ed: &mut crate::editor::Editor, n: u64, card: u64) {
+    ed.offer_dismiss();
+    pump_until(
+        ed,
+        &|_| crate::tools::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(n))),
+        "told no",
+    );
+    pump_until(ed, &|ed| ed.session.answered.iter().any(|a| a.card == card), "the no kept");
+}
+
+/// cardburden 3 (the reviewer, item 3): a card with a socket — Docker's is root's — is compared as one
+/// outside the sandbox: its "same as" shows the project's whole diff since the answer, not only names; and
+/// only a card asking the same socket is the same. (Every answer `n`: nothing runs, nothing connects.)
+#[test]
+fn a_socket_cards_same_as_shows_the_whole_diff() {
+    let (dir, root) = repo("socket");
+    let sockets =
+        crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qs{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&sockets);
+    std::fs::create_dir_all(sockets.join("c")).unwrap();
+    let (docker, other) = (sockets.join("c/docker.sock"), sockets.join("c/other.sock"));
+    let _listening = [&docker, &other].map(|s| std::os::unix::net::UnixListener::bind(s).unwrap());
+    let (mut ed, generation) = chat_in(&root);
+    // (not a check — it asks; never run)
+    let with =
+        |s: &Path| json!({ "command": "make demo", "unix_socket": s.to_str().unwrap(), "reason": "docker" });
+    let (first, q) = ask_run(&mut ed, generation, 1, with(&docker));
+    assert!(!q.contains("Same as card#"), "{q}");
+    no_to(&mut ed, 1, first);
+    std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
+    let (second, q) = ask_run(&mut ed, generation, 2, with(&docker));
+    assert!(q.starts_with(&format!("Same as card#{first} — n at ")), "{q}");
+    assert!(q.split("\n\n").next().unwrap().ends_with("\n  1 other project file changed since: src/lib.rs"));
+    assert!(
+        q.contains(&format!("\nChanged since card#{first}, in the project:\nsrc/lib.rs\n")),
+        "shown: {q}"
+    );
+    assert!(q.contains("\n-fn b() {}\n+fn b() { 2 }"), "{q}");
+    no_to(&mut ed, 2, second);
+    // Another socket: not the same card
+    let (_, q) = ask_run(&mut ed, generation, 3, with(&other));
+    assert!(!q.contains("Same as card#"), "{q}");
+    ed.offer_dismiss();
+    std::fs::remove_dir_all(&sockets).ok();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A script that runs the project's code (`cargo test` in it), in the sandbox: its own diff and the build
+/// files' hunks are shown together, under one header; the rest of the project only named.
+#[test]
+fn a_changed_script_and_build_file_are_shown_together() {
+    let (dir, root) = repo("merged");
+    std::fs::write(root.join("check.sh"), "set -e\ncargo test lib_a\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let cmd = "sh check.sh";
+    let y = yes(&root, cmd);
+    std::fs::write(root.join("check.sh"), "set -e\ncargo test lib_b\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"x\"]\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
+    let s = y.since(&root, &root, cmd, false);
+    let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
+    assert_eq!(of, "check.sh, and the project");
+    let has = |l: &str| lines.iter().any(|x| x == l);
+    assert!(has("+cargo test lib_b") && has("Cargo.toml") && has("+members = [\"x\"]"), "{lines:#?}");
+    assert!(!has("+fn b() { 2 }"), "the rest isn't shown: {lines:#?}");
+    assert!(
+        s.head().ends_with(
+            "\n  script changed: check.sh\n  build files changed: Cargo.toml\n  1 other project file changed since: \
+             src/lib.rs"
+        ),
+        "{}",
+        s.head()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `with_runs`, case by case: what can't be told is never "nothing changed" — a script that can't be told,
+/// or a project that can't (git failed), reads as new, whatever the other says; nothing of what it runs in
+/// the project changed: the script's own; both: one after the other.
+#[test]
+fn with_runs_never_says_nothing_of_what_it_cant_tell() {
+    let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let script = Changed::Lines { of: "x.sh".into(), lines: lines(&["x.sh", "+a"]) };
+    let project = lines(&["Cargo.toml", "+b"]);
+    let unknown = Changed::Unknown("it runs y.sh now, not what it ran then".into());
+    assert_eq!(with_runs(Changed::Nothing, None), Changed::Nothing);
+    assert_eq!(with_runs(script.clone(), None), script);
+    assert_eq!(with_runs(unknown.clone(), Some(Ok(project.clone()))), unknown, "the script can't be told");
+    assert_eq!(with_runs(unknown.clone(), Some(Ok(Vec::new()))), unknown);
+    for own in [Changed::Nothing, script.clone()] {
+        let c = with_runs(own, Some(Err("git failed".into())));
+        assert!(matches!(&c, Changed::Unknown(w) if w.contains("can't be told (git failed)")), "{c:?}");
+    }
+    assert_eq!(with_runs(script.clone(), Some(Ok(Vec::new()))), script);
+    assert_eq!(with_runs(Changed::Nothing, Some(Ok(Vec::new()))), Changed::Nothing);
+    assert_eq!(
+        with_runs(Changed::Nothing, Some(Ok(project.clone()))),
+        Changed::Lines { of: "the project".into(), lines: project.clone() }
+    );
+    assert_eq!(
+        with_runs(script, Some(Ok(project))),
+        Changed::Lines {
+            of: "x.sh, and the project".into(),
+            lines: lines(&["x.sh", "+a", "Cargo.toml", "+b"])
+        }
+    );
+}
+
+/// The answer kept is the one given: `y` (once), `a` (this chat), `A` (always) — through `run_answer`, as a
+/// card's key calls it. (`a` and `A` let the same run through unasked after, so no card says them here; the
+/// head's letter is `the_card_says_what_changed_since_your_y`'s.) (The runs: `touch` in the test's own temp
+/// folder.)
+#[test]
+fn the_answer_kept_is_the_key_pressed() {
+    use crate::allow::Scope;
+    let (dir, root) = repo("letters");
+    let (mut ed, generation) = chat_in(&root);
+    for (n, scope, letter) in [(1, Scope::Once, 'y'), (2, Scope::ThisChat, 'a'), (3, Scope::Always, 'A')] {
+        let cmd = format!("touch made{n}.txt && echo made");
+        let (id, _) = ask_run(&mut ed, generation, n, json!({ "command": cmd }));
+        let crate::offer::What::Run(card) = &ed.offers[0].what else { panic!("a run card") };
+        let card = (**card).clone();
+        crate::tools::run_answer(&mut ed, id, card, Some(scope));
+        pump_until(&mut ed, &|ed| ed.session.answered.iter().any(|a| a.card == id), "the answer kept");
+        let a = ed.session.answered.iter().find(|a| a.card == id).unwrap();
+        assert_eq!(a.answer, letter, "{scope:?}");
+        pump_until(&mut ed, &|_| root.join(format!("made{n}.txt")).exists(), "it ran");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Answers are kept until tarae quits, not with the conversation: after a new one (`:chat-new`), the same
+/// run's card still says which card it's the same as. (Answered `n`: nothing runs.)
+#[test]
+fn an_answer_outlasts_the_conversation() {
+    let (dir, root) = repo("newchat");
+    let (mut ed, generation) = chat_in(&root);
+    let args = json!({ "command": "make demo" });
+    let (first, _) = ask_run(&mut ed, generation, 1, args.clone());
+    no_to(&mut ed, 1, first);
+    crate::chat::reset(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    (c.state, c.focused) = (crate::chat::State::Thinking, false);
+    let generation = c.generation();
+    let (_, q) = ask_run(&mut ed, generation, 2, args);
+    assert!(q.starts_with(&format!("Same as card#{first} — n at ")), "{q}");
+    ed.offer_dismiss();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A pack's `entry` (`cargo xtask` runs `xtask/`): a part of the line before its first pipe with its words in
+/// a row — after variables and a wrapper too — never what only filters it, nor another command.
+#[test]
+fn an_entry_is_the_commands_words_in_a_row() {
+    let e = [crate::sandboxpack::Entry {
+        run: vec!["cargo".into(), "xtask".into()],
+        files: vec!["xtask/".into()],
+    }];
+    let files = |cmd: &str| entry_files_in(cmd, &e);
+    for cmd in [
+        "cargo xtask linux clippy",
+        "DOCKER_HOST=x timeout 1800 cargo xtask linux test",
+        "cd sub && cargo xtask shot",
+        "cargo xtask lint 2>&1 | tail",
+    ] {
+        assert_eq!(files(cmd), ["xtask/"], "{cmd}");
+    }
+    for cmd in ["cargo test", "cargo xtasks", "echo | cargo xtask", "cargo build xtask"] {
+        assert!(files(cmd).is_empty(), "{cmd}");
+    }
+    // (the built-in packs: the rust pack's)
+    assert_eq!(entry_files("cargo xtask linux clippy"), ["xtask/"]);
+    // A folder holds what's in it, not what only starts the same
+    assert!(in_entry("xtask/src/main.rs", "xtask/") && in_entry("a.sh", "a.sh"));
+    assert!(!in_entry("xtasks/x.rs", "xtask/") && !in_entry("xtask", "xtask/"));
 }

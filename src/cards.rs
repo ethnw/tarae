@@ -3,7 +3,9 @@
 //! read goes (`Class`), what the capability model would do instead (`decide` — the one function P3 decides
 //! by, so what's logged now is what it will do), the answer, and how long after the card was first drawn:
 //!
-//! `size · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s`
+//! `size · card#12 · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s`
+//!
+//! (The card's id since cardburden 3: a later card's `same=#12` names it.)
 //!
 //! And one `denied` line per sandboxed run the sandbox denied something — what the capability model turns
 //! into a grant asked for.
@@ -275,11 +277,19 @@ pub fn decide(r: &Request) -> Decision {
 pub struct Asked {
     pub why: Why,
     pub request: Request,
+    /// A run card the same as one answered before (`sinceyes`): that card, and whether anything changed since
+    /// — `same=#41`, `same=#41:changed` in the line, so its drawn → answered time can be set against the rest.
+    pub same: Option<(u64, bool)>,
 }
 
 impl Asked {
     pub fn new(why: Why, request: Request) -> Asked {
-        Asked { why, request }
+        Asked { why, request, same: None }
+    }
+
+    /// The same as card `card`, answered before — `unchanged`: nothing changed since.
+    pub fn same_as(self, card: u64, unchanged: bool) -> Asked {
+        Asked { same: Some((card, unchanged)), ..self }
     }
 }
 
@@ -298,8 +308,9 @@ fn kind(w: &What) -> &'static str {
     }
 }
 
-/// The `card` line: `<session> · <kind> · why=… · class=… · shadow=… · <answer> · <drawn → answered> · up
-/// <asked → answered>` (`class` only for reads).
+/// The `card` line: `<session> · card#<id> · <kind> · why=… · class=… · shadow=… · same=#41 · <answer> ·
+/// <drawn → answered> · up <asked → answered>` (`class` only for reads; `same` only for a run card the same as
+/// one answered before — that card's id, `same=#41:changed` when something changed since).
 pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
     let classes: Vec<Class> = match &asked.request {
         Request::Run { reads, .. } => reads.clone(),
@@ -312,10 +323,16 @@ pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant)
             format!(" · class={}", classes.iter().map(|c| c.word()).collect::<Vec<_>>().join(","))
         }
     };
+    let same = match asked.same {
+        Some((card, true)) => format!(" · same=#{card}"),
+        Some((card, false)) => format!(" · same=#{card}:changed"),
+        None => String::new(),
+    };
     let took = |at: Instant| crate::term::duration(now.saturating_duration_since(at).as_secs_f32());
     let drawn = o.drawn.get().map_or_else(|| "not drawn".to_string(), took);
     format!(
-        "{session} · {} · why={}{class} · shadow={} · {answer} · {drawn} · up {}",
+        "{session} · card#{} · {} · why={}{class} · shadow={}{same} · {answer} · {drawn} · up {}",
+        o.id,
         kind(&o.what),
         asked.why.word(),
         decide(&asked.request).word(),
@@ -425,12 +442,13 @@ mod tests {
         assert_eq!(class(None, &d, Some(home)), Class::Unknown);
     }
 
-    /// The line: the kind from the card, why, the classes of what's read, the model's decision, the answer,
-    /// and the time from drawn — or that it never was.
+    /// The line: the card's id, the kind from the card, why, the classes of what's read, the model's decision,
+    /// the card it's the same as (cardburden 3), the answer, and the time from drawn — or that it never was.
     #[test]
     fn a_cards_line_says_what_it_asked_and_how_it_went() {
         let call = crate::tools::Call::test(1);
         let mut o = Offer::new("t".into(), "q", "", String::new(), What::Screen { call });
+        o.id = 12;
         let asked = Asked::new(
             Why::ReadsOutside(vec![Class::Temp, Class::Home]),
             Request::Run { past: Past::No, sandboxed: true, reads: vec![Class::Temp, Class::Home] },
@@ -440,7 +458,8 @@ mod tests {
         let at = |s: u64| t0 + std::time::Duration::from_millis(s);
         assert_eq!(
             line("size", &o, &asked, "n", at(4200)),
-            "size · screen · why=reads-outside · class=temp,home · shadow=grant:read · n · not drawn · up 4.2s"
+            "size · card#12 · screen · why=reads-outside · class=temp,home · shadow=grant:read · n · not drawn · \
+             up 4.2s"
         );
         o.drawn.set(Some(at(3300)));
         let a = Asked::new(
@@ -449,8 +468,11 @@ mod tests {
         );
         assert_eq!(
             line("size", &o, &a, "a", at(4200)),
-            "size · screen · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s"
+            "size · card#12 · screen · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s"
         );
+        let same = |unchanged| line("size", &o, &a.clone().same_as(9, unchanged), "y", at(4200));
+        assert!(same(true).contains(" · shadow=none · same=#9 · y · "), "{}", same(true));
+        assert!(same(false).contains(" · shadow=none · same=#9:changed · y · "), "{}", same(false));
     }
 
     /// A run's denials as one line — the distinct ones as Claude reads them, past what's kept counted.

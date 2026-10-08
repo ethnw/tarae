@@ -418,6 +418,9 @@ fn the_packs_say_what_the_core_said() {
         "pnpm", "pytest", "rustc", "swift", "tox", "yarn", "zig",
     ];
     assert_eq!(now, was);
+    // What a command runs that its words don't name: the card for it again says whether that changed
+    let entry: Vec<(String, &[String])> = t.entry.iter().map(|e| (e.run.join(" "), &e.files[..])).collect();
+    assert_eq!(entry, [("cargo xtask".to_string(), &["xtask/".to_string()][..])]);
     // The one `$(…)` a line may hold
     let [e] = t.expand.as_slice() else { panic!("{:?}", t.expand) };
     assert_eq!(

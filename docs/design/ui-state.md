@@ -167,6 +167,9 @@ side git · 4 rows · in hand git:src/term.rs
   - `seen_whole`: `offer_read`.
   - `waited_ms` / `in_sight_ms`: from `since` and `offer_seen`.
   - `at`: its rect, as drawn.
+  - `same_as` (cardburden 3): a run card the same as one answered before since tarae started (`sinceyes.rs`)
+    — `{ card, answer, at, unchanged }`: that card's id, its answer (`y` `a` `A` `n`) and when, and whether
+    nothing changed since; `null` otherwise.
 - **`inbox`** (2026-10-05, `inbox.rs`) — what waits for the user, every session's, oldest first: the cards above
   that wait (not downloading) and the edits waiting for their review (`edit#s0:review` up in its session,
   `edit#s1:<request>` queued), reads queued for their card, a change set's files; after all that asks, Claude's

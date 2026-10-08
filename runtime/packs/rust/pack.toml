@@ -284,6 +284,9 @@ run-allow = [
 code-trees = ["{cargo}/registry/src", "{rustup}/toolchains/*/lib/rustlib/src"]
 # What builds and tests a project: a script calling one runs its code (`sinceyes.rs`)
 builders = ["cargo", "rustc"]
+# What runs that the words don't name: `cargo xtask` is the project's own `xtask/` crate (an alias in
+# `.cargo/config.toml`) — the card for it again says whether that changed since its last answer
+entry = [{ run = "cargo xtask", files = ["xtask/"] }]
 said = { rank = 10, run = "cargo build/check/test/clippy/fmt/tree/metadata", code = "the Rust toolchain's sources ($(rustc --print sysroot)/lib/rustlib/src) or cargo's downloaded crates", tests = "Rust (cargo test)", protect = "build.rs, Cargo.toml, .cargo" }
 
 # The sysroot `$(rustc --print sysroot)` gives where a command runs, as rustup says it (it reads the toolchain

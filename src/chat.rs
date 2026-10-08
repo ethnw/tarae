@@ -296,9 +296,6 @@ pub struct Chat {
     /// The scripts those commands run by their path, as they were (real path, hash of what's in it —
     /// `readonly::script_pins`, #93): one changed since, and the command asks again.
     pub run_scripts: Vec<(PathBuf, u64)>,
-    /// The commands the user said yes to running outside the sandbox in this conversation, with what they ran
-    /// as it was then — the same one asked again says what changed since (`sinceyes.rs`).
-    pub outside_yes: Vec<crate::sinceyes::Yes>,
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
     pub queued: Option<String>,
@@ -411,7 +408,6 @@ impl Chat {
             sees: false,
             run_again: Vec::new(),
             run_scripts: Vec::new(),
-            outside_yes: Vec::new(),
             queued: None,
             screen: None,
             conversation: None,
@@ -797,7 +793,6 @@ pub fn reset(ed: &mut Editor) {
     c.plan = None;
     c.unprotected = false;
     c.allowed = Default::default();
-    c.outside_yes.clear();
     c.state = State::Idle;
     c.scroll = 0;
     c.follow.new_turn();

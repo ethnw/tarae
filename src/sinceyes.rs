@@ -1,30 +1,45 @@
-//! "Since your last y" (2026-10-05): Claude asking again to run a command outside the sandbox that the user
-//! said yes to in this conversation — the same command, from the same folder — gets a card that says so and
-//! shows only what changed since that yes in what the command runs: for a command that runs the project's
-//! code (`cargo test … <filter>`), the project's changed hunks; for a script (`sh x.sh`, `python3 x.py`), the
-//! script's own diff. Nothing changed: `Unchanged since your y at 01:12`. It never answers for the user —
-//! the card still waits for `y`, as it would; it makes the answer quick (one session asked to run the same
-//! test outside the sandbox ten times in an hour, a small edit between each, and each time the whole test was
-//! to be read again). Never the content of a file outside the project: a script there is named, not shown.
+//! "Same as" (2026-10-05 for runs outside the sandbox, cardburden 3 for every run card): Claude asking again
+//! to run a command whose card the user answered since tarae started — the same run, from the same folder —
+//! gets a card whose top says so and, a row a part, what changed since in what it runs:
+//!
+//! ```text
+//! Same as card#41 — y at 18:02
+//!   xtask/ unchanged
+//!   build files unchanged
+//!   3 other project files changed since: src/sandbox/keeper.rs, src/sandbox/tier.rs, src/sandbox/redirect.rs
+//! ```
+//!
+//! Under the command, how what it runs changed: a script's own diff, the files a pack says the command runs
+//! (`[claude] entry`: `cargo xtask` runs `xtask/`), the build files (the protected names — what runs as it
+//! builds); past the sandbox — outside it, or with a socket (Docker's is root's) — the project's whole diff,
+//! as before. Kept until tarae quits, not with the conversation. It never answers for
+//! the user — the card still waits for its key, as it would; it makes the answer quick (in step 6c 14 of 27
+//! cards repeated an earlier line word for word, each 22–35 s, "has anything it runs changed?" checked by
+//! hand). Never the content of a file outside the project: a script there is named, not shown.
 //!
 //! "The same command" is what runs (`key`, from a day of answering these, #158): the program and its
 //! arguments before the first pipe — what's after it only filters what's shown — and for a script, the
 //! script, whatever its arguments. A script that runs the project's code (`cargo test` inside it, a binary
-//! built here) isn't all that runs: the card shows the project's changes too.
+//! built here) isn't all that runs: the card counts the project's changes too.
 //!
-//! At each `y` (`tools::run_answer`) a snapshot is kept with the conversation (`Chat.outside_yes`, gone with
-//! it): for scripts, their text (and the project's tree, as above); for the rest, the project's working tree
-//! as a git tree (`snapshot::tree`: the real index isn't touched, no hook runs). At the next ask the tree is
-//! taken again and `git diff <then> <now> -- .` from the project's root is what changed. Both on workers,
-//! before the run starts and before the card.
+//! At each answer (`tools::run_answer`) what it runs is kept in the session (`Session.answered`, until you
+//! quit): for scripts, their text (and the project's tree, as above); for the rest, the project's working tree
+//! as a git tree (`snapshot::tree`: the real index isn't touched, no hook runs) — taken before it runs. At the
+//! next ask the tree is taken again and compared from the project's root. Both on workers, before the run
+//! starts and before the card.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// A yes to a command outside the sandbox: what it was, what made it the same run (`key`), where it ran,
-/// when, and what it ran as it was then.
+/// An answer on a run card of Claude's: the card, the answer (`y` `a` `A` `n`), the line, what made it the
+/// same run (`key`), where it ran, when, and what it ran as it was then.
 #[derive(Clone, Debug)]
-pub struct Yes {
+pub struct Answered {
+    pub card: u64,
+    pub answer: char,
+    /// What it was asked past the sandbox with: outside it whole, one socket — only a card asking the same is
+    /// the same (a `y` in the sandbox isn't one outside it).
+    pub beyond: (bool, Option<PathBuf>),
     pub cmd: String,
     pub key: String,
     pub cwd: PathBuf,
@@ -41,16 +56,37 @@ pub enum Kept {
     Scripts { scripts: Vec<(PathBuf, Option<String>)>, project: Option<Result<String, String>> },
     /// Not kept, and why (not a git checkout, git failed) — the next card says it can't tell.
     Not(String),
+    /// Nothing: it only reads (`readonly::read_only`) — what it reads is on its card.
+    Reads,
 }
 
 /// What the next card says of it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Since {
-    /// When the yes was (`01:12`).
+    /// The card answered, and how.
+    pub card: u64,
+    pub answer: char,
+    /// When the answer was (`01:12`).
     pub at: String,
-    /// The line said yes to, when it isn't this one (`key` made them one run).
+    /// The line answered, when it isn't this one (`key` made them one run).
     pub was: Option<String>,
+    /// What it runs, part by part, changed or not: `xtask/ unchanged`, `build files changed: Cargo.toml`,
+    /// `3 other project files changed since: a.rs, b.rs, c.rs`.
+    pub said: Vec<String>,
+    /// What's shown below of how it changed.
     pub changed: Changed,
+    /// Nothing changed since — what it runs, nor any other file of the project it compared.
+    pub unchanged: bool,
+}
+
+/// A card's word of the one before it (`tarae state`'s `same_as`): that card, its answer and when, and whether
+/// anything changed since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SameAs {
+    pub card: u64,
+    pub answer: char,
+    pub at: String,
+    pub unchanged: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +147,12 @@ pub fn key(cmd: &str) -> String {
 
 /// What `cmd` (run in `cwd`, in the project at `root`) runs, as it is now — on a worker.
 pub fn take(root: &Path, cwd: &Path, cmd: &str) -> Kept {
+    take_with(root, cwd, cmd, || crate::snapshot::tree(root))
+}
+
+/// `take`, the project's tree from `tree` when one's needed (a run's own snapshot, taken right before it
+/// starts — `tools::go`).
+pub fn take_with(root: &Path, cwd: &Path, cmd: &str, tree: impl FnOnce() -> Result<String, String>) -> Kept {
     let scripts = crate::tools::scripts_run(cmd);
     if !scripts.is_empty() {
         let read = |s: &PathBuf| {
@@ -119,39 +161,247 @@ pub fn take(root: &Path, cwd: &Path, cmd: &str) -> Kept {
             (path, text)
         };
         let scripts: Vec<(PathBuf, Option<String>)> = scripts.iter().map(read).collect();
-        let project = runs_project(root, &scripts).then(|| crate::snapshot::tree(root));
+        let project = runs_project(root, &scripts).then(tree);
         return Kept::Scripts { scripts, project };
     }
-    match crate::snapshot::tree(root) {
+    match tree() {
         Ok(id) => Kept::Tree(id),
         Err(e) => Kept::Not(e),
     }
 }
 
-impl Yes {
-    /// What changed since this yes in what `cmd` runs — on a worker.
-    pub fn since(&self, root: &Path, cwd: &Path, cmd: &str) -> Since {
+impl Answered {
+    /// The answer `answer` on card `card` for `cmd` run in `cwd` (asked past the sandbox with `beyond`), at
+    /// `at` — what it runs as `kept`.
+    pub fn new(
+        (card, answer): (u64, char),
+        beyond: (bool, Option<PathBuf>),
+        cmd: &str,
+        cwd: &Path,
+        at: SystemTime,
+        kept: Kept,
+    ) -> Answered {
+        let (cmd, key, cwd) = (cmd.to_string(), key(cmd), cwd.to_path_buf());
+        Answered { card, answer, beyond, cmd, key, cwd, at, kept }
+    }
+
+    /// What changed since this answer in what `cmd` runs — on a worker. `outside`: it asks past the sandbox
+    /// (outside it, or with a socket — Docker's is root's), where the project's whole diff is shown; in it,
+    /// the diff of what it runs (scripts, a pack's `entry` files, build files) and the rest named.
+    pub fn since(&self, root: &Path, cwd: &Path, cmd: &str, outside: bool) -> Since {
+        if let Some(s) = self.only_reads(cmd) {
+            return s;
+        }
+        let entry = entry_files(cmd);
+        let mut said = Vec::new();
+        // (a file of the project changed, whether it's shown or named)
+        let mut touched = false;
         let changed = match (&self.kept, take(root, cwd, cmd)) {
             (Kept::Not(why), _) => Changed::Unknown(format!("what it ran then wasn't kept ({why})")),
+            (Kept::Reads, _) => Changed::Unknown("it only read then, and runs more now".into()),
             (_, Kept::Not(why)) => Changed::Unknown(why),
-            (Kept::Tree(then), Kept::Tree(now)) if *then == now => Changed::Nothing,
-            (Kept::Tree(then), Kept::Tree(now)) => match diff(root, then, &now, &[]) {
-                Ok(lines) if lines.is_empty() => Changed::Nothing,
-                Ok(lines) => Changed::Lines { of: "the project".into(), lines },
+            (Kept::Tree(then), Kept::Tree(now)) => match files_changed(root, then, &now, &entry, &[]) {
                 Err(e) => Changed::Unknown(e),
+                Ok(files) => {
+                    files.said(&entry, &mut said);
+                    touched = !files.is_empty();
+                    let shown = match outside {
+                        true => (then != &now).then(|| diff(root, then, &now, &[], &[])),
+                        false => files.runs(root, then, &now),
+                    };
+                    match shown {
+                        None => Changed::Nothing,
+                        Some(Ok(lines)) if lines.is_empty() => Changed::Nothing,
+                        Some(Ok(lines)) => Changed::Lines { of: "the project".into(), lines },
+                        Some(Err(e)) => Changed::Unknown(e),
+                    }
+                }
             },
             (Kept::Scripts { scripts: then, project: kept }, Kept::Scripts { scripts: now, project }) => {
                 let own = scripts_changed(root, then, &now);
-                match project {
-                    Some(project) => with_project(root, own, &now, kept.as_ref(), project),
-                    None => own,
+                let names: Vec<String> = now.iter().map(|(p, _)| crate::chat::shown(root, p)).collect();
+                said.push(match &own {
+                    Changed::Lines { .. } => format!("script changed: {}", listed(&names)),
+                    _ => format!("script unchanged ({})", listed(&names)),
+                });
+                // (the project, when the script runs its code — its trees then and now)
+                let trees = match (kept, &project) {
+                    (Some(Ok(a)), Some(Ok(b))) => Some((a.clone(), b.clone())),
+                    _ => None,
+                };
+                let files =
+                    trees.as_ref().map(|(a, b)| files_changed(root, a, b, &entry, &left_out(root, &now)));
+                match &files {
+                    Some(Ok(f)) => {
+                        f.said(&entry, &mut said);
+                        touched = !f.is_empty();
+                    }
+                    Some(Err(e)) => said.push(format!("what changed in the project can't be told ({e})")),
+                    None => {}
+                }
+                match (outside, project, trees, files) {
+                    (_, None, ..) => own,
+                    (false, Some(_), Some((a, b)), Some(Ok(f))) => with_runs(own, f.runs(root, &a, &b)),
+                    // (outside: the project's whole diff; in, its trees not both there: why, as outside)
+                    (_, Some(project), ..) => with_project(root, own, &now, kept.as_ref(), project),
                 }
             }
             // (it runs a script now and didn't then, or the other way: not the same command's files)
             _ => Changed::Unknown("it runs other files than it did".into()),
         };
+        self.said(cmd, said, changed, !touched)
+    }
+
+    /// `since` with no git (the main thread's): the answer was to a command that only reads, and `cmd` only
+    /// reads — it runs nothing of the project; None otherwise.
+    pub fn only_reads(&self, cmd: &str) -> Option<Since> {
+        let reads = matches!(self.kept, Kept::Reads) && crate::readonly::read_only(cmd);
+        reads.then(|| self.said(cmd, vec!["it only reads".into()], Changed::Nothing, true))
+    }
+
+    fn said(&self, cmd: &str, said: Vec<String>, changed: Changed, quiet: bool) -> Since {
         let was = (self.cmd.trim() != cmd.trim()).then(|| self.cmd.clone());
-        Since { at: crate::log::clock(self.at), was, changed }
+        let unchanged = changed == Changed::Nothing && quiet;
+        let at = crate::log::clock(self.at);
+        Since { card: self.card, answer: self.answer, at, was, said, changed, unchanged }
+    }
+}
+
+/// The files the packs say `cmd` runs that its words don't name (`[claude] entry`: a part of the line before
+/// its first pipe with an entry's words in a row — after the variables it sets and a wrapper, as `timeout
+/// 1800 cargo xtask linux`; read too widely, it only shows more), from the project's root.
+pub fn entry_files(cmd: &str) -> Vec<String> {
+    entry_files_in(cmd, &crate::sandboxpack::get().entry)
+}
+
+fn entry_files_in(cmd: &str, entries: &[crate::sandboxpack::Entry]) -> Vec<String> {
+    let Some(head) = crate::readonly::before_pipe(cmd) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for p in head {
+        let crate::readonly::Part::Cmd(w) = p else { continue };
+        let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+        for e in entries.iter().filter(|e| words.windows(e.run.len()).any(|r| r == e.run)) {
+            for f in e.files.iter().filter(|f| !out.contains(f)).collect::<Vec<_>>() {
+                out.push(f.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The changed files of a project between two trees, by what they are to the command: its `entry` files,
+/// build files (the protected names — `sandbox::protected_in`: what runs as it builds), the rest.
+#[derive(Debug, Default)]
+struct Files {
+    entry: Vec<String>,
+    build: Vec<String>,
+    other: Vec<String>,
+}
+
+/// At most this many files are named in a part of the first line — the rest counted.
+const NAMED_MAX: usize = 5;
+
+/// `names`, at most `NAMED_MAX` of them, the rest counted.
+fn listed(names: &[String]) -> String {
+    match names.len() > NAMED_MAX {
+        true => format!("{} and {} more", names[..NAMED_MAX].join(", "), names.len() - NAMED_MAX),
+        false => names.join(", "),
+    }
+}
+
+/// The project's files changed from tree `then` to `now` (from its root), but those `left_out` (pathspecs:
+/// the scripts, said apart), sorted by what they are to a command running `entry`.
+fn files_changed(
+    root: &Path,
+    then: &str,
+    now: &str,
+    entry: &[String],
+    left_out: &[String],
+) -> Result<Files, String> {
+    let mut f = Files::default();
+    if then == now {
+        return Ok(f);
+    }
+    let mut args = vec!["diff", "--name-only", "-z", "--no-renames", "--relative", then, now, "--", "."];
+    args.extend(left_out.iter().map(String::as_str));
+    let out = crate::snapshot::git(root, &args, None)?;
+    for rel in out.split('\0').filter(|r| !r.is_empty()) {
+        let into = match () {
+            _ if entry.iter().any(|e| in_entry(rel, e)) => &mut f.entry,
+            _ if crate::sandbox::protected_in(root, &root.join(rel)) => &mut f.build,
+            _ => &mut f.other,
+        };
+        into.push(rel.to_string());
+    }
+    Ok(f)
+}
+
+/// Whether `rel` is entry file `e`, or in it (a folder ends in `/`).
+fn in_entry(rel: &str, e: &str) -> bool {
+    match e.strip_suffix('/') {
+        Some(folder) => rel.strip_prefix(folder).is_some_and(|r| r.starts_with('/')),
+        None => rel == e,
+    }
+}
+
+/// The scripts of `now` inside the project as pathspecs that leave them out of the project's changes.
+fn left_out(root: &Path, now: &[(PathBuf, Option<String>)]) -> Vec<String> {
+    now.iter()
+        .filter_map(|(p, _)| p.strip_prefix(root).ok())
+        .map(|p| format!(":(exclude,literal){}", p.display()))
+        .collect()
+}
+
+impl Files {
+    fn is_empty(&self) -> bool {
+        self.entry.is_empty() && self.build.is_empty() && self.other.is_empty()
+    }
+
+    /// Its rows at the card's top: the `entry` files (when the command has some), the build files, the rest —
+    /// what changed named (the diff under the command shows what it runs; outside the sandbox, all of it).
+    fn said(&self, entry: &[String], said: &mut Vec<String>) {
+        if !entry.is_empty() {
+            said.push(match self.entry.is_empty() {
+                true => format!("{} unchanged", entry.join(", ")),
+                false => format!("{} changed: {}", entry.join(", "), listed(&self.entry)),
+            });
+        }
+        said.push(match self.build.is_empty() {
+            true => "build files unchanged".to_string(),
+            false => format!("build files changed: {}", listed(&self.build)),
+        });
+        let n = self.other.len();
+        said.push(match n {
+            0 => "nothing else in the project changed".to_string(),
+            _ => format!(
+                "{n} other project file{} changed since: {}",
+                if n == 1 { "" } else { "s" },
+                listed(&self.other)
+            ),
+        });
+    }
+
+    /// The diff of what it runs — its entry files and build files — from tree `then` to `now`: None when
+    /// neither changed.
+    fn runs(&self, root: &Path, then: &str, now: &str) -> Option<Result<Vec<String>, String>> {
+        let paths: Vec<String> =
+            self.entry.iter().chain(&self.build).map(|p| format!(":(literal){p}")).collect();
+        (!paths.is_empty()).then(|| diff(root, then, now, &paths, &[]))
+    }
+}
+
+/// A script's own changes (`own`) and the diff of the rest of what it runs (`runs`: its entry and build files).
+fn with_runs(own: Changed, runs: Option<Result<Vec<String>, String>>) -> Changed {
+    match (own, runs) {
+        (own, None) => own,
+        (Changed::Unknown(why), _) => Changed::Unknown(why),
+        (_, Some(Err(e))) => Changed::Unknown(format!("what it runs in the project can't be told ({e})")),
+        (own, Some(Ok(more))) if more.is_empty() => own,
+        (Changed::Nothing, Some(Ok(lines))) => Changed::Lines { of: "the project".into(), lines },
+        (Changed::Lines { of, mut lines }, Some(Ok(more))) => {
+            lines.extend(more);
+            Changed::Lines { of: format!("{of}, and the project"), lines: capped(lines) }
+        }
     }
 }
 
@@ -233,7 +483,7 @@ fn with_project(
         .collect();
     let project = match (kept, now) {
         (Some(Ok(then)), Ok(now)) if *then == now => Ok(Vec::new()),
-        (Some(Ok(then)), Ok(now)) => diff(root, then, &now, &exclude),
+        (Some(Ok(then)), Ok(now)) => diff(root, then, &now, &[], &exclude),
         (Some(Err(e)), _) => Err(e.clone()),
         (_, Err(e)) => Err(e),
         (None, _) => Err("it didn't run the project's code then, so the project wasn't kept".into()),
@@ -321,22 +571,22 @@ fn capped(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// What changed from tree `then` to `now` in the project (paths from its root), but the pathspecs `exclude`:
-/// each file's path, then its hunks. A file a card can't show as it is (control characters, bidi marks) is
-/// named, not shown.
-fn diff(root: &Path, then: &str, now: &str, exclude: &[String]) -> Result<Vec<String>, String> {
-    let mut args = vec![
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--relative",
-        "-U2",
-        then,
-        now,
-        "--",
-        ".",
-    ];
+/// What changed from tree `then` to `now` in the project (paths from its root) — in the pathspecs `paths`
+/// (none: all of it) but `exclude`: each file's path, then its hunks. A file a card can't show as it is
+/// (control characters, bidi marks) is named, not shown.
+fn diff(
+    root: &Path,
+    then: &str,
+    now: &str,
+    paths: &[String],
+    exclude: &[String],
+) -> Result<Vec<String>, String> {
+    let mut args =
+        vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "-U2", then, now, "--"];
+    match paths.is_empty() {
+        true => args.push("."),
+        false => args.extend(paths.iter().map(String::as_str)),
+    }
     args.extend(exclude.iter().map(String::as_str));
     let text = crate::snapshot::git(root, &args, None)?;
     let mut out = Vec::new();
@@ -390,30 +640,38 @@ fn diff(root: &Path, then: &str, now: &str, exclude: &[String]) -> Result<Vec<St
 }
 
 impl Since {
-    /// ` to `sh x.sh one`` — the line said yes to, when it isn't this one.
-    fn to(&self) -> String {
-        self.was.as_ref().map(|w| format!(" to `{w}`")).unwrap_or_default()
+    pub fn same_as(&self) -> SameAs {
+        SameAs { card: self.card, answer: self.answer, at: self.at.clone(), unchanged: self.unchanged }
     }
 
-    /// Its part of the card: its lines, and which of them are a diff's (drawn in the diff's colours).
-    pub fn card_lines(&self) -> (Vec<String>, std::ops::Range<usize>) {
+    /// The top of the card: `Same as card#41 — y at 18:02` — the line answered when it isn't this one
+    /// (`` (`sh x.sh one`) ``) — then a row a part (`  xtask/ unchanged`, `  build files changed:
+    /// Cargo.toml`, …): read at a glance, where one line of them wrapped to six rows in an 80-column card;
+    /// what changed can't be told: why, and to read it as new.
+    pub fn head(&self) -> String {
+        let was = self.was.as_ref().map(|w| format!(" (`{w}`)")).unwrap_or_default();
+        let same = format!("Same as card#{}{was} — {} at {}", self.card, self.answer, self.at);
         match &self.changed {
-            Changed::Nothing => {
-                let same = match self.was {
-                    None => "the same as it ran then",
-                    Some(_) => "what it runs is as it was then",
-                };
-                (vec![format!("Unchanged since your y at {}{} — {same}.", self.at, self.to())], 0..0)
-            }
+            Changed::Unknown(why) => format!("{same} — {why}; read it as new."),
+            _ if self.said.is_empty() => format!("{same} — what it runs is as it was then."),
+            _ => std::iter::once(same)
+                .chain(self.said.iter().map(|s| format!("  {s}")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    /// What's shown under the command of how what it runs changed, and which of those lines are a diff's
+    /// (drawn in the diff's colours) — none when nothing did.
+    pub fn below(&self) -> (Vec<String>, std::ops::Range<usize>) {
+        match &self.changed {
             Changed::Lines { of, lines } => {
-                let mut v = vec![format!("Since your y at {}{}, changed in {of}:", self.at, self.to())];
+                let mut v = vec![format!("Changed since card#{}, in {of}:", self.card)];
                 v.extend(lines.iter().cloned());
                 let n = v.len();
                 (v, 1..n)
             }
-            Changed::Unknown(why) => {
-                (vec![format!("You said y to it at {}{} — {why}; read it as new.", self.at, self.to())], 0..0)
-            }
+            Changed::Nothing | Changed::Unknown(_) => (Vec::new(), 0..0),
         }
     }
 }

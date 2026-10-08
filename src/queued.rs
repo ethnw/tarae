@@ -62,6 +62,9 @@ pub struct Ride {
     /// The checkout as Claude's command (not a check) found it, taken right before it starts (`tools::go`,
     /// `snapshot.rs`).
     pub snap: Option<crate::snapshot::Before>,
+    /// Its card's answer, kept in the session with what it runs as that snapshot found it (`tools::go`,
+    /// `sinceyes.rs`) — no second snapshot, and the run takes its place in line as the answer comes.
+    pub answered: Option<Box<crate::sinceyes::Answered>>,
 }
 
 /// A run waiting for its slot.

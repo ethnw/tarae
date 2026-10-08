@@ -736,23 +736,38 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   it isn't a socket card; each command is still asked as any command is. Docker's socket is different: `a`
   there is this command with that socket, word for word (filters after it that only read may differ), and
   any other command asking for it gets the socket card again
-- **Since your last y.** When Claude asks again for a command you already said `y` to outside the sandbox in
-  this conversation (the same run, from the same folder), its card says when that was and shows only what
-  changed since in what the command runs. The same run is what runs: the program and its arguments before the
-  first `|` (`cargo test parser | tail` and `cargo test parser | grep FAIL` are one), and for a script, the
-  script whatever its arguments (`sh check.sh one`, `sh check.sh two`). When the line isn't the one you said
-  yes to, the card names that one. For a command that runs the project's code (`cargo test … parser::`)
-  that's the project's changed hunks, the lines around each change dim, what came and went in the diff's
-  colours. For a script (`sh check.sh`, `python3 x.py`) it's the script's own diff, shown in place of the whole
-  script. A script that runs the project's code (`cargo test` inside it, a program built here) shows the
-  project's changes too: `unchanged` covers only what runs. Nothing changed: `Unchanged since your y at
-  01:12`. It never answers for you. The card waits for `y` as before, but you only read what's new. Nothing
-  outside the project is shown: a script there is named as changed, never shown. At each `y`, tarae keeps a snapshot with the conversation: the scripts' text, the
-  project's working tree as a git tree, or both (tarae's own index, so yours isn't touched, with no hooks). A
-  new conversation starts with none
+- **Same as an earlier card.** When Claude asks again for a command whose card you answered (`y`, `a`, `A`
+  or `n`) since tarae started, in this session — the same run, from the same folder, asked the same way (in
+  the sandbox, with the same socket, or outside it: a `y` in the sandbox isn't one outside it) — its card
+  starts with which card that was, your answer and when, then a row for each part of what it runs:
 
-![Claude asks again to run cargo test -q parser:: outside the sandbox: the card says "Since your y at 02:28, changed in the project:", then src/parser.rs and its hunk, depth > 64 in red and depth > 128 in green, then Claude's reason and the warning](screenshots/since-your-y.png)
-([hanji theme](screenshots/since-your-y-hanji.png))
+  ```
+  Same as card#41 — y at 18:02
+    xtask/ unchanged
+    build files unchanged
+    3 other project files changed since: src/sandbox/keeper.rs, src/sandbox/tier.rs, …
+  ```
+
+  The same run is what runs: the program and its arguments before the first `|` (`cargo test parser | tail`
+  and `cargo test parser | grep FAIL` are one), and for a script, the script whatever its arguments (`sh
+  check.sh one`, `sh check.sh two`). When the line isn't the one you answered, the card names that one. The
+  rows: the scripts it runs (`sh check.sh`, `python3 x.py`); the files a language pack says the command runs
+  that its words don't name (`cargo xtask` runs `xtask/`, the Rust pack's `[claude] entry`); the build files
+  (the protected names, `Cargo.toml`, `build.rs`, `.cargo`…: what runs as it builds); the rest of the
+  project, named. What it runs that changed is shown under the command — a script's own diff in place of the
+  whole script, the entry and build files' hunks, the lines around each change dim, what came and went in the
+  diff's colours. Past the sandbox — outside it, or with a socket (Docker's is as much as root) — the whole
+  project's hunks are shown, since what runs there isn't bounded by it. A command that only reads in the
+  sandbox says `it only reads`. What changed can't be told (not a git checkout, it runs other files than it
+  did): it says why, and to read it as new. It never answers for you: the card waits for its key as before,
+  weighty as before, its warnings where they were — but you only read what's new. Nothing outside the
+  project is shown: a script there is named as changed, never shown. At each answer, tarae keeps what the
+  command runs, taken right before it runs (no extra wait: the run takes its place in line at once): the
+  scripts' text, the project's working tree as a git tree, or both (tarae's own index, so yours isn't
+  touched, with no hooks). Answers are kept until you quit tarae, not with the conversation: after
+  `:chat-new` the same run's card still says which card it's the same as. The `card` log line names each
+  card (`card#41`) and says `same=#41` (nothing changed since) or `same=#41:changed`, and `tarae state` the
+  card's `same_as`
 
 - git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
   in `.git` (a write the sandbox would deny and report)

@@ -8493,7 +8493,9 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
     let any_high =
         r.files.iter().any(|f| r.graded(editor, f).iter().any(|g| g.grade == crate::risk::Grade::High));
     if any_high {
-        rows.push(match r.high_unseen(editor).len() {
+        // (a count: `high_left`'s `looked_at` stops at a change's first line not looked at — `high_unseen`
+        // finds each one's lines left, every key, for where `]h` lands: 30 µs a frame at 46 files)
+        rows.push(match r.files.iter().map(|f| r.high_left(editor, f)).sum::<usize>() {
             0 => vec![(Tone::Faint, "▲ all looked at".to_string())],
             n => vec![(Tone::High, format!("▲ {n} high to look at"))],
         });
@@ -11868,7 +11870,8 @@ mod tests {
             let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         }
         // (measured 2026-10-05: 59.5 µs against 20.7 with a copy of each file's grades per call; 28 against 25
-        // shared)
+        // shared. 2026-10-09: 56.6 against 22.7 with the head's count from `high_unseen`, every unlooked change's
+        // lines left worked out — cardburden 1; 35.2 against 32.3 counted by `high_left`)
         assert!(
             graded <= plain.mul_f64(1.5) + Duration::from_micros(20),
             "graded {graded:?} against {plain:?} ungraded"

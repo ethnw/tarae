@@ -106,6 +106,7 @@ copy = "key"
 run-allow = ["sh -c", "rm -rf"]
 code-trees = ["~/*"]
 builders = ["mybuild"]
+entry = [{ run = "mybuild go", files = ["tools/"] }]
 said = { rank = 0, run = "anything at all" }
 [claude.expand."$(id)"]
 run = ["id"]
@@ -153,11 +154,40 @@ first-word-in = "~/"
     assert!(with.kept.contains(&"~/mine".to_string()) && with.kept.len() == base.kept.len() + 1);
     assert!(with.bins.contains(&"~/mine-bin".to_string()) && with.bins.len() == base.bins.len() + 1);
     assert!(with.builders.contains(&"mybuild".to_string()) && with.builders.len() == base.builders.len() + 1);
+    let mine = Entry { run: vec!["mybuild".into(), "go".into()], files: vec!["tools/".into()] };
+    assert!(with.entry.contains(&mine) && with.entry.len() == base.entry.len() + 1, "{:?}", with.entry);
     // …and the language table says the same at the start
     let langs =
         crate::languages::build(crate::packs::builtin_manifests(), &[("rust".into(), hostile.into())]);
     assert!(langs.said.iter().any(|s| s.contains("`sandbox.reads` is read from tarae's own packs only")));
     assert!(!langs.said.iter().any(|s| s.contains("`sandbox.kept`")), "{:?}", langs.said);
+}
+
+/// An `entry` names a command by its words and files in the project by plain paths — one that names a file
+/// outside it (`..`, a root), a pattern, or no file, or isn't a command's words, is left out and said; the
+/// rest of the list is kept.
+#[test]
+fn an_entry_names_files_in_the_project() {
+    let pack = r#"
+[claude]
+entry = [
+  { run = "cargo xtask", files = ["xtask/"] },
+  { run = "make", files = ["../up"] },
+  { run = "make", files = ["/etc/x"] },
+  { run = "make", files = ["src/*"] },
+  { run = "make", files = [] },
+  { run = "$(x)", files = ["a"] },
+]
+"#;
+    let t = table(&[("p", pack)], &[]);
+    let ok = Entry { run: vec!["cargo".into(), "xtask".into()], files: vec!["xtask/".into()] };
+    assert_eq!(t.entry, [ok]);
+    let said = t.problems.join("\n");
+    for bad in
+        ["`../up` isn't a path in the project", "`/etc/x`", "`src/*`", "`make` names no files", "`$(x)`"]
+    {
+        assert!(said.contains(bad), "{bad}: {said}");
+    }
 }
 
 /// A runtime folder's pack over a built-in one through `packs::over`: its own keys by their reach.
