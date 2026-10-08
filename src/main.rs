@@ -18,6 +18,7 @@ mod compaction;
 mod completion;
 mod config;
 mod conflict;
+mod containers;
 mod dap;
 mod debugpack;
 mod diffview;

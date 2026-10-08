@@ -10,6 +10,30 @@ git = "https://github.com/camdencheek/tree-sitter-dockerfile"
 rev = "087daa20438a6cc01fa5e6fe6906d77c869d19fe"
 bundle = true
 
+# Containers a run of Claude's started, stopped with it (`containers.rs`): each engine's program, how its
+# running containers are listed — a name, a tab, when it was made (`2026-10-08 21:17:03 +0900 KST`) — and how
+# one is stopped, by name (`{name}`). A run names its containers from `TARAE_CONTAINER_PREFIX`; those are
+# stopped with it, others made while it ran are asked about. tarae's own packs only: it runs these outside
+# the sandbox.
+#
+# `settings`: what says which engine a call reaches. The calls get a run's own values of these — from its
+# environment and what its line sets in front of its command (`DOCKER_HOST=… cargo xtask linux`) — and none of
+# tarae's. `config`: the engine's config folder, an empty one of tarae's for every call (listing and stopping
+# need no credentials; the user's would run its credential helpers); when a run named a context (`for`), its
+# endpoint (`copy`: contexts' metadata, no keys) is copied in from the run's folder (`var`, else `home`).
+[[containers]]
+program = "docker"
+list = ["ps", "--format", "{{.Names}}\t{{.CreatedAt}}"]
+stop = ["stop", "{name}"]
+settings = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"]
+config = { var = "DOCKER_CONFIG", home = "~/.docker", copy = ["contexts/meta"], for = ["DOCKER_CONTEXT"] }
+
+[[containers]]
+program = "podman"
+list = ["ps", "--format", "{{.Names}}\t{{.CreatedAt}}"]
+stop = ["stop", "{name}"]
+settings = ["CONTAINER_HOST", "CONTAINER_CONNECTION", "CONTAINER_SSHKEY"]
+
 # A code review's grades (`risk.rs`): an image's build is shell, and its user and what it fetches matter —
 # running what it fetched, root, permissions, deleting, fetching from the network, secrets in the build
 [review]

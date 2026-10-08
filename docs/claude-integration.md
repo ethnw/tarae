@@ -125,6 +125,19 @@ reader where a thread waits; `sample <pid>` in a terminal shows its stacks). Not
 run (its panel and output stay, and Claude hears how it ended), `w` shows those lines in its panel, `n` keeps
 waiting and asks again after as long again. If the run prints or ends, the card goes away.
 
+**Containers a run started** stop with it. Each run of Claude's gets `TARAE_CONTAINER_PREFIX` (`tarae-<pid>-s<session>-r<run>`),
+and a script that starts containers names them from it — `cargo xtask linux` names its own `<prefix>-checks`.
+When the run is stopped — `y` on its stuck card, `space m c` / `space x c`, or dropped for another run — tarae
+lists the running containers of each engine its packs know (`[[containers]]`: docker, podman) and stops the run's
+own by name, never by pid (a killed `docker run` client leaves its container running). It asks the engine the run
+reached: the engine's settings (`DOCKER_HOST`, `DOCKER_CONTEXT`, … — the pack's `settings`) as the run's
+environment and its line (`DOCKER_HOST=… cargo xtask linux`) gave them, and none of tarae's own; a run that named
+none, the engine's default. These calls never get your `~/.docker` (its credential helpers would run): each gets an
+empty config folder of tarae's own, with only a named context's endpoint copied in. One made on that engine while
+the run went, under another name — started by hand — isn't guessed at: a card names it, `y` stops it, `n` leaves
+it. One under another run's prefix (a parallel session's) is that run's: left alone, said, never on the card. A
+run that ends by itself leaves its containers as they are. No command line of Claude's is changed.
+
 **News of sessions behind** is said where you are, inside tarae — no system notification, no bell. When a session
 behind starts waiting for you, or its Claude's turn ends, a toast names it: `fix-login · waits for you — C-q goes
 there`, `fix-login · turn ended — C-q goes there` (a stopped turn says `turn stopped`; a failed one, its error, as a

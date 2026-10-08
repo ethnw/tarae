@@ -41,7 +41,8 @@
 //! `[[waits]]`: see `waits`. `[[places]]`: see `places`. `[language.<name>]`, `[grammar.<name>]`,
 //! `[server.<name>]`'s `command` and `args`, `config-files`, `outputs`, `checks`, `color-off`: the language
 //! table, `languages.rs`. `first-made`: what a Linux run gets made
-//! first (`made_beside`, `sandbox/linux.rs`). `[sandbox]`, `[claude]`: what a toolchain needs from Claude's
+//! first (`made_beside`, `sandbox/linux.rs`). `[[containers]]`: container engines, how their containers are
+//! listed and stopped when a run of Claude's is (`containers.rs`). `[sandbox]`, `[claude]`: what a toolchain needs from Claude's
 //! sandbox and what Claude runs and reads unasked for it — `sandboxpack.rs`, its keys' reach each its own
 //! (`Reach::Keys`: what widens is the built-in packs' only). How a runtime folder's pack counts for each key:
 //! `Reach`.
@@ -491,6 +492,9 @@ pub(crate) const KEYS: &[(&str, Reach)] = &[
     ("protect", Reach::BuiltIn),
     // Tools' build folders: decides what a session's end deletes (`builds.rs`)
     ("builds", Reach::BuiltIn),
+    // Container engines: what tarae runs, outside the sandbox, to stop a stopped run's containers
+    // (`containers.rs`)
+    ("containers", Reach::BuiltIn),
     // What a toolchain needs from Claude's sandbox, and what Claude runs and reads unasked: each key by its own
     // reach — what widens the built-in packs' only, what narrows added to (`sandboxpack.rs`)
     ("sandbox", Reach::Keys(crate::sandboxpack::SANDBOX_KEYS)),

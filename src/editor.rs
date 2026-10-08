@@ -7039,6 +7039,102 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Claude's run gets the prefix its containers are named from (`TARAE_CONTAINER_PREFIX` — no command line
+    /// of Claude's is rewritten: a script names them from it), this tarae's, this session's, this run's; the
+    /// user's own task doesn't, and a value from tarae's own environment never reaches either.
+    #[test]
+    fn claudes_run_is_told_the_prefix_its_containers_are_named_from() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = editor("");
+        ed.config.llm.run_allow = vec!["printenv".into()];
+        let log =
+            claude_calls(&mut ed, &dir, "run", &json!({ "command": "printenv TARAE_CONTAINER_PREFIX" }));
+        feed(&mut ed, "<space>lname it<ret>");
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        let r = ed.session.task_run.as_ref().unwrap();
+        let prefix = crate::containers::prefix(ed.session.id, r.trace.id());
+        assert!(answer.contains("exit 0") && answer.contains(&prefix), "{prefix}: {answer}");
+        // The user's own task: none
+        let task = crate::task::Task {
+            name: "env".into(),
+            cmd: "printenv TARAE_CONTAINER_PREFIX || echo none".into(),
+            cwd: dir.clone(),
+        };
+        ed.task_start(task);
+        settle_for(&mut ed, |ed| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        let out: Vec<String> =
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.clone()).collect();
+        assert_eq!(out, ["none"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Stopping Claude's command (`space m c`) stops what it started in a container engine — its containers,
+    /// by name (a stand-in `docker` here writes down what it's asked, and with which `DOCKER_HOST`), on the
+    /// engine its line named — and asks about one made by hand meanwhile; a run that ended by itself leaves its
+    /// containers be.
+    #[test]
+    fn stopping_claudes_command_stops_its_containers() {
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tarae-run-containers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let asked = dir.join("asked");
+        let mut ed = editor("");
+        let line = "DOCKER_HOST=tcp://tarae-test.invalid:2375 sleep 30";
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": line }));
+        feed(&mut ed, "<space>lwait<ret>");
+        // (its card — it sets a name in front — answered y)
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| ed.session.task_run.is_some());
+        let prefix =
+            ed.session.task_run.as_ref().unwrap().containers.as_ref().expect("Claude's").prefix.clone();
+        let script = format!(
+            "#!/bin/sh\necho \"$* on ${{DOCKER_HOST-the default}}\" >> '{}'\n[ \"$1\" = ps ] && printf \
+             '%s\\t%s\\n' '{prefix}-checks' '2026-10-08 21:17:03 +0900 KST'\nexit 0\n",
+            asked.display()
+        );
+        std::fs::write(dir.join("bin/docker"), script).unwrap();
+        std::fs::set_permissions(dir.join("bin/docker"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // (the run as tarae started it — the engine its line named — its programs found on the stand-in's PATH)
+        let r = ed.session.task_run.as_mut().unwrap();
+        r.containers.as_mut().unwrap().find_on(dir.join("bin").as_os_str());
+        ed.task_close();
+        let stopped = format!("stop {prefix}-checks on tcp://tarae-test.invalid:2375");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(&asked).unwrap_or_default().contains(&stopped) {
+            let asked = std::fs::read_to_string(&asked).unwrap_or_default();
+            assert!(std::time::Instant::now() < end, "stopped by name, on its engine: {asked}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("the command was stopped"));
+        // Ended by itself (passed): its panel closed, nothing asked of the engine
+        std::fs::remove_file(&asked).ok();
+        let task = crate::task::Task { name: "done".into(), cmd: "true".into(), cwd: dir.clone() };
+        let mut done = crate::task::Run::for_test(task);
+        done.by_claude = true;
+        done.containers = Some(crate::containers::Run::on(
+            &prefix,
+            "Claude's command",
+            ed.events.sender(),
+            &dir.join("bin"),
+        ));
+        ed.session.task_run = Some(done);
+        ed.task_close();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!asked.exists(), "a run that ended leaves its containers be");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A command already running isn't cut short — Claude's waits its turn (not refused: `queued.rs`) — a turn
     /// that ends takes its card and what waited away, and one too long to show whole isn't put to the user.
     #[test]

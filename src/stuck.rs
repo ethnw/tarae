@@ -269,20 +269,26 @@ pub fn show(ed: &mut Editor, s: &Stuck) {
 /// panel and output stay, and Claude's report has them.
 pub fn stop(ed: &mut Editor, s: &Stuck) {
     let line = format!("── stopped from tarae's card: {} ──", said(s));
-    let pid = match s.slot {
-        Slot::Task => ed.session.task_run.as_mut().filter(|r| r.trace.id() == s.run).and_then(|r| {
+    let (pid, containers) = match s.slot {
+        Slot::Task => ed.session.task_run.as_mut().filter(|r| r.trace.id() == s.run).map(|r| {
             r.push_line(false, line, false);
-            r.pid()
+            (r.pid(), r.containers.take())
         }),
-        _ => ed.session.test_run.as_mut().filter(|r| r.trace.id() == s.run).and_then(|r| {
+        _ => ed.session.test_run.as_mut().filter(|r| r.trace.id() == s.run).map(|r| {
             r.output.push((false, line));
-            r.pid()
+            (r.pid(), r.containers.take())
         }),
-    };
+    }
+    .unwrap_or((None, None));
     let Some(pid) = pid else { return ed.set_status("that run ended already") };
     crate::log::line("stuck", "stop", &format!("pid {pid}: {}", said(s)));
     let started = crate::procs::read(pid).map(|o| o.started);
     crate::dap::term_group(pid);
+    // (what it started in a container engine — a quiet `docker run`'s work goes on there — with it, by name:
+    // `containers.rs`)
+    if let Some(c) = containers {
+        c.stopped();
+    }
     // (the same process still — a pid isn't given out again that soon, and its start says it's the one)
     ed.events.jobs().background(move || {
         std::thread::sleep(KILL_AFTER);

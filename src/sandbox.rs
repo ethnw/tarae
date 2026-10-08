@@ -4405,9 +4405,16 @@ fn output_in(
 }
 
 /// What tarae sets in every sandboxed run besides the packs' `env` (`inside_env`, `command`'s npm line,
-/// `task::color_off`) — and `TARAE_UI`, never a run of Claude's: none said as left out of its environment.
-const SET_IN_RUNS: [&str; 5] =
-    [MARK, "GIT_OPTIONAL_LOCKS", "npm_config_update_notifier", "NO_COLOR", "TARAE_UI"];
+/// `task::color_off`, `containers::VAR`) — and `TARAE_UI`, never a run of Claude's: none said as left out of
+/// its environment.
+const SET_IN_RUNS: [&str; 6] = [
+    MARK,
+    "GIT_OPTIONAL_LOCKS",
+    "npm_config_update_notifier",
+    "NO_COLOR",
+    "TARAE_UI",
+    crate::containers::VAR,
+];
 
 /// What a run in a policy made with these settings gets of `here`'s environment (`runenv::of`): the floor,
 /// what the packs' places read, the packs' `pass`, `llm.sandbox-env`.

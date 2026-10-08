@@ -182,12 +182,33 @@ fn a_stuck_run_is_captured_then_asked_about() {
     assert_eq!(ed.slot(), Some(Slot::Task));
     assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, Some(at));
     assert!(ed.offers.iter().any(|o| o.stuck().is_some()), "still to answer");
-    // `y`: stopped — its output stays, and says so
+    // (a quiet `docker run`'s work goes on in its container: a stand-in `docker` lists the run's — named from its
+    // prefix — and writes down what it's asked)
+    let prefix = ed.session.task_run.as_ref().unwrap().containers.as_ref().expect("Claude's").prefix.clone();
+    let asked = dir.join("asked");
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1\" = ps ] && printf '%s\\t%s\\n' '{prefix}-checks' \
+         '2026-10-08 21:17:03 +0900 KST'\nexit 0\n",
+        asked.display()
+    );
+    std::fs::write(dir.join("bin/docker"), script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.join("bin/docker"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tx = ed.events.sender();
+    ed.session.task_run.as_mut().unwrap().containers =
+        Some(crate::containers::Run::on(&prefix, "Claude's command", tx, &dir.join("bin")));
+    // `y`: stopped — its output stays, and says so — and its container with it, by name
     ed.handle_key(Key::plain(Code::Char('y')));
     assert!(ed.offers.iter().all(|o| o.stuck().is_none()));
     settle_until(&mut ed, |ed| {
         ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
     });
+    let end = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&asked).unwrap_or_default().contains(&format!("stop {prefix}-checks")) {
+        assert!(Instant::now() < end, "its container stopped by name");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let out = &ed.session.task_run.as_ref().unwrap().output;
     assert!(out.iter().any(|l| l.1 == head), "kept");
     assert!(

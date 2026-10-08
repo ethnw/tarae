@@ -323,6 +323,8 @@ pub struct Run {
     /// Claude's command that isn't a check: the checkout as it found it — what it changed joins the turn at
     /// its end (`snapshot.rs`; its line's next run waits for that).
     pub snap: Option<crate::snapshot::Before>,
+    /// Claude's: the containers it names from its prefix, stopped when it's stopped (`containers.rs`).
+    pub containers: Option<crate::containers::Run>,
 }
 
 impl Run {
@@ -436,6 +438,7 @@ impl Run {
             joined: Vec::new(),
             queued: None,
             snap: None,
+            containers: None,
         }
     }
 }
@@ -447,6 +450,10 @@ impl Drop for Run {
         {
             crate::dap::term_group(pid);
             self.trace.end("stopped before its end");
+            // (what it started in a container engine goes with it — `containers.rs`)
+            if let Some(c) = self.containers.take() {
+                c.stopped();
+            }
         }
     }
 }
@@ -697,9 +704,17 @@ impl Editor {
         if claudes {
             cmd.env_remove("CDPATH");
         }
+        // (Claude's: the prefix its containers are named from, stopped with it — `containers.rs`)
+        let containers = claudes.then(|| crate::containers::prefix(self.session.id, trace.id()));
+        match &containers {
+            Some(p) => cmd.env(crate::containers::VAR, p),
+            None => cmd.env_remove(crate::containers::VAR),
+        };
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
         cmd.current_dir(&task.cwd);
         color_off(&mut cmd);
+        // (which engine its containers are on: its line's settings over its environment)
+        let containers = containers.map(|p| (p, crate::containers::Reach::of_command(Some(&task.cmd), &cmd)));
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
         let acts = if claudes { crate::spawn::Acts::Claude } else { crate::spawn::Acts::User };
@@ -895,6 +910,9 @@ impl Editor {
         // The same task again: its panel starts as tall as it was (no shrink and grow back)
         let tall =
             self.session.task_run.as_ref().filter(|r| r.task.name == task.name).map_or(0, |r| r.tall.get());
+        let label = format!("Claude's command `{}`", traced(&task.cmd));
+        let containers =
+            containers.map(|(p, reach)| crate::containers::Run::new(p, label, self.events.sender(), reach));
         self.session.task_run = Some(Run {
             task,
             state: State::Running,
@@ -924,6 +942,7 @@ impl Editor {
             joined: Vec::new(),
             queued: None,
             snap: None,
+            containers,
         });
     }
 }

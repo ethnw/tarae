@@ -187,6 +187,9 @@ pub enum What {
     /// A host a run's rules don't name, its connection held by tarae's proxy (`hosts.rs`): `y` this run, `s`
     /// this session, `A` always in this project, `n` refused for this session. Gone with its run.
     Host(Box<crate::hosts::Ask>),
+    /// Containers made on an engine while a stopped run of Claude's went, under names not its own
+    /// (`containers.rs`): `y` stops them, by name · `n` leaves them running.
+    Containers(Box<crate::containers::Ask>),
 }
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
@@ -244,6 +247,8 @@ impl What {
             | What::NotesStale { .. }
             | What::NotesClose { .. }
             | What::Stuck(_)
+            // (about containers as they were then: they run on, the restart's tarae doesn't know them)
+            | What::Containers(_)
             // (its run ends with the restart)
             | What::Host(_) => Lost,
         }
@@ -407,6 +412,7 @@ impl Offer {
                 | What::Recover(_)
                 | What::Stuck(_)
                 | What::Host(_)
+                | What::Containers(_)
         )
     }
 
@@ -564,6 +570,7 @@ impl Offer {
                     | What::NotesClose { .. }
                     // (its session's: a key of another session's never answers it)
                     | What::Host(_)
+                    | What::Containers(_)
             )
     }
 
@@ -699,6 +706,7 @@ impl Offer {
             }
             W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
             W::Host(_) => vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")],
+            W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
         }
     }
 
@@ -743,6 +751,7 @@ impl Offer {
             W::Recover(_) => "recover",
             W::Stuck(_) => "stuck",
             W::Host(_) => "host",
+            W::Containers(_) => "containers",
         }
     }
 }
@@ -1081,6 +1090,7 @@ impl crate::editor::Editor {
                 crate::stuck::stop(self, &s);
             }
             What::Host(a) => crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run),
+            What::Containers(a) => crate::containers::answer(self, id, *a, true),
         }
     }
 
@@ -1532,6 +1542,7 @@ impl crate::editor::Editor {
             What::Recover(f) => crate::recovery::not_now(self, *f),
             What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
             What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused),
+            What::Containers(a) => crate::containers::answer(self, o.id, *a, false),
         }
     }
 

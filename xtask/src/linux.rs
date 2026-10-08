@@ -105,6 +105,27 @@ fn with_userns(mut a: Vec<String>, u: Option<Userns>) -> Vec<String> {
     a
 }
 
+/// The name of the container for `what` (`checks`, `probe`), from `prefix` — tarae's `TARAE_CONTAINER_PREFIX`
+/// for a run of Claude's: tarae stops what's named from it when it stops the run (`src/containers.rs`), where a
+/// stopped client left its container running. None: no prefix, or one that isn't a container's name.
+fn container_name(prefix: Option<&str>, what: &str) -> Option<String> {
+    let p = prefix.filter(|p| {
+        !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+            && !p.starts_with(['.', '-'])
+    })?;
+    Some(format!("{p}-{what}"))
+}
+
+/// `docker run`'s arguments with `--name NAME` after `run` (None: as they are).
+fn with_name(mut a: Vec<String>, name: Option<String>) -> Vec<String> {
+    if let Some(n) = name {
+        let at = 1.min(a.len());
+        a.splice(at..at, ["--name".to_string(), n]);
+    }
+    a
+}
+
 /// The leading `--env NAME=VALUE`s — set in the container (`HOME=/work`: the checkout inside home, as on a
 /// machine where it's under the user's home) — and the arguments after them.
 fn envs(args: &[String]) -> Result<(Vec<String>, &[String])> {
@@ -211,7 +232,11 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     };
     let mut docker = Command::new("docker");
-    docker.args(with_userns(with_envs(docker_args(&root, tree, &pin, platform, &what), &set), ns));
+    let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "checks");
+    docker.args(with_name(
+        with_userns(with_envs(docker_args(&root, tree, &pin, platform, &what), &set), ns),
+        name,
+    ));
     if let Some(u) = ns {
         eprintln!("--userns: the container's own seccomp and AppArmor profiles lifted ({u:?})");
     }
@@ -302,7 +327,8 @@ enum Tree<'a> {
 /// folder there) refuses a source that isn't there.
 fn sees_tree(root: &Path, pin: &str, platform: Option<&str>) -> bool {
     let mut probe = Command::new("docker");
-    probe.args(["run", "--rm"]);
+    let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "probe");
+    probe.args(with_name(vec!["run".into(), "--rm".into()], name));
     if let Some(p) = platform {
         probe.args(["--platform", p]);
     }
@@ -1526,6 +1552,21 @@ mod tests {
             ]
         );
         assert!(prune_notes(&listed[..1], Ok("me"), Ok(()), &[]).is_empty(), "nothing kept: nothing said");
+    }
+
+    /// A run of Claude's names its containers from tarae's prefix (`TARAE_CONTAINER_PREFIX`), so stopping the
+    /// run stops them by name (`src/containers.rs`); without one — or one that isn't a container's name —
+    /// they're unnamed, as before.
+    #[test]
+    fn a_run_names_its_containers_from_taraes_prefix() {
+        let a = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Clippy);
+        let named = with_name(a.clone(), container_name(Some("tarae-1-s0-r7"), "checks"));
+        assert_eq!(named[..3], ["run", "--name", "tarae-1-s0-r7-checks"]);
+        assert_eq!(named[3..], a[1..], "the rest as it was");
+        assert_eq!(with_name(a.clone(), container_name(None, "checks")), a, "no prefix: unnamed");
+        for bad in ["", "-x", "a b", "a/b", "a;rm"] {
+            assert_eq!(container_name(Some(bad), "checks"), None, "{bad:?}");
+        }
     }
 
     /// Volumes without a machine id (and the images) are this machine's only when `--mine` says so — nothing a

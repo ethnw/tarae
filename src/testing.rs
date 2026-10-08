@@ -309,6 +309,8 @@ pub struct TestRun {
     /// Claude's: the checkout as it found it — what it changed joins the turn at its end (`snapshot.rs`; its
     /// line's next run waits for that).
     pub snap: Option<crate::snapshot::Before>,
+    /// Claude's: the containers it names from its prefix, stopped when it's stopped (`containers.rs`).
+    pub containers: Option<crate::containers::Run>,
 }
 
 impl TestRun {
@@ -379,6 +381,7 @@ impl TestRun {
             joined: Vec::new(),
             queued: None,
             snap: None,
+            containers: None,
         }
     }
 
@@ -409,6 +412,10 @@ impl TestRun {
         {
             crate::dap::term_group(pid);
             self.trace.end("stopped before its end");
+            // (what it started in a container engine goes with it — `containers.rs`)
+            if let Some(c) = self.containers.take() {
+                c.stopped();
+            }
         }
     }
 }
@@ -607,7 +614,8 @@ impl Editor {
 
     /// Started now, the saves before it written (`test_start`; Claude's run, `tools::go`): in the sandbox,
     /// unless `guard` says otherwise; `trace` — its way from the ask (else it starts here). `acts`: whose run it
-    /// is (Claude's is kept from new user namespaces outside the sandbox too — `spawn::Acts`).
+    /// is (Claude's is kept from new user namespaces outside the sandbox too — `spawn::Acts` — and names its
+    /// containers, stopped with it — `containers.rs`).
     pub fn test_start_guarded(
         &mut self,
         target: Target,
@@ -629,6 +637,15 @@ impl Editor {
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
         cmd.current_dir(&target.cwd);
         crate::task::color_off(&mut cmd);
+        // (Claude's: the prefix its containers are named from, stopped with it — `containers.rs`)
+        let claudes = acts == crate::spawn::Acts::Claude;
+        let containers = claudes.then(|| crate::containers::prefix(self.session.id, trace.id()));
+        match &containers {
+            Some(p) => cmd.env(crate::containers::VAR, p),
+            None => cmd.env_remove(crate::containers::VAR),
+        };
+        // (which engine its containers are on: its environment's settings — tests run by their words, no line)
+        let containers = containers.map(|p| (p, crate::containers::Reach::of_command(None, &cmd)));
         let wall = std::time::SystemTime::now();
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
@@ -778,6 +795,9 @@ impl Editor {
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));
         });
         let parser = parser_of(&target.how);
+        let label = format!("Claude's tests {}", target.label);
+        let containers =
+            containers.map(|(p, reach)| crate::containers::Run::new(p, label, self.events.sender(), reach));
         self.session.test_run = Some(TestRun {
             target,
             state: RunState::Running,
@@ -802,6 +822,7 @@ impl Editor {
             joined: Vec::new(),
             queued: None,
             snap: None,
+            containers,
         });
     }
 
