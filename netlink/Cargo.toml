@@ -1,0 +1,11 @@
+[package]
+name = "tarae-netlink"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+description = "What tarae's transparent proxy sends the kernel: an owned nf_tables table, its routes, and the reads that say they're there"
+publish = false
+
+[dependencies]
+libc = "0.2"

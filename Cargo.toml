@@ -101,8 +101,9 @@ tar = "0.4"
 toml = "1.1.6"
 
 # Dev task crate (cargo xtask — .cargo/config.toml). Doesn't affect `cargo install --path .`
+# `netlink`: tarae's own netlink (step 6's transparent proxy, `target/sb/step6-plan.md`) — nothing calls it yet
 [workspace]
-members = ["xtask"]
+members = ["xtask", "netlink"]
 
 [dev-dependencies]
 vt100 = "0.16.2"
