@@ -541,7 +541,9 @@ mod tests {
             (o.question.clone(), warned.join("\n"))
         };
         let (q, warned) = card(&mut ed, "0");
-        let said = format!("In {}, hosts.yml holds a token-like line.", base.join("conf").display());
+        // (as the card shows it, `~` for home: the test's temp folder is in home in a sandboxed run)
+        let said =
+            format!("In {}, hosts.yml holds a token-like line.", crate::allow::tilde(&base.join("conf")));
         assert_eq!(warned, said, "{q}");
         assert!(!q.contains("tarae-fake-token"), "{q}");
         let (q, warned) = card(&mut ed, "1");

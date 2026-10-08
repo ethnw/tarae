@@ -128,6 +128,14 @@ impl Fixture {
         if let Some(s) = crate::config::state_dir() {
             names.push((profile_path(&s).display().to_string(), "$STATE"));
         }
+        // (each as the report shows it too: a fixture in a temp folder under home — a sandboxed run's own,
+        // in tarae's cache since F1 — is said `~/…`, `home_shown`)
+        let shown: Vec<(String, &str)> = names
+            .iter()
+            .map(|(from, to)| (home_shown(from), *to))
+            .filter(|(from, _)| from.starts_with('~'))
+            .collect();
+        names.extend(shown);
         // (longest first: the project is in the home, the home in the fixture's folder)
         names.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
         let mut out = text.to_string();

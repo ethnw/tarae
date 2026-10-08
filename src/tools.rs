@@ -3668,10 +3668,14 @@ mod tests {
         let o = ed.offers.first().expect("its card");
         assert_eq!(o.title, super::SOCKET_RUN_TITLE);
         let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(q.contains(&format!(
-            "It may connect to {} — that one file; everything else stays",
-            sock.display()
-        )));
+        // (as the card shows it, `~` for home: the test's temp folder is in home in a sandboxed run)
+        assert!(
+            q.contains(&format!(
+                "It may connect to {} — that one file; everything else stays",
+                crate::allow::tilde(&sock)
+            )),
+            "{q}"
+        );
         assert!(
             q.contains("Its reason: docker runs the Linux checks") && q.contains("mounts any folder"),
             "{q}"
@@ -3981,7 +3985,9 @@ mod tests {
         }
         // #152: and where it runs — the folder after its `cd`s, decided, under the command
         let q = decided(&mut ed, "cd ../other && cargo test").unwrap();
-        assert_eq!(q.lines().nth(1), Some(format!("  in {}", other.display()).as_str()), "{q}");
+        // (as the card shows it, `~` for home: the test's temp folder is in home in a sandboxed run)
+        let at = crate::allow::tilde(&other);
+        assert_eq!(q.lines().nth(1), Some(format!("  in {at}").as_str()), "{q}");
         assert_eq!(ed.offers[0].decided_lines(), 0..2, "said as decided");
         // Inside the project: at once
         assert_eq!(decided(&mut ed, "cd sub && git status"), None, "inside: runs");

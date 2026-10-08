@@ -505,13 +505,14 @@ mod tests {
         };
         ask(&mut ed, "1", "hosts.yml");
         settle(&mut ed, &|ed| !ed.offers.is_empty());
-        let file = format!("{} holds a token-like line.", out.join("hosts.yml").display());
+        // (as the card shows them, `~` for home: the test's temp folder is in home in a sandboxed run)
+        let file = format!("{} holds a token-like line.", crate::allow::tilde(&out.join("hosts.yml")));
         assert_eq!(warned(&ed), file, "{}", ed.offers[0].question);
         // Beside a second read: the folder, once looked through — said too
         let rev = ed.offers[0].rev;
         ask(&mut ed, "2", "notes.txt");
         settle(&mut ed, &|ed| matches!(&ed.offers[0].what, crate::offer::What::Read { folder: Some(_), .. }));
-        let folder = format!("In {}, .env and hosts.yml hold token-like lines.", out.display());
+        let folder = format!("In {}, .env and hosts.yml hold token-like lines.", crate::allow::tilde(&out));
         let q = ed.offers[0].question.clone();
         assert!(warned(&ed).starts_with(&file) && warned(&ed).ends_with(&folder), "{q}");
         assert!(q.contains(&format!("a and A allow everything in {}", out.display())), "{q}");

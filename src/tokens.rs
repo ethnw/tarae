@@ -1042,12 +1042,15 @@ mod tests {
         let a = t.join("a");
         let f = found_in(&a);
         assert_eq!(f, Found { files: vec![a.join(".env"), a.join("hosts.yml")], more: 0, cut: false });
+        // (places as a card shows them, `~` for home: the test's temp folder is in home in a sandboxed run —
+        // its own folder, in tarae's cache)
+        let shown = crate::allow::tilde;
         let said = f.said(&a).unwrap();
-        assert_eq!(said, format!("In {}, .env and hosts.yml hold token-like lines.", a.display()));
+        assert_eq!(said, format!("In {}, .env and hosts.yml hold token-like lines.", shown(&a)));
         assert!(!said.contains(FAKE));
         let one = found_in(&a.join("hosts.yml"));
         let file = a.join("hosts.yml");
-        assert_eq!(one.said(&file), Some(format!("{} holds a token-like line.", file.display())));
+        assert_eq!(one.said(&file), Some(format!("{} holds a token-like line.", shown(&file))));
         assert_eq!(found_in(&a.join("plain.toml")).said(&a.join("plain.toml")), None);
         for i in 0..5 {
             write(&t.join(format!("b/{i}.conf")), "password = tarae-fake-token\n");
@@ -1058,7 +1061,7 @@ mod tests {
         assert!(said.ends_with(".conf and 2 more hold token-like lines."), "{said}");
         let cut = Found { cut: true, ..Found::default() };
         let said = cut.said(&a).unwrap();
-        assert_eq!(said, format!("{} has more files than tarae looks through for tokens.", a.display()));
+        assert_eq!(said, format!("{} has more files than tarae looks through for tokens.", shown(&a)));
         std::fs::remove_dir_all(&t).ok();
     }
 
