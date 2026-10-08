@@ -251,7 +251,7 @@ impl Guard {
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
         let (mut homes, mut ports) = (Vec::new(), Vec::new());
         let refused_port = &crate::sandboxpack::get().refused_port;
-        let (mut entries, mut signals) = (false, false);
+        let (mut entries, mut signals, mut looks) = (false, false, false);
         for d in seen {
             if d.op.starts_with("file-entry-") {
                 entries = true;
@@ -262,6 +262,7 @@ impl Guard {
                     "the clipboard" => services.push("the clipboard"),
                     "the keychain" => services.push("the keychain"),
                     _ if d.op == "signal" => signals = true,
+                    _ if d.op == "process-info-pidinfo" => looks = true,
                     // (a process the packs say needs this machine's ports refused one: Gradle's JVM)
                     w if w.starts_with("connecting to port")
                         && refused_port.iter().any(|(n, _)| *n == d.process) =>
@@ -361,11 +362,25 @@ impl Guard {
                  ($TMPDIR) always is; for one the build needs there, tell the user.\n",
             );
         }
-        if signals {
-            s.push_str(
+        // (Linux: Landlock's scope keeps signals in; macOS: Seatbelt's `same-sandbox` keeps signals and looks
+        // into processes' details in — `OWN_PROCESSES`, F2)
+        let to = match (signals, looks) {
+            (true, true) => Some("signal or look into"),
+            (true, false) => Some("signal"),
+            (false, true) => Some("look into"),
+            (false, false) => None,
+        };
+        match to {
+            Some(_) if cfg!(target_os = "linux") => s.push_str(
                 "A command can't signal a process outside its own (Landlock keeps it in) — tarae's, the \
                  user's others. If one needs to, say so to the user.\n",
-            );
+            ),
+            Some(to) => s.push_str(&format!(
+                "A command can't {to} a process outside its own — tarae's, another session's commands, the \
+                 user's others: macOS's sandbox lets it signal and read the details of (`lsof -p`) only the \
+                 processes it started. If one needs to, say so to the user.\n"
+            )),
+            None => {}
         }
         (s, all)
     }
@@ -1361,7 +1376,13 @@ impl Denial {
             }
             "file-make-in" => format!("making a new file in {t}"),
             "signal" if t.is_empty() => "signalling a process outside the run's own processes".into(),
-            "signal" => format!("signalling process {t} — outside the run's own processes"),
+            // (Seatbelt names it `others [name(pid)] signum:N` — F2, measured)
+            "signal" => match seatbelt_process(&t) {
+                Some((name, pid)) => format!("signalling {name} ({pid}) — outside the run's own processes"),
+                None => format!("signalling process {t} — outside the run's own processes"),
+            },
+            // (no process named: `lsof -p` looks into every one — they're one denial, `Blocked::add`)
+            "process-info-pidinfo" => "looking into processes outside the run's own".into(),
             _ if op.starts_with("file-write") => format!("changing {t}"),
             // (a path by what it is, not as shown: under home it's `~/…` — a VM's checkout in home)
             "network-outbound" if self.target.starts_with('/') => format!("connecting to socket {t}"),
@@ -1537,7 +1558,9 @@ impl Blocked {
             return;
         }
         self.total += 1;
-        let same = |s: &Denial| s.op == d.op && s.target == d.target;
+        // (a look into another process's details is one, whichever process: `ps`, `lsof -p`, `pgrep` look into
+        // every one — each its own would take every slot from what else was refused)
+        let same = |s: &Denial| s.op == d.op && (s.target == d.target || d.op == "process-info-pidinfo");
         if self.seen.iter().any(same) {
             return;
         }
@@ -2373,6 +2396,20 @@ const NO_WAY_OUT: [&str; 2] = [
     "mach-lookup (global-name \"com.apple.coreservices.launchservicesd\") (global-name-regex #\"^com\\.apple\\.lsd\\.\")",
 ];
 
+/// The process a Seatbelt denial names — `others [name(pid)] …` — as (name, pid).
+fn seatbelt_process(target: &str) -> Option<(&str, &str)> {
+    let inner = target.split_once('[')?.1.split_once(']')?.0;
+    let (name, pid) = inner.rsplit_once('(')?;
+    let pid = pid.strip_suffix(')').filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))?;
+    Some((name, pid))
+}
+
+/// What a run does only to its own processes (`same-sandbox`): signal them, read their details (`lsof`'s
+/// `proc_pidinfo`). Not `process-info*` whole: listing pids has no target, and `lsof` of its own child failed
+/// (spike M7.3).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+const OWN_PROCESSES: [&str; 2] = ["signal", "process-info-pidinfo"];
+
 impl Policy {
     /// Its run's proxy URL — the one thing the packs' proxy lines and the proxy variables hang on (step 5f): a
     /// port and token of the run's own where it has one (`proxy`: macOS), else, where its supervisor hands its
@@ -2508,6 +2545,14 @@ impl Policy {
             p.push_str(&deny(rule));
         }
         p.push_str(&deny(&kept_services()));
+        // Signals and processes' details only within the run's own (F2): `same-sandbox` is this `sandbox-exec`'s
+        // processes — another run under the same profile isn't (spike M7.3, `target/sb/f2-spike.sh`). Its child,
+        // group and grandchild stay signalable (`make -j`, a test runner ending its workers); tarae, another
+        // session's run, the user's shell don't. (Arguments and environment aren't kept by these: spike 2)
+        for rule in OWN_PROCESSES {
+            p.push_str(&deny(rule));
+            p.push_str(&format!("(allow {rule} (target same-sandbox))\n"));
+        }
         // The settings that hold a token, each that file: the tools read their copies (`tokens.rs`)
         let hidden: String =
             (0..self.reads.copies.hidden.len()).map(|i| format!(" (literal (param \"T{i}\"))")).collect();
@@ -5095,6 +5140,125 @@ mod tests {
         assert_eq!((marker.ok().as_deref(), made, beside_made), (Some("kept"), false, false));
     }
 
+    /// F2, macOS: a run signals and looks into only its own processes. Its own child, the process group it
+    /// makes (job control) and its grandchild it can signal — a test runner ends its workers, `make -j` its jobs
+    /// — and its own child's details it reads (`lsof`: `process-info-pidinfo`); tarae, or another session's run
+    /// (the same profile, its own `sandbox-exec`), it can neither signal (signal 0, CONT) nor look into. Each
+    /// stand-in in a process group of its own, as tarae and a run are (spike M7.3: one shared with the run's
+    /// passes `(target pgrp)`). Stand-ins: shells sleeping a second at a time — the run sends them only signal 0
+    /// and CONT; TERM only to its own. (Projects of the test's own; Seatbelt's — Linux keeps signals in with
+    /// Landlock's scope, `landlock::tests`.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_run_signals_and_looks_into_only_its_own_processes() {
+        use std::os::unix::process::CommandExt;
+        let test = "sandbox::tests::a_run_signals_and_looks_into_only_its_own_processes";
+        if skipped_inside(test) {
+            return;
+        }
+        // (not in a temp folder: a policy never opens one holding its project, and a checkout isn't in one)
+        let t = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/sb-own-processes-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&t).ok();
+        for root in ["p", "q"] {
+            std::fs::create_dir_all(t.join(root)).unwrap();
+        }
+        let llm = crate::llm::LlmConfig::default();
+        let run = |root: &str| run_policy_in(&t.join(root), &llm, &[], &Here::now()).expect("a run's policy");
+        let (p, q) = (run("p"), run("q"));
+        // A shell sleeping a second at a time for `$1` seconds: signalled, it leaves at most a 1 s sleep
+        let sleeper = r#"i=0; while [ $i -lt "$1" ]; do sleep 1; i=$((i+1)); done"#;
+        let args = |name: &str| vec!["-c".to_string(), sleeper.into(), name.into(), "60".into()];
+        // tarae's stand-in, outside the sandbox, in a process group of its own
+        let mut taraes = Command::new("sh");
+        taraes.args(args("taraes-stand-in")).stdin(Stdio::null()).process_group(0);
+        let mut taraes = taraes.spawn().unwrap();
+        // Another session's run: its own policy, its own sandbox-exec, its own session (`spawn`)
+        let theirs = command(Some(&q), "sh", &args("their-run"));
+        let theirs = spawn(Some(&q), &theirs).unwrap();
+        let script = r#"
+            w() { if eval "$2" >/dev/null 2>&1; then echo "$1 ok"; else echo "$1 no"; fi; }
+            looks() { if lsof -a -p "$2" -d cwd -Fn 2>/dev/null | grep -q '^n/'; then echo "$1 seen"; else echo "$1 hidden"; fi; }
+            sh -c "$SLEEPER" own 20 & c=$!
+            sleep 0.2
+            w "own child: 0" "kill -0 $c"
+            w "own child: CONT" "kill -CONT $c"
+            looks "own child: details" "$c"
+            w "own child: TERM" "kill -TERM $c"
+            ( set -m; sleep 20 & echo $! > "$TMPDIR/group"; wait ) & sleep 0.3
+            w "own group: TERM" "kill -TERM -$(cat "$TMPDIR/group")"
+            ( sleep 20 & echo $! > "$TMPDIR/grandchild"; wait ) & sleep 0.3
+            w "own grandchild: TERM" "kill -TERM $(cat "$TMPDIR/grandchild")"
+            w "tarae: 0" "kill -0 $TARAE"
+            w "tarae: CONT" "kill -CONT $TARAE"
+            looks "tarae: details" "$TARAE"
+            w "their run: 0" "kill -0 $THEIRS"
+            w "their run: CONT" "kill -CONT $THEIRS"
+            looks "their run: details" "$THEIRS"
+        "#;
+        let mut cmd = command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.current_dir(t.join("p")).stdin(Stdio::null()).env("SLEEPER", sleeper);
+        cmd.env("TARAE", taraes.id().to_string()).env("THEIRS", theirs.pid.to_string());
+        // (its denials, as its report says them)
+        let w = Watch::start(p.tag.as_deref().expect("a run's tag"));
+        std::thread::sleep(WATCH_READY);
+        let spawned = spawn(Some(&p), &cmd).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        after_run(Some(&p))();
+        std::thread::sleep(WATCH_LAST * 2);
+        let blocked = w.blocked();
+        w.finish();
+        // (not deduplicated here: one line for every look into others' details is `Blocked::add`'s to make)
+        let mut said: Vec<String> = blocked.seen.iter().map(|d| d.plain()).collect();
+        said.sort();
+        // (the stand-ins: still there — never ended by the run — then ended here)
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        let (tarae_alive, theirs_alive) = (alive(taraes.id()), alive(theirs.pid));
+        taraes.kill().ok();
+        taraes.wait().ok();
+        // SAFETY: the other run's shell, started above and not waited on yet.
+        unsafe { libc::kill(theirs.pid as libc::pid_t, libc::SIGTERM) };
+        crate::spawn::wait(theirs.pid).ok();
+        after_run(Some(&q))();
+        drop((p, q));
+        std::fs::remove_dir_all(&t).ok();
+        let got: Vec<&str> = out.lines().collect();
+        let want = [
+            "own child: 0 ok",
+            "own child: CONT ok",
+            "own child: details seen",
+            "own child: TERM ok",
+            "own group: TERM ok",
+            "own grandchild: TERM ok",
+            "tarae: 0 no",
+            "tarae: CONT no",
+            "tarae: details hidden",
+            "their run: 0 no",
+            "their run: CONT no",
+            "their run: details hidden",
+        ];
+        assert_eq!(got, want, "{out}");
+        assert!(tarae_alive && theirs_alive, "the stand-ins outlived the run");
+        // Its report: a signal refused names its process — a stand-in, never one of its own (by pid: the name
+        // is `/bin/sh`'s); the looks into others' details are one line (`lsof -p` looks into every process:
+        // hundreds of refusals, some always logged). Not every refusal reaches the log: signal 0's never, and
+        // of the two CONTs one did (measured, twice) — so a signal line isn't required, only checked when there
+        // (its words from Seatbelt's measured form: `seatbelt_process`'s cases in `plain`'s test)
+        assert_eq!(blocked.failed, None);
+        let stand_ins =
+            [taraes.id(), theirs.pid].map(|pid| format!(" ({pid}) — outside the run's own processes"));
+        let signals: Vec<&String> = said.iter().filter(|l| l.starts_with("signalling ")).collect();
+        assert!(signals.iter().all(|l| stand_ins.iter().any(|s| l.ends_with(s))), "{said:?}");
+        let looked = said.iter().filter(|l| l.starts_with("looking into "));
+        assert_eq!(looked.collect::<Vec<_>>(), ["looking into processes outside the run's own"], "{said:?}");
+        assert_eq!(said.len(), 1 + signals.len(), "nothing else refused: {said:?}");
+    }
+
     /// A tarae that's gone (a crash, a kill) leaves its run folders in tarae's cache, which nothing else clears
     /// (the temp folders were the system's): the next start removes them — where tarae's cache is, as the
     /// variables say. Whose they are is the lock in each tarae's own folder (`Instance`), never a pid: one a
@@ -7234,6 +7398,53 @@ mod tests {
         assert_eq!((b.total, b.distinct, b.seen.len()), (22, 21, DENIALS_KEPT));
     }
 
+    /// F2: one `ps` looks into every process — each refused look its own denial would take every kept slot,
+    /// and the `.git` write after it would reach neither the panel nor Claude. They're one, whichever process;
+    /// a signal refused stays one per process (it names the one it was sent to).
+    #[test]
+    fn looks_into_other_processes_are_one_denial() {
+        let mut b = Blocked::default();
+        for pid in 0..DENIALS_KEPT + 5 {
+            b.add(denial("process-info-pidinfo", &format!("others [sleep({pid})]")));
+        }
+        b.add(denial("signal", "others [sh(1)] signum:19"));
+        b.add(denial("signal", "others [sh(2)] signum:19"));
+        b.add(denial("file-write-create", "/Users/u/p/.git/index.lock"));
+        let ops: Vec<&str> = b.seen.iter().map(|d| d.op.as_str()).collect();
+        assert_eq!(ops, ["process-info-pidinfo", "signal", "signal", "file-write-create"]);
+        assert_eq!((b.total, b.distinct), (DENIALS_KEPT + 8, 4));
+    }
+
+    /// F2, macOS: a signal or a look refused outside the run's own processes is kept on purpose — Claude reads
+    /// why, in macOS's words (never Landlock's: that's Linux's), and to ask the user, not "tell the user to open
+    /// it". (Seatbelt's denials, as the watch records them; Linux's words: `linux::tests`)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_report_says_other_processes_are_kept_on_purpose() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let said = |denials: &[(&str, &str)]| {
+            let w = Watch::quiet("t.");
+            for (op, target) in denials {
+                w.record(denial(op, target));
+            }
+            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report(&[])
+        };
+        let (signal, look) =
+            (("signal", "others [sh(71140)] signum:19"), ("process-info-pidinfo", "others [ps(9)]"));
+        for (denials, to) in
+            [(&[signal][..], "signal"), (&[look], "look into"), (&[signal, look], "signal or look into")]
+        {
+            let r = said(denials);
+            assert!(r.contains(&format!("A command can't {to} a process outside its own")), "{r}");
+            assert!(r.contains("macOS's sandbox lets it signal and read the details of"), "{r}");
+            assert!(!r.contains("If the command needs one of these"), "all of it kept on purpose: {r}");
+            assert!(!r.contains("Landlock"), "{r}");
+        }
+        // Anything else blocked beside them still asks the user to open it
+        let r = said(&[look, ("file-read-data", "/Users/u/other/x")]);
+        assert!(r.contains("If the command needs one of these"), "{r}");
+    }
+
     /// P2 leftovers: Go's telemetry counters (written in home by every go command) are denied but never named —
     /// a Go run's report says nothing was blocked; any other write next to them is named as ever. A shell's
     /// setup (`~/.zshenv`, read by every `zsh -c`) is said calmly, apart — not a warning. And npm keeps its
@@ -7570,6 +7781,21 @@ mod tests {
         assert_eq!(plain("appleevent-send", "com.apple.finder"), "Apple Event to com.apple.finder");
         assert_eq!(plain("mach-lookup", "com.apple.coreservices.launchservicesd"), "opening apps");
         assert_eq!(plain("mach-lookup", "com.apple.lsd.mapdb"), "opening apps");
+        // F2: a signal refused names its process (Seatbelt: `others [name(pid)] signum:N` — measured); a look
+        // into another's details names none — `lsof -p` looks into every process: they fold into one line
+        assert_eq!(
+            plain("signal", "others [bash(71140)] signum:19"),
+            "signalling bash (71140) — outside the run's own processes"
+        );
+        assert_eq!(plain("signal", "4242"), "signalling process 4242 — outside the run's own processes");
+        assert_eq!(
+            plain("process-info-pidinfo", "others [sleep(71161)]"),
+            "looking into processes outside the run's own"
+        );
+        assert_eq!(
+            plain("process-info-pidinfo", "others [log(71142)]"),
+            "looking into processes outside the run's own"
+        );
         // As Seatbelt says it, where there are no plainer words
         assert_eq!(plain("mach-lookup", "com.apple.other"), "mach-lookup com.apple.other");
         assert_eq!(plain("network-outbound", "remote:*:x"), "network-outbound remote:*:x");

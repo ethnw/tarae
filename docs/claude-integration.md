@@ -648,6 +648,16 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket
   folders (`$TMUX_TMPDIR` or `/tmp`, then `tmux-<uid>`; `$ZELLIJ_SOCKET_DIR` or `$TMPDIR/zellij-<uid>`) can't
   be written either, so a command can't delete or replace the multiplexer you work in
+- **Only its own processes (macOS).** A command can signal the processes it started and theirs: its children,
+  the process groups it makes and what's under them. That covers job control, `make -j` and a test runner ending
+  its workers. It can't signal tarae, another session's commands, your shell or anything else of yours, and it
+  can't look into their details either (`lsof` sees its own processes only). The run's panel names each refused
+  signal's process (`signalling bash (4242) — outside the run's own processes`). Looks into other processes are
+  one line however many there were (`lsof -p` looks into all of them). The kernel doesn't report every refusal:
+  never a signal 0, and not always each signal. **Still open**: a command can read another process's command
+  line (`pgrep -f` matches tarae's and other sessions'), and maybe its environment, so a token on a command line
+  is readable. Which rule could close that is still being measured. On Linux, signals are kept in from Landlock
+  ABI 6 (below)
 - **Programs on this machine are closed to it too, except on the ports you open.** It can still listen on a
   port; connecting is what's closed. Some ports belong to programs that run whatever they're asked, outside
   the sandbox (the table below), and macOS's sandbox can't open "all of this machine but those". So:
