@@ -154,6 +154,9 @@ pub struct Graded {
     pub added: usize,
     /// A change of mode (`Hunk.mode`), not of lines — an open document's diff doesn't have it.
     pub mode: bool,
+    /// One piece of a change taller than its pane, which of how many (`codereview::pieces`) — looked at once
+    /// every line of it was on screen, the cursor's line no shortcut.
+    pub piece: Option<(usize, usize)>,
 }
 
 impl Graded {
@@ -244,6 +247,7 @@ pub fn graded(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules, in_test: b
         removed: h.removed.len(),
         added: h.added.len(),
         mode: h.mode.is_some(),
+        piece: None,
     }
 }
 
@@ -266,6 +270,7 @@ pub fn taken_out(rel: &str, at: usize, gone: &[(&str, u32)]) -> Graded {
         removed: 0,
         added: 0,
         mode: false,
+        piece: None,
     }
 }
 
@@ -298,6 +303,7 @@ pub fn moved(
         removed: 0,
         added: 0,
         mode: false,
+        piece: None,
     }
 }
 
@@ -313,34 +319,75 @@ pub struct LookedOrder {
 }
 
 /// Of `now` (a change's added lines' keys, in order), the indices of those out of the order `then` had them
-/// in: the lines of both, outside one longest run in `then`'s order — a line moved, not the ones around it.
+/// in — the fewest lines that, put back in place, give the order looked at: the lines of `now` outside a
+/// longest common subsequence of the two (a repeated line matched by occurrence, as the sequences have it).
+/// A line of `now` not in `then`, or a copy beyond as many as `then` had, is a new line, not a moved one.
+/// (Review of cardburden 2: a placement of repeats by rule asked for an unchanged `b` as moved — before
+/// `[b, a, c, b]`, now `[c, b, a, b]`: only `c` moved.)
 pub fn out_of_order(then: &[Key], now: &[Key]) -> Vec<usize> {
-    // (each line of both by its place in `then`: the first not taken yet — a repeated line, in turn)
-    let mut places: std::collections::HashMap<Key, std::collections::VecDeque<usize>> = Default::default();
-    for (p, k) in then.iter().enumerate() {
-        places.entry(*k).or_default().push_back(p);
-    }
-    let placed: Vec<(usize, usize)> =
-        now.iter().enumerate().filter_map(|(i, k)| Some((i, places.get_mut(k)?.pop_front()?))).collect();
-    // (the longest increasing run of places — what stayed in order — in n log n: a change can be long)
-    let mut tails: Vec<usize> = Vec::new();
-    let mut from: Vec<Option<usize>> = vec![None; placed.len()];
-    for (i, &(_, p)) in placed.iter().enumerate() {
-        let at = tails.partition_point(|&t| placed[t].1 < p);
-        from[i] = at.checked_sub(1).map(|a| tails[a]);
-        match tails.get_mut(at) {
-            Some(t) => *t = i,
-            None => tails.push(i),
+    // (only the lines both have can be in it: the rest left out first — a change's table stays small)
+    let both: HashSet<Key> = then.iter().filter(|k| now.contains(k)).copied().collect();
+    let t: Vec<Key> = then.iter().filter(|k| both.contains(k)).copied().collect();
+    let at: Vec<usize> = (0..now.len()).filter(|&j| both.contains(&now[j])).collect();
+    let (n, m) = (t.len(), at.len());
+    let mut matched = vec![false; now.len()];
+    if n.saturating_mul(m) <= LCS_CELLS {
+        // (lengths of the longest common subsequence of `t[i..]` and `now[at[j..]]`)
+        let w = m + 1;
+        let mut len = vec![0u32; (n + 1) * w];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                len[i * w + j] = match t[i] == now[at[j]] {
+                    true => len[(i + 1) * w + j + 1] + 1,
+                    false => len[(i + 1) * w + j].max(len[i * w + j + 1]),
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n && j < m {
+            if t[i] == now[at[j]] {
+                matched[at[j]] = true;
+                (i, j) = (i + 1, j + 1);
+            } else if len[(i + 1) * w + j] >= len[i * w + j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    } else {
+        // (a change too long to tabulate: what's in order from the start, by the first free place after)
+        let mut i = 0;
+        for &j in &at {
+            if let Some(p) = t[i..].iter().position(|k| *k == now[j]) {
+                matched[j] = true;
+                i += p + 1;
+            }
         }
     }
-    let mut kept = vec![false; placed.len()];
-    let mut at = tails.last().copied();
-    while let Some(i) = at {
-        kept[i] = true;
-        at = from[i];
+    // (a line not matched is moved while `then` still has an unmatched copy of it — else it's a new copy)
+    let mut left: std::collections::HashMap<Key, usize> = Default::default();
+    for k in &t {
+        *left.entry(*k).or_default() += 1;
     }
-    placed.iter().zip(kept).filter(|(_, k)| !k).map(|((i, _), _)| *i).collect()
+    for j in (0..now.len()).filter(|&j| matched[j]) {
+        if let Some(c) = left.get_mut(&now[j]) {
+            *c = c.saturating_sub(1);
+        }
+    }
+    at.into_iter()
+        .filter(|&j| !matched[j])
+        .filter(|&j| match left.get_mut(&now[j]) {
+            Some(c) if *c > 0 => {
+                *c -= 1;
+                true
+            }
+            _ => false,
+        })
+        .collect()
 }
+
+/// The most cells `out_of_order` tabulates (two orders of 4000 lines): past it, a greedy match in order.
+const LCS_CELLS: usize = 16_000_000;
 
 /// Whether a line says nothing on its own — blank, or only brackets and punctuation (`}`, `)`, `];`, `},`):
 /// not kept as looked at for "taken out" (one going would ask about nothing), still a line when added.
@@ -712,6 +759,63 @@ mod tests {
         assert_eq!(key_of_hex("12387807294418380025"), None, "an FNV key kept before");
     }
 
+    /// A line moved within its change is out of the order it was looked at in; a line like another, the first
+    /// copy changed, isn't (cardburden 2: two functions in one piece, each with a `b();` — `bc()` in the first
+    /// made the second read as moved up to its place).
+    #[test]
+    fn out_of_order_is_a_move_not_a_copy_changed() {
+        let (a, b, c, b2) = (1, 2, 3, 9);
+        // moved: `a` after `b`
+        assert_eq!(out_of_order(&[a, b, c], &[b, a, c]).len(), 1);
+        // the first `b` changed (b2): the rest in order
+        assert!(out_of_order(&[a, b, c, a, b, c], &[a, b2, c, a, b, c]).is_empty());
+        // nothing changed: nothing out of order
+        assert!(out_of_order(&[a, b, c, a, b, c], &[a, b, c, a, b, c]).is_empty());
+        // review of cardburden 2: only `c` moved, past a repeated `b` — `c` asked for, no `b`
+        assert_eq!(out_of_order(&[b, a, c, b], &[c, b, a, b]), [0]);
+        // a copy beyond the ones looked at is a new line, not a moved one
+        assert!(out_of_order(&[a, b], &[a, b, a]).is_empty());
+    }
+
+    /// What `out_of_order` asks for is the fewest lines that, put back in place, give the order looked at —
+    /// over random orders with repeats: the rest of `now` is in `then`'s order, and no fewer lines would do
+    /// (every way of keeping more of `now` tried).
+    #[test]
+    fn out_of_order_asks_for_the_fewest_lines_that_restore_the_order() {
+        let mut seed: u64 = 0x5eed;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let in_order = |kept: &[Key], then: &[Key]| {
+            let mut it = then.iter();
+            kept.iter().all(|k| it.any(|x| x == k))
+        };
+        for _ in 0..2000 {
+            let len = next(9) as usize;
+            let then: Vec<Key> = (0..len).map(|_| next(4) as Key).collect();
+            let mut now = then.clone();
+            for i in (1..now.len()).rev() {
+                now.swap(i, next(i as u64 + 1) as usize);
+            }
+            let moved = out_of_order(&then, &now);
+            let kept: Vec<Key> =
+                now.iter().enumerate().filter(|(j, _)| !moved.contains(j)).map(|(_, k)| *k).collect();
+            assert!(in_order(&kept, &then), "{then:?} → {now:?}: kept {kept:?} out of order");
+            // (the most of `now` any choice keeps in order)
+            let most = (0u32..1 << now.len())
+                .filter(|mask| {
+                    let pick: Vec<Key> =
+                        (0..now.len()).filter(|j| mask >> j & 1 == 1).map(|j| now[j]).collect();
+                    in_order(&pick, &then)
+                })
+                .map(u32::count_ones)
+                .max()
+                .unwrap_or(0) as usize;
+            assert_eq!(moved.len(), now.len() - most, "{then:?} → {now:?}: {moved:?}");
+        }
+    }
+
     /// Looked at is per line: the same lines regrouped still count; a line changed since doesn't.
     #[test]
     fn looked_at_is_kept_per_line() {
@@ -726,6 +830,7 @@ mod tests {
             removed: hunk.removed.len(),
             added: hunk.added.len(),
             mode: false,
+            piece: None,
         };
         assert!(g(&h(&[], &["unsafe { a() }"])).looked_at(&looked), "a part of it, regrouped");
         assert!(!g(&h(&["old"], &["unsafe { a2() }", "b()"])).looked_at(&looked), "a line changed since");

@@ -1158,9 +1158,9 @@ fn snapshot_review_notes_by_their_author() {
 }
 
 /// A high-risk change, graded by a pack's pattern: the rail says how many are left to look at and marks the
-/// file `▲1`, the change's first line says why and the key; the reviewer's row its findings (one on the high
-/// change) and its verdict's first line. `space v h` on it, once scrolled through (it's taller than the
-/// pane): looked at — faint everywhere.
+/// file `▲2` — taller than the pane, no definitions in it, it's two pieces (cardburden 2) — its first line says
+/// which piece, why and the key; the reviewer's row its findings (one on the high change) and its verdict's
+/// first line. `space v h` on each piece once all of it was on screen: looked at — faint everywhere.
 #[test]
 fn snapshot_review_risk_and_the_reviewer() {
     use crate::notes::By;
@@ -1192,14 +1192,14 @@ fn snapshot_review_risk_and_the_reviewer() {
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
     let has = |rows: &[String], t: &str| rows.iter().any(|r| r.contains(t));
-    assert!(has(&rows, "▲ 1 high to look at"), "{rows:#?}");
-    assert!(has(&rows, "demo.rs  ▲1 +30") || has(&rows, "▲1 +30"), "the file's mark: {rows:#?}");
+    assert!(has(&rows, "▲ 2 high to look at"), "{rows:#?}");
+    assert!(has(&rows, "demo.rs  ▲2 +30") || has(&rows, "▲2 +30"), "the file's mark: {rows:#?}");
     assert!(has(&rows, "reviewer  1 finding ▲1"), "{rows:#?}");
     assert!(has(&rows, "“One risk: the unsafe"), "{rows:#?}");
-    assert!(has(&rows, "▲ high · unsafe (rust pack) · space v h"), "the line end: {rows:#?}");
+    assert!(has(&rows, "▲ high · piece 1/2 · unsafe (rust pack) · space v h"), "the line end: {rows:#?}");
     s.check("review_risk");
-    // Its 30 added lines are one change, taller than the pane: the key on it takes it only once scrolled
-    // through — to the change's end, then back on it
+    // Its 30 added lines are two pieces: the key on one takes it only once all of it was on screen — the
+    // first piece's foot is below the pane, at first
     s.ed.goto_line(6);
     crate::codereview::hunk_seen(&mut s.ed);
     assert_eq!(s.ed.session.looked.len(), 0, "not all of it was on screen");
@@ -1208,11 +1208,17 @@ fn snapshot_review_risk_and_the_reviewer() {
     s.ed.goto_line(6);
     s.frame();
     crate::codereview::hunk_seen(&mut s.ed);
+    let left = |s: &Shot| s.ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(&s.ed).len());
+    assert_eq!(left(&s), 1, "the first piece, all of it drawn: looked at");
+    s.ed.goto_line(34);
+    crate::codereview::hunk_seen(&mut s.ed);
+    // (back at the first piece's mark)
+    s.ed.goto_line(3);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
     assert!(has(&rows, "▲ all looked at"), "{rows:#?}");
-    assert!(has(&rows, "▲ looked at · unsafe (rust pack)"), "{rows:#?}");
+    assert!(has(&rows, "▲ looked at · piece 1/2 · unsafe (rust pack)"), "{rows:#?}");
 }
 
 /// #195: while the reviewer reads, the rail says how long and how far — on its row where the rail is wide
@@ -1995,6 +2001,7 @@ fn the_rail_says_what_moved() {
         removed: 0,
         added: 0,
         mode: false,
+        piece: None,
     };
     r.grades.insert(path, std::sync::Arc::from(vec![behaviour]));
     r.rail_need.take();
@@ -2027,7 +2034,8 @@ fn the_rail_measures_the_grade_it_draws() {
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
-    assert!(rows.iter().any(|r| r.contains("◦ demo.rs ▲1 +31 · 30000 moved")), "the name whole: {rows:#?}");
+    // (its 31-line change taller than the pane: two pieces to look at — cardburden 2)
+    assert!(rows.iter().any(|r| r.contains("◦ demo.rs ▲2 +31 · 30000 moved")), "the name whole: {rows:#?}");
 }
 
 /// Frictions 13, #3: where a click on the rail's first file row opened nothing — a 188×57 screen, five
@@ -2071,6 +2079,7 @@ fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
             removed: 0,
             added: 1,
             mode: false,
+            piece: None,
         };
         r.grades.insert(dir.join(rel), std::sync::Arc::from(vec![high]));
     }

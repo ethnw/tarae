@@ -1068,6 +1068,20 @@ drew. A file's mark and Claude don't count. `]h` / `[h` go to the next / previou
 the review's files; `space v h` with none under the cursor goes to the next one (going there is no look — press
 it again).
 
+A high-risk change taller than the pane comes in pieces, cut at the definitions in it (the functions, tests and
+types `space o` lists), going into a definition that's taller than the pane, and joined back while they fit the
+pane together. A 1123-line new file is about 25 pieces in a 50-row pane. Each piece is looked at by itself:
+`]h` selects it, its first line ends with `▲ high · piece 4/25 · refuse · …`, and `space v h` takes it once
+every line of it has been on screen. The cursor on it isn't enough, since a piece at the pane's foot is mostly below
+it. A definition taller than the pane with nothing in it to cut at is a piece of its own, scrolled through. A
+line two definitions share (`} fn b() {`) is the later one's. Lines in no definition, or a file with no grammar
+(no language, or its grammar not built in nor downloaded), are cut every pane's height. A change wholly inside
+one definition (a function's body changed) is that definition's. A file not open is cut the same way, at the
+definitions the review found as it opened, so the rail's `▲` counts the same pieces before and after you open
+it; an open file whose tree isn't in yet (parsing, or put to sleep unseen) is cut at those too. A fix later asks
+only for its lines since, piece by piece. A selection over several pieces on screen takes them all, as with any
+changes.
+
 A change looked at and then changed asks only for its lines since: a fix of five lines in a change of a
 thousand asks for those five. `]h` lands on the first of them, its line ends with `▲ high · 2 lines since your
 look · …`, and `space v h` takes it once each of those lines has been on screen, wherever the cursor is in the

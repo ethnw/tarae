@@ -197,6 +197,12 @@ impl Loader {
         self.failed.lock().unwrap().clear();
     }
 
+    /// Whether loading language `name` failed (no grammar, an ABI it can't take, a broken query) — and won't be
+    /// tried again until a grammar is downloaded. Safe on the main thread.
+    pub fn failed_to_load(&self, name: &str) -> bool {
+        self.failed.lock().unwrap().contains_key(name)
+    }
+
     /// Already-loaded language only (never touches disk) — safe on the main thread.
     pub fn loaded(&self, name: &str) -> Option<Arc<LangData>> {
         self.langs.lock().unwrap().get(name).cloned()

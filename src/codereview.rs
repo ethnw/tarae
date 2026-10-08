@@ -148,6 +148,16 @@ pub struct CodeReview {
     /// Files graded whole, as their blob would be (git converts them — `converted`): their open document's
     /// text isn't what a commit stores, so it isn't graded again as it changes.
     pub whole: std::collections::HashSet<PathBuf>,
+    /// The definitions of the files with a high-risk change as it opened (`grade_files`): a tall one is cut
+    /// at them while its file is closed, so the rail counts its pieces before it's opened (cardburden 2).
+    defs: Defs,
+    /// Whether a language's grammar failed to load (`Loader::failed_to_load`; tests say so of one that's here).
+    failed_to_load: fn(&str) -> bool,
+}
+
+/// Whether language `name`'s grammar failed to load, as the loader says.
+fn grammar_failed(name: &str) -> bool {
+    crate::syntax::Loader::global().failed_to_load(name)
 }
 
 impl CodeReview {
@@ -180,6 +190,8 @@ impl CodeReview {
             drawn: Default::default(),
             drawn_rows: Default::default(),
             whole: Default::default(),
+            defs: Default::default(),
+            failed_to_load: grammar_failed,
         }
     }
 
@@ -220,16 +232,37 @@ impl CodeReview {
         let lines = ed.session.looked_lines.get(&f.rel).map_or(&[][..], Vec::as_slice);
         let orders = ed.session.looked_orders.get(&f.rel).map_or(&[][..], Vec::as_slice);
         let worker = || self.grades.get(&f.path).cloned().unwrap_or_else(|| Arc::new([]));
-        if live.is_none() && lines.is_empty() && orders.is_empty() {
+        let rows = ed.viewport.0;
+        let tall = |g: &crate::risk::Graded| g.grade == Grade::High && rows > 0 && g.added > rows;
+        let cut = || self.grades.get(&f.path).is_some_and(|g| g.iter().any(tall));
+        if live.is_none() && lines.is_empty() && orders.is_empty() && !cut() {
             return worker();
         }
         let open = doc_of(ed, f).filter(|d| !d.loading);
+        // (a high-risk change taller than the pane is cut in pieces — cardburden 2 — at: its open document's
+        // tree's definitions; its tree not in (parsing, asleep) or the file closed, the ones the review's
+        // worker found, so its count of pieces doesn't jump as it's opened; no language or no grammar, every
+        // pane's height; its language still loading and nothing known, not yet)
+        let tree = live.and_then(|d| d.syntax.as_ref()).and_then(|s| s.tree.as_ref());
+        let known = self.defs.get(&f.path);
+        let at = match (live, tree, known) {
+            (Some(_), Some(_), _) => CutAt::Tree,
+            (_, _, Some(Some(_))) => CutAt::Opened,
+            (_, _, Some(None)) => CutAt::Lines,
+            (None, _, None) => CutAt::Lines,
+            (Some(d), None, None) => match crate::syntax::detect(Path::new(&f.rel)) {
+                None => CutAt::Lines,
+                Some(s) if d.syntax.is_none() && (self.failed_to_load)(&s.name) => CutAt::Lines,
+                Some(_) => CutAt::Whole,
+            },
+        };
         let stamp = (
             live.map(|d| (d.id, d.version())),
             open.map(|d| (d.id, d.version())),
             ed.session.looked.len(),
             lines.len(),
             orders.len(),
+            (rows, at),
         );
         if let Some((s, g)) = self.live.borrow().get(&f.path)
             && *s == stamp
@@ -245,6 +278,14 @@ impl CodeReview {
             }
             None => worker().to_vec(),
         };
+        if at != CutAt::Whole && g.iter().any(tall) {
+            let defs = match (at, tree, known) {
+                (CutAt::Tree, Some(t), _) => live.map(|d| defs_in(t, &d.text)).unwrap_or_default(),
+                (CutAt::Opened, _, Some(Some(defs))) => defs.clone(),
+                _ => Vec::new(),
+            };
+            g = g.iter().flat_map(|g| pieces(g, &defs, rows)).collect();
+        }
         let looked = &ed.session.looked;
         let out = self.taken_out_of(ed, f, &g, lines, orders);
         g.extend(moved_within(&f.rel, &g, orders, looked, live.map(|d| &d.text)));
@@ -466,9 +507,10 @@ impl CodeReview {
 }
 
 /// What a file's grades were worked out from: its document graded live (id, version), its document open
-/// (whose text counts what was taken out), and how many keys, lines and orders the session had looked at (a
-/// look can make a line taken out or moved one to ask about, or one no longer to).
-type LiveStamp = (Option<(DocId, u64)>, Option<(DocId, u64)>, usize, usize, usize);
+/// (whose text counts what was taken out), how many keys, lines and orders the session had looked at (a
+/// look can make a line taken out or moved one to ask about, or one no longer to), and the pane's height (a
+/// tall change's pieces fit it) and where they're cut at (`CutAt`: its document's tree in or not).
+type LiveStamp = (Option<(DocId, u64)>, Option<(DocId, u64)>, usize, usize, usize, (usize, CutAt));
 
 /// How many times each file had the texts asked about as the review opened (`grade_files`' `asked`).
 pub type Counts = std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>;
@@ -772,6 +814,8 @@ pub struct Grading {
     pub unread: Vec<(String, String)>,
     /// How many times each file has the texts asked about (`Asked`) — read with it.
     pub counts: Counts,
+    /// The files with a high-risk change: their definitions, cut at while they're closed (`Defs`).
+    pub defs: Defs,
 }
 
 /// How many times `text` has each of `asked`.
@@ -822,16 +866,17 @@ fn grade_files(
     let mut unread = Vec::new();
     let mut out = std::collections::HashMap::new();
     let mut lines: Vec<(PathBuf, Vec<Hunk>)> = Vec::new();
+    let mut defs = Defs::new();
     for (i, f) in files.iter().enumerate() {
         let raw = raws.get(&f.rel);
-        let hunks = if by_id.contains(&f.rel) {
+        let (hunks, now) = if by_id.contains(&f.rel) {
             let (blob, why) = blob_of(root, f, rev);
             if let Some(e) = why {
                 unread.push((f.rel.clone(), e));
             }
             let mut h = vec![crate::risk::binary(&blob)];
             h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
-            h
+            (h, None)
         } else {
             let (before, now) = match rev {
                 None => (
@@ -849,17 +894,21 @@ fn grade_files(
             }
             let mut h = crate::risk::changes(&before, &now);
             h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
-            h
+            (h, Some(now))
         };
         let lang = lang_of(&f.rel);
         let g: Graded = hunks.iter().map(|h| graded(&f.rel, lang, h, rules, false)).collect();
+        // (a high-risk change may be taller than the pane: cut at its definitions while the file is closed too)
+        if let Some(now) = now.filter(|_| g.iter().any(|g| g.grade == Grade::High && g.added > 1)) {
+            defs.insert(f.path.clone(), defs_on_worker(&f.rel, &now));
+        }
         out.insert(f.path.clone(), g);
         if !by_id.contains(&f.rel) {
             lines.push((f.path.clone(), hunks));
         }
     }
     let whole = files.iter().filter(|f| whole.contains(&f.rel)).map(|f| f.path.clone()).collect();
-    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts })
+    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts, defs })
 }
 
 /// What a file graded by id (binary, converted) is graded as — its key's blob (a worker's: git): git's id of
@@ -1003,6 +1052,176 @@ impl Viewed {
 /// Of `g`'s changes, the ones that are lines (not a line taken out since a look — `risk::taken_out`).
 fn of_lines(g: &crate::risk::Graded) -> bool {
     g.removed + g.added > 0 || g.mode
+}
+
+/// A definition of a document (`syntax::outline` — `space o`'s): its lines (0-based, its last included) and
+/// its name.
+type Def = (std::ops::Range<usize>, String);
+
+/// The definitions in `text` as lines, by its `tree`.
+fn defs_in(tree: &tree_sitter::Tree, text: &ropey::Rope) -> Vec<Def> {
+    let len = text.len_bytes();
+    let line = |b: usize| text.byte_to_line(b.min(len));
+    crate::syntax::outline(tree, text)
+        .into_iter()
+        .map(|def| {
+            (line(def.range.start)..line(def.range.end.saturating_sub(1).max(def.range.start)) + 1, def.name)
+        })
+        .collect()
+}
+
+/// File `rel`'s definitions in its text `now` (a worker's: the grammar loaded, the text parsed) — None when
+/// it has no language or its grammar can't load: its tall changes are cut every pane's height.
+fn defs_on_worker(rel: &str, now: &str) -> Option<Vec<Def>> {
+    let spec = crate::syntax::detect(Path::new(rel))?;
+    let lang = crate::syntax::Loader::global().load(spec).ok()?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&lang.language).ok()?;
+    let tree = parser.parse(now, None)?;
+    Some(defs_in(&tree, &ropey::Rope::from_str(now)))
+}
+
+/// Each file's definitions as the review opened (`defs_on_worker`), by path — of the files with a high-risk
+/// change only.
+pub type Defs = std::collections::HashMap<PathBuf, Option<Vec<Def>>>;
+
+/// Where a file's tall high-risk changes are cut at (`CodeReview::graded`, its cache stamp).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CutAt {
+    /// Its open document's tree's definitions.
+    Tree,
+    /// The definitions the review's worker found (`Defs`): a file not open, or its tree not in (parsing,
+    /// asleep) — so the count of its pieces is the same open or closed.
+    Opened,
+    /// Every pane's height: no language, its grammar not loaded, or its definitions not known.
+    Lines,
+    /// Not cut yet: its language still loading, nothing known of its definitions.
+    Whole,
+}
+
+/// Lines `range` cut at the definitions in it (cardburden 2): its outermost ones each a piece — gone into when
+/// taller than `rows` — and the lines between them; one with none in it stays whole however tall (scrolled
+/// through, alone); lines in no definition taller than `rows` are cut every `rows` lines. Each named by the
+/// definition it is, or is in (`name`).
+fn cut(range: std::ops::Range<usize>, defs: &[Def], rows: usize, name: Option<&str>) -> Vec<Piece> {
+    let clipped = |d: &std::ops::Range<usize>| d.start.max(range.start)..d.end.min(range.end);
+    // (lines wholly in one definition — a function's body changed — are that definition's lines)
+    let name = name.or_else(|| defs.iter().rev().find(|(d, _)| clipped(d) == range).map(|(_, n)| n.as_str()));
+    if range.len() <= rows {
+        return vec![(range, name.map(str::to_string))];
+    }
+    // (the definitions in it, as much of each as is in it — not one that's all of it — and of those the
+    // outermost)
+    let inner: Vec<(std::ops::Range<usize>, &str)> = defs
+        .iter()
+        .map(|(d, n)| (clipped(d), n.as_str()))
+        .filter(|(c, _)| c.start < c.end && *c != range)
+        .collect();
+    let mut top: Vec<&(std::ops::Range<usize>, &str)> = inner
+        .iter()
+        .filter(|(c, _)| !inner.iter().any(|(o, _)| o != c && o.start <= c.start && c.end <= o.end))
+        .collect();
+    top.sort_by_key(|(c, _)| (c.start, c.end));
+    top.dedup_by(|a, b| a.0 == b.0);
+    // (a line two of them share — `} fn b() {` — is the later one's: each line in one piece. None of them
+    // holds another, so their starts climb and each keeps its first line)
+    let ends: Vec<usize> = top
+        .iter()
+        .enumerate()
+        .map(|(i, (c, _))| top.get(i + 1).map_or(c.end, |n| c.end.min(n.0.start)))
+        .collect();
+    if top.is_empty() {
+        return match name {
+            Some(n) => vec![(range, Some(n.to_string()))],
+            None => slices(range, rows, None),
+        };
+    }
+    let gap = |r: std::ops::Range<usize>| match r.len() <= rows {
+        true => vec![(r, name.map(str::to_string))],
+        false => slices(r, rows, name),
+    };
+    let mut out = Vec::new();
+    let mut at = range.start;
+    for ((c, n), end) in top.into_iter().zip(ends) {
+        if c.start > at {
+            out.extend(gap(at..c.start));
+        }
+        out.extend(cut(c.start..end, defs, rows, Some(n)));
+        at = end;
+    }
+    if at < range.end {
+        out.extend(gap(at..range.end));
+    }
+    out
+}
+
+/// A piece of a tall change: its lines and what it's named by.
+type Piece = (std::ops::Range<usize>, Option<String>);
+
+/// `range` cut every `rows` lines.
+fn slices(range: std::ops::Range<usize>, rows: usize, name: Option<&str>) -> Vec<Piece> {
+    let rows = rows.max(1);
+    (range.start..range.end)
+        .step_by(rows)
+        .map(|s| (s..(s + rows).min(range.end), name.map(str::to_string)))
+        .collect()
+}
+
+/// `pieces` next to each other joined while they fit `rows` together — a blank line between two functions
+/// isn't a piece of its own — named by the first and last they hold.
+fn joined(pieces: Vec<Piece>, rows: usize) -> Vec<Piece> {
+    let mut out: Vec<(std::ops::Range<usize>, Vec<String>)> = Vec::new();
+    for (r, n) in pieces {
+        match out.last_mut() {
+            Some((l, names)) if l.end == r.start && l.len() + r.len() <= rows => {
+                l.end = r.end;
+                names.extend(n.filter(|n| names.last() != Some(n)));
+            }
+            _ => out.push((r, n.into_iter().collect())),
+        }
+    }
+    let said = |names: Vec<String>| match &names[..] {
+        [] => None,
+        [one] => Some(one.clone()),
+        [first, .., last] => Some(format!("{first} … {last}")),
+    };
+    out.into_iter().map(|(r, names)| (r, said(names))).collect()
+}
+
+/// A high-risk change taller than the pane (`rows`) as pieces (cardburden 2: redirect.rs's 1123-line new
+/// file was one change, read in one go and read again after any edit) — cut at its document's definitions
+/// (`defs`, `cut`), joined up to the pane (`joined`). Each piece is looked at by itself, every line of it on
+/// screen; the first holds the change's removed lines (drawn above it). Its why says which piece: `piece 4/31 ·
+/// refuse · unsafe (rust pack)`. Any other change: as it is.
+fn pieces(g: &crate::risk::Graded, defs: &[Def], rows: usize) -> Vec<crate::risk::Graded> {
+    if g.grade != Grade::High || rows == 0 || g.added <= rows || g.mode || g.piece.is_some() {
+        return vec![g.clone()];
+    }
+    let cut = joined(cut(g.at..g.at + g.added, defs, rows, None), rows);
+    let n = cut.len();
+    if n < 2 {
+        return vec![g.clone()];
+    }
+    cut.into_iter()
+        .enumerate()
+        .map(|(k, (r, name))| {
+            let first = k == 0;
+            let mut keys = if first { g.keys[..g.removed].to_vec() } else { Vec::new() };
+            keys.extend_from_slice(&g.keys[g.removed + (r.start - g.at)..g.removed + (r.end - g.at)]);
+            let named = name.map(|n| format!(" · {n}")).unwrap_or_default();
+            crate::risk::Graded {
+                grade: g.grade,
+                why: format!("piece {}/{n}{named} · {}", k + 1, g.why),
+                at: r.start,
+                lines: r.len().max(1),
+                keys,
+                removed: if first { g.removed } else { 0 },
+                added: r.len(),
+                mode: false,
+                piece: Some((k + 1, n)),
+            }
+        })
+        .collect()
 }
 
 /// A line missing from its looked-at change (`CodeReview::taken_out_of`): where the change is now, the line,
@@ -1631,7 +1850,7 @@ fn open_at(
     root: PathBuf,
     base: Base,
     mut files: Vec<File>,
-    Grading { grades, moved, whole, unread, counts }: Grading,
+    Grading { grades, moved, whole, unread, counts, defs }: Grading,
     start: Option<String>,
     say: bool,
 ) {
@@ -1683,6 +1902,8 @@ fn open_at(
         drawn: Default::default(),
         drawn_rows: Default::default(),
         whole,
+        defs,
+        failed_to_load: grammar_failed,
     });
     // (what was looked at that this base has moved past goes)
     prune_looked(ed);
@@ -2275,7 +2496,9 @@ pub fn hunk_seen(ed: &mut Editor) {
     let (high, unshown): (Vec<&crate::risk::Graded>, Vec<&crate::risk::Graded>) = graded
         .iter()
         .filter(|g| touches(g) && g.grade == Grade::High)
-        .partition(|g| match partly(g) || tall(g) {
+        // (a piece of a tall change — cardburden 2: every line of it on screen, now or since, the cursor's line
+        // no shortcut — a piece at the pane's foot is mostly below it)
+        .partition(|g| match partly(g) || tall(g) || g.piece.is_some() {
             true => unread(g).is_empty(),
             false => on_line(g) || shown(g),
         });
@@ -2288,7 +2511,7 @@ pub fn hunk_seen(ed: &mut Editor) {
     if high.is_empty() && !unshown.is_empty() {
         // (one taller than the pane, or partly looked at: how much of it is left to bring on screen)
         if let [g] = unshown[..]
-            && (tall(g) || partly(g))
+            && (tall(g) || partly(g) || g.piece.is_some())
         {
             // (which lines, said and logged: of what, how much the review drew, in a pane how tall)
             let lines = unread(g);
@@ -2309,15 +2532,22 @@ pub fn hunk_seen(ed: &mut Editor) {
                     r.drawn.len()
                 ),
             );
-            return ed.set_status(match partly(g) {
-                true => format!(
+            return ed.set_status(match (partly(g), g.piece) {
+                (true, _) => format!(
                     "this high-risk change was looked at but for {} — {} of them not on screen yet ({}): \
                      bring them on screen, then space v h with the cursor in the change",
                     crate::nav::count(g.left(looked).len(), "line since"),
                     lines.len(),
                     line_ranges(&lines, 3)
                 ),
-                false => format!(
+                (false, Some((k, n))) if !tall(g) => format!(
+                    "piece {k}/{n} of a tall high-risk change — {} of its {} lines not on screen yet ({}): \
+                     bring it all on screen, then space v h with the cursor in it",
+                    lines.len(),
+                    g.lines,
+                    line_ranges(&lines, 3)
+                ),
+                _ => format!(
                     "this high-risk change is taller than the pane — {} of its {} lines not on screen yet ({}): \
                      scroll through them, then space v h with the cursor in it",
                     lines.len(),
@@ -3005,9 +3235,17 @@ fn land_on(ed: &mut Editor, line: usize) {
     let partly = since.iter().flat_map(|g| g.iter()).any(|g| {
         g.at != line && g.keys.iter().any(|k| looked.contains(k)) && g.left(looked).first() == Some(&line)
     });
+    // (a piece of a tall change starting there — cardburden 2: that piece selected, not the whole change)
+    let piece = since.iter().flat_map(|g| g.iter()).find(|g| g.piece.is_some() && g.at == line && !partly);
+    let piece = piece.map(|g| crate::git::Hunk {
+        kind: crate::git::HunkKind::Added,
+        lines: g.at..g.at + g.lines,
+        removed: 0,
+        base: 0..0,
+    });
     let hunks = &ed.doc().git_hunks;
     let at = |h: &&crate::git::Hunk| h.lines.start <= line && line < h.lines.end.max(h.lines.start + 1);
-    match hunks.iter().find(at).filter(|_| !partly).cloned() {
+    match piece.or_else(|| hunks.iter().find(at).filter(|_| !partly).cloned()) {
         Some(h) => select_from_top(ed, &h),
         None => {
             ed.goto_line(line);
@@ -3071,6 +3309,7 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
         true => (0, g.left(looked).len()),
         false => (g.lines, 0),
     });
+    let piece = g.and_then(|g| g.piece);
     let rows = ed.viewport.0;
     high_go(ed, i, at);
     let rel = ed.session.code_review.as_ref().map(|r| r.files[i].rel.clone()).unwrap_or_default();
@@ -3080,6 +3319,10 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
                 "looked at but for {}: space v h once they're on screen",
                 crate::nav::count(since, "line since")
             )
+        }
+        false if piece.is_some() => {
+            let (k, n) = piece.unwrap_or_default();
+            format!("piece {k}/{n}, {lines} lines: space v h once it's all on screen")
         }
         true => {
             format!("{lines} lines, taller than the pane: scroll through it, then space v h")
@@ -3805,8 +4048,10 @@ mod tests {
         run(&["init", "-q"]);
         run(&["add", "."]);
         run(&["commit", "-qm", "x"]);
-        // One high-risk change of 20 new lines (5–24 — no removed rows above them), the pane far shorter
-        let added = (0..20).map(|i| format!("fn g{i}() {{ unsafe {{ x() }} }}"));
+        // One high-risk change of 20 new lines (5–24 — no removed rows above them), the pane far shorter: one
+        // function, nothing in it to cut it at (cardburden 2) — it's looked at whole, scrolled through
+        let body = (0..18).map(|_| "    unsafe { x() };".to_string());
+        let added = std::iter::once("fn g() {".to_string()).chain(body).chain(["}".to_string()]);
         lines.splice(5..5, added);
         std::fs::write(dir.join("a.rs"), lines.join("\n") + "\n").unwrap();
         let mut ed = Editor::new(crate::config::Config::default());
@@ -3862,9 +4107,10 @@ mod tests {
         // file's end takes back nothing drawn; one line of the change rewritten (line 24, at its foot) is a line
         // never drawn — that one, and only that one, is asked for
         let end = ed.doc().text.len_bytes();
-        let line24 = ed.doc().text.line_to_byte(23);
+        // (`x()` → `xy()`: still the function's line)
+        let line24 = ed.doc().text.line_to_byte(23) + "    unsafe { x".len();
         let edit = crate::transaction::Transaction::new(vec![
-            crate::transaction::Change::insert(line24, "pub "),
+            crate::transaction::Change::insert(line24, "y"),
             crate::transaction::Change::insert(end, "fn z() {}\n"),
         ]);
         ed.doc_mut().apply(&edit);
@@ -3951,7 +4197,8 @@ mod tests {
         let at = ed.doc().text.line_to_byte(64);
         edited(&mut ed, vec![crate::transaction::Change::insert(at, "pub ")]);
         assert_eq!(left(&ed), 1);
-        assert_eq!(highs(&ed)[0].left(&ed.session.looked), [64], "the one line, not 120");
+        let left_lines: Vec<usize> = highs(&ed).iter().flat_map(|g| g.left(&ed.session.looked)).collect();
+        assert_eq!(left_lines, [64], "the one line, not 120");
         frame(&mut ed);
         feed(&mut ed, "]h");
         assert_eq!(ed.cursor_line(), 64, "landed on the line, not the change's top");
@@ -3964,6 +4211,178 @@ mod tests {
         frame(&mut ed);
         feed(&mut ed, "<space>vh");
         assert_eq!(left(&ed), 0, "{}", status(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The review of `files` (as `reviewing`), a frame drawn (the pane's height known) and its document's tree in
+    /// — what a tall change's pieces are cut by — and the pane's text rows.
+    fn reviewing_parsed(name: &str, files: &[(&str, &str, &str)]) -> (Editor, PathBuf, usize) {
+        let (mut ed, dir) = reviewing(name, files);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 12).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().syntax.as_ref().is_some_and(|s| s.tree.is_some()));
+        let rows = ed.viewport.0;
+        (ed, dir, rows)
+    }
+
+    /// `n` functions of four lines each, the second an `unsafe` (a high-risk change, added whole).
+    fn four_line_fns(n: usize) -> String {
+        (0..n).map(|i| format!("fn g{i}() {{\n    unsafe {{ a() }};\n    b();\n}}\n")).collect()
+    }
+
+    /// cardburden 2: a high-risk change taller than the pane (24 new lines, six functions) is looked at in
+    /// pieces — cut at its functions, each piece fitting the pane, named — one piece a look, each with every
+    /// line of it on screen: the cursor on a piece not drawn is no look (it was a tall change's). A fix in one
+    /// function then asks for that piece's line only (cardburden 1's keys, piece by piece).
+    #[test]
+    fn a_tall_change_is_looked_at_piece_by_piece() {
+        let base = "fn main() {}\n";
+        let now = format!("{base}{}", four_line_fns(6));
+        let (mut ed, dir, rows) = reviewing_parsed("pieces", &[("a.rs", base, &now)]);
+        assert!(rows < 24, "a pane shorter than the change: {rows}");
+        let h = highs(&ed);
+        assert!(h.len() >= 2, "{h:?}");
+        for (k, g) in h.iter().enumerate() {
+            assert!(
+                g.lines <= rows && (g.at - 1) % 4 == 0,
+                "within the pane, from a function's first line: {g:?}"
+            );
+            let named = format!("piece {}/{} · g{}", k + 1, h.len(), (g.at - 1) / 4);
+            assert!(g.why.starts_with(&named), "{} — {named}", g.why);
+        }
+        // The last piece under the cursor, never drawn: no look
+        let last = h.last().unwrap().at;
+        ed.goto_line(last);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), h.len(), "{:?}", ed.status);
+        // One look a piece
+        for k in (0..h.len()).rev() {
+            look(&mut ed);
+            assert_eq!(left(&ed), k);
+        }
+        // `b()` → `bc()` in g4: that piece, that line
+        let at = ed.doc().text.line_to_byte(1 + 4 * 4 + 2) + "    b".len();
+        edited(&mut ed, vec![crate::transaction::Change::insert(at, "c")]);
+        let left_lines: Vec<usize> = highs(&ed).iter().flat_map(|g| g.left(&ed.session.looked)).collect();
+        assert_eq!((left(&ed), left_lines), (1, vec![1 + 4 * 4 + 2]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 2: a function taller than the pane, nothing in it to cut it at, is a piece of its own —
+    /// scrolled through, its own lines only (40), not the change's (48); the functions after it a piece apart.
+    #[test]
+    fn a_definition_taller_than_the_pane_is_scrolled_through_alone() {
+        let base = "fn main() {}\n";
+        let big: String = (0..38).map(|_| "    unsafe { x() };\n").collect();
+        let now = format!("{base}fn big() {{\n{big}}}\n{}", four_line_fns(2));
+        let (mut ed, dir, rows) = reviewing_parsed("alone", &[("a.rs", base, &now)]);
+        assert!(rows < 40, "{rows}");
+        let h = highs(&ed);
+        assert_eq!((h[0].at, h[0].lines), (1, 40), "the function whole: {h:?}");
+        assert!(h[0].why.starts_with(&format!("piece 1/{} · big", h.len())), "{}", h[0].why);
+        // (the cursor on it, a frame drawn: its top only)
+        ed.goto_line(1);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 12).unwrap();
+        feed(&mut ed, "<space>vh");
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status.contains("taller than the pane —") && status.contains(" of its 40 lines"), "{status}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 2: with no grammar there are no definitions to cut at — a tall high-risk change is cut every
+    /// pane's height, each piece on screen whole.
+    #[test]
+    fn with_no_grammar_a_tall_change_is_cut_every_panes_height() {
+        let now = text_of(30, |i| format!("line {i}"));
+        let (mut ed, dir) = reviewing("nogrammar", &[("a.txt", "", &now)]);
+        ed.config.review_risky = vec!["a.txt".into()];
+        if let Some(r) = ed.session.code_review.as_mut() {
+            r.set_rules(crate::risk::Rules::of(&ed.config));
+        }
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 12).unwrap();
+        let rows = ed.viewport.0;
+        let h = highs(&ed);
+        assert_eq!(h.len(), 30usize.div_ceil(rows), "{rows} rows: {h:?}");
+        assert!(h.iter().all(|g| g.lines <= rows && g.why.starts_with("piece ")), "{h:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 2: a file of a language whose grammar can't load (not built in, not downloaded — what the
+    /// loader says is the review's to ask: `failed_to_load`) never gets a tree: its tall high-risk change is
+    /// cut every pane's height, as with no language, not left whole waiting for a tree that won't come.
+    #[test]
+    fn a_language_whose_grammar_cant_load_is_cut_every_panes_height() {
+        let now = text_of(30, |i| format!("line {i}"));
+        let (mut ed, dir) = reviewing("grammarless", &[("a.py", "", &now)]);
+        assert_eq!(crate::risk::lang_of("a.py"), Some("python"));
+        // (no grammar here or there: the document has no syntax, and the loader says it failed)
+        ed.doc_mut().syntax = None;
+        ed.config.review_risky = vec!["a.py".into()];
+        if let Some(r) = ed.session.code_review.as_mut() {
+            r.failed_to_load = |name| name == "python";
+            r.set_rules(crate::risk::Rules::of(&ed.config));
+        }
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 12).unwrap();
+        let rows = ed.viewport.0;
+        let h = highs(&ed);
+        assert_eq!(h.len(), 30usize.div_ceil(rows), "{rows} rows: {h:?}");
+        assert!(h.iter().all(|g| g.lines <= rows && g.why.starts_with("piece ")), "{h:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 2: a file not open has its tall high-risk change cut as it will be once opened — at the
+    /// definitions the review's worker found — so the rail's `▲` counts the same pieces before and after (it
+    /// went ▲1 → ▲25 as the file was opened).
+    #[test]
+    fn a_closed_files_tall_change_is_cut_as_its_open_one() {
+        let base = "fn main() {}\n";
+        let tall = format!("{base}{}", four_line_fns(6));
+        let (mut ed, dir) =
+            reviewing("closedcut", &[("a.rs", base, "fn main() { x() }\n"), ("b.rs", base, &tall)]);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 12).unwrap();
+        assert!(ed.viewport.0 < 24, "a pane shorter than the change: {}", ed.viewport.0);
+        let b = dir.join("b.rs");
+        let pieces = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            let f = r.files.iter().find(|f| f.rel == "b.rs").unwrap();
+            let g = r.graded(ed, f);
+            g.iter()
+                .filter(|g| g.grade == Grade::High)
+                .map(|g| (g.at, g.lines, g.why.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert!(ed.docs.iter().all(|d| d.path.as_ref() != Some(&b)), "b.rs isn't open");
+        let closed = pieces(&ed);
+        assert!(closed.len() >= 2, "cut while closed: {closed:?}");
+        show(&mut ed, 1, false);
+        settle_until(&mut ed, |ed| landed(ed) && ed.doc().syntax.as_ref().is_some_and(|s| s.tree.is_some()));
+        assert_eq!(ed.doc().path.as_ref(), Some(&b));
+        assert_eq!(pieces(&ed), closed, "the same pieces open");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 2: a line two definitions share (`} fn a1() {`) is in one piece — the later one's: the
+    /// pieces follow each other, every line of the change in exactly one.
+    #[test]
+    fn a_line_two_definitions_share_is_in_one_piece() {
+        let base = "fn main() {}\n";
+        let mut fns = String::from("fn a0() {\n");
+        for i in 1..=6 {
+            fns += "    unsafe { x() };\n    b();\n";
+            fns += &if i < 6 { format!("}} fn a{i}() {{\n") } else { "}\n".to_string() };
+        }
+        let (ed, dir, rows) = reviewing_parsed("shared", &[("a.rs", base, &format!("{base}{fns}"))]);
+        let n = fns.lines().count();
+        assert!(rows < n, "a pane shorter than the change: {rows}");
+        let h = highs(&ed);
+        assert!(h.len() >= 2, "{h:?}");
+        assert_eq!(h[0].at, 1);
+        for w in h.windows(2) {
+            assert_eq!(w[0].at + w[0].added, w[1].at, "one after the other, no line in two: {h:?}");
+            let line = ed.doc().text.line(w[1].at).to_string();
+            assert!(line.starts_with("} fn"), "the shared line is the later one's: {line:?}");
+        }
+        assert_eq!(h.iter().map(|g| g.added).sum::<usize>(), n);
+        assert_eq!(h.iter().map(|g| g.keys.len()).sum::<usize>(), n, "each line's key once");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3983,9 +4402,9 @@ mod tests {
                 crate::transaction::Change::insert(l20, "pub "),
             ],
         );
-        let h = highs(&ed);
-        assert_eq!(h.len(), 1, "one change, the whole new file: {h:?}");
-        assert_eq!(h[0].left(&ed.session.looked), [3, 20]);
+        // (the whole new file, in pieces or not)
+        let left_lines: Vec<usize> = highs(&ed).iter().flat_map(|g| g.left(&ed.session.looked)).collect();
+        assert_eq!(left_lines, [3, 20]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4300,7 +4719,8 @@ mod tests {
     /// the rest were drawn too.
     #[test]
     fn a_repeated_line_drawn_once_isnt_drawn_everywhere() {
-        let now = format!("fn main() {{\n    unsafe {{ go() }}\n{}}}\n", "}\n".repeat(30));
+        // (thirty `{}` in one function: nothing in it to cut it at — cardburden 2 — looked at whole)
+        let now = format!("fn main() {{\n    unsafe {{ go() }}\n{}}}\n", "    {}\n".repeat(30));
         let (mut ed, dir) = reviewing("braces", &[("a.rs", "fn main() {\n}\n", &now)]);
         let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
         frame(&mut ed);
@@ -4776,6 +5196,7 @@ mod tests {
             removed: 0,
             added: 1,
             mode: false,
+            piece: None,
         };
         r.grades.insert(dir.join("a.rs"), Arc::from(vec![g]));
         ed.session.code_review = Some(r);
@@ -4793,7 +5214,9 @@ mod tests {
     fn a_tall_change_scrolled_through_in_a_key_burst_is_taken() {
         let fns: Vec<String> = (0..40).map(|i| format!("fn f{i}() {{}}")).collect();
         let mut with: Vec<String> = fns.clone();
-        with.splice(5..5, (0..30).map(|i| format!("fn g{i}() {{ unsafe {{ x() }} }}")));
+        // (one function of 30 lines: nothing in it to cut it at — cardburden 2 — looked at whole)
+        let body = (0..28).map(|_| "    unsafe { x() };".to_string());
+        with.splice(5..5, std::iter::once("fn g() {".to_string()).chain(body).chain(["}".to_string()]));
         let dir =
             bring_repo("burst", &[("a.rs", fns.join("\n") + "\n")], &[("a.rs", with.join("\n") + "\n")]);
         let mut ed = Editor::new(crate::config::Config::default());
