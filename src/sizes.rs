@@ -183,7 +183,8 @@ pub enum Slot {
 
 /// Keys while the bottom slot has them (test and task output, the terminal's scrollback): `j`/`k` a line,
 /// `C-d`/`C-u` half the panel, `g`/`G` the start/end, `tab`/`S-tab` its other tabs; on the terminal `i`
-/// (Enter) types in it, on a task or test panel Enter runs the user's run waiting there now; Esc back to
+/// (Enter) types in it, on a task or test panel Enter runs the user's run waiting there now, on the task panel
+/// `o` a preflight step's output and `K` where Claude's command ran; Esc back to
 /// the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
 /// may not be in sight). False = not the slot's.
 pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
@@ -226,6 +227,19 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         (Code::Char('o'), false) if slot == Slot::Task => {
             if let Err(e) = ed.preflight_output("") {
                 ed.set_status(e);
+            }
+            return true;
+        }
+        // Where Claude's command in it ran, and why — from its run's record (cardburden 4b)
+        (Code::Char('K'), false) if slot == Slot::Task => {
+            let ran = ed
+                .session
+                .task_run
+                .as_ref()
+                .and_then(|r| Some((crate::task::traced(&r.task.cmd), r.ran.clone()?)));
+            match ran {
+                Some((cmd, ran)) => crate::chat::say_ran(ed, &cmd, &ran),
+                None => ed.set_status("K says where a command of Claude's ran — this run isn't one"),
             }
             return true;
         }
@@ -621,6 +635,43 @@ mod tests {
     use super::*;
 
     const AUTO: Sizes = Sizes { chat: None, side: None, bottom: None };
+
+    /// cardburden 4b: `K` in the task panel says where Claude's command in it ran and why — its run's record,
+    /// as a click on its chat row's mark does; its hint on the panel's header. A run that isn't Claude's says
+    /// so. (The run is the test's own `sleep`, stopped at the end.)
+    #[test]
+    fn k_in_the_task_panel_says_where_claudes_command_ran() {
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-k-ran-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        let task = crate::task::Task { name: "t".into(), cmd: "sleep 30".into(), cwd: dir.clone() };
+        assert!(
+            ed.task_start_for(task, crate::tools::For::User("t".into()), None, Default::default()).is_ok()
+        );
+        ed.bottom_focus = true;
+        let k: Key = "K".parse().unwrap();
+        let said = |ed: &crate::editor::Editor| ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(bottom_key(&mut ed, k));
+        assert!(said(&ed).contains("this run isn't one"), "{}", said(&ed));
+        let r = ed.session.task_run.as_mut().unwrap();
+        r.by_claude = true;
+        r.ran = Some(crate::chat::Ran::of(&crate::sandbox::Guard::Outside, Some(7), None, Vec::new()));
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 140, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 140, 0);
+        parser.process(&bytes);
+        assert!(parser.screen().contents().contains("K where it ran"), "its hint");
+        assert!(bottom_key(&mut ed, k));
+        assert_eq!(
+            said(&ed),
+            "sleep 30 — ran outside\nOutside the sandbox, with all your permissions — said yes to. From card#7."
+        );
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Automatic: the chat 2/5 up to 96 (U3); at 140 with the side panel, the chat narrows so the code keeps
     /// 60; narrower still, the panel gives way; a narrow screen is all chat.

@@ -155,7 +155,8 @@
       ],
       "file": "[scratch]",
       "reason": "",
-      "undecided": 1
+      "undecided": 1,
+      "warnings": []
     },
     "picker": null,
     "review": null,

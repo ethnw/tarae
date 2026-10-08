@@ -29,6 +29,10 @@ pub struct Pending {
     pub reason: String,
     /// When it asked — its place in the inbox (`inbox.rs`).
     pub since: std::time::Instant,
+    /// Whether it changes a name that runs later outside the sandbox where its path really leads (`protected`
+    /// — a disk read, worked out on a worker as it's asked): its review says so. None until then — its review
+    /// waits for it.
+    pub protected: Option<bool>,
 }
 
 #[derive(Default)]
@@ -160,15 +164,73 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         input: req["input"].clone(),
         reason,
         since: std::time::Instant::now(),
+        protected: None,
     };
     match c.edits.at_end.clone() {
         Some(root) => unasked(ed, root, p),
         None => {
+            // (in line now, in the order asked; shown once where it really leads is known)
             c.edits.queue.push_back(p);
-            next(ed);
+            judge_later(ed, request_id);
         }
     }
     None
+}
+
+/// Works out on a worker whether the queued edit `request_id` changes a protected name (`protected`), then
+/// shows the next edit (it may be this one).
+fn judge_later(ed: &mut Editor, request_id: &str) {
+    let Some(c) = ed.session.chat.as_ref() else { return };
+    let Some(p) = c.edits.queue.iter().find(|p| p.request_id == request_id) else { return };
+    let root = ed.session.root.clone();
+    let path = crate::chat::resolve(&root, p.input["file_path"].as_str().unwrap_or_default());
+    let (id, generation) = (request_id.to_string(), c.generation());
+    ed.events.jobs().spawn(move || {
+        let protected = protected(&root, &path);
+        move |ed: &mut Editor| {
+            let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else { return };
+            if let Some(p) = c.edits.queue.iter_mut().find(|p| p.request_id == id) {
+                p.protected = Some(protected);
+            }
+            next(ed);
+        }
+    });
+}
+
+/// Whether an edit to `path` (as Claude named it, from the root) changes a name Claude's runs can't write
+/// (`sandbox::protected_at` — a build script, a manifest, `.git`, a hook) where it really leads: its `.` and `..`
+/// taken lexically, then the parts that exist resolved — links followed (`src/x.rs -> ../build.rs`, a folder
+/// linked into `.git/hooks`) — and as the system would walk it too (a link before a `..`). From the root (as
+/// given, or real) when inside it; one that leads outside is judged as it leads, all its parts. A disk read: a
+/// worker's (the review of 4b: the path as written missed `src/../build.rs`, a link, a root given otherwise).
+pub fn protected(root: &Path, path: &Path) -> bool {
+    use std::path::Component;
+    let mut lexical = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+            }
+            c => lexical.push(c),
+        }
+    }
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let judged = |p: &Path| {
+        let rel = p.strip_prefix(&real_root).or_else(|_| p.strip_prefix(root));
+        let parts: Vec<&std::ffi::OsStr> = match rel {
+            Ok(rel) => rel.iter().collect(),
+            Err(_) => p.iter().filter(|c| *c != "/").collect(),
+        };
+        !crate::sandbox::protected_at(&parts).is_empty()
+    };
+    let ways: Vec<PathBuf> =
+        [crate::paths::real(&lexical), crate::paths::real(path)].into_iter().flatten().collect();
+    // (neither resolves — no folder of it there: judged as written, `.` and `..` gone)
+    match ways.is_empty() {
+        true => judged(&lexical),
+        false => ways.iter().any(|p| judged(p)),
+    }
 }
 
 /// Why Claude makes the change it's calling for now (its review shows it): its words right before this call
@@ -197,10 +259,14 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
     let ask = ed.config.llm.review_ask.clone();
     let generation = ed.session.chat.as_ref().map(crate::chat::Chat::generation);
     ed.events.jobs().spawn(move || {
+        // (a name that runs later outside the sandbox, where it really leads: always asked, with its warning)
+        let protected = protected(&root, &path);
         // (Some: it goes in — the real path, and what's there now: None = no file)
         let found = crate::paths::inside(&root, &path)
-            .filter(|real| !real.strip_prefix(&root).is_ok_and(|rel| listed(rel, &ask)))
+            .filter(|real| !protected && !real.strip_prefix(&root).is_ok_and(|rel| listed(rel, &ask)))
             .and_then(|real| Some((before_text(&real)?, real)));
+        let mut p = p;
+        p.protected = Some(protected);
         move |ed: &mut Editor| {
             // (a new chat, claude restarted: no one waits for this answer)
             if ed.session.chat.as_ref().map(crate::chat::Chat::generation) != generation {
@@ -295,6 +361,10 @@ pub fn next(ed: &mut Editor) {
         return ed
             .set_status(format!("Claude's edit to {shown} waits — it opens when you stop typing (esc)"));
     }
+    // (where it really leads not worked out yet — `judge_later`: in a moment, the review says what it warns of)
+    if c.edits.queue.front().is_some_and(|p| p.protected.is_none()) {
+        return;
+    }
     c.edits.waiting_told = false;
     let Some(p) = c.edits.queue.pop_front() else { return };
     show(ed, p);
@@ -364,6 +434,7 @@ fn show(ed: &mut Editor, p: Pending) {
     if let Some(note) = (!existed).then(|| folder_outside(&ed.session.root, &path)).flatten() {
         reason = if reason.is_empty() { note } else { format!("{reason}\n\n{note}") };
     }
+    let warnings = if p.protected == Some(true) { warned(ed) } else { Vec::new() };
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
     let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
@@ -382,6 +453,7 @@ fn show(ed: &mut Editor, p: Pending) {
     if let Some(r) = &mut ed.session.review {
         r.from_chat = from_chat;
         r.reason = reason;
+        r.warnings = warnings;
         r.asked = since;
         // (its turn in the chat is the step)
         r.own_turn = false;
@@ -391,6 +463,26 @@ fn show(ed: &mut Editor, p: Pending) {
         }
     }
     crate::follow::settle(ed);
+}
+
+/// What an edit that changes a name running later outside the sandbox warns of (`cardwarn.rs`, cardburden
+/// 4b — the fact, `edit-protected`, worked out where its path really leads: `protected`) — judged by the
+/// packs' entries and yours as a command's are, so the review's header says it in their words.
+fn warned(ed: &Editor) -> Vec<crate::cardwarn::Warned> {
+    let packs = crate::sandboxpack::get();
+    let no = |_: &str| false;
+    let facts = crate::cardwarn::Facts {
+        cmd: "",
+        scripts: &[],
+        env: &no,
+        wrappers: &packs.wrappers,
+        reads: &[],
+        script_changed: false,
+        edit_protected: true,
+        outside: false,
+        in_outputs: &no,
+    };
+    crate::cardwarn::judge(packs.warn.iter().chain(&ed.config.cards_warn), &facts)
 }
 
 /// A new file whose folder isn't there yet, outside the project: what the review says of it — tarae's save
@@ -604,6 +696,158 @@ mod tests {
             assert!(super::listed(Path::new(p), &[]), "{p}");
         }
         assert!(!super::listed(Path::new("src/main/java/org/gradle/Api.java"), &[]));
+    }
+
+    /// The review of 4b: an edit is judged where its path really leads, not as Claude wrote it — `..` and `.`
+    /// taken, links followed (a file linked to `build.rs`, a folder linked into `.git/hooks`), the root as given
+    /// or real; one that leads outside the project judged as it leads. (Links and files in the test's own temp
+    /// folder; nothing is written.)
+    #[test]
+    fn an_edit_is_judged_where_its_path_really_leads() {
+        let base = std::env::temp_dir().join(format!("tarae-edit-judged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // (the root as given: the temp folder unresolved — `/var` for `/private/var` on macOS)
+        let (root, out) = (base.join("p"), base.join("out"));
+        for d in [root.join("src"), root.join(".git/hooks"), out.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(root.join("build.rs"), "").unwrap();
+        std::fs::write(root.join("src/a.rs"), "").unwrap();
+        std::os::unix::fs::symlink("../build.rs", root.join("src/x.rs")).unwrap();
+        std::os::unix::fs::symlink(".git/hooks", root.join("hooks")).unwrap();
+        let real_root = std::fs::canonicalize(&root).unwrap();
+        for (path, judged) in [
+            (root.join("src/a.rs"), false),
+            (root.join("src/new.rs"), false),
+            (root.join("build.rs"), true),
+            (root.join("src/../build.rs"), true),
+            (root.join("./src/new/../../build.rs"), true),
+            // (`..` taken: out of `.git` again — as written its parts name `.git`)
+            (root.join(".git/new/../../src/new.rs"), false),
+            (root.join("src/x.rs"), true),
+            (root.join("hooks/pre-commit"), true),
+            (real_root.join("src/../build.rs"), true),
+            (out.join("Makefile"), true),
+            (out.join("notes.txt"), false),
+        ] {
+            assert_eq!(protected(&root, &path), judged, "{}", path.display());
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Edits the tests ask through `request`, as claude does (`file`, its old text, its new), to a stand-in
+    /// claude that keeps what it's sent in `log`.
+    fn chat_for(dir: &Path, log: &Path) -> Editor {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.to_path_buf();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), format!("cat > '{}'", log.display())];
+        crate::chat::open(&mut ed);
+        ed
+    }
+
+    fn ask(ed: &mut Editor, id: &str, file: PathBuf, old: &str, new: &str) {
+        let input = json!({ "file_path": file, "old_string": old, "new_string": new });
+        assert!(request(ed, id, &json!({ "tool_name": "Edit", "input": input })).is_none());
+    }
+
+    /// Events until `done` (where the edit leads is worked out on a worker).
+    fn pump(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(ed) {
+            assert!(std::time::Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// cardburden 4b: an edit of Claude's to a file that runs later outside the sandbox (`build.rs`, among
+    /// every pack's protected names) says so on its review's header — in the tools pack's words, under the
+    /// title, whole (its end says what to do) — and in `tarae state`; through a link to it too (the review of
+    /// 4b); an edit to another file says nothing. (The files are the test's own, in its temp folder; nothing is
+    /// written: each review is declined.)
+    #[test]
+    fn an_edit_to_a_protected_file_warns_on_its_review() {
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-edit-protected-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("build.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("src/a.txt"), "one\n").unwrap();
+        std::os::unix::fs::symlink("../build.rs", dir.join("src/x.rs")).unwrap();
+        let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+        let reviewed = |ed: &Editor| ed.session.review.is_some();
+        ask(&mut ed, "p1", dir.join("build.rs"), "fn main() {}", "fn main() { }");
+        // (not shown before it's judged: another event first leaves it waiting)
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.session.review.is_none(), "waits for where it leads");
+        pump(&mut ed, "its review", reviewed);
+        let r = ed.session.review.as_ref().expect("its review");
+        let ids: Vec<&str> = r.warnings.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["edit-protected"]);
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 100, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 100, 0);
+        parser.process(&bytes);
+        let rows: Vec<String> = parser.screen().rows(0, 100).collect();
+        let title =
+            rows.iter().position(|r| r.contains("build.rs") && r.contains("decided")).expect("the title");
+        // (its rows under the title — wrapped at the code's width beside the chat)
+        let under: String = rows[title + 1..title + 5].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+        assert!(under.starts_with("▲ It changes a file that runs later outside the sandbox"), "{rows:#?}");
+        assert!(under.contains("read all of it. (tools pack)"), "whole, not cut: {under}");
+        let state = ed.ui_state().json();
+        assert_eq!(state["panels"]["edit_review"]["warnings"], json!(["edit-protected"]), "{state}");
+        crate::llm::close_review(&mut ed);
+        // Through a link to it: the same
+        ask(&mut ed, "p2", dir.join("src/x.rs"), "fn main() {}", "fn main() { }");
+        pump(&mut ed, "its review", reviewed);
+        assert_eq!(ed.session.review.as_ref().unwrap().warnings.len(), 1, "src/x.rs -> ../build.rs");
+        crate::llm::close_review(&mut ed);
+        // Another file: no warning
+        ask(&mut ed, "p3", dir.join("src/a.txt"), "one", "ONE");
+        pump(&mut ed, "its review", reviewed);
+        assert!(ed.session.review.as_ref().expect("its review").warnings.is_empty());
+        crate::llm::close_review(&mut ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The review of 4b, as this tarae runs: with review at the end on, an edit to a name that runs later
+    /// outside the sandbox — `build.rs` here, nothing in `llm.review-ask` — isn't let in unasked: it's
+    /// reviewed as it's made, with its warning. Another file goes in as Claude makes it (its allow sent).
+    /// (Files and the stand-in claude's log in the test's own temp folder; the review is declined.)
+    #[test]
+    fn review_at_the_end_still_asks_for_a_protected_file_with_its_warning() {
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-edit-at-end-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("build.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("src/a.txt"), "one\n").unwrap();
+        let log = dir.join("stdin.log");
+        let mut ed = chat_for(&dir, &log);
+        assert!(ed.config.llm.review_ask.is_empty());
+        ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        ask(&mut ed, "p1", dir.join("build.rs"), "fn main() {}", "fn main() { }");
+        pump(&mut ed, "its review", |ed| ed.session.review.is_some());
+        let ids: Vec<String> =
+            ed.session.review.as_ref().unwrap().warnings.iter().map(|w| w.id.clone()).collect();
+        assert_eq!(ids, ["edit-protected"]);
+        crate::llm::close_review(&mut ed);
+        // Another file: in, unasked
+        ask(&mut ed, "p2", dir.join("src/a.txt"), "one", "ONE");
+        let allowed = |log: &Path| {
+            std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .any(|l| l.contains("\"p2\"") && l.contains("\"allow\""))
+        };
+        pump(&mut ed, "allowed unasked", |_| allowed(&log));
+        assert!(ed.session.review.is_none(), "no review for it");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

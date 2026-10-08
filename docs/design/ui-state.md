@@ -196,7 +196,8 @@ side git · 4 rows · in hand git:src/term.rs
   - `side`: tab, focused, rows.
   - `review`: base, files, viewed n/m, the file in hand, the change in hand i/n.
   - `edit_review`: file, change i/n, undecided count, the first line of the reason (always Claude's — its `by`
-    went with `space c` in `v` 2).
+    went with `space c` in `v` 2), `warnings` — what the change warns of, by id (`edit-protected`, cardburden
+    4b).
   - `picker`: title, query (full level), rows, total, loading or searching.
   - `slot`: tabs with their badges, which is in front, has the keys.
   - `chat`: open, focused, minimized, busy, queued count, conversation, plan step, last call. Draft length

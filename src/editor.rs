@@ -288,6 +288,9 @@ pub struct Screen {
     pub chat_links: std::cell::RefCell<Vec<(usize, usize, usize, crate::chat::Link)>>,
     /// The chat's rows of tool calls: (row, call id) — a click goes to that call's replay stop.
     pub chat_calls: std::cell::RefCell<Vec<(usize, String)>>,
+    /// Where a command of Claude's ran, at its row's end: (row, start col, end col, its call id) — a click says
+    /// why (`chat::said_ran`).
+    pub chat_ran: std::cell::RefCell<Vec<(usize, usize, usize, String)>>,
     /// UI elements' ids in Claude's answers: (row, start col, end col, the id) — a click brings it into sight.
     pub chat_ids: std::cell::RefCell<Vec<(usize, usize, usize, String)>>,
     /// The minimized chat card (x, y, width, height) — a click on it brings the panel back.
@@ -2074,6 +2077,12 @@ impl Editor {
             match m.kind {
                 K::Down => {
                     c.focused = true;
+                    // Where a command ran, at its row's end: why, said (cardburden 4b)
+                    let ran =
+                        s.chat_ran.borrow().iter().find(|l| l.0 == y && (l.1..l.2).contains(&x)).cloned();
+                    if let Some((.., call)) = ran {
+                        return crate::chat::said_ran(self, &call);
+                    }
                     // An element's id in an answer: into sight, the keys where they are
                     let ids = s.chat_ids.borrow();
                     if let Some((.., id)) = ids.iter().find(|l| l.0 == y && (l.1..l.2).contains(&x)) {
@@ -8445,8 +8454,11 @@ mod tests {
         let edit = json!({"type": "control_request", "request_id": "p1", "request": {"subtype": "can_use_tool",
             "tool_name": "Edit", "input": {"file_path": main, "old_string": "line 2", "new_string": "LINE 2"}}});
         let result = json!({"type": "result", "result": "done"});
-        let body: Vec<String> =
-            [tool, call, edit_row, edit, result].iter().map(|e| format!("printf '%s\\n' '{e}'")).collect();
+        // (its turn's end a moment after its edit: claude itself waits for the edit's answer — the review comes
+        // once where the edit leads is worked out, `edits::judge_later`)
+        let mut body: Vec<String> =
+            [tool, call, edit_row, edit].iter().map(|e| format!("printf '%s\\n' '{e}'")).collect();
+        body.push(format!("sleep 0.5; printf '%s\\n' '{result}'"));
         let mut ed = editor("");
         ed.open(&main).unwrap();
         ed.config.llm.command = "sh".into();
@@ -8699,7 +8711,8 @@ mod tests {
         assert_eq!(waits(&ed), 1, "said once");
         assert!(ed.doc().text.to_string().starts_with("typing more"), "the keys stayed yours");
         ed.handle_event(Event::Key("esc".parse().unwrap()));
-        assert!(ed.session.review.is_some(), "stopped typing: it opens");
+        // (as soon as where it leads is worked out — `edits::judge_later`)
+        settle_until(&mut ed, |ed| ed.session.review.is_some());
         assert_eq!(ed.doc().path.as_deref(), Some(main.as_path()));
         feed(&mut ed, "y");
         assert_eq!(permission_answer(&log)["behavior"], "allow");
@@ -9319,6 +9332,7 @@ mod tests {
                 input: json!({"file_path": doc, "content": "echo bye\n"}),
                 reason: String::new(),
                 since: std::time::Instant::now(),
+                protected: Some(false),
             });
             ed.handle_event(Event::Job(Box::new(|_| {})));
             ed.session.review.as_ref().filter(|r| r.ready).map(|r| r.doc_id).expect("its review")
@@ -10172,8 +10186,12 @@ mod tests {
         ed.with_session(behind, |ed| ed.drop_cards(|w| matches!(w, crate::offer::What::Screen { .. })));
         assert_ne!(ed.doing(session_by(&ed, behind)), crate::session::Doing::Waiting);
         // Then its edit: said again, its row marked
+        // (in line, where it leads worked out — `edits::judge_later`)
         settle_until(&mut ed, |ed| {
-            session_by(ed, behind).chat.as_ref().is_some_and(|c| !c.edits.queue.is_empty())
+            session_by(ed, behind)
+                .chat
+                .as_ref()
+                .is_some_and(|c| c.edits.queue.front().is_some_and(|p| p.protected.is_some()))
         });
         assert_eq!(told(&ed), 2, "said again: {:?}", ed.messages.iter().map(|m| &m.2).collect::<Vec<_>>());
         assert_eq!(ed.doing(session_by(&ed, behind)), crate::session::Doing::Waiting);

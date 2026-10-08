@@ -33,7 +33,7 @@ pub struct Panels {
     /// The code review: its base, its files, how many viewed, the file in hand, its rail's rows on screen.
     pub review: Option<Review>,
     /// An edit's review in the buffer (Claude's — the only author since `space c` went): file, the change in
-    /// hand (i of n), undecided, the reason's first line.
+    /// hand (i of n), undecided, the reason's first line, what it warns of (ids).
     pub edit_review: Option<EditReview>,
     /// A picker: title, query, its rows on screen, how many match, loading or searching.
     pub picker: Option<Picker>,
@@ -72,6 +72,8 @@ pub struct EditReview {
     pub change: (usize, usize),
     pub undecided: usize,
     pub reason: String,
+    /// What it warns of, by id (`edit-protected` — cardburden 4b).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -235,6 +237,7 @@ impl Editor {
                 change: (r.current + 1, r.hunks.len()),
                 undecided: r.hunks.iter().filter(|h| h.decision == crate::llm::Decision::Undecided).count(),
                 reason: r.reason.lines().next().unwrap_or_default().to_string(),
+                warnings: r.warnings.iter().map(|w| w.id.clone()).collect(),
             });
         }
         if let Some(pk) = self.picker.as_ref().filter(|_| s.picker_list.is_some()) {
@@ -415,7 +418,7 @@ impl Panels {
             })),
             "edit_review": self.edit_review.as_ref().map(|r| json!({
                 "file": r.file, "change": [r.change.0, r.change.1], "undecided": r.undecided,
-                "reason": r.reason,
+                "reason": r.reason, "warnings": r.warnings,
             })),
             "picker": self.picker.as_ref().map(|p| json!({
                 "title": p.title, "query": p.query, "rows": rows_json(&p.rows), "total": p.total,

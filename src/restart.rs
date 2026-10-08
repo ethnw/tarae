@@ -2516,6 +2516,7 @@ mod tests {
                 input: json!({ "file_path": dir.join(name), "content": "TWO\n" }),
                 reason: String::new(),
                 since: Instant::now(),
+                protected: Some(false),
             });
         }
         ed.offer_accept();

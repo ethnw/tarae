@@ -114,7 +114,7 @@ Small fixes found while using tarae every day:
   one run at a time.
 - `tarae state` cuts a card's question short; it should show the whole command.
 - Each of Claude's commands says where it ran: in the sandbox (its tier), outside it, or with a socket granted — a
-  mark on its row in the chat, with the reason on hover or `K`.
+  mark on its row in the chat, with the reason on a click or `K`.
 
 **IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
 nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like

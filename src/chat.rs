@@ -357,6 +357,39 @@ impl Ran {
         }
         Ran { mark, past, why, warned }
     }
+
+    /// In words, for command `cmd` (cardburden 4b — a click on its row's mark, `K` in its task panel): where it
+    /// ran, why — the run's own record — and each warning, a line each.
+    pub fn said(&self, cmd: &str) -> String {
+        let mut s = format!("{cmd} — ran {}\n{}", self.mark, self.why);
+        for w in &self.warned {
+            s.push_str(&format!("\n▲ {}", w.line()));
+        }
+        s
+    }
+}
+
+/// Says where a command of Claude's ran and why (`Ran::said`): a warning when that was past the sandbox, else
+/// a note that goes by.
+pub fn say_ran(ed: &mut Editor, cmd: &str, ran: &Ran) {
+    match ran.past {
+        true => ed.set_warning(ran.said(cmd)),
+        false => ed.set_status(ran.said(cmd)),
+    }
+}
+
+/// A click on the mark of the chat's row of call `call`: where that command ran, and why.
+pub fn said_ran(ed: &mut Editor, call: &str) {
+    let Some(c) = &ed.session.chat else { return };
+    let Some((what, ran)) = c
+        .msgs
+        .iter()
+        .find(|m| m.call == call)
+        .and_then(|m| Some((m.look.as_ref()?.what.clone(), m.ran.clone()?)))
+    else {
+        return;
+    };
+    say_ran(ed, &what, &ran);
 }
 
 /// The command `cmd` Claude asked to run ended: its row (the newest `run` row of that command whose call is
@@ -2094,6 +2127,66 @@ mod tests {
             "{}",
             carded.why
         );
+    }
+
+    /// cardburden 4b: where a command ran was only a mark at its row's end — its reason in `tarae state`
+    /// alone. A click on its trail — `ok · outside ▲1`, the verdict too (the review of 4b: only the mark took it,
+    /// the docs said the trail) — says it: the command, where, why from the run's record (the card it ran from,
+    /// Claude's reason there), each warning — a warning when that was past the sandbox. A click on the command
+    /// isn't one. (A stand-in row; nothing runs.)
+    #[test]
+    fn a_click_on_where_a_command_ran_says_why() {
+        use crate::event::{Mouse, MouseKind};
+        let mut ed = editor("");
+        let mut c = Chat::new();
+        let look = Look {
+            verb: "run",
+            what: "docker run alpine true".into(),
+            pattern: true,
+            range: "ok".into(),
+            link: None,
+        };
+        let warned = crate::cardwarn::Warned {
+            id: "docker-own-config".into(),
+            said: "Docker: no DOCKER_CONFIG.".into(),
+            whose: "tools pack".into(),
+            asks: false,
+        };
+        let mut m = Msg::tool(look, "c1");
+        m.ran = Some(Ran::of(
+            &crate::sandbox::Guard::Outside,
+            Some(12),
+            Some("it needs the network"),
+            vec![warned],
+        ));
+        c.msgs.push(m);
+        ed.session.chat = Some(c);
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        let (y, x0, x1, call) = ed.screen.chat_ran.borrow().first().cloned().expect("the mark's spot");
+        assert_eq!(call, "c1");
+        let mut parser = vt100::Parser::new(30, 120, 0);
+        parser.process(&bytes);
+        let row: Vec<char> = parser.screen().rows(0, 120).nth(y).unwrap().chars().collect();
+        let under: String = row[x0..x1].iter().collect();
+        assert_eq!(under, "ok · outside ▲1", "the spot is the whole trail, from its verdict: {row:?}");
+        let click = |ed: &mut Editor, x: usize| {
+            let at = |kind| Mouse { kind, x: x as u16, y: y as u16, alt: false };
+            ed.handle_mouse(at(MouseKind::Down));
+            ed.handle_mouse(at(MouseKind::Up));
+        };
+        let said = |ed: &Editor| ed.messages.iter().any(|m| m.2.contains("ran outside"));
+        click(&mut ed, x0 - 4);
+        assert!(!said(&ed), "on the command, before its trail: not it");
+        // (on its verdict, `ok` — the start of the trail)
+        click(&mut ed, x0);
+        let m = ed.messages.last().expect("said");
+        assert_eq!(
+            m.2,
+            "docker run alpine true — ran outside\nOutside the sandbox, with all your permissions — said yes to. \
+             From card#12 — Claude's reason: it needs the network.\n▲ Docker: no DOCKER_CONFIG. (tools pack)"
+        );
+        assert_eq!(m.1, crate::editor::ToastKind::Warning, "past the sandbox");
     }
 
     fn editor(text: &str) -> Editor {

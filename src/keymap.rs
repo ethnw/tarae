@@ -377,6 +377,16 @@ mod tests {
             "A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output <step>`)",
         ),
         (
+            "Task panel",
+            "`K`",
+            "Where Claude's command in it ran, and why — its sandbox, the card it ran from, its warnings",
+        ),
+        (
+            "The chat",
+            "click on a command's row end (`ok · sandbox ▲1`)",
+            "Why it ran there — its sandbox, the card it ran from, Claude's reason, its warnings",
+        ),
+        (
             "The chat",
             "`C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel",
             "Scroll the conversation — `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor)",

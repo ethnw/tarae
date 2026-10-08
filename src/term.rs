@@ -418,6 +418,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         offer_cut: offer.as_ref().filter(|c| !c.bar).map(|c| c.cut),
         chat_links: Default::default(),
         chat_calls: Default::default(),
+        chat_ran: Default::default(),
         chat_ids: Default::default(),
         chat_mini: Default::default(),
         session_spots: Default::default(),
@@ -1494,6 +1495,10 @@ fn draw_task_panel(
     }
     if steps.is_some() {
         hints.insert(0, ("o", "output"));
+    }
+    // (where Claude's command ran, and why — cardburden 4b)
+    if r.ran.is_some() {
+        hints.insert(0, ("K", "where it ran"));
     }
     hints.splice(0..0, slot_hints(editor));
     let y0 = lay.slot_y();
@@ -4383,6 +4388,31 @@ fn blend(
 /// Rows of Claude's reason under a review's title.
 const REASON_ROWS: usize = 2;
 
+/// `text` in rows of at most `w` cells, broken between words, the rows after the first `hang` cells in (a
+/// word wider than a row is cut).
+fn hanging(text: &str, w: usize, hang: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let room = if rows.is_empty() { w } else { w.saturating_sub(hang) };
+        if !row.is_empty() && row.width() + 1 + word.width() > room {
+            rows.push(std::mem::take(&mut row));
+        }
+        if !row.is_empty() {
+            row.push(' ');
+        }
+        row.push_str(word);
+    }
+    rows.push(row);
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, r)| match i {
+            0 => fit_ellipsis(&r, w),
+            _ => " ".repeat(hang) + &fit_ellipsis(&r, w.saturating_sub(hang)),
+        })
+        .collect()
+}
+
 /// Review screen — **inside the buffer** (like Cursor): the whole file as in the editor, changes expanded.
 /// Deleted lines on faint red, added on faint green bg, keeping syntax colors. Each change has a head row —
 /// the current one an accent band with key hints, decided ones "accepted"/"rejected" (accept leaves only
@@ -4439,7 +4469,16 @@ fn draw_review(
         }
         rows
     };
-    let title_h = 1 + reason.len();
+    // What it warns of (cardburden 4b — a file that runs later outside the sandbox): a row each, under the title,
+    // in the warning color — above the reason, read first
+    // (wrapped, not cut: its end says what to do — under its words, as a card hangs an indented line)
+    let warn = Style { fg: t.try_get("warning").and_then(|s| s.fg).or(ui.accent.fg), ..ui.base };
+    let warned: Vec<String> = rev
+        .warnings
+        .iter()
+        .flat_map(|w| hanging(&format!("▲ {}", w.line()), width.saturating_sub(4), 2))
+        .collect();
+    let title_h = 1 + warned.len() + reason.len();
     let body = lay.text_rows.saturating_sub(title_h);
     let shown: &[RRow] = &rows[rev.scroll.min(rows.len())..];
     let shown = &shown[..shown.len().min(body)];
@@ -4488,8 +4527,15 @@ fn draw_review(
     queue!(out, Print(&instr), Spaces(width.saturating_sub(head + instr.width() + right.len())))?;
     apply(out, faint)?;
     queue!(out, Print(&right))?;
-    for (k, row) in reason.iter().enumerate() {
+    for (k, line) in warned.iter().enumerate() {
         queue!(out, MoveTo(0, lay.text_top + 1 + k as u16))?;
+        apply(out, ui.base)?;
+        queue!(out, Print("   "))?;
+        apply(out, warn)?;
+        queue!(out, Print(line), Spaces(width.saturating_sub(3 + line.width())))?;
+    }
+    for (k, row) in reason.iter().enumerate() {
+        queue!(out, MoveTo(0, lay.text_top + 1 + (warned.len() + k) as u16))?;
         apply(out, ui.base)?;
         queue!(out, Print("   "))?;
         let used = chat_spans(out, row, ui.base, width.saturating_sub(4))?;
@@ -9048,6 +9094,8 @@ fn draw_chat(
     // click goes to its replay stop)
     let mut row_links: Vec<Option<crate::chat::Link>> = Vec::new();
     let mut row_calls: Vec<(usize, &str)> = Vec::new();
+    // (a command's row: the columns of where it ran — a click there says why — and its call)
+    let mut row_ran: Vec<(usize, (usize, usize), &str)> = Vec::new();
     let sp = |text: String, style: Style| Span { text, style };
     let n = c.msgs.len();
     let string = card.patch(t.try_get("string").unwrap_or(dim));
@@ -9144,7 +9192,11 @@ fn draw_chat(
                 }
                 let styles = TrailStyles { faint, dim, string, accent, warn: warn_fg };
                 let live = exploring && i + 1 == n;
-                lines.push(trail_row(look, m.ran.as_ref(), live, w, false, &styles));
+                let (row, mark) = trail_row_at(look, m.ran.as_ref(), live, w, false, &styles);
+                lines.push(row);
+                if let Some(at) = mark {
+                    row_ran.push((lines.len() - 1, at, m.call.as_str()));
+                }
                 row_links.resize(lines.len(), None);
                 *row_links.last_mut().expect("just pushed") = look.link.clone();
                 row_calls.push((lines.len() - 1, m.call.as_str()));
@@ -9272,6 +9324,7 @@ fn draw_chat(
     let shown = &lines[from..lines.len() - scroll];
     let mut chat_links = editor.screen.chat_links.borrow_mut();
     let mut chat_calls = editor.screen.chat_calls.borrow_mut();
+    let mut chat_ran = editor.screen.chat_ran.borrow_mut();
 
     // ── Draw row by row: [gutter][padding][text w][padding]
     // (the gutter's left half the bottom slot's on its rows; in the accent while it's being dragged — U1)
@@ -9388,6 +9441,10 @@ fn draw_chat(
     }
     for i in 0..area {
         chat_row_start(out, x0, y, edge(y), card)?;
+        if let Some((_, (a, b), call)) = row_ran.iter().find(|r| r.0 == from + i).filter(|_| i < shown.len())
+        {
+            chat_ran.push((y, text_x + a, text_x + b, call.to_string()));
+        }
         let used = match shown.get(i) {
             Some(l) => match &row_links[from + i] {
                 Some(link) => {
@@ -9807,6 +9864,7 @@ fn plan_now(
 /// only the file name — patterns stand apart in string color. `live` = the one in progress (`●`). A command's
 /// row ends with where it ran (`ran` — cardburden 4): `ok · sandbox`, `ok · outside` in the warning color, and
 /// `▲2` for what it warned of — whole where it fits, after the verdict; the command gives way first.
+#[cfg(test)]
 fn trail_row(
     look: &crate::chat::Look,
     ran: Option<&crate::chat::Ran>,
@@ -9815,6 +9873,19 @@ fn trail_row(
     slim: bool,
     st: &TrailStyles,
 ) -> Vec<crate::markdown::Span> {
+    trail_row_at(look, ran, live, w, slim, st).0
+}
+
+/// `trail_row`, and the columns of its trail when where it ran is on it — its verdict, where it ran, what it
+/// warned of: `ok · sandbox ▲1` (a click there says why — cardburden 4b).
+fn trail_row_at(
+    look: &crate::chat::Look,
+    ran: Option<&crate::chat::Ran>,
+    live: bool,
+    w: usize,
+    slim: bool,
+    st: &TrailStyles,
+) -> (Vec<crate::markdown::Span>, Option<(usize, usize)>) {
     use crate::markdown::Span;
     let sp = |text: String, style: Style| Span { text, style };
     let glyph = if live { sp("●".into(), st.accent) } else { sp("◦".into(), st.faint) };
@@ -9830,8 +9901,10 @@ fn trail_row(
     }
     // (where a command ran, and its warnings — not in the minimized chat)
     let mut tail: Vec<crate::markdown::Span> = Vec::new();
+    let mut sep_w = 0;
     if let Some(r) = ran.filter(|_| !slim) {
         let sep = if range.is_empty() { "  " } else { " · " };
+        sep_w = sep.width();
         tail.push(sp(format!("{sep}{}", r.mark), if r.past { st.warn } else { st.faint }));
         if !r.warned.is_empty() {
             tail.push(sp(format!(" ▲{}", r.warned.len()), st.warn));
@@ -9844,15 +9917,21 @@ fn trail_row(
     let what = if look.pattern { fit_ellipsis(&name, room) } else { fit_left(&name, room) };
     let mut row = vec![glyph, sp(head, st.faint), sp(what, if look.pattern { st.string } else { st.dim })];
     let used: usize = row.iter().map(|s| s.text.width()).sum();
-    // (a short suffix — a command's `ok` — whenever it fits whole)
+    // (a short suffix — a command's `ok` — whenever it fits whole; where its words start, the trail a click
+    // takes starts — `ok · sandbox`, the review of 4b)
+    let mut trail_at = None;
     if w.saturating_sub(used + tail_w) >= range.width().min(6) && !range.is_empty() {
-        row.push(sp(fit_ellipsis(&range, w - used - tail_w), st.faint));
+        let shown = fit_ellipsis(&range, w - used - tail_w);
+        trail_at = Some(used + shown.width() - shown.trim_start().width());
+        row.push(sp(shown, st.faint));
     }
     let used: usize = row.iter().map(|s| s.text.width()).sum();
-    if used + tail_w <= w {
+    let mut mark = None;
+    if used + tail_w <= w && !tail.is_empty() {
         row.extend(tail);
+        mark = Some((trail_at.unwrap_or(used + sep_w), used + tail_w));
     }
-    row
+    (row, mark)
 }
 
 /// A card's place: (x, y, width, height).

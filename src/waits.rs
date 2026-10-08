@@ -194,12 +194,12 @@ impl Waiting {
     }
 
     /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27:04` (`silent_for`) — and, under a time
-    /// limit of its own still to come, `· its timeout ends it in 35:00`.
+    /// limit of its own still to come, `· its timeout ends it in 35:00` (`1h 05m`, `29d 21h` — `span`).
     pub fn silent(&self, last: Instant, now: Instant) -> Option<String> {
         let limit = self
             .limit_at
             .and_then(|at| at.checked_duration_since(now))
-            .map(|d| format!(" · its timeout ends it in {}", clock(d)))
+            .map(|d| format!(" · its timeout ends it in {}", span(d)))
             .unwrap_or_default();
         self.silent_for(last, now).map(|d| format!("no output for {}{limit}", clock(d)))
     }
@@ -244,6 +244,18 @@ pub(crate) fn clock(d: Duration) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// A time that may be long — when a run's own timeout ends it: within the hour as `clock` says it (`35:00`),
+/// then `1h 05m`, a day or more `30d` · `29d 22h` (cardburden 4b: `timeout 30d` read `43079:00`).
+pub(crate) fn span(d: Duration) -> String {
+    let s = d.as_secs();
+    match (s / 86_400, s % 86_400 / 3600) {
+        (0, 0) => clock(d),
+        (0, h) => format!("{h}h {:02}m", s % 3600 / 60),
+        (days, 0) => format!("{days}d"),
+        (days, h) => format!("{days}d {h:02}h"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +263,30 @@ mod tests {
     fn rules() -> Rules {
         let re = regex::Regex::new(r"^\s*Blocking waiting for file lock on (?<what>.+)$").unwrap();
         Rules(vec![Rule::new(re, "cargo's lock".into(), Some("cargo's {what} lock".into()))])
+    }
+
+    /// cardburden 4b: when a run's own timeout ends it, said past an hour in hours and past a day in days —
+    /// `timeout 30d` read `43079:00`; within the hour as every wait's clock, `35:00`.
+    #[test]
+    fn a_timeouts_end_reads_in_hours_and_days() {
+        let s = Duration::from_secs;
+        for (secs, said) in [
+            (2100, "35:00"),
+            (3599, "59:59"),
+            (3600, "1h 00m"),
+            (3900, "1h 05m"),
+            (86_399, "23h 59m"),
+            (86_400, "1d"),
+            (30 * 86_400, "30d"),
+            (30 * 86_400 - 121 * 60, "29d 21h"),
+        ] {
+            assert_eq!(span(s(secs)), said, "{secs}");
+        }
+        let mut w = Waiting::default();
+        let t0 = Instant::now();
+        w.limited(t0, Some(s(30 * 86_400)));
+        let said = w.silent(t0, t0 + s(181)).unwrap();
+        assert_eq!(said, "no output for 3:01 · its timeout ends it in 29d 23h");
     }
 
     /// A wait's line is state, from it to the next line that isn't one; its time is told apart from the

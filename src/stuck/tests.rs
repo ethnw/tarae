@@ -147,7 +147,7 @@ fn a_run_under_its_own_time_limit_is_not_asked_before_it_is_up() {
     assert_eq!(w.stuck_for(t0, at(121), after), Some(121 * MIN), "two hours at most");
     assert!(!held(&w, t0, at(121), false, &llm));
     let said = w.silent(t0, at(121)).unwrap();
-    assert!(said.starts_with("no output for 121:00 · its timeout ends it in 43079:00"), "{said}");
+    assert!(said.starts_with("no output for 121:00 · its timeout ends it in 29d 21h"), "{said}");
 }
 
 /// cardburden 5 (b), D4: one whose work may go on elsewhere — a daemon's socket granted, run outside the

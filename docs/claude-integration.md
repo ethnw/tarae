@@ -128,7 +128,8 @@ waiting and asks again after as long again. If the run prints or ends, the card 
 Quiet isn't always stuck, so some runs are asked later. A run under a time limit its own command sets
 (`timeout 2700 sh breaks.sh`, `gtimeout -k 30 45m …` — the programs are the tools pack's `time-limits`, found
 after `NAME=value` and other wrappers, a `-k` grace added) isn't asked before that limit is up: it ends by then,
-stuck or not, and its panel says `no output for 10:00 · its timeout ends it in 35:00`. Only a limit over all the
+stuck or not, and its panel says `no output for 10:00 · its timeout ends it in 35:00` (past an hour `1h 05m`,
+past a day `29d 21h`). Only a limit over all the
 line runs counts: commands one after another (`;`, `&&`, `||`) each need one, and theirs add up; a pipeline
 counts when its first command has one and the rest only read (`| tail -20`, not `| tail -f`). Any part without
 — `cargo build && timeout 60 cargo test`, a `cd` first —, or what tarae can't read as plain words (a `&`, a
@@ -350,9 +351,11 @@ Some edits still ask first, one at a time:
 - files outside the project (where the link or `..` really leads)
 - anything in `.git`, and the protected names: build scripts, manifests, and settings that decide what runs
   (`build.rs`, `Cargo.toml`, `package.json`, `Makefile`, `pom.xml`, `build.gradle`, `.tarae.toml`, `.cargo/`,
-  `.github/`, `.claude/`, … — the list below). They always ask, whatever the project or its config says.
-  `llm.review-ask` adds yours: a name matches anywhere in the project, and a path with `/` matches from its
-  root
+  `.github/`, `.claude/`, … — the list below). They always ask, whatever the project or its config says,
+  judged where the path really leads (`src/../build.rs`, a link to `build.rs`, a folder linked into
+  `.git/hooks`), and the review says so on its header: `▲ It changes a file that runs later outside the
+  sandbox … (tools pack)`. `llm.review-ask` adds yours: a name matches anywhere in the project, and a path with
+  `/` matches from its root
 - a file with unsaved edits of yours
 
 The turns are kept on disk per project, so `:restart` (or a crash in the middle of a turn) doesn't lose them.
@@ -820,12 +823,21 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   `ps -o user`), `missing` (`{ env, say }` or `{ wrapper, say }`, `{missing}` in `say`), `unless-part` +
   `unless-all` + `same` (regexes for a checked form: the command's own text, then its guards before it in the
   line or script, in order — the named groups equal in all), `unless-in = "outputs"`, `fact` (`reads-outside`,
-  `script-changed`, `edit-protected`, `outside-sandbox`; `{paths}` with the first), `say`, `asks`
+  `script-changed`, `edit-protected`, `outside-sandbox`; `{paths}` with the first), `say`, `asks`.
+  `edit-protected` is an edit's: Claude's edit to a file that runs later outside the sandbox (a build script, a
+  manifest, a hook — the names its commands can't write, where its path really leads: `..` taken, links
+  followed) is always asked, review at the end or not, and says it on the review's header, under the title in
+  the warning color, whole (`▲ It changes a file that runs later outside the sandbox … — read all of it. (tools
+  pack)`); `tarae state`'s `edit_review` lists its `warnings`
 - **Where it ran.** Each of Claude's commands' rows in the chat ends with where it ran, from the run's own
   record: `ok · sandbox` (on Linux its tier, `sandbox A+`, and `partial` below Landlock ABI 3), `+ Docker socket`
   or the socket granted, `+ network`; `outside`, `no sandbox`, `sandbox off` — past the sandbox (a Docker socket
-  counts) in the warning color — and `▲2` for what it warned of. `tarae state` gives each run's `ran`: where, why
-  (the card it ran from, Claude's reason there) and the warnings
+  counts) in the warning color — and `▲2` for what it warned of. A click on that end of the row (`ok · sandbox
+  ▲2`, from its verdict on), or `K` in the task panel
+  while the command's run is in it (`K where it ran` on its header), says why: the command, where it ran, how
+  (the sandbox, a socket granted and whose, the network), the card it ran from with Claude's reason there, and
+  each warning — as a warning when it was past the sandbox. `tarae state` gives each run's `ran`: where, why and
+  the warnings
 
 - git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
   in `.git` (a write the sandbox would deny and report)

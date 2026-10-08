@@ -820,6 +820,9 @@ pub struct Review {
     /// Why, in Claude's words: what it thought or said just before it asked for this edit (the chat's — a
     /// row or two under the title, the rest is in the chat).
     pub reason: String,
+    /// What the change warns of (`cardwarn.rs`, a fact of the edit's — `edit-protected`: a file that runs later
+    /// outside the sandbox): a row each under the title, in the warning color, saying whose.
+    pub warnings: Vec<crate::cardwarn::Warned>,
     /// Accepted, it's a step of its own for `space u` (`space i`'s) — a chat edit is part of its turn instead
     /// (`checkpoint.rs`).
     pub own_turn: bool,
@@ -868,6 +871,7 @@ impl Review {
             thinking: false,
             on_done: None,
             reason: String::new(),
+            warnings: Vec::new(),
             own_turn: true,
             wrap: None,
             from_chat: false,
