@@ -82,6 +82,8 @@ pub struct Run {
     /// How its sockets go: its seccomp mode (`keeper::mode`), decided with its rules (`linux::confine`).
     pub net: RunNet,
     pub held: bool,
+    /// It makes no user namespace (`tier::runs_refuse_userns`, Q4): its seccomp filter refuses one.
+    pub no_userns: bool,
 }
 
 impl Run {
@@ -205,7 +207,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             bytes(&mut b, &r.cwd);
             bytes(&mut b, &r.comm);
             let net = NETS.iter().position(|n| *n == r.net).unwrap_or(0) as u8;
-            b.extend([net, r.held as u8]);
+            b.extend([net, r.held as u8, r.no_userns as u8]);
             valid_run(r)?;
         }
         Msg::Signal { id, sig } => {
@@ -387,6 +389,7 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                 comm: r.bytes()?,
                 net: *NETS.get(usize::from(r.u8()?)).ok_or(Refused("a network mode it doesn't know"))?,
                 held: r.flag()?,
+                no_userns: r.flag()?,
             };
             valid_run(&run)?;
             Msg::Run(run)
@@ -544,6 +547,8 @@ mod tests {
                 comm: b"tl-12".to_vec(),
                 net,
                 held,
+                // (one way and the other, by the net mode: both values on the wire)
+                no_userns: net == RunNet::Routed,
             })
         };
         vec![

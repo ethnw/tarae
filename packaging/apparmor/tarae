@@ -1,0 +1,9 @@
+# tarae: user namespaces for /usr/bin/tarae (its sandbox) under the Ubuntu restriction, otherwise unconfined
+abi <abi/4.0>,
+include <tunables/global>
+
+/usr/bin/tarae flags=(unconfined) {
+  userns,
+
+  include if exists <local/tarae>
+}

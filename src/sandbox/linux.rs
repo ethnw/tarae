@@ -96,6 +96,8 @@ pub struct Confine {
     /// How a run's sockets go, decided once (`confine`): its rules are made for it, and the keeper's run takes
     /// it for its seccomp mode.
     pub net: RunNet,
+    /// Its runs make no user namespace (`tier::runs_refuse_userns`, the keeper's filter) — for the report to say.
+    pub no_userns: bool,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
@@ -147,6 +149,7 @@ impl PartialEq for Confine {
             && self.audit == other.audit
             && self.serve == other.serve
             && self.net == other.net
+            && self.no_userns == other.no_userns
             && self.closed == other.closed
             && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.kept, &other.kept)
@@ -497,7 +500,9 @@ pub fn confine(
     if let Some(k) = keeper.filter(|k| k.ns.user) {
         session_devices(&mut r, &k.devices, k.ns.shm)?;
     }
-    confine_in(r, p, audit, make_first, serve, net)
+    // (what the keeper's runs take for their filter — the same once-read answer `Keeper::start` gives them)
+    let no_userns = super::tier::runs_refuse_userns();
+    confine_in(r, p, audit, make_first, serve, net).map(|c| Confine { no_userns, ..c })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
@@ -624,6 +629,7 @@ pub(super) fn confine_in(
         audit,
         serve,
         net,
+        no_userns: false,
         made: Arc::new(made),
         closed,
         kept: Arc::new(kept),
@@ -1756,6 +1762,37 @@ mod tests {
                 "{r}"
             );
         }
+    }
+
+    /// Q4: where a run is refused user namespaces (`Confine.no_userns` — tarae under a profile with Ubuntu's
+    /// restriction on), the report says so, naming the calls and what fails for it — a tool that needs one fails
+    /// for that, not for a reason Claude would go looking for. Where it isn't, not a word of it.
+    #[test]
+    fn the_report_says_a_run_makes_no_user_namespace_where_it_cant() {
+        if kernel_abi("the_report_says_a_run_makes_no_user_namespace_where_it_cant").is_none() {
+            return;
+        }
+        let s = Scratch::new("userns");
+        let said = |no_userns| {
+            let mut p = s.policy();
+            match p.confine.as_mut() {
+                Some(Ok(c)) => c.no_userns = no_userns,
+                other => panic!("confined: {other:?}"),
+            }
+            let r = Guard::In(Box::new(p)).report(&[]);
+            r.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let refused = said(true);
+        assert!(
+            refused.contains(
+                "It can't make a user namespace (unshare, clone and clone3 are refused): tarae's AppArmor profile \
+                 would let it, which Ubuntu keeps from other programs — a tool that needs one (rootless podman, \
+                 bwrap, a browser's own sandbox) fails here; tell the user."
+            ),
+            "{refused}"
+        );
+        let kept = said(false);
+        assert!(!kept.contains("user namespace"), "{kept}");
     }
 
     /// Whether Landlock's records come is tried for real: a denial of a thread's own, its record looked for. A

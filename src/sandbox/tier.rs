@@ -266,22 +266,73 @@ pub struct Seen {
     pub dumpable: bool,
 }
 
+fn read(p: &str) -> Option<String> {
+    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
+}
+
+fn num<T: std::str::FromStr>(p: &str) -> Option<T> {
+    read(p).and_then(|s| s.parse().ok())
+}
+
+/// `kernel.apparmor_restrict_unprivileged_userns`.
+fn restriction() -> Option<u32> {
+    num("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+}
+
+/// tarae's AppArmor label: `unconfined`, `/usr/bin/tarae (unconfined)`, `docker-default (enforce)` …
+pub fn label() -> Option<String> {
+    read("/proc/self/attr/apparmor/current").or_else(|| read("/proc/self/attr/current"))
+}
+
+/// Whether `label` is a profile's — tarae runs under one, whatever its mode (`flags=(unconfined)` too).
+fn confined(label: Option<&str>) -> bool {
+    label.is_some_and(|l| !l.is_empty() && l != "unconfined")
+}
+
+/// Whether a run is refused new user namespaces (Q4: `unshare`, `clone` with `CLONE_NEWUSER`, `clone3` — the
+/// keeper's `seccomp` filter): where Ubuntu's restriction is on and tarae runs under an AppArmor profile — any. An
+/// exec keeps the label (t5), so that profile's word on `userns` is every run's too, and the restriction, which
+/// covers unconfined programs only, no longer holds for them: tarae's own profile (`apparmor.rs`) would hand a run
+/// what Ubuntu keeps from every other program. The filter puts the restriction back for runs. Elsewhere a run keeps
+/// what this system gives every program (Debian lets it make one). Read once.
+pub fn runs_refuse_userns() -> bool {
+    static REFUSED: OnceLock<bool> = OnceLock::new();
+    *REFUSED.get_or_init(|| refuses_userns(restriction(), label().as_deref()))
+}
+
+/// Tests: whether tarae runs under a profile with Ubuntu's restriction on here (`runs_refuse_userns`) — else
+/// `test` (its whole path) says it skips, and why; a machine said to hold the profile (`TARAE_EXPECT_PROFILE=1`:
+/// the VM's run under it) fails instead.
+#[cfg(test)]
+pub(crate) fn profiled(test: &str) -> bool {
+    if runs_refuse_userns() {
+        return true;
+    }
+    let label = label().unwrap_or_default();
+    let why = format!("no profile with Ubuntu's restriction here (tarae runs as `{label}`)");
+    if std::env::var("TARAE_EXPECT_PROFILE").is_ok_and(|v| v == "1") {
+        panic!("{test}: the profile expected here — {why}");
+    }
+    let line = format!("{}{test} — {why}\n", crate::test_results::SELF_SKIP);
+    let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+    false
+}
+
+/// `runs_refuse_userns` from what it reads: the restriction's value, tarae's label.
+fn refuses_userns(restrict: Option<u32>, label: Option<&str>) -> bool {
+    restrict == Some(1) && confined(label)
+}
+
 impl Seen {
     /// `failed`, with this system's answers read now.
     pub fn now(failed: BirthError) -> Seen {
-        fn read(p: &str) -> Option<String> {
-            std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
-        }
-        fn num<T: std::str::FromStr>(p: &str) -> Option<T> {
-            read(p).and_then(|s| s.parse().ok())
-        }
         let status = read("/proc/self/status").unwrap_or_default();
         let seccomp = status.lines().any(|l| l.strip_prefix("Seccomp:").is_some_and(|v| v.trim() == "2"));
-        let apparmor = read("/proc/self/attr/apparmor/current").or_else(|| read("/proc/self/attr/current"));
+        let apparmor = label();
         let version = read("/proc/version").unwrap_or_default();
         Seen {
             failed,
-            restrict_userns: num("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
+            restrict_userns: restriction(),
             max_userns: num("/proc/sys/user/max_user_namespaces"),
             userns_clone: num("/proc/sys/kernel/unprivileged_userns_clone"),
             seccomp,
@@ -299,47 +350,92 @@ const UBUNTU: &str = "Ubuntu's restriction on unprivileged user namespaces \
                       tarae's binary lifts it for tarae alone; else that setting at 0, which lifts it for every \
                       program";
 
-/// Why a keeper couldn't be born with its namespaces, from what was seen (§Tiers' table).
-pub fn why(s: &Seen) -> String {
+/// What a keeper's birth failed for (§Tiers' table), in `why`'s order: the first that fits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cause {
+    Wsl1,
+    MaxZero,
+    CloneOff,
+    Seccomp,
+    NotDumpable,
+    /// Ubuntu's restriction: the one `hint` speaks for.
+    Restriction,
+    ProfileMounts,
+    MaskedProc,
+    /// None of these: the step and errno as they are.
+    Other,
+}
+
+fn cause(s: &Seen) -> Cause {
     let BirthError { step, errno } = s.failed;
     let refused = matches!(errno, libc::EPERM | libc::EACCES);
     if s.wsl1 {
-        return "WSL 1 has no user namespaces".into();
+        return Cause::Wsl1;
     }
     if step == BirthStep::Clone {
         if errno == libc::ENOSPC || s.max_userns == Some(0) {
-            return "user namespaces are turned off on this system (user.max_user_namespaces = 0)".into();
+            return Cause::MaxZero;
         }
         if s.userns_clone == Some(0) {
-            return "unprivileged user namespaces are turned off on this system \
-                    (kernel.unprivileged_userns_clone = 0)"
-                .into();
+            return Cause::CloneOff;
         }
         if matches!(errno, libc::EPERM | libc::ENOSYS) && s.seccomp {
-            return "a seccomp filter tarae runs under refuses new namespaces — Docker's default profile does"
-                .into();
+            return Cause::Seccomp;
         }
     }
     if refused && step == BirthStep::Map && !s.dumpable {
-        return "tarae runs non-dumpable (its ids changed after it started), so the id maps of what it makes are \
-                root's to write"
-            .into();
+        return Cause::NotDumpable;
     }
     if refused && s.restrict_userns == Some(1) && step != BirthStep::Exec && !step.network() {
-        return format!("{UBUNTU} (refused at {})", step.said());
+        return Cause::Restriction;
     }
-    if refused
-        && step.mounts()
-        && let Some(profile) = s.apparmor.as_deref().filter(|a| !a.is_empty() && *a != "unconfined")
-    {
-        return format!("an AppArmor profile tarae runs under ({profile}) refuses mounting");
+    if refused && step.mounts() && confined(s.apparmor.as_deref()) {
+        return Cause::ProfileMounts;
     }
     if refused && step == BirthStep::Proc {
-        return "a fresh /proc can't be mounted here — this /proc has paths masked over it (Docker's default \
-                does), so no PID namespace"
-            .into();
+        return Cause::MaskedProc;
     }
-    s.failed.to_string()
+    Cause::Other
+}
+
+/// Why a keeper couldn't be born with its namespaces, from what was seen (§Tiers' table).
+pub fn why(s: &Seen) -> String {
+    match cause(s) {
+        Cause::Wsl1 => "WSL 1 has no user namespaces".into(),
+        Cause::MaxZero => {
+            "user namespaces are turned off on this system (user.max_user_namespaces = 0)".into()
+        }
+        Cause::CloneOff => "unprivileged user namespaces are turned off on this system \
+                            (kernel.unprivileged_userns_clone = 0)"
+            .into(),
+        Cause::Seccomp => {
+            "a seccomp filter tarae runs under refuses new namespaces — Docker's default profile does".into()
+        }
+        Cause::NotDumpable => {
+            "tarae runs non-dumpable (its ids changed after it started), so the id maps of what \
+                               it makes are root's to write"
+                .into()
+        }
+        Cause::Restriction => format!("{UBUNTU} (refused at {})", s.failed.step.said()),
+        Cause::ProfileMounts => format!(
+            "an AppArmor profile tarae runs under ({}) refuses mounting",
+            s.apparmor.as_deref().unwrap_or_default()
+        ),
+        Cause::MaskedProc => {
+            "a fresh /proc can't be mounted here — this /proc has paths masked over it (Docker's \
+                              default does), so no PID namespace"
+                .into()
+        }
+        Cause::Other => s.failed.to_string(),
+    }
+}
+
+/// The hint (6h; a toast once, and the tier's line): where Ubuntu's restriction is why a keeper got no namespaces
+/// and tarae runs under no profile — runs in `tier`, why, and the step that makes them A (`apparmor::hint`, by the
+/// binary's `place`). Under a profile that still didn't let it, none: that profile isn't the one tarae ships.
+pub fn hint(s: &Seen, tier: Tier, place: &super::apparmor::Place) -> Option<String> {
+    let ours_missing = cause(s) == Cause::Restriction && !confined(s.apparmor.as_deref());
+    ours_missing.then(|| super::apparmor::hint(tier.said(), place))
 }
 
 /// What the probe found.
@@ -360,6 +456,8 @@ pub struct Probed {
     /// `NFT_TPROXY` or the owner flag). Decided once (D-b): a session's own birth whose network fails after this
     /// passed fails its runs, said — no silent fallback. Until 6f, without it a session's runs go out by the swap.
     pub redirect: Result<(), String>,
+    /// Ubuntu's restriction kept the namespaces from a tarae under no profile: why, and the step (`hint`).
+    pub hint: Option<String>,
 }
 
 impl Probed {
@@ -372,9 +470,15 @@ impl Probed {
 /// success.
 const PROBE_WITHIN: Duration = Duration::from_secs(4);
 
+static PROBED: OnceLock<Probed> = OnceLock::new();
+
+/// What the probe found, if it has run — never probes (the main loop's).
+pub fn probed() -> Option<&'static Probed> {
+    PROBED.get()
+}
+
 /// What the probe found here — probed the first time (a worker's: it makes a keeper or two and waits on them).
 pub fn get() -> &'static Probed {
-    static PROBED: OnceLock<Probed> = OnceLock::new();
     PROBED.get_or_init(|| {
         // (a measurement's other half, in the same process: no namespaces asked — `measure_gradle_pairs`)
         #[cfg(test)]
@@ -387,6 +491,7 @@ pub fn get() -> &'static Probed {
                 served,
                 swap,
                 redirect: Err("no network namespace".into()),
+                hint: None,
             };
         }
         #[allow(unused_mut)]
@@ -401,6 +506,10 @@ pub fn get() -> &'static Probed {
         let said = match &p.short {
             None => format!("namespaces: {} ({})", p.tier().said(), p.ns.said()),
             Some(why) => format!("namespaces: {} ({}) — {why}", p.tier().said(), p.ns.said()),
+        };
+        let said = match &p.hint {
+            Some(hint) => format!("{said} — {hint}"),
+            None => said,
         };
         crate::log::line("sandbox", "info", &said);
         // (Q5: the network's way and why, beside the tier)
@@ -449,19 +558,29 @@ fn probe() -> Probed {
     };
     let all = Ns::session(true, true);
     let none = || Err("no network namespace".into());
-    let (ns, short, redirect) = match tried_with_network(all) {
-        (Ok(()), network) => (all, None, network),
+    // (no namespaces: why, and the hint where Ubuntu's restriction is why — for the binary running)
+    let without = |e: Failed| {
+        let tier = Tier::of(Ns::NONE, served.is_ok());
+        let place = || super::apparmor::place_of(&std::env::current_exe().unwrap_or_default());
+        let hint = match &e {
+            Failed::Birth(b) => hint(&Seen::now(*b), tier, &place()),
+            _ => None,
+        };
+        (Ns::NONE, Some(e.said()), none(), hint)
+    };
+    let (ns, short, redirect, hint) = match tried_with_network(all) {
+        (Ok(()), network) => (all, None, network, None),
         (Err(Failed::Birth(e)), _) if e.step == BirthStep::Proc => {
             let no_pid = why(&Seen::now(e));
             match tried_with_network(Ns::session(true, false)) {
-                (Ok(()), network) => (Ns::session(true, false), Some(no_pid), network),
-                (Err(e), _) => (Ns::NONE, Some(e.said()), none()),
+                (Ok(()), network) => (Ns::session(true, false), Some(no_pid), network, None),
+                (Err(e), _) => without(e),
             }
         }
-        (Err(e), _) => (Ns::NONE, Some(e.said()), none()),
+        (Err(e), _) => without(e),
     };
     let swap = super::supervisor::swap_unavailable().map_or(Ok(()), Err);
-    Probed { ns, short, served, swap, redirect }
+    Probed { ns, short, served, swap, redirect, hint }
 }
 
 /// A keeper born with `ns` and, where it has a netns, the session's network: whether the namespaces work, and
@@ -627,6 +746,67 @@ mod tests {
         assert!(ubuntu.find("AppArmor profile") < ubuntu.find("that setting at 0"), "{ubuntu}");
     }
 
+    /// The hint speaks only where Ubuntu's restriction is why a keeper got nothing and tarae runs under no profile
+    /// — that's what the profile would change. Not where the restriction is off or something else failed first
+    /// (Docker's filter refuses the clone before the restriction is reached), not for a failure of the session's
+    /// network (tarae's own sends, past the namespaces), and not under a profile already: one that didn't help
+    /// isn't tarae's to replace. It says the tier the runs are in.
+    #[test]
+    fn the_hint_comes_only_where_the_restriction_is_why() {
+        let place = crate::sandbox::apparmor::Place {
+            path: "/usr/bin/tarae".into(),
+            root_owned: Ok(()),
+            packaged: true,
+        };
+        let restricted = |step, label: Option<&str>| Seen {
+            restrict_userns: Some(1),
+            apparmor: label.map(str::to_string),
+            ..seen(step, libc::EPERM)
+        };
+        let hint = |s: &Seen, tier| super::hint(s, tier, &place);
+        let unconfined = restricted(BirthStep::Map, Some("unconfined"));
+        let said = hint(&unconfined, Tier::C).expect("restricted, no profile: the hint");
+        assert!(said.contains("tier C") && said.contains("sudo apparmor_parser -r"), "{said}");
+        assert!(hint(&unconfined, Tier::D).is_some_and(|h| h.contains("tier D")), "the tier the runs are in");
+        assert!(hint(&restricted(BirthStep::Devpts, None), Tier::C).is_some(), "no label read: no profile");
+        let none = [
+            (restricted(BirthStep::Map, Some("/usr/bin/tarae (unconfined)")), "under a profile already"),
+            (Seen { restrict_userns: Some(0), ..unconfined.clone() }, "the restriction off"),
+            (Seen { restrict_userns: None, ..unconfined.clone() }, "no such setting"),
+            (
+                Seen { seccomp: true, ..restricted(BirthStep::Clone, Some("unconfined")) },
+                "Docker's filter first",
+            ),
+            (restricted(BirthStep::Rules, Some("unconfined")), "the session's network"),
+            (
+                Seen { failed: BirthError { step: BirthStep::Map, errno: libc::EINVAL }, ..unconfined },
+                "not refused",
+            ),
+        ];
+        for (s, what) in none {
+            assert_eq!(hint(&s, Tier::C), None, "{what}");
+        }
+    }
+
+    /// Runs are refused new user namespaces exactly where tarae's label would hand them one Ubuntu's restriction
+    /// keeps from other programs: the restriction on and tarae under a profile. Off, or tarae unconfined (the
+    /// restriction covers its runs itself), a run keeps what this system gives every program.
+    #[test]
+    fn runs_lose_user_namespaces_only_where_a_profile_would_lend_them() {
+        assert!(refuses_userns(Some(1), Some("/usr/bin/tarae (unconfined)")));
+        assert!(
+            refuses_userns(Some(1), Some("docker-default (enforce)")),
+            "any profile decides for its runs"
+        );
+        assert!(!refuses_userns(Some(1), Some("unconfined")), "the restriction holds for them itself");
+        assert!(!refuses_userns(Some(1), None));
+        assert!(
+            !refuses_userns(Some(0), Some("/usr/bin/tarae (unconfined)")),
+            "the restriction off: as Debian"
+        );
+        assert!(!refuses_userns(None, Some("/usr/bin/tarae (unconfined)")));
+    }
+
     /// What the probe finds on this system, said on stderr (each machine's tier, in the test output): no
     /// namespaces always with a reason; the PID namespace only with the rest; the reason for no PID namespace
     /// is D12's own. A machine's expected tier, when said (`TARAE_EXPECT_TIER`, `cargo xtask linux --env …`), is
@@ -643,6 +823,20 @@ mod tests {
             p.redirect.as_ref().map_or_else(|why| format!("no TPROXY — {why}"), |()| "TPROXY".into())
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        // (6h: the label tarae runs under, whether its runs lose user namespaces, the hint — the profile's run on a
+        // VM reads them here; `TARAE_EXPECT_HINT` 1 or 0 says whether one is expected)
+        let profile = format!(
+            "label: {} · runs refuse user namespaces: {} · hint: {}\n",
+            label().unwrap_or_default(),
+            runs_refuse_userns(),
+            p.hint.as_deref().unwrap_or("none")
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), profile.as_bytes());
+        match std::env::var("TARAE_EXPECT_HINT").as_deref() {
+            Ok("1") => assert!(p.hint.is_some(), "a hint expected: {line}{profile}"),
+            Ok("0") => assert!(p.hint.is_none(), "no hint expected: {profile}"),
+            _ => {}
+        }
         if let Ok(want) = std::env::var("TARAE_EXPECT_TIER") {
             assert_eq!(p.tier().said(), want, "{line}");
         }

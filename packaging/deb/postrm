@@ -1,0 +1,9 @@
+#!/bin/sh
+# tarae removed: its profile unloaded (dpkg keeps the file, a conffile, until a purge removes it).
+set -e
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    if aa-enabled --quiet 2>/dev/null && [ -f /etc/apparmor.d/tarae ]; then
+        apparmor_parser -R /etc/apparmor.d/tarae 2>/dev/null || true
+    fi
+fi
+exit 0

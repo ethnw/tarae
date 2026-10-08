@@ -390,7 +390,8 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
         For::Claude(call) => call.trace.clone(),
         For::User(_) => ride.trace.clone(),
     };
-    ed.test_start_guarded(target, guard, trace);
+    // (Claude's tests, the user's run of them again too — as `task_start_for` has Claude's command)
+    ed.test_start_guarded(target, guard, trace, crate::spawn::Acts::Claude);
     match ed.session.test_run.as_mut().filter(|_| ed.test_generation != before) {
         Some(r) => {
             match who {
@@ -2264,9 +2265,11 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             std::thread::sleep(crate::sandbox::watch_wait(&p));
             Ok(p)
         });
+        let hint = crate::sandbox::profile_hint();
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
             crate::tokens::tell_holders(ed, &told.0, told.1);
+            hint_once(ed, hint);
             if let For::Claude(call) = &who {
                 call.step("sandbox ready");
             }
@@ -2294,6 +2297,22 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             }
         }
     });
+}
+
+/// The AppArmor profile's hint (6h, `tier::hint`: why runs have no namespaces here, and the step) — a toast once
+/// since tarae started; the tier's line in the log says it at every start.
+fn hint_once(ed: &mut Editor, hint: Option<String>) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    hint_once_by(ed, hint, &SAID);
+}
+
+/// `hint_once`, with whether it was said kept in `said` (tests keep their own).
+fn hint_once_by(ed: &mut Editor, hint: Option<String>, said: &std::sync::atomic::AtomicBool) {
+    if let Some(hint) = hint
+        && !said.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        ed.set_warning(hint);
+    }
 }
 
 /// It runs what's on disk: the user's unsaved files are saved, and it starts once they're written
@@ -3011,6 +3030,92 @@ mod tests {
         assert_eq!(v("failed (exit 101) in 3s — a.rs\n$ cargo test\n\nOutput (last 9 lines):\n"), "failed");
         assert_eq!(v("the test run was stopped — the user closed it"), "not run");
         assert_eq!(v("no tests ran in 0.3s — a::b\n$ cargo test -- a::b --exact\n"), "no tests ran");
+    }
+
+    /// The review's finding (2026-10-08), under the profile: a command of Claude's run outside the sandbox, through
+    /// the editor's own paths — `run`'s (`task_start_for`, `Guard::Outside`) and `run_tests`' (`start_tests`) —
+    /// carries the filter: its process has one (`Seccomp: 2`; tarae's own test process has none under
+    /// `--userns`) and `unshare -U` is refused. The wiring each path has (`Acts::Claude`), not a call made by hand.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claudes_commands_outside_the_sandbox_carry_the_filter() {
+        if !crate::sandbox::tier::profiled(
+            "tools::tests::claudes_commands_outside_the_sandbox_carry_the_filter",
+        ) {
+            return;
+        }
+        let script = "grep '^Seccomp:' /proc/self/status; unshare -U true 2>&1; echo \"unshare=$?\"";
+        let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !done(ed) && std::time::Instant::now() < end {
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let printed =
+            |lines: &[(bool, String)]| lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n");
+        let filtered = |out: &str| {
+            out.lines().any(|l| l.split_whitespace().eq(["Seccomp:", "2"]))
+                && out.contains("Operation not permitted")
+                && out.lines().any(|l| l == "unshare=1")
+        };
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let dir = std::env::temp_dir();
+        // `run`'s
+        let task = crate::task::Task { name: "outside".into(), cmd: script.into(), cwd: dir.clone() };
+        let who = super::For::User("outside".into());
+        assert!(
+            ed.task_start_for(task, who, Some(crate::sandbox::Guard::Outside), Default::default()).is_ok()
+        );
+        pump(&mut ed, &|ed| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        let run = printed(&ed.session.task_run.as_ref().unwrap().output);
+        // `run_tests`'
+        let target = crate::testing::Target {
+            label: "outside".into(),
+            cwd: dir,
+            how: crate::testing::How::Pack {
+                lang: "sh".into(),
+                argv: vec!["sh".into(), "-c".into(), script.into()],
+                debug: None,
+                lines: None,
+                build: None,
+                debug_run: None,
+                junit: None,
+            },
+        };
+        let who = super::For::User("outside tests".into());
+        super::start_tests(&mut ed, who, target, Some(crate::sandbox::Guard::Outside), Default::default());
+        pump(&mut ed, &|ed| {
+            ed.session.test_run.as_ref().is_some_and(|r| r.state != crate::testing::RunState::Running)
+        });
+        let tests = printed(&ed.session.test_run.as_ref().unwrap().output);
+        assert!(filtered(&run), "run's command outside the sandbox:\n{run}");
+        assert!(filtered(&tests), "run_tests' command outside the sandbox:\n{tests}");
+    }
+
+    /// The profile's hint comes once since tarae started: every run on a restricted machine brings it back
+    /// from the probe, but after its toast has gone (read, faded) the next run's brings no other — the tier's
+    /// line in the log is where it stays. None to say is nothing said, and doesn't use up the once.
+    #[test]
+    fn the_profiles_hint_is_a_toast_once() {
+        use std::sync::atomic::AtomicBool;
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let said = AtomicBool::new(false);
+        let hint = || Some("Claude's commands run in tier C here".to_string());
+        let warnings = |ed: &crate::editor::Editor| {
+            let w = ed.toasts.iter().filter(|t| t.kind == crate::editor::ToastKind::Warning);
+            w.map(|t| t.text.clone()).collect::<Vec<_>>()
+        };
+        super::hint_once_by(&mut ed, None, &said);
+        assert!(warnings(&ed).is_empty(), "no hint, nothing said");
+        super::hint_once_by(&mut ed, hint(), &said);
+        assert_eq!(warnings(&ed), ["Claude's commands run in tier C here"], "the first run's");
+        ed.toasts.clear();
+        super::hint_once_by(&mut ed, hint(), &said);
+        assert!(warnings(&ed).is_empty(), "not again once it has gone: {:?}", warnings(&ed));
     }
 
     /// The server through both revisions' sequences: the handshake (`initialize` →

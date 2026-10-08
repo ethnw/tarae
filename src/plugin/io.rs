@@ -252,6 +252,33 @@ fn find_program(program: &str) -> Result<(PathBuf, std::ffi::OsString), String> 
     Ok((exe, path))
 }
 
+/// The program a plugin's `spawn` names, started (`plugin_spawn_now`): found on `PATH`, in home, with the
+/// environment its permissions pass on (`declared`) and what it sets (`env`: variables it may read — the caller
+/// checked), stdin closed, stdout and stderr piped, in a session of its own — and kept from user namespaces
+/// where Claude's runs are (`spawn::Acts::Plugin`: tarae's AppArmor profile isn't a plugin's).
+pub(crate) fn plugin_process(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    declared: &[Permission],
+) -> Result<std::process::Child, String> {
+    let (exe, path) = find_program(program)?;
+    let home =
+        std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_dir()).unwrap_or_else(|| "/".into());
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .env_clear()
+        .envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(|k| passed_on(k, declared))))
+        .env("PATH", path)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .current_dir(home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn::keep_from_userns(&mut cmd, crate::spawn::Acts::Plugin).map_err(|e| e.to_string())?;
+    crate::dap::setsid(&mut cmd).spawn().map_err(|e| format!("{}: {e}", shown(program)))
+}
+
 /// Whether a program a plugin runs gets this environment variable: the basics, and what it may read.
 fn passed_on(name: &str, declared: &[Permission]) -> bool {
     matches!(name, "HOME" | "USER" | "LOGNAME" | "LANG" | "TERM" | "TMPDIR" | "TZ")
@@ -526,21 +553,7 @@ impl Editor {
         if let Some((k, _)) = sp.env.iter().find(|(k, _)| !declared.contains(&Permission::Env(k.clone()))) {
             return Err(format!("it may set only variables it may read, not {} (permissions())", shown(k)));
         }
-        let (exe, path) = find_program(&sp.program)?;
-        let home =
-            std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_dir()).unwrap_or_else(|| "/".into());
-        let mut cmd = Command::new(exe);
-        cmd.args(&sp.args)
-            .env_clear()
-            .envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(|k| passed_on(k, &declared))))
-            .env("PATH", path)
-            .envs(sp.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child =
-            crate::dap::setsid(&mut cmd).spawn().map_err(|e| format!("{}: {e}", shown(&sp.program)))?;
+        let mut child = plugin_process(&sp.program, &sp.args, &sp.env, &declared)?;
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let ended = Arc::new(AtomicBool::new(false));

@@ -597,7 +597,7 @@ impl Editor {
                 return crate::queued::again(ed, crate::queued::What::Tests(target), Some(trace));
             }
             let before = ed.test_generation;
-            ed.test_start_guarded(target, None, Some(trace));
+            ed.test_start_guarded(target, None, Some(trace), crate::spawn::Acts::User);
             // (it didn't start: the pane goes to what waits for it — Claude's failures say so in `tools::fail`)
             if ed.test_generation == before {
                 crate::queued::run_next(ed);
@@ -606,12 +606,14 @@ impl Editor {
     }
 
     /// Started now, the saves before it written (`test_start`; Claude's run, `tools::go`): in the sandbox,
-    /// unless `guard` says otherwise; `trace` — its way from the ask (else it starts here).
+    /// unless `guard` says otherwise; `trace` — its way from the ask (else it starts here). `acts`: whose run it
+    /// is (Claude's is kept from new user namespaces outside the sandbox too — `spawn::Acts`).
     pub fn test_start_guarded(
         &mut self,
         target: Target,
         guard: Option<crate::sandbox::Guard>,
         trace: Option<crate::trace::RunTrace>,
+        acts: crate::spawn::Acts,
     ) {
         let trace = trace.unwrap_or_else(|| crate::trace::RunTrace::new(format!("tests: {}", target.label)));
         trace.step("saved");
@@ -630,7 +632,7 @@ impl Editor {
         let wall = std::time::SystemTime::now();
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
-        let child = match crate::sandbox::spawn(policy, &cmd) {
+        let child = match crate::sandbox::spawn_as(policy, &cmd, acts) {
             Ok(c) => c,
             // (the previous run, if any, stays current — its lines·end still land)
             Err(e) => {
@@ -814,7 +816,7 @@ impl Editor {
         let root = target.cwd.clone();
         let before = self.test_generation;
         // (saved already — `test_debug_target`)
-        self.test_start_guarded(t, None, None);
+        self.test_start_guarded(t, None, None, crate::spawn::Acts::User);
         if self.test_generation == before {
             return; // couldn't launch (reason shown)
         }

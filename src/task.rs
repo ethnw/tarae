@@ -702,7 +702,8 @@ impl Editor {
         color_off(&mut cmd);
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
-        let child = match crate::sandbox::spawn(sandbox, &cmd) {
+        let acts = if claudes { crate::spawn::Acts::Claude } else { crate::spawn::Acts::User };
+        let child = match crate::sandbox::spawn_as(sandbox, &cmd, acts) {
             Ok(c) => c,
             Err(e) => {
                 trace.end(format!("didn't spawn: {e}"));

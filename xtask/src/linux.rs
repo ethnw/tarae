@@ -56,10 +56,17 @@ enum What {
         args: Vec<String>,
         repeat: u32,
     },
+    /// `test --installed`: tarae's own tests (`--bin tarae`) built, the binary put at `/usr/bin/tarae` (root's, as
+    /// its `.deb` puts it) and run from there with these arguments (the test binary's: a filter, `--exact` …) —
+    /// where an AppArmor profile on the Docker's machine attaches to tarae by its path (`--userns`: the container
+    /// unconfined, so the machine's profiles apply by path inside it; step 6h).
+    Installed {
+        args: Vec<String>,
+    },
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
 
 /// What `--userns` lets the container do, so the sandbox's tier tests reach a real session keeper
 /// (`src/sandbox/tier.rs`): Docker's default seccomp profile refuses new namespaces, its `docker-default`
@@ -150,6 +157,7 @@ fn what(args: &[String]) -> Result<What> {
         None => What::Both,
         Some((c, [])) if c == "clippy" => What::Clippy,
         Some((t, rest)) if t == "test" => match rest {
+            [i, rest @ ..] if i == "--installed" => What::Installed { args: rest.to_vec() },
             [r, n, rest @ ..] if r == "--repeat" => What::Test {
                 args: rest.to_vec(),
                 repeat: n
@@ -1062,7 +1070,7 @@ fn script(tree: Tree, what: &What) -> String {
         }
     });
     s.push_str("echo \"toolchain: $(rustc --version)\"\n");
-    if !matches!(what, What::Test { .. }) {
+    if !matches!(what, What::Test { .. } | What::Installed { .. }) {
         // (every package: netlink/ is Linux code, linted only here)
         s.push_str("cargo clippy --locked --workspace --all-targets -- -D warnings\n");
         s.push_str(
@@ -1071,6 +1079,16 @@ fn script(tree: Tree, what: &What) -> String {
     }
     match what {
         What::Clippy => {}
+        What::Installed { args } => {
+            s.push_str(&format!(
+                "exe=$(cargo test --locked --bin tarae --no-run 2>&1 | tee /dev/stderr | sed -n '{EXE_SED}')\n\
+                 test -n \"$exe\" || {{ echo 'cargo named no test binary'; exit 1; }}\n\
+                 install -o root -g root -m 0755 \"$exe\" /usr/bin/tarae\n\
+                 echo \"the tests run as /usr/bin/tarae ($(stat -c '%U:%G %a' /usr/bin/tarae))\"\n",
+            ));
+            let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
+            s.push_str(&format!("CARGO_MANIFEST_DIR=/work/tarae /usr/bin/tarae {}\n", args.join(" ")));
+        }
         What::Both => s.push_str("cargo test --locked --workspace\n"),
         What::Test { args, repeat } => {
             let test = std::iter::once("cargo test --locked".to_string())
@@ -1089,6 +1107,10 @@ fn script(tree: Tree, what: &What) -> String {
     }
     s
 }
+
+/// The binary `cargo test --no-run` built for tarae's own tests, from its line `Executable unittests src/main.rs
+/// (<path>)` — a `sed -n` expression.
+const EXE_SED: &str = r"s/^ *Executable unittests src\/main.rs (\(.*\))$/\1/p";
 
 /// `a` as one word for sh, whatever is in it.
 fn quoted(a: &str) -> String {
@@ -1184,6 +1206,35 @@ mod tests {
         assert_eq!(what(&args(&["test"])), Ok(What::Test { args: Vec::new(), repeat: 1 }));
         assert!(what(&args(&["test", "--repeat", "0"])).unwrap_err().contains("--repeat 0: a count"));
         assert!(what(&args(&["clippy", "x"])).unwrap_err().starts_with("usage:"));
+    }
+
+    /// `test --installed` (6h): tarae's own tests run from `/usr/bin/tarae` — the binary cargo built, put there
+    /// root's, as the `.deb` does — so a profile on the Docker's machine attaches to it by path; the arguments are
+    /// the test binary's, as words. Neither clippy nor `cargo test` itself runs the tests.
+    #[test]
+    fn installed_runs_the_tests_from_the_packaged_path() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let w = what(&args(&["test", "--installed", "sandbox::", "--exact", "it's"])).unwrap();
+        assert_eq!(w, What::Installed { args: args(&["sandbox::", "--exact", "it's"]) });
+        let s = script(Tree::Mounted(None), &w);
+        assert!(s.contains("cargo test --locked --bin tarae --no-run"), "built, not run: {s}");
+        assert!(s.contains("install -o root -g root -m 0755 \"$exe\" /usr/bin/tarae\n"), "{s}");
+        assert!(s.contains("/usr/bin/tarae 'sandbox::' '--exact' 'it'\\''s'\n"), "run from there: {s}");
+        assert!(!s.contains("cargo clippy") && !s.contains("cargo test --locked\n"), "{s}");
+        // (cargo's lines through the script's sed: the binary's path alone, not the other targets')
+        assert!(s.contains(&format!("sed -n '{EXE_SED}'")), "{s}");
+        let said = "   Compiling tarae v0.1.0 (/work/tarae)\n    Finished `test` profile\n  \
+                    Executable unittests src/main.rs (/target/debug/deps/tarae-0123abcd)\n  \
+                    Executable tests/e2e.rs (/target/debug/deps/e2e-4567)\n";
+        let mut sed = Command::new("sed")
+            .args(["-n", EXE_SED])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut sed.stdin.take().unwrap(), said.as_bytes()).unwrap();
+        let out = sed.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/target/debug/deps/tarae-0123abcd\n");
     }
 
     /// `--platform linux/<arch>` first: `docker run` on it, with a target and toolchains of its own (an x86_64

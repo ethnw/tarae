@@ -1,0 +1,9 @@
+#!/bin/sh
+# tarae's AppArmor profile (/etc/apparmor.d/tarae) loaded, as dh_apparmor's snippet does: only where AppArmor
+# is on and this system can load it (not inside a container: no CAP_MAC_ADMIN) — a failure never fails the
+# install; tarae then says why its runs have no namespaces, and the step.
+set -e
+if [ "$1" = configure ] && aa-enabled --quiet 2>/dev/null; then
+    apparmor_parser -r -T -W /etc/apparmor.d/tarae || true
+fi
+exit 0

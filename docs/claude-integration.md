@@ -804,6 +804,18 @@ thread of tarae's that confined itself first, and everything it starts stays con
     what its programs leave running (a *child subreaper*): a daemon that detached itself from a command comes
     to tarae, not to init, and its connections are served after the command is over
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
+- **Ubuntu and user namespaces.** From 23.10 on, Ubuntu lets a program make user namespaces only through an
+  AppArmor profile that names it. Without one, tarae gives a session no namespaces of its own (tier C), and the
+  first sandboxed command says so once: why, and the `sudo` step that installs tarae's profile. tarae never
+  writes the profile itself, and offers it only for a tarae at a path only root can replace — its `.deb` puts
+  tarae at `/usr/bin/tarae` with the profile beside it. With the profile, what tarae starts may make user
+  namespaces, as what VS Code starts may under Ubuntu's own `vscode` profile: your terminal's shell (podman,
+  buildah, a browser's sandbox), language servers, git, formatters, the debugger, your own tasks and tests.
+  **Claude's commands and what a plugin starts can't** — sandboxed or not (outside the sandbox once, for the
+  conversation, or with `llm.sandbox` off): `unshare` and `clone` asking for one are refused, `clone3` answers
+  that it doesn't exist, and Claude's result says so. The filter that refuses them also means a setuid program
+  (`sudo`) such a command starts runs without its privileges. A command that needs either is yours to run in
+  the terminal.
 - **What a command leaves running** (a build tool's daemon) stays tarae's, still inside the command's sandbox
   and under its rules. What the sandbox refuses it is said in the result of the project's command going
   then — or the next one's. It's in `:procs` under its session, as `java · left by a run`, and it ends when

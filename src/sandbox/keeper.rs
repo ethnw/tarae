@@ -826,17 +826,33 @@ impl Keeper {
         if matches!(net, RunNet::Served | RunNet::Routed) {
             return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
         }
-        self.start_with(cmd, comm, rules, net).map(|(s, _)| s)
+        let no_userns = super::tier::runs_refuse_userns();
+        self.start_with(cmd, comm, rules, net, no_userns).map(|(s, _)| s)
+    }
+
+    /// Tests: `start`, new user namespaces refused (`no_userns`) as asked rather than as this system decides.
+    #[cfg(test)]
+    pub fn start_userns(
+        &self,
+        cmd: &std::process::Command,
+        comm: &str,
+        rules: BorrowedFd,
+        net: RunNet,
+        no_userns: bool,
+    ) -> io::Result<Started> {
+        self.start_with(cmd, comm, rules, net, no_userns).map(|(s, _)| s)
     }
 
     /// `start`, served or not; with a handoff socket when served or held (a keeper in a PID namespace — its
-    /// run waits for tarae to know its pid): tarae's end of it comes back.
+    /// run waits for tarae to know its pid): tarae's end of it comes back. `no_userns`: its filter refuses new
+    /// user namespaces (`tier::runs_refuse_userns`).
     fn start_with(
         &self,
         cmd: &std::process::Command,
         comm: &str,
         rules: BorrowedFd,
         net: RunNet,
+        no_userns: bool,
     ) -> io::Result<(Started, Option<Arc<OwnedFd>>)> {
         use std::os::unix::ffi::OsStrExt;
         // (its own sockets only inside the network namespace that holds them to `lo`)
@@ -870,6 +886,7 @@ impl Keeper {
             comm: comm.as_bytes().to_vec(),
             net,
             held: self.ns.pid,
+            no_userns,
         };
         let stdin = open_null(libc::O_RDONLY)?;
         let (out_r, out_w) = io::pipe()?;
@@ -921,7 +938,7 @@ impl Keeper {
             return Err(io::Error::other("a run not served starts on its own (start)"));
         }
         let to = super::supervisor::serve(policy, net, refused)?;
-        let (started, ours) = self.start_with(cmd, comm, rules, net)?;
+        let (started, ours) = self.start_with(cmd, comm, rules, net, super::tier::runs_refuse_userns())?;
         let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
         let pidfd = started.pidfd.clone();
         crate::event::thread("tarae-handoff", move || {
@@ -1893,7 +1910,7 @@ fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
         RunNet::Own => crate::seccomp::Mode::OwnNetwork,
         RunNet::Plain => crate::seccomp::Mode::Plain,
     };
-    let listener = match crate::seccomp::apply(mode) {
+    let listener = match crate::seccomp::apply(mode, run.no_userns) {
         Ok(l) => l,
         Err(e) => fail(Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
     };
@@ -2744,6 +2761,12 @@ mod tests {
         env: &[(&str, &str)],
         cwd: Option<&Path>,
     ) -> String {
+        let cmd = helper_cmd(what, env, cwd);
+        helper_said(k.start(&cmd, &crate::landlock::thread_name(), rules, net).unwrap())
+    }
+
+    /// The test binary on `helper` doing `what` (with `env` set, in `cwd`).
+    fn helper_cmd(what: &str, env: &[(&str, &str)], cwd: Option<&Path>) -> std::process::Command {
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.args([
             "--exact",
@@ -2757,7 +2780,11 @@ mod tests {
         if let Some(d) = cwd {
             cmd.current_dir(d);
         }
-        let s = k.start(&cmd, &crate::landlock::thread_name(), rules, net).unwrap();
+        cmd
+    }
+
+    /// What the helper run `s` printed after `helper: `, once it ended.
+    fn helper_said(s: Started) -> String {
         let (mut out, mut err) = (String::new(), String::new());
         io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
         io::Read::read_to_string(&mut s.spawned.stderr.unwrap(), &mut err).unwrap();
@@ -2839,6 +2866,8 @@ mod tests {
                 format!("datagram={}", tried(sent))
             }
             "nlchanges" => helper_nl_changes(),
+            "userns" => helper_userns(),
+            "setns" => helper_setns(&std::env::var("TARAE_NS").unwrap_or_default()),
             "lookup4" => format!("v4={} lookup4={}", ipv4_addresses().join(","), lookup4_own_name()),
             "lookup6" => {
                 let name = std::env::var("TARAE_NAME").unwrap_or_default();
@@ -2847,6 +2876,241 @@ mod tests {
             other => format!("no helper {other}"),
         };
         println!("helper: {said}");
+    }
+
+    /// `userns`: a user namespace made three ways — `unshare` (in a fork: a process with threads can't), `clone` and
+    /// `clone3` — each `capable` (a network namespace made inside it: what Ubuntu's restriction takes away),
+    /// `capless <errno>`, or the errno it was refused with: `unshare=… clone=… clone3=…`.
+    fn helper_userns() -> String {
+        /// In the child each way made: a network namespace inside, its errno (0: made) on `w`, then the end.
+        unsafe fn inside(w: i32) -> ! {
+            // SAFETY: raw calls only — this is a copy of a process with threads.
+            unsafe {
+                let r = libc::unshare(libc::CLONE_NEWNET);
+                let e: i32 = if r == 0 { 0 } else { *libc::__errno_location() };
+                libc::write(w, (&raw const e).cast(), 4);
+                libc::_exit(0)
+            }
+        }
+        let way = |make: &dyn Fn() -> libc::c_long, w: i32, r: i32| -> String {
+            let pid = make();
+            if pid == 0 {
+                // SAFETY: the new child's own end.
+                unsafe { inside(w) }
+            }
+            if pid < 0 {
+                return io::Error::last_os_error().raw_os_error().unwrap_or(0).to_string();
+            }
+            let mut e = -1i32;
+            // SAFETY: a read into an int we own; the child reaped.
+            unsafe {
+                libc::read(r, (&raw mut e).cast(), 4);
+                libc::waitpid(pid as i32, std::ptr::null_mut(), 0);
+            }
+            match e {
+                0 => "capable".into(),
+                e => format!("capless {e}"),
+            }
+        };
+        let (r, w) = io::pipe().unwrap();
+        let (r, w) = (std::os::fd::AsRawFd::as_raw_fd(&r), std::os::fd::AsRawFd::as_raw_fd(&w));
+        // SAFETY: each a plain call making a child (stack 0: a copy, as a fork's) — `inside` is all it runs.
+        let unshare = way(
+            &|| unsafe {
+                let pid = libc::fork();
+                if pid == 0 {
+                    if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                        let e = -*libc::__errno_location();
+                        libc::write(w, (&raw const e).cast(), 4);
+                        libc::_exit(0);
+                    }
+                    inside(w)
+                }
+                pid as libc::c_long
+            },
+            w,
+            r,
+        );
+        // (unshare's own refusal comes back negative from its child — said as the errno, as the others)
+        let unshare = match unshare.strip_prefix("capless -") {
+            Some(errno) => errno.to_string(),
+            None => unshare,
+        };
+        let user = libc::CLONE_NEWUSER as u64;
+        let flags = user | libc::SIGCHLD as u64;
+        // SAFETY: as above.
+        let clone = way(&|| unsafe { libc::syscall(libc::SYS_clone, flags, 0, 0, 0, 0) }, w, r);
+        let mut args = [0u64; 11]; // struct clone_args: flags, …, exit_signal
+        (args[0], args[4]) = (user, libc::SIGCHLD as u64);
+        let size = std::mem::size_of_val(&args);
+        // SAFETY: as above; the struct lives through the call.
+        let clone3 = way(&|| unsafe { libc::syscall(libc::SYS_clone3, args.as_ptr(), size) }, w, r);
+        format!("unshare={unshare} clone={clone} clone3={clone3}")
+    }
+
+    /// Q4: where tarae runs under its AppArmor profile with Ubuntu's restriction on, a run makes no user namespace —
+    /// not by `unshare`, `clone` nor `clone3` — though the profile, whose label the run carries (an exec keeps it,
+    /// t5), would let it. The control: the same run without the refusal makes one by each, capable — the profile is
+    /// what gives it, so the refusal is what stops it. Elsewhere the test says why it skips; a machine said to hold
+    /// the profile (`TARAE_EXPECT_PROFILE=1`: the VM's run under it) fails instead.
+    #[test]
+    fn a_run_makes_no_user_namespace_under_the_profile() {
+        let test = "a_run_makes_no_user_namespace_under_the_profile";
+        if !profiled(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let k = keeper("userns");
+        let through = |no_userns| {
+            let cmd = helper_cmd("userns", &[], None);
+            let comm = crate::landlock::thread_name();
+            helper_said(k.start_userns(&cmd, &comm, rules.fd(), RunNet::Plain, no_userns).unwrap())
+        };
+        let (refused, control) = (through(true), through(false));
+        k.end();
+        let (eperm, enosys) = (libc::EPERM, libc::ENOSYS);
+        assert_eq!(refused, format!("unshare={eperm} clone={eperm} clone3={enosys}"), "refused, every way");
+        assert_eq!(
+            control, "unshare=capable clone=capable clone3=capable",
+            "the profile lends it: {refused}"
+        );
+    }
+
+    /// `setns`: the user namespace at `ns` (a `/proc/<pid>/ns/user`) joined — in a fork: a process with threads
+    /// can't change its user namespace — and a network namespace made inside it (what a capable one allows):
+    /// `setns=<ok|errno> net=<ok|errno|->`.
+    fn helper_setns(ns: &str) -> String {
+        let path = std::ffi::CString::new(ns).unwrap_or_default();
+        let (r, w) = io::pipe().unwrap();
+        let (r, w) = (std::os::fd::AsRawFd::as_raw_fd(&r), std::os::fd::AsRawFd::as_raw_fd(&w));
+        // SAFETY: the child makes raw calls only (on the path and buffer made above), then ends; the parent reads
+        // into an array it owns and reaps the child.
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                let errno = || *libc::__errno_location();
+                let fd = libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                let got: [i32; 2] = if fd < 0 || libc::setns(fd, libc::CLONE_NEWUSER) != 0 {
+                    [errno(), -1]
+                } else {
+                    [0, if libc::unshare(libc::CLONE_NEWNET) == 0 { 0 } else { errno() }]
+                };
+                libc::write(w, got.as_ptr().cast(), 8);
+                libc::_exit(0);
+            }
+            let mut got = [-1i32; 2];
+            libc::read(r, got.as_mut_ptr().cast(), 8);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+            let said = |e: i32| match e {
+                0 => "ok".to_string(),
+                -1 => "-".to_string(),
+                e => e.to_string(),
+            };
+            format!("setns={} net={}", said(got[0]), said(got[1]))
+        }
+    }
+
+    /// The review's finding (2026-10-08), under the profile: a user namespace is refused joined as it's refused
+    /// made. The user's own tool makes a capable one and stays in it (`unshare -U sleep`, started as the user's
+    /// task is: `Acts::User`); a process of the user's kind joins it (`setns` through its `/proc/<pid>/ns/user`) and
+    /// makes a network namespace there — the control: the profile lends it, joining works. A run of Claude's
+    /// outside the sandbox trying the same is refused `setns` itself (`EPERM`), so Q4 isn't got round through a
+    /// namespace the terminal's podman made.
+    #[test]
+    fn claudes_run_joins_no_user_namespace_the_users_tool_made() {
+        if !profiled("claudes_run_joins_no_user_namespace_the_users_tool_made") {
+            return;
+        }
+        let mut hold = std::process::Command::new("unshare");
+        hold.args(["-U", "sleep", "60"]);
+        let holder = crate::spawn::setsid_as(&hold, crate::spawn::Acts::User).expect("unshare -U starts");
+        let ns = format!("/proc/{}/ns/user", holder.pid);
+        let ours = std::fs::read_link("/proc/self/ns/user").unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_link(&ns).is_ok_and(|n| n == ours) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let theirs = std::fs::read_link(&ns).ok();
+        let joined = |acts| {
+            let cmd = helper_cmd("setns", &[("TARAE_NS", ns.as_str())], None);
+            let s = crate::spawn::setsid_as(&cmd, acts).expect("the joiner starts");
+            let mut out = String::new();
+            io::Read::read_to_string(&mut s.stdout.unwrap(), &mut out).unwrap();
+            crate::spawn::wait(s.pid).unwrap();
+            out.lines().find_map(|l| l.split_once("helper: ").map(|(_, s)| s.trim().to_string()))
+        };
+        let (users, claudes) = (joined(crate::spawn::Acts::User), joined(crate::spawn::Acts::Claude));
+        // SAFETY: the group the holder leads (`setsid`), ours.
+        unsafe { libc::kill(-(holder.pid as libc::pid_t), libc::SIGKILL) };
+        let _ = crate::spawn::wait(holder.pid);
+        assert!(theirs.is_some_and(|t| t != ours), "the holder made its own user namespace");
+        assert_eq!(users.as_deref(), Some("setns=ok net=ok"), "the control: the user's kind joins, capable");
+        assert_eq!(claudes, Some(format!("setns={} net=-", libc::EPERM)), "Claude's run is refused setns");
+    }
+
+    /// `tier::profiled`, for a test of this module.
+    fn profiled(test: &str) -> bool {
+        super::super::tier::profiled(&format!("sandbox::keeper::tests::{test}"))
+    }
+
+    /// The user's call (2026-10-08), for real under the profile: outside the sandbox, a run of Claude's (started
+    /// as `task_spawn` starts it: `sandbox::spawn_as` without a policy, `Acts::Claude` — the editor's own paths:
+    /// `tools::tests::claudes_commands_outside_the_sandbox_carry_the_filter`) and what a plugin starts (by
+    /// `plugin_spawn_now`'s own `plugin_process`) make no user namespace, by any of the three calls. The control:
+    /// the terminal's shell — the user's own, started as `terminal_run` starts it — makes a capable one: the
+    /// profile lends it where the user said it should, so the filter is what keeps the others.
+    #[test]
+    fn outside_the_sandbox_claude_and_plugins_make_no_user_namespace_the_terminal_does() {
+        if !profiled("outside_the_sandbox_claude_and_plugins_make_no_user_namespace_the_terminal_does") {
+            return;
+        }
+        let said = |out: &str| {
+            let line = out.lines().find_map(|l| l.split_once("helper: ").map(|(_, s)| s.trim().to_string()));
+            line.unwrap_or_else(|| panic!("the helper said nothing:\n{out}"))
+        };
+        // Claude's run, outside the sandbox
+        let s = crate::sandbox::spawn_as(None, &helper_cmd("userns", &[], None), crate::spawn::Acts::Claude)
+            .expect("Claude's run starts");
+        let mut out = String::new();
+        io::Read::read_to_string(&mut s.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(s.pid).unwrap();
+        let claudes = said(&out);
+        // What a plugin starts: this binary by its name on PATH (`--installed`: /usr/bin/tarae), as a plugin's
+        // `spawn` names a program, the helper's variable one it may read
+        let exe = std::env::current_exe().unwrap();
+        let name = exe.file_name().unwrap().to_string_lossy().into_owned();
+        let args: Vec<String> = ["--exact", "sandbox::keeper::tests::helper", "--ignored", "--nocapture"]
+            .iter()
+            .map(|a| a.to_string())
+            .chain(["--test-threads=1".into()])
+            .collect();
+        let env = [(HELPER.to_string(), "userns".to_string())];
+        let declared = [crate::plugin::PluginPermission::Env(HELPER.into())];
+        let child = crate::plugin::plugin_process(&name, &args, &env, &declared)
+            .unwrap_or_else(|e| panic!("the plugin's program starts ({name} on PATH): {e}"));
+        let out = child.wait_with_output().unwrap();
+        let plugins = said(&String::from_utf8_lossy(&out.stdout));
+        // The terminal's shell
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let argv: Vec<String> = std::iter::once(exe.display().to_string()).chain(args).collect();
+        ed.terminal_run(argv, vec![(HELPER.into(), "userns".into())]);
+        let end = Instant::now() + Duration::from_secs(20);
+        let screen = |ed: &crate::editor::Editor| {
+            ed.session.terminal.as_ref().map(|t| t.parser.screen().contents()).unwrap_or_default()
+        };
+        while ed.session.terminal.as_ref().is_none_or(|t| t.exited.is_none()) && Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(100)) {
+                ed.handle_event(ev);
+            }
+        }
+        let terminals = said(&screen(&ed));
+        let refused = format!("unshare={} clone={} clone3={}", libc::EPERM, libc::EPERM, libc::ENOSYS);
+        assert_eq!(claudes, refused, "Claude's run outside the sandbox");
+        assert_eq!(plugins, refused, "what a plugin starts");
+        assert_eq!(
+            terminals, "unshare=capable clone=capable clone3=capable",
+            "the terminal's shell keeps them"
+        );
     }
 
     /// `listen`: a listener of its own on `127.0.0.1:$TARAE_PORT` (0: any), its port said, then one connection

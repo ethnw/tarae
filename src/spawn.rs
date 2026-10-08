@@ -22,6 +22,61 @@ pub struct Spawned {
     pub stderr: Option<PipeReader>,
 }
 
+/// Whom a process tarae starts acts for — whether it's kept from new user namespaces (Q4, the user's call
+/// 2026-10-08). Under tarae's AppArmor profile everything tarae starts carries its label and so its `userns`;
+/// where that's so (`tier::runs_refuse_userns`), what acts for Claude or a plugin — sandboxed or not — gets the
+/// filter that refuses one (`seccomp::NoUserns`). The user's own tools keep them, as what VS Code starts does under
+/// Ubuntu's own `vscode` profile (the same shape: `flags=(unconfined) { userns, }`) — the terminal's shell,
+/// language servers, git, formatters, the debugger, the user's tasks and tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Acts {
+    User,
+    /// A command of Claude's (`run`, `run_tests`) — outside the sandbox too: once, for the conversation, or with
+    /// it off; the user's run again of one.
+    Claude,
+    /// What a plugin's permission starts (`plugin_spawn_now`).
+    Plugin,
+}
+
+impl Acts {
+    /// Whether its process is kept from new user namespaces, where runs are refused them (`refused_here`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // (Linux's — its test runs everywhere)
+    pub fn no_userns(self, refused_here: bool) -> bool {
+        refused_here && matches!(self, Acts::Claude | Acts::Plugin)
+    }
+
+    /// `no_userns` as this system decides it.
+    #[cfg(target_os = "linux")]
+    fn kept_here(self) -> bool {
+        self.no_userns(crate::sandbox::tier::runs_refuse_userns())
+    }
+}
+
+/// `setsid`, for whom it acts: kept from new user namespaces where `acts` says so — started from a short-lived
+/// thread under the filter (`seccomp::outside`).
+pub fn setsid_as(cmd: &Command, acts: Acts) -> io::Result<Spawned> {
+    #[cfg(target_os = "linux")]
+    if acts.kept_here() {
+        return crate::seccomp::outside(|| setsid(cmd));
+    }
+    let _ = acts;
+    setsid(cmd)
+}
+
+/// A `Command` std starts (a fork: `pre_exec`) kept from new user namespaces where `acts` says so — the filter
+/// made now, put on in the child (`seccomp::NoUserns::apply`: raw calls only).
+pub fn keep_from_userns(cmd: &mut Command, acts: Acts) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if acts.kept_here() {
+        use std::os::unix::process::CommandExt;
+        let filter = crate::seccomp::NoUserns::new()?;
+        // SAFETY: `apply` makes raw calls only, between fork and exec.
+        unsafe { cmd.pre_exec(move || filter.apply()) };
+    }
+    let _ = (cmd, acts);
+    Ok(())
+}
+
 /// `cmd`'s program, arguments, environment changes and folder, started in a session of its own: stdin
 /// `/dev/null`, stdout and stderr pipes (what `cmd` says of its stdio isn't read — `Command` doesn't tell;
 /// nor `env_clear`: a variable to leave out is removed by name — `sandbox::from_run_env`).
@@ -306,6 +361,16 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read};
     use std::time::{Duration, Instant};
+
+    /// The user's call (2026-10-08): where tarae's profile would lend user namespaces to everything it starts,
+    /// what acts for Claude or a plugin is kept from them — sandboxed or not — and the user's own tools keep
+    /// them, as VS Code's do under Ubuntu's `vscode` profile. Where runs aren't refused them, nothing is.
+    #[test]
+    fn only_claudes_and_plugins_processes_are_kept_from_user_namespaces() {
+        let kinds = [Acts::User, Acts::Claude, Acts::Plugin];
+        assert_eq!(kinds.map(|a| a.no_userns(true)), [false, true, true], "under the profile");
+        assert_eq!(kinds.map(|a| a.no_userns(false)), [false; 3], "elsewhere");
+    }
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("tarae-spawn-{name}-{}", std::process::id()));

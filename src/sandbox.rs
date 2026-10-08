@@ -26,6 +26,8 @@
 //! commands don't run quietly without one: each asks, or the user agrees for the conversation, and the chat's
 //! title says so.
 
+// (the profile and its hint: plain text, built everywhere — said on Linux)
+pub mod apparmor;
 #[cfg(target_os = "linux")]
 pub mod channel;
 #[cfg(test)]
@@ -550,10 +552,44 @@ impl Guard {
                      {copies}{linux}"
                 )
             }
-            Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
-            Guard::Off => "Ran without a sandbox — the user turned it off (llm.sandbox).".into(),
-            Guard::Outside => "Ran outside the sandbox — the user chose to, this once.".into(),
+            Guard::Without(why) => {
+                format!("Ran without a sandbox ({why}) — the user agreed.{}", outside_userns(refused_here()))
+            }
+            Guard::Off => format!(
+                "Ran without a sandbox — the user turned it off (llm.sandbox).{}",
+                outside_userns(refused_here())
+            ),
+            Guard::Outside => {
+                format!(
+                    "Ran outside the sandbox — the user chose to, this once.{}",
+                    outside_userns(refused_here())
+                )
+            }
         }
+    }
+}
+
+/// Whether Claude's runs are refused new user namespaces here (`tier::runs_refuse_userns`) — outside the sandbox
+/// too (`spawn::Acts`).
+fn refused_here() -> bool {
+    #[cfg(target_os = "linux")]
+    return tier::runs_refuse_userns();
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
+/// What the report of a run outside the sandbox says of user namespaces (Q4): where they're refused (`refused`),
+/// that this one had none either, and where they are — the user's own terminal and tools.
+fn outside_userns(refused: bool) -> &'static str {
+    match refused {
+        true => {
+            " It couldn't make a user namespace either (unshare, clone and clone3 are refused): tarae's AppArmor \
+             profile would let it, which Ubuntu keeps from other programs — a tool that needs one (rootless \
+             podman, bwrap, a browser's own sandbox) fails, and a setuid program (sudo) runs without its \
+             privileges; the user's own terminal and tools keep both, as VS Code's do: such a command is theirs \
+             to run there."
+        }
+        false => "",
     }
 }
 
@@ -2672,9 +2708,19 @@ impl Policy {
                     }
                 )
             });
+            // (Q4: tarae's AppArmor profile would lend its runs what Ubuntu's restriction keeps from programs)
+            let userns = match c.no_userns {
+                true => {
+                    " It can't make a user namespace (unshare, clone and clone3 are refused): tarae's AppArmor \
+                     profile would let it, which Ubuntu keeps from other programs — a tool that needs one \
+                     (rootless podman, bwrap, a browser's own sandbox) fails here; tell the user."
+                }
+                false => "",
+            };
             let notes = format!(
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
-                 it before your next run), and the terminal multiplexers' folders in /tmp stay writable.{}{}{}",
+                 it before your next run), and the terminal multiplexers' folders in /tmp stay \
+                 writable.{userns}{}{}{}",
                 linux::notes(c.abi),
                 linux::made_said(&c.made, &self.root),
                 linux::kept_said(&c.kept, &self.root)
@@ -3226,6 +3272,15 @@ fn user_temp(tmp: &Path) -> PathBuf {
 }
 
 // ── On a worker ─────────────────────────────────────────────────────────────
+
+/// Linux: the profile's hint (`tier::hint`) the probe found — None elsewhere, or none. Only read (the probe has run
+/// once a run's policy was made: `policy_from` → `confined`).
+pub fn profile_hint() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    return tier::probed().and_then(|p| p.hint.clone());
+    #[cfg(not(target_os = "linux"))]
+    None
+}
 
 /// Whether commands can be sandboxed here — looked once per run of tarae (blocks: a worker's).
 pub fn probe() -> Availability {
@@ -4433,7 +4488,13 @@ fn lock_held() -> std::sync::MutexGuard<'static, Option<(PathBuf, Held)>> {
 /// keeper (`keeper::Keeper::start`: its rules and the seccomp filter its own, and tarae's supervisor deciding
 /// what it reaches by address — the main loop waits for its start only); elsewhere the sandbox is in the
 /// command already. A policy whose rules or keeper couldn't be made doesn't start at all.
-pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::spawn::Spawned> {
+/// Without a policy (outside the sandbox) its process acts for `acts`: Claude's is kept from new user namespaces
+/// where runs are (`spawn::setsid_as`) — a sandboxed one is by its keeper's run.
+pub fn spawn_as(
+    policy: Option<&Policy>,
+    cmd: &Command,
+    acts: crate::spawn::Acts,
+) -> std::io::Result<crate::spawn::Spawned> {
     #[cfg(target_os = "linux")]
     if let Some(p) = policy {
         let c = match &p.confine {
@@ -4482,7 +4543,7 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
         }
         return Ok(spawned);
     }
-    let spawned = crate::spawn::setsid(cmd)?;
+    let spawned = crate::spawn::setsid_as(cmd, acts)?;
     // (macOS, the network open: the run's own port goes to tarae's proxy — its end comes with `after_run`)
     #[cfg(not(target_os = "linux"))]
     if let Some((p, r)) = policy.and_then(|p| Some((p, p.proxy.as_ref()?))) {
@@ -4491,6 +4552,12 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
     #[cfg(target_os = "linux")]
     let _ = policy;
     Ok(spawned)
+}
+
+/// Tests: `spawn_as`, the process the user's (what they test is the policy's run).
+#[cfg(test)]
+pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::spawn::Spawned> {
+    spawn_as(policy, cmd, crate::spawn::Acts::User)
 }
 
 /// What a sandboxed command runs (`command`'s: the program after `sandbox-exec`'s own arguments), by its file
@@ -4598,6 +4665,25 @@ pub(crate) fn skipped_inside(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run of Claude's outside the sandbox — once, for the conversation, with the sandbox off — tells Claude,
+    /// where runs are refused user namespaces, that it had none either, that a setuid program ran without its
+    /// privileges (the filter's `no_new_privs`), and that the user's terminal is where such a command runs; where
+    /// they aren't, not a word of it. Each guard says what this machine decides (`refused_here`).
+    #[test]
+    fn a_run_outside_the_sandbox_says_it_had_no_user_namespace_where_refused() {
+        let said = outside_userns(true);
+        assert!(
+            said.starts_with(" It couldn't make a user namespace either (unshare, clone and clone3"),
+            "{said}"
+        );
+        assert!(said.contains("a setuid program (sudo) runs without its privileges"), "{said}");
+        assert!(said.contains("the user's own terminal and tools keep both"), "{said}");
+        assert_eq!(outside_userns(false), "");
+        for g in [Guard::Without("no Landlock".into()), Guard::Off, Guard::Outside] {
+            assert!(g.report(&[]).ends_with(outside_userns(refused_here())), "{g:?}");
+        }
+    }
 
     /// Where a run may write, as `gitrepo` asks it (`write_places`), is its policy's own (`policy`): the same
     /// list — the project, the toolchain's folders its probe found (a Go module cache here), `llm.sandbox-write`,

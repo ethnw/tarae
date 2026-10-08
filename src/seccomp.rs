@@ -14,6 +14,11 @@
 //! (what it reaches is tarae's to say, at its `connect`). Not served (no supervisor here), a unix datagram
 //! pair is refused too: its `sendto` reaches any datagram socket by path (journald's, `/dev/log`).
 //!
+//! Where tarae runs under an AppArmor profile with Ubuntu's restriction on (`tier::runs_refuse_userns`), a run
+//! makes no user namespace (Q4): `unshare` and `clone` with `CLONE_NEWUSER` refused, `clone3` answered as missing
+//! — its flags are in memory the filter can't read, and glibc falls back to `clone` (Docker's default profile
+//! does the same) — and joins none: `setns` refused.
+//!
 //! Like Landlock, the filter is the calling thread's — threads already running stay as they were — and what
 //! the thread starts afterwards inherits it, for good (`landlock::spawn` starts a command from a short-lived
 //! thread of its own).
@@ -83,20 +88,20 @@ enum Op {
     /// Equal to this?
     Is(u32, To, To),
     /// Any of these bits set?
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Has(u32, To, To),
 }
 
 /// The checks, in order — each jumps only forward: to the next, over a block that isn't its call's, or to an
-/// answer. The last block is `socket()`'s; any other call is allowed.
-fn ops(arch: u32, mode: Mode) -> Vec<Op> {
+/// answer. The last block is `socket()`'s; any other call is allowed. `no_userns`: no new user namespace.
+fn ops(arch: u32, mode: Mode, no_userns: bool) -> Vec<Op> {
     let nr = |n: libc::c_long| n as u32;
     let served = matches!(mode, Mode::Served | Mode::Routed);
-    let mut ops = vec![Op::Load(ARCH_AT), Op::Is(arch, To::Next, To::Missing), Op::Load(NR)];
-    #[cfg(target_arch = "x86_64")]
-    ops.push(Op::Has(X32_BIT, To::Missing, To::Next));
+    let mut ops = native(arch);
     for n in [libc::SYS_io_uring_setup, libc::SYS_io_uring_enter, libc::SYS_io_uring_register] {
         ops.push(Op::Is(nr(n), To::Missing, To::Next));
+    }
+    if no_userns {
+        ops.extend(userns_ops());
     }
     if served {
         // (`listen`: on a socket tarae put out of the session it would listen on this machine's every address)
@@ -168,9 +173,53 @@ fn ops(arch: u32, mode: Mode) -> Vec<Op> {
     ops
 }
 
-/// `ops` as classic BPF, the four answers after them.
-fn program(arch: u32, mode: Mode) -> Vec<libc::sock_filter> {
-    let ops = ops(arch, mode);
+/// The first checks of every filter: the call's ABI is this architecture's — another's, and x32's numbers, find
+/// no call at all — and its number loaded.
+fn native(arch: u32) -> Vec<Op> {
+    let mut ops = vec![Op::Load(ARCH_AT), Op::Is(arch, To::Next, To::Missing), Op::Load(NR)];
+    #[cfg(target_arch = "x86_64")]
+    ops.push(Op::Has(X32_BIT, To::Missing, To::Next));
+    ops
+}
+
+/// No new user namespace: `unshare` and `clone` with `CLONE_NEWUSER` refused, `clone3` missing (its flags are in
+/// memory the filter can't read; glibc falls back to `clone`) — and none joined: `setns` refused whatever it
+/// names, every namespace type and a pidfd alike. Under tarae's profile the user's own tools make capable user
+/// namespaces (the terminal's podman), owned by the same uid: one joined through `/proc/<pid>/ns/user` is as good
+/// as one made (Docker's default profile refuses `setns` outright for the same reason). Starts and ends on the
+/// call's number.
+fn userns_ops() -> Vec<Op> {
+    let nr = |n: libc::c_long| n as u32;
+    let mut ops = Vec::new();
+    // (both take their flags first, on every architecture; `CLONE_NEWUSER` is in the low half)
+    for n in [libc::SYS_unshare, libc::SYS_clone] {
+        ops.extend([
+            Op::Is(nr(n), To::Next, To::Skip(3)),
+            Op::Load(arg_low(0)),
+            Op::Has(libc::CLONE_NEWUSER as u32, To::Refuse, To::Next),
+            Op::Load(NR), // (back to the call's number for the next block)
+        ]);
+    }
+    ops.push(Op::Is(nr(libc::SYS_clone3), To::Missing, To::Next));
+    ops.push(Op::Is(nr(libc::SYS_setns), To::Refuse, To::Next));
+    ops
+}
+
+/// What runs outside the sandbox for Claude or a plugin gets (`spawn::Acts`, Q4): only no new user namespace —
+/// every other call as without a filter, sockets and all (another ABI's calls aside, as in every filter here).
+fn outside_ops(arch: u32) -> Vec<Op> {
+    let mut ops = native(arch);
+    ops.extend(userns_ops());
+    ops
+}
+
+/// `ops` for `mode` as classic BPF (`assemble`).
+fn program(arch: u32, mode: Mode, no_userns: bool) -> Vec<libc::sock_filter> {
+    assemble(&ops(arch, mode, no_userns))
+}
+
+/// `ops` as classic BPF, the four answers after them — falling off the last check is allowed.
+fn assemble(ops: &[Op]) -> Vec<libc::sock_filter> {
     let n = ops.len();
     let at = |i: usize, to: To| -> u8 {
         let target = match to {
@@ -211,12 +260,12 @@ pub fn available() -> bool {
 /// first (the kernel asks it of an unprivileged caller). Served: the listener tarae's supervisor answers on
 /// — once it has read a call, the caller waits for its answer through any signal but a fatal one
 /// (`WAIT_KILLABLE_RECV`, Linux 5.19: a call tarae did isn't started again by a signal; without it, older
-/// kernels).
-pub fn apply(mode: Mode) -> io::Result<Option<OwnedFd>> {
+/// kernels). `no_userns`: no new user namespace either (`tier::runs_refuse_userns`).
+pub fn apply(mode: Mode, no_userns: bool) -> io::Result<Option<OwnedFd>> {
     let Some(arch) = ARCH else {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "no seccomp filter for this architecture"));
     };
-    let mut prog = program(arch, mode);
+    let mut prog = program(arch, mode, no_userns);
     let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() };
     let listener = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
     let tries: &[libc::c_ulong] = match mode {
@@ -246,6 +295,48 @@ pub fn apply(mode: Mode) -> io::Result<Option<OwnedFd>> {
     }
 }
 
+/// The outside filter (`outside_ops`), made before it's put on — where it goes on in a fork's child (`pre_exec`),
+/// nothing may be allocated: `apply` makes raw calls only.
+pub struct NoUserns(Vec<libc::sock_filter>);
+
+impl NoUserns {
+    pub fn new() -> io::Result<NoUserns> {
+        let arch = ARCH.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Unsupported, "no seccomp filter for this architecture")
+        })?;
+        Ok(NoUserns(assemble(&outside_ops(arch))))
+    }
+
+    /// Puts it on the calling thread, and what it starts from now on, for good — `no_new_privs` first, which
+    /// the kernel asks of an unprivileged caller (so a setuid program it starts runs without its privileges).
+    /// Raw calls only: fit for a fork's child.
+    pub fn apply(&self) -> io::Result<()> {
+        let fprog = libc::sock_fprog { len: self.0.len() as u16, filter: self.0.as_ptr().cast_mut() };
+        // SAFETY: the program outlives the call (the kernel copies it; it never writes through the pointer).
+        unsafe {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, &raw const fprog) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `start` on a short-lived thread under the outside filter (`NoUserns`): what it starts (`posix_spawn`)
+/// inherits it; tarae's other threads don't — as `landlock::confined` does for a sandboxed run.
+pub fn outside<T: Send>(start: impl FnOnce() -> io::Result<T> + Send) -> io::Result<T> {
+    let filter = NoUserns::new()?;
+    std::thread::scope(|s| {
+        let t = std::thread::Builder::new().name("tarae-outside".into()).spawn_scoped(s, || {
+            filter.apply()?;
+            start()
+        })?;
+        t.join().unwrap_or_else(|_| Err(io::Error::other("its starting thread panicked")))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,8 +345,13 @@ mod tests {
 
     /// `f` on a thread of its own under the plain filter (the served one is the supervisor's to test).
     fn filtered<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        filtered_with(false, f)
+    }
+
+    /// `filtered`, with new user namespaces refused or not.
+    fn filtered_with<T: Send + 'static>(no_userns: bool, f: impl FnOnce() -> T + Send + 'static) -> T {
         std::thread::spawn(move || {
-            apply(Mode::Plain).expect("the filter applies");
+            apply(Mode::Plain, no_userns).expect("the filter applies");
             f()
         })
         .join()
@@ -366,7 +462,7 @@ mod tests {
         let (ready_tx, ready) = mpsc::channel();
         let (go, go_rx) = mpsc::channel::<()>();
         let filtered = std::thread::spawn(move || {
-            ready_tx.send(apply(Mode::Plain).map(drop)).unwrap();
+            ready_tx.send(apply(Mode::Plain, false).map(drop)).unwrap();
             go_rx.recv().unwrap();
             (socket(libc::AF_INET, libc::SOCK_STREAM), socket(libc::AF_UNIX, libc::SOCK_STREAM))
         });
@@ -379,52 +475,223 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The program run over calls as the kernel would (classic BPF: loads, a mask, jumps, returns): another
-    /// ABI and x32's numbers find no call at all; plain, as the tests above have it; served, the calls that
-    /// name an address go to tarae — a `sendto` only with one — and a unix stream socket may be made.
+    /// The program for `mode` (new user namespaces refused or not: `no_userns`) run over one call as the kernel
+    /// would (classic BPF: loads, a mask, jumps, returns) — the program this architecture's, the call `call_arch`'s.
+    fn eval_with(mode: Mode, no_userns: bool, call_arch: u32, nr: i64, args: &[u64]) -> u32 {
+        eval_prog(&program(ARCH.unwrap(), mode, no_userns), call_arch, nr, args)
+    }
+
+    /// `prog` run over one call as the kernel would.
+    fn eval_prog(prog: &[libc::sock_filter], call_arch: u32, nr: i64, args: &[u64]) -> u32 {
+        let mut data = [0u8; 64];
+        data[0..4].copy_from_slice(&(nr as i32).to_le_bytes());
+        data[4..8].copy_from_slice(&call_arch.to_le_bytes());
+        for (i, a) in args.iter().enumerate() {
+            data[16 + 8 * i..24 + 8 * i].copy_from_slice(&a.to_le_bytes());
+        }
+        let (mut acc, mut pc) = (0u32, 0usize);
+        loop {
+            let i = &prog[pc];
+            let code = u32::from(i.code);
+            match code {
+                c if c == libc::BPF_LD | libc::BPF_W | libc::BPF_ABS => {
+                    let k = i.k as usize;
+                    acc = u32::from_le_bytes(data[k..k + 4].try_into().unwrap());
+                    pc += 1;
+                }
+                c if c == libc::BPF_ALU | libc::BPF_AND | libc::BPF_K => {
+                    acc &= i.k;
+                    pc += 1;
+                }
+                c if c == libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K => {
+                    pc += 1 + usize::from(if acc == i.k { i.jt } else { i.jf });
+                }
+                c if c == libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K => {
+                    pc += 1 + usize::from(if acc & i.k != 0 { i.jt } else { i.jf });
+                }
+                c if c == libc::BPF_RET | libc::BPF_K => return i.k,
+                c => panic!("an instruction the kernel's checker would want to see: {c:#x}"),
+            }
+        }
+    }
+
+    const ALLOW: u32 = libc::SECCOMP_RET_ALLOW;
+    const EPERM: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    const ENOSYS: u32 = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
+
+    /// Where runs lose user namespaces (Q4), the program refuses exactly the calls that make one — `unshare` and
+    /// `clone` by their flag word, whatever else is asked with it or set in its high half; `clone3`, whose flags
+    /// it can't read, as missing (glibc's fallback is `clone`) — and the one that joins one, `setns`, whatever
+    /// it names (a user namespace, any type, a pidfd's set); and leaves the rest: other namespaces, a plain fork,
+    /// threads. Without the refusal every one of them goes on, in every mode.
+    #[test]
+    fn under_the_profile_a_run_is_refused_new_user_namespaces() {
+        let arch = ARCH.unwrap();
+        let user = libc::CLONE_NEWUSER as u64;
+        let fork = libc::SIGCHLD as u64;
+        let thread =
+            (libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD)
+                as u64;
+        for mode in [Mode::Plain, Mode::Served, Mode::Routed, Mode::OwnNetwork] {
+            let refused = |nr, args: &[u64]| eval_with(mode, true, arch, nr, args);
+            assert_eq!(refused(libc::SYS_unshare, &[user]), EPERM, "{mode:?}");
+            assert_eq!(refused(libc::SYS_unshare, &[user | libc::CLONE_NEWNET as u64 | (1 << 32)]), EPERM);
+            assert_eq!(refused(libc::SYS_clone, &[user | fork]), EPERM, "{mode:?}");
+            assert_eq!(refused(libc::SYS_clone, &[user | thread | (7 << 32)]), EPERM, "{mode:?}");
+            assert_eq!(refused(libc::SYS_clone3, &[0x1000, 88]), ENOSYS, "{mode:?}: its flags unread");
+            let setns = [[4, user], [4, 0], [4, (libc::CLONE_NEWNET | libc::CLONE_NEWUSER) as u64]];
+            for args in setns {
+                assert_eq!(refused(libc::SYS_setns, &args), EPERM, "{mode:?}: setns {args:?}");
+            }
+            assert_eq!(
+                refused(libc::SYS_unshare, &[libc::CLONE_NEWNS as u64]),
+                ALLOW,
+                "{mode:?}: not a user one"
+            );
+            assert_eq!(refused(libc::SYS_clone, &[fork]), ALLOW, "{mode:?}: a fork");
+            assert_eq!(refused(libc::SYS_clone, &[thread]), ALLOW, "{mode:?}: a thread");
+            assert_eq!(refused(libc::SYS_read, &[user]), ALLOW, "{mode:?}: another call, the same bit");
+            let kept = |nr, args: &[u64]| eval_with(mode, false, arch, nr, args);
+            for (nr, args) in [
+                (libc::SYS_unshare, [user]),
+                (libc::SYS_clone, [user | fork]),
+                (libc::SYS_clone3, [0]),
+                (libc::SYS_setns, [4]),
+            ] {
+                assert_eq!(kept(nr, &args), ALLOW, "{mode:?}: {nr} without the refusal");
+            }
+        }
+    }
+
+    /// A new user namespace asked three ways from this thread — `unshare`, `clone`, `clone3` with
+    /// `CLONE_NEWUSER` — each `None` (made) or its errno, and whether a plain fork works. Never changes this
+    /// process: `unshare` of a user namespace in a process with threads (the test's own, and this one) is the
+    /// kernel's `EINVAL` at most, and a child either clone makes ends at once.
+    fn userns_calls() -> (Option<i32>, Option<i32>, Option<i32>, bool) {
+        let errno = |r: libc::c_long| if r < 0 { io::Error::last_os_error().raw_os_error() } else { None };
+        // SAFETY: plain calls; a child one of them makes (stack 0: a copy, as a fork's) ends at once.
+        unsafe {
+            let unshare = errno(libc::unshare(libc::CLONE_NEWUSER) as libc::c_long);
+            let flags = (libc::CLONE_NEWUSER | libc::SIGCHLD) as libc::c_ulong;
+            let clone = libc::syscall(libc::SYS_clone, flags, 0, 0, 0, 0);
+            if clone == 0 {
+                libc::_exit(0);
+            }
+            let clone_errno = errno(clone);
+            let mut args = [0u64; 11]; // struct clone_args: its flags and exit signal set
+            (args[0], args[4]) = (libc::CLONE_NEWUSER as u64, libc::SIGCHLD as u64);
+            let clone3 = libc::syscall(libc::SYS_clone3, args.as_mut_ptr(), std::mem::size_of_val(&args));
+            if clone3 == 0 {
+                libc::_exit(0);
+            }
+            let clone3_errno = errno(clone3);
+            let fork = libc::syscall(libc::SYS_clone, libc::SIGCHLD as libc::c_ulong, 0, 0, 0, 0);
+            if fork == 0 {
+                libc::_exit(0);
+            }
+            for pid in [clone, clone3, fork].into_iter().filter(|p| *p > 0) {
+                libc::waitpid(pid as i32, std::ptr::null_mut(), 0);
+            }
+            (unshare, clone_errno, clone3_errno, fork > 0)
+        }
+    }
+
+    /// The same live, on a thread under the filter: a new user namespace by any of the three calls is refused
+    /// before the kernel looks at it (`EPERM`, not `unshare`'s `EINVAL` in a process with threads), a plain fork
+    /// still works. It counts only where the calls reach the kernel without tarae's filter — the control, the
+    /// same calls on a thread without it: Docker's default profile answers them `EPERM` and `ENOSYS` itself,
+    /// exactly what's asserted, so in a container under it (`cargo xtask linux test` without `--userns`) the test
+    /// couldn't fail and says it skips; a machine said to give namespaces (`TARAE_EXPECT_TIER`) fails instead.
+    #[test]
+    fn a_filtered_thread_makes_no_user_namespace() {
+        if !userns_calls_reach_the_kernel("a_filtered_thread_makes_no_user_namespace") {
+            return;
+        }
+        let (unshare, clone, clone3, fork) = filtered_with(true, userns_calls);
+        assert_eq!((unshare, clone, clone3), (Some(libc::EPERM), Some(libc::EPERM), Some(libc::ENOSYS)));
+        assert!(fork, "a plain fork");
+    }
+
+    /// The control of the live tests here: the calls of `userns_calls` on a thread without tarae's filter reach
+    /// the kernel (`unshare`'s `EINVAL` in a process with threads, both clones made) — else `test` says it skips,
+    /// and why (Docker's default profile answers them `EPERM` and `ENOSYS` itself: exactly what the tests assert),
+    /// or fails where a machine is said to give namespaces (`TARAE_EXPECT_TIER`).
+    fn userns_calls_reach_the_kernel(test: &str) -> bool {
+        let control = std::thread::spawn(userns_calls).join().unwrap();
+        if control == (Some(libc::EINVAL), None, None, true) {
+            return true;
+        }
+        let why = format!(
+            "the calls don't reach the kernel without tarae's filter here (unshare, clone, clone3, fork: \
+             {control:?}) — Docker's default seccomp profile refuses them itself"
+        );
+        if let Ok(want) = std::env::var("TARAE_EXPECT_TIER")
+            && ["A+", "A", "B+", "B"].contains(&want.trim())
+        {
+            panic!("tier {want} expected here: {why}");
+        }
+        let line = format!("{}seccomp::tests::{test} — {why}\n", crate::test_results::SELF_SKIP);
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        false
+    }
+
+    /// What acts for Claude or a plugin outside the sandbox (`NoUserns`, `spawn::Acts`) is refused user namespaces
+    /// exactly as a sandboxed run is — none made, none joined (`setns`, whatever it names) — and nothing else:
+    /// sockets of every family, other namespaces made, a namespace's file looked at, a pidfd, a fork, a thread go
+    /// through as without a filter. Another ABI's calls find none (their numbers aren't these).
+    #[test]
+    fn the_outside_filter_refuses_only_new_user_namespaces() {
+        let arch = ARCH.unwrap();
+        let prog = assemble(&outside_ops(arch));
+        let run = |nr, args: &[u64]| eval_prog(&prog, arch, nr, args);
+        let user = libc::CLONE_NEWUSER as u64;
+        assert_eq!(run(libc::SYS_unshare, &[user | (1 << 32)]), EPERM);
+        assert_eq!(run(libc::SYS_clone, &[user | libc::SIGCHLD as u64]), EPERM);
+        assert_eq!(run(libc::SYS_clone3, &[0x1000, 88]), ENOSYS);
+        for nstype in [user, 0, libc::CLONE_NEWNET as u64] {
+            assert_eq!(run(libc::SYS_setns, &[4, nstype]), EPERM, "setns {nstype:#x}");
+        }
+        let raw = (libc::AF_INET as u64, libc::SOCK_RAW as u64);
+        for (nr, args) in [
+            (libc::SYS_unshare, vec![libc::CLONE_NEWNS as u64]),
+            (libc::SYS_unshare, vec![libc::CLONE_NEWNET as u64]),
+            (libc::SYS_ioctl, vec![4, 0xb701]), // (NS_GET_USERNS: a namespace's owner looked at)
+            (libc::SYS_pidfd_open, vec![1, 0]),
+            (libc::SYS_clone, vec![libc::SIGCHLD as u64]),
+            (libc::SYS_socket, vec![raw.0, raw.1, 0]),
+            (libc::SYS_socket, vec![libc::AF_UNIX as u64, libc::SOCK_DGRAM as u64, 0]),
+            (libc::SYS_connect, vec![3]),
+            (libc::SYS_io_uring_setup, vec![1]),
+            (libc::SYS_read, vec![user]),
+        ] {
+            assert_eq!(run(nr, &args), ALLOW, "{nr} {args:?}: as without a filter");
+        }
+        assert_eq!(eval_prog(&prog, 0x4000_0003, libc::SYS_read, &[]), ENOSYS, "i386's calls");
+    }
+
+    /// The same live: a thread under the outside filter (`outside`, as Claude's run outside the sandbox starts)
+    /// makes no user namespace by any of the three calls; a plain fork still works.
+    #[test]
+    fn what_starts_outside_for_claude_makes_no_user_namespace() {
+        if !userns_calls_reach_the_kernel("what_starts_outside_for_claude_makes_no_user_namespace") {
+            return;
+        }
+        let (unshare, clone, clone3, fork) = outside(|| Ok(userns_calls())).unwrap();
+        assert_eq!((unshare, clone, clone3), (Some(libc::EPERM), Some(libc::EPERM), Some(libc::ENOSYS)));
+        assert!(fork, "a plain fork");
+    }
+
+    /// The program run over calls as the kernel would: another ABI and x32's numbers find no call at all;
+    /// plain, as the tests above have it; served, the calls that name an address go to tarae — a `sendto` only
+    /// with one — and a unix stream socket may be made.
     #[test]
     fn the_filter_knows_only_the_native_calls() {
         let arch = ARCH.unwrap();
         // (the program is this architecture's; the call says its own)
         let eval = |mode: Mode, call_arch: u32, nr: i64, args: &[u64]| -> u32 {
-            let prog = program(arch, mode);
-            let mut data = [0u8; 64];
-            data[0..4].copy_from_slice(&(nr as i32).to_le_bytes());
-            data[4..8].copy_from_slice(&call_arch.to_le_bytes());
-            for (i, a) in args.iter().enumerate() {
-                data[16 + 8 * i..24 + 8 * i].copy_from_slice(&a.to_le_bytes());
-            }
-            let (mut acc, mut pc) = (0u32, 0usize);
-            loop {
-                let i = &prog[pc];
-                let code = u32::from(i.code);
-                match code {
-                    c if c == libc::BPF_LD | libc::BPF_W | libc::BPF_ABS => {
-                        let k = i.k as usize;
-                        acc = u32::from_le_bytes(data[k..k + 4].try_into().unwrap());
-                        pc += 1;
-                    }
-                    c if c == libc::BPF_ALU | libc::BPF_AND | libc::BPF_K => {
-                        acc &= i.k;
-                        pc += 1;
-                    }
-                    c if c == libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K => {
-                        pc += 1 + usize::from(if acc == i.k { i.jt } else { i.jf });
-                    }
-                    c if c == libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K => {
-                        pc += 1 + usize::from(if acc & i.k != 0 { i.jt } else { i.jf });
-                    }
-                    c if c == libc::BPF_RET | libc::BPF_K => return i.k,
-                    c => panic!("an instruction the kernel's checker would want to see: {c:#x}"),
-                }
-            }
+            eval_with(mode, false, call_arch, nr, args)
         };
-        let (allow, eperm, enosys, tarae) = (
-            libc::SECCOMP_RET_ALLOW,
-            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
-            libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
-            libc::SECCOMP_RET_USER_NOTIF,
-        );
+        let (allow, eperm, enosys, tarae) = (ALLOW, EPERM, ENOSYS, libc::SECCOMP_RET_USER_NOTIF);
         let (inet, inet6, unix) = (libc::AF_INET as u64, libc::AF_INET6 as u64, libc::AF_UNIX as u64);
         let stream = (libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u64;
         let dgram = (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as u64;

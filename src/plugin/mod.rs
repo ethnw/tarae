@@ -36,9 +36,12 @@ use abi::Action;
 pub use abi::Event as PluginEvent;
 pub use abi::HostEvent as PluginHostEvent;
 pub use abi::Permission as PluginPermission;
+// (the sandbox's tests start a stand-in the way a plugin's spawn does)
 pub use abi::Side as PluginSide;
 pub use abi::Tone as PluginTone;
 use host::{Call, Host, Input, Manifest, Note};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use io::plugin_process;
 pub use panel::{PanelState as PluginPanelState, key as plugin_panel_key};
 pub use perm::Ask as PluginAsk;
 

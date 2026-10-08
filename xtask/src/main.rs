@@ -14,6 +14,7 @@
 //!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
 //! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see
 //!   [`linux`]).
+//! - `deb [--binary PATH]` — tarae as a `.deb`, its AppArmor profile beside it (see [`deb`]).
 //! - `stream [--model M] [prompt]`, `stream --file F` — one real streamed answer from the chat's model (`llm.model`),
 //!   timed line by line: its bursts, and what tarae's text batching adds to them (see [`stream`]).
 //! - `trace [offcpu|syscalls|pty] [scenario …]`, `trace test` — tarae measured with eBPF on Linux, in a
@@ -25,6 +26,7 @@ use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod deb;
 mod linux;
 mod perf;
 // (tarae's own: a pty close-on-exec from the start)
@@ -46,10 +48,11 @@ fn main() {
         // linux.rs)
         Some("linux") if args.get(1).is_some_and(|a| a == "prune") => linux::prune_cmd(&args[2..]),
         Some("linux") => linux::run(&args[1..]),
+        Some("deb") => deb::run(&args[1..]),
         Some("stream") => stream::run(&args[1..]),
         Some("trace") => trace::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy"
                 .into(),
         ),
     };
