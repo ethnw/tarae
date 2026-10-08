@@ -72,10 +72,26 @@ pub struct Keeper {
     /// Its session's network (`redirect`), where it was born with one: let go when it's gone — the owned table
     /// with tarae's socket (P4), and its netns with the sockets that hold it.
     pub network: Mutex<Option<super::redirect::Made>>,
+    /// 6g: where its runs' own cgroups are, or why they have none — None: not asked (no TPROXY network, or
+    /// `tier::Probed.cgroups` says why for every keeper).
+    pub runs_in: Option<Result<RunsIn, String>>,
+    /// Tests: what its birth's read-only step came to (`read_only`).
+    #[cfg(test)]
+    cgroupfs: Result<(), String>,
     chan: OwnedFd,
     pidfd: OwnedFd,
     state: Mutex<State>,
     changed: Condvar,
+}
+
+/// A keeper's scope (6g): each of its runs starts in a cgroup of its own right below it.
+#[derive(Clone, Debug)]
+pub struct RunsIn {
+    /// The scope's cgroup, as tarae's namespace — the machine's — names it.
+    pub scope: String,
+    /// The level a `socket cgroupv2` rule names a run's cgroup at (`cgroup::run_level`).
+    pub level: u32,
+    source: super::cgroup::Source,
 }
 
 #[derive(Default)]
@@ -107,6 +123,8 @@ struct State {
 struct Slot {
     /// `Started`'s pid and pidfd — or why it didn't start.
     started: Option<Result<(u32, Arc<OwnedFd>), String>>,
+    /// The id of its own cgroup (6g) — 0: it's in its keeper's.
+    cgroup: u64,
     /// Its `wait` status — or why it has none (the keeper ended first).
     exited: Option<Result<i32, String>>,
     /// A held run's end of its handoff socket: a byte on it once its pid is known, and it goes on to its exec.
@@ -191,7 +209,7 @@ pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, Stri
 /// itself whether there is one) — kept by nobody but the caller.
 pub(super) fn born_for_probe(root: &Path, ns: Ns, redirect: bool) -> io::Result<Arc<Keeper>> {
     let network = (redirect && ns.netns()).then_some(NetworkFor::Session);
-    Keeper::born_lo(root, None, ns, Families::here(), false, network)
+    Keeper::born_lo(root, None, ns, Families::here(), false, network, None)
 }
 
 /// The network a keeper born with `ns` gets: the session's, where it has a netns and the probe's landed (`probed`,
@@ -294,13 +312,17 @@ impl Keeper {
         Keeper::born_with(root, key, ns, Families::here())
     }
 
-    /// `born`, its `lo` carrying `families`' addresses.
+    /// `born`, its `lo` carrying `families`' addresses. With the session's network, a scope of its own where this
+    /// tarae's keepers get one (6g, `tier::Probed.cgroups`).
     fn born_with(root: &Path, key: Option<&str>, ns: Ns, families: Families) -> io::Result<Arc<Keeper>> {
-        Keeper::born_lo(root, key, ns, families, false, network_for(ns, &super::tier::get().redirect))
+        let probed = super::tier::get();
+        let network = network_for(ns, &probed.redirect);
+        let cgroups = network.as_ref().and(probed.cgroups.clone().ok());
+        Keeper::born_lo(root, key, ns, families, false, network, cgroups)
     }
 
     /// `born_with` — tests: the mirrors put on a device that isn't there (`off_lo`), the network another one
-    /// (None: none).
+    /// (None: none), the scope from where tests say (`cgroups`, None: none).
     fn born_lo(
         root: &Path,
         key: Option<&str>,
@@ -308,12 +330,19 @@ impl Keeper {
         families: Families,
         off_lo: bool,
         network: Option<NetworkFor>,
+        cgroups: Option<super::cgroup::Source>,
     ) -> io::Result<Arc<Keeper>> {
         let exe = exe()?;
         let (ours, theirs) = seqpacket()?;
         let null = open_null(libc::O_RDWR)?;
         let birth = Birth::new(families, off_lo, network.is_some() && ns.netns())?;
+        #[cfg(test)]
+        let birth = {
+            let seam = lock(&CGROUPFS_SEAMS).iter().find(|(r, _)| r == root).map(|(_, s)| *s);
+            Birth { seam, ..birth }
+        };
         let mut lo_missing = Families::default();
+        let mut cgroupfs = None;
         let argv: Vec<CString> = keeper_argv();
         let argv_p: Vec<*const libc::c_char> =
             argv.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
@@ -372,12 +401,23 @@ impl Keeper {
             if unsafe { libc::write(go.as_raw_fd(), [1u8].as_ptr().cast(), 1) } != 1 {
                 return Err(BirthError { step: BirthStep::Go, errno: errno() }.into());
             }
-            said_ready(ours.as_fd(), told, &mut lo_missing)
+            said_ready(ours.as_fd(), told, &mut lo_missing, &mut cgroupfs)
         })();
         let (ready, devices) = match ready {
             Ok(devices) => (Ok(()), devices),
             Err(e) => (Err(e), Vec::new()),
         };
+        // (6g: in a scope of its own before any run, its folder handed over — or why not, its runs in its cgroup;
+        // only where its birth made /sys/fs/cgroup read-only: else a run could move itself between the scope's
+        // cgroups, all the user's)
+        let runs_in = cgroups.filter(|_| ready.is_ok()).map(|source| -> Result<RunsIn, String> {
+            read_only(ns, cgroupfs)
+                .map_err(|why| format!("{why} — a run could move itself between cgroups"))?;
+            let scope = super::cgroup::place(&source, pid as u32)?;
+            channel::send(ours.as_fd(), &Msg::Cgroup, &[scope.dir.as_fd()])
+                .map_err(|e| format!("handing the keeper its scope: {e}"))?;
+            Ok(RunsIn { scope: scope.path, level: scope.level, source })
+        });
         let k = Arc::new(Keeper {
             pid: pid as u32,
             root: root.to_path_buf(),
@@ -385,6 +425,9 @@ impl Keeper {
             devices,
             lo_missing,
             network: Mutex::new(None),
+            runs_in,
+            #[cfg(test)]
+            cgroupfs: read_only(ns, cgroupfs),
             chan: ours,
             pidfd,
             state: Mutex::new(State { key: key.map(str::to_string), ..State::default() }),
@@ -433,10 +476,15 @@ impl Keeper {
                 }
             }
         }
+        let runs = match &k.runs_in {
+            None => String::new(),
+            Some(Ok(r)) => format!("; runs in cgroups of their own in {} (level {})", r.scope, r.level),
+            Some(Err(why)) => format!("; runs in its cgroup — no scope of its own: {why}"),
+        };
         crate::log::line(
             "sandbox",
             "info",
-            &format!("a keeper for {}: pid {}, {}", root.display(), k.pid, k.said()),
+            &format!("a keeper for {}: pid {}, {}{runs}", root.display(), k.pid, k.said()),
         );
         Ok(k)
     }
@@ -481,7 +529,23 @@ impl Keeper {
     fn heard(self: &Arc<Self>, msg: Msg, mut fds: Vec<OwnedFd>) {
         let mut s = lock(&self.state);
         match msg {
-            Msg::Started { id, pid } => {
+            Msg::Started { id, pid, cgroup, missed } => {
+                // (D5: a run that couldn't have its own cgroup started in its keeper's — said, not refused)
+                if let Some((step, errno)) = missed {
+                    crate::log::line(
+                        "sandbox",
+                        "info",
+                        &format!(
+                            "a run (keeper {}) started in its keeper's cgroup — {}: {}",
+                            self.pid,
+                            step.said(),
+                            io::Error::from_raw_os_error(errno)
+                        ),
+                    );
+                }
+                if let Some(slot) = s.runs.get_mut(&id) {
+                    slot.cgroup = cgroup;
+                }
                 let pidfd = fds.pop();
                 // (in a PID namespace its number is the keeper's: tarae's own from its pidfd, read while it
                 // waits for its byte)
@@ -640,6 +704,10 @@ impl Keeper {
                 _ => format!("it was ended by signal {}", info.si_status()),
             }
         };
+        // (its scope, once no process of its is in it)
+        if let Some(Ok(r)) = &self.runs_in {
+            super::cgroup::let_go(&r.source, &r.scope);
+        }
         self.gone(how);
     }
 
@@ -755,14 +823,14 @@ impl Keeper {
     }
 
     /// Asks for run `req` with its descriptors (the ruleset, stdin, stdout, stderr — and served or held, the
-    /// handoff socket's child end) and waits for its start (`STARTED_WITHIN`): its pid and pidfd. `hold`, a held
-    /// run's end of that socket: its byte goes once its pid is known (`heard`).
+    /// handoff socket's child end) and waits for its start (`STARTED_WITHIN`): its pid, pidfd and own cgroup's id
+    /// (0: none). `hold`, a held run's end of that socket: its byte goes once its pid is known (`heard`).
     fn run(
         &self,
         mut req: channel::Run,
         fds: &[BorrowedFd],
         hold: Option<Arc<OwnedFd>>,
-    ) -> io::Result<(u32, Arc<OwnedFd>)> {
+    ) -> io::Result<(u32, Arc<OwnedFd>, u64)> {
         let id = {
             let mut s = lock(&self.state);
             if let Some(why) = &s.gone {
@@ -784,11 +852,13 @@ impl Keeper {
         let deadline = Instant::now() + STARTED_WITHIN;
         let mut s = lock(&self.state);
         loop {
-            if let Some(started) = s.runs.get(&id).and_then(|r| r.started.clone()) {
+            if let Some((started, cgroup)) =
+                s.runs.get(&id).and_then(|r| Some((r.started.clone()?, r.cgroup)))
+            {
                 if started.is_err() {
                     s.runs.remove(&id);
                 }
-                return started.map_err(io::Error::other);
+                return started.map(|(pid, pidfd)| (pid, pidfd, cgroup)).map_err(io::Error::other);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -807,6 +877,10 @@ impl Keeper {
 pub struct Started {
     pub spawned: crate::spawn::Spawned,
     pub pidfd: Arc<OwnedFd>,
+    /// The id of the cgroup of its own it started in (6g) — None: its keeper's. Its rule's level is its keeper's
+    /// (`RunsIn.level`). Nothing reads it before 6d but tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub cgroup: Option<u64>,
 }
 
 impl Keeper {
@@ -899,9 +973,9 @@ impl Keeper {
         fds.extend(handoff.as_ref().map(|(_, theirs)| theirs.as_fd()));
         let ours = handoff.as_ref().map(|(ours, _)| ours.clone());
         let hold = ours.clone().filter(|_| req.held);
-        let (pid, pidfd) = self.run(req, &fds, hold)?;
+        let (pid, pidfd, cgroup) = self.run(req, &fds, hold)?;
         let spawned = crate::spawn::Spawned { pid, stdout: Some(out_r), stderr: Some(err_r) };
-        Ok((Started { spawned, pidfd }, ours))
+        Ok((Started { spawned, pidfd, cgroup: (cgroup != 0).then_some(cgroup) }, ours))
     }
 }
 
@@ -1041,11 +1115,53 @@ struct Birth {
     /// The session's network is made (`redirect`): a raw ICMP socket is made in its netns too, while the child still
     /// has the capability that takes (`CAP_NET_RAW`) — `Taken` answers refused datagrams on it.
     icmp: bool,
+    /// Tests: what its read-only step does instead (`CgroupfsSeam`, by the keeper's root).
+    #[cfg(test)]
+    seam: Option<CgroupfsSeam>,
 }
 
 /// What a birth's child says on its birth pipe of a mirror it couldn't make (`Families`): IPv4's, IPv6's —
 /// codes past `BirthStep`'s, as (code, errno); the birth goes on (`said_ready` takes the family off).
 const LO_NOTES: [u8; 2] = [0x80, 0x81];
+/// What a birth's child says of its read-only step (`cgroupfs_read_only`), every time it has a mount namespace: 0
+/// made read-only, `NOTHING_THERE`, `NOT_A_MOUNT`, else the errno it couldn't for. The birth goes on whatever it
+/// says (the step is 6g's second lock — Landlock never grants the hierarchy — and only 6g needs it): a keeper whose
+/// step didn't make it read-only gets no scope (`read_only`).
+const CGROUPFS_NOTE: u8 = 0x82;
+/// `/sys/fs/cgroup` isn't there in its mount namespace (checked: `statx` says so).
+const NOTHING_THERE: i32 = -1;
+/// `/sys/fs/cgroup` is there but no mount's root (checked: `STATX_ATTR_MOUNT_ROOT`, or its device its parent's).
+const NOT_A_MOUNT: i32 = -2;
+
+/// Tests: what a birth's read-only step does instead of its calls — fails with this errno, or finds no
+/// `mount_setattr` (answered `ENOSYS`: the pre-5.12 way, forced).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum CgroupfsSeam {
+    Fail(i32),
+    NoSetattr,
+}
+
+/// Tests: the seams asked for, by the keeper's root — one test's never reaches another's keeper.
+#[cfg(test)]
+static CGROUPFS_SEAMS: Mutex<Vec<(PathBuf, CgroupfsSeam)>> = Mutex::new(Vec::new());
+
+/// Whether a keeper whose birth said `said` (`CGROUPFS_NOTE`; None: nothing — no mount namespace of its own, `ns`)
+/// has `/sys/fs/cgroup` read-only in its namespace — else why not, for its log line: only such a keeper gets a
+/// scope (6g, the review's second pass). Pure.
+fn read_only(ns: Ns, said: Option<i32>) -> Result<(), String> {
+    match (ns.user, said) {
+        (false, _) => Err("it has no mount namespace of its own to make /sys/fs/cgroup read-only in".into()),
+        (true, Some(0)) => Ok(()),
+        (true, Some(NOTHING_THERE)) => Err("nothing is at /sys/fs/cgroup in its mount namespace".into()),
+        (true, Some(NOT_A_MOUNT)) => Err("/sys/fs/cgroup isn't a mount point in its mount namespace".into()),
+        (true, Some(e)) => Err(format!(
+            "/sys/fs/cgroup couldn't be made read-only there: {}",
+            io::Error::from_raw_os_error(e)
+        )),
+        (true, None) => Err("its birth said nothing of /sys/fs/cgroup".into()),
+    }
+}
 
 /// The address families tarae's own network has — what glibc's `AI_ADDRCONFIG` counts: an IPv4 address but
 /// loopback, an IPv6 one but loopback and link-local. The session's `lo` carries a documentation address of each
@@ -1118,7 +1234,16 @@ impl Birth {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(63);
-        Ok(Birth { go: pipe()?, told: pipe()?, last_cap, families, off_lo, icmp })
+        Ok(Birth {
+            go: pipe()?,
+            told: pipe()?,
+            last_cap,
+            families,
+            off_lo,
+            icmp,
+            #[cfg(test)]
+            seam: None,
+        })
     }
 
     /// tarae's ends, the child's closed: the go pipe's writer, the birth pipe's reader.
@@ -1126,7 +1251,8 @@ impl Birth {
         (self.go.1, self.told.0)
     }
 
-    /// Says a step that failed and was done without (`LO_NOTES`, `errno`) on the birth pipe; the child goes on.
+    /// Says how a step the birth goes on without went (`LO_NOTES`, `CGROUPFS_NOTE`; an errno or its own code) on the
+    /// birth pipe; the child goes on.
     ///
     /// # Safety
     /// The birth's child's: raw calls only.
@@ -1227,6 +1353,16 @@ impl Birth {
             {
                 self.failed(BirthStep::Shm, errno());
             }
+            // (said, never failed for: only 6g needs it, and only 6g is done without — `read_only`)
+            #[cfg(test)]
+            let (fail, setattr) = match self.seam {
+                Some(CgroupfsSeam::Fail(e)) => (Some(e), true),
+                Some(CgroupfsSeam::NoSetattr) => (None, false),
+                None => (None, true),
+            };
+            #[cfg(not(test))]
+            let (fail, setattr) = (None, true);
+            self.note(CGROUPFS_NOTE, cgroupfs_read_only(fail, setattr));
             if ns.net {
                 let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
                 let mut ifr = IfFlags { name: [0; 16], flags: 0, rest: [0; 22] };
@@ -1287,6 +1423,111 @@ impl Birth {
     }
 }
 
+/// `struct mount_attr` (Linux 5.12): what `mount_setattr` sets and clears.
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+const MOUNT_ATTR_RDONLY: u64 = 1;
+
+/// `statx`'s attribute: the path is the root of a mount (Linux 5.8).
+const STATX_ATTR_MOUNT_ROOT: u64 = 0x2000;
+
+/// `/sys/fs/cgroup` and what's mounted under it read-only in the birth's mount namespace (6g, the review's second
+/// finding): every cgroup there is the user's — the runs' own uid — under `Delegate=yes`, so with it writable a run
+/// could move itself into another run's cgroup (6d's rules would count it that run's), into or out of its keeper's
+/// scope, or change one. The keeper itself writes none by path: its runs' cgroups are made and entered through the
+/// scope's folder tarae opened in its own namespace, writable there. What it says (`CGROUPFS_NOTE`): 0, made
+/// read-only; `NOTHING_THERE` or `NOT_A_MOUNT`, each as checked (`statx`), never guessed from an error; else the
+/// errno it couldn't for (`fail`: tests say one instead of trying).
+///
+/// `mount_setattr` only adds read-only, leaving what the mount has locked as it is. Without it (before 5.12 —
+/// `setattr` false: tests force that way), a bind remount, which must keep every flag a mount from a more privileged
+/// namespace has locked or be refused (`EPERM`): nosuid, nodev, noexec and the atime ones — noatime, nodiratime,
+/// relatime, else strictatime — each as `statvfs` says it has them (said, not left to the kernel's keeping atime on a
+/// remount that names none).
+///
+/// # Safety
+/// The birth's child's: raw calls only.
+unsafe fn cgroupfs_read_only(fail: Option<i32>, setattr: bool) -> i32 {
+    let at = c"/sys/fs/cgroup";
+    // SAFETY: raw calls with live buffers of their sizes and NUL-terminated paths.
+    unsafe {
+        let mut stx: libc::statx = std::mem::zeroed();
+        let how = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT;
+        if libc::statx(libc::AT_FDCWD, at.as_ptr(), how, libc::STATX_BASIC_STATS, &mut stx) != 0 {
+            return if errno() == libc::ENOENT { NOTHING_THERE } else { errno() };
+        }
+        let root = match stx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT != 0 {
+            true => stx.stx_attributes & STATX_ATTR_MOUNT_ROOT != 0,
+            // (before 5.8: a mount's root is on another device than its parent)
+            false => {
+                let mut parent: libc::statx = std::mem::zeroed();
+                let up = libc::statx(
+                    libc::AT_FDCWD,
+                    c"/sys/fs".as_ptr(),
+                    how,
+                    libc::STATX_BASIC_STATS,
+                    &mut parent,
+                );
+                up != 0
+                    || (stx.stx_dev_major, stx.stx_dev_minor) != (parent.stx_dev_major, parent.stx_dev_minor)
+            }
+        };
+        if !root {
+            return NOT_A_MOUNT;
+        }
+        if let Some(e) = fail {
+            return e;
+        }
+        if setattr {
+            let attr = MountAttr { attr_set: MOUNT_ATTR_RDONLY, attr_clr: 0, propagation: 0, userns_fd: 0 };
+            let r = libc::syscall(
+                libc::SYS_mount_setattr,
+                libc::AT_FDCWD,
+                at.as_ptr(),
+                libc::AT_RECURSIVE,
+                &raw const attr,
+                std::mem::size_of::<MountAttr>(),
+            );
+            if r == 0 {
+                return 0;
+            }
+            if errno() != libc::ENOSYS {
+                return errno();
+            }
+        }
+        let mut st: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(at.as_ptr(), &mut st) != 0 {
+            return errno();
+        }
+        let mut kept = 0;
+        for (st_flag, ms) in [
+            (libc::ST_NOSUID, libc::MS_NOSUID),
+            (libc::ST_NODEV, libc::MS_NODEV),
+            (libc::ST_NOEXEC, libc::MS_NOEXEC),
+            (libc::ST_NOATIME, libc::MS_NOATIME),
+            (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
+            (libc::ST_RELATIME, libc::MS_RELATIME),
+        ] {
+            if st.f_flag & st_flag != 0 {
+                kept |= ms;
+            }
+        }
+        // (neither noatime nor relatime: strictatime, said as such)
+        if st.f_flag & (libc::ST_NOATIME | libc::ST_RELATIME) == 0 {
+            kept |= libc::MS_STRICTATIME;
+        }
+        let flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | kept;
+        let null = std::ptr::null::<libc::c_char>();
+        if libc::mount(null, at.as_ptr(), null, flags, std::ptr::null()) == 0 { 0 } else { errno() }
+    }
+}
+
 /// `fd` moved up past the descriptors a birth's child moves into 0–3 (close-on-exec).
 fn high(fd: OwnedFd) -> io::Result<OwnedFd> {
     // SAFETY: a dup of a descriptor we own; the new one is ours.
@@ -1318,11 +1559,12 @@ fn id_maps(pid: i32) -> Result<(), BirthError> {
 /// Waits for a new keeper's `Ready` on `chan` (`READY_WITHIN`) — or what its birth pipe `told` says failed
 /// first (its end, the exec, says nothing). Its device handles: those of `DEVICE_HANDLES`' places, each once
 /// (another name or a second one is left out, said in the log). A mirror its child couldn't make (`LO_NOTES`)
-/// is put in `missing` and said in the log.
+/// is put in `missing` and said in the log; what its read-only step said (`CGROUPFS_NOTE`), in `cgroupfs`.
 fn said_ready(
     chan: BorrowedFd,
     told: OwnedFd,
     missing: &mut Families,
+    cgroupfs: &mut Option<i32>,
 ) -> io::Result<Vec<(&'static str, OwnedFd)>> {
     let deadline = Instant::now() + READY_WITHIN;
     let mut told = Some(told);
@@ -1348,6 +1590,10 @@ fn said_ready(
             // SAFETY: a read into a buffer of its size.
             let n = unsafe { libc::read(t.as_raw_fd(), b.as_mut_ptr().cast(), b.len()) };
             let errno = i32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+            if n == 5 && b[0] == CGROUPFS_NOTE {
+                *cgroupfs = Some(errno);
+                continue;
+            }
             if n == 5 && LO_NOTES.contains(&b[0]) {
                 let (family, address, lookups) = match b[0] == LO_NOTES[0] {
                     true => (&mut missing.v4, SESSION_V4.to_string(), "IPv4"),
@@ -1514,6 +1760,8 @@ fn readable(fd: BorrowedFd, wait: Duration) -> io::Result<bool> {
 struct Child {
     pid: i32,
     error: Option<OwnedFd>,
+    /// Its own cgroup's name in the keeper's scope (6g), removed once it's reaped.
+    cgroup: Option<CString>,
 }
 
 /// The keeper (`tarae --sandbox-keeper`, first thing in `main`): its loop over its channel, its children's
@@ -1546,7 +1794,16 @@ pub fn main() -> ! {
         }
         (OwnedFd::from_raw_fd(CHANNEL_FD), OwnedFd::from_raw_fd(sfd))
     };
-    let mut k = Kept { chan, signals, children: HashMap::new(), reaped: 0 };
+    let mut k = Kept {
+        chan,
+        signals,
+        children: HashMap::new(),
+        reaped: 0,
+        scope: None,
+        clone3: true,
+        ran: false,
+        emptied: Vec::new(),
+    };
     // (handed with the first `Planted`, never to a run: close-on-exec from here)
     let mut raw = birth_raw();
     // SAFETY: getpid has no preconditions.
@@ -1620,6 +1877,8 @@ pub fn main() -> ! {
                     let fds: Vec<BorrowedFd> = made.iter().map(|(_, fd)| fd.as_fd()).collect();
                     let _ = k.say(&Msg::Planted { kinds, errno }, &fds);
                 }
+                // (6g: its scope, taken before any run only — each run's own cgroup made there from now on)
+                Ok(Some((Ok(Msg::Cgroup), mut fds))) if !k.ran && k.scope.is_none() => k.scope = fds.pop(),
                 // (a keeper's own kinds, or a malformed record: refused, and it goes on)
                 Ok(Some((Ok(_), _))) | Ok(Some((Err(_), _))) => {
                     let _ = k.say(&Msg::Failed { id: 0, errno: libc::EINVAL, step: Step::Request }, &[]);
@@ -1658,18 +1917,38 @@ struct Kept {
     children: HashMap<u64, Child>,
     /// Orphans reaped since `Reaped` last said so.
     reaped: u32,
+    /// 6g: its scope's folder (`Msg::Cgroup`), where each run's own cgroup is made.
+    scope: Option<OwnedFd>,
+    /// Whether `clone3` is still worth asking — not once it was answered `ENOSYS`.
+    clone3: bool,
+    /// A run was asked: its scope is taken no more.
+    ran: bool,
+    /// The cgroups of runs reaped, still to remove: one a run's leftovers are still in (`EBUSY`) goes once the
+    /// last of them is reaped (`reap`), or at the end (`end_all`).
+    emptied: Vec<CString>,
 }
+
+/// `CLONE_INTO_CGROUP` (Linux 5.7): the child starts in the cgroup `clone_args.cgroup` names, never in its parent's.
+const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 
 impl Kept {
     fn say(&self, msg: &Msg, fds: &[BorrowedFd]) -> io::Result<()> {
         channel::send(self.chan.as_fd(), msg, fds)
     }
 
-    /// Forks run `run` (its child: `child`), then says `Started` with its pidfd — or `Failed`.
+    /// Starts run `run` (its child: `child`), then says `Started` with its pidfd — or `Failed`. With a scope (6g),
+    /// in a cgroup of its own made there: `clone3(CLONE_INTO_CGROUP)`, so nothing of the run ever runs in the
+    /// keeper's (no `cgroup.procs` write after the fact, and its tail — spike6 Q4). That folder or that call failing,
+    /// it's forked as without a scope, in the keeper's cgroup — `Started` says why (D5: said, never refused).
     fn start(&mut self, run: channel::Run, fds: Vec<OwnedFd>) {
         let id = run.id;
+        self.ran = true;
         let failed = |k: &Kept, step, errno| {
             let _ = k.say(&Msg::Failed { id, errno, step }, &[]);
+        };
+        let exec = match Exec::of(&run) {
+            Ok(exec) => exec,
+            Err(e) => return failed(self, Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
         };
         let mut pipe = [0; 2];
         // SAFETY: a two-int array for the call to fill.
@@ -1678,30 +1957,75 @@ impl Kept {
         }
         // SAFETY: both just made, ours.
         let (error_r, error_w) = unsafe { (OwnedFd::from_raw_fd(pipe[0]), OwnedFd::from_raw_fd(pipe[1])) };
-        // SAFETY: the keeper is single-threaded (in tarae's binary; a test's keeper has libtest's idle main
-        // thread beside it), so the child may run ordinary code before its exec.
-        let pid = unsafe { libc::fork() };
-        if pid == 0 {
-            child(&run, &fds, self.chan.as_raw_fd(), error_w.as_raw_fd());
+        // (a scope, but `clone3` answered missing before: not asked again — no folder made for nothing — and each
+        // run said to start in the keeper's cgroup, its own not tried)
+        let mut missed = (self.scope.is_some() && !self.clone3).then_some((Step::Cgroup, libc::ENOSYS));
+        let mut started: Option<(libc::pid_t, OwnedFd, u64, CString)> = None;
+        if let Some(scope) = self.scope.as_ref().filter(|_| self.clone3) {
+            match run_cgroup(scope.as_fd(), id) {
+                Ok((name, dir, cgroup)) => {
+                    let mut pidfd: libc::c_int = -1;
+                    // SAFETY: the child is `child`, which allocates nothing and makes raw calls only on what was made
+                    // before (`Exec`) — `clone_into`'s contract.
+                    let pid = unsafe { clone_into(&mut pidfd, dir.as_raw_fd()) };
+                    if pid == 0 {
+                        child(&run, &exec, &fds, self.chan.as_raw_fd(), error_w.as_raw_fd());
+                    }
+                    if pid > 0 {
+                        // SAFETY: the pidfd `clone3` made for us.
+                        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
+                        started = Some((pid as libc::pid_t, pidfd, cgroup, name));
+                    } else {
+                        let e = errno();
+                        // (refused by a filter, or no such call: not asked again)
+                        self.clone3 &= e != libc::ENOSYS;
+                        remove_cgroup(scope.as_fd(), &name);
+                        missed = Some((Step::Fork, e));
+                    }
+                }
+                Err(e) => missed = Some((Step::Cgroup, e)),
+            }
         }
+        let (pid, pidfd, cgroup, name) = match started {
+            Some((pid, pidfd, cgroup, name)) => (pid, pidfd, cgroup, Some(name)),
+            None => {
+                // SAFETY: the child is `child` — raw calls on what was made before (`Exec`), as after a clone.
+                let pid = unsafe { libc::fork() };
+                if pid == 0 {
+                    child(&run, &exec, &fds, self.chan.as_raw_fd(), error_w.as_raw_fd());
+                }
+                if pid < 0 {
+                    return failed(self, Step::Fork, errno());
+                }
+                // SAFETY: plain call on our own child (not reaped yet: the pid is it).
+                let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+                if pidfd < 0 {
+                    let e = errno();
+                    // SAFETY: our own unreaped child.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    self.children.insert(id, Child { pid, error: None, cgroup: None });
+                    return failed(self, Step::Fork, e);
+                }
+                // SAFETY: just made, ours.
+                (pid, unsafe { OwnedFd::from_raw_fd(pidfd as RawFd) }, 0, None)
+            }
+        };
         drop(error_w);
         drop(fds);
-        if pid < 0 {
-            return failed(self, Step::Fork, errno());
-        }
-        // SAFETY: plain call on our own child (not reaped yet: the pid is it).
-        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
-        if pidfd < 0 {
-            let e = errno();
-            // SAFETY: our own unreaped child.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-            self.children.insert(id, Child { pid, error: None });
-            return failed(self, Step::Fork, e);
-        }
-        // SAFETY: just made, ours.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as RawFd) };
-        self.children.insert(id, Child { pid, error: Some(error_r) });
-        let _ = self.say(&Msg::Started { id, pid: pid as u32 }, &[pidfd.as_fd()]);
+        self.children.insert(id, Child { pid, error: Some(error_r), cgroup: name });
+        let started = Msg::Started { id, pid: pid as u32, cgroup, missed };
+        let _ = self.say(&started, &[pidfd.as_fd()]);
+    }
+
+    /// Removes the cgroups of runs reaped (`emptied`) — keeping those still holding what a run left.
+    fn empty_cgroups(&mut self) {
+        let Some(scope) = &self.scope else { return };
+        // (kept only while something is in it: one gone already is let go)
+        self.emptied.retain(|name| {
+            // SAFETY: a removal by name in the scope's folder, ours.
+            let r = unsafe { libc::unlinkat(scope.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+            r != 0 && errno() == libc::EBUSY
+        });
     }
 
     /// Reads run `id`'s failure pipe: a failure (step, errno) is said; its end (the exec closed it) closes it.
@@ -1736,7 +2060,9 @@ impl Kept {
                     if self.children.get(&id).is_some_and(|c| c.error.is_some()) {
                         self.failure(id);
                     }
-                    self.children.remove(&id);
+                    if let Some(name) = self.children.remove(&id).and_then(|c| c.cgroup) {
+                        self.emptied.push(name);
+                    }
                     let _ = self.say(&Msg::Exited { id, status }, &[]);
                 }
                 None => self.reaped += 1,
@@ -1746,6 +2072,8 @@ impl Kept {
             let _ = self.say(&Msg::Reaped { n: self.reaped }, &[]);
             self.reaped = 0;
         }
+        // (a run's cgroup goes with its last process: the run's own, else the last thing it left)
+        self.empty_cgroups();
     }
 
     /// `sig` to run `id`'s group (and itself) — only while unreaped: after, its pid may be another's.
@@ -1786,9 +2114,67 @@ impl Kept {
                 }
             }
         }
+        // (and with it every run's cgroup it could remove: `reap`'s last round)
         self.reap();
         std::process::exit(0)
     }
+}
+
+/// Run `id`'s own cgroup, made in the keeper's scope: its name there, its folder (for `clone3`) and its id (the
+/// folder's inode: a cgroup's id on a 64-bit kernel) — or the errno that stopped it.
+fn run_cgroup(scope: BorrowedFd, id: u64) -> Result<(CString, OwnedFd, u64), i32> {
+    let name = CString::new(format!("run-{id}")).map_err(|_| libc::EINVAL)?;
+    // SAFETY: a folder made and opened by name in the scope's folder, ours; a stat into a zeroed buffer.
+    unsafe {
+        if libc::mkdirat(scope.as_raw_fd(), name.as_ptr(), 0o755) != 0 {
+            return Err(errno());
+        }
+        let fd = libc::openat(
+            scope.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
+        );
+        if fd < 0 {
+            let e = errno();
+            remove_cgroup(scope, &name);
+            return Err(e);
+        }
+        let dir = OwnedFd::from_raw_fd(fd);
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(dir.as_raw_fd(), &mut st) != 0 {
+            let e = errno();
+            remove_cgroup(scope, &name);
+            return Err(e);
+        }
+        Ok((name, dir, st.st_ino))
+    }
+}
+
+/// Removes the cgroup `name` in `scope` (one no process is in).
+fn remove_cgroup(scope: BorrowedFd, name: &CString) {
+    // SAFETY: a removal by name in the scope's folder, ours.
+    unsafe { libc::unlinkat(scope.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+}
+
+/// A child in the cgroup whose folder is `cgroup`, with its pidfd from the start (in `pidfd`): `clone3(CLONE_PIDFD |
+/// CLONE_INTO_CGROUP)` — 0 in the child, its pid in the parent, -1 and errno on failure (`ENOSYS`: no such call, or
+/// a filter refused it). Without a new stack, as a fork.
+///
+/// # Safety
+/// The child is a copy of the calling process without fork's bookkeeping — glibc's atfork handlers don't run (its
+/// malloc locks aren't reset: one another thread held at the clone stays held), its cached thread id is the
+/// parent's: until its exec it must allocate and free nothing and make no call that needs a thread id (`raise`,
+/// `pthread_kill`) — raw calls on what was made before the clone only, as `child` does.
+unsafe fn clone_into(pidfd: &mut libc::c_int, cgroup: RawFd) -> libc::c_long {
+    let args = CloneArgs {
+        flags: libc::CLONE_PIDFD as u64 | CLONE_INTO_CGROUP,
+        pidfd: (pidfd as *mut libc::c_int) as u64,
+        exit_signal: libc::SIGCHLD as u64,
+        cgroup: cgroup as u64,
+        ..CloneArgs::default()
+    };
+    // SAFETY: a live `clone_args` of its size; the caller keeps the child as said.
+    unsafe { libc::syscall(libc::SYS_clone3, &raw const args, std::mem::size_of::<CloneArgs>()) }
 }
 
 /// `capset`'s header, version 3 (two data blocks of effective, permitted, inheritable).
@@ -1859,29 +2245,51 @@ fn own_usage() -> (u64, u64) {
     (kb("Rss:"), kb("Pss:"))
 }
 
-/// A run's child, after the keeper's fork: its channel closed, dumpable again (finding 1: tarae takes its
-/// listener with `pidfd_getfd`, which a non-dumpable process refuses without a namespace of tarae's), a session
-/// of its own, its stdio, its folder, its name (what Landlock's audit names), every signal unblocked, its
-/// Landlock rules, its seccomp filter — served, its listener's number handed to tarae and one byte back; held,
-/// one byte once tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno)
-/// and in its stderr, and it exits 127.
-fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
+/// A run's child, after the keeper's `clone3` or fork: its channel closed, dumpable again (finding 1: tarae takes
+/// its listener with `pidfd_getfd`, which a non-dumpable process refuses without a namespace of tarae's), a session
+/// of its own, its stdio, its folder, its name (what Landlock's audit names), every signal unblocked, its Landlock
+/// rules, its seccomp filter — served, its listener's number handed to tarae and one byte back; held, one byte once
+/// tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno) and in its stderr,
+/// and it exits 127.
+///
+/// Nothing here allocates or frees: a raw `clone3`'s child has none of fork's bookkeeping — glibc's malloc locks
+/// aren't reset in it, so one another thread held at the clone (a test's keeper has libtest's thread beside it)
+/// would never be let go. Its strings and its seccomp program come made (`Exec`); a failure is said in fixed bytes
+/// and its errno's digits (tarae says the errno's words, from `error`); every other call is a raw one.
+/// (`a_runs_child_allocates_nothing_before_its_exec` holds it.)
+fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
+    #[cfg(test)]
+    tests::NO_ALLOC.store(true, std::sync::atomic::Ordering::Relaxed);
     let fail = |step: Step, errno: i32| -> ! {
         let mut b = [step.code(); 5];
         b[1..].copy_from_slice(&errno.to_le_bytes());
-        let line = format!(
-            "tarae's sandbox couldn't start it — {}: {}\n",
-            step.said(),
-            io::Error::from_raw_os_error(errno)
-        );
+        // (the errno's digits, right to left, in a buffer of the stack's)
+        let mut digits = [0u8; 12];
+        let (mut n, mut at) = (errno.unsigned_abs(), digits.len());
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        let parts: [&[u8]; 4] = [
+            "tarae's sandbox couldn't start it — ".as_bytes(),
+            step.said().as_bytes(),
+            b": errno ",
+            &digits[at..],
+        ];
         // SAFETY: writes of buffers we own, then the end of this process.
         unsafe {
             libc::write(error, b.as_ptr().cast(), b.len());
-            libc::write(2, line.as_ptr().cast(), line.len());
+            for p in parts {
+                libc::write(2, p.as_ptr().cast(), p.len());
+            }
+            libc::write(2, b"\n".as_ptr().cast(), 1);
             libc::_exit(127)
         }
     };
-    let c = |s: &[u8]| CString::new(s).unwrap_or_default();
     let (ruleset, stdin, stdout, stderr) = (&fds[0], &fds[1], &fds[2], &fds[3]);
     // SAFETY: plain calls on this process and descriptors it holds.
     unsafe {
@@ -1893,10 +2301,10 @@ fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
                 fail(Step::Request, errno());
             }
         }
-        if libc::chdir(c(&run.cwd).as_ptr()) != 0 {
+        if libc::chdir(exec.cwd.as_ptr()) != 0 {
             fail(Step::Chdir, errno());
         }
-        libc::prctl(libc::PR_SET_NAME, c(&run.comm).as_ptr());
+        libc::prctl(libc::PR_SET_NAME, exec.comm.as_ptr());
         let mut none: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut none);
         libc::pthread_sigmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
@@ -1904,13 +2312,7 @@ fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
     if let Err(e) = crate::landlock::restrict_self(ruleset.as_fd()) {
         fail(Step::Landlock, e.raw_os_error().unwrap_or(libc::EIO));
     }
-    let mode = match run.net {
-        RunNet::Served => crate::seccomp::Mode::Served,
-        RunNet::Routed => crate::seccomp::Mode::Routed,
-        RunNet::Own => crate::seccomp::Mode::OwnNetwork,
-        RunNet::Plain => crate::seccomp::Mode::Plain,
-    };
-    let listener = match crate::seccomp::apply(mode, run.no_userns) {
+    let listener = match exec.filter.apply() {
         Ok(l) => l,
         Err(e) => fail(Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
     };
@@ -1941,15 +2343,54 @@ fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
         }
     }
     drop(listener);
-    let argv: Vec<CString> = run.argv.iter().map(|a| c(a)).collect();
-    let envp: Vec<CString> = run.envp.iter().map(|e| c(e)).collect();
-    let ptrs = |v: &[CString]| -> Vec<*const libc::c_char> {
-        v.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect()
-    };
-    let (argv_p, envp_p) = (ptrs(&argv), ptrs(&envp));
-    // SAFETY: the program, argv and envp are NUL-terminated arrays of strings held above.
-    unsafe { libc::execve(c(&run.program).as_ptr(), argv_p.as_ptr(), envp_p.as_ptr()) };
+    // SAFETY: the program, argv and envp are NUL-terminated arrays of strings `exec` holds.
+    unsafe { libc::execve(exec.program.as_ptr(), exec.argv_p.as_ptr(), exec.envp_p.as_ptr()) };
     fail(Step::Exec, errno())
+}
+
+/// What a run's child needs made — its strings as `chdir`, `prctl` and `execve` take them, its seccomp program —
+/// made by the keeper before the run's process is: the child allocates nothing (`child`).
+struct Exec {
+    program: CString,
+    cwd: CString,
+    comm: CString,
+    /// `argv_p` and `envp_p` point into these (their heap buffers: moving the `Vec`s moves none).
+    _argv: Vec<CString>,
+    _envp: Vec<CString>,
+    argv_p: Vec<*const libc::c_char>,
+    envp_p: Vec<*const libc::c_char>,
+    /// Its filter, for its `net` (`keeper::mode`'s), made; the child only puts it on.
+    filter: crate::seccomp::Filter,
+}
+
+impl Exec {
+    /// `run`'s (its strings hold no NUL: `channel::decode` refused any) — Err: no filter for this machine.
+    fn of(run: &channel::Run) -> io::Result<Exec> {
+        let mode = match run.net {
+            RunNet::Served => crate::seccomp::Mode::Served,
+            RunNet::Routed => crate::seccomp::Mode::Routed,
+            RunNet::Own => crate::seccomp::Mode::OwnNetwork,
+            RunNet::Plain => crate::seccomp::Mode::Plain,
+        };
+        let filter = crate::seccomp::Filter::new(mode, run.no_userns)?;
+        let c = |s: &[u8]| CString::new(s).unwrap_or_default();
+        let argv: Vec<CString> = run.argv.iter().map(|a| c(a)).collect();
+        let envp: Vec<CString> = run.envp.iter().map(|e| c(e)).collect();
+        let ptrs = |v: &[CString]| -> Vec<*const libc::c_char> {
+            v.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect()
+        };
+        let (argv_p, envp_p) = (ptrs(&argv), ptrs(&envp));
+        Ok(Exec {
+            program: c(&run.program),
+            cwd: c(&run.cwd),
+            comm: c(&run.comm),
+            _argv: argv,
+            _envp: envp,
+            argv_p,
+            envp_p,
+            filter,
+        })
+    }
 }
 
 /// Tests: tarae's number for the process a run of `k`'s calls `inner` (what `$!` or `$$` says inside a PID
@@ -2853,6 +3294,16 @@ mod tests {
             "protocols" => helper_protocols(),
             "udp" => helper_udp(&std::env::var("TARAE_TO").unwrap_or_default()),
             "within" => helper_within(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "cgroupwrites" => helper_cgroup_writes(),
+            // (`within` once `$TARAE_GO` is there — what the test wanted in place first is: 5 s at most)
+            "within_when" => {
+                let go = std::env::var_os("TARAE_GO").unwrap_or_default();
+                let by = Instant::now() + Duration::from_secs(5);
+                while !Path::new(&go).exists() && Instant::now() < by {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                helper_within(&std::env::var("TARAE_TO").unwrap_or_default())
+            }
             "asked" => helper_asked(&std::env::var("TARAE_TO").unwrap_or_default()),
             "lookup_timed" => {
                 let name = std::env::var("TARAE_NAME").unwrap_or_default();
@@ -3129,6 +3580,37 @@ mod tests {
             let _ = io::Write::write_all(&mut &s, format!("got {line}").as_bytes());
         }
         println!("helper: served");
+    }
+
+    /// `cgroupwrites` (6g): each way a run could move itself or change a cgroup, tried — its own cgroup's
+    /// `cgroup.procs`, a sibling run's (`$TARAE_SIBLING`), its keeper's scope's (`$TARAE_SCOPE`), the one above the
+    /// scope's (moving out of it), a folder made in the scope, a file of its own cgroup (`cgroup.max.descendants`):
+    /// `own=… sibling=… scope=… out=… mkdir=… file=…`, each `ok` or its errno.
+    fn helper_cgroup_writes() -> String {
+        let at = |c: &str| Path::new("/sys/fs/cgroup").join(c.trim_start_matches('/'));
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let own = own.lines().find_map(|l| l.strip_prefix("0::")).unwrap_or_default().to_string();
+        let scope = std::env::var("TARAE_SCOPE").unwrap_or_default();
+        let sibling = std::env::var("TARAE_SIBLING").unwrap_or_default();
+        let me = std::process::id().to_string();
+        let write = |p: PathBuf, v: &str| {
+            tried(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(p)
+                    .and_then(|mut f| io::Write::write_all(&mut f, v.as_bytes())),
+            )
+        };
+        let out = Path::new(&scope).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        format!(
+            "own={} sibling={} scope={} out={} mkdir={} file={}",
+            write(at(&own).join("cgroup.procs"), &me),
+            write(at(&sibling).join("cgroup.procs"), &me),
+            write(at(&scope).join("cgroup.procs"), &me),
+            write(at(&out).join("cgroup.procs"), &me),
+            tried(std::fs::create_dir(at(&scope).join("made-by-a-run"))),
+            write(at(&own).join("cgroup.max.descendants"), "0"),
+        )
     }
 
     /// `connect`: `$TARAE_TO` reached, `hello` written, its answer read: `reached <answer>`, or the errno.
@@ -3768,15 +4250,7 @@ mod tests {
             return;
         }
         let Some(rules) = open_rules("a_run_reads_no_details_outside_its_session") else { return };
-        // (`; :` keeps the shell, its arguments with it, from becoming `sleep`)
-        let mut target = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 30; :", "session-arg-marker"])
-            .env("TARAE_F2_MARKER", "session-env-marker")
-            .spawn()
-            .unwrap();
-        let read = |f: &str| std::fs::read(format!("/proc/{}/{f}", target.id())).unwrap();
-        let has = |bytes: &[u8], m: &str| bytes.windows(m.len()).any(|w| w == m.as_bytes());
-        assert!(has(&read("cmdline"), "session-arg-marker") && has(&read("environ"), "session-env-marker"));
+        let mut target = crate::landlock::stand_in("session-arg-marker", "session-env-marker");
         let k = keeper("details");
         // (the markers split in the script: its own command line mustn't carry them; the shell runs the loop
         // again as itself with the control's markers in its environment and arguments, both in place
@@ -4879,6 +5353,7 @@ mod tests {
             both,
             true,
             network_for(ns(), &super::super::tier::get().redirect),
+            None,
         )
         .expect("born, without its mirrors");
         assert_eq!(k.lo_missing, both, "neither carried");
@@ -4896,6 +5371,7 @@ mod tests {
             both,
             false,
             network_for(ns(), &super::super::tier::get().redirect),
+            None,
         )
         .expect("a keeper starts");
         assert_eq!(k.lo_missing, Families::default(), "both carried where they can be");
@@ -5128,6 +5604,647 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // ── step 6g: a cgroup per run ──────────────────────────────────────────────────────────────────────────
+
+    /// Set first thing in a run's child (`child`): from then on the test binary's allocator ends that process
+    /// with `ALLOCATED` at any allocation or free, before it touches malloc's locks.
+    pub(super) static NO_ALLOC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// The exit status of a run's child that allocated before its exec.
+    const ALLOCATED: i32 = 121;
+
+    /// The test binary's allocator: the system's, watched — `NO_ALLOC` set, any call ends the process.
+    struct Watched;
+
+    impl Watched {
+        fn check() {
+            if NO_ALLOC.load(std::sync::atomic::Ordering::Relaxed) {
+                // SAFETY: the end of this process (a run's child), nothing allocated.
+                unsafe { libc::_exit(ALLOCATED) }
+            }
+        }
+    }
+
+    // SAFETY: the system's allocator, a check before each call.
+    unsafe impl std::alloc::GlobalAlloc for Watched {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            Watched::check();
+            // SAFETY: as the caller's contract.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            Watched::check();
+            // SAFETY: as the caller's contract.
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            Watched::check();
+            // SAFETY: as the caller's contract.
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new: usize) -> *mut u8 {
+            Watched::check();
+            // SAFETY: as the caller's contract.
+            unsafe { std::alloc::System.realloc(ptr, layout, new) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: Watched = Watched;
+
+    /// The review's first finding: a run's child allocates and frees nothing between the keeper's `clone3` (or fork)
+    /// and its exec — a raw `clone3` doesn't reset glibc's malloc locks, so in a keeper with another thread (a test's)
+    /// an allocation there could wait for good. Shown deterministically rather than by catching a thread holding
+    /// malloc's lock across the clone (a race a test can only hope to hit): the test binary's allocator ends a child
+    /// that allocates (`NO_ALLOC`, exit 121) — every run of every test here would show it; this one goes through the
+    /// way out too (a folder that isn't there: `fail`'s words, made of fixed bytes and the errno's digits), through
+    /// `clone3` where the keeper has a scope (`--cgroup`), else the fork.
+    #[test]
+    fn a_runs_child_allocates_nothing_before_its_exec() {
+        let Some(rules) = open_rules("a_runs_child_allocates_nothing_before_its_exec") else { return };
+        let k = keeper("noalloc");
+        let (out, status) = sh_through(&k, &rules, "echo ran");
+        assert_eq!((status.code(), out.as_str()), (Some(0), "ran\n"), "the child allocated: {ALLOCATED}?");
+        let missing = std::env::temp_dir().join(format!("tarae-noalloc-{}-missing", std::process::id()));
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "true"]).current_dir(&missing);
+        let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
+        let mut err = String::new();
+        io::Read::read_to_string(&mut s.spawned.stderr.unwrap(), &mut err).unwrap();
+        let status = crate::spawn::wait(s.spawned.pid).unwrap();
+        assert_eq!(status.code(), Some(127), "its way out, not an allocation ({ALLOCATED}): {err}");
+        let said = format!("tarae's sandbox couldn't start it — its folder: errno {}\n", libc::ENOENT);
+        assert_eq!(err, said);
+        let way = if matches!(k.runs_in, Some(Ok(_))) { "clone3 into its cgroup" } else { "fork" };
+        let line = format!("a run's child, by {way}: nothing allocated before its exec\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        k.end();
+    }
+
+    /// Whether this system's keepers get a scope of their own, each run a cgroup of its own (6g: with the session's
+    /// network, where `tier::Probed.cgroups` says so — in tests only a folder `cargo xtask linux --cgroup` gives) —
+    /// else says the test skips itself, and why. A machine said to give them (`TARAE_EXPECT_CGROUP`, which `--cgroup`
+    /// sets) fails instead.
+    fn cgroups_here(test: &str) -> bool {
+        if !network_here(test) {
+            return false;
+        }
+        match &super::super::tier::get().cgroups {
+            Ok(_) => true,
+            Err(why) => {
+                if std::env::var_os("TARAE_EXPECT_CGROUP").is_some() {
+                    panic!("{test}: a cgroup per run expected here (TARAE_EXPECT_CGROUP), none — {why}");
+                }
+                let line = format!(
+                    "{}sandbox::keeper::tests::{test} — no cgroup per run here: {why}\n",
+                    crate::test_results::SELF_SKIP
+                );
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+                false
+            }
+        }
+    }
+
+    /// `k`'s scope, as it must have one here.
+    fn scope_of(k: &Keeper) -> RunsIn {
+        match &k.runs_in {
+            Some(Ok(r)) => r.clone(),
+            other => panic!("a keeper without its scope: {other:?}"),
+        }
+    }
+
+    /// A run's own cgroup's folder, as tarae sees the hierarchy.
+    fn folder(cgroup: &str) -> PathBuf {
+        Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'))
+    }
+
+    /// 6g: each run starts in a cgroup of its own right below its keeper's scope — not the keeper's, not another
+    /// run's — and what it forks is in its run's (a child inherits it: what a run leaves stays its run's, as 6d's
+    /// rules will see it — spike6 Q2). `Started` says that cgroup's id: its folder's inode, what a rule compares.
+    #[test]
+    fn each_run_is_in_its_own_cgroup() {
+        use std::io::BufRead;
+        use std::os::unix::fs::MetadataExt;
+        let test = "each_run_is_in_its_own_cgroup";
+        if !cgroups_here(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let k = keeper("cgroups");
+        let scope = scope_of(&k).scope;
+        assert_eq!(super::super::cgroup::cgroup_of(k.pid), Ok(scope.clone()), "the keeper is in its scope");
+        // (the run's shell's cgroup and its child's — sed's own — said, then it waits in its cgroup)
+        let script = "sed -n 's/^0:://p' /proc/$$/cgroup /proc/self/cgroup; exec sleep 30";
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script]);
+        let runs: Vec<(Started, Vec<String>)> = (0..2)
+            .map(|_| {
+                let mut s =
+                    k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
+                let lines = std::io::BufReader::new(s.spawned.stdout.take().unwrap());
+                let said = lines.lines().take(2).map(Result::unwrap).collect();
+                (s, said)
+            })
+            .collect();
+        let own: Vec<&String> = runs.iter().map(|(_, said)| &said[0]).collect();
+        assert_ne!(own[0], own[1], "each its own");
+        for (s, said) in &runs {
+            assert!(said[0].starts_with(&format!("{scope}/run-")), "right below the scope: {said:?}");
+            assert_eq!(said[1], said[0], "its child in its cgroup");
+            let ino = std::fs::metadata(folder(&said[0])).unwrap().ino();
+            assert_eq!(s.cgroup, Some(ino), "Started says its id");
+        }
+        for (s, _) in runs {
+            crate::dap::term_group(s.spawned.pid);
+            crate::spawn::wait(s.spawned.pid).unwrap();
+        }
+        k.end();
+    }
+
+    /// 6g, the real path (by hand — `target/sb/profile6h/m11-live.sh`: a machine with the user's systemd manager, as
+    /// the user, outside a container — whose cgroup the manager couldn't move a keeper out of): a keeper is put in a
+    /// scope of its own by the user's manager over the user bus (`StartTransientUnit`, `Delegate=yes`) — under
+    /// `user@<uid>.service`, the user's — its run starts in a cgroup of its own right below it, and the scope is gone
+    /// once the keeper is (`CollectMode=inactive-or-failed`). In the session's user and mount namespaces (no network,
+    /// no PID one): a scope goes only to a keeper whose birth made `/sys/fs/cgroup` read-only in a mount namespace of
+    /// its own — so on Ubuntu with its restriction, only as `/usr/bin/tarae` under tarae's profile. How long the birth
+    /// took, said.
+    #[test]
+    #[ignore = "the user's own systemd manager: by hand on a VM (target/sb/profile6h/m11-live.sh)"]
+    fn a_keeper_gets_its_own_delegated_scope() {
+        use std::os::unix::fs::MetadataExt;
+        let bus = super::super::cgroup::user_bus(
+            std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().as_deref(),
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).as_deref(),
+            |p| p.exists(),
+        )
+        .expect("a user bus");
+        let Some(rules) = open_rules("a_keeper_gets_its_own_delegated_scope") else { return };
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-scope", std::process::id()));
+        let source = super::super::cgroup::Source::UserBus(bus);
+        let t0 = Instant::now();
+        let k = Keeper::born_lo(
+            &root,
+            None,
+            Ns::session(false, false),
+            Families::here(),
+            false,
+            None,
+            Some(source),
+        )
+        .expect("a keeper starts");
+        let born = t0.elapsed();
+        let scope = scope_of(&k).scope;
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert!(scope.contains(&format!("/user@{uid}.service/")) && scope.ends_with(".scope"), "{scope}");
+        assert_eq!(super::super::cgroup::cgroup_of(k.pid), Ok(scope.clone()), "the keeper is in it");
+        assert_eq!(std::fs::metadata(folder(&scope)).unwrap().uid(), uid, "delegated: the user's");
+        let (out, status) = sh_through(&k, &rules, "sed -n 's/^0:://p' /proc/self/cgroup");
+        assert!(status.success(), "{out}");
+        assert_eq!(out.trim(), format!("{scope}/run-1"), "its run in a cgroup of its own");
+        k.end();
+        assert!(gone_soon(&folder(&scope)), "the scope went with its keeper");
+        let line = format!("a keeper in {scope}: born in {} ms with its scope\n", born.as_millis());
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+    }
+
+    /// The folder the tests' scopes go in (`TARAE_TEST_CGROUP`), where this system gives a keeper the session's
+    /// namespaces too — a scope goes only to one with a mount namespace of its own — else says the test skips itself,
+    /// and why (`TARAE_EXPECT_CGROUP`: fails instead).
+    fn given_folder(test: &str) -> Option<PathBuf> {
+        if !namespaced(test) {
+            return None;
+        }
+        match std::env::var_os("TARAE_TEST_CGROUP") {
+            Some(folder) => Some(folder.into()),
+            None if std::env::var_os("TARAE_EXPECT_CGROUP").is_some() => {
+                panic!("{test}: a scope's folder expected (TARAE_EXPECT_CGROUP)")
+            }
+            None => {
+                let line = format!(
+                    "{}sandbox::keeper::tests::{test} — no folder for a scope (TARAE_TEST_CGROUP)\n",
+                    crate::test_results::SELF_SKIP
+                );
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+                None
+            }
+        }
+    }
+
+    /// The review's second pass, its first finding: a birth whose read-only step fails (here told to, `EPERM`) is a
+    /// birth all the same — the step is 6g's second lock, not the keeper's — the keeper there, with no scope (its runs
+    /// in its own cgroup), why said on its line. Before, it failed every keeper's birth, 6g or not.
+    #[test]
+    fn a_birth_goes_on_where_cgroupfs_cant_be_made_read_only() {
+        let test = "a_birth_goes_on_where_cgroupfs_cant_be_made_read_only";
+        let Some(given) = given_folder(test) else { return };
+        let Some(rules) = open_rules(test) else { return };
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-ro-fails", std::process::id()));
+        lock(&CGROUPFS_SEAMS).push((root.clone(), CgroupfsSeam::Fail(libc::EPERM)));
+        let captured = crate::log::capture();
+        let source = super::super::cgroup::Source::Given(given.clone());
+        let born = Keeper::born_lo(&root, None, ns(), Families::here(), false, None, Some(source));
+        lock(&CGROUPFS_SEAMS).retain(|(r, _)| *r != root);
+        let k = born.expect("born all the same");
+        let why = match &k.runs_in {
+            Some(Err(why)) => why.clone(),
+            other => panic!("a scope where /sys/fs/cgroup wasn't read-only: {other:?}"),
+        };
+        let eperm = io::Error::from_raw_os_error(libc::EPERM);
+        assert!(why.contains(&format!("couldn't be made read-only there: {eperm}")), "{why}");
+        assert!(!given.join(format!("keeper-{}", k.pid)).exists(), "never put in one");
+        let (out, _) = sh_through(&k, &rules, "sed -n 's/^0:://p' /proc/self/cgroup");
+        let keepers = super::super::cgroup::cgroup_of(k.pid).unwrap();
+        assert_eq!(out.trim(), keepers, "its run in its keeper's cgroup");
+        let said = format!("a keeper for {}: pid {}", root.display(), k.pid);
+        let line = captured.lines().into_iter().find(|l| l.contains(&said)).expect("its line");
+        assert!(line.contains("runs in its cgroup — no scope of its own: ") && line.contains(&why), "{line}");
+        k.end();
+    }
+
+    /// The review's second pass, its third finding: a scope goes only to a keeper whose birth made `/sys/fs/cgroup`
+    /// read-only in a mount namespace of its own. One born without namespaces (tier C's) has none to do it in: its runs
+    /// could move themselves between the scope's cgroups, all the user's — so it gets no scope (never even asked for
+    /// one), said; its runs in its own cgroup.
+    #[test]
+    fn a_scope_goes_only_to_a_keeper_whose_cgroupfs_is_read_only() {
+        let test = "a_scope_goes_only_to_a_keeper_whose_cgroupfs_is_read_only";
+        let Some(given) = given_folder(test) else { return };
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-no-mntns", std::process::id()));
+        let source = super::super::cgroup::Source::Given(given.clone());
+        let k = Keeper::born_lo(&root, None, Ns::NONE, Families::here(), false, None, Some(source))
+            .expect("born");
+        match &k.runs_in {
+            Some(Err(why)) => assert!(why.contains("no mount namespace of its own"), "{why}"),
+            other => panic!("a scope for a keeper without a mount namespace: {other:?}"),
+        }
+        assert!(!given.join(format!("keeper-{}", k.pid)).exists(), "never put in one");
+        k.end();
+    }
+
+    /// The review's second pass, its second finding: without `mount_setattr` (answered `ENOSYS` — the pre-5.12 way,
+    /// forced), the read-only step's bind remount keeps every flag the mount has locked — here a tmpfs over
+    /// `/sys/fs/cgroup` mounted nosuid, nodev, noexec, noatime in the scene's own user and mount namespaces, so locked
+    /// for the keeper's (a namespace below): a remount losing one is refused. In a process of its own
+    /// (`cgroupfs_fallback_scene`); what a run of the keeper's sees: the mount read-only with its flags, a write
+    /// `EROFS`.
+    #[test]
+    fn without_mount_setattr_the_remount_keeps_the_mounts_flags() {
+        use std::os::unix::process::CommandExt;
+        if !namespaced("without_mount_setattr_the_remount_keeps_the_mounts_flags") {
+            return;
+        }
+        let mut cmd = scene_cmd("cgroupfs_fallback_scene", &[]);
+        // SAFETY: plain calls with no arguments.
+        let (u, g) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let maps: Vec<(&'static std::ffi::CStr, Vec<u8>)> = vec![
+            (c"/proc/self/setgroups", b"deny".to_vec()),
+            (c"/proc/self/uid_map", format!("{u} {u} 1").into_bytes()),
+            (c"/proc/self/gid_map", format!("{g} {g} 1").into_bytes()),
+        ];
+        // SAFETY: in the forked child before its exec: raw calls only, on strings made before the fork.
+        unsafe {
+            cmd.pre_exec(move || {
+                let null = std::ptr::null::<libc::c_char>();
+                if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                for (path, map) in &maps {
+                    let fd = libc::open(path.as_ptr(), libc::O_WRONLY);
+                    if fd < 0 || libc::write(fd, map.as_ptr().cast(), map.len()) != map.len() as isize {
+                        return Err(io::Error::last_os_error());
+                    }
+                    libc::close(fd);
+                }
+                let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOATIME;
+                if libc::mount(null, c"/".as_ptr(), null, libc::MS_REC | libc::MS_PRIVATE, std::ptr::null())
+                    != 0
+                    || libc::mount(
+                        c"tmpfs".as_ptr(),
+                        c"/sys/fs/cgroup".as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        flags,
+                        std::ptr::null(),
+                    ) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let want = "read-only=ok opts=ro,nosuid,nodev,noexec,noatime write=Read-only file system";
+        assert_eq!(said_by("cgroupfs_fallback_scene", cmd), want);
+    }
+
+    /// `without_mount_setattr_the_remount_keeps_the_mounts_flags`' scene, in the user and mount namespaces its test
+    /// made (`/sys/fs/cgroup` a tmpfs there): a keeper born in namespaces of its own with `mount_setattr` answered
+    /// missing (`CgroupfsSeam::NoSetattr`), and a run of its: `scene: read-only=<ok or why> opts=<the mount's, as the
+    /// run sees it> write=<a file made there>`.
+    #[test]
+    #[ignore = "run by without_mount_setattr_the_remount_keeps_the_mounts_flags in a process of its own"]
+    fn cgroupfs_fallback_scene() {
+        if std::env::var_os(SCENE).is_none() {
+            return;
+        }
+        let rules = open_rules("cgroupfs_fallback_scene").expect("Landlock");
+        let root = PathBuf::from("/tarae-keeper-cgroupfs-fallback");
+        lock(&CGROUPFS_SEAMS).push((root.clone(), CgroupfsSeam::NoSetattr));
+        let k = Keeper::born_lo(&root, None, Ns::session(false, false), Families::here(), false, None, None)
+            .expect("born");
+        let read_only = match &k.cgroupfs {
+            Ok(()) => "ok".to_string(),
+            Err(why) => why.clone(),
+        };
+        let script = "awk '$5 == \"/sys/fs/cgroup\" { print $6 }' /proc/self/mountinfo";
+        let (opts, _) = sh_through(&k, &rules, script);
+        // (the shell's own words for a file it can't make — `…: Read-only file system`, the errno's text)
+        let (made, _) = sh_through(&k, &rules, "( : > /sys/fs/cgroup/made-by-a-run ) 2>&1 && echo ok");
+        let write = made.trim().rsplit(": ").next().unwrap_or_default().to_string();
+        k.end();
+        // (the tmpfs is mounted over the hierarchy: the last line at that place is the mount the run sees)
+        let top = opts.trim().lines().last().unwrap_or_default();
+        println!("scene: read-only={read_only} opts={top} write={write}");
+    }
+
+    /// The keeper's lines in `captured` saying a run started in its keeper's cgroup: what kept it from its own.
+    fn missed_said(captured: &crate::log::Capture, k: &Keeper) -> Vec<String> {
+        let mark = format!("a run (keeper {}) started in its keeper's cgroup — ", k.pid);
+        captured.lines().iter().filter_map(|l| l.split_once(&mark).map(|(_, why)| why.to_string())).collect()
+    }
+
+    /// The review's third finding, D5's "said, never refused": a run whose own cgroup can't be made (here the scope
+    /// takes no more — `cgroup.max.descendants` 0, so `mkdirat` is `EAGAIN`) starts all the same, in its keeper's
+    /// cgroup; `Started` has no id of its own and why is said.
+    #[test]
+    fn a_run_without_its_own_cgroup_starts_in_its_keepers_said() {
+        let test = "a_run_without_its_own_cgroup_starts_in_its_keepers_said";
+        if !cgroups_here(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let k = keeper("cgroup-full");
+        let scope = scope_of(&k).scope;
+        let max = folder(&scope).join("cgroup.max.descendants");
+        std::fs::write(&max, "0").unwrap();
+        let captured = crate::log::capture();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sed -n 's/^0:://p' /proc/self/cgroup"]);
+        let started = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain);
+        std::fs::write(&max, "max").unwrap();
+        let s = started.expect("started all the same");
+        assert_eq!(s.cgroup, None, "no cgroup of its own");
+        let mut out = String::new();
+        io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
+        assert!(crate::spawn::wait(s.spawned.pid).unwrap().success());
+        assert_eq!(out.trim(), scope, "in its keeper's: sed, its child, is");
+        let why = io::Error::from_raw_os_error(libc::EAGAIN);
+        assert_eq!(missed_said(&captured, &k), [format!("its own cgroup: {why}")]);
+        k.end();
+    }
+
+    /// The review's third finding: where `clone3` answers `ENOSYS` (a filter's — the scene's own), a keeper with a
+    /// scope says its first run started in its cgroup for that, and asks it no more — no folder made for nothing —
+    /// each later run said not to have tried (`its own cgroup`, not `starting it`).
+    #[test]
+    fn clone3_missing_is_asked_once() {
+        if given_folder("clone3_missing_is_asked_once").is_none() {
+            return;
+        }
+        let no = io::Error::from_raw_os_error(libc::ENOSYS);
+        let want = format!("run1=starting it: {no} run2=its own cgroup: {no} run3=its own cgroup: {no}");
+        assert_eq!(scene("clone3_missing_scene", &[]), want);
+    }
+
+    /// `clone3_missing_is_asked_once`'s scene: this thread's `clone3` answered `ENOSYS` (a filter of its own — the
+    /// whole process is the scene's, the keeper born from it inherits it), a keeper in the session's user and mount
+    /// namespaces (where a scope may go: `/sys/fs/cgroup` read-only there) put in a scope of its own in
+    /// `TARAE_TEST_CGROUP`, three runs. Prints `scene: run1=… run2=… run3=…`, what each said.
+    #[test]
+    #[ignore = "run by clone3_missing_is_asked_once in a process of its own"]
+    fn clone3_missing_scene() {
+        if std::env::var_os(SCENE).is_none() {
+            return;
+        }
+        let given = std::env::var_os("TARAE_TEST_CGROUP").unwrap();
+        let rules = open_rules("clone3_missing_scene").expect("Landlock");
+        let op = |code: u32, k: u32, jt: u8, jf: u8| libc::sock_filter { code: code as u16, jt, jf, k };
+        let ret = libc::BPF_RET | libc::BPF_K;
+        let filter = [
+            op(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+            op(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, libc::SYS_clone3 as u32, 0, 1),
+            op(ret, libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32, 0, 0),
+            op(ret, libc::SECCOMP_RET_ALLOW, 0, 0),
+        ];
+        let prog = libc::sock_fprog { len: filter.len() as u16, filter: filter.as_ptr().cast_mut() };
+        // SAFETY: plain prctls on this thread; the program is live for the call.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            let r = libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &raw const prog);
+            assert_eq!(r, 0, "{}", io::Error::last_os_error());
+        }
+        let captured = crate::log::capture();
+        let root = Path::new("/tarae-keeper-clone3-missing");
+        let source = super::super::cgroup::Source::Given(given.into());
+        let ns = Ns::session(false, false);
+        let k = Keeper::born_lo(root, None, ns, Families::here(), false, None, Some(source)).expect("born");
+        for _ in 0..3 {
+            let (_, status) = sh_through(&k, &rules, "true");
+            assert!(status.success());
+        }
+        let said = missed_said(&captured, &k);
+        k.end();
+        let said: Vec<String> = said.iter().enumerate().map(|(i, w)| format!("run{}={w}", i + 1)).collect();
+        println!("scene: {}", said.join(" "));
+    }
+
+    /// The review's third finding: a keeper takes its scope once, and only before any run — a second one sent (a
+    /// folder elsewhere), or one sent after a run, is refused (said) and its runs never go there. Else a scope could
+    /// be swapped under a session whose runs 6d's rules already name.
+    #[test]
+    fn a_scope_is_taken_once_and_before_any_run() {
+        let test = "a_scope_is_taken_once_and_before_any_run";
+        if !cgroups_here(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let given = std::env::var("TARAE_TEST_CGROUP").unwrap();
+        let decoy = Path::new(&given).join(format!("decoy-{}", std::process::id()));
+        std::fs::create_dir(&decoy).unwrap();
+        let hand = |k: &Keeper| {
+            let dir = std::fs::File::open(&decoy).unwrap();
+            channel::send(k.chan.as_fd(), &Msg::Cgroup, &[dir.as_fd()]).unwrap();
+        };
+        let cgroup_of_a_run = |k: &Keeper| {
+            let (out, status) = sh_through(k, &rules, "sed -n 's/^0:://p' /proc/self/cgroup");
+            assert!(status.success(), "{out}");
+            out.trim().to_string()
+        };
+        let captured = crate::log::capture();
+        let refused = |k: &Keeper| {
+            let said = format!("a run (keeper {}) failed at the request", k.pid);
+            captured.lines().iter().filter(|l| l.contains(&said)).count()
+        };
+        // A second scope, before any run
+        let k = keeper("scope-twice");
+        let scope = scope_of(&k).scope;
+        hand(&k);
+        assert!(cgroup_of_a_run(&k).starts_with(&format!("{scope}/run-")), "its first scope");
+        assert_eq!(refused(&k), 1, "the second refused, said");
+        k.end();
+        // A scope after a run
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-scope-late", std::process::id()));
+        let k = Keeper::born_lo(&root, None, ns(), Families::here(), false, None, None).expect("born");
+        let before = cgroup_of_a_run(&k);
+        hand(&k);
+        assert_eq!(cgroup_of_a_run(&k), before, "still its keeper's");
+        assert_eq!(refused(&k), 1, "the late one refused, said");
+        k.end();
+        std::fs::remove_dir(&decoy).ok();
+    }
+
+    /// `cgroupwrites` as a run of `k`'s under `rules` (made for `net`), beside a sibling run waiting in its own
+    /// cgroup: what it said. Anything it made in the scope (a write let through) is removed after.
+    fn cgroup_writes(k: &Keeper, rules: BorrowedFd, net: RunNet, cwd: &Path) -> String {
+        let scope = scope_of(k).scope;
+        let mut wait = std::process::Command::new("sh");
+        wait.args(["-c", "exec sleep 30"]);
+        let sibling = k.start(&wait, &crate::landlock::thread_name(), rules, net).unwrap();
+        let theirs = super::super::cgroup::cgroup_of(sibling.spawned.pid).unwrap();
+        assert!(theirs.starts_with(&format!("{scope}/run-")), "a sibling in its own: {theirs}");
+        let env = [("TARAE_SCOPE", scope.as_str()), ("TARAE_SIBLING", theirs.as_str())];
+        let said = helper_through(k, rules, net, "cgroupwrites", &env, Some(cwd));
+        crate::dap::term_group(sibling.spawned.pid);
+        crate::spawn::wait(sibling.spawned.pid).unwrap();
+        let _ = std::fs::remove_dir(folder(&scope).join("made-by-a-run"));
+        said
+    }
+
+    /// The review's second finding: a run moves no process between cgroups and changes none — not into a sibling
+    /// run's (6d's rules would count its connections that run's), not into its keeper's scope nor out of it (the
+    /// session's default, or the user's own `app.slice`), not making one in the scope, not writing its own cgroup's
+    /// files — though every one of them is the user's, the runs' own uid (`Delegate=yes`). With a run's own rules
+    /// (the project's): each refused, said which way.
+    #[test]
+    fn a_run_moves_nothing_between_cgroups_nor_changes_one() {
+        let test = "a_run_moves_nothing_between_cgroups_nor_changes_one";
+        if !cgroups_here(test) {
+            return;
+        }
+        let k = keeper("cgroup-writes");
+        let (_, c, root) = project_served("cgroup-writes", vec![], Some(&k), &[], Err("not served".into()));
+        let said = cgroup_writes(&k, c.rules_fd(), c.net, &root);
+        let line = format!("a run's writes to cgroups, under its own rules: {said}\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        assert!(said.starts_with("own=") && !said.contains("=ok"), "{said}");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same, with Landlock out of the way (rules granting every write): the session's mount namespace holds it
+    /// alone — `/sys/fs/cgroup` is read-only there (`Birth::child`), each write `EROFS`. Two locks: a run's rules
+    /// never grant the hierarchy, and a grant that did (a setting, a card) meets the read-only mount.
+    #[test]
+    fn the_sessions_cgroup_hierarchy_is_read_only() {
+        let test = "the_sessions_cgroup_hierarchy_is_read_only";
+        if !cgroups_here(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let k = keeper("cgroup-ro");
+        let root = std::env::temp_dir();
+        let said = cgroup_writes(&k, rules.fd(), RunNet::Plain, &root);
+        let e = libc::EROFS;
+        let want = format!("own={e} sibling={e} scope={e} out={e} mkdir={e} file={e}");
+        assert_eq!(said, want, "every write refused by the mount, Landlock granting it");
+        k.end();
+    }
+
+    /// Whether `path` is gone within 2 s.
+    fn gone_soon(path: &Path) -> bool {
+        let by = Instant::now() + Duration::from_secs(2);
+        while path.exists() && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !path.exists()
+    }
+
+    /// 6g: a run's cgroup goes with its last process — right after the run's reap when it left nothing; while what it
+    /// left runs, it stays (that process is in it), and it goes once the keeper reaps that one too. A keeper's
+    /// scope never fills up with the folders of runs long gone.
+    #[test]
+    fn a_runs_cgroup_goes_with_its_last_process() {
+        let test = "a_runs_cgroup_goes_with_its_last_process";
+        if !cgroups_here(test) {
+            return;
+        }
+        let Some(rules) = open_rules(test) else { return };
+        let k = keeper("cgroup-gone");
+        let run = |n: u64| folder(&format!("{}/run-{n}", scope_of(&k).scope));
+        let (_, status) = sh_through(&k, &rules, "true");
+        assert!(status.success());
+        assert!(gone_soon(&run(1)), "removed after its reap");
+        let (_, status) = sh_through(&k, &rules, "sleep 30 >/dev/null 2>&1 &");
+        assert!(status.success());
+        assert!(run(2).exists(), "kept while what it left runs in it");
+        let left = k.leftovers();
+        assert_eq!(left.len(), 1, "the sleep it left: {left:?}");
+        crate::reaper::end(&left, LEFT_TERM);
+        assert!(gone_soon(&run(2)), "removed once the keeper reaped what it left");
+        k.end();
+    }
+
+    /// 6g, for 6d: a rule at a run's level (`RunsIn.level`) naming its cgroup's id holds that run's connections and no
+    /// other's — the level counted right on this kernel (the machine's root on Ubuntu's 6.8, the sender's namespace's
+    /// on 6.1 and 7.3: one and the same where tarae is in the machine's namespace). With `socket cgroupv2 level L <A>
+    /// drop` in the session's output chain, run A's connect beyond never reaches tarae; run B's, at the same moment,
+    /// lands on the planted socket. (IPv4: these machines' containers have no IPv6 of their own.)
+    #[test]
+    fn the_level_matches_on_this_kernel() {
+        use tarae_netlink::nft::{self, Expr, Reg, SocketKey, Transaction, Verdict};
+        let test = "the_level_matches_on_this_kernel";
+        if !cgroups_here(test) {
+            return;
+        }
+        let k = keeper("level");
+        let level = scope_of(&k).level;
+        let (_, c, root) = project_served("level-own", vec![], Some(&k), &[], Err("not served".into()));
+        let go = root.join("go");
+        let env = [("TARAE_TO", "203.0.113.7:443"), ("TARAE_GO", go.to_str().unwrap())];
+        let start = || {
+            let cmd = helper_cmd("within_when", &env, Some(&root));
+            k.start(&cmd, &crate::landlock::thread_name(), c.rules_fd(), c.net).unwrap()
+        };
+        let (a, b) = (start(), start());
+        let id = a.cgroup.expect("run A in a cgroup of its own");
+        let mut t = Transaction::new();
+        t.rule(
+            "tarae",
+            "out",
+            &[
+                Expr::Socket { key: SocketKey::Cgroupv2 { level }, dreg: Reg::R1 },
+                Expr::Cmp { sreg: Reg::R1, data: nft::cgroup(id) },
+                Expr::Verdict(Verdict::Drop),
+            ],
+        );
+        let sent = lock(&k.network)
+            .as_mut()
+            .expect("its network")
+            .nf
+            .apply(&t.end(), Instant::now() + Duration::from_secs(2));
+        sent.expect("the rule taken");
+        std::fs::write(&go, "").unwrap();
+        let (said_a, said_b) = (helper_said(a), helper_said(b));
+        assert_eq!(said_b, "reached reset", "B's lands on the planted socket");
+        assert!(!said_a.starts_with("reached"), "A's held by the rule at level {level}: {said_a}");
+        let taken = lock(&k.network).as_ref().map(|m| m.taken.count());
+        assert_eq!(taken, Some(1), "only B's reached tarae");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// P5's "before any run": sockets a keeper hands once a run was asked of it aren't taken — they could be a
     /// run's — so a later ask goes unanswered (refused, said in the log) and fails at its time limit.
     #[test]
@@ -5193,7 +6310,7 @@ mod tests {
         }
         let session = keeper("p5-session");
         let other_root = std::env::temp_dir().join(format!("tarae-keeper-{}-p5-other", std::process::id()));
-        let other = Keeper::born_lo(&other_root, None, ns(), Families::here(), false, None)
+        let other = Keeper::born_lo(&other_root, None, ns(), Families::here(), false, None, None)
             .expect("born, no network");
         let carried = Families {
             v4: Families::here().v4 && !other.lo_missing.v4,
@@ -5303,7 +6420,7 @@ mod tests {
         {
             let captured = crate::log::capture();
             let given = Some(NetworkFor::Given(network));
-            let e = match Keeper::born_lo(&root, None, ns(), Families::here(), false, given) {
+            let e = match Keeper::born_lo(&root, None, ns(), Families::here(), false, given, None) {
                 Ok(k) => {
                     k.end();
                     panic!("born with half its network ({step:?})");
@@ -5542,8 +6659,8 @@ mod tests {
             return;
         }
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-badplant", std::process::id()));
-        let k =
-            Keeper::born_lo(&root, None, ns(), Families { v4: true, v6: false }, true, None).expect("born");
+        let k = Keeper::born_lo(&root, None, ns(), Families { v4: true, v6: false }, true, None, None)
+            .expect("born");
         assert!(k.lo_missing.v4, "its lo without the session's IPv4 address");
         match k.plant(Families { v4: true, v6: false }) {
             Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Planted, libc::EADDRNOTAVAIL), "{e}"),

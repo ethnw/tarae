@@ -221,6 +221,21 @@ fn each_message_is_byte_for_byte_what_nft_sent() {
             "pre-socket-plain",
             one_rule("tarae", "pre", &then(then(l4proto(TCP), transparent(0)), [accept.clone()])),
         ),
+        // (6g: `system.slice` at level 1 — its inode, 60 on deb12, is the only value the machine gave)
+        (
+            "split-out-cgroup",
+            one_rule(
+                "tarae",
+                "out",
+                &[
+                    Expr::Socket { key: SocketKey::Cgroupv2 { level: 1 }, dreg: Reg::R1 },
+                    Expr::Cmp { sreg: Reg::R1, data: nft::cgroup(60) },
+                    Expr::Immediate { dreg: Reg::R1, data: nft::mark(0x11) },
+                    Expr::MetaSet { key: MetaKey::Mark, sreg: Reg::R1 },
+                    accept.clone(),
+                ],
+            ),
+        ),
     ];
     for (case, ours) in cases {
         assert_bytes(&without_acks(ours.bytes()), &fixture::last_sent(case), case);

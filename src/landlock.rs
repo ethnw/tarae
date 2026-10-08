@@ -444,6 +444,43 @@ pub fn spawn(rules: &Ruleset, cmd: &mut Command) -> io::Result<Child> {
     confined(rules, || Ok(()), |()| cmd.spawn())
 }
 
+/// Tests, F2's stand-in (here and `keeper::tests`): a process of the test's own with the harmless marker `arg` in its
+/// arguments and `env` in its environment — returned once the test reads both in its `/proc` files. `spawn` comes
+/// back when the child's `execve` has swapped its memory, before the new program's arguments and environment are in
+/// place (`posix_spawn`'s vfork parent is woken there): read at once, they were seen empty, or still the test's own
+/// (deb12, 1 run in 3–40). Waits 2 s at most, then says what it read.
+#[cfg(test)]
+pub(crate) fn stand_in(arg: &str, env: &str) -> std::process::Child {
+    // (`; :` keeps the shell, its arguments with it, from becoming `sleep`)
+    let mut target = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 30; :", arg])
+        .env("TARAE_F2_MARKER", env)
+        .spawn()
+        .unwrap();
+    let has = |bytes: &[u8], m: &str| bytes.windows(m.len()).any(|w| w == m.as_bytes());
+    let read = |f: &str| std::fs::read(format!("/proc/{}/{f}", target.id())).unwrap_or_default();
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let (seen, cmdline, environ) = loop {
+        let (cmdline, environ) = (read("cmdline"), read("environ"));
+        let seen = has(&cmdline, arg) && has(&environ, env);
+        if seen || std::time::Instant::now() > by {
+            break (seen, cmdline, environ);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    if seen {
+        target
+    } else {
+        target.kill().ok();
+        target.wait().ok();
+        panic!(
+            "the test reads its own stand-in's: cmdline {:?}, environ {:?}",
+            String::from_utf8_lossy(&cmdline),
+            String::from_utf8_lossy(&environ)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,17 +875,8 @@ mod tests {
     #[test]
     fn a_confined_run_reads_no_environment_outside_it() {
         let Some(abi) = kernel_abi("a_confined_run_reads_no_environment_outside_it") else { return };
-        // (`; :` keeps the shell, its arguments with it, from becoming `sleep`)
-        let mut target = Command::new("/bin/sh")
-            .args(["-c", "sleep 30; :", "outside-arg-marker"])
-            .env("TARAE_F2_MARKER", "outside-env-marker")
-            .spawn()
-            .unwrap();
+        let mut target = stand_in("outside-arg-marker", "outside-env-marker");
         let pid = target.id().to_string();
-        let has = |bytes: &[u8], m: &str| bytes.windows(m.len()).any(|w| w == m.as_bytes());
-        let read = |f: &str| std::fs::read(format!("/proc/{pid}/{f}")).unwrap();
-        assert!(has(&read("cmdline"), "outside-arg-marker"), "the test reads its arguments");
-        assert!(has(&read("environ"), "outside-env-marker"), "the test reads its environment");
         // (the markers split in the script: its own command line mustn't carry them; no `2>/dev/null` — these
         // rules don't let it open that, and the refusal would be the redirect's)
         let script = r#"for f in cmdline environ; do

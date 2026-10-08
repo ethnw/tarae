@@ -74,6 +74,12 @@ that need the rest of the suite beside them show up with `--bin tarae` alone. A 
 only: `cargo xtask linux --platform linux/amd64 …` runs on that one (its own target and toolchains) — emulated on
 an aarch64 VM, slow and liable to stall; a Docker on a real x86_64 machine (`DOCKER_HOST`) is better.
 
+The sandbox's per-run cgroups (step 6g) are tested with `cargo xtask linux --userns --cgroup …`: the container
+runs in the machine's cgroup namespace with `/sys/fs/cgroup` mounted writable, so the tests can stand a folder in
+for the user's systemd manager. That gives the container's root the machine's **whole** cgroup hierarchy — it can
+move, freeze or kill any of the machine's processes through it. Use it only on a throwaway test VM, never on a
+Docker whose machine runs anything else (colima's VM is every session's).
+
 `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory
 with this repository open), in the `perf` profile — release, with line tables. It runs them three times, keeps

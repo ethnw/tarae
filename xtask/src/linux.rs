@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -66,7 +66,46 @@ enum What {
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
+
+/// `--cgroup` (6g): the container in the machine's cgroup namespace (`--cgroupns host`), the hierarchy writable, and
+/// a folder under the container's own cgroup made first, as root — as systemd's `Delegate=yes` makes one — for the
+/// tests' keepers to be put in (`TARAE_TEST_CGROUP`, standing for the user manager's scopes; `TARAE_EXPECT_CGROUP`:
+/// a test that finds no cgroup per run fails rather than skips). With `--userns`: only TPROXY sessions get one.
+/// The container's cgroup goes with it, whatever was left in that folder (M11: deb12, 6.8, 7.3).
+///
+/// **What it opens**: the machine's whole cgroup hierarchy, writable by the container's root — the root of the
+/// machine's processes all the same as far as cgroups go: it can move any of the machine's processes between cgroups,
+/// set their limits, freeze them, kill every process of one (`cgroup.kill`). No capability is added (no `SYS_ADMIN`:
+/// the bind mount does it, root's ownership does the rest), but that's the reach. For a throwaway test VM only —
+/// never a Docker whose machine runs anything you'd mind (colima's VM is shared by every session's runs).
+const CGROUP_OPTS: [&str; 4] = ["--cgroupns", "host", "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw"];
+const CGROUP_SETUP: &str = "c=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)\n\
+                            mkdir \"$c/tarae-tests\"\n\
+                            export TARAE_TEST_CGROUP=\"$c/tarae-tests\" TARAE_EXPECT_CGROUP=1\n\
+                            echo \"--cgroup: the tests' keepers go in $TARAE_TEST_CGROUP\"\n";
+
+/// A leading `--cgroup`, and the arguments after it.
+fn cgroup(args: &[String]) -> (bool, &[String]) {
+    match args.split_first() {
+        Some((c, rest)) if c == "--cgroup" => (true, rest),
+        _ => (false, args),
+    }
+}
+
+/// `docker run`'s arguments with `--cgroup`'s: its options after `run --rm --cap-add SYS_PTRACE`, its setup first
+/// in the script (the last argument).
+fn with_cgroup(mut a: Vec<String>, on: bool) -> Vec<String> {
+    if !on {
+        return a;
+    }
+    let at = 4.min(a.len());
+    a.splice(at..at, CGROUP_OPTS.map(String::from));
+    if let Some(script) = a.last_mut() {
+        *script = format!("{CGROUP_SETUP}{script}");
+    }
+    a
+}
 
 /// What `--userns` lets the container do, so the sandbox's tier tests reach a real session keeper
 /// (`src/sandbox/tier.rs`): Docker's default seccomp profile refuses new namespaces, its `docker-default`
@@ -196,6 +235,7 @@ fn what(args: &[String]) -> Result<What> {
 pub fn run(args: &[String]) -> Result<()> {
     let (set, args) = envs(args)?;
     let (ns, args) = userns(args)?;
+    let (cgroups, args) = cgroup(args);
     let (platform, what) = ask(args)?;
     let platform = platform.as_deref();
     let root = root();
@@ -233,12 +273,14 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let mut docker = Command::new("docker");
     let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "checks");
-    docker.args(with_name(
-        with_userns(with_envs(docker_args(&root, tree, &pin, platform, &what), &set), ns),
-        name,
-    ));
+    let args = with_userns(with_envs(docker_args(&root, tree, &pin, platform, &what), &set), ns);
+    // (the name last: `with_cgroup` puts its options after `run --rm --cap-add SYS_PTRACE`, counted unnamed)
+    docker.args(with_name(with_cgroup(args, cgroups), name));
     if let Some(u) = ns {
         eprintln!("--userns: the container's own seccomp and AppArmor profiles lifted ({u:?})");
+    }
+    if cgroups {
+        eprintln!("--cgroup: the container in the machine's cgroup namespace, the hierarchy writable");
     }
     let st = match tree {
         Tree::Mounted(_) => docker.status(),
@@ -1175,6 +1217,39 @@ mod tests {
         assert_eq!(full[full.len() - 4..], base[base.len() - 4..], "the image and its script last");
         assert_eq!(full.len(), base.len() + 6);
         assert!(!full.iter().any(|a| a == "--privileged" || a.contains("SYS_ADMIN")), "{full:?}");
+    }
+
+    /// `--cgroup` (6g): the container in the machine's cgroup namespace with the hierarchy writable, and the script
+    /// first makes the tests' folder under the container's own cgroup and names it (`TARAE_TEST_CGROUP`, with
+    /// `TARAE_EXPECT_CGROUP`) — before anything else it runs; without it, nothing of that. No capability is added
+    /// (no `SYS_ADMIN`, no `--privileged`), but the container's root can write the machine's whole hierarchy through
+    /// that mount (`CGROUP_OPTS` says what that reaches): a throwaway VM's option.
+    #[test]
+    fn cgroup_gives_the_tests_a_folder_in_the_machines_namespace() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let on = args(&["--cgroup", "test", "keeper"]);
+        assert_eq!(cgroup(&on), (true, &on[1..]));
+        let off = args(&["test"]);
+        assert_eq!(cgroup(&off), (false, &off[..]));
+        let base = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Both);
+        assert_eq!(with_cgroup(base.clone(), false), base);
+        let with = with_cgroup(base.clone(), true);
+        assert_eq!(
+            &with[..8],
+            ["run", "--rm", "--cap-add", "SYS_PTRACE", "--cgroupns", "host", "-v", CGROUP_OPTS[3]]
+        );
+        let (script, was) = (with.last().unwrap(), base.last().unwrap());
+        assert!(
+            script.starts_with(CGROUP_SETUP) && script.ends_with(was.as_str()),
+            "its setup first: {script}"
+        );
+        assert!(script.contains("export TARAE_TEST_CGROUP=") && script.contains("TARAE_EXPECT_CGROUP=1"));
+        assert_eq!(with.len(), base.len() + 4);
+        assert!(!with.iter().any(|a| a == "--privileged" || a.contains("SYS_ADMIN")), "{with:?}");
+        // (after --userns, as the usage says)
+        let both = args(&["--userns", "--cgroup", "clippy"]);
+        let (u, rest) = userns(&both).unwrap();
+        assert_eq!((u, cgroup(rest).0), (Some(Userns::Full), true));
     }
 
     #[test]

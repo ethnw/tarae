@@ -95,6 +95,11 @@ pub enum Verdict {
 pub enum SocketKey {
     /// Whether the socket the packet would be delivered to is transparent (`IP_TRANSPARENT`).
     Transparent,
+    /// The id of the packet's own socket's cgroup's ancestor at `level` (8 bytes, `cgroup`) — the cgroup of the
+    /// process that made the socket, not of one that holds it now. What `level` counts from is the kernel's: the
+    /// sender's cgroup namespace's root on Debian's 6.1 and on 7.3, the machine's root on Ubuntu's 6.8.0-1013 — the
+    /// same only where the sender's namespace is the machine's (spike6, Q2).
+    Cgroupv2 { level: u32 },
 }
 
 /// An expression of a rule.
@@ -126,6 +131,11 @@ pub fn port(p: u16) -> Vec<u8> {
 /// A mark as the kernel holds it.
 pub fn mark(m: u32) -> Vec<u8> {
     m.to_ne_bytes().to_vec()
+}
+
+/// A cgroup's id as the kernel holds it (its folder's inode), to compare with what `SocketKey::Cgroupv2` loads.
+pub fn cgroup(id: u64) -> Vec<u8> {
+    id.to_ne_bytes().to_vec()
 }
 
 /// An address as a packet holds it.
@@ -261,6 +271,11 @@ fn expr(b: &mut Vec<u8>, e: &Expr) {
             put_be32(b, 2, dreg.0);
             // (the cgroup level: nft writes 0 for every other key)
             put_be32(b, 3, 0);
+        }),
+        Expr::Socket { key: SocketKey::Cgroupv2 { level }, dreg } => data(b, "socket", &|b| {
+            put_be32(b, 1, 3);
+            put_be32(b, 2, dreg.0);
+            put_be32(b, 3, *level);
         }),
     }
 }

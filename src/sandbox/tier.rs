@@ -289,6 +289,15 @@ fn confined(label: Option<&str>) -> bool {
     label.is_some_and(|l| !l.is_empty() && l != "unconfined")
 }
 
+/// Whether `label` is a profile in a mode that refuses — every mode but `complain` (logs only) and `unconfined`:
+/// `enforce` (`docker-default (enforce)`), `kill`, `prompt`, and any a later AppArmor adds. tarae's own
+/// (`/usr/bin/tarae (unconfined)`) refuses none, so a mount refused under it is refused for another reason. A
+/// label without a mode (`unconfined`) is no profile.
+fn refusing(label: Option<&str>) -> bool {
+    let mode = label.and_then(|l| l.strip_suffix(')')).and_then(|l| l.rsplit_once(" (")).map(|(_, m)| m);
+    mode.is_some_and(|m| !matches!(m, "complain" | "unconfined"))
+}
+
 /// Whether a run is refused new user namespaces (Q4: `unshare`, `clone` with `CLONE_NEWUSER`, `clone3` — the
 /// keeper's `seccomp` filter): where Ubuntu's restriction is on and tarae runs under an AppArmor profile — any. An
 /// exec keeps the label (t5), so that profile's word on `userns` is every run's too, and the restriction, which
@@ -389,7 +398,7 @@ fn cause(s: &Seen) -> Cause {
     if refused && s.restrict_userns == Some(1) && step != BirthStep::Exec && !step.network() {
         return Cause::Restriction;
     }
-    if refused && step.mounts() && confined(s.apparmor.as_deref()) {
+    if refused && step.mounts() && refusing(s.apparmor.as_deref()) {
         return Cause::ProfileMounts;
     }
     if refused && step == BirthStep::Proc {
@@ -456,6 +465,10 @@ pub struct Probed {
     /// `NFT_TPROXY` or the owner flag). Decided once (D-b): a session's own birth whose network fails after this
     /// passed fails its runs, said — no silent fallback. Until 6f, without it a session's runs go out by the swap.
     pub redirect: Result<(), String>,
+    /// 6g: whether a keeper with that network gets a scope of its own, each run a cgroup of its own below it — where
+    /// the scope comes from — or why not (`cgroup::conditions`; without `redirect`, nothing would read it). Decided
+    /// once (D-b); a keeper whose own scope fails says so with it, its runs in its cgroup.
+    pub cgroups: Result<super::cgroup::Source, String>,
     /// Ubuntu's restriction kept the namespaces from a tarae under no profile: why, and the step (`hint`).
     pub hint: Option<String>,
 }
@@ -491,6 +504,7 @@ pub fn get() -> &'static Probed {
                 served,
                 swap,
                 redirect: Err("no network namespace".into()),
+                cgroups: Err("no TPROXY network".into()),
                 hint: None,
             };
         }
@@ -518,6 +532,18 @@ pub fn get() -> &'static Probed {
             Err(why) => format!("network: the swap and the session's proxy — no TPROXY: {why}"),
         };
         crate::log::line("sandbox", "info", &way);
+        // (6g, D4: said here only — nothing is lost without it but what 6d would add)
+        if p.redirect.is_ok() {
+            let runs = match &p.cgroups {
+                Ok(source) => format!(
+                    "runs: a cgroup each, in their keeper's own scope ({}) — a rule's level: a run's depth \
+                     below the root",
+                    source.said()
+                ),
+                Err(why) => format!("runs: in their keeper's cgroup — {why}"),
+            };
+            crate::log::line("sandbox", "info", &runs);
+        }
         if let (Ok(()), Err(why)) = (&p.served, &p.swap) {
             let said = format!("a policy that opens a port or the network keeps no netns of its own: {why}");
             crate::log::line("sandbox", "info", &said);
@@ -580,7 +606,11 @@ fn probe() -> Probed {
         (Err(e), _) => without(e),
     };
     let swap = super::supervisor::swap_unavailable().map_or(Ok(()), Err);
-    Probed { ns, short, served, swap, redirect, hint }
+    let cgroups = match &redirect {
+        Ok(()) => super::cgroup::conditions(&super::cgroup::facts()),
+        Err(_) => Err("no TPROXY network".into()),
+    };
+    Probed { ns, short, served, swap, redirect, cgroups, hint }
 }
 
 /// A keeper born with `ns` and, where it has a netns, the session's network: whether the namespaces work, and
@@ -689,6 +719,28 @@ mod tests {
         }
     }
 
+    /// A refused mount is blamed on the AppArmor profile tarae runs under only where that profile's mode refuses —
+    /// `enforce`, `kill`, `prompt` (and a mode a later AppArmor adds) — never `complain` (it only logs) nor
+    /// `unconfined` (tarae's own profile: then the reason is another, here a masked `/proc`); a label with no mode
+    /// is no profile.
+    #[test]
+    fn a_refused_mount_is_the_profiles_only_in_a_mode_that_refuses() {
+        for (label, theirs) in [
+            ("docker-default (enforce)", true),
+            ("tarae-test (kill)", true),
+            ("snap.app.app (prompt)", true),
+            ("some-profile//&other (enforce)", true),
+            ("/usr/bin/tarae (unconfined)", false),
+            ("tarae-test (complain)", false),
+            ("unconfined", false),
+            ("", false),
+        ] {
+            let s = Seen { apparmor: Some(label.into()), ..seen(BirthStep::Propagation, libc::EACCES) };
+            assert_eq!(why(&s).contains("refuses mounting"), theirs, "{label}: {}", why(&s));
+        }
+        assert!(!refusing(None));
+    }
+
     /// A run's internet sockets are its own only not served and in a network namespace its keeper made — `net`
     /// without `user` makes none (`clone_flags`).
     #[test]
@@ -728,6 +780,14 @@ mod tests {
                     ..seen(BirthStep::Propagation, libc::EACCES)
                 },
                 "AppArmor profile tarae runs under (docker-default (enforce)) refuses mounting",
+            ),
+            // (tarae's own profile is `flags=(unconfined)`: it refuses no mount — a masked /proc is still why)
+            (
+                Seen {
+                    apparmor: Some("/usr/bin/tarae (unconfined)".into()),
+                    ..seen(BirthStep::Proc, libc::EPERM)
+                },
+                "masked over it",
             ),
             (Seen { dumpable: false, ..seen(BirthStep::Map, libc::EACCES) }, "tarae runs non-dumpable"),
             (seen(BirthStep::Map, libc::EACCES), "writing its id maps: Permission denied"),

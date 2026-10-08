@@ -29,7 +29,11 @@
 // (the profile and its hint: plain text, built everywhere — said on Linux)
 pub mod apparmor;
 #[cfg(target_os = "linux")]
+pub mod cgroup;
+#[cfg(target_os = "linux")]
 pub mod channel;
+// (a keeper's scope from the user's manager: the wire built everywhere — its tests run on macOS too —, asked on Linux)
+pub mod dbus;
 #[cfg(test)]
 mod golden;
 #[cfg(all(test, target_os = "linux"))]

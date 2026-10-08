@@ -3255,9 +3255,13 @@ mod tests {
         keys(&mut ed, &"j ".repeat(at));
         keys(&mut ed, "r");
         assert!(ed.doc().lsp.client.is_some(), "started again");
-        settle(&mut ed, |ed| ed.procs.mark().is_none());
-        assert!(ed.procs.mark().is_none(), "the check ended");
-        assert!(ed.procs.checks.iter().any(|c| c.what.contains("exited 3 times")), "and is recorded");
+        // (its own check: the test binary's other children — another test's `sh` not waited for yet — are checks
+        // of `:procs` too, and the tests run side by side)
+        let ended = |ed: &Editor| {
+            ed.procs.checks.iter().any(|c| c.what.contains("exited 3 times") && c.ended.is_some())
+        };
+        settle(&mut ed, |ed| ended(ed));
+        assert!(ended(&ed), "the check ended, and is recorded — still holding: {:?}", ed.procs.holding());
         std::fs::remove_dir_all(root).ok();
     }
 

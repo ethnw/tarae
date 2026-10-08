@@ -256,42 +256,65 @@ pub fn available() -> bool {
     ARCH.is_some()
 }
 
-/// Puts the filter on the calling thread — and what it starts from now on — for good. Sets `no_new_privs`
-/// first (the kernel asks it of an unprivileged caller). Served: the listener tarae's supervisor answers on
-/// — once it has read a call, the caller waits for its answer through any signal but a fatal one
-/// (`WAIT_KILLABLE_RECV`, Linux 5.19: a call tarae did isn't started again by a signal; without it, older
-/// kernels). `no_userns`: no new user namespace either (`tier::runs_refuse_userns`).
+/// Puts the filter for `mode` on the calling thread (`Filter::new`, then `Filter::apply`).
+#[cfg(test)]
 pub fn apply(mode: Mode, no_userns: bool) -> io::Result<Option<OwnedFd>> {
-    let Some(arch) = ARCH else {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "no seccomp filter for this architecture"));
-    };
-    let mut prog = program(arch, mode, no_userns);
-    let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() };
-    let listener = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
-    let tries: &[libc::c_ulong] = match mode {
-        Mode::Plain | Mode::OwnNetwork => &[0],
-        Mode::Served | Mode::Routed => &[listener | libc::SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, listener],
-    };
-    // SAFETY: the program outlives the call (the kernel copies it); this thread only (no TSYNC).
-    unsafe {
-        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fprog = &raw const fprog;
-        let mut last = io::Error::from_raw_os_error(libc::EINVAL);
-        for &flags in tries {
-            let r = libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, flags, fprog);
-            if r >= 0 {
-                // (the listener comes close-on-exec: no run inherits it)
-                let listens = matches!(mode, Mode::Served | Mode::Routed);
-                return Ok(listens.then(|| OwnedFd::from_raw_fd(r as i32)));
+    Filter::new(mode, no_userns)?.apply()
+}
+
+/// A run's filter, made before it's put on — the keeper's run puts it on in the child of a raw `clone3`, which
+/// has no fork bookkeeping (glibc's malloc locks aren't reset there): `apply` makes raw calls only and allocates
+/// nothing, its errors errno's alone.
+pub struct Filter {
+    prog: Vec<libc::sock_filter>,
+    mode: Mode,
+}
+
+impl Filter {
+    /// The filter for `mode` — `no_userns`: no new user namespace either (`tier::runs_refuse_userns`).
+    pub fn new(mode: Mode, no_userns: bool) -> io::Result<Filter> {
+        let arch = ARCH.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Unsupported, "no seccomp filter for this architecture")
+        })?;
+        Ok(Filter { prog: program(arch, mode, no_userns), mode })
+    }
+
+    /// Puts it on the calling thread — and what it starts from now on — for good. Sets `no_new_privs` first
+    /// (the kernel asks it of an unprivileged caller). Served: the listener tarae's supervisor answers on — once
+    /// it has read a call, the caller waits for its answer through any signal but a fatal one
+    /// (`WAIT_KILLABLE_RECV`, Linux 5.19: a call tarae did isn't started again by a signal; without it, older
+    /// kernels). Raw calls only, nothing allocated.
+    pub fn apply(&self) -> io::Result<Option<OwnedFd>> {
+        let fprog = libc::sock_fprog { len: self.prog.len() as u16, filter: self.prog.as_ptr().cast_mut() };
+        let listener = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
+        let tries: &[libc::c_ulong] = match self.mode {
+            Mode::Plain | Mode::OwnNetwork => &[0],
+            Mode::Served | Mode::Routed => {
+                &[listener | libc::SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, listener]
             }
-            last = io::Error::last_os_error();
-            if last.raw_os_error() != Some(libc::EINVAL) {
-                break;
+        };
+        // SAFETY: the program outlives the call (the kernel copies it; it never writes through the pointer); this
+        // thread only (no TSYNC).
+        unsafe {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(io::Error::last_os_error());
             }
+            let fprog = &raw const fprog;
+            let mut last = io::Error::from_raw_os_error(libc::EINVAL);
+            for &flags in tries {
+                let r = libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, flags, fprog);
+                if r >= 0 {
+                    // (the listener comes close-on-exec: no run inherits it)
+                    let listens = matches!(self.mode, Mode::Served | Mode::Routed);
+                    return Ok(listens.then(|| OwnedFd::from_raw_fd(r as i32)));
+                }
+                last = io::Error::last_os_error();
+                if last.raw_os_error() != Some(libc::EINVAL) {
+                    break;
+                }
+            }
+            Err(last)
         }
-        Err(last)
     }
 }
 

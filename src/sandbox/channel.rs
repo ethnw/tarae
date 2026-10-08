@@ -35,11 +35,21 @@ pub enum Step {
     Seccomp,
     Handoff,
     Exec,
+    /// Its own cgroup's folder (6g: `mkdirat` in the keeper's scope) — a run starts without one then, never fails.
+    Cgroup,
 }
 
 impl Step {
-    const ALL: [Step; 7] =
-        [Step::Request, Step::Fork, Step::Chdir, Step::Landlock, Step::Seccomp, Step::Handoff, Step::Exec];
+    const ALL: [Step; 8] = [
+        Step::Request,
+        Step::Fork,
+        Step::Chdir,
+        Step::Landlock,
+        Step::Seccomp,
+        Step::Handoff,
+        Step::Exec,
+        Step::Cgroup,
+    ];
 
     /// As a byte (the record's, and a run's failure pipe's).
     pub fn code(self) -> u8 {
@@ -60,6 +70,7 @@ impl Step {
             Step::Seccomp => "its socket filter",
             Step::Handoff => "handing its calls to tarae",
             Step::Exec => "running the program",
+            Step::Cgroup => "its own cgroup",
         }
     }
 }
@@ -116,6 +127,9 @@ pub enum Msg {
         v4: bool,
         v6: bool,
     },
+    /// 6g: the folder of the delegated cgroup the keeper was moved into, its descriptor with it — each run starts in
+    /// a cgroup of its own made there (`clone3(CLONE_INTO_CGROUP)`). Sent once, by the birth, before any run.
+    Cgroup,
     // keeper → tarae
     /// It's there; with an `O_PATH` handle of each device place it has (`places`, the names — the fds in their
     /// order), opened in its own mount namespace before any run (`keeper::DEVICE_HANDLES`).
@@ -124,10 +138,13 @@ pub enum Msg {
         places: Vec<Vec<u8>>,
     },
     /// The run's process is there; its pidfd comes with it. `pid` is the keeper's number for it — in a PID
-    /// namespace not tarae's (tarae reads its own from the pidfd).
+    /// namespace not tarae's (tarae reads its own from the pidfd). `cgroup`: the id of the cgroup it started in,
+    /// its own (6g) — 0: the keeper's, where `missed` says why when the keeper has a scope (what failed, errno).
     Started {
         id: u64,
         pid: u32,
+        cgroup: u64,
+        missed: Option<(Step, i32)>,
     },
     Failed {
         id: u64,
@@ -163,6 +180,7 @@ impl Msg {
             Msg::AskUsage => 3,
             Msg::End => 4,
             Msg::Plant { .. } => 5,
+            Msg::Cgroup => 6,
             Msg::Ready { .. } => 64,
             Msg::Started { .. } => 65,
             Msg::Failed { .. } => 66,
@@ -178,7 +196,7 @@ impl Msg {
         match self {
             Msg::Run(r) => 4 + (r.served() || r.held) as usize,
             Msg::Ready { places, .. } => places.len(),
-            Msg::Started { .. } => 1,
+            Msg::Started { .. } | Msg::Cgroup => 1,
             Msg::Planted { kinds, .. } => kinds.len(),
             _ => 0,
         }
@@ -214,7 +232,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(id.to_le_bytes());
             b.extend(sig.to_le_bytes());
         }
-        Msg::AskUsage | Msg::End => {}
+        Msg::AskUsage | Msg::End | Msg::Cgroup => {}
         Msg::Plant { v4, v6 } => b.extend([*v4 as u8, *v6 as u8]),
         Msg::Ready { pid, places } => {
             if places.len() > FDS_MAX {
@@ -223,9 +241,17 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(pid.to_le_bytes());
             list(&mut b, places)?;
         }
-        Msg::Started { id, pid } => {
+        Msg::Started { id, pid, cgroup, missed } => {
             b.extend(id.to_le_bytes());
             b.extend(pid.to_le_bytes());
+            b.extend(cgroup.to_le_bytes());
+            match missed {
+                None => b.push(0),
+                Some((step, errno)) => {
+                    b.extend([1, step.code()]);
+                    b.extend(errno.to_le_bytes());
+                }
+            }
         }
         Msg::Failed { id, errno, step } => {
             b.extend(id.to_le_bytes());
@@ -337,6 +363,10 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn step(&mut self) -> Result<Step, Refused> {
+        Step::from_code(self.u8()?).ok_or(Refused("a step that isn't one"))
+    }
+
     fn u32(&mut self) -> Result<u32, Refused> {
         Ok(u32::from_le_bytes(self.array()?))
     }
@@ -398,6 +428,7 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
         3 => Msg::AskUsage,
         4 => Msg::End,
         5 => Msg::Plant { v4: r.flag()?, v6: r.flag()? },
+        6 => Msg::Cgroup,
         64 => {
             let pid = r.u32()?;
             let places = r.list()?;
@@ -406,12 +437,16 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
             }
             Msg::Ready { pid, places }
         }
-        65 => Msg::Started { id: r.u64()?, pid: r.u32()? },
-        66 => Msg::Failed {
+        65 => Msg::Started {
             id: r.u64()?,
-            errno: r.i32()?,
-            step: Step::from_code(r.u8()?).ok_or(Refused("a step that isn't one"))?,
+            pid: r.u32()?,
+            cgroup: r.u64()?,
+            missed: match r.flag()? {
+                false => None,
+                true => Some((r.step()?, r.i32()?)),
+            },
         },
+        66 => Msg::Failed { id: r.u64()?, errno: r.i32()?, step: r.step()? },
         67 => Msg::Exited { id: r.u64()?, status: r.i32()? },
         68 => Msg::Reaped { n: r.u32()? },
         69 => Msg::Usage { rss_kb: r.u64()?, pss_kb: r.u64()? },
@@ -565,7 +600,10 @@ mod tests {
                 pid: 1,
                 places: vec![b"/dev/pts".to_vec(), b"/dev/pts/ptmx".to_vec(), b"/dev/shm".to_vec()],
             },
-            Msg::Started { id: 7, pid: 4243 },
+            Msg::Started { id: 7, pid: 4243, cgroup: 0, missed: None },
+            Msg::Started { id: 8, pid: 4244, cgroup: 0x1_0000_2a3c, missed: None },
+            Msg::Started { id: 9, pid: 4245, cgroup: 0, missed: Some((Step::Cgroup, libc::EAGAIN)) },
+            Msg::Cgroup,
             Msg::Failed { id: 7, errno: libc::ENOENT, step: Step::Exec },
             Msg::Exited { id: 7, status: 3 << 8 },
             Msg::Reaped { n: 2 },
@@ -668,7 +706,7 @@ mod tests {
     fn a_message_and_its_descriptors_cross_the_socket() {
         let (a, b) = pair();
         let (r, _w) = io::pipe().unwrap();
-        let started = Msg::Started { id: 9, pid: 77 };
+        let started = Msg::Started { id: 9, pid: 77, cgroup: 4242, missed: None };
         send(a.as_fd(), &started, &[r.as_fd()]).unwrap();
         assert!(send(a.as_fd(), &started, &[]).is_err(), "too few descriptors aren't sent");
         let mut buf = Vec::new();
