@@ -132,6 +132,20 @@ setting = { env = "CARGO_BUILD_BUILD_DIR", files = [".cargo/config.toml", ".carg
 remove = { under = "build", depth = 2 }
 # Every project's crates and git checkouts: never removed
 keep = ["registry", "git"]
+# Cargo makes a new build folder under a temp name beside it, then renames it into place. Beside a checkout's
+# own are other checkouts', which no run writes, so tarae makes a checkout's own before its first sandboxed
+# build — marked as cargo marks one as it makes it (measured, cargo 1.99: a folder there already gets no mark):
+# the cache directory tag's lines after its signature, and on macOS two attributes, byte for byte as cargo
+# wrote them — kept out of Time Machine (what NSURLIsExcludedFromBackupKey writes: a binary plist of
+# com.apple.backupd — header, the string, its offset, the trailer) and out of file sync (File Provider's ignore)
+cache-tag = """
+# This file is a cache directory tag created by cargo.
+# For information about cache directory tags see https://bford.info/cachedir/
+"""
+macos-xattrs = [
+    { name = "com.apple.metadata:com_apple_backup_excludeItem", hex = "62706c6973743030 5f1011 636f6d2e6170706c652e6261636b757064 08 0000000000000101 0000000000000001 0000000000000000 000000000000001c" },
+    { name = "com.apple.fileprovider.ignore#P", hex = "31" },
+]
 
 [tasks]
 when = ["Cargo.toml"]

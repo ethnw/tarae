@@ -10,7 +10,9 @@
 //! variable, else the nearest of `files` up from the checkout, else `home-files` in the home; the TOML key; what
 //! in its value makes it one per checkout), `remove = { under, depth }` (a session's own build folder may go
 //! from exactly `depth` folders below `{home}/{under}`), `keep` (folders in the home never removed, added to
-//! the floor).
+//! the floor), `cache-tag` (the lines a new build folder's cache directory tag holds after its signature, when
+//! the tool tags one) and `macos-xattrs = [{ name, hex }]` (the attributes it sets on one on macOS) — `Marks`:
+//! tarae makes a checkout's own before a run, marked as the tool would (`sandbox::own_build_made`).
 
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,6 +38,18 @@ pub struct Tool {
     setting: Option<Setting>,
     remove: Option<Remove>,
     keep: Vec<PathBuf>,
+    marks: Marks,
+}
+
+/// How the tool marks a new build folder as it makes it (`cache-tag`, `macos-xattrs`) — what tarae puts on
+/// one it makes for a run (`sandbox::own_build_made`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    /// The cache directory tag's lines after its signature (`# …` lines, each ending in a line break) — None:
+    /// the tool writes no tag.
+    pub cache_tag: Option<String>,
+    /// macOS: the extended attributes it sets, name and value.
+    pub macos_xattrs: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +77,23 @@ fn plain(p: &str) -> Option<PathBuf> {
 /// A pack's `[builds]`.
 pub fn tool_of(v: &toml::Value) -> Result<Tool, String> {
     let t = v.as_table().ok_or("isn't a table")?;
-    known(t, &["name", "when", "ask", "target", "build", "home", "setting", "remove", "keep"], "it")?;
+    known(
+        t,
+        &[
+            "name",
+            "when",
+            "ask",
+            "target",
+            "build",
+            "home",
+            "setting",
+            "remove",
+            "keep",
+            "cache-tag",
+            "macos-xattrs",
+        ],
+        "it",
+    )?;
     let need = |k: &str| string(t, k)?.ok_or(format!("has no `{k}`"));
     let list = |k: &str| strings(t.get(k), k).map(Option::unwrap_or_default);
     let when = list("when")?;
@@ -117,6 +147,7 @@ pub fn tool_of(v: &toml::Value) -> Result<Tool, String> {
         .iter()
         .map(|k| plain(k).ok_or(format!("`keep` {k:?} isn't a folder's name in the home")))
         .collect::<Result<_, _>>()?;
+    let marks = Marks { cache_tag: cache_tag_of(t)?, macos_xattrs: xattrs_of(t.get("macos-xattrs"))? };
     Ok(Tool {
         name: need("name")?,
         when,
@@ -128,7 +159,59 @@ pub fn tool_of(v: &toml::Value) -> Result<Tool, String> {
         setting,
         remove,
         keep,
+        marks,
     })
+}
+
+/// `cache-tag`: what follows the tag's signature line — comments only (`# …`, each line ending in a line
+/// break), so nothing of the pack's can be read as the tag's own line (a second signature), at most 1 KB.
+fn cache_tag_of(t: &Table) -> Result<Option<String>, String> {
+    let Some(text) = string(t, "cache-tag")? else { return Ok(None) };
+    let comments = !text.is_empty()
+        && text.len() <= 1024
+        && text.ends_with('\n')
+        && !text.contains(['\r', '\0'])
+        && text.lines().all(|l| l.starts_with('#'));
+    match comments {
+        true => Ok(Some(text)),
+        false => Err(format!("`cache-tag` {text:?} isn't `# …` lines, each ending in a line break, ≤ 1 KB")),
+    }
+}
+
+/// `macos-xattrs`: `{ name, hex }` each — a name of at most 127 bytes (macOS's longest), no NUL, none twice; a
+/// value of 1 byte to 4 KB in hex (spaces between bytes allowed, to group them).
+fn xattrs_of(v: Option<&toml::Value>) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    let list = v.as_array().ok_or("`macos-xattrs` isn't a list")?;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for e in list {
+        let e = e.as_table().ok_or("`macos-xattrs` holds a non-table")?;
+        known(e, &["name", "hex"], "`macos-xattrs`")?;
+        let name = string(e, "name")?.unwrap_or_default();
+        if name.is_empty() || name.len() > 127 || name.contains('\0') {
+            return Err(format!("`macos-xattrs` name {name:?} isn't 1 to 127 bytes without a NUL"));
+        }
+        if out.iter().any(|(n, _)| *n == name) {
+            return Err(format!("`macos-xattrs` names {name:?} twice"));
+        }
+        let hex = string(e, "hex")?.unwrap_or_default();
+        let value = unhex(&hex)
+            .filter(|b| (1..=4096).contains(&b.len()))
+            .ok_or(format!("`macos-xattrs` {name:?}: {hex:?} isn't 1 byte to 4 KB in hex"))?;
+        out.push((name, value));
+    }
+    Ok(out)
+}
+
+/// `s`'s bytes, two hex digits each, spaces between bytes ignored — None when it isn't that.
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    let digits: Vec<u8> = s.bytes().filter(|b| *b != b' ').collect();
+    // (whole bytes in every group: `3 1` isn't 0x31)
+    if s.split(' ').any(|g| !g.len().is_multiple_of(2)) {
+        return None;
+    }
+    let digit = |d: u8| (d as char).to_digit(16).map(|n| n as u8);
+    digits.chunks(2).map(|p| Some((digit(p[0])? << 4) | digit(p[1])?)).collect()
 }
 
 impl Tool {
@@ -186,6 +269,11 @@ impl Tool {
     /// Where a checkout's own build folder sits: so many folders below this one in the tool's home (`remove`).
     pub(crate) fn own_under(&self) -> Option<(&Path, usize)> {
         self.remove.as_ref().map(|r| (r.under.as_path(), r.depth))
+    }
+
+    /// How the tool marks a new build folder as it makes it.
+    pub(crate) fn marks(&self) -> &Marks {
+        &self.marks
     }
 
     /// The files that set where the checkout at `root` builds: its `when` and `setting.files` there, the
@@ -255,6 +343,13 @@ impl Tool {
         }
         if let Some(r) = &self.remove {
             s += &format!(" · remove {} depth {}", r.under.display(), r.depth);
+        }
+        if let Some(tag) = &self.marks.cache_tag {
+            s += &format!(" · cache tag {tag:?}");
+        }
+        for (name, value) in &self.marks.macos_xattrs {
+            let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
+            s += &format!(" · macos xattr {name}={hex}");
         }
         let keep: Vec<String> = self.keep.iter().map(|k| k.display().to_string()).collect();
         s + &format!(" · keep {}", keep.join(" "))
@@ -767,6 +862,96 @@ mod tests {
         assert!(text.contains(from), "{from}");
         let t = crate::packs::read_pack("rust", &text.replace(from, to), "built in");
         Builds::of(&[("rust".to_string(), t)])
+    }
+
+    /// A tool of the test's own: `[builds]` with these lines more (its marks).
+    fn marked_with(lines: &str) -> Result<Marks, String> {
+        let text = format!(
+            "[builds]\nname = \"T\"\nwhen = [\"t.toml\"]\nask = [\"t\"]\ntarget = \"target\"\n{lines}\n"
+        );
+        let read = Builds::of(&[("test".to_string(), crate::packs::read_pack("test", &text, "built in"))]);
+        read.into_iter().next().unwrap().2.map(|t| t.marks)
+    }
+
+    /// The rust pack's marks for a new build folder read (a mistake in them would leave its whole `[builds]`
+    /// unread): a cache tag, and attributes for macOS — a value written as a binary plist is a whole one, its
+    /// hand-written hex agreeing with its own trailer (its one object right after the header, the offset table
+    /// right after that object, the trailer right after the table). Whether these are cargo's own marks is the
+    /// cargo run's to say, against the folder cargo marked itself
+    /// (`sandbox::tests::a_checkouts_first_cargo_test_runs_and_no_other_build_dir_is_written`): the tag on
+    /// both systems, the attributes on macOS.
+    #[test]
+    fn the_rust_pack_says_how_cargo_marks_a_new_build_folder() {
+        let read = rust_changed("[builds]", "[builds]");
+        let marks = read[0].2.as_ref().map(Tool::marks).expect("the rust pack's [builds]");
+        assert!(marks.cache_tag.is_some(), "no cache tag");
+        let plists: Vec<_> = marks.macos_xattrs.iter().filter(|(_, v)| v.starts_with(b"bplist00")).collect();
+        assert!(!plists.is_empty(), "no binary plist among {:?}", marks.macos_xattrs);
+        for (name, v) in plists {
+            // (big-endian, as the format has its numbers)
+            let be = |r: std::ops::Range<usize>| v[r].iter().fold(0, |n, b| n << 8 | usize::from(*b));
+            let trailer = v.len() - 32;
+            let (size, objects, top) =
+                (usize::from(v[trailer + 6]), be(trailer + 8..trailer + 16), be(trailer + 16..trailer + 24));
+            let table = be(trailer + 24..v.len());
+            assert_eq!((objects, top, table + objects * size), (1, 0, trailer), "{name}: {v:?}");
+            // Its one object: an ASCII string (0x5_, its length in the one-byte int after it)
+            let at = be(table..table + size);
+            assert_eq!((at, &v[at..at + 2]), (8, &[0x5f, 0x10][..]), "{name}: {v:?}");
+            assert_eq!(
+                at + 3 + usize::from(v[at + 2]),
+                table,
+                "{name}: the string ends where the table starts"
+            );
+        }
+    }
+
+    /// A cache tag's text follows its signature line in the file, so the pack's part is comments only — `# …`
+    /// lines, each ending in a line break: anything else (a bare word, a second signature, no last line break,
+    /// a carriage return, empty, past 1 KB) leaves the pack's `[builds]` unread, said in its words; none is no
+    /// tag at all.
+    #[test]
+    fn a_cache_tags_text_is_comment_lines() {
+        let tag = |t: &str| marked_with(&format!("cache-tag = {t:?}")).map(|m| m.cache_tag);
+        assert_eq!(tag("# made by t.\n# more\n"), Ok(Some("# made by t.\n# more\n".into())));
+        assert_eq!(marked_with("").map(|m| m.cache_tag), Ok(None));
+        let long = format!("#{}\n", "x".repeat(1024));
+        for bad in ["", "t", "# a\nSignature: 8a477f597d28d172789f06886806bc55\n", "# a", "# a\r\n", &long] {
+            let said = tag(bad).expect_err(bad);
+            assert!(said.contains("isn't `# …` lines"), "{bad:?}: {said}");
+        }
+    }
+
+    /// The attributes a tool sets on a new build folder are the pack's, name and value: the value's hex read
+    /// to its bytes (spaces between bytes allowed); a name empty, too long or holding a NUL, a name twice, hex
+    /// that isn't whole bytes or isn't hex, an empty or too big value, a key it doesn't know — each leaves the
+    /// pack's `[builds]` unread, said.
+    #[test]
+    fn macos_xattrs_are_names_and_hex_values() {
+        let xattrs =
+            |entries: &str| marked_with(&format!("macos-xattrs = [{entries}]")).map(|m| m.macos_xattrs);
+        assert_eq!(
+            xattrs(r#"{ name = "a.b", hex = "00 ff 7A" }, { name = "c", hex = "31" }"#),
+            Ok(vec![("a.b".into(), vec![0, 0xff, 0x7a]), ("c".into(), b"1".to_vec())])
+        );
+        assert_eq!(marked_with("").map(|m| m.macos_xattrs), Ok(Vec::new()));
+        let long = format!(r#"{{ name = "{}", hex = "31" }}"#, "n".repeat(128));
+        let big = format!(r#"{{ name = "a", hex = "{}" }}"#, "00".repeat(4097));
+        for (bad, why) in [
+            (r#"{ name = "", hex = "31" }"#, "isn't 1 to 127 bytes"),
+            (&long, "isn't 1 to 127 bytes"),
+            (r#"{ name = "a\u0000b", hex = "31" }"#, "isn't 1 to 127 bytes"),
+            (r#"{ name = "a", hex = "31" }, { name = "a", hex = "32" }"#, "names \"a\" twice"),
+            (r#"{ name = "a", hex = "3" }"#, "isn't 1 byte to 4 KB in hex"),
+            (r#"{ name = "a", hex = "3 1" }"#, "isn't 1 byte to 4 KB in hex"),
+            (r#"{ name = "a", hex = "zz" }"#, "isn't 1 byte to 4 KB in hex"),
+            (r#"{ name = "a", hex = "" }"#, "isn't 1 byte to 4 KB in hex"),
+            (&big, "isn't 1 byte to 4 KB in hex"),
+            (r#"{ name = "a", hex = "31", flags = 1 }"#, "flags"),
+        ] {
+            let said = xattrs(bad).expect_err(bad);
+            assert!(said.contains(why), "{bad}: {said}");
+        }
     }
 
     /// A tool of the test's own: `[builds]` with this `remove` and `keep`.

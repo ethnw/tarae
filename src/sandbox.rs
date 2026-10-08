@@ -853,12 +853,14 @@ fn kept_in(home: &Path, vars: &crate::sandboxpack::Vars, packs: &[String]) -> Ve
 
 /// The checkout's build tool (a built-in pack's `[builds]`), as its named folders are judged: who names them
 /// (`builds-said`: `cargo`), its home (real, when it's there), and where a checkout's own build folder sits in
-/// that home — so many folders below this one (`[builds] remove`: `build`, 2).
+/// that home — so many folders below this one (`[builds] remove`: `build`, 2) — and how it marks a new one
+/// (`[builds] cache-tag`, `macos-xattrs`: `own_build_made`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Builder {
     pub who: String,
     pub home: Option<PathBuf>,
     pub own_under: Option<(PathBuf, usize)>,
+    pub marks: crate::builds::Marks,
 }
 
 /// Whether a folder the checkout's build tool names for the checkout at `root` (`d`, a real path) may be
@@ -3194,17 +3196,55 @@ fn caches_in(c: &crate::sandboxpack::Caches, home: &Path) -> (CachesSaid, Vec<Pa
     (CachesSaid { dirs, rule: c.rule.clone(), said: c.said.clone(), xattr: c.xattr.clone() }, files)
 }
 
-/// The policy for the project at `root` with these settings and the places in home the user let Claude read
-/// (`reads`, real) — the toolchain's folders found (blocks).
+/// The policy for the run about to start in the project at `root` with these settings and the places in home
+/// the user let Claude read (`reads`, real) — the toolchain's folders found, and what the run needs there
+/// before it starts (`run_policy_in`). Blocks (a worker's).
 pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
-    let p = policy_in(root, llm, reads, &Here::now());
+    let p = run_policy_in(root, llm, reads, &Here::now());
     #[cfg(target_os = "linux")]
     let p = confined(p);
     p
 }
 
-/// `policy` with what `here` says — its Landlock rules not made yet (`confined`).
+/// `policy_in`, for a run about to start: the checkout's own build folder in its tool's home, opened to its
+/// runs, made where it isn't yet — a run can't make it beside other checkouts' (`own_build_made`). Only here,
+/// on a run's way: making a policy (`policy_in`, its tests, the goldens) writes nothing in the user's homes.
+pub(crate) fn run_policy_in(
+    root: &Path,
+    llm: &crate::llm::LlmConfig,
+    reads: &[PathBuf],
+    here: &Here,
+) -> Policy {
+    let (p, own) = policy_and_own_build(root, llm, reads, here);
+    if let Some((own, tool)) = own {
+        match own_build_made(&own, &tool) {
+            Ok(true) => {
+                crate::log::line("sandbox", "info", &format!("made {} for its first build", own.display()))
+            }
+            Ok(false) => {}
+            Err(e) => {
+                crate::log::line("sandbox", "warning", &format!("the checkout's own build folder: {e}"))
+            }
+        }
+    }
+    p
+}
+
+/// `policy` with what `here` says — its Landlock rules not made yet (`confined`), nothing made for its run
+/// (`run_policy_in`).
+#[cfg(test)]
 pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf], here: &Here) -> Policy {
+    policy_and_own_build(root, llm, reads, here).0
+}
+
+/// `policy_in`, and the checkout's own build folder in its tool's home when the policy opens it to its runs:
+/// the folder, and the tool that keeps it.
+fn policy_and_own_build(
+    root: &Path,
+    llm: &crate::llm::LlmConfig,
+    reads: &[PathBuf],
+    here: &Here,
+) -> (Policy, Option<(PathBuf, Builder)>) {
     let (mut env, above) = env_in(root, llm, reads, here);
     let real_home = env.home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
     // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
@@ -3219,6 +3259,7 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
         env.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &above);
     }
     let mut p = Policy { run, tag, ..Policy::for_project(&env) };
+    let own = env.own_build.clone().filter(|o| p.write.contains(o)).map(|o| (o, env.builder.clone()));
     // (macOS: the network open goes out through tarae's proxy, at a port of the run's own)
     if p.network && here.os == Os::Mac {
         p.proxy = proxy::RunPort::new(p.run_id)
@@ -3263,7 +3304,7 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
     let mut env = std::mem::take(&mut p.env);
     proxy_made(p.run.as_ref().map(|r| r.path()), url.as_ref(), &mut env, &p.run_env);
     p.env = env;
-    p
+    (p, own)
 }
 
 /// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
@@ -3603,6 +3644,101 @@ impl Unlinked {
     }
 }
 
+/// The checkout's own build folder in its tool's home (`own`, real: one its runs may write —
+/// `asked_dir_verdict`), made where it isn't yet. The tool makes a new one under a temp name beside it and
+/// renames it into place (cargo does), and beside it are other checkouts' build folders, which no run writes —
+/// a checkout's first build in the sandbox couldn't start. Made from the tool's home (real) a folder at a time,
+/// each opened without following a link (`O_NOFOLLOW`): a link on the way stops it (Err), never removed — the
+/// home's folders are the user's. The folder made is marked as the tool marks a new one (`cache_marked`) —
+/// or, that failing, taken back with the folders made on the way to it (Err): the tool never marks one that's
+/// there already, so one left unmarked would stay out of nothing (backups, file sync) for good. Ok(true):
+/// made. Blocks (a worker's).
+fn own_build_made(own: &Path, tool: &Builder) -> Result<bool, String> {
+    own_build_made_with(own, tool, &|dir| cache_marked(dir, &tool.marks))
+}
+
+/// `own_build_made`, the new folder marked by `mark` (tests: one that fails).
+fn own_build_made_with(
+    own: &Path,
+    tool: &Builder,
+    mark: &dyn Fn(&Unlinked) -> Result<(), String>,
+) -> Result<bool, String> {
+    if std::fs::symlink_metadata(own).is_ok() {
+        return Ok(false);
+    }
+    let home = tool.home.as_deref().ok_or("its tool's home isn't known")?;
+    let rel = own.strip_prefix(home).map_err(|_| format!("{} isn't in {}", own.display(), home.display()))?;
+    let mut dirs = vec![
+        open_dir_at(libc::AT_FDCWD, &c_name(home.as_os_str())?)
+            .map_err(|e| format!("{}: {e}", home.display()))?,
+    ];
+    // (each folder this call made, outermost first: its parent's place in `dirs`, its name, its path)
+    let (mut at, mut made) = (home.to_path_buf(), Vec::new());
+    for part in rel.iter() {
+        let c = c_name(part)?;
+        at.push(part);
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&dirs[dirs.len() - 1]);
+        // SAFETY: a folder descriptor of ours and a name, live for the call (one there already: EEXIST). The
+        // mode as the tool's own (`create_dir_all`'s), the umask taking its part.
+        if unsafe { libc::mkdirat(fd, c.as_ptr(), 0o777) } == 0 {
+            made.push((dirs.len() - 1, c.clone(), at.clone()));
+        }
+        dirs.push(
+            open_dir_at(fd, &c).map_err(|e| format!("{}: {e} — a link or no folder there", at.display()))?,
+        );
+    }
+    if !made.last().is_some_and(|(i, ..)| i + 2 == dirs.len()) {
+        return Ok(false);
+    }
+    let new = Unlinked { fd: dirs.pop().expect("the folder made"), at };
+    let Err(why) = mark(&new) else { return Ok(true) };
+    // What marking put in it, then each folder made on the way, innermost first — empty: nothing else has run
+    // in them yet. Removed as folders only (rmdir): one holding something now (another checkout's first build,
+    // meanwhile) is that one's, and stays with the ones around it, said.
+    let gone = new.remove_file("CACHEDIR.TAG").and_then(|()| {
+        for (n, (i, name, at)) in made.iter().rev().enumerate() {
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&dirs[*i]);
+            // SAFETY: a folder descriptor of ours and a name, live for the call.
+            if unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+                return match io::Error::last_os_error() {
+                    e if n > 0 && e.raw_os_error() == Some(libc::ENOTEMPTY) => {
+                        Ok(Some(format!("{} stays: something else is in it now", at.display())))
+                    }
+                    e => Err(format!("{}: {e}", at.display())),
+                };
+            }
+        }
+        Ok(None)
+    });
+    Err(match gone {
+        Ok(None) => format!("{why} — not kept, unmarked"),
+        Ok(Some(stays)) => format!("{why} — not kept, unmarked; {stays}"),
+        Err(e) => format!("{why} — and it couldn't be taken back: {e}"),
+    })
+}
+
+/// The cache directory tag's first line, as the standard has it (https://bford.info/cachedir/ — backup tools
+/// skip a folder holding a `CACHEDIR.TAG` that starts with it, whatever tool made it).
+const CACHEDIR_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+
+/// Folder `dir`, new, marked as its tool marks a new one — what its pack says (`marks`): the cache directory
+/// tag, its signature line then the pack's lines (none: no tag), and on macOS the pack's extended attributes.
+fn cache_marked(dir: &Unlinked, marks: &crate::builds::Marks) -> Result<(), String> {
+    if let Some(text) = &marks.cache_tag {
+        dir.write_file("CACHEDIR.TAG", format!("{CACHEDIR_SIGNATURE}{text}").as_bytes())?;
+    }
+    #[cfg(target_os = "macos")]
+    for (name, value) in &marks.macos_xattrs {
+        let c = c_name(name.as_ref())?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&dir.fd);
+        // SAFETY: a folder descriptor of ours, a name and a value of its length, live for the call.
+        if unsafe { libc::fsetxattr(fd, c.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) } != 0 {
+            return Err(format!("{} ({name}): {}", dir.at.display(), io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
+
 /// `name` as C wants it.
 fn c_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString, String> {
     std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| format!("{name:?}: a NUL in it"))
@@ -3679,6 +3815,7 @@ fn asks_for(root: &Path, home: Option<&Path>, here: &Here) -> Asks {
         ),
         home: tool_home.clone(),
         own_under: tool.as_ref().and_then(|t| t.own_under()).map(|(u, d)| (u.to_path_buf(), d)),
+        marks: tool.as_ref().map(|t| t.marks().clone()).unwrap_or_default(),
     };
     let fields =
         tool.as_ref().map(|t| t.asked()).map(|(_, t, b)| [t.to_string(), b.unwrap_or(t).to_string()]);
@@ -4260,7 +4397,8 @@ mod tests {
         let builds = crate::builds::Builds::of(crate::packs::builtin_manifests());
         let (_, _, rust) = builds.iter().find(|(p, ..)| p == "rust").expect("its [builds]");
         let own_under = rust.as_ref().unwrap().own_under().map(|(u, d)| (u.to_path_buf(), d));
-        let builder = Builder { who: "cargo".into(), home: Some(home.into()), own_under };
+        let marks = rust.as_ref().unwrap().marks().clone();
+        let builder = Builder { who: "cargo".into(), home: Some(home.into()), own_under, marks };
         Env { caches: vec![said], files, builder, ..Env::default() }
     }
 
@@ -4466,6 +4604,277 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// For real, with the policy a run gets (cargo asked where the checkout builds): where your setting gives
+    /// each checkout a build folder of its own in cargo's home (`{cargo-cache-home}/build/
+    /// {workspace-path-hash}`), a checkout's first `cargo test` runs in the sandbox — cargo makes a new one under
+    /// a temp name beside it and renames it into place, and beside it are other checkouts' build folders, so
+    /// tarae makes it on the run's way (`run_policy_in` — a policy made alone writes nothing in cargo's home:
+    /// tests and goldens make policies), marked as cargo marks a new one (the cache tag; on
+    /// macOS, kept out of Time Machine and file sync: the same attributes as the other checkout's, which cargo
+    /// made). And another checkout's build folder stays as it was: no file made, changed or removed in it, no
+    /// folder made beside it. Harmless: a cargo home and two checkouts of the test's own under `target/`
+    /// (never the real `~/.cargo` — only its toolchain runs).
+    #[test]
+    fn a_checkouts_first_cargo_test_runs_and_no_other_build_dir_is_written() {
+        let test = "sandbox::tests::a_checkouts_first_cargo_test_runs_and_no_other_build_dir_is_written";
+        #[cfg(target_os = "macos")]
+        if skipped_inside(test) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if !matches!(crate::landlock::abi(), Ok(n) if n >= 2) {
+            let why = format!("{}{test} — needs Landlock ABI 2\n", crate::test_results::SELF_SKIP);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), why.as_bytes());
+            return;
+        }
+        let t = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/sb-own-build-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&t).ok();
+        let (home, p_root, q_root) = (t.join("cargo"), t.join("p"), t.join("q"));
+        for (root, name) in [(&p_root, "p"), (&q_root, "q")] {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(root.join("src/lib.rs"), "#[test]\nfn t() {\n    assert_eq!(1 + 1, 2);\n}\n")
+                .unwrap();
+        }
+        std::fs::create_dir_all(&home).unwrap();
+        let home = std::fs::canonicalize(&home).unwrap();
+        let per_checkout = "{cargo-cache-home}/build/{workspace-path-hash}";
+        // (the variable wins over every cargo config — yours above this folder too)
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let outside = |root: &Path, args: &[&str]| {
+            let out = Command::new(&cargo)
+                .args(args)
+                .current_dir(root)
+                .env("CARGO_HOME", &home)
+                .env("CARGO_BUILD_BUILD_DIR", per_checkout)
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env_remove("RUSTC_WRAPPER")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "cargo {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            out.stdout
+        };
+        let build_dir = |root: &Path| {
+            let json = outside(root, &["metadata", "--no-deps", "--offline", "--format-version", "1"]);
+            let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+            profile_path(Path::new(v["build_directory"].as_str().unwrap()))
+        };
+        // The other checkout built by cargo itself, outside — its build folder made and marked by cargo
+        outside(&q_root, &["check", "--offline", "-q"]);
+        let (own, theirs) = (build_dir(&p_root), build_dir(&q_root));
+        assert!(own.starts_with(home.join("build")) && theirs.starts_with(home.join("build")), "{own:?}");
+        assert!(!own.exists(), "this checkout never built");
+        std::fs::write(theirs.join("marker"), "kept").unwrap();
+        // The policy a run gets, cargo's home and setting as the test's
+        let mut here = Here::now();
+        here.env.insert("CARGO_HOME".into(), home.clone().into());
+        here.env.insert("CARGO_BUILD_BUILD_DIR".into(), per_checkout.into());
+        here.env.insert("CARGO_TARGET_DIR".into(), p_root.join("target").into());
+        here.env.remove("RUSTC_WRAPPER");
+        let llm = crate::llm::LlmConfig::default();
+        // Making a policy writes nothing in cargo's home: only a run's way does
+        let made = policy_in(&p_root, &llm, &[], &here);
+        assert!(made.write.contains(&own) && !own.exists(), "made by a policy alone");
+        let p = run_policy_in(&p_root, &llm, &[], &here);
+        #[cfg(target_os = "linux")]
+        let p = confined(p);
+        assert!(p.write.contains(&own), "its own build folder opened: {:?} · {:?}", p.write, p.refused);
+        let script = r#"
+            if "$C" test --offline -q >"$TMPDIR/out" 2>&1; then echo "test ok"; else echo "test failed:"; cat "$TMPDIR/out"; fi
+            w() { if ( eval "$2" ) 2>/dev/null; then echo "$1 ok"; else echo "$1 no"; fi; }
+            w make 'printf x > "$Q/made"'
+            w change 'printf y >> "$Q/marker"'
+            w remove 'rm "$Q/marker"'
+            w beside 'mkdir "${Q}abcdef"'
+        "#;
+        let mut cmd = command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.current_dir(&p_root).env("C", &cargo).env("Q", &theirs).stdin(Stdio::null());
+        let spawned = spawn(Some(&p), &cmd).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        after_run(Some(&p))();
+        let got: Vec<&str> = out.lines().collect();
+        assert_eq!(got, ["test ok", "make no", "change no", "remove no", "beside no"], "{out}");
+        // Marked as cargo marks the one it makes: its tag byte for byte (both systems — the pack's text is
+        // pinned here, against the tag cargo wrote)
+        let tag = |d: &Path| std::fs::read(d.join("CACHEDIR.TAG")).unwrap_or_default();
+        let cargos = tag(&theirs);
+        assert!(cargos.starts_with(CACHEDIR_SIGNATURE.as_bytes()), "{:?}", String::from_utf8_lossy(&cargos));
+        assert_eq!(tag(&own), cargos, "the cache tag");
+        // (the rust pack's attributes, each as cargo set it on its own — the pack's bytes are cargo's)
+        #[cfg(target_os = "macos")]
+        for (name, value) in &cargo_at(&home).builder.marks.macos_xattrs {
+            let (mine, cargos) = (xattr_of(&own, name), xattr_of(&theirs, name));
+            assert_eq!(cargos.as_ref(), Some(value), "cargo's {name}");
+            assert_eq!(mine, cargos, "{name}");
+        }
+        // The other checkout's as it was
+        assert_eq!(std::fs::read_to_string(theirs.join("marker")).unwrap(), "kept");
+        assert!(!theirs.join("made").exists());
+        let beside = std::fs::read_dir(theirs.parent().unwrap()).unwrap().flatten().map(|e| e.file_name());
+        let name = theirs.file_name().unwrap().to_string_lossy().into_owned();
+        let beside: Vec<_> =
+            beside.filter(|n| n.to_string_lossy().starts_with(&name) && *n != *name).collect();
+        assert!(beside.is_empty(), "{beside:?}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// The checkout's own build folder is made from its tool's home a folder at a time through no link: a link
+    /// where one of them goes (one sending it elsewhere) stops it, and stays — the home's folders are the user's;
+    /// a new one is marked as its pack says the tool marks one (a tool that marks none: nothing on it or in it);
+    /// one there already is left as it is. One that can't be marked
+    /// isn't kept: the tool never marks a folder there already, so it would stay unmarked for good — taken
+    /// back with the folders made on the way to it (not one there before, nor one another run wrote in
+    /// meanwhile — said), the next run makes it again. (Folders of the test's own.)
+    #[test]
+    fn the_own_build_folder_is_made_through_no_link() {
+        let t = std::env::temp_dir().join(format!("tarae-own-build-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(t.join("cargo/build")).unwrap();
+        std::fs::create_dir_all(t.join("elsewhere")).unwrap();
+        let t = std::fs::canonicalize(&t).unwrap();
+        let home = t.join("cargo");
+        let tool = Builder {
+            who: "cargo".into(),
+            home: Some(home.clone()),
+            own_under: Some(("build".into(), 2)),
+            // (marks of the test's own: whatever the pack says is what's put)
+            marks: crate::builds::Marks {
+                cache_tag: Some("# made by the test.\n".into()),
+                macos_xattrs: vec![("com.tarae.test-mark".into(), b"x\0y".to_vec())],
+            },
+        };
+        let own = home.join("build/ab/cd1234");
+        assert_eq!(own_build_made(&own, &tool), Ok(true));
+        let tag = std::fs::read_to_string(own.join("CACHEDIR.TAG")).unwrap();
+        assert_eq!(tag, "Signature: 8a477f597d28d172789f06886806bc55\n# made by the test.\n");
+        #[cfg(target_os = "macos")]
+        assert_eq!(xattr_of(&own, "com.tarae.test-mark"), Some(b"x\0y".to_vec()));
+        // A tool that tags none and marks nothing: made, nothing in it, no mark on it
+        let plain = Builder { marks: Default::default(), ..tool.clone() };
+        let bare = home.join("build/ab/9999");
+        assert_eq!(own_build_made(&bare, &plain), Ok(true));
+        assert_eq!(std::fs::read_dir(&bare).unwrap().count(), 0, "a file made in it");
+        #[cfg(target_os = "macos")]
+        assert_eq!(xattr_of(&bare, "com.tarae.test-mark"), None);
+        std::fs::remove_file(own.join("CACHEDIR.TAG")).unwrap();
+        assert_eq!(own_build_made(&own, &tool), Ok(false), "there already");
+        assert!(!own.join("CACHEDIR.TAG").exists(), "left as it is");
+        std::os::unix::fs::symlink(t.join("elsewhere"), home.join("build/ef")).unwrap();
+        let made = own_build_made(&home.join("build/ef/0123ab"), &tool);
+        assert!(made.as_ref().is_err_and(|e| e.contains("a link or no folder there")), "{made:?}");
+        assert_eq!(
+            std::fs::read_dir(t.join("elsewhere")).unwrap().count(),
+            0,
+            "nothing made through the link"
+        );
+        assert!(home.join("build/ef").is_symlink(), "the link stays");
+        // Marking fails partway (the tag written, then an attribute refused) under a hash prefix new too:
+        // nothing of it kept — the folder and the prefix made on the way to it
+        let next = home.join("build/12/5678ef");
+        let fails = |dir: &Unlinked| {
+            dir.write_file("CACHEDIR.TAG", b"Signature: 8a477f597d28d172789f06886806bc55\n")?;
+            Err("an attribute refused".to_string())
+        };
+        let made = own_build_made_with(&next, &tool, &fails);
+        assert_eq!(made, Err("an attribute refused — not kept, unmarked".into()));
+        assert!(!home.join("build/12").exists(), "a folder made on the way left");
+        assert!(home.join("build").is_dir(), "a folder there before taken back");
+        assert_eq!(own_build_made(&next, &tool), Ok(true), "made again, marked");
+        assert!(next.join("CACHEDIR.TAG").is_file());
+        // … under a prefix there before: the folder taken back, the prefix stays
+        let beside = home.join("build/ab/5678ef");
+        assert_eq!(own_build_made_with(&beside, &tool, &fails), made);
+        assert!(!beside.exists() && home.join("build/ab").is_dir());
+        // … and under a new prefix another run wrote in meanwhile: the folder taken back, the prefix stays, said
+        let theirs = home.join("build/34/other");
+        let fails_beside = |dir: &Unlinked| {
+            std::fs::create_dir(&theirs).unwrap();
+            fails(dir)
+        };
+        let made = own_build_made_with(&home.join("build/34/5678ef"), &tool, &fails_beside);
+        assert!(
+            made.as_ref().is_err_and(|e| e.contains("build/34 stays: something else is in it")),
+            "{made:?}"
+        );
+        assert!(!home.join("build/34/5678ef").exists() && theirs.is_dir());
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// tarae makes the checkout's own build folder outside the sandbox, so only where the policy opens it to
+    /// the run: a build-folder setting of yours naming a folder that can't be a checkout's own — beside cargo's
+    /// crates, too shallow or too deep under `build`, outside cargo's home — makes nothing there, and is said as
+    /// kept closed. The one that may be is made, marked (the same setup: the cases differ only in the folder).
+    /// (A cargo home and a checkout of the test's own under `target/`; no cargo run — what it names is given.)
+    #[test]
+    fn a_build_folder_the_policy_refuses_is_never_made() {
+        let base = profile_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/sb-own-refused-{}", std::process::id())),
+        );
+        std::fs::remove_dir_all(&base).ok();
+        let (home, root) = (base.join("home"), base.join("home/work/p"));
+        let cargo = home.join(".cargo");
+        std::fs::create_dir_all(cargo.join("build")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        let here = Here { env: [("HOME".to_string(), home.clone().into())].into(), ..Here::default() };
+        let llm = crate::llm::LlmConfig::default();
+        let run_with = |own: &Path| {
+            let named = vec![(own.to_path_buf(), "build-dir".to_string())];
+            let found = ToolDirs { named, own_build: Some(own.to_path_buf()), ..ToolDirs::default() };
+            toolchain_found_in(&root, found, &here);
+            run_policy_in(&root, &llm, &[], &here)
+        };
+        for bad in [
+            cargo.join("registry/ab/cd1234"),
+            cargo.join("build/ab"),
+            cargo.join("build/ab/cd1234/ef"),
+            home.join("elsewhere/ab/cd1234"),
+        ] {
+            let p = run_with(&bad);
+            assert!(!p.write.contains(&bad), "{} opened: {:?}", bad.display(), p.write);
+            assert!(p.refused.iter().any(|(r, _)| *r == bad), "{} not said: {:?}", bad.display(), p.refused);
+            assert!(!bad.exists(), "{} made", bad.display());
+        }
+        let good = cargo.join("build/ab/cd1234");
+        let p = run_with(&good);
+        assert!(p.write.contains(&good), "{:?} · {:?}", p.write, p.refused);
+        assert!(good.join("CACHEDIR.TAG").is_file(), "its own not made");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// An extended attribute of folder `d` (not through a link).
+    #[cfg(target_os = "macos")]
+    fn xattr_of(d: &Path, name: &str) -> Option<Vec<u8>> {
+        let (p, n) = (c_name(d.as_os_str()).unwrap(), c_name(name.as_ref()).unwrap());
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: two C strings and a buffer of its length, live for the call.
+        let got = unsafe {
+            libc::getxattr(
+                p.as_ptr(),
+                n.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        buf.truncate(usize::try_from(got).ok()?);
+        Some(buf)
+    }
+
     /// The folders a checkout's build tool names are judged the same for any tool a pack brings: a tool of the
     /// test's own naming home, `/`, the checkout's parent and its own home — all closed, each said in its words;
     /// its own build folder (where its `[builds] remove` puts one) and the checkout's own open. (Names only.)
@@ -4478,6 +4887,7 @@ mod tests {
             who: "mytool".into(),
             home: Some(tool_home.clone()),
             own_under: Some(("cache".into(), 1)),
+            ..Builder::default()
         };
         let bad =
             [home.clone(), "/".into(), home.join("work"), tool_home.clone(), tool_home.join("cache/one/x")];
