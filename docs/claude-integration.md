@@ -654,10 +654,16 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   can't look into their details either (`lsof` sees its own processes only). The run's panel names each refused
   signal's process (`signalling bash (4242) — outside the run's own processes`). Looks into other processes are
   one line however many there were (`lsof -p` looks into all of them). The kernel doesn't report every refusal:
-  never a signal 0, and not always each signal. **Still open**: a command can read another process's command
-  line (`pgrep -f` matches tarae's and other sessions'), and maybe its environment, so a token on a command line
-  is readable. Which rule could close that is still being measured. On Linux, signals are kept in from Landlock
-  ABI 6 (below)
+  never a signal 0, and not always each signal. On Linux, signals are kept in from Landlock ABI 6 (below)
+- **Other processes' command lines and environments are within reach (macOS).** A command can read the command
+  line and the starting environment of any process of yours: tarae's, your shell's, another session's commands
+  (`pgrep -f` matches them; a few lines of C read the environment too). No rule of macOS's sandbox closes it —
+  measured on macOS 27: not the process-information rules, not a system setting's name, not even every system
+  setting's read denied (which breaks ordinary programs anyway). So a token tarae keeps out of a command's own
+  environment is still within its reach in yours, as is one on a command line. Keep tokens in files tarae never
+  reads (the places above) or the keychain rather than in exported variables. Claude is told this once a
+  conversation, with the variables left out, and to ask you rather than read them. On Linux a command never
+  reads another's environment (below)
 - **Programs on this machine are closed to it too, except on the ports you open.** It can still listen on a
   port; connecting is what's closed. Some ports belong to programs that run whatever they're asked, outside
   the sandbox (the table below), and macOS's sandbox can't open "all of this machine but those". So:
@@ -773,6 +779,13 @@ thread of tarae's that confined itself first, and everything it starts stays con
   meanwhile reaches nothing, and a unix socket is opened by its real path without following a link. The
   sockets a command listens on are bound to this machine's loopback, so even one listening on every address
   hears only this machine. A server that checks who connects sees tarae's process, not the command's.
+- **Other processes: their command lines at most.** A command never reads the environment of a process outside
+  its own (`/proc/<pid>/environ` is a read Landlock keeps to the command's own processes, whatever the file
+  rules say). Command lines are everyone's to read on Linux, so it can read those of the processes it sees.
+  Where the system lets tarae give its session namespaces of its own (unprivileged user namespaces, and a
+  `/proc` of the session's own — not under Docker's masked one), the session numbers its processes on its own,
+  and a command sees none outside its session at all. Measured: Landlock ABI 4 in Docker, and a session with and
+  without its own process numbering on Debian 12
 - **The network, but not this machine.** With `llm.sandbox-network` on, a command reaches the network beyond
   this machine — never link-local addresses or the cloud metadata servers tarae knows of (most are link-local;
   besides, Alibaba Cloud's `100.100.100.200` and AWS's and Google's IPv6 ones), also in their NAT64 and 6to4 forms,

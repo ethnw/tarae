@@ -829,6 +829,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// F2, Linux: a confined run reads another process's command line, never its environment — not of one
+    /// outside its domain. `/proc/<pid>/environ` is a ptrace-mode read, which Landlock keeps within the domain
+    /// (since ABI 1), whatever the file rules grant — here reading everywhere; `/proc/<pid>/cmdline` is
+    /// everyone's. (macOS lets a run read both — spike 2b; this is what the docs say of Linux.) A stand-in of
+    /// the test's own with a harmless marker in its arguments and one in its environment; the test itself reads
+    /// both first. Each result said.
+    #[test]
+    fn a_confined_run_reads_no_environment_outside_it() {
+        let Some(abi) = kernel_abi("a_confined_run_reads_no_environment_outside_it") else { return };
+        // (`; :` keeps the shell, its arguments with it, from becoming `sleep`)
+        let mut target = Command::new("/bin/sh")
+            .args(["-c", "sleep 30; :", "outside-arg-marker"])
+            .env("TARAE_F2_MARKER", "outside-env-marker")
+            .spawn()
+            .unwrap();
+        let pid = target.id().to_string();
+        let has = |bytes: &[u8], m: &str| bytes.windows(m.len()).any(|w| w == m.as_bytes());
+        let read = |f: &str| std::fs::read(format!("/proc/{pid}/{f}")).unwrap();
+        assert!(has(&read("cmdline"), "outside-arg-marker"), "the test reads its arguments");
+        assert!(has(&read("environ"), "outside-env-marker"), "the test reads its environment");
+        // (the markers split in the script: its own command line mustn't carry them; no `2>/dev/null` — these
+        // rules don't let it open that, and the refusal would be the redirect's)
+        let script = r#"for f in cmdline environ; do
+                if v=$(tr '\0' ' ' < "/proc/$1/$f"); then
+                    case "$v" in *"outside-arg""-marker"*|*"outside-env""-marker"*) echo "$f: read, marker seen" ;;
+                        *) echo "$f: read, no marker" ;; esac
+                else echo "$f: refused"; fi
+            done"#;
+        let (dir, granted, _) = folders("details");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", script, "sh", &pid]).stdout(std::process::Stdio::piped());
+        let out = spawn(&run_rules(abi, &granted), &mut cmd).unwrap().wait_with_output().unwrap();
+        target.kill().ok();
+        target.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+        let said = String::from_utf8_lossy(&out.stdout).trim().replace('\n', "; ");
+        let line = format!("Landlock ABI {abi}, a process outside the run's domain: {said}\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        assert_eq!(said, "cmdline: read, marker seen; environ: refused");
+    }
+
     /// Reading and running everywhere (the shell, its libraries), everything in `granted`.
     fn run_rules(abi: u32, granted: &Path) -> Ruleset {
         let mut rules = Ruleset::new(abi).unwrap();

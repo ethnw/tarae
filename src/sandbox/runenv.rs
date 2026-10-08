@@ -199,6 +199,15 @@ fn grouped(names: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// What Claude is told once a conversation on macOS (F2, spikes 2b and 2c): no rule of Seatbelt's keeps a
+/// command from another process's command line and starting environment (KERN_PROCARGS2 — not the
+/// `process-info*` rules, not a settings name, not every settings read denied), so a variable left out of its
+/// own is still within reach. Linux keeps environments in (Landlock: `landlock::tests::
+/// a_confined_run_reads_no_environment_outside_it`), so it isn't said there.
+const OTHERS_READ: &str = " On macOS left out isn't out of reach: a command can read the command line and starting \
+     environment of the user's other processes (tarae's, their shell's, other sessions' commands) — no rule of \
+     macOS's sandbox closes it. Don't read them for a value left out here; ask the user.";
+
 impl RunEnv {
     /// A variable as the run gets it, in UTF-8 — None: left out, or not set.
     pub fn var(&self, name: &str) -> Option<String> {
@@ -213,7 +222,8 @@ impl RunEnv {
 
     /// What Claude reads of the names left out that `said` doesn't hold yet — which it then does (once a
     /// chat: `Chat::env_said`). Token-like ones by name, the rest grouped (`grouped`). None: nothing new.
-    pub fn said(&self, said: &mut Vec<String>) -> Option<String> {
+    /// On macOS (`os`) the first time also says left out isn't out of reach (`OTHERS_READ`).
+    pub fn said(&self, said: &mut Vec<String>, os: super::Os) -> Option<String> {
         let new = |names: &[String]| -> Vec<String> {
             names.iter().filter(|n| !said.contains(n)).cloned().collect()
         };
@@ -229,12 +239,15 @@ impl RunEnv {
             let label = if tokens.is_empty() { "" } else { "the rest: " };
             parts.push(format!("{label}{}", grouped(&others).join(", ")));
         }
+        let first = said.is_empty();
         said.extend(tokens.into_iter().chain(others));
+        let others_read = if first && os == super::Os::Mac { OTHERS_READ } else { "" };
         Some(format!(
             "Your commands' environment holds PATH, HOME, the locale and the toolchains' own variables — not the \
              rest of the user's. Left out (names only) — {}. A command that needs one of them fails without it: \
-             tell the user — llm.sandbox-env passes one (:sandbox-env lists them all); don't work around it.",
-            parts.join("; ")
+             tell the user — llm.sandbox-env passes one (:sandbox-env lists them all); don't work around it.{}",
+            parts.join("; "),
+            others_read
         ))
     }
 
@@ -289,6 +302,7 @@ impl RunEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::Os;
 
     const FAKE: &str = "tarae-fake-token";
 
@@ -395,7 +409,7 @@ mod tests {
             .into(),
         };
         let mut said = Vec::new();
-        let first = e.said(&mut said).unwrap();
+        let first = e.said(&mut said, Os::Mac).unwrap();
         assert!(
             first.contains(
                 "Left out (names only) — token-like: GEMINI_API_KEY, GITHUB_TOKEN; the rest: BAGGAGE, CLAUDE_* (3), \
@@ -404,10 +418,16 @@ mod tests {
             "{first}"
         );
         assert!(first.contains("llm.sandbox-env") && first.contains(":sandbox-env"), "{first}");
-        assert_eq!(e.said(&mut said), None, "said again in the chat");
+        // (F2: on macOS the first time also says other processes' environments are within reach — never on
+        // Linux, where Landlock keeps them in)
+        assert!(first.ends_with(OTHERS_READ), "{first}");
+        let linux = e.said(&mut Vec::new(), Os::Linux).unwrap();
+        assert!(!linux.contains("On macOS") && linux.ends_with("don't work around it."), "{linux}");
+        assert_eq!(e.said(&mut said, Os::Mac), None, "said again in the chat");
         let more = RunEnv { others: vec!["NEW_ONE".into()], ..e.clone() };
-        let next = more.said(&mut said).unwrap();
+        let next = more.said(&mut said, Os::Mac).unwrap();
         assert!(next.contains("Left out (names only) — NEW_ONE.") && !next.contains("GITHUB"), "{next}");
+        assert!(!next.contains("On macOS"), "once a conversation: {next}");
         let page = e.page();
         assert!(page.contains("GITHUB_TOKEN\n") && page.contains("CLAUDE_CODE_A\n"), "{page}");
         // A name the output says, as a word, is said every time — not one inside another word

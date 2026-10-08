@@ -3187,6 +3187,66 @@ mod tests {
         k.end();
     }
 
+    /// F2: no process outside its session gives a run its environment. With the PID namespace (A+) the run
+    /// can't even name one: nothing it sees carries the stand-in's markers. Without it (A: Docker's masked
+    /// `/proc`) it sees the stand-in and reads its command line, never its environment (Landlock keeps a
+    /// ptrace-mode read in the domain — `landlock::tests::a_confined_run_reads_no_environment_outside_it`).
+    /// The stand-in is the test's own, with a harmless marker in its arguments and one in its environment;
+    /// the run looks through every process it sees, and must find its own markers (arguments and
+    /// environment) — else a run that reads nothing would pass. Each result said.
+    #[test]
+    fn a_run_reads_no_details_outside_its_session() {
+        if !namespaced("a_run_reads_no_details_outside_its_session") {
+            return;
+        }
+        let Some(rules) = open_rules("a_run_reads_no_details_outside_its_session") else { return };
+        // (`; :` keeps the shell, its arguments with it, from becoming `sleep`)
+        let mut target = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30; :", "session-arg-marker"])
+            .env("TARAE_F2_MARKER", "session-env-marker")
+            .spawn()
+            .unwrap();
+        let read = |f: &str| std::fs::read(format!("/proc/{}/{f}", target.id())).unwrap();
+        let has = |bytes: &[u8], m: &str| bytes.windows(m.len()).any(|w| w == m.as_bytes());
+        assert!(has(&read("cmdline"), "session-arg-marker") && has(&read("environ"), "session-env-marker"));
+        let k = keeper("details");
+        // (the markers split in the script: its own command line mustn't carry them; the shell runs the loop
+        // again as itself with the control's markers in its environment and arguments, both in place
+        // before the loop reads — no child that may not have started yet)
+        let script = r#"s='n=0 a=0 e=0 oa=0 oe=0
+            for d in /proc/[0-9]*; do
+                n=$((n+1))
+                v=$(tr "\0" " " < "$d/cmdline" 2>/dev/null)
+                case "$v" in *"session-arg""-marker"*) a=$((a+1)) ;; esac
+                case "$v" in *"run-arg""-marker"*) oa=$((oa+1)) ;; esac
+                v=$(tr "\0" " " < "$d/environ" 2>/dev/null)
+                case "$v" in *"session-env""-marker"*) e=$((e+1)) ;; esac
+                case "$v" in *"run-env""-marker"*) oe=$((oe+1)) ;; esac
+            done
+            echo "$n $a $e $oa $oe"'
+            export TARAE_F2_RUN="run-env""-marker"
+            exec sh -c "$s" sh "run-arg""-marker""#;
+        let (out, status) = sh_through(&k, &rules, script);
+        target.kill().ok();
+        target.wait().ok();
+        let pid_ns = k.ns.pid;
+        k.end();
+        assert!(status.success(), "{out}");
+        let n: Vec<usize> = out.split_whitespace().map(|w| w.parse().unwrap()).collect();
+        let (seen, args, env, own_args, own_env) = (n[0], n[1], n[2], n[3], n[4]);
+        let tier = if pid_ns { "A+ (its own PID namespace)" } else { "A (no PID namespace)" };
+        let line = format!(
+            "tier {tier}: the run sees {seen} processes — its own markers read in {own_args} (arguments) and \
+             {own_env} (environment), the stand-in's arguments in {args}, its environment in {env}\n"
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        // The control: the loop finds the run's own markers, so a 0 for the stand-in's is a refusal or a
+        // process out of sight, not a loop that reads nothing (in A+ both of the stand-in's are 0).
+        assert!(own_args >= 1 && own_env >= 1, "the run doesn't find its own markers: {line}");
+        assert_eq!(env, 0, "an environment read outside the session: {line}");
+        assert_eq!(args, usize::from(!pid_ns), "{line}");
+    }
+
     /// D10 under Landlock: the session's own `/dev/pts` and `/dev/shm` sit over this system's, where a rule
     /// isn't reached through them (measured: `target/sb/step3-notes.md`), so a run's rules grant the devices on
     /// the keeper's own places too (the handles it gave with `Ready` — `linux::session_devices`). Under a

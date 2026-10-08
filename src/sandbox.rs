@@ -9338,7 +9338,8 @@ mod tests {
         let said =
             format!("token={};path={}", probe["token"].as_str().unwrap(), probe["path"].as_str().unwrap());
         std::fs::write(dir.join("probe"), said).unwrap();
-        std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new()).unwrap_or_default()).unwrap();
+        std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new(), Os::HOST).unwrap_or_default())
+            .unwrap();
     }
 
     /// A toolchain's probe (`output_in`) runs through the session's keeper, confined: its parent is the keeper
