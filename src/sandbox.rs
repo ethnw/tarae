@@ -160,7 +160,13 @@ impl Guard {
             None => " \"Operation not permitted\" is likely the sandbox.".into(),
         };
         let mut b = self.watch().map(|w| w.blocked()).unwrap_or_default();
-        let said = p.said_in_output(output, &b.seen);
+        let mut said = p.said_in_output(output, &b.seen);
+        // (`ps` that never started is said as itself, not as a write to it refused)
+        let ps = ps_said(output, Os::HOST);
+        if ps.is_some() {
+            said.retain(|d| d.target != PS);
+        }
+        let ps = ps.unwrap_or_default();
         let mut o = Blocked::default();
         for d in p.merge_made(&mut b.seen, said) {
             o.add(d);
@@ -171,7 +177,7 @@ impl Guard {
             }
         }
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
-            return format!("{rules}{unwatched}");
+            return format!("{ps}{rules}{unwatched}");
         }
         if b.total > 0 || o.total > 0 {
             let mut s = match (&b.failed, b.total) {
@@ -206,6 +212,7 @@ impl Guard {
             let (kept, all) = self.kept(&all_seen);
             s.push_str(&kept);
             s.push_str(&quiet_said(&b).unwrap_or_default());
+            s.push_str(ps);
             s.push_str(&rules);
             // (step 5g: what the proxy tarae itself goes out by failed is the user's proxy's, not the sandbox's)
             if all_seen.iter().any(|d| d.op == proxy::UPSTREAM_OP) {
@@ -227,10 +234,10 @@ impl Guard {
         }
         let quiet = quiet_said(&b).unwrap_or_default();
         match b.failed {
-            None => format!("The sandbox blocked nothing. {quiet}{rules}"),
+            None => format!("The sandbox blocked nothing. {quiet}{ps}{rules}"),
             Some(why) => {
                 let mut s =
-                    format!("tarae couldn't watch what the sandbox blocked ({why}). {rules}{unwatched}");
+                    format!("tarae couldn't watch what the sandbox blocked ({why}). {ps}{rules}{unwatched}");
                 let refused = refused_lines(output);
                 if !refused.is_empty() {
                     s.push_str("\nLines that may be the sandbox:\n");
@@ -1545,6 +1552,28 @@ fn quiet_said(b: &Blocked) -> Option<String> {
             shell.join(", ")
         )
     })
+}
+
+/// macOS's `ps`: setuid (it runs as root to read every process), and Seatbelt starts no setuid program — no
+/// rule opens it and nothing reaches the log; the shell says "Operation not permitted" (measured, 27.0).
+const PS: &str = "/bin/ps";
+
+/// Whether a line of output is a shell (or `env`) saying it couldn't start `ps`: `sh: /bin/ps: …`, `bash:
+/// line 1: /bin/ps: …`, `zsh:1: operation not permitted: ps`, `env: ps: …`.
+fn ps_refused(line: &str) -> bool {
+    let l = line.trim_end().to_ascii_lowercase();
+    let words = "operation not permitted";
+    l.ends_with(&format!("{words}: ps"))
+        || [format!(" {PS}: {words}"), format!(" ps: {words}")].iter().any(|w| l.contains(w.as_str()))
+}
+
+/// The report's line on `ps` when the output says it never started — on macOS only (elsewhere it runs).
+fn ps_said(output: &[(bool, String)], os: Os) -> Option<&'static str> {
+    (os == Os::Mac && output.iter().any(|(_, l)| ps_refused(l))).then_some(
+        "ps never starts in macOS's sandbox: it's setuid (it runs as root to read every process), and the \
+         sandbox starts no setuid program — nothing to open. pgrep -l -x name finds processes by name; lsof \
+         -p <pid> shows what one of the run's own processes has open.\n",
+    )
 }
 
 impl Blocked {
@@ -7443,6 +7472,43 @@ mod tests {
         // Anything else blocked beside them still asks the user to open it
         let r = said(&[look, ("file-read-data", "/Users/u/other/x")]);
         assert!(r.contains("If the command needs one of these"), "{r}");
+    }
+
+    /// macOS: `/bin/ps` is setuid and the sandbox never starts it — the shell says only "Operation not
+    /// permitted" (nothing in Seatbelt's log), which read as a write to `/bin/ps` refused and "tell the user to
+    /// open it". The report says why in plain words and what to use instead (`pgrep`, `lsof -p`), nothing to
+    /// open. Each shell's line as it says it (measured, macOS 27.0); a line naming another program isn't it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_report_says_why_ps_never_starts() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let g = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("t.")), ..p.clone() }));
+        let said = |line: &str| g.report(&[(true, line.to_string())]);
+        for line in [
+            "sh: /bin/ps: Operation not permitted",
+            "bash: line 1: /bin/ps: Operation not permitted",
+            "zsh:1: operation not permitted: ps",
+            "env: ps: Operation not permitted",
+        ] {
+            let r = said(line);
+            assert!(r.contains("ps never starts in macOS's sandbox: it's setuid"), "{line}: {r}");
+            assert!(r.contains("pgrep -l -x name") && r.contains("lsof -p"), "{line}: {r}");
+            // (names only: never a way to read other processes' command lines — F2 keeps that unasked-for)
+            assert!(!r.contains("pgrep -f") && !r.contains("pgrep -lf"), "{line}: {r}");
+            assert!(!r.contains("writing /bin/ps") && !r.contains("If the command needs one"), "{line}: {r}");
+        }
+        // Beside something blocked: both said, and that one still asks the user
+        let w = Watch::quiet("t.");
+        w.record(denial("file-write-create", "/Users/u/other/x"));
+        let r = Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() }))
+            .report(&[(true, "sh: /bin/ps: Operation not permitted".into())]);
+        assert!(r.contains("ps never starts") && !r.contains("writing /bin/ps"), "{r}");
+        assert!(r.contains("writing /Users/u/other/x") && r.contains("If the command needs one"), "{r}");
+        for other in ["sh: /bin/pstree: Operation not permitted", "zsh:1: operation not permitted: top"] {
+            assert!(!said(other).contains("setuid"), "{other}");
+        }
+        // (Linux: `ps` isn't setuid there and runs — never said)
+        assert_eq!(ps_said(&[(true, "sh: /bin/ps: Operation not permitted".into())], Os::Linux), None);
     }
 
     /// P2 leftovers: Go's telemetry counters (written in home by every go command) are denied but never named —

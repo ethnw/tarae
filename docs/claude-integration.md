@@ -654,7 +654,9 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   can't look into their details either (`lsof` sees its own processes only). The run's panel names each refused
   signal's process (`signalling bash (4242) — outside the run's own processes`). Looks into other processes are
   one line however many there were (`lsof -p` looks into all of them). The kernel doesn't report every refusal:
-  never a signal 0, and not always each signal. On Linux, signals are kept in from Landlock ABI 6 (below)
+  never a signal 0, and not always each signal. `ps` never starts in the sandbox: it's setuid, and macOS's
+  sandbox starts no setuid program. The run's report says so and points to `pgrep` and `lsof -p` instead. On
+  Linux, signals are kept in from Landlock ABI 6 (below)
 - **Other processes' command lines and environments are within reach (macOS).** A command can read the command
   line and the starting environment of any process of yours: tarae's, your shell's, another session's commands
   (`pgrep -f` matches them; a few lines of C read the environment too). No rule of macOS's sandbox closes it —
