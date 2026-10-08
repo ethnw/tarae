@@ -173,6 +173,13 @@ side git · 4 rows · in hand git:src/term.rs
   - `same_as` (cardburden 3): a run card the same as one answered before since tarae started (`sinceyes.rs`)
     — `{ card, answer, at, unchanged }`: that card's id, its answer (`y` `a` `A` `n`) and when, and whether
     nothing changed since; `null` otherwise.
+  - `text` (cardburden 5, full level only): the card's text whole, `[{ line, role }]` — `role` as the card draws
+    the line: `warning` (what yes risks, the warning colour: `Offer.warning` and the data's `warnings`) over
+    `diff` (what changed since a `y`, `sinceyes`) over `decided` (`decided_lines`, full strength) — the rest
+    `said` (faint). A driver tells a card's weight from it without reading the frame. Left out at Claude's
+    level (its `asks` stays cut); the text form keeps its one line.
+  - `warnings` (cardburden 5): the warnings the card says (`cardwarn.rs`), by id; left out when none. Claude's
+    level has them, but not a plugin's or `git-trust` card's.
 - **`inbox`** (2026-10-05, `inbox.rs`) — what waits for the user, every session's, oldest first: the cards above
   that wait (not downloading) and the edits waiting for their review (`edit#s0:review` up in its session,
   `edit#s1:<request>` queued), reads queued for their card, a change set's files; after all that asks, Claude's
@@ -196,7 +203,10 @@ side git · 4 rows · in hand git:src/term.rs
     (full level adds its text).
   - `follow`: on, paused, the gaze.
 - **`runs`** — task, tests, preflight steps, Claude's runs, and queued ones (`runs_next`).
-  - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `passed` · `failed` · `stopped`.
+  - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `quiet` (cardburden 5: a run of
+    Claude's printing nothing, held from the stuck card — under its own time limit still to come, or its work
+    maybe elsewhere and not yet `llm.stuck-after-outside` quiet: `stuck::held`) · `passed` · `failed` ·
+    `stopped`.
   - `since`.
   - A run id, new: a sequence number given with its `RunTrace`.
 - **`procs`** (#143, 2026-10-05) — what `:procs` lists, as of its last look (`looked_ms` ago: every 30 s, each
@@ -388,7 +398,9 @@ meok and hanji, a narrow screen, the stacked-card case, and a mark next to the `
 
 - **What's in it at all:** labels and structure, never contents. A card's `asks` is what the card shows at
   full strength (a command, a path, a setting), not a hook's body. No code text, terminal output, previews,
-  diffs or chat bodies. No env values, ever.
+  diffs or chat bodies. No env values, ever. One exception, at the full level only (cardburden 5): a card's
+  `text` — what the card itself shows the user, its diff since a `y` among it, so a driver answering it reads
+  what the user would; never at Claude's level.
 - **Drivers (full level):** same uid only, and not from under Claude's processes. They also get unsent text
   (the chat draft, the prompt and picker query). Any process of the user's could read the files and saved
   chats anyway; what it can't read elsewhere is unsent text and the screen's structure. Holding that back

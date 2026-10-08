@@ -407,6 +407,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.stuck_after = n(v) as u64,
     },
     Setting {
+        path: "llm.stuck-after-outside",
+        kind: Kind::Int { min: 0, max: 1440 },
+        doc: "Chat: …and for a run whose work may go on elsewhere — granted a daemon's socket (Docker's), run outside the sandbox on your y, connected outside its processes — with no time limit of its own (a run all under its own `timeout` isn't asked before that ends, two hours at most) (0 = as llm.stuck-after)",
+        get: |c| Value::from(c.llm.stuck_after_outside as i64),
+        set: |c, v| c.llm.stuck_after_outside = n(v) as u64,
+    },
+    Setting {
         path: "llm.review-at-end",
         kind: Kind::Bool,
         doc: "Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here)",

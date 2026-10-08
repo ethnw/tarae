@@ -467,7 +467,10 @@ back (§8.2). P3 must not start before P2's measurements and the `file-link` res
 - `Offer.asked` (what a card asks, set where Claude's cards and the sandbox's are made: `tools::ask_with`,
   `ask_unprotected`, `reads::next`, `seeing`, `blocked`) and `Offer.drawn` (first drawn in front,
   `term::render_frame`). Lines come from the answer paths (`offer_accept`, `offer_dismiss`,
-  `offer_lasting`) and `drop_cards`.
+  `offer_lasting`) and `drop_cards`. Since cardburden 5 every card has its line: one with no `asked` (tarae's
+  own — a preflight's, a stuck run's, a review's end, notes gone stale) as `why=own · shadow=own`
+  (`Why::Own`, `Request::Own` → `Decision::Own`), the kind as `tarae state` names it (`Offer::kind`; it was
+  `other`), and the answers by a card's own letter (`w` `f` `p` `X` `D` `R` `c` `N` — `offer_answered`) too.
 - The user-visible gain: `allow::defaults` (was `also_readable`) adds **the repository's other
   checkouts** (`allow::checkouts` — read from git's own files, no git run, taken only when the links go
   both ways, so a `.git/worktrees` entry that came with a download can't name some other folder) and **the

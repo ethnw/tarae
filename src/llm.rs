@@ -134,6 +134,10 @@ pub struct LlmConfig {
     /// Chat: minutes a run of Claude's prints nothing at next to no CPU before a card asks whether it's
     /// stuck (`stuck.rs`; 0 = never).
     pub stuck_after: u64,
+    /// …and one whose work may go on elsewhere — granted a daemon's socket, run outside the sandbox, connected
+    /// outside its processes — with no time limit of its own: minutes before that card (cardburden 5; 0 = as
+    /// `stuck_after`).
+    pub stuck_after_outside: u64,
 }
 
 impl Default for LlmConfig {
@@ -162,6 +166,7 @@ impl Default for LlmConfig {
             sandbox_kept_days: 14,
             screen_terminal: true,
             stuck_after: 10,
+            stuck_after_outside: 30,
         }
     }
 }

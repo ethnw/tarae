@@ -28,6 +28,12 @@
       "session": "s0",
       "settled": true,
       "state": "asking",
+      "text": [
+        {
+          "line": "2 files not viewed.",
+          "role": "said"
+        }
+      ],
       "title": "End the review?",
       "up": "front",
       "viewing": false,
@@ -66,6 +72,12 @@
       "session": "s1",
       "settled": false,
       "state": "asking",
+      "text": [
+        {
+          "line": "Claude renames `x`.",
+          "role": "decided"
+        }
+      ],
       "title": "Claude changes 2 files",
       "up": "parked",
       "viewing": false,

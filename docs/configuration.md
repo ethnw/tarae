@@ -190,7 +190,13 @@ Where the steps come from:
   Java with the Gradle or Maven installed here (`build.gradle(.kts)` or `settings.gradle(.kts)`: `gradle test
   --console=plain`; `pom.xml`: `mvn -B test`), together in a project that is several. The commands are
   tarae's, but what they run is the project's code — its tests and build scripts — so the first run in a
-  project shows them on a card that says so (`y` runs them): run them only for code you trust.
+  repository shows them on a card that says so (`y` runs them): run them only for code you trust. A `y` is
+  kept (`~/.local/state/tarae/preflight-told`: a hash of the repository, that clone of it — its git folder's
+  device, inode and making time — and the names and commands of the steps the card listed; no path or command
+  in it), so the card shows again only when a step changes, for steps it didn't list (`:preflight-full`'s
+  `full = true` ones after the quick card), in another repository, or after the repository is cloned again —
+  not after `:restart`, nor in another session of the same clone. Where the file system can't tell when a
+  folder was made, nothing is kept: the card once each start.
 
   A Java project with its own wrapper (`./gradlew`, `./mvnw`) builds with that, a script from the repository:
   tarae's defaults never run it, and `:preflight` says to list it in the project's `[preflight]` — `{ name =

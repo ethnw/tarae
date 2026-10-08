@@ -1137,7 +1137,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        self.card_answered(o.id);
+        self.offer_answered(&o, 'w');
         if let What::Restart(c) = o.what {
             crate::restart::wait_answer(self, o.id, *c);
         }
@@ -1149,7 +1149,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        self.card_answered(o.id);
+        self.offer_answered(&o, 'f');
         if let What::Restart(c) = o.what {
             crate::restart::chosen(self, o.id, *c, Some(1));
         }
@@ -1163,7 +1163,9 @@ impl crate::editor::Editor {
         if let Some(why) = self.offers[0].held.clone() {
             return self.offer_refused(why);
         }
-        if let What::Rebased(m) = self.offers.remove(0).what {
+        let o = self.offers.remove(0);
+        self.offer_answered(&o, 'p');
+        if let What::Rebased(m) = o.what {
             self.rebase_preflight_then_bring(*m);
         }
     }
@@ -1190,7 +1192,9 @@ impl crate::editor::Editor {
         if !self.offers.first().is_some_and(Offer::aborts) {
             return;
         }
-        if let What::RebaseResolved { root } = self.offers.remove(0).what {
+        let o = self.offers.remove(0);
+        self.offer_answered(&o, 'X');
+        if let What::RebaseResolved { root } = o.what {
             self.rebase_answer(&root, false);
         }
     }
@@ -1203,6 +1207,8 @@ impl crate::editor::Editor {
             return;
         }
         let mut o = self.offers.remove(0);
+        o.said(self.session.label(), if both { "D" } else { "R" });
+        self.card_how(o.id, if both { "answered D" } else { "answered R" });
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
@@ -1229,7 +1235,9 @@ impl crate::editor::Editor {
         if !self.offers.first().is_some_and(Offer::commits_first) {
             return;
         }
-        if let What::SessionEnd(e) = self.offers.remove(0).what {
+        let o = self.offers.remove(0);
+        self.offer_answered(&o, 'c');
+        if let What::SessionEnd(e) = o.what {
             self.session_commit_first(*e);
         }
     }
@@ -1470,8 +1478,17 @@ impl crate::editor::Editor {
         let Some(o) = self.offers.first().filter(|o| !o.installing()) else { return };
         let (What::Install { tool, .. } | What::Fetch { tool, .. }) = &o.what else { return };
         let tool = tool.clone();
-        self.offers.remove(0);
+        let o = self.offers.remove(0);
+        self.offer_answered(&o, 'N');
         self.install_never(&tool);
+    }
+
+    /// Card `o`, taken off by key `key` (one of its own letters, past `y` `n`): its `card` line, how it went
+    /// for the gone ring, and its call told it's answered.
+    fn offer_answered(&mut self, o: &Offer, key: char) {
+        o.said(self.session.label(), &key.to_string());
+        self.card_how(o.id, format!("answered {key}"));
+        self.card_answered(o.id);
     }
 
     pub fn offer_dismiss(&mut self) {

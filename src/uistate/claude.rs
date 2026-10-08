@@ -91,6 +91,11 @@ impl Editor {
                 true => c.title.clone(),
                 false => super::asks_line(&c.asks),
             };
+            // (the text whole is for scripts — the warnings' ids stay, but not a plugin's or git's)
+            c.text.clear();
+            if by_title(c.kind) {
+                c.warnings.clear();
+            }
         }
         for e in &mut s.inbox {
             let card = s.cards.iter().find(|c| c.id == e.id);

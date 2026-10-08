@@ -13,6 +13,13 @@
 //! are said on the card — titled `Quiet:` when it's connected outside or was granted a daemon's socket (the
 //! network or no sandbox alone say nothing of where it is: a note); it's asked all the same — a daemon gone
 //! dead looks the same.
+//!
+//! But not as soon (cardburden 5 — step 6c's breaks run, Docker's socket granted and its own `timeout 2700`,
+//! asked at 10 minutes, ended by itself at 14): a run under a time limit its own command set over all it runs
+//! (`limit`: the packs' `time-limits`, `timeout`) isn't asked before that limit is up, two hours at most
+//! (`HOLD_MAX`) — the panel says `its timeout ends it in 35:00`; one granted a daemon's socket or run outside the sandbox on a card's `y`, or found connected outside
+//! its processes, not before `llm.stuck-after-outside` (30 min) — no sandbox at all (none here, off) is every
+//! run, and asked as before. `tarae state` says such a run is `quiet`.
 
 use std::time::{Duration, Instant};
 
@@ -47,23 +54,37 @@ pub struct Stuck {
     pub reach: Option<crate::sandbox::ReachOut>,
 }
 
-/// A run of Claude's running in session `l`'s `slot`: its pid, trace id, when it last printed, its waits and
-/// what it was let reach (`Guard::reaches_out`).
-type Running<'a> = (u32, u64, Instant, &'a mut crate::waits::Waiting, Option<crate::sandbox::ReachOut>);
+/// A run of Claude's running in session `l`'s `slot`: its pid, trace id, when it last printed, its waits,
+/// what it was let reach (`Guard::reaches_out`) and whether its work may go on elsewhere (`away`).
+type Running<'a> = (u32, u64, Instant, &'a mut crate::waits::Waiting, Option<crate::sandbox::ReachOut>, bool);
 
 fn running(l: &mut crate::session::Session, slot: Slot) -> Option<Running<'_>> {
     let reach = |g: &Option<crate::sandbox::Guard>| g.as_ref().and_then(crate::sandbox::Guard::reaches_out);
     match slot {
         Slot::Task => {
             let r = l.task_run.as_mut().filter(|r| r.by_claude && r.state == crate::task::State::Running)?;
-            Some((r.pid()?, r.trace.id(), r.last_output, &mut r.wait, reach(&r.guard)))
+            Some((
+                r.pid()?,
+                r.trace.id(),
+                r.last_output,
+                &mut r.wait,
+                reach(&r.guard),
+                away(r.guard.as_ref()),
+            ))
         }
         Slot::Test => {
             let r = l
                 .test_run
                 .as_mut()
                 .filter(|r| r.by_claude && r.state == crate::testing::RunState::Running)?;
-            Some((r.pid()?, r.trace.id(), r.last_output, &mut r.wait, reach(&r.guard)))
+            Some((
+                r.pid()?,
+                r.trace.id(),
+                r.last_output,
+                &mut r.wait,
+                reach(&r.guard),
+                away(r.guard.as_ref()),
+            ))
         }
         _ => None,
     }
@@ -72,14 +93,17 @@ fn running(l: &mut crate::session::Session, slot: Slot) -> Option<Running<'_>> {
 /// A look at the processes (`rows`, taken at `now`): each run of Claude's told its CPU; one that looks stuck
 /// has its threads read, then asked about — in its own session.
 pub fn look(ed: &mut Editor, rows: &[Row], now: Instant) {
-    let after = Duration::from_secs(ed.config.llm.stuck_after.saturating_mul(60));
+    let (after, outside) = afters(&ed.config.llm);
     let mut due: Vec<(SessionId, Stuck)> = Vec::new();
     for l in std::iter::once(&mut ed.session).chain(&mut ed.sessions) {
         for slot in [Slot::Task, Slot::Test] {
-            let Some((pid, run, last, wait, reach)) = running(l, slot) else { continue };
+            let Some((pid, run, last, wait, reach, away)) = running(l, slot) else { continue };
             if let Some((pct, _)) = crate::procs::summed(rows, &[pid]) {
                 wait.looked(pct, now);
             }
+            // (granted a daemon's socket, outside the sandbox, or found connected outside: its work may go on
+            // there — asked later)
+            let after = if away || wait.connected { outside } else { after };
             if let Some(quiet) = wait.stuck_for(last, now, after) {
                 wait.stuck_asked = Some(now);
                 let cpu = wait.cpu.unwrap_or(0.0);
@@ -96,6 +120,48 @@ pub fn look(ed: &mut Editor, rows: &[Row], now: Instant) {
             })
         });
     }
+}
+
+/// How long a run prints nothing at next to no CPU before the card asks: `llm.stuck-after` — and, its work
+/// maybe going on elsewhere (`away`, or connected outside its processes), `llm.stuck-after-outside`,
+/// never sooner (0: as the first).
+pub fn afters(llm: &crate::llm::LlmConfig) -> (Duration, Duration) {
+    let min = |m: u64| Duration::from_secs(m.saturating_mul(60));
+    let after = min(llm.stuck_after);
+    let outside = match llm.stuck_after_outside {
+        0 => after,
+        m => min(m).max(after),
+    };
+    (after, outside)
+}
+
+/// Whether a run was let reach where its work may go on while nothing here uses CPU: a daemon's socket granted
+/// (Docker's), or run outside the sandbox on a card's `y` — not the network alone (frictions15: that says
+/// nothing of where it is), nor no sandbox at all (none here, off: every run so — #181's hang, cargo under
+/// qemu, is asked at `llm.stuck-after` all the same).
+pub fn away(guard: Option<&crate::sandbox::Guard>) -> bool {
+    use crate::sandbox::Guard;
+    match guard {
+        Some(Guard::In(p)) => !p.sockets.is_empty(),
+        Some(Guard::Outside) => true,
+        _ => false,
+    }
+}
+
+/// Whether a running run that printed nothing since `last` is held from the stuck card now — under its own
+/// time limit still to come, or its work maybe elsewhere (`away`, or found connected outside) and not quiet
+/// for `llm.stuck-after-outside` yet: `tarae state` says `quiet`, not `running`.
+pub fn held(
+    wait: &crate::waits::Waiting,
+    last: Instant,
+    now: Instant,
+    away: bool,
+    llm: &crate::llm::LlmConfig,
+) -> bool {
+    let quiet = now.saturating_duration_since(last);
+    let silent = wait.silent_for(last, now).is_some();
+    let limited = wait.hold_until.is_some_and(|at| at > now);
+    silent && (limited || ((away || wait.connected) && quiet < afters(llm).1))
 }
 
 /// What `pid`'s tree is connected to outside itself (`procs::sockets`), as said — a daemon's socket, a host
@@ -164,6 +230,98 @@ fn grouped(threads: &[Thread]) -> Vec<String> {
         .collect()
 }
 
+/// The longest a run holds the stuck card under its own time limit, whatever the limit says (the user's call,
+/// review of cardburden 5): `timeout 30d sh x.sh` hung at 0% CPU is still a hang to ask about — two hours
+/// covers a long test suite or a container build, and past them the card asks as it would have.
+pub const HOLD_MAX: Duration = Duration::from_secs(2 * 3600);
+
+/// The time limit command line `cmd` sets itself over all it runs (cardburden 5: `DOCKER_HOST=… timeout 2700
+/// sh breaks.sh` asked "stuck?" at 10 minutes, ended by itself at 14) — None unless every part of it is under
+/// one (the review: `cargo build && timeout 60 cargo test` or `hang; timeout 1d true` was held while the part
+/// that hangs had none). The line as `readonly::parse_env` reads it (a `&`, a subshell, a `$(…)`: None);
+/// commands one after another (`;` `&&` `||`) add up; a pipeline counts when its first command is limited and
+/// the rest only read (`readonly::only_reads`: they end with their input — `| tail -20`, not `| tail -f`). A
+/// command is limited by a program of the packs' `time-limits` leading it — after `NAME=value` and other
+/// wrappers — its duration the first word that isn't one of its options (`1800`, `45m`, `2h`, `1.5d`; a grace
+/// option's value added, `-k 30`).
+pub fn limit(cmd: &str) -> Option<Duration> {
+    let packs = crate::sandboxpack::get();
+    limit_in(cmd, &packs.time_limits, &packs.wrappers)
+}
+
+fn limit_in(cmd: &str, limits: &[crate::sandboxpack::TimeLimit], wrappers: &[String]) -> Option<Duration> {
+    use crate::readonly::Part;
+    let (parts, piped) = crate::readonly::parse_env(cmd)?;
+    let mut total = Duration::ZERO;
+    let mut i = 0;
+    while i < parts.len() {
+        // (this pipeline: parts i..=end, joined by single `|`s)
+        let end = (i..parts.len()).find(|&j| !piped.get(j).copied().unwrap_or(false)).unwrap_or(i);
+        let Part::Cmd(first) = &parts[i] else { return None };
+        let words: Vec<String> = first.iter().map(|w| w.text.clone()).collect();
+        let t = limited(&words, limits, wrappers)?;
+        let readers =
+            parts[i + 1..=end].iter().all(|p| matches!(p, Part::Cmd(w) if crate::readonly::only_reads(w)));
+        if !readers {
+            return None;
+        }
+        total = total.checked_add(t)?;
+        i = end + 1;
+    }
+    (!parts.is_empty()).then_some(total)
+}
+
+/// The limit one command's `words` set (`limit`): None when no program of `limits` leads it.
+fn limited(
+    words: &[String],
+    limits: &[crate::sandboxpack::TimeLimit],
+    wrappers: &[String],
+) -> Option<Duration> {
+    let words = &words[crate::cardwarn::lead(words)..];
+    // (the limit among the leading wrappers: `nice timeout 60 …`, `timeout 60 nice …`)
+    let (k, l) = words
+        .iter()
+        .enumerate()
+        .take_while(|(_, w)| wrappers.contains(w))
+        .find_map(|(k, w)| limits.iter().find(|l| l.run == *w).map(|l| (k, l)))?;
+    let (mut i, mut grace) = (k + 1, Duration::ZERO);
+    while let Some(w) = words.get(i) {
+        if let Some((name, value)) = w.split_once('=').filter(|(n, _)| n.starts_with("--")) {
+            if l.grace.iter().any(|g| g == name) {
+                grace = duration(value).unwrap_or(grace);
+            }
+            i += 1;
+        } else if l.option_values.contains(w) {
+            if l.grace.contains(w) {
+                grace = words.get(i + 1).and_then(|v| duration(v)).unwrap_or(grace);
+            }
+            i += 2;
+        } else if w.starts_with('-') {
+            i += 1;
+        } else {
+            return duration(w)?.checked_add(grace);
+        }
+    }
+    None
+}
+
+/// A duration as `timeout` takes one: a number, a fraction too, and `s` `m` `h` `d` (none: seconds).
+fn duration(w: &str) -> Option<Duration> {
+    let (n, unit) = match w.char_indices().last()? {
+        (i, c) if c.is_ascii_alphabetic() => (&w[..i], c),
+        _ => (w, 's'),
+    };
+    let secs: f64 = n.parse().ok().filter(|s: &f64| s.is_finite() && *s >= 0.0)?;
+    let times = match unit {
+        's' => 1.0,
+        'm' => 60.0,
+        'h' => 3600.0,
+        'd' => 86400.0,
+        _ => return None,
+    };
+    Duration::try_from_secs_f64(secs * times).ok()
+}
+
 /// `no output for 12 min, 0% CPU`.
 fn said(s: &Stuck) -> String {
     format!("no output for {} min, {:.0}% CPU", s.quiet.as_secs() / 60, s.cpu)
@@ -172,6 +330,20 @@ fn said(s: &Stuck) -> String {
 /// Its threads read: into its output (from `s.at`) — then the card (`card`), if it's still running and still
 /// quiet.
 fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
+    // (connected outside its processes — a container engine, another host: its work may go on there, and it
+    // isn't asked before `llm.stuck-after-outside`; marked so, the next looks wait that long)
+    let (_, outside) = afters(&ed.config.llm);
+    if !peers.is_empty() && s.quiet < outside {
+        crate::log::line(
+            "stuck",
+            "held",
+            &format!("pid {}: {} — connected to {}", s.pid, said(&s), peers.join(", ")),
+        );
+        if let Some(w) = run_wait(ed, &s) {
+            (w.connected, w.stuck_asked) = (true, None);
+        }
+        return;
+    }
     let head = format!("── tarae: {} — what each of its threads waits in ──", said(&s));
     let still = |at: Instant| at <= s.asked;
     let label = match s.slot {
@@ -201,6 +373,14 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
     let o = card(s, &label, &lines, &peers);
     crate::log::line("stuck", "ask", &format!("{label}: {}", o.question.lines().next().unwrap_or_default()));
     ed.push_offer(o);
+}
+
+/// The waits of the run `s` is about, while it's still that run.
+fn run_wait<'a>(ed: &'a mut Editor, s: &Stuck) -> Option<&'a mut crate::waits::Waiting> {
+    match s.slot {
+        Slot::Task => ed.session.task_run.as_mut().filter(|r| r.trace.id() == s.run).map(|r| &mut r.wait),
+        _ => ed.session.test_run.as_mut().filter(|r| r.trace.id() == s.run).map(|r| &mut r.wait),
+    }
 }
 
 /// The card about run `s` (`label`: which it is and where), its threads' `lines`, what its tree is connected

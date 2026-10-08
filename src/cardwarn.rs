@@ -384,7 +384,7 @@ fn matched(w: &Warn, c: &Command, wrappers: &[String]) -> Option<usize> {
 }
 
 /// How many of `words` lead a command without being it: `NAME=value`, and a shell's keywords.
-fn lead(words: &[String]) -> usize {
+pub(crate) fn lead(words: &[String]) -> usize {
     const KEYWORDS: [&str; 11] =
         ["if", "then", "else", "elif", "do", "while", "until", "!", "{", "exec", "command"];
     words.iter().take_while(|w| assign(w).is_some() || KEYWORDS.contains(&w.as_str())).count()

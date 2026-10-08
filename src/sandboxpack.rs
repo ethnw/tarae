@@ -73,6 +73,9 @@
 //! - `builders`: programs that build or test the project (a script calling one runs its code).
 //! - `[[claude.warn]]`: what a run card warns of, in the pack's words (`cardwarn.rs`); `wrappers`: programs that
 //!   run what follows their words (`timeout`), a warning's command found after one.
+//! - `time-limits = [{ run, option-values, grace }]`: programs that end what they run after a time their next
+//!   word gives (`timeout 2700 …`; `grace`: an option whose value is added — `-k 5`) — a run of Claude's under one
+//!   isn't asked whether it's stuck before then (`stuck::limit`).
 //! - `entry = [{ run, files }]`: what a command runs that its words don't name — a line with `run`'s words in
 //!   a row (after a wrapper too: `timeout 1800 cargo xtask`) runs the project's `files` (folders end in `/`):
 //!   the card for it again says whether they changed since its last answer, and shows how (`sinceyes.rs`).
@@ -136,6 +139,8 @@ pub(crate) const CLAUDE_KEYS: &[(&str, Reach)] = &[
     // (narrows: a card says more — and with `asks`, `a` lets less through; never less said)
     ("warn", Reach::Added),
     ("wrappers", Reach::Added),
+    // (a run under one isn't asked whether it's stuck before its limit: built-in only — it holds a card back)
+    ("time-limits", Reach::BuiltIn),
     // (Claude's prompt)
     ("said", Reach::BuiltIn),
 ];
@@ -283,6 +288,15 @@ pub struct Entry {
     pub files: Vec<String>,
 }
 
+/// A program that ends what it runs after a time (`time-limits`): its name, its options that take a value (the
+/// next word), and of those the ones whose value is a grace added after the time (`-k 5`: killed 5 s later).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimeLimit {
+    pub run: String,
+    pub option_values: Vec<String>,
+    pub grace: Vec<String>,
+}
+
 /// A pack's words in Claude's prompt and tools (`said`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Said {
@@ -325,6 +339,9 @@ pub struct Packs {
     /// Programs that run what follows their words (`timeout 600 docker …`) — a warning's command is found after
     /// one, and `missing`'s wrappers are among them.
     pub wrappers: Vec<String>,
+    /// Programs that end what they run after a time their words give (`timeout 2700 sh x.sh`) — a run of
+    /// Claude's under one isn't asked whether it's stuck before then (`stuck::limit`).
+    pub time_limits: Vec<TimeLimit>,
     pub said: Vec<Said>,
     /// What was wrong: a built-in pack's entry left out (a mistake in tarae's pack — a test fails), a runtime
     /// folder's key that's the built-in packs' only.
@@ -692,6 +709,20 @@ fn read_key_of(
         ("claude", "warn") => {
             let whose = if builtin { format!("{pack} pack") } else { format!("your {pack} pack") };
             out.warn.extend(crate::cardwarn::read(v, &whose, &mut wrong));
+        }
+        ("claude", "time-limits") => {
+            let Some(entries) = v.as_array() else { return Err("`time-limits` isn't a list".into()) };
+            for e in entries {
+                let e = tab(e)?;
+                known(&e, &["run", "option-values", "grace"], "a `time-limits` entry")?;
+                let run = need(&e, "run", "a `time-limits` entry")?;
+                let (option_values, grace) = (list_in(&e, "option-values")?, list_in(&e, "grace")?);
+                match (plain_word(&run), grace.iter().find(|g| !option_values.contains(g))) {
+                    (false, _) => wrong.push(format!("`{run}` isn't a program's name")),
+                    (_, Some(g)) => wrong.push(format!("`{g}` is a `grace` but not among `option-values`")),
+                    _ => out.time_limits.push(TimeLimit { run, option_values, grace }),
+                }
+            }
         }
         ("claude", "wrappers") => {
             for w in list(v)? {

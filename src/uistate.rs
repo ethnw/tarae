@@ -967,6 +967,10 @@ pub struct CardState {
     /// A run card the same as one answered before: that card, its answer and when, and whether anything changed
     /// since (`sinceyes`, cardburden 3).
     pub same_as: Option<crate::sinceyes::SameAs>,
+    /// Its text whole, a line at a time with what each is (`text`, cardburden 5) — empty at Claude's level.
+    pub text: Vec<(String, &'static str)>,
+    /// The warnings it says (`cardwarn.rs`), by id.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1128,6 +1132,8 @@ impl Editor {
                     crate::offer::What::Run(r) => r.same.clone(),
                     _ => None,
                 },
+                text: text(o),
+                warnings: o.asked.as_ref().map(|a| a.warn.clone()).unwrap_or_default(),
             }
         };
         let mut cards: Vec<CardState> = self
@@ -1157,6 +1163,30 @@ fn asks(o: &crate::offer::Offer) -> String {
         }
     }
     s
+}
+
+/// A card's text whole, a line at a time with what it is, as the card draws it (cardburden 5 — a driver told
+/// the card's weight without reading the frame): `warning` (what yes risks, in the warning colour — `warning`,
+/// the data's `warnings`) · `diff` (what changed since, `sinceyes`) · `decided` (at full strength: what's being
+/// decided) · `said` (the rest, faint).
+fn text(o: &crate::offer::Offer) -> Vec<(String, &'static str)> {
+    let decided = o.decided_lines();
+    let warns = |i: usize| {
+        o.warning.as_ref().is_some_and(|r| r.contains(&i)) || o.warnings.iter().any(|r| r.contains(&i))
+    };
+    o.question
+        .split('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            let role = match () {
+                _ if warns(i) => "warning",
+                _ if o.diff.as_ref().is_some_and(|r| r.contains(&i)) => "diff",
+                _ if decided.contains(&i) => "decided",
+                _ => "said",
+            };
+            (line.to_string(), role)
+        })
+        .collect()
 }
 
 /// A card's `asks` where room or tokens count (Claude's level, the inbox picker's row): cut at `ASKS_MAX`.
@@ -1216,7 +1246,7 @@ impl UiState {
             .cards
             .iter()
             .map(|c| {
-                json!({
+                let mut v = json!({
                     "id": c.id, "session": c.session, "whose": c.whose, "kind": c.kind, "title": c.title,
                     "asks": c.asks,
                     "answers": c.answers.iter().map(|(k, d)| json!({ "key": k.to_string(), "does": d }))
@@ -1229,7 +1259,16 @@ impl UiState {
                         "card": format!("card#{}", s.card), "answer": s.answer.to_string(), "at": s.at,
                         "unchanged": s.unchanged,
                     })),
-                })
+                });
+                // (none at Claude's level: its `asks` is cut, and the text would be it whole)
+                if !c.text.is_empty() {
+                    v["text"] =
+                        c.text.iter().map(|(line, role)| json!({ "line": line, "role": role })).collect();
+                }
+                if !c.warnings.is_empty() {
+                    v["warnings"] = json!(c.warnings);
+                }
+                v
             })
             .collect();
         let toasts: Vec<Value> = self

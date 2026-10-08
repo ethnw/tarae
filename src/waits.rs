@@ -97,6 +97,15 @@ pub struct Waiting {
     pub cpu: Option<f32>,
     /// When the stuck card last asked about it — it asks again only after as long again.
     pub stuck_asked: Option<Instant>,
+    /// When the time limit its own command set ends it (`timeout 2700 …` — `stuck::limit`): the stuck card
+    /// doesn't ask before then (cardburden 5: the breaks run, its own 45 minutes, asked at 10).
+    pub limit_at: Option<Instant>,
+    /// Until when that limit holds the stuck card: it, at most `stuck::HOLD_MAX` from the start (`timeout 30d`
+    /// hung is still asked about).
+    pub hold_until: Option<Instant>,
+    /// Its processes were found connected outside themselves (a container engine, another host —
+    /// `stuck::connected_outside`): its work may go on there, and it's asked as one let reach a daemon is.
+    pub connected: bool,
 }
 
 impl Waiting {
@@ -154,6 +163,13 @@ impl Waiting {
         (self.now.is_none() && !d.is_zero()).then_some(d)
     }
 
+    /// Its own command limits it to `limit` from `started` (`stuck::limit`): said until then, and the stuck
+    /// card held until then — `stuck::HOLD_MAX` at most.
+    pub fn limited(&mut self, started: Instant, limit: Option<Duration>) {
+        self.limit_at = limit.and_then(|d| started.checked_add(d));
+        self.hold_until = limit.and_then(|d| started.checked_add(d.min(crate::stuck::HOLD_MAX)));
+    }
+
     /// A look at its processes at `now`: `pct` of a core, all told — under `IDLE_PCT`, idle from then on
     /// (unless it already was).
     pub fn looked(&mut self, pct: f32, now: Instant) {
@@ -171,12 +187,21 @@ impl Waiting {
         let quiet = now.saturating_duration_since(last);
         let idle = now.saturating_duration_since(self.idle?);
         let asked = self.stuck_asked.is_some_and(|a| now.saturating_duration_since(a) < after);
-        (!after.is_zero() && self.now.is_none() && quiet >= after && idle >= after && !asked).then_some(quiet)
+        // (its own time limit still to come: it ends by then, stuck or not — cardburden 5; two hours at most)
+        let limited = self.hold_until.is_some_and(|at| at > now);
+        let due = !after.is_zero() && self.now.is_none() && quiet >= after && idle >= after;
+        (due && !asked && !limited).then_some(quiet)
     }
 
-    /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27:04` (`silent_for`).
+    /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27:04` (`silent_for`) — and, under a time
+    /// limit of its own still to come, `· its timeout ends it in 35:00`.
     pub fn silent(&self, last: Instant, now: Instant) -> Option<String> {
-        self.silent_for(last, now).map(|d| format!("no output for {}", clock(d)))
+        let limit = self
+            .limit_at
+            .and_then(|at| at.checked_duration_since(now))
+            .map(|d| format!(" · its timeout ends it in {}", clock(d)))
+            .unwrap_or_default();
+        self.silent_for(last, now).map(|d| format!("no output for {}{limit}", clock(d)))
     }
 
     /// Claude's report's line, once the run ended (`took` all told — from its start): `Waited 16.0s for

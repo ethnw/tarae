@@ -103,7 +103,8 @@ pub struct Run {
     pub of: &'static str,
     pub kind: &'static str,
     pub label: String,
-    /// `queued` · `running` · `waiting` · `passed` · `failed` · `stopped` · `no tests`.
+    /// `queued` · `running` · `waiting` · `quiet` (printing nothing, held from the stuck card — its own time
+    /// limit to come, or its work maybe elsewhere) · `passed` · `failed` · `stopped` · `no tests`.
     pub state: String,
     /// What it waits on (`waiting for cargo's lock · 0:37`), or where it is in line (`1st`).
     pub waiting: Option<String>,
@@ -305,8 +306,13 @@ impl Editor {
                     _ => ("user", "task"),
                 };
                 let waiting = r.wait.shown(now);
+                // (held from the stuck card: its own time limit to come, or its work maybe elsewhere — cardburden 5)
+                let away = crate::stuck::away(r.guard.as_ref());
+                let quiet =
+                    r.by_claude && crate::stuck::held(&r.wait, r.last_output, now, away, &self.config.llm);
                 let state = match &r.state {
                     S::Running if waiting.is_some() => "waiting".to_string(),
+                    S::Running if quiet => "quiet".into(),
                     S::Running => "running".into(),
                     S::Passed => "passed".into(),
                     S::Failed(_) => "failed".into(),
@@ -329,8 +335,12 @@ impl Editor {
             if let Some(r) = &l.test_run {
                 use crate::testing::RunState as S;
                 let waiting = r.wait.shown(now);
+                let away = crate::stuck::away(r.guard.as_ref());
+                let quiet =
+                    r.by_claude && crate::stuck::held(&r.wait, r.last_output, now, away, &self.config.llm);
                 let state = match &r.state {
                     S::Running if waiting.is_some() => "waiting",
+                    S::Running if quiet => "quiet",
                     S::Running => "running",
                     S::Passed => "passed",
                     S::Failed(_) => "failed",

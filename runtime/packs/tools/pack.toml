@@ -15,6 +15,12 @@ pass = ["MISE_*", "ASDF_*", "VOLTA_*", "SDKMAN_*"]
 [claude]
 # Programs that run what follows their words: a warning's command is found after one (`timeout 600 docker …`)
 wrappers = ["timeout", "gtimeout", "env", "nice", "nohup", "time", "stdbuf", "caffeinate", "sudo", "doas"]
+# Programs that end what they run after a time (GNU's `timeout`, Homebrew's `gtimeout`): a run of Claude's under
+# one isn't asked whether it's stuck before its time is up (`stuck.rs`) — `-k`'s grace added
+time-limits = [
+    { run = "timeout", option-values = ["-k", "-s", "--kill-after", "--signal"], grace = ["-k", "--kill-after"] },
+    { run = "gtimeout", option-values = ["-k", "-s", "--kill-after", "--signal"], grace = ["-k", "--kill-after"] },
+]
 
 # Docker without its own settings: `DOCKER_CONFIG` unset, it reads the user's ~/.docker (whose credential
 # helpers run); `DOCKER_HOST` unset, whichever engine is current; no timeout, a hung container holds the run

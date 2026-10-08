@@ -125,6 +125,21 @@ reader where a thread waits; `sample <pid>` in a terminal shows its stacks). Not
 run (its panel and output stay, and Claude hears how it ended), `w` shows those lines in its panel, `n` keeps
 waiting and asks again after as long again. If the run prints or ends, the card goes away.
 
+Quiet isn't always stuck, so some runs are asked later. A run under a time limit its own command sets
+(`timeout 2700 sh breaks.sh`, `gtimeout -k 30 45m …` — the programs are the tools pack's `time-limits`, found
+after `NAME=value` and other wrappers, a `-k` grace added) isn't asked before that limit is up: it ends by then,
+stuck or not, and its panel says `no output for 10:00 · its timeout ends it in 35:00`. Only a limit over all the
+line runs counts: commands one after another (`;`, `&&`, `||`) each need one, and theirs add up; a pipeline
+counts when its first command has one and the rest only read (`| tail -20`, not `| tail -f`). Any part without
+— `cargo build && timeout 60 cargo test`, a `cd` first —, or what tarae can't read as plain words (a `&`, a
+`$(…)`), holds nothing. And a limit holds the card two hours at most: `timeout 30d sh x.sh` hung at 0% CPU is
+asked about then. A run whose work may go on
+elsewhere — granted a daemon's socket (Docker's), run outside the sandbox on your `y`, or found connected outside
+its own processes — with no limit of its own isn't asked before `llm.stuck-after-outside` minutes (30 by
+default; never less than `llm.stuck-after`; 0 = the same). No sandbox at all (none on this system, or
+`llm.sandbox` off) is every run, so those are asked at `llm.stuck-after` as before. While a run is held so,
+`tarae state` lists it as `quiet`, not `running`.
+
 **Containers a run started** stop with it. Each run of Claude's gets `TARAE_CONTAINER_PREFIX` (`tarae-<pid>-s<session>-r<run>`),
 and a script that starts containers names them from it — `cargo xtask linux` names its own `<prefix>-checks`.
 When the run is stopped — `y` on its stuck card, `space m c` / `space x c`, or dropped for another run — tarae
@@ -955,7 +970,9 @@ for. What's read goes to Claude.
 - Each answer on a card is one `card` line in tarae's log (`~/.local/state/tarae/tarae.log`): the session, why
   it asked, where the read goes, what the planned card model would do instead, your answer and how long it
   was up — and each run the sandbox denied something is a `denied` line. That's how the cards are counted
-  (`docs/design/cards.md`)
+  (`docs/design/cards.md`). tarae's own cards (a preflight's, a stuck run's, a review's end, notes gone stale
+  …) have their line too, as `why=own · shadow=own`, and so does an answer by a card's own letter (`w`, `p`,
+  `X`, `c` …)
 
 ### Notes
 

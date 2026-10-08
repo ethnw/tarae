@@ -3703,7 +3703,7 @@ mod tests {
         let l = lines();
         assert_eq!(l.len(), 3, "{l:?}");
         assert!(l[2].contains("· run · why=script · shadow=none · dropped · "), "{}", l[2]);
-        // A light card that asks nothing of Claude's says nothing
+        // A card of tarae's own, asking nothing of Claude's: its line all the same (cardburden 5)
         ed.push_offer(crate::offer::Offer::new(
             "x".into(),
             "q",
@@ -3712,7 +3712,9 @@ mod tests {
             crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() },
         ));
         ed.offer_dismiss();
-        assert_eq!(lines().len(), 3);
+        let l = lines();
+        assert_eq!(l.len(), 4, "{l:?}");
+        assert!(l[3].contains("· review-end · why=own · shadow=own · n · not drawn · up "), "{}", l[3]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

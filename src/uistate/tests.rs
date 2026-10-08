@@ -1233,6 +1233,62 @@ fn a_long_cards_asks_is_whole_in_every_full_level_form() {
     assert!(claude["cards"][0]["asks"].as_str().unwrap().ends_with('…'), "Claude's level is cut");
 }
 
+/// cardburden 5: a driver read only `asks` — the decided lines — so why a card asked, its warnings and the diff
+/// since a `y` weren't in the state, and it read them off the screen. The full level has the card's text
+/// whole, each line with what it is as drawn (warning over diff over decided; the rest `said`), and the
+/// warnings' ids; the text form stays one line; Claude's level keeps its cut (the ids, no text).
+#[test]
+fn a_cards_text_is_whole_in_the_state_each_line_with_its_part() {
+    let mut ed = editor();
+    let q = "cargo test\n\nIt runs outside the sandbox.\nIt reaches beyond this machine.\n@@ -1 +1 @@\n+echo b\nfaint";
+    let mut o = Offer::new(
+        "Claude wants to run a command".into(),
+        q,
+        "",
+        String::new(),
+        What::Install {
+            tool: "t".into(),
+            run: vec!["true".into()],
+            cwd: ed_root(),
+            then: crate::install::Then::Lsp,
+        },
+    )
+    .warning(2..3);
+    (o.decided, o.diff) = (Some(0..1), Some(4..6));
+    o.warnings.push(3..4);
+    let why = crate::cards::Why::NotACheck("cargo".into());
+    let run = crate::cards::Request::Run { past: crate::cards::Past::No, sandboxed: true, reads: Vec::new() };
+    o.asked = Some(crate::cards::Asked::new(why, run).warned(vec!["outward".into()]));
+    ed.push_offer(o);
+    frame(&mut ed);
+    let card = ed.ui_state().json()["cards"][0].clone();
+    let text: Vec<(&str, &str)> = card["text"]
+        .as_array()
+        .expect("its text")
+        .iter()
+        .map(|l| (l["line"].as_str().unwrap(), l["role"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        text,
+        [
+            ("cargo test", "decided"),
+            ("", "said"),
+            ("It runs outside the sandbox.", "warning"),
+            ("It reaches beyond this machine.", "warning"),
+            ("@@ -1 +1 @@", "diff"),
+            ("+echo b", "diff"),
+            ("faint", "said"),
+        ]
+    );
+    assert_eq!(card["warnings"], json!(["outward"]));
+    let line = ed.ui_state().text().lines().find(|l| l.starts_with("card#")).unwrap().to_string();
+    assert!(!line.contains("faint") && !line.contains("+echo b"), "the text form stays one line: {line}");
+    let claude = ed.ui_state_claude().json();
+    assert!(claude["cards"][0].get("text").is_none(), "{claude}");
+    assert_eq!(claude["cards"][0]["warnings"], json!(["outward"]));
+    feed(&mut ed, &["n"]);
+}
+
 /// A paste in normal mode: a `:` line opens the command line with it, not run (`:w` pasted into a commit
 /// message became part of its subject, unsaid); any other text is held for `p`, not put in, and said
 /// (#124); into the minimized chat, it comes back with it.

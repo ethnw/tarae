@@ -109,6 +109,9 @@ pub struct Session {
     pub blocked: Option<(crate::blocked::BlockedRun, Vec<crate::blocked::Choice>)>,
     /// `:preflight` under way, or the last one while its run is in the task panel (`preflight.rs`).
     pub preflight: Option<crate::preflight::Preflight>,
+    /// Where the packs' default preflights shown on their card and run are kept, by clone and steps listed
+    /// (`$state/preflight-told`, `preflight::told_key`) — None in tests: since tarae started only.
+    pub preflight_kept: Option<PathBuf>,
     /// Its checkout's rebase onto its base, under way (`rebase.rs`) · its bring waits for the preflight to
     /// pass (the bring card's `p`).
     pub rebase: Option<crate::rebase::Rebase>,
@@ -268,6 +271,7 @@ impl Session {
             changed_files: Vec::new(),
             blocked: None,
             preflight: None,
+            preflight_kept: if cfg!(test) { None } else { crate::preflight::kept_path() },
             rebase: None,
             bring_after_preflight: false,
             turn_review_back: None,

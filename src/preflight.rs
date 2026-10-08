@@ -15,7 +15,8 @@
 //! Where the steps come from: the project's `[preflight]` (`.tarae.toml`, or your config for every project),
 //! else the language packs' defaults for the kind of project it is (`packs::preflight` — Cargo.toml, go.mod,
 //! a Gradle or Maven build without its own wrapper …; the commands are tarae's, but they build and run the
-//! project's code, so the first run in a project shows them on a card that says so — `DEFAULTS_SAY`; a
+//! project's code, so the first run in a repository shows them on a card that says so — `DEFAULTS_SAY`, once
+//! per clone for the steps it listed, kept across starts (`told_key`); a
 //! project with a wrapper is told to list it, since the wrapper is the repository's own script); then
 //! `.tarae.local.toml`'s steps, yours, added after either (`config.rs` — read only while git ignores it).
 //!
@@ -373,6 +374,76 @@ pub fn long_duration(d: Duration) -> String {
     if s < 60.0 { crate::term::duration(s) } else { format!("{}m {:02}s", s as u64 / 60, s as u64 % 60) }
 }
 
+/// Where the packs' default preflights told on their card are kept (`$state/preflight-told`, a key a line —
+/// `told_key`) so the card shows once until the steps change, across starts and checkouts (cardburden 5: it
+/// asked again after every `:restart` and in every new session).
+pub fn kept_path() -> Option<std::path::PathBuf> {
+    crate::config::state_dir().map(|d| d.join("preflight-told"))
+}
+
+/// What a told preflight is kept by: its repository — git's common folder, one for all its checkouts (else the
+/// project's real path) — and that clone of it (`identity`: the review — a repository removed and another
+/// cloned at its path, a fork with the same root commit too, had the same key and ran with no card), and each
+/// step the card listed, name and command — as one SHA-256 (`trust::hash`): no path or command in the file, and
+/// a step changed or added is a card again. None where the clone can't be told apart: nothing is kept.
+fn told_key(root: &std::path::Path, steps: &[Step]) -> Option<String> {
+    let repo = crate::allow::common_dir(root)
+        .or_else(|| std::fs::canonicalize(root).ok())
+        .unwrap_or_else(|| root.to_path_buf());
+    let items: Vec<(String, String)> =
+        [("repository".to_string(), repo.display().to_string()), ("clone".to_string(), identity(&repo)?)]
+            .into_iter()
+            .chain(steps.iter().map(|s| (s.name.clone(), s.cmd.clone())))
+            .collect();
+    Some(crate::trust::hash(&items).iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The folder `dir` as the file system tells this one from another made at its path: its device and inode,
+/// and when it was made (`Metadata::created` — macOS's `st_birthtime`, Linux's statx `btime`). None where
+/// its making time can't be read (a file system without it): then nothing is kept, a card each start.
+fn identity(dir: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir).ok()?;
+    let born = m.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}:{}:{}", m.dev(), m.ino(), born.as_nanos()))
+}
+
+/// Whether the card a `:preflight` of `set` over `steps` in `root` would show was answered `y` before — for
+/// exactly the steps it lists (`set.of`: the review — a `y` on the quick card kept the `full = true` ones it
+/// never showed). None: nothing to go by (nothing kept here, or no key — `told_key`). The worker's lookup, and
+/// the tests' entry's.
+fn told_before(
+    kept: Option<&std::path::Path>,
+    root: &std::path::Path,
+    steps: &[Step],
+    set: Set,
+) -> Option<bool> {
+    let kept = kept?;
+    let key = told_key(root, &set.of(steps))?;
+    Some(told_in(kept, &key))
+}
+
+/// Whether `key` is kept in `path`.
+fn told_in(path: &std::path::Path, key: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|t| t.lines().any(|l| l.trim() == key))
+}
+
+/// Keeps `key` in `path` — appending, so two tareas answering at once both keep theirs, and a file that can't
+/// be read isn't written over.
+fn told_add(path: &std::path::Path, key: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if told_in(path, key) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // (after a last line with no newline)
+    let ends_open = std::fs::read(path).is_ok_and(|b| b.last().is_some_and(|&c| c != b'\n'));
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "{}{key}", if ends_open { "\n" } else { "" })
+}
+
 impl Editor {
     /// `o` in the task panel · `:preflight-output [step]` — a step's whole output (as kept) in a buffer of its
     /// own, to read and search: the step named, else the first that failed, else the one in view (#126: a
@@ -434,6 +505,17 @@ impl Editor {
     /// `preflight_start` — `always`: on its card whatever the steps are (its card asked again after
     /// `:restart` was never answered: asking again never runs anything).
     pub fn preflight_start_asking(&mut self, set: Set, always: bool) -> Result<(), String> {
+        self.preflight_start_with(set, always, crate::packs::preflight)
+    }
+
+    /// `preflight_start_asking`, the packs' defaults for the project looked for by `defaults` on the worker
+    /// (`packs::preflight`; a test's stand-in steps — the rest of the path is the real one).
+    pub(crate) fn preflight_start_with(
+        &mut self,
+        set: Set,
+        always: bool,
+        defaults: fn(&std::path::Path) -> crate::packs::Defaults,
+    ) -> Result<(), String> {
         self.preflight_free()?;
         // The project's own, held back until it's trusted: not the packs' instead
         if self.config_project_held("preflight.") {
@@ -450,15 +532,19 @@ impl Editor {
             return self.preflight_run(steps, set);
         }
         let root = self.preflight_root();
+        let kept = self.session.preflight_kept.clone();
         self.events.jobs().spawn(move || {
-            let packs = crate::packs::preflight(&root);
+            let packs = defaults(&root);
+            // (the card for these very steps answered before in this clone, at any start of tarae's)
+            let all = [&packs.steps[..], &local[..]].concat();
+            let told = told_before(kept.as_deref(), &root, &all, set);
             move |ed: &mut Editor| match packs.held.first() {
                 // (a kind of project the packs know, but it runs its checks its own way: say how)
                 Some(why) if packs.steps.is_empty() && local.is_empty() => {
                     ed.session.bring_after_preflight = false;
                     ed.set_error(format!("no preflight steps — {why}"));
                 }
-                _ => ed.preflight_found_asking(root, packs.steps, local, set, always),
+                _ => ed.preflight_found_asking(root, packs.steps, local, set, always, told),
             }
         });
         Ok(())
@@ -475,7 +561,8 @@ impl Editor {
     }
 
     /// The packs' default steps for `root` came (none: not a kind of project they know), with yours after:
-    /// the first time in a project, a card says what will run, and that it runs the project's code.
+    /// the first time in a project, a card says what will run, and that it runs the project's code. (What's
+    /// kept is read here, by the worker's `told_before`.)
     #[cfg(test)]
     pub(crate) fn preflight_found(
         &mut self,
@@ -484,12 +571,16 @@ impl Editor {
         local: Vec<Step>,
         set: Set,
     ) {
-        self.preflight_found_asking(root, packs, local, set, false);
+        let all = [&packs[..], &local[..]].concat();
+        let told = told_before(self.session.preflight_kept.as_deref(), &root, &all, set);
+        self.preflight_found_asking(root, packs, local, set, false, told);
     }
 
     /// The packs' default steps for `root` came (none: not a kind of project they know), with yours after:
-    /// the first time in a project, a card says what will run, and that it runs the project's code —
-    /// `always`: on the card even when told already, or with no defaults among them.
+    /// the first time, a card says what will run, and that it runs the project's code — once per clone until
+    /// the steps it lists change (`told`: so kept, read on the worker — None: nothing to go by, then once per
+    /// project since tarae started, for a card that listed every step). `always`: on the card even when told
+    /// already, or with no defaults among them.
     fn preflight_found_asking(
         &mut self,
         root: std::path::PathBuf,
@@ -497,6 +588,7 @@ impl Editor {
         local: Vec<Step>,
         set: Set,
         always: bool,
+        told: Option<bool>,
     ) {
         if packs.is_empty() && local.is_empty() {
             self.session.bring_after_preflight = false;
@@ -507,7 +599,8 @@ impl Editor {
         }
         let defaults = !packs.is_empty();
         let steps = [packs, local].concat();
-        if always || (defaults && !self.preflight_told.contains(&root)) {
+        let told = told.unwrap_or_else(|| self.preflight_told.contains(&root));
+        if always || (defaults && !told) {
             return self.preflight_ask(root, steps, set, defaults);
         }
         if let Err(e) = self.preflight_run(steps, set) {
@@ -546,7 +639,8 @@ impl Editor {
         self.push_offer(o);
     }
 
-    /// `y` on that card: run, and no card again for this project until quit.
+    /// `y` on that card: run, and no card again for the steps it listed in this clone — kept on a worker
+    /// (nothing kept here, or no key: for this project until quit, when it listed every step).
     pub(crate) fn preflight_answer(
         &mut self,
         id: u64,
@@ -559,7 +653,21 @@ impl Editor {
             self.session.bring_after_preflight = false;
             return self.set_status("preflight not run");
         }
-        self.preflight_told.insert(root);
+        let listed = set.of(&steps);
+        if let Some(kept) = self.session.preflight_kept.clone() {
+            let (root, listed) = (root.clone(), listed.clone());
+            self.events.jobs().background(move || {
+                let Some(key) = told_key(&root, &listed) else { return };
+                if let Err(e) = told_add(&kept, &key) {
+                    crate::log::line("preflight", "told not kept", &format!("{}: {e}", kept.display()));
+                }
+            });
+        }
+        // (since tarae started, what goes by where nothing is kept: only a card that listed every step — one
+        // that left the `full = true` ones out says nothing of them)
+        if listed.len() == steps.len() {
+            self.preflight_told.insert(root);
+        }
         if let Err(e) = self.preflight_run(steps, set) {
             self.session.bring_after_preflight = false;
             self.set_error(e);
@@ -810,6 +918,113 @@ mod tests {
         for c in &clippy {
             assert!(c.split_whitespace().any(|w| w == "--workspace"), "{c}: lints only the root package");
         }
+    }
+
+    /// Stand-in pack defaults for `preflight_start_with`: one step that `echo`es.
+    fn pack_a(_: &std::path::Path) -> crate::packs::Defaults {
+        crate::packs::Defaults {
+            steps: vec![Step { from: "rust pack".into(), ..step("fmt", "echo a") }],
+            held: vec![],
+        }
+    }
+
+    /// …and the same step changed.
+    fn pack_b(_: &std::path::Path) -> crate::packs::Defaults {
+        crate::packs::Defaults {
+            steps: vec![Step { from: "rust pack".into(), ..step("fmt", "echo b") }],
+            held: vec![],
+        }
+    }
+
+    /// cardburden 5: the defaults' card asked again after every `:restart` and in every new session of the same
+    /// repository. A `y` is kept by repository (git's common folder: a linked checkout is the same one), by that
+    /// clone of it, and by the steps the card listed — the next tarae, in another checkout, runs them with no
+    /// card. The review: a step changed, another repository, the repository removed and cloned again at its path
+    /// (a fork's root commit is the same: the folder's device, inode and making time aren't), or the full set's
+    /// steps the quick card never listed — each a card again. Driven through `:preflight`'s own start and
+    /// worker, the packs' lookup the only stand-in. (Stand-in git folders, no git run; the steps `echo`.)
+    #[test]
+    fn the_defaults_card_shows_once_per_clone_for_the_steps_it_listed() {
+        use crate::editor::Editor;
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-preflight-told-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // (a file system that can't tell when a folder was made keeps nothing: the card each start, as before)
+        if identity(&dir).is_none() {
+            return;
+        }
+        let (repo, linked, other) = (dir.join("repo"), dir.join("linked"), dir.join("other"));
+        let meta = repo.join(".git/worktrees/linked");
+        for d in [&meta, &linked, &other.join(".git")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", meta.display())).unwrap();
+        std::fs::write(meta.join("gitdir"), format!("{}\n", linked.join(".git").display())).unwrap();
+        std::fs::write(meta.join("commondir"), "../..\n").unwrap();
+        let kept = dir.join("state/preflight-told");
+        let soak = Step { from: ".tarae.local.toml".into(), full: true, ..step("soak", "echo soak") };
+        let tarae = |root: &std::path::Path| {
+            let mut ed = Editor::new(crate::config::Config::default());
+            (ed.session.root, ed.session.preflight_kept) = (root.to_path_buf(), Some(kept.clone()));
+            ed.config.preflight_local = vec![soak.clone()];
+            ed
+        };
+        let carded =
+            |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Preflight { .. }));
+        let pump = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
+            let end = Instant::now() + Duration::from_secs(5);
+            while !done(ed) {
+                assert!(Instant::now() < end, "{what}");
+                if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        // `:preflight` as typed: its card, or its run (stopped: the test's `echo`)
+        let asks = |ed: &mut Editor, set: Set, packs: fn(&std::path::Path) -> crate::packs::Defaults| {
+            ed.preflight_start_with(set, false, packs).unwrap();
+            pump(ed, "a card or a run", &|ed| carded(ed) || ed.session.task_run.is_some());
+            let card = carded(ed);
+            if !card {
+                ed.session.task_run = None;
+            }
+            card
+        };
+        let lines = || std::fs::read_to_string(&kept).map_or(0, |t| t.lines().count());
+        let yes = |ed: &mut Editor, n: usize| {
+            ed.offer_accept();
+            pump(ed, "kept after y, and run", &|ed| lines() == n && ed.session.task_run.is_some());
+            ed.session.task_run = None;
+        };
+        let mut ed = tarae(&repo);
+        assert!(asks(&mut ed, Set::Quick, pack_a), "the first time: its card");
+        let listed = ed.offers[0].question.clone();
+        assert!(listed.contains("echo a") && !listed.contains("soak"), "the quick set: {listed}");
+        yes(&mut ed, 1);
+        let text = std::fs::read_to_string(&kept).unwrap();
+        assert!(
+            !text.contains("echo") && !text.contains(&*dir.to_string_lossy()),
+            "no command or path: {text}"
+        );
+        // A tarae started again, in the linked checkout: no card
+        let mut ed = tarae(&linked);
+        assert!(!asks(&mut ed, Set::Quick, pack_a), "told in this repository");
+        // `:preflight-full`: the step the quick card never listed — its own card, then told too
+        assert!(asks(&mut ed, Set::Full, pack_a), "the full set's steps weren't on the quick card");
+        yes(&mut ed, 2);
+        assert!(!asks(&mut tarae(&repo), Set::Full, pack_a));
+        // A step changed, or another repository: asked again
+        assert!(asks(&mut tarae(&linked), Set::Quick, pack_b), "the steps changed");
+        assert!(asks(&mut tarae(&other), Set::Quick, pack_a), "another repository");
+        // Removed and cloned again at its path (its common folder made anew): asked again
+        std::fs::remove_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert!(asks(&mut tarae(&repo), Set::Quick, pack_a), "another clone at the same path");
+        // A folder that isn't there can't be told apart: no key, nothing kept
+        assert_eq!(told_key(&dir.join("gone"), &pack_a(&dir).steps), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The card before pack defaults run: each source's steps under it, a pack's said to be tarae's own.

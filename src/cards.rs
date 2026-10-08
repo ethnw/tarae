@@ -5,7 +5,8 @@
 //!
 //! `size · card#12 · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s`
 //!
-//! (The card's id since cardburden 3: a later card's `same=#12` names it.)
+//! (The card's id since cardburden 3: a later card's `same=#12` names it. Since cardburden 5 every card has
+//! its line — tarae's own questions as `why=own · shadow=own`.)
 //!
 //! And one `denied` line per sandboxed run the sandbox denied something — what the capability model turns
 //! into a grant asked for.
@@ -13,7 +14,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::offer::{Offer, What};
+use crate::offer::Offer;
 
 /// Where a read goes, as the capability model sorts places (`class`) — most telling last, the order a
 /// line lists them in.
@@ -126,6 +127,9 @@ pub enum Why {
     Host,
     /// `a` allowed it before, but a warning of it asks each time (`cardwarn.rs`, `asks` — D2): its ids.
     Asks(String),
+    /// tarae's own question, not about what Claude does (a preflight, a stuck run, notes gone stale, a review's
+    /// end …) — logged all the same (cardburden 5), so every card's answer and time are measured.
+    Own,
 }
 
 impl Why {
@@ -150,6 +154,7 @@ impl Why {
             Why::Blocked => "blocked".into(),
             Why::Host => "host".into(),
             Why::Asks(ids) => format!("asks:{ids}"),
+            Why::Own => "own".into(),
         }
     }
 
@@ -185,7 +190,8 @@ impl Why {
             | Why::Read
             | Why::Screen
             | Why::Blocked
-            | Why::Host => return None,
+            | Why::Host
+            | Why::Own => return None,
         })
     }
 }
@@ -222,6 +228,8 @@ pub enum Request {
     Grant(crate::allow::Grant),
     /// A host reached through tarae's proxy (`host:port`).
     Host(String),
+    /// tarae's own question (`Why::Own`): no capability asked for.
+    Own,
 }
 
 /// What the capability model does with a request (docs/design/cards.md §3).
@@ -237,6 +245,8 @@ pub enum Decision {
     Screen,
     /// A host past the session's (the proxy holds it).
     Host,
+    /// tarae's own question: asked as today, the model has nothing to say of it.
+    Own,
 }
 
 impl Decision {
@@ -251,6 +261,7 @@ impl Decision {
             Decision::NoSandbox => "no-sandbox",
             Decision::Screen => "screen",
             Decision::Host => "host",
+            Decision::Own => "own",
         }
     }
 }
@@ -276,6 +287,7 @@ pub fn decide(r: &Request) -> Decision {
         Request::Grant(crate::allow::Grant::Socket(_)) => Decision::Socket,
         Request::Grant(crate::allow::Grant::Host(..)) => Decision::Host,
         Request::Host(_) => Decision::Host,
+        Request::Own => Decision::Own,
     }
 }
 
@@ -307,25 +319,10 @@ impl Asked {
     }
 }
 
-/// The card's kind, as the line says it.
-fn kind(w: &What) -> &'static str {
-    match w {
-        What::Run(_) => "run",
-        What::NoSandbox { .. } => "no-sandbox",
-        What::ProtectedMade { .. } => "protected-made",
-        What::Read { .. } => "read",
-        What::Screen { .. } => "screen",
-        What::Grant { .. } => "grant",
-        What::Outside { .. } => "outside",
-        What::Host(_) => "host",
-        _ => "other",
-    }
-}
-
 /// The `card` line: `<session> · card#<id> · <kind> · why=… · class=… · shadow=… · same=#41 · warn=… ·
-/// <answer> · <drawn → answered> · up <asked → answered>` (`class` only for reads; `same` only for a run card
-/// the same as one answered before — that card's id, `same=#41:changed` when something changed since; `warn`
-/// the warnings it said, by id).
+/// <answer> · <drawn → answered> · up <asked → answered>` (the kind as `tarae state` names it, `Offer::kind`;
+/// `class` only for reads; `same` only for a run card the same as one answered before — that card's id,
+/// `same=#41:changed` when something changed since; `warn` the warnings it said, by id).
 pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
     let classes: Vec<Class> = match &asked.request {
         Request::Run { reads, .. } => reads.clone(),
@@ -352,18 +349,20 @@ pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant)
     format!(
         "{session} · card#{} · {} · why={}{class} · shadow={}{same} · {answer} · {drawn} · up {}",
         o.id,
-        kind(&o.what),
+        o.kind(),
         asked.why.word(),
         decide(&asked.request).word(),
         took(o.since)
     )
 }
 
-/// Card `o` was answered (`y` `a` `A` `n`) or dropped unanswered: its line, if it says what it asked.
+/// Card `o` was answered (`y` `a` `A` `n`, or a letter of its own) or dropped unanswered: its line — what it
+/// asked, or `why=own · shadow=own` for tarae's own questions (cardburden 5: a preflight's, a stuck run's, a
+/// review's end were never measured).
 pub fn said(session: &str, o: &Offer, answer: &str) {
-    if let Some(asked) = &o.asked {
-        logged("card", &line(session, o, asked, answer, Instant::now()));
-    }
+    let own = Asked::new(Why::Own, Request::Own);
+    let asked = o.asked.as_ref().unwrap_or(&own);
+    logged("card", &line(session, o, asked, answer, Instant::now()));
 }
 
 /// A command of Claude's that ran with no card (a check, an `a` before) and warns of something (`cardwarn.rs`):
@@ -425,6 +424,7 @@ pub fn logged_lines(prefix: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::offer::What;
     use std::path::PathBuf;
 
     /// What the capability model asks about: past the sandbox, no sandbox, a read outside the places read
@@ -506,6 +506,33 @@ mod tests {
         let warned = a.clone().warned(vec!["docker-own-config".into(), "outward".into()]);
         let l = line("size", &o, &warned, "y", at(4200));
         assert!(l.contains(" · shadow=none · warn=docker-own-config,outward · y · "), "{l}");
+    }
+
+    /// cardburden 5: tarae's own cards were never in the log — a preflight's, a stuck run's, notes gone stale,
+    /// a rebase's — so how long they held anyone wasn't known. Every card's answer is a `card` line now, a
+    /// letter of its own too (`X`): `why=own · shadow=own`, the kind as `tarae state` names it. (The rebase
+    /// card's root is no session's: its `X` does nothing.)
+    #[test]
+    fn every_card_answered_has_its_line_tarae_s_own_too() {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let up = |ed: &mut crate::editor::Editor, what| {
+            ed.push_offer(Offer::new("t".into(), "q", "", String::new(), what));
+            ed.offers[0].id
+        };
+        let id = up(&mut ed, What::NotesStale { ids: Vec::new() });
+        ed.offer_dismiss();
+        let at = |id: u64| logged_lines("card ").into_iter().find(|l| l.contains(&format!("card#{id} ")));
+        let l = at(id).expect("its line");
+        assert!(
+            l.contains(&format!(" · card#{id} · notes-stale · why=own · shadow=own · n · not drawn · up ")),
+            "{l}"
+        );
+        let root = std::env::temp_dir().join(format!("tarae-cards-no-session-{}", std::process::id()));
+        let id = up(&mut ed, What::RebaseResolved { root });
+        ed.offer_abort();
+        assert!(ed.offers.is_empty());
+        let l = at(id).expect("its line");
+        assert!(l.contains(&format!(" · card#{id} · rebase-resolved · why=own · shadow=own · X · ")), "{l}");
     }
 
     /// A run's denials as one line — the distinct ones as Claude reads them, past what's kept counted.

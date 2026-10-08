@@ -652,6 +652,8 @@ impl Editor {
                 r.by_claude = true;
                 r.guard = guard;
                 r.ran = ran;
+                // (a time limit its own command sets: the stuck card waits for it — cardburden 5)
+                r.wait.limited(r.started, crate::stuck::limit(&r.task.cmd));
                 (r.key, r.joined, r.queued, r.snap) = (ride.key, ride.joined, ride.queued, ride.snap);
                 Ok(())
             }
