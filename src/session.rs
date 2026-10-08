@@ -156,6 +156,14 @@ pub struct Session {
     /// The changed lines a person looked at in a review (`space v h` on a high-risk change — `risk::keys`):
     /// what holds the review's end and the bring until they're all here (`risk.rs`).
     pub looked: std::collections::HashSet<crate::risk::Key>,
+    /// The added lines a person looked at (`space v h`), by file (from the checkout's root): where each was
+    /// then and its text — one the file no longer has is a change to look at again (`risk::taken_out`). Kept
+    /// in the restore file with `looked`.
+    pub looked_lines: std::collections::HashMap<String, Vec<crate::risk::LookedLine>>,
+    /// Of each high-risk change looked at, by file: its added lines' keys in the order they were — one out of
+    /// that order since (moved within the change) is a change to look at again (`risk::moved`). The latest
+    /// look at a change replaces its order.
+    pub looked_orders: std::collections::HashMap<String, Vec<crate::risk::LookedOrder>>,
     /// Its files that came again from disk (or changed there under an edit) while it was behind — said only
     /// in `:messages` (`disk_said`), so its tab, the chip and its row in the list carry a `•` (#6) until it
     /// comes to the front.
@@ -273,6 +281,8 @@ impl Session {
             spawned: Vec::new(),
             viewed: Default::default(),
             looked: Default::default(),
+            looked_lines: Default::default(),
+            looked_orders: Default::default(),
             reloaded: 0,
             usage: Default::default(),
             compacted: Default::default(),

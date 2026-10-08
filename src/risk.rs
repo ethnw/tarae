@@ -17,6 +17,14 @@
 //!   commits a bring takes, and a line changed since is a line not looked at. The key has no position, on
 //!   purpose (regrouped, a change must still count): the same line added again elsewhere in the same file, by
 //!   the same sign, counts as looked at already. A change of mode is keyed by its modes (sign `m`).
+//! - A change partly looked at waits only for its lines not looked at (`Graded::left`): a fix of five lines in
+//!   a change of a thousand asks for those five (cardburden 1).
+//! - A line taken out since it was looked at (`taken_out`): an added line a person looked at that the file has
+//!   fewer of than then (counted in its whole text: one committed since is still there; one taken out beside a
+//!   copy that stays is one fewer) is a change of its own to look at (sign `x`) — taking out a check that
+//!   stood beside an `unsafe` made no new key, and the change stayed "looked at".
+//! - A line moved within its change since it was looked at (`moved`, `out_of_order`): the same keys in
+//!   another order — a check moved after the call it guarded — is a change of its own to look at (sign `o`).
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -139,7 +147,11 @@ pub struct Graded {
     pub at: usize,
     /// How many lines it spans now (at least 1 — a deletion's place).
     pub lines: usize,
+    /// Its lines' keys: the removed ones, then the added ones, then a change of mode's (`keys`).
     pub keys: Vec<Key>,
+    /// How many of `keys` are removed lines, and added ones.
+    pub removed: usize,
+    pub added: usize,
     /// A change of mode (`Hunk.mode`), not of lines — an open document's diff doesn't have it.
     pub mode: bool,
 }
@@ -148,6 +160,29 @@ impl Graded {
     /// Whether a person looked at every line of it (`looked`: the session's keys — `space v h`).
     pub fn looked_at(&self, looked: &HashSet<Key>) -> bool {
         self.keys.iter().all(|k| looked.contains(k))
+    }
+
+    /// The lines (0-based, now) of it no one has looked at, in order, each once: an added line where it is; a
+    /// removed line, or a change of mode, at the change's first line (where its removed rows are drawn).
+    pub fn left(&self, looked: &HashSet<Key>) -> Vec<usize> {
+        self.left_by(|k| looked.contains(k))
+    }
+
+    /// `left`, by whatever counts as seen (`seen`: a viewed mark's keys, or the looked at ones).
+    pub fn left_by(&self, seen: impl Fn(&Key) -> bool) -> Vec<usize> {
+        let mut out: Vec<usize> = self
+            .keys
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| !seen(k))
+            .map(|(i, _)| match i.checked_sub(self.removed) {
+                Some(a) if a < self.added => self.at + a,
+                _ => self.at,
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 }
 
@@ -200,7 +235,133 @@ pub fn grade(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules, in_test: bo
 /// `h` of `rel` graded, with its keys.
 pub fn graded(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules, in_test: bool) -> Graded {
     let (grade, why) = grade(rel, lang, h, rules, in_test);
-    Graded { grade, why, at: h.at, lines: h.added.len().max(1), keys: keys(rel, h), mode: h.mode.is_some() }
+    Graded {
+        grade,
+        why,
+        at: h.at,
+        lines: h.added.len().max(1),
+        keys: keys(rel, h),
+        removed: h.removed.len(),
+        added: h.added.len(),
+        mode: h.mode.is_some(),
+    }
+}
+
+/// The added lines of `rel` a person looked at that the file has fewer of now (`gone`: each text as it was,
+/// and how many times the file has it now), at `at` — where they were when looked at: a high-risk change of
+/// its own, keyed by each text and that count (`taken_out_key`). Looked at, it's done; another copy taken
+/// out later is a new count, asked again.
+pub fn taken_out(rel: &str, at: usize, gone: &[(&str, u32)]) -> Graded {
+    let shown: String = gone.first().map(|t| t.0.trim()).unwrap_or_default().chars().take(60).collect();
+    let more = match gone.len() {
+        0 | 1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    Graded {
+        grade: Grade::High,
+        why: format!("taken out since your look: `{shown}`{more}"),
+        at,
+        lines: 1,
+        keys: gone.iter().map(|(t, now)| taken_out_key(rel, t, *now)).collect(),
+        removed: 0,
+        added: 0,
+        mode: false,
+    }
+}
+
+/// The key of a line of `rel` taken out since it was looked at, the file having it `now` times (sign `x`).
+pub fn taken_out_key(rel: &str, text: &str, now: u32) -> Key {
+    key(rel, b'x', &format!("{now}\0{text}"))
+}
+
+/// A line of `rel` (its key `line`) that moved within its change since it was looked at — between the lines
+/// `prev` and `next` now (none: the change's end): a high-risk change of its own at `at` (its line now).
+/// Keyed by the line and its new neighbours (sign `o`): looked at there, it's done; moved again, it's asked
+/// again. `text`: the line, when its document is open.
+pub fn moved(
+    rel: &str,
+    at: usize,
+    text: Option<&str>,
+    (line, prev, next): (Key, Option<Key>, Option<Key>),
+) -> Graded {
+    let why = match text {
+        Some(t) => format!("moved since your look: `{}`", t.trim().chars().take(60).collect::<String>()),
+        None => "a line moved since your look".to_string(),
+    };
+    let around = format!("{}\0{}\0{}", key_hex(line), key_hex(prev.unwrap_or(0)), key_hex(next.unwrap_or(0)));
+    Graded {
+        grade: Grade::High,
+        why,
+        at,
+        lines: 1,
+        keys: vec![key(rel, b'o', &around)],
+        removed: 0,
+        added: 0,
+        mode: false,
+    }
+}
+
+/// One high-risk change looked at (`Session.looked_orders`): its added lines' keys in the order a person
+/// looked at them — a line found out of that order since is a change to look at (`moved`) — and the lines just
+/// above and below it then, its place: one of its lines missing since is counted between them as they're
+/// found now (`codereview::taken_out_of` — a line the diff now pairs with another copy is still there).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LookedOrder {
+    pub keys: Vec<Key>,
+    pub above: Option<String>,
+    pub below: Option<String>,
+}
+
+/// Of `now` (a change's added lines' keys, in order), the indices of those out of the order `then` had them
+/// in: the lines of both, outside one longest run in `then`'s order — a line moved, not the ones around it.
+pub fn out_of_order(then: &[Key], now: &[Key]) -> Vec<usize> {
+    // (each line of both by its place in `then`: the first not taken yet — a repeated line, in turn)
+    let mut places: std::collections::HashMap<Key, std::collections::VecDeque<usize>> = Default::default();
+    for (p, k) in then.iter().enumerate() {
+        places.entry(*k).or_default().push_back(p);
+    }
+    let placed: Vec<(usize, usize)> =
+        now.iter().enumerate().filter_map(|(i, k)| Some((i, places.get_mut(k)?.pop_front()?))).collect();
+    // (the longest increasing run of places — what stayed in order — in n log n: a change can be long)
+    let mut tails: Vec<usize> = Vec::new();
+    let mut from: Vec<Option<usize>> = vec![None; placed.len()];
+    for (i, &(_, p)) in placed.iter().enumerate() {
+        let at = tails.partition_point(|&t| placed[t].1 < p);
+        from[i] = at.checked_sub(1).map(|a| tails[a]);
+        match tails.get_mut(at) {
+            Some(t) => *t = i,
+            None => tails.push(i),
+        }
+    }
+    let mut kept = vec![false; placed.len()];
+    let mut at = tails.last().copied();
+    while let Some(i) = at {
+        kept[i] = true;
+        at = from[i];
+    }
+    placed.iter().zip(kept).filter(|(_, k)| !k).map(|((i, _), _)| *i).collect()
+}
+
+/// Whether a line says nothing on its own — blank, or only brackets and punctuation (`}`, `)`, `];`, `},`):
+/// not kept as looked at for "taken out" (one going would ask about nothing), still a line when added.
+pub fn trivial(line: &str) -> bool {
+    line.trim().chars().all(|c| c.is_ascii_punctuation())
+}
+
+/// An added line a person looked at (`Session.looked_lines`): where it was then, its text, its key as added
+/// (`+`, the diff's), and how many times the file had that text then — fewer now, one was taken out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookedLine {
+    pub at: usize,
+    pub text: String,
+    pub added: Key,
+    pub count: u32,
+}
+
+impl LookedLine {
+    pub fn new(rel: &str, at: usize, text: &str, count: u32) -> LookedLine {
+        LookedLine { at, text: text.to_string(), added: key(rel, b'+', text), count }
+    }
 }
 
 /// A changed line's key (`keys`): the first 128 bits of a SHA-256 — a gate's mark, so not a hash one can
@@ -562,6 +723,8 @@ mod tests {
             at: 0,
             lines: 1,
             keys: keys("src/a.rs", hunk),
+            removed: hunk.removed.len(),
+            added: hunk.added.len(),
             mode: false,
         };
         assert!(g(&h(&[], &["unsafe { a() }"])).looked_at(&looked), "a part of it, regrouped");

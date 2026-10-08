@@ -102,6 +102,92 @@ impl State {
         }
     }
 
+    /// The added lines looked at in this folder's reviews (`Session.looked_lines` — `risk::LookedLine`): by
+    /// file, each `[line then, text, how many times the file had it]`.
+    pub fn looked_lines(
+        &self,
+        cwd: &Path,
+    ) -> std::collections::HashMap<String, Vec<crate::risk::LookedLine>> {
+        let line = |rel: &str, v: &Value| {
+            let (at, text) = (v.get(0)?.as_u64()? as usize, v.get(1)?.as_str()?);
+            Some(crate::risk::LookedLine::new(rel, at, text, v.get(2)?.as_u64()? as u32))
+        };
+        self.by_file("looked_lines", cwd, line)
+    }
+
+    /// The high-risk changes looked at in this folder's reviews (`Session.looked_orders`): by file, each its
+    /// added lines' keys in order (hex) and the lines just above and below it.
+    pub fn looked_orders(
+        &self,
+        cwd: &Path,
+    ) -> std::collections::HashMap<String, Vec<crate::risk::LookedOrder>> {
+        let order = |_: &str, v: &Value| {
+            let keys = v["keys"].as_array()?.iter().map(|k| crate::risk::key_of_hex(k.as_str()?));
+            Some(crate::risk::LookedOrder {
+                keys: keys.collect::<Option<Vec<_>>>()?,
+                above: v["above"].as_str().map(str::to_string),
+                below: v["below"].as_str().map(str::to_string),
+            })
+        };
+        self.by_file("looked_orders", cwd, order)
+    }
+
+    /// `cwd`'s entry under `name`, each file's items read by `item` (one it can't read left out).
+    fn by_file<T>(
+        &self,
+        name: &str,
+        cwd: &Path,
+        item: impl Fn(&str, &Value) -> Option<T>,
+    ) -> std::collections::HashMap<String, Vec<T>> {
+        let files = self.root.get(name).and_then(|n| n.get(cwd.to_str()?)).and_then(Value::as_object);
+        files
+            .into_iter()
+            .flatten()
+            .map(|(rel, v)| {
+                (rel.clone(), v.as_array().into_iter().flatten().filter_map(|v| item(rel, v)).collect())
+            })
+            .collect()
+    }
+
+    /// The looked-at added lines and changes' orders of the session in `cwd` as they are now (as
+    /// `set_looked`).
+    pub fn set_looked_lines(
+        &mut self,
+        cwd: &Path,
+        lines: &std::collections::HashMap<String, Vec<crate::risk::LookedLine>>,
+        orders: &std::collections::HashMap<String, Vec<crate::risk::LookedOrder>>,
+    ) {
+        let line = |l: &crate::risk::LookedLine| json!([l.at, l.text, l.count]);
+        let order = |o: &crate::risk::LookedOrder| {
+            let keys: Vec<String> = o.keys.iter().map(|k| crate::risk::key_hex(*k)).collect();
+            json!({ "keys": keys, "above": o.above, "below": o.below })
+        };
+        self.set_by_file("looked_lines", cwd, lines, line);
+        self.set_by_file("looked_orders", cwd, orders, order);
+    }
+
+    /// `cwd`'s entry under `name`: each file's items as `item` writes them (none: the entry goes).
+    fn set_by_file<T>(
+        &mut self,
+        name: &str,
+        cwd: &Path,
+        files: &std::collections::HashMap<String, Vec<T>>,
+        item: impl Fn(&T) -> Value,
+    ) {
+        let Some(cwd) = cwd.to_str() else { return };
+        let saved = self.root.entry(name).or_insert_with(|| json!({}));
+        if let Some(map) = saved.as_object_mut() {
+            match files.is_empty() {
+                true => map.remove(cwd),
+                false => {
+                    let files: Map<String, Value> =
+                        files.iter().map(|(rel, v)| (rel.clone(), v.iter().map(&item).collect())).collect();
+                    map.insert(cwd.to_string(), Value::Object(files))
+                }
+            };
+        }
+    }
+
     /// The notes of the session in `cwd` as they are now — what `notes` gives from here on (a session ended
     /// and opened again in the same run), and what's written on quit.
     pub fn set_notes(&mut self, cwd: &Path, notes: Vec<Value>) {
@@ -182,7 +268,10 @@ impl Editor {
             let _ = std::fs::create_dir_all(dir);
         }
         let body = Value::Object(self.restore.root.clone()).to_string();
-        let _ = crate::disk::write_atomic(&f, |w| w.write_all(body.as_bytes()));
+        // (yours only, from its first byte: it holds lines of code looked at in reviews, and notes' text)
+        if let Err(e) = crate::disk::write_private(&f, |w| w.write_all(body.as_bytes())) {
+            crate::log::line("tarae", "warning", &format!("{}: not written ({e})", f.display()));
+        }
     }
 
     /// What `save_restore` writes, put in `self.restore` (tests read it back from there).
@@ -201,6 +290,19 @@ impl Editor {
             self.sessions_in_order().iter().map(|l| (l.root.clone(), l.looked.clone())).collect();
         for (cwd, looked) in looked {
             self.restore.set_looked(&cwd, &looked);
+        }
+        type Looked = (
+            PathBuf,
+            std::collections::HashMap<String, Vec<crate::risk::LookedLine>>,
+            std::collections::HashMap<String, Vec<crate::risk::LookedOrder>>,
+        );
+        let lines: Vec<Looked> = self
+            .sessions_in_order()
+            .iter()
+            .map(|l| (l.root.clone(), l.looked_lines.clone(), l.looked_orders.clone()))
+            .collect();
+        for (cwd, lines, orders) in lines {
+            self.restore.set_looked_lines(&cwd, &lines, &orders);
         }
         let opened = self.restore.opened;
         let folder = self.session.root.to_str().map(str::to_string);

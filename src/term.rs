@@ -3151,12 +3151,21 @@ fn draw_text(
     if let (Some(r), Some(p)) = (editor.session.code_review.as_ref(), doc.path.as_deref())
         && let Some(f) = r.files.iter().find(|f| f.path == p)
     {
+        let looked = &editor.session.looked;
         for g in r.graded(editor, f).iter().filter(|g| g.grade == crate::risk::Grade::High) {
+            // (partly looked at — cardburden 1: on the first of its lines since, saying how many)
+            let left = g.left(looked);
+            let (at, why) = match left.first() {
+                Some(&first) if g.keys.iter().any(|k| looked.contains(k)) => {
+                    (first, format!("{} · {}", crate::nav::count(left.len(), "line since your look"), g.why))
+                }
+                _ => (g.at, g.why.clone()),
+            };
             // (two on a line — a change of mode on the first, with a change of lines: the one left to look at)
-            if let Some(slot) = g.at.checked_sub(top).and_then(|r| risk_at.get_mut(r))
+            if let Some(slot) = at.checked_sub(top).and_then(|r| risk_at.get_mut(r))
                 && slot.as_ref().is_none_or(|(looked, _)| *looked)
             {
-                *slot = Some((g.looked_at(&editor.session.looked), g.why.clone()));
+                *slot = Some((g.looked_at(looked), why));
             }
         }
     }
@@ -8596,6 +8605,13 @@ fn draw_review_rail(
     }
     rows.push((summary, card, None));
     rows.push((vec![sp(format!("{viewed} of {n} viewed"), faint)], card, None));
+    // Marked viewed, changed since (cardburden 1): what's left of each is its new lines — their `◦` warned
+    let since =
+        r.files.iter().filter(|f| r.since(editor, f).is_some_and(|s| s != Default::default())).count();
+    if since > 0 {
+        let said = format!("{since} changed since viewed");
+        rows.push((vec![sp(fit_ellipsis(&said, w), Style { fg: warn_fg, ..card })], card, None));
+    }
     // Files outside the checkout (a turn's temp files): said, they're not part of what's committed (#145)
     let outside = r.files.iter().filter(|f| r.outside(f)).count();
     if outside > 0 {
@@ -8656,7 +8672,8 @@ fn draw_review_rail(
         let f = &r.files[i];
         let here = marked == Some(i);
         let bg = if here { selected } else { card };
-        let seen = r.viewed(editor, f);
+        let since = r.since(editor, f);
+        let seen = since == Some(crate::codereview::Since::default());
         let mut tail = Vec::new();
         // Its grade: `▲k` high-risk changes to look at (all looked at: a faint `▲`), `•` behaviour, quiet none
         match r.top(editor, f) {
@@ -8706,9 +8723,18 @@ fn draw_review_rail(
         let mut row = vec![
             sp(if here { "▎ ".into() } else { "  ".into() }, Style { fg: ui.accent.fg, ..bg }),
             sp(guides.text, Style { fg: ui.linenr.fg, ..bg }),
+            // (marked, changed since — cardburden 1: its `◦` warned, the header counts them; the rail's width
+            // was measured as it opened, so nothing is added to the row)
             sp(
                 if seen { "● ".into() } else { "◦ ".into() },
-                Style { fg: if seen { ui.diff_plus.fg } else { ui.linenr.fg }, ..bg },
+                Style {
+                    fg: match (seen, since.is_some()) {
+                        (true, _) => ui.diff_plus.fg,
+                        (false, true) => warn_fg,
+                        (false, false) => ui.linenr.fg,
+                    },
+                    ..bg
+                },
             ),
             sp(shown.clone(), name_st),
         ];

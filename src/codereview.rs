@@ -115,7 +115,15 @@ pub struct CodeReview {
     /// open document's own diff is graded again as it changes (`live`, by version), its tree saying where
     /// tests are.
     pub grades: Grades,
-    live: std::cell::RefCell<std::collections::HashMap<DocId, (u64, Graded)>>,
+    /// Each file's grades as `graded` last gave them, and what they were worked out from (`LiveStamp`).
+    live: std::cell::RefCell<std::collections::HashMap<PathBuf, (LiveStamp, Graded)>>,
+    /// How many times each file has the texts of the lines looked at and viewed in it — counted as the review
+    /// opened (`grade_files`' `asked`), and again each time its open document is (`counts_of`), so a file
+    /// closed since keeps what it had then: one not open with fewer now — taken out.
+    counts: std::cell::RefCell<Counts>,
+    /// Of each document, at its version and its diff's: its added lines' place among the added lines with
+    /// the same text (`occurrences` — what a drawn line is kept as).
+    occurrences: std::cell::RefCell<std::collections::HashMap<DocId, OccurrencesAt>>,
     /// The rules it's graded by (the packs', the project's from the checkout tarae started in).
     pub rules: crate::risk::Rules,
     /// The buffer of the binary file shown last (`show_binary`) — that file is in hand while it's in front
@@ -128,9 +136,15 @@ pub struct CodeReview {
     /// How many of each file's changed lines moved (`moved_lines`) — said beside its counts, which include
     /// them: `+800 −500 · 500 moved`.
     pub moved: Moved,
-    /// The lines of each of its documents drawn since its text last changed (`drawn_sync`, after every
-    /// frame): a high-risk change taller than its pane is on screen once every line of it was (`hunk_seen`).
-    drawn: std::collections::HashMap<DocId, (u64, std::collections::HashSet<usize>)>,
+    /// The lines of its files drawn since it opened, each by its text and which of the file's added lines with
+    /// that text it is (`drawn_key`, `drawn_sync` after every frame): a high-risk change taller than its pane
+    /// is on screen once every line of it was (`hunk_seen`) — an edit elsewhere in the file doesn't take back
+    /// what was drawn (cardburden 1: a 5-line fix had the whole 1123-line change scrolled through again), and a
+    /// `}` drawn isn't every `}`.
+    drawn: std::collections::HashSet<crate::risk::Key>,
+    /// Of each document, the lines already counted in `drawn` at its version and its diff's (a frame's rows
+    /// hashed once).
+    drawn_rows: std::collections::HashMap<DocId, ((u64, u64), std::collections::HashSet<usize>)>,
     /// Files graded whole, as their blob would be (git converts them — `converted`): their open document's
     /// text isn't what a commit stores, so it isn't graded again as it changes.
     pub whole: std::collections::HashSet<PathBuf>,
@@ -157,11 +171,14 @@ impl CodeReview {
             started: std::time::Instant::now(),
             grades: Default::default(),
             live: Default::default(),
+            counts: Default::default(),
+            occurrences: Default::default(),
             rules: Default::default(),
             binary_shown: None,
             beyond: None,
             moved: Default::default(),
             drawn: Default::default(),
+            drawn_rows: Default::default(),
             whole: Default::default(),
         }
     }
@@ -195,22 +212,158 @@ impl CodeReview {
     /// File `f`'s changes graded: its open document's diff as it is now (graded once a version), else what
     /// the worker found as the review opened (none yet: empty). Shared, not copied: the rail asks every file's
     /// several times a frame (`perf_frames_with_a_graded_review`: a copy each tripled a 46-file review's frame).
+    /// After its changes, open or not: the lines looked at that it has fewer of since (`taken_out_of`), and
+    /// those moved within their change since (`moved_within`).
     pub fn graded(&self, ed: &Editor, f: &File) -> Graded {
-        let live = |d: &&crate::document::Document| d.review_base.is_some() && d.git_version == d.version();
-        if let Some(d) = doc_of(ed, f).filter(live).filter(|_| !self.whole.contains(&f.path)) {
-            if let Some((v, g)) = self.live.borrow().get(&d.id)
-                && *v == d.version()
-            {
-                return g.clone();
-            }
-            let mut g = grade_doc(d, &f.rel, &self.rules);
-            // (a change of mode isn't in a document's diff: the review's grade of it stays)
-            g.extend(self.grades.get(&f.path).into_iter().flat_map(|g| g.iter()).filter(|g| g.mode).cloned());
-            let g: Graded = g.into();
-            self.live.borrow_mut().insert(d.id, (d.version(), g.clone()));
-            return g;
+        let ready = |d: &&crate::document::Document| d.review_base.is_some() && d.git_version == d.version();
+        let live = doc_of(ed, f).filter(ready).filter(|_| !self.whole.contains(&f.path));
+        let lines = ed.session.looked_lines.get(&f.rel).map_or(&[][..], Vec::as_slice);
+        let orders = ed.session.looked_orders.get(&f.rel).map_or(&[][..], Vec::as_slice);
+        let worker = || self.grades.get(&f.path).cloned().unwrap_or_else(|| Arc::new([]));
+        if live.is_none() && lines.is_empty() && orders.is_empty() {
+            return worker();
         }
-        self.grades.get(&f.path).cloned().unwrap_or_else(|| Arc::new([]))
+        let open = doc_of(ed, f).filter(|d| !d.loading);
+        let stamp = (
+            live.map(|d| (d.id, d.version())),
+            open.map(|d| (d.id, d.version())),
+            ed.session.looked.len(),
+            lines.len(),
+            orders.len(),
+        );
+        if let Some((s, g)) = self.live.borrow().get(&f.path)
+            && *s == stamp
+        {
+            return g.clone();
+        }
+        let mut g = match live {
+            Some(d) => {
+                let mut g = grade_doc(d, &f.rel, &self.rules);
+                // (a change of mode isn't in a document's diff: the review's grade of it stays)
+                g.extend(worker().iter().filter(|g| g.mode).cloned());
+                g
+            }
+            None => worker().to_vec(),
+        };
+        let looked = &ed.session.looked;
+        let out = self.taken_out_of(ed, f, &g, lines, orders);
+        g.extend(moved_within(&f.rel, &g, orders, looked, live.map(|d| &d.text)));
+        g.extend(out);
+        let g: Graded = g.into();
+        self.live.borrow_mut().insert(f.path.clone(), (stamp, g.clone()));
+        g
+    }
+
+    /// How many times `f` has each of `texts` now: its open document's text (kept in `counts` for when it's
+    /// closed) — else as last counted (`counts`: as the review opened, or its document last); None for a text
+    /// it can't tell.
+    fn counts_of<'a>(
+        &self,
+        ed: &Editor,
+        f: &File,
+        texts: impl IntoIterator<Item = &'a str>,
+    ) -> std::collections::HashMap<&'a str, Option<u32>> {
+        let mut out: std::collections::HashMap<&'a str, Option<u32>> =
+            texts.into_iter().map(|t| (t, None)).collect();
+        match doc_of(ed, f).filter(|d| !d.loading) {
+            Some(d) => {
+                for v in out.values_mut() {
+                    *v = Some(0);
+                }
+                for l in d.text.lines() {
+                    let l = l.to_string();
+                    if let Some(Some(n)) = out.get_mut(crate::risk::line_text(&l)) {
+                        *n += 1;
+                    }
+                }
+                let mut counts = self.counts.borrow_mut();
+                let kept = counts.entry(f.path.clone()).or_default();
+                for (t, n) in &out {
+                    kept.insert(t.to_string(), n.unwrap_or(0));
+                }
+            }
+            None => {
+                let counts = self.counts.borrow();
+                let counted = counts.get(&f.path);
+                for (t, v) in out.iter_mut() {
+                    *v = counted.and_then(|c| c.get(*t).copied());
+                }
+            }
+        }
+        out
+    }
+
+    /// The added lines of `f` a person looked at that were taken out since — of each looked-at change still
+    /// there (`orders`; found by its lines in `now`, the file's changes), the lines it's missing now that its
+    /// place also has fewer of than then: counted, in its open document, between the lines that were just
+    /// above and below it as they're found now around it (`in_place` — one the diff now pairs with another copy
+    /// is still there); not open, in the whole file as last counted (`counts_of`: one committed since is still
+    /// there; one it can't tell is taken as gone) — not looked at as taken out at that count: a high-risk
+    /// change at the change's place (`risk::taken_out`). Within its own place, so an edit elsewhere takes
+    /// nothing back; only lines recorded (`lines`: not blank or only punctuation — `risk::trivial`). A change
+    /// gone whole (reverted, committed) asks nothing (`prune_looked` lets its records go).
+    fn taken_out_of(
+        &self,
+        ed: &Editor,
+        f: &File,
+        now: &[crate::risk::Graded],
+        lines: &[crate::risk::LookedLine],
+        orders: &[crate::risk::LookedOrder],
+    ) -> Vec<crate::risk::Graded> {
+        if lines.is_empty() || orders.is_empty() {
+            return Vec::new();
+        }
+        let recorded: std::collections::HashSet<crate::risk::Key> = lines.iter().map(|l| l.added).collect();
+        let doc = doc_of(ed, f).filter(|d| !d.loading);
+        // (each missing line: where its change is now, and how many its place has now and had then — None:
+        // as the whole file was last counted)
+        let mut missing: Vec<Missing> = Vec::new();
+        for o in orders {
+            let matched: Vec<&crate::risk::Graded> = now
+                .iter()
+                .filter(|g| {
+                    of_lines(g) && added_keys(g).iter().any(|k| recorded.contains(k) && o.keys.contains(k))
+                })
+                .collect();
+            let Some(place) = matched.iter().map(|g| g.at).min() else { continue };
+            let end = matched.iter().map(|g| g.at + g.lines).max().unwrap_or(place);
+            let mut have: std::collections::HashMap<crate::risk::Key, usize> = Default::default();
+            for k in matched.iter().flat_map(|g| added_keys(g)) {
+                *have.entry(*k).or_default() += 1;
+            }
+            for k in &o.keys {
+                match have.get_mut(k) {
+                    Some(n) if *n > 0 => *n -= 1,
+                    _ => {
+                        let Some(l) = lines.iter().find(|l| l.added == *k) else { continue };
+                        let then = o.keys.iter().filter(|x| *x == k).count() as u32;
+                        let counted = doc.map(|d| (in_place(&d.text, o, place, end, &l.text), then));
+                        missing.push((place, l, counted));
+                    }
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        let counts = self.counts_of(ed, f, missing.iter().map(|(_, l, _)| l.text.as_str()));
+        let looked = &ed.session.looked;
+        let mut at: std::collections::BTreeMap<usize, Vec<(&str, u32)>> = Default::default();
+        for (place, l, counted) in missing {
+            let (now, then) = counted
+                .unwrap_or_else(|| (counts.get(l.text.as_str()).copied().flatten().unwrap_or(0), l.count));
+            let gone = at.entry(place).or_default();
+            if now < then
+                && !looked.contains(&crate::risk::taken_out_key(&f.rel, &l.text, now))
+                && !gone.iter().any(|(t, _)| *t == l.text)
+            {
+                gone.push((&l.text, now));
+            }
+        }
+        at.into_iter()
+            .filter(|(_, gone)| !gone.is_empty())
+            .map(|(at, gone)| crate::risk::taken_out(&f.rel, at, &gone))
+            .collect()
     }
 
     /// How many of `f`'s high-risk changes no one has looked at yet (`space v h`).
@@ -237,40 +390,23 @@ impl CodeReview {
             .collect()
     }
 
-    /// The high-risk changes no one has looked at, across the review: (file, its line now, 0-based).
+    /// The high-risk changes no one has looked at, across the review: (file, the first of its lines left to
+    /// look at, 0-based — the change's first line when none of it was; partly looked at, its first line since).
     pub fn high_unseen(&self, ed: &Editor) -> Vec<(usize, usize)> {
         let looked = &ed.session.looked;
         let mut out = Vec::new();
         for (i, f) in self.files.iter().enumerate() {
             for g in self.graded(ed, f).iter().filter(|g| g.grade == Grade::High && !g.looked_at(looked)) {
-                out.push((i, g.at));
+                out.push((i, g.left(looked).first().copied().unwrap_or(g.at)));
             }
         }
         out
     }
 
-    /// Whether `f` is marked viewed and its diff is still what it was then (#9): its counts, and — its
-    /// document open with the review's base — the base's and the text's content (checked once a version).
-    /// A mark waiting for the file's base counts.
+    /// Whether `f` is marked viewed and nothing in its diff changed since (#9) — no line new since the mark
+    /// (looked at counts), none taken out (`since`). A mark waiting for the file's base counts.
     pub fn viewed(&self, ed: &Editor, f: &File) -> bool {
-        if self.pending.contains(&f.path) {
-            return true;
-        }
-        let Some(v) = ed.session.viewed.get(&f.path) else { return false };
-        if v.counts != (f.added, f.removed) {
-            return false;
-        }
-        let Some((d, base)) = doc_of(ed, f).and_then(|d| Some((d, d.review_base.as_ref()?))) else {
-            return true;
-        };
-        if let Some((id, version, same)) = v.checked.get()
-            && (id, version) == (d.id, d.version())
-        {
-            return same;
-        }
-        let same = rope_hash(base) == v.base && rope_hash(&d.text) == v.text;
-        v.checked.set(Some((d.id, d.version(), same)));
-        same
+        self.since(ed, f) == Some(Since::default())
     }
 
     /// The rail's rows: the files under their folders.
@@ -327,6 +463,122 @@ impl CodeReview {
             }
         }
     }
+}
+
+/// What a file's grades were worked out from: its document graded live (id, version), its document open
+/// (whose text counts what was taken out), and how many keys, lines and orders the session had looked at (a
+/// look can make a line taken out or moved one to ask about, or one no longer to).
+type LiveStamp = (Option<(DocId, u64)>, Option<(DocId, u64)>, usize, usize, usize);
+
+/// How many times each file had the texts asked about as the review opened (`grade_files`' `asked`).
+pub type Counts = std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>;
+
+/// The texts to count in each file as a review opens (`asked_of`): those of the lines looked at in it (by its
+/// path from the root) and of its viewed mark (by its path).
+#[derive(Clone, Debug, Default)]
+pub struct Asked {
+    looked: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    viewed: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
+}
+
+impl Asked {
+    /// The texts to count in `f` — None: none.
+    fn of(&self, f: &File) -> Option<std::collections::HashSet<String>> {
+        let (a, b) = (self.looked.get(&f.rel), self.viewed.get(&f.path));
+        (a.is_some() || b.is_some()).then(|| a.into_iter().chain(b).flatten().cloned().collect())
+    }
+}
+
+/// What was looked at that the review's base has moved past goes (review of cardburden 1: kept forever, a
+/// reverted change asked "taken out" in every later review, and the restore file kept collecting code). Only
+/// a review of the working tree against git (`Head`, `Branch`: its files are every file with a diff): a file
+/// with no diff to its base any more loses its records; in a file still changed, a looked-at change none of
+/// whose recorded lines is in its diff (committed, or reverted) loses its order, and lines no order keeps go.
+pub fn prune_looked(ed: &mut Editor) {
+    let Some(r) =
+        ed.session.code_review.as_ref().filter(|r| matches!(r.base, Base::Head | Base::Branch { .. }))
+    else {
+        return;
+    };
+    let mut kept: Vec<(String, Vec<crate::risk::LookedOrder>, Vec<crate::risk::LookedLine>)> = Vec::new();
+    for (rel, orders) in &ed.session.looked_orders {
+        let Some(f) = r.files.iter().find(|f| &f.rel == rel) else { continue };
+        let lines = ed.session.looked_lines.get(rel).map_or(&[][..], Vec::as_slice);
+        let recorded: std::collections::HashSet<crate::risk::Key> = lines.iter().map(|l| l.added).collect();
+        let now: std::collections::HashSet<crate::risk::Key> =
+            r.graded(ed, f).iter().filter(|g| of_lines(g)).flat_map(|g| added_keys(g).to_vec()).collect();
+        let orders: Vec<crate::risk::LookedOrder> = orders
+            .iter()
+            .filter(|o| o.keys.iter().any(|k| recorded.contains(k) && now.contains(k)))
+            .cloned()
+            .collect();
+        let lines: Vec<crate::risk::LookedLine> =
+            lines.iter().filter(|l| orders.iter().any(|o| o.keys.contains(&l.added))).cloned().collect();
+        if !orders.is_empty() {
+            kept.push((rel.clone(), orders, lines));
+        }
+    }
+    ed.session.looked_orders = kept.iter().map(|(rel, o, _)| (rel.clone(), o.clone())).collect();
+    ed.session.looked_lines =
+        kept.into_iter().filter(|k| !k.2.is_empty()).map(|(rel, _, l)| (rel, l)).collect();
+}
+
+/// What a review opening counts in its files (`Asked`): the texts of the lines looked at and viewed in them.
+fn asked_of(ed: &Editor) -> Asked {
+    let looked = ed
+        .session
+        .looked_lines
+        .iter()
+        .map(|(rel, lines)| (rel.clone(), lines.iter().map(|l| l.text.clone()).collect()))
+        .collect();
+    let viewed = ed
+        .session
+        .viewed
+        .iter()
+        .map(|(path, v)| (path.clone(), v.added.iter().map(|(t, _)| t.clone()).collect()))
+        .collect();
+    Asked { looked, viewed }
+}
+
+/// A document's added lines, each its place among the added lines with the same text — in the diff's order.
+type Occurrences = std::collections::HashMap<usize, u32>;
+
+/// A document's `Occurrences` at its version and its diff's.
+type OccurrencesAt = (u64, u64, Arc<Occurrences>);
+
+/// The lines of `rel`'s high-risk changes (`now`) out of the order a person looked at them in (`orders`) —
+/// moved within their change since (a check moved after the call it guarded makes no new key) — not looked
+/// at where they are now: a high-risk change for each (`risk::moved`). `text`: its open document's, to name
+/// them.
+fn moved_within(
+    rel: &str,
+    now: &[crate::risk::Graded],
+    orders: &[crate::risk::LookedOrder],
+    looked: &std::collections::HashSet<crate::risk::Key>,
+    text: Option<&ropey::Rope>,
+) -> Vec<crate::risk::Graded> {
+    let mut out = Vec::new();
+    if orders.is_empty() {
+        return out;
+    }
+    for g in now.iter().filter(|g| g.grade == Grade::High && g.added > 1) {
+        let added = &g.keys[g.removed..g.removed + g.added];
+        let mut moved: Vec<usize> = Vec::new();
+        for then in orders.iter().filter(|o| added.iter().filter(|k| o.keys.contains(k)).nth(1).is_some()) {
+            moved.extend(crate::risk::out_of_order(&then.keys, added));
+        }
+        moved.sort_unstable();
+        moved.dedup();
+        for i in moved {
+            let around = (added[i], i.checked_sub(1).map(|j| added[j]), added.get(i + 1).copied());
+            let line = text.filter(|t| g.at + i < t.len_lines()).map(|t| line_at(t, g.at + i));
+            let m = crate::risk::moved(rel, g.at + i, line.as_deref(), around);
+            if !m.looked_at(looked) {
+                out.push(m);
+            }
+        }
+    }
+    out
 }
 
 /// An open document's diff against the review's base, graded — its lines as `risk::changes` takes them (the
@@ -518,6 +770,22 @@ pub struct Grading {
     /// Files git couldn't read to grade whole (`hash-object` failed — unreadable, a filter held or missing),
     /// and why: each graded as unread (a key nothing else has), said as the review opens.
     pub unread: Vec<(String, String)>,
+    /// How many times each file has the texts asked about (`Asked`) — read with it.
+    pub counts: Counts,
+}
+
+/// How many times `text` has each of `asked`.
+fn count_asked(
+    text: &str,
+    asked: &std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, u32> {
+    let mut out: std::collections::HashMap<String, u32> = asked.iter().map(|t| (t.clone(), 0)).collect();
+    for l in text.lines() {
+        if let Some(n) = out.get_mut(l) {
+            *n += 1;
+        }
+    }
+    out
 }
 
 /// Every file's changes against the review's base, graded (a worker's — git, files read): a git base's
@@ -531,8 +799,10 @@ fn grade_files(
     files: &[File],
     befores: &[Option<ropey::Rope>],
     rules: &crate::risk::Rules,
+    asked: &Asked,
 ) -> Result<Grading, String> {
     use crate::risk::{Hunk, graded, lang_of};
+    let mut counts = Counts::new();
     let raws: std::collections::HashMap<String, Raw> = match rev {
         Some(rev) => {
             let args: Vec<&str> =
@@ -562,14 +832,22 @@ fn grade_files(
             let mut h = vec![crate::risk::binary(&blob)];
             h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
             h
-        } else if rev.is_none() {
-            let before = befores.get(i).cloned().flatten().map(|b| b.to_string()).unwrap_or_default();
-            crate::risk::changes(&before, &std::fs::read_to_string(&f.path).unwrap_or_default())
         } else {
-            // (untracked: not in the listing — all of it new)
-            let base = raw.map(|r| side_text(&r.old_mode, &r.old, &blobs)).unwrap_or_default();
-            let mut h =
-                crate::risk::changes(&base, &worktree_text(root, f, raw.map(|r| r.new_mode.as_str())));
+            let (before, now) = match rev {
+                None => (
+                    befores.get(i).cloned().flatten().map(|b| b.to_string()).unwrap_or_default(),
+                    std::fs::read_to_string(&f.path).unwrap_or_default(),
+                ),
+                // (untracked: not in the listing — all of it new)
+                Some(_) => (
+                    raw.map(|r| side_text(&r.old_mode, &r.old, &blobs)).unwrap_or_default(),
+                    worktree_text(root, f, raw.map(|r| r.new_mode.as_str())),
+                ),
+            };
+            if let Some(a) = asked.of(f) {
+                counts.insert(f.path.clone(), count_asked(&now, &a));
+            }
+            let mut h = crate::risk::changes(&before, &now);
             h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
             h
         };
@@ -581,7 +859,7 @@ fn grade_files(
         }
     }
     let whole = files.iter().filter(|f| whole.contains(&f.rel)).map(|f| f.path.clone()).collect();
-    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread })
+    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts })
 }
 
 /// What a file graded by id (binary, converted) is graded as — its key's blob (a worker's: git): git's id of
@@ -671,54 +949,38 @@ fn doc_of<'a>(ed: &'a Editor, f: &File) -> Option<&'a crate::document::Document>
     })
 }
 
-/// A file's viewed mark (#9): what its diff was when marked — its base's and its text's content, its counts
-/// — and the document version last checked against it, and how that went (drawing asks every frame).
+/// A file's viewed mark (#9): what its diff was when marked — every changed line's key (`risk::keys`), and
+/// its added lines' text — so what changed since is found line by line (cardburden 1: a 5-line fix in a
+/// 900-line file took the whole mark back): the lines new since (neither marked nor looked at), and the added
+/// ones taken out since. And the check last made against it, and how that went (drawing asks every frame).
 #[derive(Clone, Debug)]
 pub struct Viewed {
-    base: u64,
-    text: u64,
-    counts: (usize, usize),
-    checked: std::cell::Cell<Option<(DocId, u64, bool)>>,
+    keys: std::collections::HashSet<crate::risk::Key>,
+    /// Its added lines' texts, each with how many times the file had it then — fewer now: taken out (counted
+    /// in its whole text, open or not: `counts_of`).
+    added: Vec<(String, u32)>,
+    /// Its text's hash when marked — while the diff is being worked out again after an edit, a text not the
+    /// one marked is "changed, how much not known yet" (none: a binary file, or a mark from an earlier build).
+    text: Option<u64>,
+    checked: std::cell::Cell<Option<(ViewedStamp, Since)>>,
 }
 
-/// Every session's viewed marks for `:restart`'s state (#5 — they were gone after one), by the session's
-/// root. (The hashes are the toolchain's `DefaultHasher`: a build on another one drops them, as a changed
-/// diff would.)
-pub fn viewed_snapshot(ed: &Editor) -> Value {
-    let sessions = ed.sessions_in_order().into_iter().filter(|s| !s.viewed.is_empty());
-    let marks = |s: &crate::session::Session| -> Vec<Value> {
-        s.viewed
-            .iter()
-            .map(|(p, v)| json!({ "path": p, "base": v.base, "text": v.text, "counts": [v.counts.0, v.counts.1] }))
-            .collect()
-    };
-    Value::Array(sessions.map(|s| json!({ "root": s.root, "files": marks(s) })).collect())
+/// What a viewed mark was last checked against: the document (none: the review's grades), its version and
+/// its diff's, how many keys the session had looked at, and which grades of which review (a review opened
+/// again, its file changed on disk meanwhile, is graded anew — review finding 1).
+type ViewedStamp = (Option<DocId>, u64, u64, usize, usize, std::time::Instant);
+
+/// What changed in a file since its viewed mark: its lines new since, and its added lines taken out since —
+/// or (`unsure`) its text changed and its diff not worked out again yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Since {
+    pub new: usize,
+    pub out: usize,
+    pub unsure: bool,
 }
 
-/// Back from `:restart`'s state, into the sessions there are again (after `worktree::restore`) — each mark
-/// still checked against the diff as it is when its file is drawn.
-pub fn viewed_restore(ed: &mut Editor, v: &Value) {
-    for s in v.as_array().into_iter().flatten() {
-        let Some(root) = s["root"].as_str().map(PathBuf::from) else { continue };
-        let Some(session) = std::iter::once(&mut ed.session).chain(&mut ed.sessions).find(|l| l.root == root)
-        else {
-            continue;
-        };
-        for f in s["files"].as_array().into_iter().flatten() {
-            let n = |v: &Value| v.as_u64();
-            let (Some(path), Some(base), Some(text), Some(added), Some(removed)) =
-                (f["path"].as_str(), n(&f["base"]), n(&f["text"]), n(&f["counts"][0]), n(&f["counts"][1]))
-            else {
-                continue;
-            };
-            let counts = (added as usize, removed as usize);
-            session
-                .viewed
-                .insert(PathBuf::from(path), Viewed { base, text, counts, checked: Default::default() });
-        }
-    }
-}
-
+/// A text's hash (the toolchain's `DefaultHasher`): a viewed mark's, a hint while a diff is worked out again —
+/// never a gate.
 fn rope_hash(r: &ropey::Rope) -> u64 {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -728,28 +990,217 @@ fn rope_hash(r: &ropey::Rope) -> u64 {
     h.finish()
 }
 
+impl Viewed {
+    fn new(
+        keys: std::collections::HashSet<crate::risk::Key>,
+        added: Vec<(String, u32)>,
+        text: Option<u64>,
+    ) -> Self {
+        Viewed { keys, added, text, checked: Default::default() }
+    }
+}
+
+/// Of `g`'s changes, the ones that are lines (not a line taken out since a look — `risk::taken_out`).
+fn of_lines(g: &crate::risk::Graded) -> bool {
+    g.removed + g.added > 0 || g.mode
+}
+
+/// A line missing from its looked-at change (`CodeReview::taken_out_of`): where the change is now, the line,
+/// and how many its place has now and had then (None: as the whole file was last counted).
+type Missing<'a> = (usize, &'a crate::risk::LookedLine, Option<(u32, u32)>);
+
+/// How many times `text` has `line` in the place of looked-at change `o`, now at lines `place..end`: between
+/// the nearest line above it that's the one above it then, and the nearest below that's the one below it then
+/// (none: the file's start, its end).
+fn in_place(text: &ropey::Rope, o: &crate::risk::LookedOrder, place: usize, end: usize, line: &str) -> u32 {
+    let n = text.len_lines();
+    let at = |l: usize| line_at(text, l);
+    let from = match &o.above {
+        Some(a) => (0..place.min(n)).rev().find(|&l| at(l) == *a).unwrap_or(0),
+        None => 0,
+    };
+    let to = match &o.below {
+        Some(b) => (end.min(n)..n).find(|&l| at(l) == *b).map_or(n, |l| l + 1),
+        None => n,
+    };
+    (from..to).filter(|&l| at(l) == line).count() as u32
+}
+
+/// `g`'s added lines' keys, in order.
+fn added_keys(g: &crate::risk::Graded) -> &[crate::risk::Key] {
+    &g.keys[g.removed..g.removed + g.added]
+}
+
+impl CodeReview {
+    /// What changed in `f` since its viewed mark — None: not marked (a mark waiting for its file's base counts
+    /// as nothing since). Open or not: its lines new since (its grades' keys), and its added lines taken out
+    /// since (`counts_of` — one it can't tell makes it `unsure`).
+    pub fn since(&self, ed: &Editor, f: &File) -> Option<Since> {
+        if self.pending.contains(&f.path) {
+            return Some(Since::default());
+        }
+        let v = ed.session.viewed.get(&f.path)?;
+        let looked = &ed.session.looked;
+        let doc = doc_of(ed, f).filter(|d| d.review_base.is_some());
+        let grades = self.grades.get(&f.path).map_or(0, |g| Arc::as_ptr(g) as *const () as usize);
+        let stamp = (
+            doc.map(|d| d.id),
+            doc.map_or(0, |d| d.version()),
+            doc.map_or(0, |d| d.git_version),
+            looked.len(),
+            grades,
+            self.started,
+        );
+        if let Some((s, since)) = v.checked.get()
+            && s == stamp
+        {
+            return Some(since);
+        }
+        // (edited, its diff not worked out again yet: the text marked is viewed still; another one changed —
+        // how much, once the diff lands)
+        if let Some(d) = doc.filter(|d| d.git_version != d.version()) {
+            let since = match v.text == Some(rope_hash(&d.text)) {
+                true => Since::default(),
+                false => Since { unsure: true, ..Since::default() },
+            };
+            v.checked.set(Some((stamp, since)));
+            return Some(since);
+        }
+        let graded = self.graded(ed, f);
+        let now: std::collections::HashSet<crate::risk::Key> =
+            graded.iter().filter(|g| of_lines(g)).flat_map(|g| g.keys.iter().copied()).collect();
+        let new = now.iter().filter(|k| !v.keys.contains(k) && !looked.contains(k)).count();
+        let counts = self.counts_of(ed, f, v.added.iter().map(|(t, _)| t.as_str()));
+        let (mut out, mut unsure) = (0, false);
+        for (t, then) in &v.added {
+            match counts.get(t.as_str()).copied().flatten() {
+                Some(now) => out += then.saturating_sub(now) as usize,
+                None => unsure = true,
+            }
+        }
+        let since = Since { new, out, unsure };
+        v.checked.set(Some((stamp, since)));
+        Some(since)
+    }
+
+    /// The lines (0-based, now) of `f` new since its viewed mark — what `]g` goes to in a file partly viewed.
+    /// None: not marked, or nothing new.
+    pub fn unviewed_lines(&self, ed: &Editor, f: &File) -> Option<Vec<usize>> {
+        let v = ed.session.viewed.get(&f.path)?;
+        let looked = &ed.session.looked;
+        let seen = |k: &crate::risk::Key| v.keys.contains(k) || looked.contains(k);
+        let mut out: Vec<usize> =
+            self.graded(ed, f).iter().filter(|g| of_lines(g)).flat_map(|g| g.left_by(seen)).collect();
+        out.sort_unstable();
+        out.dedup();
+        (!out.is_empty()).then_some(out)
+    }
+}
+
+/// The lines new since the viewed mark of the review's file in front (`unviewed_lines`) — None: no review,
+/// not one of its files, not marked, or nothing new.
+pub fn unviewed_here(ed: &Editor) -> Option<Vec<usize>> {
+    let r = ed.session.code_review.as_ref()?;
+    let f = &r.files[r.current(ed)?];
+    r.unviewed_lines(ed, f)
+}
+
+/// What changed in the review's file in front since its viewed mark, said: `1 line new · 1 taken out since
+/// you marked it viewed` — None: not marked, or nothing since.
+pub fn since_here(ed: &Editor) -> Option<String> {
+    let r = ed.session.code_review.as_ref()?;
+    let s = r.since(ed, &r.files[r.in_hand(ed)?]).filter(|s| *s != Since::default())?;
+    if s.unsure {
+        return Some("changed since you marked it viewed".into());
+    }
+    let mut said = Vec::new();
+    if s.new > 0 {
+        said.push(format!("{} new", crate::nav::count(s.new, "line")));
+    }
+    if s.out > 0 {
+        said.push(format!("{} taken out", crate::nav::count(s.out, "line")));
+    }
+    Some(format!("{} since you marked it viewed", said.join(" · ")))
+}
+
+/// Every session's viewed marks for `:restart`'s state (#5 — they were gone after one), by the session's
+/// root: each file's keys (hex) and added lines.
+pub fn viewed_snapshot(ed: &Editor) -> Value {
+    let sessions = ed.sessions_in_order().into_iter().filter(|s| !s.viewed.is_empty());
+    let marks = |s: &crate::session::Session| -> Vec<Value> {
+        s.viewed
+            .iter()
+            .map(|(p, v)| {
+                let keys: Vec<String> = v.keys.iter().map(|k| crate::risk::key_hex(*k)).collect();
+                let added: Vec<Value> = v.added.iter().map(|(t, n)| json!([t, n])).collect();
+                json!({ "path": p, "keys": keys, "added": added, "text": v.text })
+            })
+            .collect()
+    };
+    Value::Array(sessions.map(|s| json!({ "root": s.root, "files": marks(s) })).collect())
+}
+
+/// Back from `:restart`'s state, into the sessions there are again (after `worktree::restore`) — each mark
+/// checked against the diff as it is when its file is drawn. An earlier build's (whole-file hashes) is
+/// dropped: that file is to be viewed again.
+pub fn viewed_restore(ed: &mut Editor, v: &Value) {
+    for s in v.as_array().into_iter().flatten() {
+        let Some(root) = s["root"].as_str().map(PathBuf::from) else { continue };
+        let Some(session) = std::iter::once(&mut ed.session).chain(&mut ed.sessions).find(|l| l.root == root)
+        else {
+            continue;
+        };
+        for f in s["files"].as_array().into_iter().flatten() {
+            let (Some(path), Some(keys), Some(added)) =
+                (f["path"].as_str(), f["keys"].as_array(), f["added"].as_array())
+            else {
+                continue;
+            };
+            let keys = keys.iter().filter_map(Value::as_str).filter_map(crate::risk::key_of_hex).collect();
+            let added = added
+                .iter()
+                .filter_map(|a| Some((a[0].as_str()?.to_string(), a[1].as_u64()? as u32)))
+                .collect();
+            session.viewed.insert(PathBuf::from(path), Viewed::new(keys, added, f["text"].as_u64()));
+        }
+    }
+}
+
 /// File `i` marked viewed as its diff is now — or, its base still on the way (a click on a file opening,
-/// #67), once it's there. Marking a marked file leaves it marked.
+/// #67), once it's there. Marking a marked file (or one partly viewed) marks it as it is now.
 fn mark(ed: &mut Editor, i: usize) {
     let Some(r) = ed.session.code_review.as_ref() else { return };
     let Some(f) = r.files.get(i) else { return };
-    let counts = (f.added, f.removed);
-    // (a binary file has no diff to show: its counts are all there is)
-    let now = match doc_of(ed, f).filter(|d| !d.loading) {
-        _ if f.binary => Some((0, 0, None)),
-        Some(d) => d
-            .review_base
-            .as_ref()
-            .map(|b| (rope_hash(b), rope_hash(&d.text), Some((d.id, d.version(), true)))),
+    // (a binary file has no lines: its blob's key is all there is)
+    let doc = doc_of(ed, f).filter(|d| !d.loading && d.review_base.is_some());
+    let text = doc.filter(|_| !f.binary).map(|d| rope_hash(&d.text));
+    let now = match doc {
+        _ if f.binary => Some(Vec::new()),
+        Some(d) => {
+            // (each added line's text once, with how many times the file has it)
+            let graded = r.graded(ed, f);
+            let lines = graded.iter().filter(|g| of_lines(g)).flat_map(|g| g.at..g.at + g.added);
+            let mut texts: Vec<String> =
+                lines.filter(|&l| l < d.text.len_lines()).map(|l| line_at(&d.text, l)).collect();
+            texts.sort_unstable();
+            texts.dedup();
+            let counts = r.counts_of(ed, f, texts.iter().map(String::as_str));
+            let added: Vec<(String, u32)> = texts
+                .iter()
+                .map(|t| (t.clone(), counts.get(t.as_str()).copied().flatten().unwrap_or(0)))
+                .collect();
+            Some(added)
+        }
         None => None,
     };
+    let keys: std::collections::HashSet<crate::risk::Key> =
+        r.graded(ed, f).iter().filter(|g| of_lines(g)).flat_map(|g| g.keys.iter().copied()).collect();
     let path = f.path.clone();
     let r = ed.session.code_review.as_mut().expect("checked");
     match now {
-        Some((base, text, checked)) => {
+        Some(added) => {
             r.pending.retain(|p| *p != path);
-            let checked = std::cell::Cell::new(checked);
-            ed.session.viewed.insert(path, Viewed { base, text, counts, checked });
+            ed.session.viewed.insert(path, Viewed::new(keys, added, text));
         }
         None if !r.pending.contains(&path) => r.pending.push(path),
         None => {}
@@ -897,6 +1348,7 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
         None => "review: gathering changes…".into(),
     };
     let rules = crate::risk::Rules::of(&ed.config);
+    let asked = asked_of(ed);
     let work = move || -> Result<Gathered, String> {
         let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
         let base = match branch {
@@ -918,7 +1370,7 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
             }
         };
         let files = changed(&root, &base)?;
-        let grades = grade_files(&root, base.rev(), &files, &[], &rules)?;
+        let grades = grade_files(&root, base.rev(), &files, &[], &rules, &asked)?;
         Ok((root, base, files, grades))
     };
     ed.step(ed.events.jobs(), "review", said, work, |ed, found| match found {
@@ -974,9 +1426,10 @@ pub fn reopen(ed: &mut Editor, v: &Value) {
     };
     let current = v["current"].as_str().map(str::to_string);
     let rules = crate::risk::Rules::of(&ed.config);
+    let asked = asked_of(ed);
     ed.events.jobs().spawn(move || {
         let files = changed(&root, &base).and_then(|f| {
-            let grades = grade_files(&root, base.rev(), &f, &[], &rules)?;
+            let grades = grade_files(&root, base.rev(), &f, &[], &rules, &asked)?;
             Ok((f, grades))
         });
         move |ed: &mut Editor| match files {
@@ -1051,6 +1504,7 @@ fn start_turn_at(ed: &mut Editor, at: usize, earlier: usize, start: Option<Strin
         .and_then(|c| c.edits.at_end.clone())
         .unwrap_or_else(|| ed.session.root.clone());
     let rules = crate::risk::Rules::of(&ed.config);
+    let asked = asked_of(ed);
     ed.events.jobs().spawn(move || {
         let befores: Vec<Option<ropey::Rope>> = files.iter().map(|f| f.1.clone()).collect();
         let files: Vec<File> = files
@@ -1075,7 +1529,7 @@ fn start_turn_at(ed: &mut Editor, at: usize, earlier: usize, start: Option<Strin
                 }
             })
             .collect();
-        let grades = grade_files(&root, None, &files, &befores, &rules);
+        let grades = grade_files(&root, None, &files, &befores, &rules, &asked);
         let beyond = beyond_turn(&root, &files);
         move |ed: &mut Editor| {
             let grades = ungraded_said(ed, grades);
@@ -1117,6 +1571,7 @@ pub fn start_replay(
     then: fn(&mut Editor),
 ) {
     let rules = crate::risk::Rules::of(&ed.config);
+    let asked = asked_of(ed);
     ed.events.jobs().spawn(move || {
         let files: Vec<File> = rels
             .into_iter()
@@ -1140,7 +1595,7 @@ pub fn start_replay(
                 }
             })
             .collect();
-        let grades = grade_files(&root, Some(&commit), &files, &[], &rules);
+        let grades = grade_files(&root, Some(&commit), &files, &[], &rules, &asked);
         move |ed: &mut Editor| {
             // (ungraded, said: the rebase's card still comes — what it resolved is still to be seen)
             let grades = ungraded_said(ed, grades);
@@ -1176,7 +1631,7 @@ fn open_at(
     root: PathBuf,
     base: Base,
     mut files: Vec<File>,
-    Grading { grades, moved, whole, unread }: Grading,
+    Grading { grades, moved, whole, unread, counts }: Grading,
     start: Option<String>,
     say: bool,
 ) {
@@ -1219,13 +1674,18 @@ fn open_at(
         started: std::time::Instant::now(),
         grades,
         live: Default::default(),
+        counts: std::cell::RefCell::new(counts),
+        occurrences: Default::default(),
         rules: crate::risk::Rules::of(&ed.config),
         binary_shown: None,
         beyond: None,
         moved,
         drawn: Default::default(),
+        drawn_rows: Default::default(),
         whole,
     });
+    // (what was looked at that this base has moved past goes)
+    prune_looked(ed);
     if say {
         let s = if n == 1 { "" } else { "s" };
         ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
@@ -1777,20 +2237,33 @@ pub fn hunk_seen(ed: &mut Editor) {
     // (the lines the last frame drew of this document — what was on screen as the key was pressed)
     let drawn: std::collections::HashSet<usize> = ed.screen.rows_of(doc.id).map(|row| row.0).collect();
     // (the pane's text rows — its size, not what the last frame drew there: a short file, or another file
-    // drawn in it, is no measure — and every line drawn since the text changed)
+    // drawn in it, is no measure)
     let rows = ed.viewport.0;
-    let ever = r.drawn.get(&doc.id).filter(|(v, _)| *v == doc.version()).map(|(_, lines)| lines);
+    let looked = &ed.session.looked;
+    // (a line drawn since the review opened — this one, by its text and which added line with it it is: an
+    // edit elsewhere takes nothing back, and another line like it drawn isn't this one — `drawn_key`)
+    let occ = r.occurrences(doc);
+    let ever = |l: usize| l < doc.text.len_lines() && r.drawn.contains(&drawn_key(&f.rel, doc, &occ, l));
     let graded = r.graded(ed, f);
     let touches = |g: &crate::risk::Graded| spans.iter().any(|&(a, b)| g.at < b && a < g.at + g.lines);
+    // Partly looked at (cardburden 1): only its lines since are asked for — each on screen as the key was
+    // pressed, or drawn since the review opened — wherever the cursor is in it, however tall it is
+    let partly = |g: &crate::risk::Graded| {
+        let k = g.keys.iter().filter(|k| looked.contains(k)).count();
+        k > 0 && k < g.keys.len()
+    };
     // A cursor's line: the change it's on. A selection over more lines: only the changes that were on screen
     // — every line of one drawn, or one that filled the pane — never one scrolled past (`%` takes no more
     // than what was shown). One taller than the pane can't be on screen at once: taken — under a selection or
-    // the cursor alike — once every line of it was drawn since the text changed (scrolled through)
+    // the cursor alike — once every line of it was drawn (scrolled through)
     let tall = |g: &crate::risk::Graded| rows > 0 && g.lines > rows;
-    let unread = |g: &crate::risk::Graded| {
-        (g.at..g.at + g.lines).filter(|l| !ever.is_some_and(|e| e.contains(l))).count()
+    let unread = |g: &crate::risk::Graded| -> Vec<usize> {
+        let need: Vec<usize> = match partly(g) {
+            true => g.left(looked),
+            false => (g.at..g.at + g.lines).collect(),
+        };
+        need.into_iter().filter(|&l| !drawn.contains(&l) && !ever(l)).collect()
     };
-    let read_through = |g: &crate::risk::Graded| tall(g) && unread(g) == 0;
     let on_line =
         |g: &crate::risk::Graded| spans.iter().any(|&(a, b)| b == a + 1 && g.at < b && a < g.at + g.lines);
     let shown = |g: &crate::risk::Graded| {
@@ -1799,53 +2272,59 @@ pub fn hunk_seen(ed: &mut Editor) {
                 || drawn.iter().all(|l| (g.at..g.at + g.lines).contains(l)))
     };
     // (every high one there: a file's change of mode sits on its first line, with any change of lines there)
-    let (high, unshown): (Vec<&crate::risk::Graded>, Vec<&crate::risk::Graded>) =
-        graded.iter().filter(|g| touches(g) && g.grade == Grade::High).partition(|g| match tall(g) {
-            true => read_through(g),
+    let (high, unshown): (Vec<&crate::risk::Graded>, Vec<&crate::risk::Graded>) = graded
+        .iter()
+        .filter(|g| touches(g) && g.grade == Grade::High)
+        .partition(|g| match partly(g) || tall(g) {
+            true => unread(g).is_empty(),
             false => on_line(g) || shown(g),
         });
-    let unshown: Vec<&crate::risk::Graded> =
-        unshown.into_iter().filter(|g| !g.looked_at(&ed.session.looked)).collect();
+    let unshown: Vec<&crate::risk::Graded> = unshown.into_iter().filter(|g| !g.looked_at(looked)).collect();
     // (a selection's that weren't on screen: said, never taken)
     let off = match unshown.len() {
         0 => String::new(),
         n => format!(" · {} under the selection not on screen", crate::nav::count(n, "high-risk change")),
     };
     if high.is_empty() && !unshown.is_empty() {
-        // (one taller than the pane: how much of it is left to scroll through)
+        // (one taller than the pane, or partly looked at: how much of it is left to bring on screen)
         if let [g] = unshown[..]
-            && tall(g)
+            && (tall(g) || partly(g))
         {
-            // (which lines, said and logged: what was drawn of which text, in a pane how tall)
-            let lines: Vec<usize> =
-                (g.at..g.at + g.lines).filter(|l| !ever.is_some_and(|e| e.contains(l))).collect();
-            let (seen, version) = r.drawn.get(&doc.id).map_or((0, None), |(v, e)| (e.len(), Some(*v)));
-            let since = match version {
-                Some(v) if v != doc.version() => {
-                    format!("drawn lines were of version {v}, now {}", doc.version())
-                }
-                Some(v) => format!("{seen} lines drawn of version {v}"),
-                None => "none drawn".into(),
+            // (which lines, said and logged: of what, how much the review drew, in a pane how tall)
+            let lines = unread(g);
+            let what = match partly(g) {
+                true => format!("{} lines left to look at", g.left(looked).len()),
+                false => format!("{} lines", g.lines),
             };
             crate::log::line(
                 "review",
                 "unread",
                 &format!(
-                    "{}: {} of the {} lines of the high-risk change at line {} not drawn ({}) — pane {rows} rows, {since}",
+                    "{}: {} of the {what} of the high-risk change at line {} not drawn ({}) — pane {rows} rows, \
+                     {} lines drawn in this review",
                     f.rel,
                     lines.len(),
-                    g.lines,
                     g.at + 1,
-                    line_ranges(&lines, usize::MAX)
+                    line_ranges(&lines, usize::MAX),
+                    r.drawn.len()
                 ),
             );
-            return ed.set_status(format!(
-                "this high-risk change is taller than the pane — {} of its {} lines not on screen yet ({}): \
-                 scroll through them, then space v h with the cursor in it",
-                lines.len(),
-                g.lines,
-                line_ranges(&lines, 3)
-            ));
+            return ed.set_status(match partly(g) {
+                true => format!(
+                    "this high-risk change was looked at but for {} — {} of them not on screen yet ({}): \
+                     bring them on screen, then space v h with the cursor in the change",
+                    crate::nav::count(g.left(looked).len(), "line since"),
+                    lines.len(),
+                    line_ranges(&lines, 3)
+                ),
+                false => format!(
+                    "this high-risk change is taller than the pane — {} of its {} lines not on screen yet ({}): \
+                     scroll through them, then space v h with the cursor in it",
+                    lines.len(),
+                    g.lines,
+                    line_ranges(&lines, 3)
+                ),
+            });
         }
         return ed.set_status(format!(
             "{} under the selection not on screen — not looked at · ]h goes to the next",
@@ -1876,9 +2355,72 @@ pub fn hunk_seen(ed: &mut Editor) {
         }
         return;
     }
-    let fresh = high.iter().filter(|g| !g.looked_at(&ed.session.looked)).count();
+    let fresh = high.iter().filter(|g| !g.looked_at(looked)).count();
     let keys: Vec<crate::risk::Key> = high.iter().flat_map(|g| g.keys.iter().copied()).collect();
+    // (their added lines as they are, each with how many times the file has it — one it has fewer of later is
+    // asked about again: `taken_out_of` — and each change's lines in order: `moved_within`)
+    let rel = f.rel.clone();
+    let texts: Vec<(usize, String)> = high
+        .iter()
+        .flat_map(|g| g.at..g.at + g.added)
+        .filter(|&l| l < doc.text.len_lines())
+        .map(|l| (l, line_at(&doc.text, l)))
+        .filter(|(_, t)| !crate::risk::trivial(t))
+        .collect();
+    let counts = r.counts_of(ed, f, texts.iter().map(|(_, t)| t.as_str()));
+    let lines: Vec<crate::risk::LookedLine> = texts
+        .iter()
+        .map(|(l, t)| {
+            let n = counts.get(t.as_str()).copied().flatten().unwrap_or(1);
+            crate::risk::LookedLine::new(&rel, *l, t, n)
+        })
+        .collect();
+    // (each change's lines in order, and the lines just above and below it: its place)
+    let around = |l: Option<usize>| l.filter(|&l| l < doc.text.len_lines()).map(|l| line_at(&doc.text, l));
+    let orders: Vec<crate::risk::LookedOrder> = high
+        .iter()
+        .filter(|g| g.added > 0)
+        .map(|g| crate::risk::LookedOrder {
+            keys: added_keys(g).to_vec(),
+            above: around(g.at.checked_sub(1)),
+            below: around(Some(g.at + g.added)),
+        })
+        .collect();
+    // (a line taken out, looked at as such: done — its records go, so its change no longer misses it)
+    let was = ed.session.looked_lines.get(&rel).map_or(&[][..], Vec::as_slice);
+    let counts = r.counts_of(ed, f, was.iter().map(|l| l.text.as_str()));
+    let done: Vec<crate::risk::Key> = was
+        .iter()
+        .filter(|l| {
+            let now = counts.get(l.text.as_str()).copied().flatten().unwrap_or(0);
+            keys.contains(&crate::risk::taken_out_key(&rel, &l.text, now))
+        })
+        .map(|l| l.added)
+        .collect();
     ed.session.looked.extend(keys);
+    let kept = ed.session.looked_lines.entry(rel.clone()).or_default();
+    kept.retain(|l| !done.contains(&l.added));
+    for l in lines {
+        match kept.iter_mut().find(|k| k.added == l.added) {
+            Some(k) => (k.at, k.count) = (l.at, l.count),
+            None => kept.push(l),
+        }
+    }
+    let recorded: std::collections::HashSet<crate::risk::Key> = kept.iter().map(|l| l.added).collect();
+    // (a change's latest look is its order: an earlier order sharing a recorded line with it gives way — not
+    // one sharing only a `}`)
+    let kept = ed.session.looked_orders.entry(rel).or_default();
+    for o in kept.iter_mut() {
+        for k in &done {
+            if let Some(i) = o.keys.iter().position(|x| x == k) {
+                o.keys.remove(i);
+            }
+        }
+    }
+    for o in orders {
+        kept.retain(|k| !k.keys.iter().any(|x| recorded.contains(x) && o.keys.contains(x)));
+        kept.push(o);
+    }
     let left = r.high_unseen(ed).len();
     held_sync(ed);
     // (one: its marker went, in sight; several — a selection's — counted aloud)
@@ -2451,13 +2993,21 @@ fn select_from_top(ed: &mut Editor, h: &crate::git::Hunk) {
     ed.align_view(crate::viewalign::Place::Center);
 }
 
-/// The change at `line` of the document in front selected as `land` does; no change of its diff there (its
-/// diff not there yet, a change graded without one — a file git converts, graded whole; a change of mode):
-/// the line, never the next change (`space v h` there would go on to the same place again).
+/// The change at `line` of the document in front selected as `land` does — the hunk holding it (a file not
+/// open was graded by the review's worker: its change may start elsewhere in the hunk). No change of its diff
+/// there (its diff not there yet, a change graded without one — a file git converts, graded whole; a change of
+/// mode), or the first line since a look inside a change partly looked at (cardburden 1: line 800 of a
+/// 1123-line change, not its top): the line, never the next change (`space v h` there would go on to the same
+/// place again).
 fn land_on(ed: &mut Editor, line: usize) {
+    let since = ed.session.code_review.as_ref().and_then(|r| Some(r.graded(ed, &r.files[r.current(ed)?])));
+    let looked = &ed.session.looked;
+    let partly = since.iter().flat_map(|g| g.iter()).any(|g| {
+        g.at != line && g.keys.iter().any(|k| looked.contains(k)) && g.left(looked).first() == Some(&line)
+    });
     let hunks = &ed.doc().git_hunks;
     let at = |h: &&crate::git::Hunk| h.lines.start <= line && line < h.lines.end.max(h.lines.start + 1);
-    match hunks.iter().find(at).cloned() {
+    match hunks.iter().find(at).filter(|_| !partly).cloned() {
         Some(h) => select_from_top(ed, &h),
         None => {
             ed.goto_line(line);
@@ -2512,12 +3062,25 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
     };
     let (i, at) = *target.expect("not empty");
     let k = highs.iter().position(|&x| x == (i, at)).unwrap_or(0) + 1;
-    // (one taller than the pane — as the last frame drew it — is looked at once scrolled through)
-    let lines = r.graded(ed, &r.files[i]).iter().find(|g| g.at == at).map_or(0, |g| g.lines);
+    // (one taller than the pane — as the last frame drew it — is looked at once scrolled through; one partly
+    // looked at, once its lines since were on screen: it's landed on at the first of them)
+    let looked = &ed.session.looked;
+    let graded = r.graded(ed, &r.files[i]);
+    let g = graded.iter().find(|g| !g.looked_at(looked) && g.left(looked).first() == Some(&at));
+    let (lines, since) = g.map_or((0, 0), |g| match g.keys.iter().any(|k| looked.contains(k)) {
+        true => (0, g.left(looked).len()),
+        false => (g.lines, 0),
+    });
     let rows = ed.viewport.0;
     high_go(ed, i, at);
     let rel = ed.session.code_review.as_ref().map(|r| r.files[i].rel.clone()).unwrap_or_default();
     let look = match rows > 0 && lines > rows {
+        _ if since > 0 => {
+            format!(
+                "looked at but for {}: space v h once they're on screen",
+                crate::nav::count(since, "line since")
+            )
+        }
         true => {
             format!("{lines} lines, taller than the pane: scroll through it, then space v h")
         }
@@ -2539,11 +3102,57 @@ pub fn frame_per_key(ed: &Editor) -> bool {
     }
     let Some(i) = r.current(ed) else { return false };
     let looked = &ed.session.looked;
-    r.graded(ed, &r.files[i]).iter().any(|g| g.grade == Grade::High && g.lines > rows && !g.looked_at(looked))
+    // (one partly looked at: when what's left of it is taller than the pane)
+    let tall = |g: &crate::risk::Graded| match g.left(looked)[..] {
+        [] => false,
+        [first, .., last] if g.keys.iter().any(|k| looked.contains(k)) => last + 1 - first > rows,
+        _ => g.lines > rows,
+    };
+    r.graded(ed, &r.files[i]).iter().any(|g| g.grade == Grade::High && tall(g))
 }
 
-/// After a frame: the lines it drew of the review's documents (`CodeReview.drawn`), kept while each one's
-/// text stays as it is.
+/// What line `l` of document `d` (of `rel`; `occ`: its `occurrences`) drawn in a review is kept as
+/// (`CodeReview.drawn`) — a SHA-256 key (`risk::key`: none one could make collide with a line that was drawn).
+/// An added line: its text and which of the file's added lines with that text it is (sign `d`) — an edit
+/// elsewhere takes nothing back, and a `}` drawn is that `}` only (review finding 3: by text alone, a line
+/// drawn anywhere was drawn everywhere). Any other line: its text where it is (sign `p`).
+fn drawn_key(rel: &str, d: &crate::document::Document, occ: &Occurrences, l: usize) -> crate::risk::Key {
+    let text = line_at(&d.text, l);
+    match occ.get(&l) {
+        Some(n) => crate::risk::key(rel, b'd', &format!("{n}\0{text}")),
+        None => crate::risk::key(rel, b'p', &format!("{l}\0{text}")),
+    }
+}
+
+impl CodeReview {
+    /// Document `d`'s added lines, each its place among the added lines with the same text, in its diff's
+    /// order (`git_hunks` — current: the caller checks) — once a version of it and of its diff.
+    fn occurrences(&self, d: &crate::document::Document) -> Arc<Occurrences> {
+        if let Some((v, g, o)) = self.occurrences.borrow().get(&d.id)
+            && (*v, *g) == (d.version(), d.git_version)
+        {
+            return o.clone();
+        }
+        let mut seen: std::collections::HashMap<String, u32> = Default::default();
+        let mut out = Occurrences::new();
+        for l in d.git_hunks.iter().flat_map(|h| h.lines.clone()).filter(|&l| l < d.text.len_lines()) {
+            let n = seen.entry(line_at(&d.text, l)).or_insert(0);
+            out.insert(l, *n);
+            *n += 1;
+        }
+        let out = Arc::new(out);
+        self.occurrences.borrow_mut().insert(d.id, (d.version(), d.git_version, out.clone()));
+        out
+    }
+}
+
+/// Line `l` of `text`, as a change has it (`risk::line_text`).
+fn line_at(text: &ropey::Rope, l: usize) -> String {
+    crate::risk::line_text(&text.line(l).to_string()).to_string()
+}
+
+/// After a frame: the lines it drew of the review's documents, by their text (`CodeReview.drawn`) — each
+/// row hashed once a version (`drawn_rows`).
 pub fn drawn_sync(ed: &mut Editor) {
     // (the buffer of a bring's changes: its lines drawn, while its text is as made)
     if let Some((doc, version)) = ed.session.held_view.as_ref().map(|v| (v.doc, v.version))
@@ -2564,11 +3173,24 @@ pub fn drawn_sync(ed: &mut Editor) {
             d.id == *doc && d.path.as_ref().is_some_and(|p| r.files.iter().any(|f| f.path == *p))
         };
         let Some(d) = ed.docs.iter().find(of_review) else { continue };
-        let e = r.drawn.entry(d.id).or_default();
-        if e.0 != d.version() {
-            *e = (d.version(), Default::default());
+        let Some(rel) = r.files.iter().find(|f| d.path.as_ref() == Some(&f.path)).map(|f| f.rel.clone())
+        else {
+            continue;
+        };
+        // (its diff behind its text: which added line is which can't be told — the next frame, once it's in)
+        if d.git_version != d.version() {
+            continue;
         }
-        e.1.extend(rows.iter().map(|row| row.0));
+        let occ = r.occurrences(d);
+        let e = r.drawn_rows.entry(d.id).or_default();
+        if e.0 != (d.version(), d.git_version) {
+            *e = ((d.version(), d.git_version), Default::default());
+        }
+        for row in rows.iter().map(|row| row.0).filter(|&l| l < d.text.len_lines()) {
+            if e.1.insert(row) {
+                r.drawn.insert(drawn_key(&rel, d, &occ, row));
+            }
+        }
     }
 }
 
@@ -2697,7 +3319,7 @@ pub fn close_asked(ed: &mut Editor) {
         ));
         warning = Some(from..q.split('\n').count());
     }
-    q.push_str("\n\nDrafts stay. Opened again, its marks are kept while a file's diff is the same.");
+    q.push_str("\n\nDrafts stay. Opened again, its marks are kept: a file changed since asks only for its lines since.");
     let what = crate::offer::What::ReviewEnd { session: ed.session.id, started: r.started };
     let mut card = crate::offer::Offer::new(format!("End {name}'s review?"), &q, "", String::new(), what);
     if !high.is_empty() {
@@ -3236,24 +3858,544 @@ mod tests {
         let (from, to) = (ed.doc().selection().primary().from(), ed.doc().selection().primary().to());
         let line = |ed: &Editor, p| crate::movement::line_of(&ed.doc().text, p);
         assert!(line(&ed, from) <= 24 && line(&ed, to) > line(&ed, from), "over its end: {from}..{to}");
-        // …and its text changed since (a line added at the file's end): read again — not taken
+        // …and its text changed since (cardburden 1: drawn is kept by each line's text). A line added at the
+        // file's end takes back nothing drawn; one line of the change rewritten (line 24, at its foot) is a line
+        // never drawn — that one, and only that one, is asked for
         let end = ed.doc().text.len_bytes();
-        let add = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(
-            end,
-            "fn z() {}\n",
-        )]);
-        ed.doc_mut().apply(&add);
-        frame(&mut ed);
-        feed(&mut ed, "<space>vh");
-        assert_eq!(left(&ed), 1, "what was read was another text: {}", status(&ed));
-        // Read through again: taken, from the cursor in it too
+        let line24 = ed.doc().text.line_to_byte(23);
+        let edit = crate::transaction::Transaction::new(vec![
+            crate::transaction::Change::insert(line24, "pub "),
+            crate::transaction::Change::insert(end, "fn z() {}\n"),
+        ]);
+        ed.doc_mut().apply(&edit);
         feed(&mut ed, "gg");
         frame(&mut ed);
-        through(&mut ed);
         ed.goto_line(10);
         frame(&mut ed);
         feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "its rewritten line was never drawn: {}", status(&ed));
+        assert!(status(&ed).contains("1 of its 20 lines not on screen yet (line 24)"), "{}", status(&ed));
+        // That line brought on screen: taken, from the cursor in the change
+        ed.goto_line(23);
+        frame(&mut ed);
+        ed.goto_line(10);
+        feed(&mut ed, "<space>vh");
         assert_eq!(left(&ed), 0, "{}", status(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A repository in the test's own temp folder (`name`): `files` committed as (path, base text), then each
+    /// written as its text now — the review is opened on it, on its first file, its diff there.
+    fn reviewing(name: &str, files: &[(&str, &str, &str)]) -> (Editor, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tarae-review-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        for (path, base, _) in files.iter().filter(|f| !f.1.is_empty()) {
+            std::fs::write(dir.join(path), base).unwrap();
+            run(&["add", path]);
+        }
+        run(&["commit", "-qm", "x", "--allow-empty"]);
+        for (path, _, now) in files {
+            std::fs::write(dir.join(path), now).unwrap();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        (ed, dir)
+    }
+
+    /// Lines `0..n` made by `line`, each ended.
+    fn text_of(n: usize, line: impl Fn(usize) -> String) -> String {
+        (0..n).map(|i| line(i) + "\n").collect()
+    }
+
+    /// An edit to the document in front, then its diff worked out again (a worker's — every event asks for
+    /// it: `git_schedule`) — as typing does.
+    fn edited(ed: &mut Editor, changes: Vec<crate::transaction::Change>) {
+        ed.doc_mut().apply(&crate::transaction::Transaction::new(changes));
+        ed.git_schedule();
+        settle_until(ed, landed);
+    }
+
+    /// The high-risk changes of the file in front, as graded now.
+    fn highs(ed: &Editor) -> Vec<crate::risk::Graded> {
+        let r = ed.session.code_review.as_ref().unwrap();
+        let f = &r.files[r.current(ed).unwrap()];
+        r.graded(ed, f).iter().filter(|g| g.grade == Grade::High).cloned().collect()
+    }
+
+    /// cardburden 1: a high-risk change looked at, then fixed in one line, asks for that one line — not its
+    /// 120: `]h` lands on it and says so; `space v h` takes it once that line was on screen (not before), from
+    /// the cursor on it, however tall the change.
+    #[test]
+    fn a_fix_regates_only_the_lines_it_changed() {
+        let base = text_of(10, |i| format!("fn f{i}() {{}}"));
+        let mut now: Vec<String> = base.lines().map(str::to_string).collect();
+        now.splice(5..5, (0..120).map(|i| format!("fn g{i}() {{ unsafe {{ x() }} }}")));
+        let (mut ed, dir) = reviewing("fix", &[("a.rs", &base, &(now.join("\n") + "\n"))]);
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        // (looked at before: every line of it)
+        let all: Vec<crate::risk::Key> = highs(&ed).iter().flat_map(|g| g.keys.clone()).collect();
+        ed.session.looked.extend(all);
+        assert_eq!(left(&ed), 0);
+        // One line of it rewritten (line 65): that line is what's left of it
+        let at = ed.doc().text.line_to_byte(64);
+        edited(&mut ed, vec![crate::transaction::Change::insert(at, "pub ")]);
+        assert_eq!(left(&ed), 1);
+        assert_eq!(highs(&ed)[0].left(&ed.session.looked), [64], "the one line, not 120");
+        frame(&mut ed);
+        feed(&mut ed, "]h");
+        assert_eq!(ed.cursor_line(), 64, "landed on the line, not the change's top");
+        assert!(status(&ed).contains("looked at but for 1 line since"), "{}", status(&ed));
+        // Not drawn yet (no frame since `]h`): not taken, and which line is said
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "{}", status(&ed));
+        assert!(status(&ed).contains("not on screen yet (line 65)"), "{}", status(&ed));
+        // On screen: taken
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "{}", status(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 1: a new file looked at whole, then two of its lines changed: only those two are asked for
+    /// — its unchanged part stays looked at.
+    #[test]
+    fn a_new_files_unchanged_part_stays_looked_at() {
+        let now = text_of(30, |i| format!("fn g{i}() {{ unsafe {{ x() }} }}"));
+        let (mut ed, dir) = reviewing("newfile", &[("c.rs", "", &now)]);
+        let all: Vec<crate::risk::Key> = highs(&ed).iter().flat_map(|g| g.keys.clone()).collect();
+        ed.session.looked.extend(all);
+        let (l3, l20) = (ed.doc().text.line_to_byte(3), ed.doc().text.line_to_byte(20));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(l3, "pub "),
+                crate::transaction::Change::insert(l20, "pub "),
+            ],
+        );
+        let h = highs(&ed);
+        assert_eq!(h.len(), 1, "one change, the whole new file: {h:?}");
+        assert_eq!(h[0].left(&ed.session.looked), [3, 20]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 1 (found in planning): a line taken out of a high-risk change after a person looked at it
+    /// made no new key — the change stayed "looked at" with its check gone from beside its `unsafe`. Now the
+    /// line taken out is a high-risk change of its own: it holds the review's end and asks for a look, naming
+    /// what went; looked at, it's done.
+    #[test]
+    fn a_line_taken_out_of_a_looked_at_change_needs_a_look() {
+        let base = "fn main() {\n}\n";
+        let now = "fn main() {\n    check_permission();\n    unsafe { go() }\n}\n";
+        let (mut ed, dir) = reviewing("out", &[("a.rs", base, now)]);
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        frame(&mut ed);
+        feed(&mut ed, "]h");
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0);
+        // The check taken out: the `unsafe` line alone is still looked at — what went is asked about
+        let (a, b) = (ed.doc().text.line_to_byte(1), ed.doc().text.line_to_byte(2));
+        edited(&mut ed, vec![crate::transaction::Change::delete(a, b)]);
+        assert_eq!(left(&ed), 1);
+        let out = highs(&ed).into_iter().find(|g| !g.looked_at(&ed.session.looked)).unwrap();
+        assert_eq!(out.why, "taken out since your look: `check_permission();`");
+        let key = crate::risk::taken_out_key("a.rs", "    check_permission();", 0);
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert!(r.high_unseen_keys(&ed).contains(&key), "it holds the review's end");
+        frame(&mut ed);
+        feed(&mut ed, "]h");
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "looked at: done");
+        // …and its records go (review of cardburden 1: they only grew): the line, and its place in the order
+        let gone = crate::risk::key("a.rs", b'+', "    check_permission();");
+        assert!(!ed.session.looked_lines["a.rs"].iter().any(|l| l.added == gone));
+        assert!(!ed.session.looked_orders["a.rs"].iter().any(|o| o.keys.contains(&gone)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of cardburden 1, 1: a line is taken out of its own change — an edit elsewhere takes nothing back
+    /// (a copy of a looked-at line and a blank line deleted elsewhere: counted across the whole file, each was
+    /// a high-risk "taken out"), and a line that says nothing (blank, `}`) isn't asked about leaving it. A
+    /// line that does, taken out of the change, is.
+    #[test]
+    fn a_line_is_taken_out_of_its_own_change_only() {
+        let rest = "\nfn other() {\n    check();\n}\n\nfn third() {\n    check();\n}\n";
+        let base = format!("fn main() {{\n}}\n{rest}");
+        let now = format!("fn main() {{\n    check();\n\n    unsafe {{ go() }}\n}}\n{rest}");
+        let (mut ed, dir) = reviewing("ownchange", &[("a.rs", &base, &now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        let line = |ed: &Editor, l: usize| ed.doc().text.line_to_byte(l);
+        // Elsewhere: the copy in `third`, and the blank line above it
+        let (a, b) = (line(&ed, 11), line(&ed, 12));
+        edited(&mut ed, vec![crate::transaction::Change::delete(a, b)]);
+        let (a, b) = (line(&ed, 9), line(&ed, 10));
+        edited(&mut ed, vec![crate::transaction::Change::delete(a, b)]);
+        let rest = "\nfn other() {\n    check();\n}\nfn third() {\n}\n";
+        assert_eq!(
+            ed.doc().text.to_string(),
+            format!("fn main() {{\n    check();\n\n    unsafe {{ go() }}\n}}\n{rest}")
+        );
+        assert_eq!(left(&ed), 0, "an edit elsewhere: {:?}", highs(&ed));
+        // In the change: its blank line
+        let (a, b) = (line(&ed, 2), line(&ed, 3));
+        edited(&mut ed, vec![crate::transaction::Change::delete(a, b)]);
+        assert_eq!(
+            ed.doc().text.to_string(),
+            format!("fn main() {{\n    check();\n    unsafe {{ go() }}\n}}\n{rest}")
+        );
+        assert_eq!(left(&ed), 0, "a blank line says nothing: {:?}", highs(&ed));
+        // In the change: the check
+        let (a, b) = (line(&ed, 1), line(&ed, 2));
+        edited(&mut ed, vec![crate::transaction::Change::delete(a, b)]);
+        assert_eq!(left(&ed), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of cardburden 1, 2: what was looked at goes once the review's base moved past it — a looked-at
+    /// change reverted, its file no longer differs: opened again, no "taken out" for it, its records gone, and
+    /// the restore file the smaller for it.
+    #[test]
+    fn what_the_base_moved_past_is_let_go() {
+        let now = "fn main() {\n    check();\n    unsafe { go() }\n}\n";
+        let base = "fn main() {\n}\n";
+        let (mut ed, dir) = reviewing("letgo", &[("a.rs", base, now), ("b.txt", "x\n", "y\n")]);
+        look(&mut ed);
+        let saved = |ed: &Editor| {
+            let mut s = crate::restore::State::from_json(json!({}));
+            s.set_looked_lines(&dir, &ed.session.looked_lines, &ed.session.looked_orders);
+            let mut back = Editor::new(crate::config::Config::default());
+            (back.session.root, back.restore) = (dir.clone(), s);
+            let id = back.session.id;
+            crate::notes::restore_in(&mut back, id);
+            back.session.looked_lines.values().map(Vec::len).sum::<usize>()
+                + back.session.looked_orders.values().map(Vec::len).sum::<usize>()
+        };
+        let before = saved(&ed);
+        assert!(ed.session.looked_lines.contains_key("a.rs") && before > 0);
+        // Reverted on disk, the review opened again: only b.txt differs
+        close(&mut ed);
+        std::fs::write(dir.join("a.rs"), base).unwrap();
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.as_ref().is_some_and(|r| r.files.len() == 1));
+        assert!(
+            !ed.session.looked_lines.contains_key("a.rs") && !ed.session.looked_orders.contains_key("a.rs")
+        );
+        assert!(saved(&ed) < before, "the restore file keeps less");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of cardburden 1, 3: restored twice in one run (a session ended and opened again), the changes'
+    /// orders are there once — not piled up and saved back each time.
+    #[test]
+    fn orders_restored_twice_are_there_once() {
+        let root = PathBuf::from("/x/proj");
+        let order = crate::risk::LookedOrder {
+            keys: vec![crate::risk::key("a.rs", b'+', "a"), crate::risk::key("a.rs", b'+', "b")],
+            above: Some("fn main() {".into()),
+            below: None,
+        };
+        let orders = std::collections::HashMap::from([("a.rs".to_string(), vec![order])]);
+        let lines = std::collections::HashMap::from([(
+            "a.rs".to_string(),
+            vec![crate::risk::LookedLine::new("a.rs", 1, "a", 1)],
+        )]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = root.clone();
+        ed.restore.set_looked_lines(&root, &lines, &orders);
+        let id = ed.session.id;
+        crate::notes::restore_in(&mut ed, id);
+        crate::notes::restore_in(&mut ed, id);
+        assert_eq!(ed.session.looked_orders, orders);
+        assert_eq!(ed.session.looked_lines, lines);
+    }
+
+    /// Review of cardburden 1, 4: `]h` to a high-risk change of a file not open selects the change — the hunk
+    /// holding the line the review's worker graded it at, which may not be the hunk's first.
+    #[test]
+    fn h_selects_a_change_graded_inside_its_hunk() {
+        let now = "fn main() {\n    a();\n    unsafe { go() }\n    b();\n}\n";
+        let (mut ed, dir) =
+            reviewing("inside", &[("a.txt", "x\n", "y\n"), ("b.rs", "fn main() {\n}\n", now)]);
+        assert!(ed.doc().path.as_deref() == Some(&dir.join("a.txt")), "b.rs not open");
+        // (as the worker graded it: its change a line into the hunk)
+        let r = ed.session.code_review.as_mut().unwrap();
+        let path = dir.join("b.rs");
+        let mut g = r.grades[&path].to_vec();
+        g.iter_mut().filter(|g| g.grade == Grade::High).for_each(|g| g.at += 1);
+        r.grades.insert(path, g.into());
+        feed(&mut ed, "]h");
+        settle_until(&mut ed, |ed| landed(ed) && ed.doc().path.as_deref() == Some(&dir.join("b.rs")));
+        let (text, sel) = (&ed.doc().text, ed.doc().selection().primary());
+        let lines = (crate::movement::line_of(text, sel.from()), crate::movement::line_of(text, sel.to()));
+        assert_eq!(lines, (1, 4), "the hunk, lines 2–4, selected");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 1: a file marked viewed keeps its mark but for what changed since — the rail's head counts
+    /// it (`1 changed since viewed`; its row's `◦` warned, no wider: the rail was measured as it opened), `]g` goes past
+    /// what was viewed to it and says how much (`1 line new · 1 line taken out`: a line rewritten is both),
+    /// and `space v m` marks it as it is now.
+    #[test]
+    fn a_viewed_file_keeps_its_mark_but_the_new_lines() {
+        let base = text_of(40, |i| format!("line {i}"));
+        let now = text_of(40, |i| match i {
+            5 | 30 => format!("changed {i}"),
+            _ => format!("line {i}"),
+        });
+        let (mut ed, dir) = reviewing("viewed", &[("b.txt", &base, &now)]);
+        let since = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.since(ed, &r.files[0])
+        };
+        feed(&mut ed, "<space>vm");
+        assert_eq!(since(&ed), Some(Since::default()), "viewed");
+        let at = ed.doc().text.line_to_byte(30);
+        // (edited, its diff not back yet: not viewed at once — how much, once the diff lands)
+        let edit = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(at, "x")]);
+        ed.doc_mut().apply(&edit);
+        assert_eq!(since(&ed), Some(Since { unsure: true, ..Since::default() }));
+        ed.git_schedule();
+        settle_until(&mut ed, landed);
+        assert_eq!(since(&ed), Some(Since { new: 1, out: 1, unsure: false }));
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 20).unwrap();
+        let mut vt = vt100::Parser::new(20, 120, 0);
+        vt.process(&bytes);
+        let rows: Vec<String> = vt.screen().rows(0, 120).collect();
+        assert!(rows.iter().any(|r| r.contains("  1 changed since viewed ")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("◦ b.txt")), "its name stays in the row: {rows:#?}");
+        // `]g` from the top: past line 6's change (viewed) to line 31's
+        feed(&mut ed, "gg]g");
+        assert_eq!(ed.cursor_line(), 30);
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status.starts_with("1 line new · 1 line taken out since you marked it viewed"), "{status}");
+        feed(&mut ed, "<space>vm");
+        assert_eq!(since(&ed), Some(Since::default()), "marked as it is now");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `]h`, a frame, `space v h`: the high-risk change it goes to looked at.
+    fn look(ed: &mut Editor) {
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        frame(ed);
+        feed(ed, "]h");
+        frame(ed);
+        feed(ed, "<space>vh");
+    }
+
+    /// High-risk changes left to look at in the review.
+    fn left(ed: &Editor) -> usize {
+        ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len())
+    }
+
+    /// `rel`'s document closed — the file no longer open.
+    fn closed(ed: &mut Editor, dir: &Path, rel: &str) {
+        let id = ed.docs.iter().find(|d| d.path.as_deref() == Some(&dir.join(rel))).map(|d| d.id).unwrap();
+        ed.close_doc(id);
+        assert!(ed.docs.iter().all(|d| d.path.as_deref() != Some(&dir.join(rel))), "{rel} still open");
+    }
+
+    /// The review's file `rel`: whether it's viewed.
+    fn viewed_now(ed: &Editor, rel: &str) -> bool {
+        let r = ed.session.code_review.as_ref().unwrap();
+        r.viewed(ed, r.files.iter().find(|f| f.rel == rel).unwrap())
+    }
+
+    /// cardburden 1: a restart keeps what was looked at and viewed — the looked-at lines (keys, text, counts,
+    /// orders: the restore file) and the viewed marks (the restart's state) — so a review opened again after
+    /// one doesn't ask for the whole review again; without them, it would.
+    #[test]
+    fn a_restart_doesnt_regate_the_review() {
+        let now = "fn main() {\n    check();\n    unsafe { go() }\n}\n";
+        let (mut ed, dir) = reviewing("restart", &[("a.rs", "fn main() {\n}\n", now)]);
+        // (the session's checkout: what both are kept under)
+        ed.session.root = dir.clone();
+        look(&mut ed);
+        feed(&mut ed, "<space>vm");
+        assert!((left(&ed), viewed_now(&ed, "a.rs")) == (0, true));
+        // What a restart writes, and reads back in a new tarae (`notes::restore_in`, `viewed_restore`)
+        let mut state = crate::restore::State::from_json(json!({}));
+        state.set_looked(&dir, &ed.session.looked);
+        state.set_looked_lines(&dir, &ed.session.looked_lines, &ed.session.looked_orders);
+        let snap = viewed_snapshot(&ed);
+        let again = |state: crate::restore::State, snap: &Value| {
+            let mut back = Editor::new(crate::config::Config::default());
+            (back.session.root, back.restore) = (dir.clone(), state);
+            let id = back.session.id;
+            crate::notes::restore_in(&mut back, id);
+            viewed_restore(&mut back, snap);
+            start_in(&mut back, dir.clone(), None);
+            settle_until(&mut back, landed);
+            back
+        };
+        let back = again(state, &snap);
+        assert_eq!(back.session.looked_lines, ed.session.looked_lines);
+        assert_eq!(back.session.looked_orders, ed.session.looked_orders);
+        assert_eq!((left(&back), viewed_now(&back, "a.rs")), (0, true), "nothing asked again");
+        // (what it protects: a restart that kept nothing asks for all of it)
+        let bare = again(crate::restore::State::from_json(json!({})), &json!([]));
+        assert_eq!((left(&bare), viewed_now(&bare, "a.rs")), (1, false));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 1: a file viewed, not open, changed on disk while the review was ended — opened again,
+    /// the review grades it anew, and it isn't viewed (its mark's last check was of the old review's grades).
+    #[test]
+    fn a_reopened_review_sees_a_file_changed_meanwhile() {
+        let base = text_of(10, |i| format!("line {i}"));
+        let now = text_of(10, |i| if i == 5 { "changed 5".into() } else { format!("line {i}") });
+        let (mut ed, dir) = reviewing("reopen", &[("a.txt", &base, &now), ("b.txt", &base, &now)]);
+        feed(&mut ed, "]F");
+        settle_until(&mut ed, landed);
+        feed(&mut ed, "<space>vm");
+        closed(&mut ed, &dir, "b.txt");
+        assert!(viewed_now(&ed, "b.txt"), "viewed, not open");
+        close(&mut ed);
+        std::fs::write(dir.join("b.txt"), now.replace("line 7", "changed 7")).unwrap();
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        assert!(ed.docs.iter().all(|d| d.path.as_deref() != Some(&dir.join("b.txt"))), "still not open");
+        assert!(!viewed_now(&ed, "b.txt"), "changed since its mark");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 2: a line taken out of a viewed file that isn't open is counted — from the file as the
+    /// review read it (`counts`) — so its mark doesn't stand over a check gone.
+    #[test]
+    fn a_line_taken_out_of_a_viewed_file_not_open_is_counted() {
+        let base = "a\nb\n";
+        let now = "a\n    check_permission();\n    go();\nb\n";
+        let (mut ed, dir) = reviewing("outclosed", &[("a.txt", base, "a\nc\n"), ("b.txt", base, now)]);
+        feed(&mut ed, "]F");
+        settle_until(&mut ed, landed);
+        feed(&mut ed, "<space>vm");
+        closed(&mut ed, &dir, "b.txt");
+        close(&mut ed);
+        std::fs::write(dir.join("b.txt"), "a\n    go();\nb\n").unwrap();
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        assert!(ed.docs.iter().all(|d| d.path.as_deref() != Some(&dir.join("b.txt"))), "not open");
+        let r = ed.session.code_review.as_ref().unwrap();
+        let f = r.files.iter().find(|f| f.rel == "b.txt").unwrap();
+        assert_eq!(r.since(&ed, f), Some(Since { new: 0, out: 1, unsure: false }), "one fewer, not open");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 3: a drawn line is that line — its text and which of the file's added lines with that
+    /// text it is — not every line like it. A tall change of `}` lines, its first ones drawn: not taken until
+    /// the rest were drawn too.
+    #[test]
+    fn a_repeated_line_drawn_once_isnt_drawn_everywhere() {
+        let now = format!("fn main() {{\n    unsafe {{ go() }}\n{}}}\n", "}\n".repeat(30));
+        let (mut ed, dir) = reviewing("braces", &[("a.rs", "fn main() {\n}\n", &now)]);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        frame(&mut ed);
+        feed(&mut ed, "]h");
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "its last `}}`s never drawn");
+        // Scrolled through: taken
+        feed(&mut ed, "v");
+        for _ in 0..8 {
+            feed(&mut ed, "<C-d>");
+            frame(&mut ed);
+        }
+        feed(&mut ed, "<esc>");
+        ed.goto_line(5);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 3: a line new since a look, its text the same as a line drawn elsewhere (another
+    /// change's), isn't taken until it was on screen itself.
+    #[test]
+    fn a_new_line_like_one_drawn_elsewhere_is_asked_for_itself() {
+        let mut now: Vec<String> = (0..60).map(|i| format!("fn f{i}() {{}}")).collect();
+        now[2] = "    let x = 1;".into();
+        now.splice(40..40, ["    unsafe { a() }".to_string(), "    unsafe { b() }".to_string()]);
+        let base = text_of(60, |i| format!("fn f{i}() {{}}"));
+        let (mut ed, dir) = reviewing("alike", &[("a.rs", &base, &(now.join("\n") + "\n"))]);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // A line like line 3's added into the looked-at change
+        let at = ed.doc().text.line_to_byte(41);
+        edited(&mut ed, vec![crate::transaction::Change::insert(at, "    let x = 1;\n")]);
+        assert_eq!(left(&ed), 1);
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        ed.goto_line(40);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "line 3's drawn, not this one");
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "on screen itself: taken");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The user's finding 5: an added line looked at, taken out where a copy of it stays elsewhere (`check();`
+    /// at the file's top) — one fewer is a line taken out (by text alone it was still "there").
+    #[test]
+    fn a_looked_line_taken_out_beside_a_copy_is_asked() {
+        let base = "    check();\nfn main() {\n}\n";
+        let now = "    check();\nfn main() {\n    check();\n    unsafe { go() }\n}\n";
+        let (mut ed, dir) = reviewing("copy", &[("a.rs", base, now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        let (a, b) = (ed.doc().text.line_to_byte(2), ed.doc().text.line_to_byte(3));
+        edited(&mut ed, vec![crate::transaction::Change::delete(a, b)]);
+        assert_eq!(left(&ed), 1, "two then, one now");
+        let out = highs(&ed).into_iter().find(|g| !g.looked_at(&ed.session.looked)).unwrap();
+        assert_eq!(out.why, "taken out since your look: `check();`");
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The user's finding 6: lines looked at, then reordered within their change (a check moved after the call
+    /// it guards) — no new key, no line taken out, so it stayed looked at (before cardburden 1 too). Now a line
+    /// out of the order it was looked at in is asked for; looked at, done.
+    #[test]
+    fn a_line_moved_within_a_looked_at_change_is_asked() {
+        let base = "fn main() {\n}\n";
+        let now = "fn main() {\n    check();\n    unsafe { go() }\n    done();\n}\n";
+        let (mut ed, dir) = reviewing("moved", &[("a.rs", base, now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // `check();` after the call it guarded
+        let (a, b) = (ed.doc().text.line_to_byte(1), ed.doc().text.line_to_byte(2));
+        let after = ed.doc().text.line_to_byte(3);
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::delete(a, b),
+                crate::transaction::Change::insert(after, "    check();\n"),
+            ],
+        );
+        assert_eq!(
+            ed.doc().text.to_string(),
+            "fn main() {\n    unsafe { go() }\n    check();\n    done();\n}\n"
+        );
+        assert_eq!(left(&ed), 1, "the same keys, another order");
+        let moved = highs(&ed).into_iter().find(|g| !g.looked_at(&ed.session.looked)).unwrap();
+        assert!(moved.why.starts_with("moved since your look: `"), "{}", moved.why);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3631,6 +4773,8 @@ mod tests {
             at: 50,
             lines: 1,
             keys: vec![7],
+            removed: 0,
+            added: 1,
             mode: false,
         };
         r.grades.insert(dir.join("a.rs"), Arc::from(vec![g]));
@@ -3804,7 +4948,8 @@ mod tests {
         let files = changed(&dir, &Base::Head).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(rels, ["a b.rs", "run.sh", "ü/build.rs"]);
-        let grades = grade_files(&dir, Some("HEAD"), &files, &[], &rules).unwrap().grades;
+        let grades =
+            grade_files(&dir, Some("HEAD"), &files, &[], &rules, &Default::default()).unwrap().grades;
         let whys = |rel: &str| -> Vec<(Grade, String)> {
             let f = files.iter().find(|f| f.rel == rel).unwrap();
             grades[&f.path].iter().map(|g| (g.grade, g.why.clone())).collect()
@@ -3928,7 +5073,7 @@ mod tests {
         let base =
             Base::Branch { name: "main".into(), commit: git_out(&["rev-parse", "main"]).trim().into() };
         let files = changed(&dir, &base).unwrap();
-        let grades = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap().grades;
+        let grades = grade_files(&dir, base.rev(), &files, &[], &rules, &Default::default()).unwrap().grades;
         let high_keys = |g: &mut dyn Iterator<Item = &crate::risk::Graded>| {
             let mut k: Vec<crate::risk::Key> =
                 g.filter(|g| g.grade == Grade::High).flat_map(|g| g.keys.iter().copied()).collect();
@@ -4138,7 +5283,7 @@ mod tests {
         });
         let base = Base::Branch { name: "main".into(), commit: "main".into() };
         let files = changed(&dir, &base).unwrap();
-        let grading = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap();
+        let grading = grade_files(&dir, base.rev(), &files, &[], &rules, &Default::default()).unwrap();
         let path = dir.join("sandbox.txt");
         let mut review: Vec<crate::risk::Key> =
             grading.grades[&path].iter().flat_map(|g| g.keys.iter().copied()).collect();
@@ -4201,7 +5346,8 @@ mod tests {
             binary: false,
         };
         let rules = crate::risk::Rules::of(&crate::config::EditorConfig::default());
-        let grading = grade_files(&dir, Some("HEAD"), &[file], &[], &rules).expect("the review goes on");
+        let grading = grade_files(&dir, Some("HEAD"), &[file], &[], &rules, &Default::default())
+            .expect("the review goes on");
         assert_eq!(grading.unread.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["a.dat"]);
         let keys: Vec<crate::risk::Key> =
             grading.grades[&dir.join("a.dat")].iter().flat_map(|g| g.keys.iter().copied()).collect();
@@ -4290,7 +5436,7 @@ mod tests {
         });
         let base = Base::Branch { name: "main".into(), commit: "main".into() };
         let files = changed(&top, &base).unwrap();
-        let grades = grade_files(&top, base.rev(), &files, &[], &rules).unwrap().grades;
+        let grades = grade_files(&top, base.rev(), &files, &[], &rules, &Default::default()).unwrap().grades;
         let mut review: Vec<crate::risk::Key> = grades
             .get(&sub)
             .into_iter()
@@ -4347,7 +5493,7 @@ mod tests {
         });
         let base = Base::Branch { name: "main".into(), commit: "main".into() };
         let files = changed(&dir, &base).unwrap();
-        let grading = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap();
+        let grading = grade_files(&dir, base.rev(), &files, &[], &rules, &Default::default()).unwrap();
         let path = dir.join("sandbox.txt");
         let mut review: Vec<crate::risk::Key> =
             grading.grades[&path].iter().flat_map(|g| g.keys.iter().copied()).collect();
@@ -4386,7 +5532,7 @@ mod tests {
         });
         let base = Base::Branch { name: "main".into(), commit: "main".into() };
         let files = changed(&dir, &base).unwrap();
-        let grading = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap();
+        let grading = grade_files(&dir, base.rev(), &files, &[], &rules, &Default::default()).unwrap();
         let path = dir.join("sandbox.txt");
         assert!(!grading.whole.contains(&path), "line by line");
         let mut review: Vec<crate::risk::Key> =
@@ -4416,7 +5562,7 @@ mod tests {
             binary: false,
         };
         let rules = crate::risk::Rules::of(&crate::config::EditorConfig::default());
-        let got = grade_files(&dir, Some("HEAD"), &[file], &[], &rules);
+        let got = grade_files(&dir, Some("HEAD"), &[file], &[], &rules, &Default::default());
         assert!(got.is_err(), "graded anyway: {:?}", got.map(|g| g.grades.len()));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4595,7 +5741,8 @@ mod tests {
             k
         };
         let files = changed(&top, &Base::Head).unwrap();
-        let grades = grade_files(&top, Some("HEAD"), &files, &[], &rules).unwrap().grades;
+        let grades =
+            grade_files(&top, Some("HEAD"), &files, &[], &rules, &Default::default()).unwrap().grades;
         let review = high(&mut grades.get(&sub).into_iter().flat_map(|g| g.iter()));
         git_in(&top, &["commit", "-qam", "moved"]);
         let highs = highs_between(&top, &base, "HEAD", &rules).unwrap();

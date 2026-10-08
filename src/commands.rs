@@ -1734,14 +1734,22 @@ fn hover(cx: &mut Context) {
 /// review, past the last one it goes on into the next file.
 /// `]g` `[g`: to the next (previous) hunk — changes a few lines apart are one, as `git diff` shows them
 /// (#49: a rewritten function was ten stops); `parts`: each change on its own (`]G` `[G`). Past the last
-/// one, the review's next file.
+/// one, the review's next file. In a review's file partly viewed — marked, changed since — only the hunks
+/// with lines new since the mark (cardburden 1: the rest was viewed).
 fn goto_change(cx: &mut Context, forward: bool, parts: bool) {
+    let new = crate::codereview::unviewed_here(cx.editor);
     let doc = cx.editor.doc();
     let text = &doc.text;
     // (from the selection's end going on, its start going back — a hunk selected isn't landed on again)
     let r = doc.selection().primary();
     let line = crate::movement::line_of(text, if forward { r.cursor(text) } else { r.from() });
-    let hunks = if parts { doc.git_hunks.clone() } else { crate::git::regions(&doc.git_hunks) };
+    let mut hunks = if parts { doc.git_hunks.clone() } else { crate::git::regions(&doc.git_hunks) };
+    if let Some(new) = &new {
+        let has = |h: &crate::git::Hunk| {
+            new.iter().any(|&l| h.lines.start <= l && l < h.lines.end.max(h.lines.start + 1))
+        };
+        hunks.retain(has);
+    }
     let target = if forward {
         hunks.iter().find(|h| h.lines.start > line)
     } else {
@@ -1749,6 +1757,11 @@ fn goto_change(cx: &mut Context, forward: bool, parts: bool) {
     };
     let (target, none) = (target.cloned(), hunks.is_empty());
     match target {
+        Some(h) if new.is_some() => {
+            let said = crate::codereview::since_here(cx.editor);
+            cx.editor.select_hunk(&h);
+            cx.editor.set_status(format!("{} · space v m marks it again", said.unwrap_or_default()));
+        }
         Some(h) => cx.editor.select_hunk(&h),
         None if crate::codereview::next_file(cx.editor, forward) => {}
         None => cx.editor.set_status(if none { "no git changes" } else { "no more changes" }),

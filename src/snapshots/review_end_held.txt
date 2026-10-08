@@ -24,8 +24,8 @@
 21                            ▌                         each):
 22                            ▌                           src/demo.rs:6
 23                            ▌
-24                            ▌                         Drafts stay. Opened again, its marks are kept while a
-25   ]g hunk  ]F file         ▌                         file's diff is the same.
+24                            ▌                         Drafts stay. Opened again, its marks are kept: a file
+25   ]g hunk  ]F file         ▌                         changed since asks only for its lines since.
 26   space e files            ▌
 27   space n comment          ▌                         h Go to them   n Keep reviewing
 28   space v m viewed · q end ▌                      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
@@ -86,8 +86,8 @@
 21                                                      wwwwww
 22                                                        wwwwwwwwwwwww
 23
-24                                                      dddddd ddddd dddddd dddddd ddd ddddd ddd dddd ddddd d
-25   DD ffff  DD ffff                                   dddddd dddd dd ddd ddddd
+24                                                      dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd
+25   DD ffff  DD ffff                                   ddddddd ddddd dddd dddd ddd ddd ddddd dddddd
 26   DDDDD D fffff
 27   DDDDD D fffffff                                    A              A dddd ddddddddd
 28   DDDDD D f ffffff f f fff

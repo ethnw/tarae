@@ -990,9 +990,12 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   sending). Drafts show as `¶ draft · …` and in the rail, and `]n` walks them
 - `space v s` sends every draft to Claude in one message, each with its lines as a diff. Claude answers every comment
   on its note and makes the changes, which come to you as the usual [edit review](#edits)
-- `space v m` marks a file viewed, again unmarks it. The mark stays while the file's diff is what it was — ended and
-  opened again, the review keeps it — and a change to the diff takes it back. `space v q` ends the review (with files
-  not viewed it asks first, on a card naming them), and the gutter goes back to comparing against the index
+- `space v m` marks a file viewed, again unmarks it. The mark is kept line by line: ended and opened again, the
+  review keeps it, and a change to the file asks only for what changed since. Its `◦` in the rail turns to the
+  warning colour, and the rail's head says how many files changed since they were viewed. `]g` in such a file
+  goes only to the changes new since the mark and says how much (`2 lines new · 1 line taken out since you
+  marked it viewed`). `space v m` marks it again as it is now. `space v q` ends the review (with files not
+  viewed it asks first, on a card naming them), and the gutter goes back to comparing against the index
 
 ### A second Claude reviews your changes
 
@@ -1056,12 +1059,28 @@ tarae, not a model, grades every change in a review:
 A person looks at each high-risk change: `space v h` on it, in review mode — or over a selection, every one it
 touches that is on screen (all its lines, or the whole pane); one scrolled past isn't taken (`%` scrolls to the
 file's end, so `%` then `space v h` takes the ones in sight there, not the whole file), and the status line says how many were left. One taller than the
-pane is taken — under the cursor or a selection — only once every line of it has been on screen, scrolled through
-since its text last changed; `]h` and `space v h` say so, and which lines are left (`lines 212–229`). While one
+pane is taken — under the cursor or a selection — only once every line of it has been on screen, scrolled through;
+`]h` and `space v h` say so, and which lines are left (`lines 212–229`). What was drawn is kept line by line: an
+added line by its text and which of the file's added lines with that text it is, so a `}` drawn is that `}`
+only. An edit elsewhere in the file takes nothing back, and a line edited since must be on screen again. While one
 waits in the file in front, each key gets a frame of its own, so a held `C-d` can't scroll past lines no frame
 drew. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
 the review's files; `space v h` with none under the cursor goes to the next one (going there is no look — press
-it again). Until each has had a look:
+it again).
+
+A change looked at and then changed asks only for its lines since: a fix of five lines in a change of a
+thousand asks for those five. `]h` lands on the first of them, its line ends with `▲ high · 2 lines since your
+look · …`, and `space v h` takes it once each of those lines has been on screen, wherever the cursor is in the
+change. An added line you looked at that's missing from its change since is a high-risk change of its own, at
+the change: ``▲ high · taken out since your look: `check_permission();` ``. Taking out a check beside an
+`unsafe` is a change too, also when another copy of it stays elsewhere in the file. It's counted in the change's
+own place, between the lines that were just above and below it, so an edit elsewhere asks nothing. A line that
+says nothing on its own (blank, or only brackets and punctuation like `}` or `];`) isn't asked about when it
+goes; it's still a line to look at when it's added. So is a line moved within its change since you looked
+(``▲ high · moved since your look: `check();` ``, a check moved after the call it guarded). That holds in files
+that aren't open too: they're counted as the review reads them. A change gone whole (reverted, or committed
+before the review opened) asks nothing, and its records go when a review of the working tree opens. A line taken
+out, once looked at, lets its records go too. Until each has had a look:
 
 - the file can't be marked viewed;
 - `space v q`'s card names what's left and has no yes;
@@ -1081,7 +1100,8 @@ with the change on screen, is the look.
 The look is kept per changed line: its file, whether it was added or removed, and its text. A change looked at
 before it was committed still counts, and a line changed since needs a look again. Where the line is isn't part
 of it, so commits that regroup the changes still count. The same line added again elsewhere in the same file
-counts as looked at already.
+counts as looked at already. The added lines' text, their counts, each change's order and the lines around it
+are kept in the restore file, which only you can read (0600 from its first byte).
 
 A file made executable or turned into a symlink is a high-risk change too, shown on its first line. It's kept
 by its modes, so `space v h` there takes it.

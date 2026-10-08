@@ -289,8 +289,25 @@ pub fn restore_in(ed: &mut Editor, id: crate::event::SessionId) {
     let Some(s) = std::iter::once(session).chain(sessions.iter_mut()).find(|l| l.id == id) else { return };
     let saved = restore.notes(&s.root);
     restore_from(&mut s.notes, docs, saved);
-    // (and the lines looked at in its reviews — `risk.rs`)
+    // (and the lines looked at in its reviews — `risk.rs` — with the added ones' text)
     s.looked.extend(restore.looked(&s.root));
+    for (rel, lines) in restore.looked_lines(&s.root) {
+        let kept = s.looked_lines.entry(rel).or_default();
+        for l in lines {
+            if !kept.iter().any(|k| k.added == l.added) {
+                kept.push(l);
+            }
+        }
+    }
+    // (each once: restored again in the same run — a session ended and opened again — adds none twice)
+    for (rel, orders) in restore.looked_orders(&s.root) {
+        let kept = s.looked_orders.entry(rel).or_default();
+        for o in orders {
+            if !kept.contains(&o) {
+                kept.push(o);
+            }
+        }
+    }
 }
 
 fn restore_from(notes: &mut Notes, docs: &mut [crate::document::Document], saved: Vec<Value>) {

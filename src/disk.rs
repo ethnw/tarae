@@ -121,6 +121,25 @@ pub fn write_atomic(
     path: &Path,
     fill: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
 ) -> io::Result<()> {
+    write_atomic_as(path, None, fill)
+}
+
+/// `write_atomic` for a file only its owner reads (0600, whatever mode it had): the temp file is made 0600,
+/// never readable by others for a moment; written in place (its folder not writable), the file is made 0600
+/// before a byte goes in. Err when that can't be done — nothing written then.
+pub fn write_private(
+    path: &Path,
+    fill: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+) -> io::Result<()> {
+    write_atomic_as(path, Some(0o600), fill)
+}
+
+fn write_atomic_as(
+    path: &Path,
+    mode: Option<u32>,
+    fill: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let mut target = path.to_path_buf();
     for _ in 0..40 {
         let Ok(link) = std::fs::read_link(&target) else { break };
@@ -136,17 +155,38 @@ pub fn write_atomic(
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     // (`NOT_TEMP` matches this name)
     let tmp = dir.join(format!(".{name}.tarae-{}-{n}.tmp", std::process::id()));
-    let f = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+    let mut open = OpenOptions::new();
+    open.write(true).create_new(true);
+    if let Some(m) = mode {
+        open.mode(m);
+    }
+    let f = match open.open(&tmp) {
         Ok(f) => f,
         Err(_) => {
-            let mut w = BufWriter::new(File::create(&target)?);
+            // (in place: a private file made so before anything goes in, or not written at all)
+            let f = match mode {
+                Some(m) => {
+                    let f = OpenOptions::new().write(true).create(true).mode(m).open(&target)?;
+                    f.set_permissions(std::fs::Permissions::from_mode(m))?;
+                    f.set_len(0)?;
+                    f
+                }
+                None => File::create(&target)?,
+            };
+            let mut w = BufWriter::new(f);
             fill(&mut w)?;
             return w.into_inner().map_err(|e| e.into_error())?.sync_all();
         }
     };
     let result = (|| {
-        if let Ok(m) = std::fs::metadata(&target) {
-            f.set_permissions(m.permissions())?;
+        match mode {
+            // (`mode` at creation is under the umask: set it whole)
+            Some(m) => f.set_permissions(std::fs::Permissions::from_mode(m))?,
+            None => {
+                if let Ok(m) = std::fs::metadata(&target) {
+                    f.set_permissions(m.permissions())?;
+                }
+            }
         }
         let mut w = BufWriter::new(f);
         fill(&mut w)?;
@@ -1284,6 +1324,44 @@ mod tests {
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o755);
         let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names.len(), 2, "no temp file left: {names:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 1, review finding 4: a private file (the restore file: lines of code looked at, notes) is
+    /// its owner's from its first byte — the temp file is 0600 while it's written (it was the old file's mode,
+    /// 0644 when new, until a chmod after the rename), and a file written in place (its folder not writable)
+    /// is made 0600 before anything goes in.
+    #[test]
+    fn a_private_file_is_never_readable_by_others() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tarae-disk-private-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("restore.json");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mode = |f: &File| f.metadata().unwrap().permissions().mode() & 0o777;
+        let mut while_written = 0;
+        write_private(&file, |w| {
+            while_written = mode(w.get_ref());
+            w.write_all(b"new")
+        })
+        .unwrap();
+        assert_eq!(while_written, 0o600, "the temp file, as it's written");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        // In place (no temp file can be made beside it): 0600 before the first byte
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let written = write_private(&file, |w| {
+            while_written = mode(w.get_ref());
+            w.write_all(b"again")
+        });
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        written.unwrap();
+        assert_eq!(while_written, 0o600, "made private before it's written");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "again");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -1992,6 +1992,8 @@ fn the_rail_says_what_moved() {
         at: 5,
         lines: 30,
         keys: Vec::new(),
+        removed: 0,
+        added: 0,
         mode: false,
     };
     r.grades.insert(path, std::sync::Arc::from(vec![behaviour]));
@@ -2066,6 +2068,8 @@ fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
             at: 0,
             lines: 1,
             keys: vec![1],
+            removed: 0,
+            added: 1,
             mode: false,
         };
         r.grades.insert(dir.join(rel), std::sync::Arc::from(vec![high]));
