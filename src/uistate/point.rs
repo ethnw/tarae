@@ -95,7 +95,7 @@ impl Editor {
                 out.push(Target { id, x: a, y, w: b - a, at: (a, y + 1) });
             }
         }
-        out.sort_by_key(|t| (t.at.1, t.at.0));
+        crate::sorting::by_key(&mut out, |t| (t.at.1, t.at.0));
         out.dedup_by(|a, b| a.id == b.id);
         out.truncate(ALPHABET.len() * ALPHABET.len());
         out

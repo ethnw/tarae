@@ -10,6 +10,11 @@
 //! worst-of-N frame jumps a tenth of a millisecond: `DEFAULT_NOISE`), not a share of its budget: a loose
 //! budget (startup's 500 ms) would hide a real slowdown (5.7 → 10 ms).
 //!
+//! The release binary's size is measured too (`SIZES`, against a budget), and a jump in it fails: more than
+//! `SIZE_JUMP` above the median of its last runs on this branch (`size_jump`) — the budget leaves room for
+//! the roadmap's features, so alone it wouldn't see a dependency's +0.5 MB. `--accept-jump` keeps one that's
+//! meant.
+//!
 //! Only on a quiet machine: with a load of `BUSY` or more it waits up to `WAIT` for it to fall (a fat-LTO
 //! build leaves the load up), then says "not measured (machine busy)" and keeps nothing — numbers from a
 //! busy machine (or a sandboxed parallel run) would only be noise. A budget broken on a quiet machine is a
@@ -129,6 +134,19 @@ pub fn run(args: &[String]) -> Result<()> {
         // A budget as it is (`{}`: 16 → "16", 9.5 → "9.5" — `{:.0}` said 10 for the size's 9.5)
         println!("{:width$}  {:>10.3}  budget {:>6}{vs}", p.name, p.value, p.budget);
     }
+    // A jump in the release size fails whatever room the budget has — and keeps nothing, as a broken budget
+    // doesn't: kept, three runs again would make it the median. One that's meant is kept with `--accept-jump`.
+    if let Some(size) = now.iter().find(|p| p.name == SIZE_JUMP.0) {
+        let mut known: BTreeMap<String, bool> = BTreeMap::new();
+        let has = |c: &str| *known.entry(c.to_string()).or_insert_with(|| head_has(&root, c));
+        let jump = size_jump(size.value, &kept(&past, SIZE_JUMP.0), has);
+        let said = jump_said(SIZE_JUMP.0, size.value, &jump);
+        match jump {
+            Jump::Over { .. } if !args.iter().any(|a| a == "--accept-jump") => return Err(said),
+            Jump::Over { .. } => println!("{said} — kept (--accept-jump)"),
+            _ => println!("{said}"),
+        }
+    }
     let (date, commit) = (today(), commit(&root));
     let mut add = String::new();
     if past.is_empty() {
@@ -156,11 +174,103 @@ pub fn run(args: &[String]) -> Result<()> {
 /// 9.5 (2026-10-04, ~8.5 then): feature batches added 0.03–0.24 MB each, so it has room for the roadmap
 /// (queues, UI state, the RA swap) and still trips on a dependency's +0.5 MB (ripgrep's crates were).
 /// 10 (2026-10-05, 9.41 then): the user's call — a size pass comes at the roadmap's end.
+/// 12 (2026-10-09, 11.05 then; ~10.95 with std's sorts back in `sorting` — target/sb/size-2026-10.md): the
+/// user's call — features grew it ~0.4 MB a day, no one cause; the size pass stays at the roadmap's end, and a
+/// dependency's jump is `SIZE_JUMP`'s to catch, not the budget's.
 const SIZES: [(&str, &[&str], &str, f64); 2] = [
-    ("release_size_mb", &[], "target", 10.0),
+    ("release_size_mb", &[], "target", 12.0),
     ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 15.0),
 ];
 const SIZE_NOISE: f64 = 0.05;
+
+/// The number a jump fails (`size_jump`), and by how much over its past median (MB): a dependency's +0.5 MB
+/// (ripgrep's crates were) trips it; a batch of features (0.03–0.24 MB measured) doesn't. Steady growth of
+/// more than a third of it per recorded run trips it too — the median is three runs back.
+const SIZE_JUMP: (&str, f64) = ("release_size_mb", 0.3);
+
+/// One kept run of a number (`target/perf/history.tsv`): when, at which commit (`+`: with changes), its value.
+#[derive(Clone, Debug, PartialEq)]
+struct Kept {
+    date: String,
+    commit: String,
+    value: f64,
+}
+
+/// What `size_jump` found.
+#[derive(Clone, Debug, PartialEq)]
+enum Jump {
+    /// No kept run this branch has: nothing to compare with.
+    NoHistory,
+    /// Within `SIZE_JUMP` of the median of `runs` (newest first).
+    Within { median: f64, runs: Vec<Kept> },
+    /// More than `SIZE_JUMP` above it, by `by`.
+    Over { median: f64, by: f64, runs: Vec<Kept> },
+}
+
+/// The release size `now` against the median of the last `HISTORY` kept runs (`rows`, oldest first) whose
+/// commit HEAD has (`has`: that commit is HEAD or comes before it) — a checkout's history mixes branches (a
+/// session's branch brought to main, an experiment, a rebase), and another branch's size says nothing of
+/// this one's step. Fewer such runs than `HISTORY`: the median of those there are (sizes don't jitter: one is
+/// enough to see a jump); none: nothing to compare.
+fn size_jump(now: f64, rows: &[Kept], mut has: impl FnMut(&str) -> bool) -> Jump {
+    let runs: Vec<Kept> = rows.iter().rev().filter(|r| has(&r.commit)).take(HISTORY).cloned().collect();
+    if runs.is_empty() {
+        return Jump::NoHistory;
+    }
+    let median = median(runs.iter().map(|r| r.value).collect());
+    // (kept to three places: 11.3 − 11.0 is 0.30000000000000071 — "more than" by a thousandth)
+    match now - median {
+        by if by > SIZE_JUMP.1 + 1e-6 => Jump::Over { median, by, runs },
+        _ => Jump::Within { median, runs },
+    }
+}
+
+/// How a jump is said: the size, by how much over which median, and the runs it's the median of.
+fn jump_said(name: &str, now: f64, j: &Jump) -> String {
+    let runs = |runs: &[Kept]| {
+        let each: Vec<String> =
+            runs.iter().map(|r| format!("{} {} {:.3}", r.date, r.commit, r.value)).collect();
+        format!("{} run{} ({})", runs.len(), if runs.len() == 1 { "" } else { "s" }, each.join(", "))
+    };
+    match j {
+        Jump::NoHistory => format!("{name}: no kept run on this branch to compare a jump with"),
+        Jump::Within { median, runs: r } => {
+            format!("{name}: {:+.3} MB vs {median:.3}, the median of its last {}", now - median, runs(r))
+        }
+        Jump::Over { median, by, runs: r } => format!(
+            "{name}: {now:.3} MB is {by:.3} MB above {median:.3}, the median of its last {} — more than the \
+             {} MB a jump may be (a dependency?). If it's meant: `cargo perf --accept-jump` keeps it",
+            runs(r),
+            SIZE_JUMP.1
+        ),
+    }
+}
+
+/// `name`'s kept runs in `tsv`, oldest first.
+fn kept(tsv: &str, name: &str) -> Vec<Kept> {
+    tsv.lines()
+        .skip_while(|l| l.starts_with("date\t"))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let value = f.get(3)?.parse().ok()?;
+            (f.get(2) == Some(&name)).then(|| Kept { date: f[0].into(), commit: f[1].into(), value })
+        })
+        .collect()
+}
+
+/// Whether HEAD has `commit` (a kept run's: `+` — with changes — is the commit's all the same). `?` (no git)
+/// or a commit git no longer knows: no.
+fn head_has(root: &Path, commit: &str) -> bool {
+    let commit = commit.trim_end_matches('+');
+    commit != "?"
+        && Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+            .current_dir(root)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
 
 /// What the bundled binary has beyond the default one (which every run measures): which grammars are in
 /// it, their sources, how they're built, and the release profile. Its size is measured again only when
@@ -490,5 +600,78 @@ mod tests {
         assert!(is_slower(10.0, 5.7, 0.5));
         assert!(is_slower(43.0, 37.0, 2.0) && !is_slower(38.5, 37.0, 2.0), "memory, in MB");
         assert_eq!((civil(0), civil(20_363)), ((1970, 1, 1), (2025, 10, 2)));
+    }
+
+    /// Kept runs of the release size at `values` (oldest first), on commits `c0`, `c1` … — all this branch's.
+    fn sizes_kept(values: &[f64]) -> Vec<Kept> {
+        let row = |(i, v): (usize, &f64)| Kept {
+            date: format!("2026-10-{:02}", i + 1),
+            commit: format!("c{i}"),
+            value: *v,
+        };
+        values.iter().enumerate().map(row).collect()
+    }
+
+    /// A dependency's +0.4 MB in one step fails, whatever room the budget has — said with how much, over
+    /// which median, and the runs it's the median of (newest first). "More than" 0.3: 0.3 itself passes
+    /// (as kept, to three places — 11.3 − 11.0 is 0.30000000000000071 in floating point).
+    #[test]
+    fn a_jump_in_the_release_size_fails_naming_the_runs() {
+        let rows = sizes_kept(&[10.90, 10.95, 11.00, 11.00, 11.05]);
+        let j = size_jump(11.40, &rows, |_| true);
+        let Jump::Over { median, by, runs } = &j else { panic!("a jump of 0.4 MB passed: {j:?}") };
+        assert_eq!(*median, 11.00);
+        assert!((by - 0.40).abs() < 1e-9, "{by}");
+        assert_eq!(
+            runs.iter().map(|r| r.commit.as_str()).collect::<Vec<_>>(),
+            ["c4", "c3", "c2", "c1", "c0"]
+        );
+        let said = jump_said("release_size_mb", 11.40, &j);
+        assert!(said.starts_with("release_size_mb: 11.400 MB is 0.400 MB above 11.000, the median of its last 5 runs (2026-10-05 c4 11.050, 2026-10-04 c3 11.000,"), "{said}");
+        assert!(said.contains("--accept-jump"), "{said}");
+        assert!(matches!(size_jump(11.31, &rows, |_| true), Jump::Over { .. }), "just over");
+        assert!(matches!(size_jump(11.30, &rows, |_| true), Jump::Within { .. }), "0.3 itself");
+    }
+
+    /// Features adding a little each run never trip it — only the last `HISTORY` runs count, so a long
+    /// climb (20 runs, +0.95 MB in all) is judged by its last steps, not against where it started.
+    #[test]
+    fn slow_growth_in_the_release_size_passes() {
+        let rows = sizes_kept(&[10.80, 10.85, 10.90, 10.95, 11.00]);
+        assert_eq!(
+            size_jump(11.05, &rows, |_| true),
+            Jump::Within { median: 10.90, runs: rows.iter().rev().cloned().collect() }
+        );
+        let climb: Vec<f64> = (0..20).map(|i| 10.0 + 0.05 * f64::from(i)).collect();
+        let j = size_jump(11.00, &sizes_kept(&climb), |_| true);
+        assert!(matches!(j, Jump::Within { median, .. } if (median - 10.85).abs() < 1e-9), "{j:?}");
+    }
+
+    /// A checkout's history mixes branches: only runs at commits HEAD has count (`+`, with changes, is the
+    /// commit's) — another branch's smaller binary isn't this one's jump. Fewer than `HISTORY` of them: the
+    /// median of those there are; none: nothing to compare, said. The rows read back from the file as kept.
+    #[test]
+    fn a_size_jump_compares_this_branchs_runs_only() {
+        let tsv = "date\tcommit\tname\tvalue\tbudget\n\
+                   2026-10-01\ta\trelease_size_mb\t11.000\t12\n2026-10-01\ta\tstartup_ms\t6.500\t500\n\
+                   2026-10-02\tx\trelease_size_mb\t9.000\t12\n2026-10-03\tx\trelease_size_mb\t9.000\t12\n\
+                   2026-10-04\tb+\trelease_size_mb\t11.050\t12\n2026-10-05\ty\trelease_size_mb\t9.000\t12\n";
+        let rows = kept(tsv, "release_size_mb");
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[3], Kept { date: "2026-10-04".into(), commit: "b+".into(), value: 11.05 });
+        let ours = |c: &str| ["a", "b"].contains(&c.trim_end_matches('+'));
+        let j = size_jump(11.10, &rows, ours);
+        let Jump::Within { median, runs } = &j else { panic!("the other branch's 9.0 MB counted: {j:?}") };
+        assert_eq!((*median, runs.len()), (11.05, 2), "the two this branch has");
+        assert!(
+            jump_said("release_size_mb", 11.10, &j)
+                .contains("its last 2 runs (2026-10-04 b+ 11.050, 2026-10-01 a 11.000)")
+        );
+        assert!(matches!(size_jump(11.50, &rows, ours), Jump::Over { .. }), "against 11.05: a jump still");
+        assert_eq!(size_jump(11.10, &rows, |_| false), Jump::NoHistory);
+        assert_eq!(
+            jump_said("release_size_mb", 11.10, &Jump::NoHistory),
+            "release_size_mb: no kept run on this branch to compare a jump with"
+        );
     }
 }

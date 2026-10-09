@@ -303,7 +303,7 @@ impl Reach {
 }
 
 fn sorted(mut v: Vec<(String, String)>) -> Vec<(String, String)> {
-    v.sort();
+    crate::sorting::sort(&mut v);
     v
 }
 

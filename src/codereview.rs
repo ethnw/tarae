@@ -609,7 +609,7 @@ fn moved_within(
         for then in orders.iter().filter(|o| added.iter().filter(|k| o.keys.contains(k)).nth(1).is_some()) {
             moved.extend(crate::risk::out_of_order(&then.keys, added));
         }
-        moved.sort_unstable();
+        crate::sorting::sort(&mut moved);
         moved.dedup();
         for i in moved {
             let around = (added[i], i.checked_sub(1).map(|j| added[j]), added.get(i + 1).copied());
@@ -1121,7 +1121,7 @@ fn cut(range: std::ops::Range<usize>, defs: &[Def], rows: usize, name: Option<&s
         .iter()
         .filter(|(c, _)| !inner.iter().any(|(o, _)| o != c && o.start <= c.start && c.end <= o.end))
         .collect();
-    top.sort_by_key(|(c, _)| (c.start, c.end));
+    crate::sorting::by_key(&mut top, |(c, _)| (c.start, c.end));
     top.dedup_by(|a, b| a.0 == b.0);
     // (a line two of them share — `} fn b() {` — is the later one's: each line in one piece. None of them
     // holds another, so their starts climb and each keeps its first line)
@@ -1310,7 +1310,7 @@ impl CodeReview {
         let seen = |k: &crate::risk::Key| v.keys.contains(k) || looked.contains(k);
         let mut out: Vec<usize> =
             self.graded(ed, f).iter().filter(|g| of_lines(g)).flat_map(|g| g.left_by(seen)).collect();
-        out.sort_unstable();
+        crate::sorting::sort(&mut out);
         out.dedup();
         (!out.is_empty()).then_some(out)
     }
@@ -1401,7 +1401,7 @@ fn mark(ed: &mut Editor, i: usize) {
             let lines = graded.iter().filter(|g| of_lines(g)).flat_map(|g| g.at..g.at + g.added);
             let mut texts: Vec<String> =
                 lines.filter(|&l| l < d.text.len_lines()).map(|l| line_at(&d.text, l)).collect();
-            texts.sort_unstable();
+            crate::sorting::sort(&mut texts);
             texts.dedup();
             let counts = r.counts_of(ed, f, texts.iter().map(String::as_str));
             let added: Vec<(String, u32)> = texts
@@ -2992,8 +2992,8 @@ fn binary_open(ed: &mut Editor, i: usize, f: &File, read: BinaryRead) {
     let mut fresh: Vec<crate::risk::Key> = crate::risk::keys(&f.rel, &crate::risk::binary(&read.blob));
     fresh.extend(read.mode.iter().flat_map(|m| crate::risk::keys(&f.rel, m)));
     let mut was: Vec<crate::risk::Key> = graded.iter().flat_map(|g| g.keys.iter().copied()).collect();
-    fresh.sort_unstable();
-    was.sort_unstable();
+    crate::sorting::sort(&mut fresh);
+    crate::sorting::sort(&mut was);
     let stale = !graded.is_empty() && fresh != was;
     let keys: Vec<crate::risk::Key> =
         graded.iter().filter(|g| g.grade == Grade::High).flat_map(|g| g.keys.iter().copied()).collect();
@@ -3261,7 +3261,7 @@ fn highs_in_order(ed: &Editor) -> Vec<(usize, usize)> {
     let order = r.rail_order();
     let rank = |i: usize| order.iter().position(|&k| k == i).unwrap_or(usize::MAX);
     let mut v = r.high_unseen(ed);
-    v.sort_by_key(|&(i, at)| (rank(i), at));
+    crate::sorting::by_key(&mut v, |&(i, at)| (rank(i), at));
     v
 }
 

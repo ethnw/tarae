@@ -115,6 +115,10 @@ Small fixes found while using tarae every day:
 - `tarae state` cuts a card's question short; it should show the whole command.
 - Each of Claude's commands says where it ran: in the sandbox (its tier), outside it, or with a socket granted — a
   mark on its row in the chat, with the reason on a click or `K`.
+- Small core-only-core moves from the size audit (2026-10-09; its moves are ~40 KB in all, so the reason is the
+  rule, not the size): `term.rs` `output_style`'s pass/fail lines → pack data; `allow.rs`'s Docker socket names →
+  the containers pack, built-in only; the `.java` frame in `test_results` → a pack regex; `tokens.rs`
+  `NOT_SETTINGS` → derived from the packs' file-types; `SELF_SKIP` → Rust pack data.
 
 **IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
 nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like
@@ -221,7 +225,18 @@ git tab, search, a short Kubernetes one.
 - **Core audit**: a session's own build folders. (Sandbox rules as pack data are done.)
 - **Image viewing** — undecided: an external viewer, a canvas in the core with a WebAssembly decoder plugin, or a
   viewer in the core.
-- **A size pass.** The release binary's budget was raised to 10 MB for now.
+- **A size pass.** The release binary's budget was raised to 12 MB for now (2026-10-09); `cargo perf` fails a
+  jump of more than 0.3 MB meanwhile. Four helpers LTO had copied into many callers are kept out of line
+  (−66 KB measured). From the size audit (2026-10-09):
+  - Per-package `opt-level = "s"` for crates off the hot path, the frame path kept at 3 (tarae, ropey,
+    tree-sitter, the grep crates, vt100), decided by a full `cargo perf` A/B. The whole binary at `s` measured
+    −2.36 MB and 12–40 % slower: that's the upper bound.
+  - `plugin::cli` into a binary of its own; decide `dsyms`.
+  - Test-code regions and the Cargo helper → pack data and a plugin, when the testing packs are touched.
+  - Java debugging → a plugin, once the plugin API has a debug-way hook.
 - **ACP**: hosting other agents inside tarae. Claude is the only agent tarae runs today.
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
+
+Not doing: a cheaper hash for `risk::Key` — no size win, and it widens a collision surface (size audit,
+2026-10-09).

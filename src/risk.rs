@@ -183,7 +183,7 @@ impl Graded {
                 _ => self.at,
             })
             .collect();
-        out.sort_unstable();
+        crate::sorting::sort(&mut out);
         out.dedup();
         out
     }

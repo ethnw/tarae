@@ -56,6 +56,8 @@ pub fn last_line(text: &Rope) -> usize {
     if n > 1 && text.line(n - 1).len_bytes() == 0 { n - 2 } else { n - 1 }
 }
 
+// (LTO copies it into many callers; −66 KB with node_slice, line_end, line_full_end — measured 2026-10-09)
+#[inline(never)]
 pub fn line_of(text: &Rope, pos: usize) -> usize {
     text.byte_to_line(pos.min(text.len_bytes()))
 }
@@ -65,6 +67,8 @@ pub fn line_start(text: &Rope, line: usize) -> usize {
 }
 
 /// End of the line content (excluding newline) = position of the newline char.
+// (LTO copies it into many callers; −66 KB with node_slice, line_of, line_full_end — measured 2026-10-09)
+#[inline(never)]
 pub fn line_end(text: &Rope, line: usize) -> usize {
     let (start, mut end) = (line_start(text, line), line_full_end(text, line));
     // Most calls (every row of every frame): the line ends in its chunk
@@ -80,6 +84,8 @@ pub fn line_end(text: &Rope, line: usize) -> usize {
 }
 
 /// Line end including newline = start of the next line.
+// (LTO copies it into many callers; −66 KB with node_slice, line_of, line_end — measured 2026-10-09)
+#[inline(never)]
 pub fn line_full_end(text: &Rope, line: usize) -> usize {
     text.line_to_byte((line + 1).min(text.len_lines()))
 }

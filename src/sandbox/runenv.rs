@@ -163,7 +163,7 @@ pub fn of(here: &Here, policy: &[&str], pass: &[String], yours: &[String], set: 
         }
     };
     let mut names: Vec<&String> = here.env.keys().collect();
-    names.sort();
+    crate::sorting::sort(&mut names);
     let mut out = RunEnv::default();
     for name in names {
         let value = &here.env[name];

@@ -219,7 +219,7 @@ pub fn children(pid: u32) -> Vec<u32> {
             }
         }
     }
-    out.sort_unstable();
+    crate::sorting::sort(&mut out);
     out.dedup();
     out
 }
@@ -415,7 +415,7 @@ pub fn threads(pid: u32) -> Vec<Thread> {
         .flatten()
         .filter_map(|e| e.file_name().to_str()?.parse().ok())
         .collect();
-    tids.sort_unstable();
+    crate::sorting::sort(&mut tids);
     tids.iter()
         .take(THREADS_MAX)
         .filter_map(|tid| {
@@ -1167,7 +1167,7 @@ fn load_usual(path: &Path) -> Usual {
 /// The median of `program`'s kept peaks.
 fn usual_of(usual: &Usual, program: &str) -> Option<u64> {
     let mut v = usual.get(program)?.clone();
-    v.sort_unstable();
+    crate::sorting::sort(&mut v);
     v.get(v.len() / 2).copied()
 }
 

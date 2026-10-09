@@ -368,12 +368,12 @@ impl Guard {
                 _ => all = false,
             }
         }
-        names.sort();
+        crate::sorting::sort(&mut names);
         names.dedup();
-        secret.sort();
+        crate::sorting::sort(&mut secret);
         secret.dedup();
         services.dedup();
-        copied.sort();
+        crate::sorting::sort(&mut copied);
         copied.dedup();
         let mut s = String::new();
         if !copied.is_empty() {
@@ -939,7 +939,7 @@ pub fn reads_for(home: &Path, also: &[PathBuf], vars: &crate::sandboxpack::Vars)
     allow.extend(also.iter().cloned());
     let kept = kept_reads(home, vars);
     allow.retain(|p| p.starts_with(home) && p != home && !kept.iter().any(|k| p.starts_with(k)));
-    allow.sort();
+    crate::sorting::sort(&mut allow);
     allow.dedup();
     let log = crate::log::path().map(|l| profile_path(&l));
     Reads { home: Some(home.to_path_buf()), allow, kept, log, copies: Default::default() }
@@ -971,7 +971,7 @@ fn kept_in(home: &Path, vars: &crate::sandboxpack::Vars, packs: &[String]) -> Ve
     v.extend(packs.iter().flat_map(|k| vars.places_both(k)).map(at));
     v.push(at(vars.xdg_config.join("git/credentials")));
     v.extend(crate::config::state_dir().map(at));
-    v.sort();
+    crate::sorting::sort(&mut v);
     v.dedup();
     v
 }
@@ -1086,14 +1086,14 @@ impl RunsLater {
         let homes = homes.chain(vars.listed.iter().cloned());
         let real = |v: &mut Vec<PathBuf>| {
             *v = v.iter().map(|p| profile_path(p)).collect();
-            v.sort();
+            crate::sorting::sort(v);
             v.dedup();
         };
         let mut caches: Vec<_> = vars.caches.clone();
         for c in &mut caches {
             c.at = profile_path(&c.at);
         }
-        caches.sort();
+        crate::sorting::sort(&mut caches);
         caches.dedup();
         let mut r = RunsLater { bins: bins.collect(), caches, homes: homes.collect(), own: Vec::new() };
         real(&mut r.bins);
@@ -2374,7 +2374,7 @@ pub fn protected_at(parts: &[&std::ffi::OsStr]) -> Vec<usize> {
             }
         }
     }
-    at.sort_unstable();
+    crate::sorting::sort(&mut at);
     at.dedup();
     at
 }
@@ -2924,7 +2924,7 @@ impl Policy {
             .chain(run)
             .chain(DEVICE_PLACES.iter().map(PathBuf::from))
             .collect();
-        all.sort();
+        crate::sorting::sort(&mut all);
         all.dedup();
         all
     }
@@ -3179,7 +3179,7 @@ impl Policy {
         write.retain(|w| !root.starts_with(w) && !w.starts_with(&root));
         write.dedup();
         let mut ports: Vec<u16> = env.ports.clone();
-        ports.sort_unstable();
+        crate::sorting::sort(&mut ports);
         ports.dedup();
         ports.truncate(PORTS_MAX);
         let session = proxy::session_of(&root);
@@ -3485,7 +3485,7 @@ pub(crate) fn env_in(
     if let Some(h) = &env.reads.home {
         let keep = found.kept.into_iter().filter(|d| d.starts_with(h) && d != h && !env.root.starts_with(d));
         env.reads.kept.extend(keep);
-        env.reads.kept.sort();
+        crate::sorting::sort(&mut env.reads.kept);
         env.reads.kept.dedup();
     }
     (env, above)

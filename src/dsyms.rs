@@ -158,7 +158,7 @@ fn prune(dir: &Path, now: &Path, keep: usize) -> Result<Vec<PathBuf>, String> {
         .filter(|p| p != now)
         .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH), p))
         .collect();
-    kept.sort_by(|a, b| b.cmp(a));
+    crate::sorting::by(&mut kept, |a, b| b.cmp(a));
     let mut failed = Vec::new();
     let gone: Vec<PathBuf> = kept
         .into_iter()

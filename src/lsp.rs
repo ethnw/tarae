@@ -401,7 +401,7 @@ pub fn shared_by_packs() -> Vec<String> {
         .filter(|(_, t)| t.share.is_some())
         .map(|(n, _)| n.clone())
         .collect();
-    names.sort();
+    crate::sorting::sort(&mut names);
     names
 }
 

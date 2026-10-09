@@ -170,7 +170,7 @@ pub fn unseen(top: &Path, base: &str, likely: &[&str]) -> Vec<Hook> {
             }
         }
     }
-    files.sort();
+    crate::sorting::sort(&mut files);
     let mut out = Vec::new();
     for p in files {
         let Ok(rel) = p.strip_prefix(&top).map(|r| r.to_string_lossy().into_owned()) else { continue };

@@ -892,7 +892,7 @@ pub fn step(ed: &mut Editor, forward: bool) {
     // From the note shown here, else from the cursor line
     let here = here(ed).map(key).unwrap_or((path, ed.cursor_line(), 0));
     let mut all: Vec<(PathBuf, usize, u64)> = ed.session.notes.list.iter().map(key).collect();
-    all.sort();
+    crate::sorting::sort(&mut all);
     let target = if forward {
         all.iter().find(|t| **t > here).or(all.first())
     } else {

@@ -460,7 +460,7 @@ pub fn find(entries: &[Entry], hooks: &Path, head: &Path) -> Local {
             .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
             .filter(|(name, _)| !name.ends_with(".sample"))
             .collect();
-        names.sort();
+        crate::sorting::sort(&mut names);
         // (every one watched, executable or not: a `chmod +x` later is a hook that runs — stamped before it's
         // looked at)
         for (_, path) in &names {
@@ -582,7 +582,7 @@ pub fn cover(local: &mut Local, runs_in: &Path, work_tree: Option<&Path>, git_di
                 .map(|e| e.path())
                 .filter(|p| !p.to_string_lossy().ends_with(".sample"))
                 .collect();
-            each.sort();
+            crate::sorting::sort(&mut each);
             for hook in each {
                 watch(local, &hook);
                 if std::fs::metadata(&hook).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)

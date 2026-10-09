@@ -693,7 +693,7 @@ fn found_under(place: &Path, home: Option<&Path>) -> Found {
             }
         }
     }
-    f.files.sort();
+    crate::sorting::sort(&mut f.files);
     f
 }
 

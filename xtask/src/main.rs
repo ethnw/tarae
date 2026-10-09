@@ -21,6 +21,9 @@
 //!   container: off-CPU time by stack, the syscall mix, terminal write latency, over perf scenarios (see
 //!   [`trace`]).
 
+// (clippy.toml's sort rule is for the tarae binary's size: these tasks aren't in it)
+#![allow(clippy::disallowed_methods, reason = "dev tasks: not in the release binary")]
+
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};

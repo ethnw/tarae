@@ -174,7 +174,7 @@ fn save(path: &Path, all: &BTreeMap<String, Approval>) -> std::io::Result<()> {
 /// The declared list, as kept (sorted, so the order a plugin gives it in doesn't matter).
 fn keys(declared: &[Permission]) -> Vec<String> {
     let mut k: Vec<String> = declared.iter().map(key).collect();
-    k.sort();
+    crate::sorting::sort(&mut k);
     k.dedup();
     k
 }
@@ -606,7 +606,7 @@ impl Editor {
         let mut out =
             String::from("# Plugin permissions\n\n`:plugin-revoke <plugin>` takes a plugin's back.\n");
         let mut names: Vec<&String> = p.permissions.keys().collect();
-        names.sort();
+        crate::sorting::sort(&mut names);
         for name in names {
             let declared = &p.permissions[name];
             let a = p.approvals.get(name).cloned().unwrap_or_default();

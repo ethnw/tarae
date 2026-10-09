@@ -104,6 +104,10 @@ impl Completion {
             .map(|&i| {
                 let mut idx = Vec::new();
                 pat.indices(Utf32Str::new(&self.items[i].label, &mut buf), &mut self.matcher, &mut idx);
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "an item's match marks, every key: std's, in place"
+                )]
                 idx.sort_unstable();
                 idx.dedup();
                 idx

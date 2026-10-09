@@ -9,6 +9,7 @@
 //! - Esc goes out alone and is followed by a wait: crossterm reads `ESC x` arriving in one read as Alt-x.
 //! - Keys are sent only after the first frame (raw mode is on by then — no line-discipline echo).
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods, reason = "tests: not in the release binary (clippy.toml)")]
 
 mod harness;
 

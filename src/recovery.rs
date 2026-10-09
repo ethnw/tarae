@@ -590,7 +590,7 @@ fn scan(dir: &Path, own: &Path, origin: &Path, roots: &[PathBuf]) -> (Vec<(PathB
         }
     }
     // One card per file: its newest copy
-    found.sort_by(|a, b| a.path.cmp(&b.path).then(b.at.cmp(&a.at)));
+    crate::sorting::by(&mut found, |a, b| a.path.cmp(&b.path).then(b.at.cmp(&a.at)));
     let mut seen: Option<PathBuf> = None;
     found.retain(|f| {
         let older = seen.as_ref() == Some(&f.path);

@@ -1,5 +1,9 @@
 //! tarae (타래) — a selection-first modal editor carrying on helix's spirit and keymap.
 
+// (std's `sort_by` family is `sorting::by`'s in the binary — clippy.toml; tests sort as they like: what's only
+// built with them isn't in it, and the binary's own build still checks the rest)
+#![cfg_attr(test, allow(clippy::disallowed_methods, reason = "tests: not in the release binary"))]
+
 mod allow;
 mod attach;
 mod blocked;

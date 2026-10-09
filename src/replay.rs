@@ -261,7 +261,7 @@ pub fn count(text: &str, hits: &[(PathBuf, usize)], cut: bool) -> String {
         return String::new();
     }
     let mut files: Vec<&PathBuf> = hits.iter().map(|h| &h.0).collect();
-    files.sort();
+    crate::sorting::sort(&mut files);
     files.dedup();
     let plus = if cut { "+" } else { "" };
     let n = hits.len();

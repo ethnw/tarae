@@ -78,7 +78,7 @@ pub fn class(at: Option<&Path>, d: &crate::allow::Defaults, home: Option<&Path>)
 pub fn classes(places: &[std::path::PathBuf], d: &crate::allow::Defaults) -> Vec<Class> {
     let home = crate::allow::home();
     let mut v: Vec<Class> = places.iter().map(|p| class(Some(p), d, home.as_deref())).collect();
-    v.sort();
+    crate::sorting::sort(&mut v);
     v.dedup();
     v
 }

@@ -211,7 +211,7 @@ impl Tests {
                     .filter_map(|e| Some(e.ok()?.path()))
                     .filter(|p| p.extension().is_some_and(|x| x == "rs"))
                     .collect();
-                v.sort();
+                crate::sorting::sort(&mut v);
                 v
             })
             .clone()

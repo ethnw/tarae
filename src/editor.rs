@@ -2935,7 +2935,7 @@ impl Editor {
         // (the most recent few keep theirs however long ago — a handful of files you go between)
         let mut recent: Vec<(std::time::Instant, DocId)> =
             self.docs.iter().filter_map(|d| Some((d.seen?, d.id))).collect();
-        recent.sort_unstable_by_key(|r| std::cmp::Reverse(r.0));
+        crate::sorting::by_key(&mut recent, |r| std::cmp::Reverse(r.0));
         recent.truncate(TREES_RECENT);
         let unseen = trees_unseen();
         for d in &mut self.docs {
@@ -3545,7 +3545,7 @@ impl Editor {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    entries.sort();
+                    crate::sorting::sort(&mut entries);
                     move |ed: &mut Editor| {
                         ed.cmd_loading.remove(&dir);
                         ed.cmd_lists.dirs.insert(dir, entries);

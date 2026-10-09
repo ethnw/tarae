@@ -441,7 +441,7 @@ impl Editor {
         if o.lasts() || o.weighty() {
             t.extend(['a', 'A']);
         }
-        t.sort_unstable();
+        crate::sorting::sort(&mut t);
         t.dedup();
         t
     }
@@ -1038,7 +1038,7 @@ impl Editor {
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
-        sessions.sort_by_key(|s| s.id[1..].parse::<u64>().unwrap_or(0));
+        crate::sorting::by_key(&mut sessions, |s| s.id[1..].parse::<u64>().unwrap_or(0));
         let cards = self.ui_cards();
         let inbox = self.inbox_from(&cards);
         let on_card = self.screen.toast_card.get().is_some();

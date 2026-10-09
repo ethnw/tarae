@@ -54,6 +54,10 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn new(mut changes: Vec<Change>) -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "every edit's changes (one a cursor): std's sort, in place"
+        )]
         changes.sort_by_key(|c| (c.from, c.to));
         let mut out: Vec<Change> = Vec::with_capacity(changes.len());
         for c in changes {

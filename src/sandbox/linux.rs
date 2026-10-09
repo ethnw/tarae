@@ -285,7 +285,7 @@ impl Kept {
         }
         // (in order, not the file system's listing order — it differs between file systems, and the report
         // names them in this order; a parent still comes before its folders)
-        dirs.sort();
+        crate::sorting::sort(&mut dirs);
         Kept { dirs, restored: Default::default() }
     }
 
@@ -386,7 +386,7 @@ pub fn to_make(root: &Path, found: &[PathBuf], packs: &[crate::packs::MadeBeside
             }
         }
     }
-    out.sort();
+    crate::sorting::sort(&mut out);
     out
 }
 

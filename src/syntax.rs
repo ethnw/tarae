@@ -710,6 +710,8 @@ fn node_ranges(node: Node, children: bool, unnamed: bool) -> Vec<tree_sitter::Ra
 
 /// A node's text — ends snapped to char boundaries, so a briefly stale tree (edits not yet reparsed) stays
 /// safe to slice.
+// (LTO copies it into many callers — every text predicate; −66 KB with movement's three, measured 2026-10-09)
+#[inline(never)]
 pub(crate) fn node_slice<'a>(text: &'a Rope, node: Node) -> ropey::RopeSlice<'a> {
     let len = text.len_bytes();
     // Already on a boundary almost always — told by the chunk, one lookup instead of a round trip via chars
@@ -1017,6 +1019,10 @@ fn query_spans(
             spans.push((s, e, hl, usize::MAX));
         }
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a frame's highlight spans, thousands: std's sort, in place"
+    )]
     spans.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)).then(a.3.cmp(&b.3)));
     spans
 }

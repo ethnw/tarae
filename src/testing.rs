@@ -165,7 +165,7 @@ fn declared_with_path(path: &Path, root: &Path, lang: &tree_sitter::Language) ->
             .filter_map(|e| Some(e.ok()?.path()))
             .filter(|p| p.extension().is_some_and(|x| x == "rs") && p.as_path() != path)
             .collect();
-        files.sort();
+        crate::sorting::sort(&mut files);
         for file in files {
             let Ok(src) = std::fs::read_to_string(&file) else { continue };
             if !src.contains("#[path") || !src.contains(name) {

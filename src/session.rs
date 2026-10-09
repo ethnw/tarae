@@ -529,7 +529,7 @@ impl Editor {
             }
         }
         // (here first, then the sessions in the order their oldest came)
-        wheres.sort_by_key(|w| w.0 != "here");
+        crate::sorting::by_key(&mut wheres, |w| w.0 != "here");
         let wheres: Vec<String> = wheres.iter().map(|(at, n)| format!("{n} {at}")).collect();
         let lists = match self.keymaps.bindings().remove("inbox") {
             Some(key) => format!("{key} lists them"),
@@ -564,7 +564,7 @@ impl Editor {
             .filter(|l| self.doing(l) == Doing::Done)
             .filter_map(|l| Some((l.turn_end.as_ref()?.0, l.id)))
             .collect();
-        ended.sort();
+        crate::sorting::sort(&mut ended);
         ended.into_iter().map(|(_, id)| id).collect()
     }
 

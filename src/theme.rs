@@ -198,7 +198,7 @@ pub fn available() -> Vec<String> {
         })
         .filter(|n| !names.contains(n))
         .collect();
-    found.sort();
+    crate::sorting::sort(&mut found);
     found.dedup();
     names.extend(found);
     names

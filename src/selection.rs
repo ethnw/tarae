@@ -146,6 +146,10 @@ impl Selection {
         let primary = self.primary;
         let mut tagged: Vec<(Range, bool)> =
             self.ranges.into_iter().enumerate().map(|(i, r)| (r, i == primary)).collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the cursors, on every key that moves them (thousands)"
+        )]
         tagged.sort_by_key(|(r, _)| (r.from(), r.to()));
         let mut out: Vec<(Range, bool)> = Vec::with_capacity(tagged.len());
         for (r, is_primary) in tagged {

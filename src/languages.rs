@@ -244,7 +244,7 @@ pub(crate) fn build(builtin: &[(String, Result<Table, String>)], yours: &[(Strin
         }
     }
     let mut by_name: Vec<&LangSpec> = out.langs.iter().collect();
-    by_name.sort_by(|a, b| a.name.cmp(&b.name));
+    crate::sorting::by(&mut by_name, |a, b| a.name.cmp(&b.name));
     for l in by_name {
         union(&mut out.roots_any, &l.roots);
         union(&mut out.test_files, &l.test_files);

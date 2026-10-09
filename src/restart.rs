@@ -1309,9 +1309,9 @@ fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
     let focus = v["focus"].as_u64();
     if let (Some(split), Some(focus)) = (split, focus) {
         let mut leaves = split.leaves();
-        leaves.sort_unstable();
+        crate::sorting::sort(&mut leaves);
         let mut ids: Vec<_> = views.iter().map(|w| w.id).collect();
-        ids.sort_unstable();
+        crate::sorting::sort(&mut ids);
         if leaves == ids
             && let Some(f) = views.iter().find(|w| w.id == focus)
             && let Some(i) = ed.docs.iter().position(|d| d.id == f.doc)

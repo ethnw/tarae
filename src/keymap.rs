@@ -67,12 +67,25 @@ impl Node {
     /// Entries in display order (which-key, docs): single characters before named keys (`esc`, `C-w`),
     /// alphabetical, lowercase before uppercase. Total (`A-C`/`A-c` tie otherwise), so the order is stable.
     fn sorted(&self) -> Vec<(&Key, &KeyTrie)> {
-        let mut out: Vec<_> = self.map.iter().collect();
-        out.sort_by_cached_key(|(k, _)| {
-            let s = k.to_string();
-            (s.chars().count() > 1, s.to_lowercase(), s.chars().next().is_some_and(char::is_uppercase), s)
-        });
-        out
+        // (each key's text made once)
+        let mut keyed: Vec<_> = self
+            .map
+            .iter()
+            .map(|e| {
+                let s = e.0.to_string();
+                (
+                    (
+                        s.chars().count() > 1,
+                        s.to_lowercase(),
+                        s.chars().next().is_some_and(char::is_uppercase),
+                        s,
+                    ),
+                    e,
+                )
+            })
+            .collect();
+        crate::sorting::by(&mut keyed, |a, b| a.0.cmp(&b.0));
+        keyed.into_iter().map(|(_, e)| e).collect()
     }
 
     pub fn search(&self, keys: &[Key]) -> Option<&KeyTrie> {

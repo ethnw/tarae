@@ -170,7 +170,7 @@ fn answer_hops(root: &Path, text: &str) -> Vec<Hop> {
         .map(|(r, l)| (r.start, Hop::Place(l, None)))
         .collect();
     all.extend(ids.into_iter().map(|(r, id)| (r.start, Hop::Element(id))));
-    all.sort_by_key(|h| h.0);
+    crate::sorting::by_key(&mut all, |h| h.0);
     all.into_iter().map(|h| h.1).collect()
 }
 

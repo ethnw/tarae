@@ -13,6 +13,7 @@
 //! yours (so the tools and claude's login are found). A run that can't find a tool it needs says so and
 //! passes — a missing rust-analyzer isn't a tarae bug.
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods, reason = "tests: not in the release binary (clippy.toml)")]
 
 mod harness;
 

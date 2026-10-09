@@ -574,7 +574,7 @@ impl Usage {
         if !self.turns.iter().any(|t| t.conversation == id) {
             let kept = v["turns"].as_array().into_iter().flatten().filter_map(|t| Turn::from_json(id, t));
             self.turns.extend(kept);
-            self.turns.sort_by_key(|t| t.at_ms);
+            crate::sorting::by_key(&mut self.turns, |t| t.at_ms);
         }
         for w in v["windows"].as_array().into_iter().flatten() {
             if let (Some(m), Some(n)) = (w[0].as_str(), w[1].as_u64())

@@ -200,8 +200,16 @@ fn filter(
     let tail = tree && scored.len() > TREE_MAX;
     if tail {
         scored.select_nth_unstable_by(TREE_MAX, order);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the picker's ranking, every key: std's sort, in place"
+        )]
         scored[..TREE_MAX].sort_unstable_by(order);
     } else {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the picker's ranking, every key: std's sort, in place"
+        )]
         scored.sort_unstable_by(order);
     }
     (scored.into_iter().map(|(_, i)| i).collect(), tail)
@@ -774,6 +782,7 @@ impl Picker {
     pub fn shown(&self) -> impl Iterator<Item = &Item> {
         let mut m = self.matches.clone();
         if self.tail_unsorted {
+            #[expect(clippy::disallowed_methods, reason = "the matches past a tree, ~140k: std's, in place")]
             m[TREE_MAX..].sort_unstable();
         }
         m.into_iter().map(|i| &self.items[i as usize])
@@ -821,6 +830,10 @@ impl Picker {
         let mut marks = |label: &str, matcher: &mut Matcher| {
             let mut idx = Vec::new();
             pat.indices(Utf32Str::new(label, &mut buf), matcher, &mut idx);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "each row's match marks, every frame: std's, in place"
+            )]
             idx.sort_unstable();
             idx.dedup();
             idx
@@ -1223,6 +1236,10 @@ fn by_place(mut items: Vec<Item>) -> Vec<Item> {
         Action::Goto { path, line, col } => (path.clone(), *line, *col),
         _ => (PathBuf::new(), 0, 0),
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "search results, up to many thousands: std's sort, in place"
+    )]
     items.sort_by_key(at);
     items.dedup_by(|b, a| {
         let (a, b) = (at(a), at(b));

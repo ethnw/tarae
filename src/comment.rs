@@ -50,7 +50,7 @@ fn lines(text: &Rope, sel: &Selection) -> Vec<usize> {
             a..=b
         })
         .collect();
-    v.sort_unstable();
+    crate::sorting::sort(&mut v);
     v.dedup();
     v
 }
@@ -120,7 +120,7 @@ fn selection_spans(text: &Rope, sel: &Selection) -> Vec<(usize, usize)> {
 /// Block comments around `spans`: all of them commented → uncomment each, else comment the ones that
 /// aren't. Spans that overlap (two cursors on a line) are one.
 fn wrap(text: &Rope, mut spans: Vec<(usize, usize)>, start: &str, end: &str) -> Option<Transaction> {
-    spans.sort_unstable();
+    crate::sorting::sort(&mut spans);
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (from, to) in spans {
         match merged.last_mut() {

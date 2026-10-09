@@ -1202,7 +1202,7 @@ impl Vars {
             caches.extend(given.map(|at| place(at, true)));
             caches.extend(c.var.as_deref().and_then(abs).map(|at| place(at, false)));
         }
-        caches.sort();
+        crate::sorting::sort(&mut caches);
         caches.dedup();
         v.caches = caches;
         v
@@ -1295,7 +1295,7 @@ pub fn filled(p: &Path) -> Vec<PathBuf> {
         found = next;
     }
     let mut out: Vec<PathBuf> = found.into_iter().map(|(p, _)| p).collect();
-    out.sort();
+    crate::sorting::sort(&mut out);
     out
 }
 

@@ -1010,7 +1010,7 @@ fn plan(
         found.push((f.rel, f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
         true
     })?;
-    found.sort();
+    crate::sorting::sort(&mut found);
     // An open buffer: all of its lines (its text isn't what the search read)
     let targets: Vec<(PathBuf, Vec<usize>)> = found
         .into_iter()

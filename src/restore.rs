@@ -321,7 +321,7 @@ impl Editor {
                     .iter()
                     .map(|(k, v)| (v.get(2).and_then(Value::as_u64).unwrap_or(0), k.clone()))
                     .collect();
-                by_age.sort();
+                crate::sorting::sort(&mut by_age);
                 for (_, k) in by_age.into_iter().take(map.len() - KEEP_POSITIONS) {
                     map.remove(&k);
                 }

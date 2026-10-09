@@ -964,7 +964,7 @@ fn selected_lines(cx: &Context) -> Vec<usize> {
             a..=b
         })
         .collect();
-    lines.sort_unstable();
+    crate::sorting::sort(&mut lines);
     lines.dedup();
     lines
 }
@@ -1428,7 +1428,7 @@ fn add_newline(cx: &mut Context, below: bool) {
             if below { mv::line_full_end(text, last) } else { mv::line_start(text, first) }
         })
         .collect();
-    spots.sort_unstable();
+    crate::sorting::sort(&mut spots);
     spots.dedup();
     let tx = Transaction::new(spots.iter().map(|&p| Change::insert(p, "\n".repeat(n))).collect());
     // Above: text at the insert point moves down with its line; below: it's the next line's, stays put

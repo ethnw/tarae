@@ -113,7 +113,7 @@ pub fn pack_manifests_user() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for d in dirs() {
         let mut found: Vec<_> = std::fs::read_dir(d.join("packs")).into_iter().flatten().flatten().collect();
-        found.sort_by_key(|e| e.file_name());
+        crate::sorting::by_key(&mut found, |e| e.file_name());
         for e in found {
             let pack = e.file_name().to_string_lossy().into_owned();
             if out.iter().any(|(p, _)| *p == pack) {
@@ -138,7 +138,7 @@ pub fn pack_langs() -> Vec<String> {
             }
         }
     }
-    out.sort();
+    crate::sorting::sort(&mut out);
     out.dedup();
     out
 }

@@ -709,7 +709,7 @@ impl Editor {
                         (rel.clone(), d.map_or(0, |d| d.git_version), d.map_or(0, |d| d.conflicts_of))
                     })
                     .collect();
-                opened.sort();
+                crate::sorting::sort(&mut opened);
                 let now =
                     (self.session.git_status.as_ref().map_or(0, |g| g.generation), doc.path.clone(), opened);
                 if s.git_of.as_ref() != Some(&now) {

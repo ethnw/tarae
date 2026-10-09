@@ -237,7 +237,7 @@ fn instructions(top: &Path) -> Vec<String> {
         .filter(|n| n.starts_with("settings") && n.ends_with(".json"))
         .map(|n| format!(".claude/{n}"))
         .collect();
-    settings.sort();
+    crate::sorting::sort(&mut settings);
     let found: Vec<String> = INSTRUCTIONS
         .iter()
         .map(|n| n.to_string())

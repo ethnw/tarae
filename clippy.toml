@@ -1,0 +1,13 @@
+# Every `sort_by(closure)` is a fresh copy of std's sort in the release binary (~3–6 KB each), and so is a plain
+# `sort()` for each item type: tarae's own lists go through `sorting::by` / `by_key` / `sort` — one copy
+# (`src/sorting.rs`, 37539136; 2026-10-09: 0.1 MB had crept back). A hot path or a long list keeps std's sort
+# with an `#[expect(clippy::disallowed_methods, reason = "…")]` saying why; tests are allowed (main.rs).
+disallowed-methods = [
+  { path = "slice::sort_by", reason = "a copy of std's sort per call: `sorting::by`" },
+  { path = "slice::sort_by_key", reason = "a copy of std's sort per call: `sorting::by_key`" },
+  { path = "slice::sort_unstable_by", reason = "a copy of std's sort per call: `sorting::by`" },
+  { path = "slice::sort_unstable_by_key", reason = "a copy of std's sort per call: `sorting::by_key`" },
+  { path = "slice::sort_by_cached_key", reason = "a copy of std's sort per call: `sorting::by` on keys made once" },
+  { path = "slice::sort", reason = "a copy of std's sort per item type: `sorting::sort`" },
+  { path = "slice::sort_unstable", reason = "a copy of std's sort per item type: `sorting::sort`" },
+]

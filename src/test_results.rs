@@ -241,7 +241,7 @@ impl Rules {
         phases.retain(|p| !p.is_empty());
         phases.dedup();
         let mut groups: Vec<&str> = self.lines.iter().flat_map(|l| l.re.capture_names().flatten()).collect();
-        groups.sort();
+        crate::sorting::sort(&mut groups);
         groups.dedup();
         let mut s = format!("{} line rules · groups {}", self.lines.len(), groups.join(" "));
         if !phases.is_empty() {
@@ -432,7 +432,7 @@ pub fn junit(report_dirs: &[PathBuf], since: SystemTime, src_roots: &[PathBuf]) 
         .filter(|p| p.extension().is_some_and(|x| x == "xml"))
         .filter(|p| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t >= since))
         .collect();
-    files.sort();
+    crate::sorting::sort(&mut files);
     for f in files {
         let Ok(xml) = std::fs::read_to_string(&f) else { continue };
         let mut rest = xml.as_str();

@@ -179,7 +179,7 @@ fn prune(dir: &Path) {
     if files.len() <= KEEP_FILES {
         return;
     }
-    files.sort();
+    crate::sorting::sort(&mut files);
     for (_, p) in files.iter().take(files.len() - KEEP_FILES) {
         let _ = std::fs::remove_file(p);
     }

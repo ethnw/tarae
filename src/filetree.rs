@@ -154,7 +154,9 @@ impl Dir {
     /// Folders first, then files, each by name (case folded, so `Cargo.toml` sits with `build.rs`).
     fn sort(&mut self) {
         let key = |s: &str| (s.to_lowercase(), s.to_string());
+        #[expect(clippy::disallowed_methods, reason = "the file tree, up to 200k files: std's, in place")]
         self.dirs.sort_by_cached_key(|d| key(&d.name));
+        #[expect(clippy::disallowed_methods, reason = "the file tree, up to 200k files: std's, in place")]
         self.files.sort_by_cached_key(|f| key(&f.name));
         for d in &mut self.dirs {
             d.sort();
@@ -170,6 +172,10 @@ enum Kid<'a> {
 fn emit(dir: &Dir, depth: usize, open: Option<&HashSet<String>>, out: &mut Vec<Row>) {
     let mut kids: Vec<Kid> = dir.dirs.iter().map(Kid::Dir).chain(dir.files.iter().map(Kid::File)).collect();
     if open.is_none() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the file tree, every key in a picker: std's sort, in place"
+        )]
         kids.sort_by_key(|k| match k {
             Kid::Dir(d) => d.first,
             Kid::File(f) => f.first,

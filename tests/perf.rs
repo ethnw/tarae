@@ -4,6 +4,7 @@
 //! `PERF <name> <value> budget=<value>`, past libtest's capture. At the test profile's opt-level 0 (`cargo
 //! test`) they skip themselves, saying so — they'd measure a debug build.
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods, reason = "tests: not in the release binary (clippy.toml)")]
 
 mod harness;
 

@@ -7931,6 +7931,7 @@ fn draw_follow_card(
             .chain(keep.iter().map(|&r| (r, r + 1)))
             .filter(|b| b.0 < end && b.1 > py)
             .collect();
+        #[expect(clippy::disallowed_methods, reason = "a card's placement, every frame: std's, in place")]
         blocks.sort_unstable();
         let mut gaps = Vec::new();
         let mut at = py;
@@ -10033,6 +10034,7 @@ fn underline_refs<'a>(
         for r in refs.iter().map(|r| &r.0).chain(ids.iter().map(|i| &i.0)) {
             cuts.extend([r.start, r.end].into_iter().filter(|&b| b > at && b < end));
         }
+        #[expect(clippy::disallowed_methods, reason = "each chat row's spans, every frame: std's, in place")]
         cuts.sort_unstable();
         cuts.dedup();
         for pair in cuts.windows(2) {

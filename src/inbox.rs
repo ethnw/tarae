@@ -213,7 +213,9 @@ impl Editor {
             }
         }
         let quiet = |e: &Entry| !e.asks_answer();
-        v.sort_by(|a, b| (quiet(&a.0).cmp(&quiet(&b.0))).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        crate::sorting::by(&mut v, |a, b| {
+            (quiet(&a.0).cmp(&quiet(&b.0))).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
+        });
         v.into_iter().map(|(e, ..)| e).collect()
     }
 

@@ -85,7 +85,7 @@ fn line_edits(
     let mut edits = Vec::new();
     let mut count = 0;
     let mut lines = lines.to_vec();
-    lines.sort_unstable();
+    crate::sorting::sort(&mut lines);
     lines.dedup();
     for l in lines.into_iter().filter(|&l| l < text.len_lines()) {
         let (start, end) = (crate::movement::line_start(text, l), crate::movement::line_end(text, l));

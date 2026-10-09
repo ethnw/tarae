@@ -13,6 +13,9 @@
 //! the package root, this script's working directory), and the generated code holds the files' text
 //! rather than an `include_str!` of a path that would point into whichever checkout ran this last.
 
+// (clippy.toml's sort rule is for the tarae binary's size: this script isn't in it)
+#![allow(clippy::disallowed_methods, reason = "build script: not in the release binary")]
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 

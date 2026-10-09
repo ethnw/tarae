@@ -176,6 +176,7 @@ fn ops(arch: u32, mode: Mode, no_userns: bool) -> Vec<Op> {
 /// The first checks of every filter: the call's ABI is this architecture's — another's, and x32's numbers, find
 /// no call at all — and its number loaded.
 fn native(arch: u32) -> Vec<Op> {
+    #[cfg_attr(not(target_arch = "x86_64"), expect(unused_mut, reason = "only x86_64 adds x32's check"))]
     let mut ops = vec![Op::Load(ARCH_AT), Op::Is(arch, To::Next, To::Missing), Op::Load(NR)];
     #[cfg(target_arch = "x86_64")]
     ops.push(Op::Has(X32_BIT, To::Missing, To::Next));

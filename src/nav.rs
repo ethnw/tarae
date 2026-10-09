@@ -320,7 +320,7 @@ fn finish(ed: &mut Editor, n: u64) {
             return text_matches(ed, a.call, name, why, later);
         }
         Ok(mut found) => {
-            found.sort();
+            crate::sorting::sort(&mut found);
             found.dedup();
             found
         }
@@ -1270,7 +1270,7 @@ fn tree_found(root: &Path, word: &str, goto: Goto) -> Result<TreeFound, String> 
         files.push((root.join(&f.rel), f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
         files.len() < TREE_FILES
     })?;
-    files.sort();
+    crate::sorting::sort(&mut files);
     let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(word))).map_err(|e| e.to_string())?;
     let (mut out, mut no_grammar) = (Vec::new(), std::collections::BTreeSet::new());
     let mut parser = tree_sitter::Parser::new();
@@ -1603,7 +1603,7 @@ pub fn diagnostics_moved(ed: &mut Editor) {
         std::iter::once(&ed.session).chain(&ed.sessions).map(|l| l.id).collect();
     ed.lsp.tool_diags.retain(|w| sessions.contains(&w.session));
     let mut asking: Vec<crate::event::SessionId> = ed.lsp.tool_diags.iter().map(|w| w.session).collect();
-    asking.sort_unstable();
+    crate::sorting::sort(&mut asking);
     asking.dedup();
     for session in asking {
         if session == ed.session.id {

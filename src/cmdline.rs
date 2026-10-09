@@ -237,6 +237,10 @@ fn rank(query: &str, items: Vec<Cand>, keep_order_when_empty: bool) -> Vec<Cand>
             let score = pat.score(Utf32Str::new(&c.label, &mut buf), &mut matcher)?;
             let mut hits = Vec::new();
             pat.indices(Utf32Str::new(&c.label, &mut buf), &mut matcher, &mut hits);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "a completion's match marks, every key: std's, in place"
+            )]
             hits.sort_unstable();
             hits.dedup();
             c.hits = hits;
