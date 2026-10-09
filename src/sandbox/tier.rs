@@ -40,6 +40,11 @@ pub enum RunNet {
     Own,
     /// None (`Mode::Plain`); Landlock handles TCP and UDP.
     Plain,
+    /// Served where tarae can't take a run's descriptors (`pidfd_getfd` refused — Docker's default profile; 6f′):
+    /// tarae makes every socket the run has, its unix and netlink ones too, and keeps a copy of each
+    /// (`seccomp::Mode::Copied`, `supervisor::Copies`) — never in a network namespace (its sockets are tarae's). Landlock
+    /// handles TCP and UDP.
+    Copied,
 }
 
 impl Ns {
@@ -70,10 +75,12 @@ impl Ns {
         self.clone_flags() & libc::CLONE_NEWNET as u64 != 0
     }
 
-    /// How the internet sockets of a run of a keeper born with these go, `served` or not — decided once, in
+    /// How the internet sockets of a run of a keeper born with these go, `served` or not — by copies where tarae
+    /// can't take a run's descriptors (`copies`: every socket tarae's, whatever the namespaces) — decided once, in
     /// `linux::confine` (`Confine.net`).
-    pub fn run_net(self, served: bool) -> RunNet {
+    pub fn run_net(self, served: bool, copies: bool) -> RunNet {
         match (served, self.netns()) {
+            (true, _) if copies => RunNet::Copied,
             (true, true) => RunNet::Routed,
             (true, false) => RunNet::Served,
             (false, true) => RunNet::Own,
@@ -530,6 +537,13 @@ pub fn get() -> &'static Probed {
             Some(hint) => format!("{said} — {hint}"),
             None => said,
         };
+        let said = match p.served.is_ok() && super::supervisor::copies() {
+            true => format!(
+                "{said} — its runs served by tarae's own copies of their sockets (pidfd_getfd refused: Docker's \
+                 default profile; --cap-add SYS_PTRACE gives the full way)"
+            ),
+            false => said,
+        };
         crate::log::line("sandbox", "info", &said);
         // (Q5: the network's way and why, beside the tier)
         let way = match &p.redirect {
@@ -599,7 +613,18 @@ fn probe() -> Probed {
         None => Ok(()),
         Some(why) => Err(why),
     };
-    let all = Ns::session(true, true);
+    probe_with(served, super::supervisor::copies(), tried)
+}
+
+/// `probe` where serving is `served`, by `copies` or not, and a keeper's birth and run is `tried` (tests stand in).
+fn probe_with(
+    served: Result<(), String>,
+    copies: bool,
+    mut tried: impl FnMut(Ns, bool) -> Result<(), Failed>,
+) -> Probed {
+    // (6f′: where tarae serves by its own copies, every socket is tarae's — a session netns would hold none of them)
+    let net = !copies;
+    let all = Ns::session(net, true);
     let none = || Err("no network namespace".into());
     // (no namespaces: why, and the hint where Ubuntu's restriction is why — for the binary running)
     let without = |e: Failed| {
@@ -611,12 +636,12 @@ fn probe() -> Probed {
         };
         (Ns::NONE, Some(e.said()), none(), hint)
     };
-    let (ns, short, redirect, hint) = match tried_with_network(all) {
+    let (ns, short, redirect, hint) = match with_network(all, &mut tried) {
         (Ok(()), network) => (all, None, network, None),
         (Err(Failed::Birth(e)), _) if e.step == BirthStep::Proc => {
             let no_pid = why(&Seen::now(e));
-            match tried_with_network(Ns::session(true, false)) {
-                (Ok(()), network) => (Ns::session(true, false), Some(no_pid), network, None),
+            match with_network(Ns::session(net, false), &mut tried) {
+                (Ok(()), network) => (Ns::session(net, false), Some(no_pid), network, None),
                 (Err(e), _) => without(e),
             }
         }
@@ -634,12 +659,8 @@ fn probe() -> Probed {
 /// `measure_the_probe`; a second keeper for the network alone was the whole 47 more, on the first run's path).
 /// A network step failing (`BirthStep::network`), the namespaces are tried again alone: a network that can't be
 /// made doesn't cost the session its namespaces. Anything else — a namespace step, no answer in time, the run — is
-/// the namespaces' answer as it is, and the network wasn't tried.
-fn tried_with_network(ns: Ns) -> (Result<(), Failed>, Result<(), String>) {
-    with_network(ns, tried)
-}
-
-/// `tried_with_network` with the keeper's try passed in (`tried`; the tests pass a stand-in).
+/// the namespaces' answer as it is, and the network wasn't tried. The keeper's try is `tried` (the tests pass a
+/// stand-in).
 fn with_network(
     ns: Ns,
     mut tried: impl FnMut(Ns, bool) -> Result<(), Failed>,
@@ -698,7 +719,7 @@ fn true_through(ns: Ns, redirect: bool) -> Result<(), Failed> {
         // (no Landlock here: the birth is what's probed — the sandbox itself is missing anyway)
         Err(_) => Ok(()),
         Ok(abi) => (|| {
-            let net = ns.run_net(false);
+            let net = ns.run_net(false, false);
             let mut rules = match net {
                 RunNet::Own => crate::landlock::Ruleset::new_own_network(abi)?,
                 _ => crate::landlock::Ruleset::new(abi)?,
@@ -826,13 +847,46 @@ mod tests {
     /// without `user` makes none (`clone_flags`).
     #[test]
     fn a_run_owns_its_network_only_in_a_namespace_made_for_it() {
-        assert_eq!(Ns::session(true, true).run_net(false), RunNet::Own);
-        assert_eq!(Ns::session(true, false).run_net(true), RunNet::Routed);
-        assert_eq!(Ns::session(false, true).run_net(false), RunNet::Plain, "no network namespace");
-        assert_eq!(Ns::session(false, true).run_net(true), RunNet::Served);
-        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(false), RunNet::Plain, "net without user: none made");
-        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(true), RunNet::Served);
-        assert_eq!(Ns::NONE.run_net(true), RunNet::Served);
+        assert_eq!(Ns::session(true, true).run_net(false, false), RunNet::Own);
+        assert_eq!(Ns::session(true, false).run_net(true, false), RunNet::Routed);
+        assert_eq!(Ns::session(false, true).run_net(false, false), RunNet::Plain, "no network namespace");
+        assert_eq!(Ns::session(false, true).run_net(true, false), RunNet::Served);
+        assert_eq!(
+            Ns { net: true, ..Ns::NONE }.run_net(false, false),
+            RunNet::Plain,
+            "net without user: none made"
+        );
+        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(true, false), RunNet::Served);
+        assert_eq!(Ns::NONE.run_net(true, false), RunNet::Served);
+        // (6f′: by copies wherever it's served — every socket tarae's, a netns or not; not served, as before)
+        assert_eq!(Ns::NONE.run_net(true, true), RunNet::Copied);
+        assert_eq!(Ns::session(true, true).run_net(true, true), RunNet::Copied);
+        assert_eq!(Ns::NONE.run_net(false, true), RunNet::Plain);
+    }
+
+    /// Served by copies (6f′), the probe asks for no network namespace at all — every socket a run has is tarae's,
+    /// a session netns would hold none of them — and the session gets none (nor the TPROXY network); served the
+    /// usual way, its first keeper is asked with one. (Keepers stood in for: what each was asked.)
+    #[test]
+    fn served_by_copies_the_probe_asks_no_network_namespace() {
+        let asked = |copies: bool| {
+            let mut asked = Vec::new();
+            let p = probe_with(Ok(()), copies, |ns: Ns, redirect| {
+                asked.push((ns.netns(), redirect));
+                // (the network's step refused: what the session's network would be isn't this test's)
+                match redirect {
+                    true => Err(Failed::Birth(BirthError { step: BirthStep::Netns, errno: libc::EPERM })),
+                    false => Ok(()),
+                }
+            });
+            (asked, p)
+        };
+        let (by_copies, p) = asked(true);
+        assert_eq!(by_copies, [(false, false)], "one keeper, no netns, no network tried");
+        assert!(!p.ns.netns() && p.redirect.is_err(), "{:?}", p.ns);
+        let (taken, p) = asked(false);
+        assert_eq!(taken[0], (true, true), "the usual way: a netns and its network first");
+        assert!(p.ns.netns());
     }
 
     /// Each of §Tiers' rows from what a stand-in system would show: the probe says why in the words of

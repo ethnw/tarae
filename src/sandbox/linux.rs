@@ -499,7 +499,7 @@ pub fn confine(
     serve: Result<(), String>,
 ) -> io::Result<Confine> {
     let ns = keeper.map_or(super::tier::Ns::NONE, |k| k.ns);
-    let net = ns.run_net(serve.is_ok());
+    let net = ns.run_net(serve.is_ok(), super::supervisor::copies());
     let tier = match keeper {
         Some(_) => super::tier::Tier::of(ns, serve.is_ok()).said(),
         None => "",
@@ -518,7 +518,7 @@ pub fn confine(
 pub(super) fn ruleset_for(net: RunNet, abi: u32) -> io::Result<Ruleset> {
     match net {
         RunNet::Own => Ruleset::new_own_network(abi),
-        RunNet::Served | RunNet::Routed | RunNet::Plain => Ruleset::new(abi),
+        RunNet::Served | RunNet::Routed | RunNet::Plain | RunNet::Copied => Ruleset::new(abi),
     }
 }
 

@@ -74,6 +74,13 @@ that need the rest of the suite beside them show up with `--bin tarae` alone. A 
 only: `cargo xtask linux --platform linux/amd64 …` runs on that one (its own target and toolchains) — emulated on
 an aarch64 VM, slow and liable to stall; a Docker on a real x86_64 machine (`DOCKER_HOST`) is better.
 
+`cargo xtask linux --docker-default test|clippy` runs the container as a dev container usually is, without the
+`CAP_SYS_PTRACE` the checks otherwise add: Docker's default profile refuses `pidfd_getfd`, so the sandbox serves its
+runs by its own copies of their sockets (tier C). It doesn't go with `--userns`. Killed or interrupted (SIGTERM,
+SIGINT, SIGHUP), `cargo xtask linux` kills its container before it exits — a `timeout` around it ends the run, not
+just the client. A sandbox test that could wait for good has a watchdog (`sandbox::watchdog`): past its limit it
+ends the test binary, saying which test and what it waited for.
+
 The sandbox's per-run cgroups (step 6g) are tested with `cargo xtask linux --userns --cgroup …`: the container
 runs in the machine's cgroup namespace with `/sys/fs/cgroup` mounted writable, so the tests can stand a folder in
 for the user's systemd manager. That gives the container's root the machine's **whole** cgroup hierarchy — it can

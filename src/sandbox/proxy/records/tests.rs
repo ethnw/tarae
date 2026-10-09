@@ -33,12 +33,48 @@ fn respond(q: &[u8], says: &Says, udp: bool) -> Vec<u8> {
     m
 }
 
+/// How many ports `one_port` tries.
+const PORT_TRIES: usize = 64;
+
+/// A loopback port free for both UDP and TCP, bound for both: UDP's picked by the kernel, then TCP's on the same
+/// number (`tcp`: the bind) — taken there (another test's TCP socket holds that number: only the UDP one was free),
+/// the pair let go and tried again on another.
+fn one_port(
+    mut tcp: impl FnMut(SocketAddr) -> std::io::Result<std::net::TcpListener>,
+) -> (UdpSocket, std::net::TcpListener) {
+    for _ in 0..PORT_TRIES {
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let at = udp.local_addr().unwrap();
+        match tcp(at) {
+            Ok(l) => return (udp, l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => panic!("TCP on {at}: {e}"),
+        }
+    }
+    panic!("no loopback port free for both UDP and TCP in {PORT_TRIES} tries");
+}
+
+/// A port of the stand-in's is free for both protocols: where TCP finds the number UDP got taken — here, the first
+/// three times — the pair goes and another is tried, never failing the test (the flake: another test's TCP socket
+/// held the number, 2026-10-10).
+#[test]
+fn the_stand_ins_port_is_free_for_both() {
+    let mut taken = 3;
+    let (udp, tcp) = one_port(|at| match taken {
+        0 => std::net::TcpListener::bind(at),
+        _ => {
+            taken -= 1;
+            Err(std::io::ErrorKind::AddrInUse.into())
+        }
+    });
+    assert_eq!((taken, udp.local_addr().unwrap().port()), (0, tcp.local_addr().unwrap().port()));
+}
+
 /// A stand-in nameserver on a loopback port of its own (UDP and TCP): what it says, and how many questions came over
 /// each (UDP, TCP). `silent`: it answers nothing over UDP.
 fn nameserver(says: Says, silent: bool) -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let (udp, tcp) = one_port(std::net::TcpListener::bind);
     let at = udp.local_addr().unwrap();
-    let tcp = std::net::TcpListener::bind(at).unwrap();
     let (by_udp, by_tcp) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let (n, s) = (by_udp.clone(), says.clone());
     std::thread::spawn(move || {

@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -66,7 +66,7 @@ enum What {
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
 
 /// `--cgroup` (6g): the container in the machine's cgroup namespace (`--cgroupns host`), the hierarchy writable, and
 /// a folder under the container's own cgroup made first, as root — as systemd's `Delegate=yes` makes one — for the
@@ -131,6 +131,54 @@ fn userns(args: &[String]) -> Result<(Option<Userns>, &[String])> {
     }
 }
 
+/// `--docker-default` (6f′'s M8b): the container exactly as `docker run` makes one — Docker's default seccomp and
+/// AppArmor profiles, and no `--cap-add SYS_PTRACE` either, so `pidfd_getfd` is refused as in a dev container
+/// started the usual way. Not with `--userns` (which lifts those profiles). Leading, or right after `--userns`'s
+/// place: the flag and the arguments after it.
+fn docker_default(args: &[String]) -> (bool, &[String]) {
+    match args.split_first() {
+        Some((d, rest)) if d == "--docker-default" => (true, rest),
+        _ => (false, args),
+    }
+}
+
+/// `docker run`'s arguments without `--cap-add SYS_PTRACE` (`on`: `--docker-default`) — wherever it is among the
+/// options (`--cap-add SYS_PTRACE` or `--cap-add=SYS_PTRACE`), nothing else changed. An error where an option still
+/// gives the capability (`--cap-add ALL`, `--privileged`): the run would test the full way while saying it doesn't.
+fn without_ptrace(a: Vec<String>, on: bool) -> Result<Vec<String>> {
+    if !on {
+        return Ok(a);
+    }
+    // (the options: before the image, `sh`, `-ec` and the script — the last four)
+    let options = a.len().saturating_sub(4);
+    let (mut out, mut i) = (Vec::with_capacity(a.len()), 0);
+    while i < a.len() {
+        match (i < options, a[i].as_str(), a.get(i + 1).map(String::as_str)) {
+            (true, "--cap-add", Some("SYS_PTRACE")) => i += 2,
+            (true, "--cap-add=SYS_PTRACE", _) => i += 1,
+            _ => {
+                out.push(a[i].clone());
+                i += 1;
+            }
+        }
+    }
+    // (what Docker takes for it: any case, with or without `CAP_`, or all of them)
+    let ptrace = |v: &str| {
+        let v = v.to_ascii_uppercase();
+        matches!(v.strip_prefix("CAP_").unwrap_or(&v), "SYS_PTRACE" | "ALL")
+    };
+    let opts = &out[..out.len().saturating_sub(4)];
+    let still = opts.iter().enumerate().any(|(i, o)| {
+        o == "--privileged"
+            || o.strip_prefix("--cap-add=").is_some_and(ptrace)
+            || o == "--cap-add" && opts.get(i + 1).is_some_and(|v| ptrace(v))
+    });
+    if still {
+        return Err(format!("--docker-default: an option still gives SYS_PTRACE — {opts:?}"));
+    }
+    Ok(out)
+}
+
 /// A leading `--image NAME`, and the arguments after it: the checks run in that image instead of `rust:<pin>` —
 /// one built from it with the tools a measurement runs (step 6e′'s M5: `target/sb/m5/m5-image.sh`). It runs the
 /// same script, as root, with the same volumes: its `/usr/local/rustup` and the registry are the volumes'.
@@ -182,6 +230,56 @@ fn container_name(prefix: Option<&str>, what: &str) -> Option<String> {
             && !p.starts_with(['.', '-'])
     })?;
     Some(format!("{p}-{what}"))
+}
+
+/// The signals that end the checks' container with xtask: an interrupt (Ctrl-C), a termination (`timeout`, a
+/// stopped run of tarae's), the terminal's hangup.
+const ENDING: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+/// Where `ENDING`'s handler writes the signal it took (a pipe's write end; -1: none yet).
+static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// `ENDING`'s handler: the signal's number, one byte, on `SIGNALLED`'s pipe — all a handler may do.
+extern "C" fn took(sig: libc::c_int) {
+    let fd = SIGNALLED.load(std::sync::atomic::Ordering::Relaxed);
+    let b = sig as u8;
+    // SAFETY: write(2) is async-signal-safe; one byte of the stack's.
+    unsafe { libc::write(fd, (&raw const b).cast(), 1) };
+}
+
+/// From here on, an `ENDING` signal ends the checks' container (`docker kill <name>`, `--rm` removes it) and then
+/// xtask (128 + the signal, as a shell says a killed process) — killed alone, xtask left `docker run`'s client
+/// living and the container running: a `timeout` around it ended only xtask, and a pipe after it waited on (6f′).
+/// A handler for the whole process (whichever thread takes the signal; a child's exec resets it) writes the signal on
+/// a pipe, and a thread of its own reads it and does the rest.
+fn stop_on_signal(name: String) {
+    let Ok((mut r, w)) = std::io::pipe() else { return };
+    SIGNALLED.store(std::os::fd::IntoRawFd::into_raw_fd(w), std::sync::atomic::Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let mut sig = [0u8];
+        if std::io::Read::read_exact(&mut r, &mut sig).is_err() {
+            return;
+        }
+        let sig = i32::from(sig[0]);
+        eprintln!("signal {sig}: ending the container {name}");
+        let _ = Command::new("docker").args(killing(&name)).stdout(std::process::Stdio::null()).status();
+        std::process::exit(128 + sig);
+    });
+    // SAFETY: a zeroed sigaction with its handler and an empty mask, for signals that may have one.
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = took as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        act.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut act.sa_mask);
+        for s in ENDING {
+            libc::sigaction(s, &act, std::ptr::null_mut());
+        }
+    }
+}
+
+/// `docker`'s arguments that end container `name` at once.
+fn killing(name: &str) -> [String; 2] {
+    ["kill".into(), name.into()]
 }
 
 /// `docker run`'s arguments with `--name NAME` after `run` (None: as they are).
@@ -262,7 +360,13 @@ fn what(args: &[String]) -> Result<What> {
 
 pub fn run(args: &[String]) -> Result<()> {
     let (set, args) = envs(args)?;
+    let (stock, args) = docker_default(args);
     let (ns, args) = userns(args)?;
+    let (stock_after, args) = docker_default(args);
+    let stock = stock || stock_after;
+    if stock && ns.is_some() {
+        return Err(format!("--docker-default and --userns: one or the other — {USAGE}"));
+    }
     let (cgroups, args) = cgroup(args);
     let (named, args) = image_named(args)?;
     let (platform, what) = ask(args)?;
@@ -301,16 +405,30 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     };
     let mut docker = Command::new("docker");
-    let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "checks");
+    // (always a name — tarae's prefix's, else one of this process's own: a signal ends the container by it)
+    let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "checks")
+        .unwrap_or_else(|| format!("tarae-xtask-{}-checks", std::process::id()));
+    stop_on_signal(name.clone());
+    let name = Some(name);
     let args = with_image(docker_args(&root, tree, &pin, platform, &what), named.as_deref());
     let args = with_userns(with_envs(args, &set), ns);
     if let Some(i) = &named {
         eprintln!("--image: the checks run in {i}");
     }
-    // (the name last: `with_cgroup` puts its options after `run --rm --cap-add SYS_PTRACE`, counted unnamed)
-    docker.args(with_name(with_cgroup(args, cgroups), name));
+    // (the name last: `with_cgroup` puts its options after `run --rm --cap-add SYS_PTRACE`, counted unnamed; then
+    // `--docker-default` takes the capability out)
+    docker.args(with_name(without_ptrace(with_cgroup(args, cgroups), stock)?, name));
     if let Some(u) = ns {
         eprintln!("--userns: the container's own seccomp and AppArmor profiles lifted ({u:?})");
+    }
+    if stock {
+        let version = Command::new("docker").args(["version", "--format", "{{.Server.Version}}"]).output();
+        let version =
+            version.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        eprintln!(
+            "--docker-default: Docker {version}'s default seccomp and AppArmor profiles, no SYS_PTRACE — \
+             pidfd_getfd refused"
+        );
     }
     if cgroups {
         eprintln!("--cgroup: the container in the machine's cgroup namespace, the hierarchy writable");
@@ -1222,6 +1340,78 @@ fn quoted(a: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The scene of `a_signal_ends_the_checks_container`, in a process of its own: as `run` ends —
+    /// `stop_on_signal` for the container, then `docker run --name …` waited for — with the stand-in `docker` its
+    /// parent put first on PATH.
+    #[test]
+    #[ignore = "run by a_signal_ends_the_checks_container in a process of its own"]
+    fn signalled_scene() {
+        let Ok(name) = std::env::var("XTASK_SCENE_NAME") else { return };
+        stop_on_signal(name.clone());
+        let st = Command::new("docker").args(["run", "--rm", "--name", &name, "rust:1"]).status();
+        println!("scene: docker run ended unsignalled: {st:?}");
+    }
+
+    /// A signal to xtask — `timeout`'s SIGTERM, Ctrl-C's SIGINT — ends the checks' container by its name (`docker
+    /// kill`), then xtask itself, 128 + the signal; killed alone, xtask left `docker run`'s client and the container
+    /// going (6f′). A stand-in `docker` (a script in the test's own folder, first on PATH) logs its calls; its `run`
+    /// waits until its `kill` comes. The scene runs in a process of its own (signals, handlers: not this binary's).
+    #[test]
+    fn a_signal_ends_the_checks_container() {
+        let dir = std::env::temp_dir().join(format!("xtask-signal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("docker");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho \"$*\" >> \"$FAKE_DIR/log\"\ncase \"$1\" in\n  run) sleep 30 & echo $! > \"$FAKE_DIR/run.pid\"; \
+             wait ;;\n  kill) kill \"$(cat \"$FAKE_DIR/run.pid\")\" ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+        let log = dir.join("log");
+        for sig in [libc::SIGTERM, libc::SIGINT] {
+            let name = format!("xtask-test-{sig}-checks");
+            let _ = std::fs::remove_file(&log);
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "linux::tests::signalled_scene", "--ignored", "--nocapture"])
+                .env("PATH", &path)
+                .env("FAKE_DIR", &dir)
+                .env("XTASK_SCENE_NAME", &name)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let logged = || std::fs::read_to_string(&log).unwrap_or_default();
+            let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !logged().contains(&format!("run --rm --name {name}")) {
+                assert!(std::time::Instant::now() < by, "the scene's docker run never came: {}", logged());
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // SAFETY: a signal to a child of ours.
+            unsafe { libc::kill(child.id() as i32, sig) };
+            let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let st = loop {
+                if let Some(st) = child.try_wait().unwrap() {
+                    break st;
+                }
+                if std::time::Instant::now() > by {
+                    let _ = child.kill();
+                    panic!("signal {sig}: the scene didn't end within 10 s — {}", logged());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            assert_eq!(st.code(), Some(128 + sig), "signal {sig}: ended so — {}", logged());
+            assert!(
+                logged().lines().any(|l| l == format!("kill {name}")),
+                "the container ended by name: {}",
+                logged()
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// `--userns` lifts the container's own seccomp, AppArmor and masked paths (tier A+), `--userns=masked`
     /// keeps `/proc` masked (tier A), and without it the container is Docker's defaults: no `--security-opt`.
     /// Its options go after `--cap-add SYS_PTRACE`, before the image, with the rest kept.
@@ -1250,6 +1440,49 @@ mod tests {
         assert_eq!(full[full.len() - 4..], base[base.len() - 4..], "the image and its script last");
         assert_eq!(full.len(), base.len() + 6);
         assert!(!full.iter().any(|a| a == "--privileged" || a.contains("SYS_ADMIN")), "{full:?}");
+    }
+
+    /// `--docker-default` (6f′'s M8b): the container as `docker run` makes one — `--cap-add SYS_PTRACE` taken out
+    /// and nothing else changed (no `--security-opt`, the image and its script as they were, `--cgroup`'s options
+    /// kept), leading or in `--userns`'s place; without it the capability stays.
+    #[test]
+    fn docker_default_takes_only_sys_ptrace_away() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let on = args(&["--docker-default", "test", "sandbox"]);
+        assert_eq!(docker_default(&on), (true, &on[1..]));
+        let off = args(&["test"]);
+        assert_eq!(docker_default(&off), (false, &off[..]));
+        let base = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Both);
+        assert_eq!(without_ptrace(base.clone(), false), Ok(base.clone()));
+        let stock = without_ptrace(base.clone(), true).unwrap();
+        assert_eq!(&stock[..2], ["run", "--rm"]);
+        assert_eq!((stock.len(), &stock[2..]), (base.len() - 2, &base[4..]), "only the capability gone");
+        assert!(!stock.iter().any(|a| a.contains("SYS_PTRACE") || a == "--security-opt"), "{stock:?}");
+        let cg = without_ptrace(with_cgroup(base.clone(), true), true).unwrap();
+        assert_eq!(&cg[..4], ["run", "--rm", "--cgroupns", "host"], "--cgroup's options kept");
+    }
+
+    /// `--docker-default` takes the capability by value — wherever it stands among the options, in either form —
+    /// and fails, saying so, where an option still gives it: a run that kept it would test the full way under a
+    /// line saying `pidfd_getfd` is refused (the review: it took it only from one place, silently).
+    #[test]
+    fn docker_default_fails_where_sys_ptrace_stays() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let tail = ["rust:1", "sh", "-ec", "echo SYS_PTRACE"];
+        let at = |opts: &[&str]| args(&[&["run", "--rm"], opts, &tail[..]].concat());
+        // (moved: after other options; and the `=` form)
+        let moved = at(&["-e", "X=1", "--cap-add", "SYS_PTRACE", "-v", "a:b"]);
+        assert_eq!(without_ptrace(moved, true), Ok(at(&["-e", "X=1", "-v", "a:b"])), "the script left alone");
+        assert_eq!(without_ptrace(at(&["--cap-add=SYS_PTRACE"]), true), Ok(at(&[])));
+        for kept in [
+            &["--cap-add", "ALL"][..],
+            &["--cap-add", "cap_sys_ptrace"],
+            &["--cap-add=all"],
+            &["--privileged"],
+        ] {
+            let e = without_ptrace(at(kept), true).unwrap_err();
+            assert!(e.contains("still gives SYS_PTRACE"), "{kept:?}: {e}");
+        }
     }
 
     /// `--cgroup` (6g): the container in the machine's cgroup namespace with the hierarchy writable, and the script

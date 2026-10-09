@@ -870,7 +870,6 @@ impl Keeper {
 /// A run the keeper started (`Keeper::start`).
 pub struct Started {
     pub spawned: crate::spawn::Spawned,
-    pub pidfd: Arc<OwnedFd>,
     /// The id of the cgroup of its own it started in (6g) — None: its keeper's. Its rule's level is its keeper's
     /// (`RunsIn.level`). Nothing reads it before 6d but tests.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -891,7 +890,7 @@ impl Keeper {
         rules: BorrowedFd,
         net: RunNet,
     ) -> io::Result<Started> {
-        if matches!(net, RunNet::Served | RunNet::Routed) {
+        if matches!(net, RunNet::Served | RunNet::Routed | RunNet::Copied) {
             return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
         }
         let no_userns = super::tier::runs_refuse_userns();
@@ -967,9 +966,9 @@ impl Keeper {
         fds.extend(handoff.as_ref().map(|(_, theirs)| theirs.as_fd()));
         let ours = handoff.as_ref().map(|(ours, _)| ours.clone());
         let hold = ours.clone().filter(|_| req.held);
-        let (pid, pidfd, cgroup) = self.run(req, &fds, hold)?;
+        let (pid, _pidfd, cgroup) = self.run(req, &fds, hold)?;
         let spawned = crate::spawn::Spawned { pid, stdout: Some(out_r), stderr: Some(err_r) };
-        Ok((Started { spawned, pidfd, cgroup: (cgroup != 0).then_some(cgroup) }, ours))
+        Ok((Started { spawned, cgroup: (cgroup != 0).then_some(cgroup) }, ours))
     }
 }
 
@@ -988,10 +987,10 @@ fn stream_pair() -> io::Result<(Arc<OwnedFd>, OwnedFd)> {
 
 impl Keeper {
     /// `start`, served: the run's supervisor started first (`supervisor::serve`: `policy` as it is now, its
-    /// refusals out on `refused`), then the run with the child's end of a handoff pair; once its filter is on,
-    /// its listener's number comes on that pair, tarae takes the listener from the run's process
-    /// (`pidfd_getfd`, on a thread of its own — the main loop doesn't wait for it), hands it to the supervisor
-    /// and says one byte back: the run goes on to its exec. Anything failing there closes the pair, and the run
+    /// refusals out on `refused`), then the run with the child's end of a handoff pair; once its filter is made,
+    /// its listener comes on that pair (`SCM_RIGHTS`, `hand_over` — no `pidfd_getfd`, which Docker's default profile
+    /// refuses), read on a thread of its own (the main loop doesn't wait for it), handed to the supervisor, and
+    /// one byte said back: the run goes on to its exec. Anything failing there closes the pair, and the run
     /// fails at its handoff. `net`: `Served`, or `Routed` (its own sockets in the session's netns).
     pub fn start_served(
         &self,
@@ -1002,30 +1001,21 @@ impl Keeper {
         policy: Arc<super::Policy>,
         refused: std::sync::mpsc::Sender<super::Denial>,
     ) -> io::Result<Started> {
-        if !matches!(net, RunNet::Served | RunNet::Routed) {
+        if !matches!(net, RunNet::Served | RunNet::Routed | RunNet::Copied) {
             return Err(io::Error::other("a run not served starts on its own (start)"));
         }
         // (6d: where its session has the TPROXY network, beyond is the run's own socket marked as its run's)
         let marks = lock(&self.network).as_ref().map(|n| n.marks.clone());
-        let to = super::supervisor::serve(policy, net, refused, marks)?;
+        let to = super::supervisor::serve(policy, net, refused, marks, self.pid)?;
         let (started, ours) = self.start_with(cmd, comm, rules, net, super::tier::runs_refuse_userns())?;
         let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
-        let pidfd = started.pidfd.clone();
         crate::event::thread("tarae-handoff", move || {
-            let mut n = [0u8; 4];
-            // SAFETY: a read into a buffer of its size, a send of one byte, on our end of the pair.
-            unsafe {
-                if libc::read(ours.as_raw_fd(), n.as_mut_ptr().cast(), 4) != 4 {
-                    return;
-                }
-                let Ok(listener) = super::supervisor::pidfd_getfd(&pidfd, i32::from_le_bytes(n)) else {
-                    return;
-                };
-                if to.send(listener).is_err() {
-                    return;
-                }
-                libc::send(ours.as_raw_fd(), [1u8].as_ptr().cast(), 1, libc::MSG_NOSIGNAL);
+            let Ok(listener) = recv_listener(&ours) else { return };
+            if to.send(listener).is_err() {
+                return;
             }
+            // SAFETY: a send of one byte on our end of the pair.
+            unsafe { libc::send(ours.as_raw_fd(), [1u8].as_ptr().cast(), 1, libc::MSG_NOSIGNAL) };
         });
         Ok(started)
     }
@@ -2252,11 +2242,11 @@ fn own_usage() -> (u64, u64) {
     (kb("Rss:"), kb("Pss:"))
 }
 
-/// A run's child, after the keeper's `clone3` or fork: its channel closed, dumpable again (finding 1: tarae takes
-/// its listener with `pidfd_getfd`, which a non-dumpable process refuses without a namespace of tarae's), a session
-/// of its own, its stdio, its folder, its name (what Landlock's audit names), every signal unblocked, its Landlock
-/// rules, its seccomp filter — served, its listener's number handed to tarae and one byte back; held, one byte once
-/// tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno) and in its stderr,
+/// A run's child, after the keeper's `clone3` or fork: its channel closed, dumpable again (finding 1: tarae reads a
+/// served run's memory through `/proc/<tid>/mem`, which a non-dumpable process refuses without a namespace of
+/// tarae's), a session of its own, its stdio, its folder, its name (what Landlock's audit names), every signal
+/// unblocked, its Landlock rules, its seccomp filter — served, put on by a helper thread and its listener sent to
+/// tarae (`hand_over`), one byte back; held, one byte once tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno) and in its stderr,
 /// and it exits 127.
 ///
 /// Nothing here allocates or frees: a raw `clone3`'s child has none of fork's bookkeeping — glibc's malloc locks
@@ -2319,19 +2309,20 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
     if let Err(e) = crate::landlock::restrict_self(ruleset.as_fd()) {
         fail(Step::Landlock, e.raw_os_error().unwrap_or(libc::EIO));
     }
-    let listener = match exec.filter.apply() {
-        Ok(l) => l,
-        Err(e) => fail(Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
-    };
     let handoff = fds.get(4);
-    if let (Some(l), Some(handoff)) = (&listener, handoff) {
-        let n = (l.as_raw_fd() as u32).to_le_bytes();
-        // SAFETY: a write of a buffer we own on the handoff socket (not a call the filter hands to tarae: no
-        // address).
-        if unsafe { libc::write(handoff.as_raw_fd(), n.as_ptr().cast(), n.len()) } != 4 {
-            fail(Step::Handoff, errno());
-        }
-    }
+    // (served: the filter on a helper thread, its listener sent to tarae before the filter is this thread's —
+    // `hand_over`; else on this thread)
+    let listener = match (run.served(), handoff) {
+        (true, Some(h)) => match hand_over(exec, h.as_raw_fd()) {
+            Ok(l) => Some(l),
+            Err((step, e)) => fail(step, e),
+        },
+        (true, None) => fail(Step::Request, libc::EINVAL),
+        (false, _) => match exec.filter.apply() {
+            Ok(l) => l,
+            Err(e) => fail(Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
+        },
+    };
     // (a byte once tarae has its listener, served; one once tarae knows its pid, held — in either order)
     let bytes = run.served() as usize + run.held as usize;
     if bytes > 0 {
@@ -2368,6 +2359,8 @@ struct Exec {
     envp_p: Vec<*const libc::c_char>,
     /// Its filter, for its `net` (`keeper::mode`'s), made; the child only puts it on.
     filter: crate::seccomp::Filter,
+    /// The stack of the thread that puts a served filter on and makes its listener (`hand_over`).
+    stack: Box<[u8]>,
 }
 
 impl Exec {
@@ -2378,6 +2371,7 @@ impl Exec {
             RunNet::Routed => crate::seccomp::Mode::Routed,
             RunNet::Own => crate::seccomp::Mode::OwnNetwork,
             RunNet::Plain => crate::seccomp::Mode::Plain,
+            RunNet::Copied => crate::seccomp::Mode::Copied,
         };
         let filter = crate::seccomp::Filter::new(mode, run.no_userns)?;
         let c = |s: &[u8]| CString::new(s).unwrap_or_default();
@@ -2396,7 +2390,178 @@ impl Exec {
             argv_p,
             envp_p,
             filter,
+            stack: vec![0u8; HELPER_STACK].into_boxed_slice(),
         })
+    }
+}
+
+/// The helper thread's stack (`hand_over`): it puts the filter on and makes two calls.
+const HELPER_STACK: usize = 64 << 10;
+
+/// What the helper thread says the main one (`hand_over`): its listener's number, or `-errno` — `WAITING` until then.
+static HELPER_LISTENER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(WAITING);
+/// 0: before the handoff; 1: the listener is tarae's, sync; 2: synced (`HELPER_SYNCED` says how).
+static HELPER_STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// `TSYNC`'s answer: 0, or `-errno` (a thread it couldn't sync: `-ESRCH`).
+static HELPER_SYNCED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+const WAITING: i32 = i32::MIN;
+
+/// A served run's filter and listener, its listener handed to tarae with no `pidfd_getfd` (6f′, G1 (b) — Docker's
+/// default profile refuses that call; measured in M8b on 6.1, 6.8 and 7.3, `target/sb/m8b/`). Once the filter is on,
+/// a `sendmsg` goes to the listener, which nobody reads before tarae has it — so the filter goes on a helper thread of
+/// the child (`helper`) first: the main thread, still unfiltered, sends the listener on the handoff socket
+/// (`SCM_RIGHTS`), and the helper then syncs it onto its filter (`SECCOMP_FILTER_FLAG_TSYNC` with an allow-all filter
+/// on top: the main thread gets the helper's whole chain, `no_new_privs` with it). The child's exec ends the helper.
+/// No allocation: the stack is `Exec`'s, the rest is raw calls and atomics (a raw clone's child — `child`).
+fn hand_over(exec: &Exec, handoff: RawFd) -> Result<OwnedFd, (Step, i32)> {
+    use std::sync::atomic::Ordering::SeqCst;
+    HELPER_LISTENER.store(WAITING, SeqCst);
+    HELPER_STEP.store(0, SeqCst);
+    let top = (exec.stack.as_ptr() as usize + exec.stack.len()) & !15;
+    let flags = libc::CLONE_VM
+        | libc::CLONE_FS
+        | libc::CLONE_FILES
+        | libc::CLONE_SIGHAND
+        | libc::CLONE_THREAD
+        | libc::CLONE_SYSVSEM;
+    // SAFETY: a thread on a stack of its own that outlives it (`Exec` lives until the exec, which ends the thread);
+    // its argument is `exec`, read only. Without `CLONE_SETTLS` it shares this thread's TLS: it calls nothing that
+    // touches it but `errno` (which this thread doesn't read meanwhile).
+    let r = unsafe {
+        libc::clone(helper, top as *mut libc::c_void, flags, (exec as *const Exec).cast_mut().cast())
+    };
+    if r < 0 {
+        return Err((Step::Seccomp, errno()));
+    }
+    let l = loop {
+        match HELPER_LISTENER.load(SeqCst) {
+            WAITING => {
+                // SAFETY: plain call.
+                unsafe { libc::sched_yield() };
+            }
+            l => break l,
+        }
+    };
+    if l < 0 {
+        return Err((Step::Seccomp, -l));
+    }
+    // SAFETY: the helper made it, in the descriptors both threads share; ours from here.
+    let listener = unsafe { OwnedFd::from_raw_fd(l) };
+    if !send_listener(handoff, l) {
+        return Err((Step::Handoff, errno()));
+    }
+    HELPER_STEP.store(1, SeqCst);
+    while HELPER_STEP.load(SeqCst) != 2 {
+        // SAFETY: plain call.
+        unsafe { libc::sched_yield() };
+    }
+    match HELPER_SYNCED.load(SeqCst) {
+        0 => Ok(listener),
+        e => Err((Step::Seccomp, -e)),
+    }
+}
+
+/// The helper thread (`hand_over`): the filter put on itself and its listener said, then — once that's tarae's — the
+/// main thread synced onto it.
+extern "C" fn helper(arg: *mut libc::c_void) -> libc::c_int {
+    use std::sync::atomic::Ordering::SeqCst;
+    // SAFETY: `hand_over`'s `Exec`, alive until the exec.
+    let exec = unsafe { &*arg.cast::<Exec>() };
+    let l = match exec.filter.apply() {
+        Ok(Some(l)) => std::os::fd::IntoRawFd::into_raw_fd(l),
+        Ok(None) => -libc::EINVAL,
+        Err(e) => -e.raw_os_error().unwrap_or(libc::EIO),
+    };
+    HELPER_LISTENER.store(l, SeqCst);
+    if l < 0 {
+        return 0;
+    }
+    while HELPER_STEP.load(SeqCst) != 1 {
+        // SAFETY: plain call.
+        unsafe { libc::sched_yield() };
+    }
+    let mut allow = [libc::sock_filter {
+        code: (libc::BPF_RET | libc::BPF_K) as u16,
+        jt: 0,
+        jf: 0,
+        k: libc::SECCOMP_RET_ALLOW,
+    }];
+    let prog = libc::sock_fprog { len: 1, filter: allow.as_mut_ptr() };
+    // SAFETY: a program that outlives the call; every thread of the process synced onto this one's filters.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_TSYNC,
+            &raw const prog,
+        )
+    };
+    let synced = match r {
+        0 => 0,
+        r if r > 0 => -libc::ESRCH,
+        _ => -errno(),
+    };
+    HELPER_SYNCED.store(synced, SeqCst);
+    HELPER_STEP.store(2, SeqCst);
+    0
+}
+
+/// The listener `l` sent on `handoff` with one byte (`SCM_RIGHTS`) — the child's half of the handoff; nothing
+/// allocated. False: not sent (`errno` says why).
+fn send_listener(handoff: RawFd, l: RawFd) -> bool {
+    let mut byte = *b"L";
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut control = [0u64; 4];
+    // SAFETY: a zeroed header pointed at buffers of ours, the one control message written within its buffer
+    // (`CMSG_SPACE` of one descriptor: 24 bytes, of 32).
+    unsafe {
+        let mut m: libc::msghdr = std::mem::zeroed();
+        m.msg_iov = &raw mut iov;
+        m.msg_iovlen = 1;
+        m.msg_control = control.as_mut_ptr().cast();
+        m.msg_controllen = libc::CMSG_SPACE(4) as _;
+        let c = libc::CMSG_FIRSTHDR(&m);
+        (*c).cmsg_level = libc::SOL_SOCKET;
+        (*c).cmsg_type = libc::SCM_RIGHTS;
+        (*c).cmsg_len = libc::CMSG_LEN(4) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(c).cast::<RawFd>(), l);
+        loop {
+            match libc::sendmsg(handoff, &m, libc::MSG_NOSIGNAL) {
+                1 => return true,
+                _ if errno() == libc::EINTR => {}
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// tarae's half of the handoff: the listener a served run's child sent (`send_listener`) — close-on-exec.
+fn recv_listener(ours: &OwnedFd) -> io::Result<OwnedFd> {
+    let mut byte = [0u8];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut control = [0u64; 4];
+    // SAFETY: a zeroed header pointed at buffers of ours; the control data read only within what the kernel wrote,
+    // its one descriptor taken once.
+    unsafe {
+        let mut m: libc::msghdr = std::mem::zeroed();
+        m.msg_iov = &raw mut iov;
+        m.msg_iovlen = 1;
+        m.msg_control = control.as_mut_ptr().cast();
+        m.msg_controllen = std::mem::size_of_val(&control) as _;
+        let n = loop {
+            let n = libc::recvmsg(ours.as_raw_fd(), &mut m, libc::MSG_CMSG_CLOEXEC);
+            if n >= 0 || errno() != libc::EINTR {
+                break n;
+            }
+        };
+        if n != 1 {
+            return Err(io::Error::other("the run's child sent no listener"));
+        }
+        let c = libc::CMSG_FIRSTHDR(&m);
+        if c.is_null() || (*c).cmsg_level != libc::SOL_SOCKET || (*c).cmsg_type != libc::SCM_RIGHTS {
+            return Err(io::Error::other("the run's child's message carried no descriptor"));
+        }
+        Ok(OwnedFd::from_raw_fd(std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<RawFd>())))
     }
 }
 
@@ -3291,6 +3456,16 @@ mod tests {
                 )
             }
             "listen" => return helper_listen(),
+            // (6f′, by copies: descriptors passed, `accept`, a port bound again, a socket handed in)
+            "passfds" => helper_pass_fds(),
+            "accepts" => helper_accepts(),
+            "rebinds" => helper_rebinds(),
+            "handed" => helper_handed(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "latepass" => helper_late_pass(),
+            "signals" => helper_signals(),
+            "passanon" => helper_pass_anon(),
+            "closes" => helper_closes(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "pairsend" => helper_pair_send(&std::env::var("TARAE_TO").unwrap_or_default()),
             "connect" => helper_connect(&std::env::var("TARAE_TO").unwrap_or_default()),
             "origin" => helper_origin(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swap" => helper_swap(&std::env::var("TARAE_TO").unwrap_or_default()),
@@ -3757,6 +3932,340 @@ mod tests {
         let mut reply = String::new();
         let _ = std::io::BufReader::new(&s).read_line(&mut reply);
         format!("addr={} reply={}", at.ip(), reply.trim_end())
+    }
+
+    /// `passfds` (6f′): a pipe's write end and a socket of a pair passed over a `socketpair` (`SCM_RIGHTS`, one
+    /// message), received, and each written through: `pipe=<what the pipe's read end got> sock=<what the pair's
+    /// other end got>`, or where it failed.
+    fn helper_pass_fds() -> String {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        let (a, b) = match UnixStream::pair() {
+            Ok(p) => p,
+            Err(e) => return format!("socketpair={}", tried::<()>(Err(e))),
+        };
+        let (mut r, w) = match std::io::pipe() {
+            Ok(p) => p,
+            Err(e) => return format!("pipe={}", tried::<()>(Err(e))),
+        };
+        let (x, mut y) = match UnixStream::pair() {
+            Ok(p) => p,
+            Err(e) => return format!("socketpair={}", tried::<()>(Err(e))),
+        };
+        let sent: [BorrowedFd; 2] = [w.as_fd(), x.as_fd()];
+        super::super::handed::send_fds(&a, &sent);
+        drop((w, x));
+        let got = super::super::handed::received_fds(&b);
+        let [w2, x2] = <[OwnedFd; 2]>::try_from(got).unwrap_or_else(|g| panic!("{} received", g.len()));
+        let mut w2 = std::fs::File::from(w2);
+        let mut x2 = UnixStream::from(x2);
+        let _ = w2.write_all(b"via-pipe");
+        drop(w2);
+        let _ = x2.write_all(b"via-sock");
+        drop(x2);
+        let mut b8 = [0u8; 8];
+        let piped = match r.read_exact(&mut b8) {
+            Ok(()) => String::from_utf8_lossy(&b8).into_owned(),
+            Err(e) => tried::<()>(Err(e)),
+        };
+        let sock = match y.read_exact(&mut b8) {
+            Ok(()) => String::from_utf8_lossy(&b8).into_owned(),
+            Err(e) => tried::<()>(Err(e)),
+        };
+        format!("pipe={piped} sock={sock}")
+    }
+
+    /// `accepts` (6f′): a listener of its own on `127.0.0.1:$TARAE_PORT` (opened: in tier C a run's own loopback
+    /// listener is this machine's), non-blocking first (`accept4` with nothing waiting: its errno), then a thread
+    /// connecting and sending `hello`, accepted, then nothing coming under a 300 ms `SO_RCVTIMEO` — `nonblock=<errno>
+    /// peer=<its address's ip> got=<what came> timed=<errno> <in time | off>`.
+    fn helper_accepts() -> String {
+        use std::io::{Read, Write};
+        let port = std::env::var("TARAE_PORT").unwrap_or_default();
+        let l = match std::net::TcpListener::bind(format!("127.0.0.1:{port}")) {
+            Ok(l) => l,
+            Err(e) => return format!("bind={}", tried::<()>(Err(e))),
+        };
+        let at = l.local_addr().unwrap();
+        l.set_nonblocking(true).unwrap();
+        let empty = match l.accept() {
+            Ok(_) => "accepted".to_string(),
+            Err(e) => tried::<()>(Err(e)),
+        };
+        l.set_nonblocking(false).unwrap();
+        let timeout = |tv_sec, tv_usec| {
+            let wait = libc::timeval { tv_sec, tv_usec };
+            // SAFETY: a live struct of its size, on our listener.
+            unsafe {
+                libc::setsockopt(
+                    l.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVTIMEO,
+                    (&raw const wait).cast(),
+                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                )
+            };
+        };
+        // (a connection that never comes ends the accept, `EAGAIN`, after 5 s: never a hang)
+        timeout(5, 0);
+        std::thread::spawn(move || {
+            if let Ok(mut s) = std::net::TcpStream::connect(at) {
+                let _ = s.write_all(b"hello");
+            }
+        });
+        let accepted = match l.accept() {
+            Ok((mut s, peer)) => {
+                let mut got = [0u8; 5];
+                let _ = s.read_exact(&mut got);
+                format!("peer={} got={}", peer.ip(), String::from_utf8_lossy(&got))
+            }
+            Err(e) => format!("accept={}", tried::<()>(Err(e))),
+        };
+        // (then nothing coming, 300 ms: its errno, and that it came then — not at once, not after the 5 s)
+        timeout(0, 300_000);
+        let at = Instant::now();
+        let none = tried(l.accept());
+        let took = at.elapsed();
+        let timed = if (Duration::from_millis(250)..Duration::from_secs(2)).contains(&took) {
+            "in time"
+        } else {
+            "off"
+        };
+        format!("nonblock={empty} {accepted} timed={none} {timed}")
+    }
+
+    /// `rebinds` (6f′): a UDP port bound, the socket closed, the same port bound again at once — `again=ok` or its
+    /// errno.
+    fn helper_rebinds() -> String {
+        let first = match std::net::UdpSocket::bind("127.0.0.1:0") {
+            Ok(s) => s,
+            Err(e) => return format!("bind={}", tried::<()>(Err(e))),
+        };
+        let at = first.local_addr().unwrap();
+        drop(first);
+        format!("again={}", tried(std::net::UdpSocket::bind(at)))
+    }
+
+    /// `pairsend` (6f′): the proxy's address `to` connected to (tarae's pair put in the socket's place), a `CONNECT`
+    /// for `$TARAE_HOST` sent with `sendmsg` — a call tarae makes on its copy of the pair's end — and the answer's
+    /// first line read: `reply=<it>`, or the errno where it failed.
+    fn helper_pair_send(to: &str) -> String {
+        let Ok(at) = to.parse::<std::net::SocketAddr>() else { return format!("not an address: {to}") };
+        let s = match std::net::TcpStream::connect_timeout(&at, Duration::from_secs(10)) {
+            Ok(s) => s,
+            Err(e) => return format!("connect={}", tried::<()>(Err(e))),
+        };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+        let host = std::env::var("TARAE_HOST").unwrap_or_default();
+        let mut head = format!("CONNECT {host} HTTP/1.1\r\nHost: {host}\r\n\r\n").into_bytes();
+        let mut iov = libc::iovec { iov_base: head.as_mut_ptr().cast(), iov_len: head.len() };
+        // SAFETY: a zeroed header pointed at a buffer of ours, no address.
+        let sent = unsafe {
+            let mut m: libc::msghdr = std::mem::zeroed();
+            (m.msg_iov, m.msg_iovlen) = (&raw mut iov, 1);
+            libc::sendmsg(s.as_raw_fd(), &m, libc::MSG_NOSIGNAL)
+        };
+        if sent < 0 {
+            return format!("sent={}", io::Error::last_os_error().raw_os_error().unwrap_or(0));
+        }
+        let mut line = String::new();
+        let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
+        format!("reply={}", line.trim_end())
+    }
+
+    /// `closes` (6f′): `to` reached, `hello` written, its answer read, the connection closed — and the run goes on 2 s
+    /// before it says `closed after <answer>` (its peer sees the end while it's alive).
+    fn helper_closes(to: &str) -> String {
+        let s = match std::net::TcpStream::connect(to) {
+            Ok(s) => s,
+            Err(e) => return format!("connect={}", tried::<()>(Err(e))),
+        };
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = io::Write::write_all(&mut &s, b"hello\n");
+        let mut line = String::new();
+        let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
+        drop(s);
+        std::thread::sleep(Duration::from_secs(2));
+        format!("closed after {}", line.trim())
+    }
+
+    /// `handed` (6f′): a unix socket at `to` connected to, a socket received on it (`SCM_RIGHTS` — one made outside
+    /// the sandbox), and a message sent on that one with `sendmsg` — `sent=ok` or its errno.
+    fn helper_handed(to: &str) -> String {
+        use std::os::unix::net::UnixStream;
+        let s = match UnixStream::connect(to) {
+            Ok(s) => s,
+            Err(e) => return format!("connect={}", tried::<()>(Err(e))),
+        };
+        let Some(h) = super::super::handed::received_fds(&s).into_iter().next() else {
+            return "none handed".into();
+        };
+        let mut byte = *b"x";
+        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        // SAFETY: a zeroed header pointed at a buffer of ours, no address.
+        let sent = unsafe {
+            let mut m: libc::msghdr = std::mem::zeroed();
+            (m.msg_iov, m.msg_iovlen) = (&raw mut iov, 1);
+            libc::sendmsg(h.as_raw_fd(), &m, libc::MSG_NOSIGNAL)
+        };
+        match sent {
+            1 => "sent=ok".into(),
+            _ => format!("sent={}", io::Error::last_os_error().raw_os_error().unwrap_or(0)),
+        }
+    }
+
+    /// `sendmsg` of `data` on `fd` (a call tarae serves on its copy, by copies): `ok`, or its errno.
+    fn sent_on(fd: RawFd, data: &[u8]) -> String {
+        let mut data = data.to_vec();
+        let mut iov = libc::iovec { iov_base: data.as_mut_ptr().cast(), iov_len: data.len() };
+        // SAFETY: a zeroed header pointed at a buffer of ours, no address.
+        let sent = unsafe {
+            let mut m: libc::msghdr = std::mem::zeroed();
+            (m.msg_iov, m.msg_iovlen) = (&raw mut iov, 1);
+            libc::sendmsg(fd, &m, libc::MSG_NOSIGNAL)
+        };
+        match sent {
+            n if n >= 0 => "ok".into(),
+            _ => io::Error::last_os_error().raw_os_error().unwrap_or(0).to_string(),
+        }
+    }
+
+    /// `latepass` (6f′, the review): a socket of a pair passed over another pair (`SCM_RIGHTS`) and closed by the
+    /// sender, left in the receiver's queue a second — held by no process, past the scans' two strikes — then
+    /// received and written through with `sendmsg`: `late=<what its pair's other end got>`, or `sent=<errno>`.
+    fn helper_late_pass() -> String {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        let (Ok((a, b)), Ok((x, mut y))) = (UnixStream::pair(), UnixStream::pair()) else {
+            return "socketpair failed".into();
+        };
+        if let Err(e) = super::super::handed::try_send_fds(&a, &[x.as_fd()]) {
+            return format!("passed={}", tried::<()>(Err(e)));
+        }
+        drop(x);
+        std::thread::sleep(Duration::from_secs(1));
+        let Some(x2) = super::super::handed::received_fds(&b).into_iter().next() else {
+            return "none received".into();
+        };
+        match sent_on(x2.as_raw_fd(), b"late") {
+            ok if ok == "ok" => {}
+            e => return format!("sent={e}"),
+        }
+        let mut got = [0u8; 4];
+        match y.read_exact(&mut got) {
+            Ok(()) => format!("late={}", String::from_utf8_lossy(&got)),
+            Err(e) => format!("read={}", tried::<()>(Err(e))),
+        }
+    }
+
+    /// Signals `accepts_signalled`'s handler counted.
+    static HANDLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" fn counted(_: libc::c_int) {
+        HANDLED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// `signals` (6f′, the review): a blocking `accept` on a unix listener in the project, `SIGUSR1` coming 300 ms in
+    /// and a connection (`hi`) 1 s in — four ways: `restart` (a handler with `SA_RESTART`, sent to the accepting
+    /// thread), `plain` (one without), `timed` (`SA_RESTART`, the listener with a 5 s `SO_RCVTIMEO`), `shared`
+    /// (`SA_RESTART`, sent to the process by a thread that blocks it — another thread there, not blocking it, takes
+    /// it). Each `<how>=<what the connection sent, or the
+    /// accept's errno>/<signals handled>`.
+    fn helper_signals() -> String {
+        let dir = std::env::current_dir().unwrap_or_default();
+        ["restart", "plain", "timed", "shared"]
+            .map(|how| format!("{how}={}", accept_signalled(&dir, how)))
+            .join(" ")
+    }
+
+    fn accept_signalled(dir: &Path, how: &str) -> String {
+        use std::io::{Read, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        HANDLED.store(0, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: a zeroed sigaction set to a handler that only counts.
+        unsafe {
+            let mut act: libc::sigaction = std::mem::zeroed();
+            act.sa_sigaction = counted as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            act.sa_flags = if how == "plain" { 0 } else { libc::SA_RESTART };
+            libc::sigemptyset(&mut act.sa_mask);
+            libc::sigaction(libc::SIGUSR1, &act, std::ptr::null_mut());
+        }
+        let path = dir.join(format!("{how}.sock"));
+        let l = match UnixListener::bind(&path) {
+            Ok(l) => l,
+            Err(e) => return format!("bind:{}", tried::<()>(Err(e))),
+        };
+        if how == "timed" {
+            let wait = libc::timeval { tv_sec: 5, tv_usec: 0 };
+            // SAFETY: a live struct of its size, on our listener.
+            unsafe {
+                libc::setsockopt(
+                    l.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVTIMEO,
+                    (&raw const wait).cast(),
+                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                )
+            };
+        }
+        // SAFETY: plain call.
+        let main = unsafe { libc::pthread_self() };
+        let shared = how == "shared";
+        let poker = std::thread::spawn(move || {
+            // SAFETY: this thread's own mask; plain calls to signal this process or its accepting thread.
+            unsafe {
+                if shared {
+                    let mut set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut set);
+                    libc::sigaddset(&mut set, libc::SIGUSR1);
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                match shared {
+                    true => libc::kill(libc::getpid(), libc::SIGUSR1),
+                    false => libc::pthread_kill(main, libc::SIGUSR1),
+                };
+            }
+            std::thread::sleep(Duration::from_millis(700));
+            if let Ok(mut s) = UnixStream::connect(&path) {
+                let _ = s.write_all(b"hi");
+            }
+        });
+        // (raw: std's accept takes `EINTR` as "again")
+        // SAFETY: our listener, no address asked.
+        let fd = unsafe { libc::accept4(l.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), 0) };
+        let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let _ = poker.join();
+        let handled = HANDLED.load(std::sync::atomic::Ordering::SeqCst);
+        if fd < 0 {
+            return format!("{errno}/{handled}");
+        }
+        // SAFETY: just accepted, ours.
+        let mut s = UnixStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        let mut got = [0u8; 2];
+        match s.read_exact(&mut got) {
+            Ok(()) => format!("{}/{handled}", String::from_utf8_lossy(&got)),
+            Err(e) => format!("read:{}/{handled}", tried::<()>(Err(e))),
+        }
+    }
+
+    /// `passanon` (6f′, the review): an eventfd and an epoll passed over a socketpair (`SCM_RIGHTS`, one message
+    /// each) — by copies, neither can be opened again through `/proc` (`anon_inode:`): `eventfd=<ok | errno>
+    /// epoll=<ok | errno>`.
+    fn helper_pass_anon() -> String {
+        use std::os::unix::net::UnixStream;
+        let Ok((a, _b)) = UnixStream::pair() else { return "socketpair failed".into() };
+        // SAFETY: plain calls; descriptors they make are ours.
+        let made = unsafe {
+            [libc::eventfd(0, libc::EFD_CLOEXEC), libc::epoll_create1(libc::EPOLL_CLOEXEC)]
+                .map(|fd| (fd >= 0).then(|| OwnedFd::from_raw_fd(fd)))
+        };
+        let [Some(event), Some(poll)] = made else { return "eventfd or epoll failed".into() };
+        let pass = |fd: &OwnedFd| match super::super::handed::try_send_fds(&a, &[fd.as_fd()]) {
+            Ok(()) => "ok".to_string(),
+            Err(e) => tried::<()>(Err(e)),
+        };
+        format!("eventfd={} epoll={}", pass(&event), pass(&poll))
     }
 
     /// `raw` (6e+): `name` looked up as a tool does (`getaddrinfo`), its first address connected to at `$TARAE_PORT`,
@@ -5416,6 +5925,239 @@ mod tests {
         }
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-{test}", std::process::id()));
         Keeper::born_lo(&root, None, ns, Families::here(), false, None, None).expect("a keeper starts")
+    }
+
+    // ── 6f′: by copies ──────────────────────────────────────────────────────────────────────────────────────
+
+    use super::super::watchdog::Watchdog;
+
+    /// A tier-C keeper of the test's own and a served project of it whose runs go by copies (`RunNet::Copied`) —
+    /// whatever this system serves by, so the copies' way runs in every check, not only under Docker's default
+    /// profile (`cargo xtask linux --docker-default`, where it's every served run's). `ports`: this machine's ports it
+    /// opens. None where nothing's served here.
+    fn copied(test: &'static str, ports: Vec<u16>) -> Option<Copied> {
+        copied_with(test, ports, |_| {})
+    }
+
+    /// What `copied` gives: the test's watchdog, its keeper, the run's policy and rules, the project.
+    type Copied = (Watchdog, Arc<Keeper>, Arc<super::super::Policy>, super::super::linux::Confine, PathBuf);
+
+    /// `copied`, the policy `change`d.
+    fn copied_with(
+        test: &'static str,
+        ports: Vec<u16>,
+        change: impl FnOnce(&mut super::super::Policy),
+    ) -> Option<Copied> {
+        served_tiers(test, false)?;
+        let w = Watchdog::new(test, COPIED_LIMIT);
+        w.waiting_for("the keeper's birth (tier C)");
+        let k = keeper_for(test, Ns::NONE, false);
+        w.waiting_for("the project's policy and rules");
+        let (mut p, mut c, root) = project_served(test, ports, Some(&k), &[], Ok(()));
+        c.net = RunNet::Copied;
+        change(&mut p);
+        Some((w, k, Arc::new(p), c, root))
+    }
+
+    /// By copies: the socket tarae puts in the run's place for a connection to its proxy (the pair's end) is one it
+    /// keeps a copy of — a `sendmsg` on it after (a call tarae makes on the copy) goes, and the proxy answers. The host
+    /// the `CONNECT` names is a listener of the test's on this machine's own address, named for the proxy
+    /// (`proxy::TEST_NAMES`: no lookup — a real one of a made-up name took over 10 s on u2610).
+    #[test]
+    fn by_copies_a_proxied_connection_takes_sendmsg() {
+        let Some(ip) = outside() else { return };
+        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
+        let host = "pair-6fprime.test";
+        super::super::proxy::TEST_NAMES.lock().unwrap().push((host.into(), at));
+        let open = |p: &mut super::super::Policy| {
+            let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
+            (p.network, p.own_addresses, p.egress) = (true, Some(Vec::new()), egress);
+        };
+        let Some((w, k, p, c, root)) = copied_with("copies-pairsend", Vec::new(), open) else { return };
+        let to = super::super::route::PROXY.to_string();
+        let named = format!("{host}:{}", at.port());
+        let env = [("TARAE_TO", to.as_str()), ("TARAE_HOST", named.as_str())];
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "pairsend", &env);
+        assert_eq!(said, "reply=HTTP/1.1 200 Connection established", "the proxy answered — {refused:?}");
+    }
+
+    /// Each `by_copies_` test ends within this, or its watchdog ends the binary saying what it waited for.
+    const COPIED_LIMIT: Duration = Duration::from_secs(60);
+
+    /// `served_said` for `what`, the watchdog told; then the keeper ended, the project gone.
+    fn copied_said(
+        w: &Watchdog,
+        k: &Keeper,
+        run: (&Arc<super::super::Policy>, &super::super::linux::Confine, &Path),
+        what: &str,
+        env: &[(&str, &str)],
+    ) -> (String, Vec<super::super::Denial>) {
+        w.waiting_for(&format!("the run's answer and its end (helper `{what}`)"));
+        let said = served_said(k, run, what, env);
+        w.waiting_for("the keeper's end");
+        k.end();
+        std::fs::remove_dir_all(run.2).ok();
+        w.waiting_for("the test's checks");
+        said
+    }
+
+    /// By copies (6f′): descriptors passed between a run's own sockets (`SCM_RIGHTS`) — what Python's forkserver
+    /// does, M8b's census — go: a socket by tarae's copy of it, a pipe's write end opened again through `/proc` (its
+    /// own open file of the same pipe), each one written through on the far side.
+    #[test]
+    fn by_copies_a_run_passes_a_pipe_and_a_socket() {
+        let Some((w, k, p, c, root)) = copied("copies-passfds", Vec::new()) else { return };
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "passfds", &[]);
+        assert_eq!(said, "pipe=via-pipe sock=via-sock", "{refused:?}");
+    }
+
+    /// By copies: a run's `accept` is tarae's (6f′, G2 (b)) — on its copy of the run's listener, as the run would:
+    /// non-blocking with nothing waiting `EAGAIN` at once; blocking, the connection comes, its peer's address written
+    /// where the run asked, and what it sent read on the accepted socket; blocking with nothing coming, `EAGAIN` once
+    /// its `SO_RCVTIMEO` is past (300 ms), as the kernel's accept. (Its port opened: in tier C the run's own
+    /// loopback listener is this machine's — unopened, its connect is refused and the accept waits on, until the
+    /// listener's `SO_RCVTIMEO`.)
+    #[test]
+    fn by_copies_an_accept_is_taraes() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let Some((w, k, p, c, root)) = copied("copies-accept", vec![port]) else { return };
+        let port = port.to_string();
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "accepts", &[("TARAE_PORT", &port)]);
+        let want = format!("nonblock={0} peer=127.0.0.1 got=hello timed={0} in time", libc::EAGAIN);
+        assert_eq!(said, want, "{refused:?}");
+    }
+
+    /// By copies: a port a run bound and closed is bound again at once — tarae's copy would hold it until collected
+    /// (two scans); a bind that finds it taken has the copies collected first (`Copies::collect_now`), then tries again.
+    #[test]
+    fn by_copies_a_closed_port_binds_again_at_once() {
+        let Some((w, k, p, c, root)) = copied("copies-rebind", Vec::new()) else { return };
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "rebinds", &[]);
+        assert_eq!(said, "again=ok", "{refused:?}");
+    }
+
+    /// By copies: a socket made outside the sandbox and handed in (`SCM_RIGHTS`, over a unix socket in the project)
+    /// is one tarae has no copy of — a `sendmsg` on it is refused (`EPERM`), said as made outside.
+    #[test]
+    fn by_copies_a_socket_handed_in_is_refused() {
+        let Some((w, k, p, c, root)) = copied("copies-handed", Vec::new()) else { return };
+        let path = root.join("handed.sock");
+        let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        l.set_nonblocking(true).unwrap();
+        let outside = std::os::unix::net::UnixStream::pair().unwrap();
+        let handing = std::thread::spawn(move || {
+            // (a run that never connects fails the test, never hangs it)
+            let by = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < by {
+                match l.accept() {
+                    Ok((s, _)) => {
+                        s.set_nonblocking(false).unwrap();
+                        super::super::handed::send_fds(&s, &[outside.0.as_fd()]);
+                        std::thread::sleep(Duration::from_secs(2));
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+        let to = path.to_string_lossy().into_owned();
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "handed", &[("TARAE_TO", &to)]);
+        w.waiting_for("the handing thread's end");
+        handing.join().unwrap();
+        assert_eq!(said, format!("sent={}", libc::EPERM), "{refused:?}");
+        assert!(
+            refused
+                .iter()
+                .any(|d| d.op == "network-bound" && d.target.contains("made outside tarae's sandbox")),
+            "said: {refused:?}"
+        );
+    }
+
+    /// By copies (the review): a socket passed in a message waits in the receiver's queue held by no process — here
+    /// a second, past the scans' two strikes — and its copy stays (`Copies::in_flight`): received, a `sendmsg` on it
+    /// goes. (Without that, the copy went and the receiver's call was refused as "made outside the sandbox": what
+    /// Python's forkserver does broke.)
+    #[test]
+    fn by_copies_a_socket_passed_stays_while_in_flight() {
+        let Some((w, k, p, c, root)) = copied("copies-latepass", Vec::new()) else { return };
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "latepass", &[]);
+        assert_eq!(said, "late=late", "{refused:?}");
+    }
+
+    /// By copies (the review): a signal ends a served `accept` as the kernel's would, where tarae can tell. Sent to
+    /// the accepting thread: after a handler with `SA_RESTART` the accept goes on (`ERESTARTSYS`: the kernel restarts
+    /// the call, tarae serves it anew) and takes the connection that comes after; without `SA_RESTART`, `EINTR`; on a
+    /// listener with its own `SO_RCVTIMEO`, `EINTR` whatever the handler (the kernel's `sock_intr_errno`). Sent to
+    /// the process: the kernel gives it to a thread that doesn't block it — here the test harness's main thread (the
+    /// helper runs on a test thread) — and the accept goes on, as the kernel's would. (Where no other thread takes it,
+    /// tarae can't tell which thread the kernel woke: `EINTR` after a slice, whatever the handler — pinned by
+    /// `a_process_signal_no_other_thread_takes_ends_the_wait_with_eintr`; a live process whose every other thread
+    /// blocks the signal can't be made here.) Each handled once.
+    #[test]
+    fn by_copies_a_signal_ends_an_accept_as_the_kernels_would() {
+        let Some((w, k, p, c, root)) = copied("copies-signals", Vec::new()) else { return };
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "signals", &[]);
+        let want = format!("restart=hi/1 plain={0}/1 timed={0}/1 shared=hi/1", libc::EINTR);
+        assert_eq!(said, want, "{refused:?}");
+    }
+
+    /// By copies (the review): an eventfd or an epoll passed in a message (`SCM_RIGHTS`) can't be opened again
+    /// through `/proc` (`anon_inode:`) — refused (`EPERM`), said with what it was.
+    #[test]
+    fn by_copies_an_eventfd_or_epoll_passed_is_refused() {
+        let Some((w, k, p, c, root)) = copied("copies-passanon", Vec::new()) else { return };
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "passanon", &[]);
+        assert_eq!(said, format!("eventfd={0} epoll={0}", libc::EPERM), "{refused:?}");
+        for what in ["anon_inode:[eventfd]", "anon_inode:[eventpoll]"] {
+            assert!(
+                refused.iter().any(|d| d.op == "network-bound" && d.target.contains(what)),
+                "{what}: {refused:?}"
+            );
+        }
+    }
+
+    /// By copies, the late FIN pinned end to end: a run's connection to this machine, closed while the run goes on,
+    /// reaches its peer's end only once tarae's copy is collected — not before one interval (`copies::INTERVAL`),
+    /// within `STRIKES` of them and a scan's time. (A run's end ends its supervisor, and every copy with it: no scan
+    /// needed then.)
+    #[test]
+    fn by_copies_a_closed_connections_end_comes_within_two_scans() {
+        use super::super::copies::{INTERVAL, STRIKES};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let Some((w, k, p, c, root)) = copied("copies-fin", vec![port]) else { return };
+        l.set_nonblocking(true).unwrap();
+        let ended = std::thread::spawn(move || {
+            // (a run that never connects fails the test, never hangs it)
+            let by = Instant::now() + Duration::from_secs(10);
+            let s = loop {
+                match l.accept() {
+                    Ok((s, _)) => break s,
+                    Err(_) if Instant::now() < by => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => return None,
+                }
+            };
+            s.set_nonblocking(false).ok()?;
+            let mut line = String::new();
+            io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line).ok()?;
+            io::Write::write_all(&mut &s, b"hi\n").ok()?;
+            let answered = Instant::now();
+            s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+            let mut rest = Vec::new();
+            io::Read::read_to_end(&mut &s, &mut rest).ok()?;
+            Some(answered.elapsed())
+        });
+        let to = format!("127.0.0.1:{port}");
+        let (said, refused) = copied_said(&w, &k, (&p, &c, &root), "closes", &[("TARAE_TO", &to)]);
+        w.waiting_for("the listener's thread: the connection's end");
+        let took = ended.join().unwrap();
+        assert_eq!(said, "closed after hi", "{refused:?}");
+        let took = took.expect("its end came");
+        let most = INTERVAL * u32::from(STRIKES + 1) + Duration::from_millis(300);
+        assert!(
+            took >= INTERVAL && took < most,
+            "the end {took:?} after the answer: between {INTERVAL:?} and {most:?}"
+        );
     }
 
     /// This machine's own address beyond loopback (a container's, a LAN's, Docker's bridge's) is this machine,

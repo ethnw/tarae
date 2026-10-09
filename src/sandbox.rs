@@ -55,8 +55,14 @@ pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
+// (6f′: tarae's own copies of a run's sockets, where it can't take them — built and tested everywhere, used on Linux)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod copies;
 #[cfg(target_os = "linux")]
 pub mod tier;
+// (tests: a hang fails within the test's own limit, saying what it waited for)
+#[cfg(test)]
+pub mod watchdog;
 
 use std::collections::HashMap;
 use std::io;
@@ -4605,7 +4611,7 @@ pub fn spawn_as(
             w.owned_by(owner(0));
         }
         let started = match c.net {
-            net @ (tier::RunNet::Served | tier::RunNet::Routed) => {
+            net @ (tier::RunNet::Served | tier::RunNet::Routed | tier::RunNet::Copied) => {
                 let serve = std::sync::Arc::new(p.clone());
                 k.start_served(cmd, &comm, c.rules_fd(), net, serve.clone(), told(serve))?
             }

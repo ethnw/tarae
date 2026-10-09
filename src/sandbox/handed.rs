@@ -36,6 +36,12 @@ pub(super) fn received_fds(s: &UnixStream) -> Vec<OwnedFd> {
 
 /// `fds` sent on `s` with one byte, as one message (`SCM_RIGHTS`), at most four.
 pub(super) fn send_fds(s: &UnixStream, fds: &[BorrowedFd]) {
+    let sent = try_send_fds(s, fds);
+    assert!(sent.is_ok(), "sent: {sent:?}");
+}
+
+/// `send_fds`, its failure said.
+pub(super) fn try_send_fds(s: &UnixStream, fds: &[BorrowedFd]) -> io::Result<()> {
     let raw: Vec<RawFd> = fds.iter().take(4).map(|f| f.as_raw_fd()).collect();
     let byte = [1u8];
     let mut iov = libc::iovec { iov_base: byte.as_ptr().cast_mut().cast(), iov_len: 1 };
@@ -54,6 +60,9 @@ pub(super) fn send_fds(s: &UnixStream, fds: &[BorrowedFd]) {
         (*c).cmsg_type = libc::SCM_RIGHTS;
         (*c).cmsg_len = libc::CMSG_LEN(len) as _;
         std::ptr::copy_nonoverlapping(raw.as_ptr(), libc::CMSG_DATA(c).cast::<RawFd>(), raw.len());
-        assert!(libc::sendmsg(s.as_raw_fd(), &m, 0) == 1, "sent: {}", io::Error::last_os_error());
+        match libc::sendmsg(s.as_raw_fd(), &m, 0) {
+            1 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
     }
 }

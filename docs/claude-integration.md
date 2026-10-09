@@ -919,11 +919,25 @@ thread of tarae's that confined itself first, and everything it starts stays con
   connection that's neither TLS nor HTTP (ssh, a database client) can't go out yet. Elsewhere (macOS, Linux
   without that network) the commands' proxy variables name tarae's proxy, and the packs tell the tools that
   ignore them.
+- **In a container without `CAP_SYS_PTRACE`** (Docker's default), the filter refuses the call tarae takes a
+  command's socket with (`pidfd_getfd`), so tarae makes every socket the command has — its unix sockets and
+  `socketpair`s too, and the connections its servers accept — and keeps its own copy of each. Ports, unix
+  sockets in the project and the network work as elsewhere, with the session's commands on the container's
+  loopback (tier C). What it costs:
+  - a socket closed reaches its peer late (≈ 0.1 s while the command is busy, up to ≈ 1 s after a quiet spell),
+    as tarae lets its copy go only once no process holds the socket — and not at all while a process tarae
+    can't look into (ssh-agent, gpg-agent) runs among the command's; a port a command closed is free again for
+    its next bind of it (which may wait a moment, at most 0.2 s, for tarae to let it go)
+  - a signal to a multithreaded server waiting in `accept` can end the wait with `EINTR` even where its handler
+    asks for the call to be restarted
+  - a socket handed in from outside the sandbox, and an eventfd, epoll or pidfd passed between processes, are
+    refused, said in Claude's result
+  - tarae reads the command's descriptors on a timer while it holds copies (≈ 1% of a core for an idle Gradle
+    daemon)
+
+  `--cap-add SYS_PTRACE` (`runArgs` in `devcontainer.json`) gives the full way, with none of these.
 - **When tarae can't make a command's connections**, the command gets no socket at all — no port on this
   machine, no unix socket, not even the project's — and Claude's result says why. That happens:
-  - in a container without `CAP_SYS_PTRACE`: Docker's default filter refuses the calls tarae takes a
-    command's socket with (`pidfd_open`, `pidfd_getfd`). A dev container needs `--cap-add SYS_PTRACE`
-    (`runArgs` in `devcontainer.json`)
   - with Yama's `ptrace_scope` at 2 (unless tarae holds `CAP_SYS_PTRACE`) or 3: tarae can't read a command's
     calls. At 1, the default on Ubuntu, a process has to stay below tarae — so tarae is the last parent of
     what its programs leave running (a *child subreaper*): a daemon that detached itself from a command comes

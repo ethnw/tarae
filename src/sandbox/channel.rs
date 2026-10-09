@@ -101,12 +101,12 @@ pub struct Run {
 impl Run {
     /// Served: its calls that name an address go to tarae, over its handoff socket's listener.
     pub fn served(&self) -> bool {
-        matches!(self.net, RunNet::Served | RunNet::Routed)
+        matches!(self.net, RunNet::Served | RunNet::Routed | RunNet::Copied)
     }
 }
 
 /// `RunNet` on the wire, each its byte.
-const NETS: [RunNet; 4] = [RunNet::Plain, RunNet::Served, RunNet::Routed, RunNet::Own];
+const NETS: [RunNet; 5] = [RunNet::Plain, RunNet::Served, RunNet::Routed, RunNet::Own, RunNet::Copied];
 
 /// A message, either way.
 #[derive(Clone, Debug, PartialEq, Eq)]

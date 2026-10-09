@@ -56,7 +56,7 @@ each address it reaches. It leaves four things open:
  the supervisor: threads, state per session ───────────┘   │   with user namespaces: PID 1 of user+net+ipc+pid+mnt
    decides each address, makes each allowed call           │   without: a fork server and child subreaper
  ── request channel (socketpair, close-on-exec) ──────────▶│   forks every run; parent or reaper of what runs leave
- ◀── each run's pidfd · status · its listener by pidfd_getfd│     └─ run: Landlock + seccomp of its own, then exec
+ ◀── each run's pidfd · status · its listener (SCM_RIGHTS) │     └─ run: Landlock + seccomp of its own, then exec
 ```
 
 | | Proxy | Supervisor | Keeper |
@@ -65,7 +65,7 @@ each address it reaches. It leaves four things open:
 | **How many** | one for all sessions | one set per session (its policy, grants, report, log) | one per session, in every tier |
 | **Does** | parses CONNECT and the TLS ClientHello's SNI, resolves the name itself, checks every address, connects to the very address it checked, relays | takes each run's seccomp listener, reads the address, decides (`route::route`), and makes the call itself on the run's socket. Never `CONTINUE` | forks each run, reaps it, reports its status; owns what runs leave |
 | **Talks through** | a channel (`mpsc`) with the supervisor only (D23): in, an owned message per connection (the traffic end, the session's id, its rules as a read-only snapshot); out, `Refused` and log lines. No mutable state shared with the supervisor | the policy at run start, `Refused` out, the listener by descriptor (nothing else, so moving it into a process later, D21, is mechanical); to the proxy, the channel (D23) | the request channel (`SOCK_SEQPACKET`, `channel.rs`) |
-| **Holds** | the session's rules per socket | the run's listener; descriptors it takes with `pidfd_getfd` | stdio from `/dev/null`, its channel's end; no capability |
+| **Holds** | the session's rules per socket | the run's listener; descriptors it takes with `pidfd_getfd`, or by copies its own copy of every socket the run has (§By copies) | stdio from `/dev/null`, its channel's end; no capability |
 
 **The supervisor needs nothing from tarae mid-run.** Its `Policy` is an `Arc` cloned when the run starts
 (`sandbox::spawn`, `supervisor::serve`). Grants take effect at the next run (`blocked.rs`), cards come before or
@@ -178,7 +178,7 @@ supervisor–proxy messages would move onto it only if they ever leave tarae's p
 
 | tarae → keeper | |
 |---|---|
-| `Run { id, program, argv, envp, cwd, comm, net, held }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and, served or held, the run's handoff socket. `net` (one byte, `tier::RunNet`, decided once with the rules in `linux::confine`): `Served` (no netns: tarae makes its sockets), `Routed` (served in the session's netns: its own sockets, its address-naming calls tarae's), `Own` (not served, in the netns: Landlock's TCP and UDP unhandled), `Plain` — its seccomp mode follows. `held`: it waits for tarae to know its pid (a keeper in a PID namespace). A malformed request gets `Failed`, never a crash. No `pty`: no sandboxed run asks for one, so it waits for a caller (a run opening `/dev/ptmx` gets the session's own) |
+| `Run { id, program, argv, envp, cwd, comm, net, held }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and, served or held, the run's handoff socket. `net` (one byte, `tier::RunNet`, decided once with the rules in `linux::confine`): `Served` (no netns: tarae makes its sockets), `Routed` (served in the session's netns: its own sockets, its address-naming calls tarae's), `Own` (not served, in the netns: Landlock's TCP and UDP unhandled), `Plain`, `Copied` (served by copies, no netns: tarae makes every socket it has, §By copies) — its seccomp mode follows. `held`: it waits for tarae to know its pid (a keeper in a PID namespace). A malformed request gets `Failed`, never a crash. No `pty`: no sandboxed run asks for one, so it waits for a caller (a run opening `/dev/ptmx` gets the session's own) |
 | `Signal { id, sig }` | cancel: the keeper signals the run's process group, only while it hasn't reaped it (`dap::term_group` asks here: once the keeper has reaped a run, a kill from tarae could reach a reused pid) |
 | `AskUsage` | its own Rss and Pss (M3): its `smaps_rollup` is unreadable to tarae |
 | `End`, or EOF | end every run and leftover, then exit |
@@ -194,22 +194,40 @@ supervisor–proxy messages would move onto it only if they ever leave tarae's p
 
 **The forked child**, step by step:
 1. Closes the channel.
-2. Sets `PR_SET_DUMPABLE` 1 again, for the handoff below. Without a user namespace, `pidfd_getfd` needs ptrace access
-   to the child, which a non-dumpable process refuses unless the caller has `CAP_SYS_PTRACE`. With one (step 3),
-   tarae's capabilities in the namespace cover it. A dumpable run is what every run was before, and what exec makes an
-   ordinary program anyway. Landlock's ptrace rule keeps other confined runs off it.
+2. Sets `PR_SET_DUMPABLE` 1 again: the supervisor reads the run's memory and its `/proc/<tid>/fd` (and, served on
+   taken descriptors, `pidfd_getfd`s them), which needs ptrace access to the run, refused by a non-dumpable process
+   unless the caller has `CAP_SYS_PTRACE`. With a user namespace (step 3), tarae's capabilities in it cover it. A
+   dumpable run is what every run was before, and what exec makes an ordinary program anyway. Landlock's ptrace rule
+   keeps other confined runs off it.
 3. `setsid` (and the controlling terminal with `pty`); `dup2`s its stdio; `chdir(cwd)`.
 4. `PR_SET_NAME` = `comm`, which Landlock's audit names beside the run's own pid.
 5. Unblocks every signal.
-6. `landlock_restrict_self(ruleset)`; then seccomp (`seccomp::apply`).
-7. Served: writes its listener's number on the handoff socket. tarae (a thread of its own, not the main loop) runs
-   `pidfd_getfd`, hands the listener to `supervisor::serve`, and writes one byte back.
-8. Execs.
+6. `landlock_restrict_self(ruleset)`; then seccomp (`seccomp::apply`) — served, by the handoff below.
+7. Execs.
 
 Each step's failure is written on a close-on-exec pipe the keeper reads.
 
-tarae uses the pidfd for `pidfd_getfd`. The run's pid comes with `Started`. Yama 1 holds: tarae → keeper → run, and
-what runs leave stays below the keeper.
+**The handoff** (6f′, G1 (b), `keeper::hand_over`; every served tier). Once the served filter is on, a `sendmsg` goes
+to its listener, which nobody reads before tarae has it: the child can't send the listener itself after step 6. So:
+1. A helper thread of the child (a raw `clone` with `CLONE_THREAD` on a stack `Exec` allocated before the fork — the
+   child allocates nothing) puts the filter on itself and gets the listener (`SECCOMP_FILTER_FLAG_NEW_LISTENER`).
+2. The main thread, still unfiltered, sends it on the handoff socket with one byte (`SCM_RIGHTS`). tarae (a thread of
+   its own, not the main loop) receives it close-on-exec, hands it to `supervisor::serve`, and writes one byte back.
+3. The helper syncs the main thread onto its filters: `seccomp(SET_MODE_FILTER, TSYNC)` with an allow-all filter on
+   top (`TSYNC` gives every thread the caller's whole chain, `no_new_privs` with it). A thread it couldn't sync, or
+   any error, fails the run (`Step::Seccomp`).
+4. The main thread waits for tarae's byte and execs; the exec ends the helper.
+
+The two threads meet on atomics and `sched_yield`, raw calls only (the helper shares the main thread's TLS: glibc's
+`errno` is the one thing it touches, and the main thread doesn't read it meanwhile). Measured in M8b
+(`target/sb/m8b/`) on 6.1, 6.8 and 7.3, under Docker's default profile and without it. `pidfd_getfd` is out of the
+handoff, so it works where Docker refuses that call.
+
+The keeper's `Started` message carries the run's pidfd: tarae reads its own number for the run from it (in a PID
+namespace) and kills a run it can't number through it. It goes no further than that — what `Keeper::start` returns
+(`keeper::Started`) has no pidfd since 6f′ (it was the handoff's), and the supervisor opens a pidfd of its own per
+served call (`Caller::open`) for `pidfd_getfd`. Yama 1 holds: tarae → keeper → run, and what runs leave stays below
+the keeper.
 
 ### What runs leave
 
@@ -339,6 +357,58 @@ refused.
 internet socket in served mode, so one table holds each socket's inode against its session; a loopback listener is
 looked up by inode (`/proc/net/{tcp,tcp6,udp,udp6}`) and refused if it is another session's.
 
+### By copies (*built*, 6f′, `copies.rs`, `target/sb/step6fprime-design.md`)
+
+Where `pidfd_getfd` is refused (Docker's default profile, a container without `--cap-add SYS_PTRACE`), the supervisor
+can't take a run's socket to make a call on it. The probe (`supervisor::serving`) then answers `Serving::Copies`, not
+"can't serve": the session is born without a netns (every socket is tarae's; Docker refuses new namespaces anyway) and
+its runs are `RunNet::Copied` — tier C, said "served by tarae's own copies of their sockets".
+- **tarae makes every socket the run has** (`seccomp::Mode::Copied`): internet ones as in C, and also unix stream and
+  netlink route ones, `socketpair` and `accept`/`accept4`. Each is kept as a copy by inode before the run holds it
+  (`Copies::keep`); a call on descriptor `n` finds it by the inode `readlink /proc/<tid>/fd/<n>` names
+  (`socket:[…]`, `PTRACE_MODE_READ` only). Netlink keeps its routing-only rule.
+- **A socket tarae has no copy of** (handed in from outside the sandbox) is refused, `EPERM` and `network-bound`,
+  said "made outside tarae's sandbox … tarae serves only the sockets it made".
+- **A descriptor passed with `SCM_RIGHTS`**: a socket by its copy; a file or pipe opened again through
+  `/proc/<tid>/fd/<n>` with its `fdinfo` access flags (an open of its own: its offset isn't the run's); an eventfd,
+  epoll or pidfd (`anon_inode:`) can't be, and is refused, said.
+- **`accept`** is tarae's, on its copy of the listener: it waits as the run would (the same open socket's
+  `O_NONBLOCK`), up to the listener's `SO_RCVTIMEO` (`EAGAIN` after, as the kernel's), in 100 ms slices that look
+  for a signal the caller doesn't block. The connection's copy is kept and its peer's address written back. A
+  waiting accept holds one supervisor thread, as every slow call does.
+- **A signal during a served accept** ends it as the kernel's would where tarae can tell: one sent to the accepting
+  thread, or to a process of one thread, is answered `ERESTARTSYS` — the kernel then restarts the call after a
+  handler with `SA_RESTART` (tarae serves it anew) and fails it `EINTR` after one without; on a listener with its
+  own `SO_RCVTIMEO`, `EINTR` (the kernel's `sock_intr_errno`). Where it can't tell — a signal sent to a process with
+  other threads, which the kernel may have given to another — it waits one slice more; still pending, `EINTR`
+  whatever the handler (a spurious one after `SA_RESTART`: `ERESTARTSYS` reaching a thread with no signal to take
+  would be error 512); gone by then — another thread took it — the accept goes on, as the kernel's.
+  `by_copies_a_signal_ends_an_accept_as_the_kernels_would` pins the restart, `EINTR`, the timeout and a signal another
+  thread takes live; `a_process_signal_no_other_thread_takes_ends_the_wait_with_eintr` the last case.
+
+**The copies' cost: a late close.** While tarae holds a copy, the run's `close()` sends no FIN and a bound port stays
+bound. Copies are collected by scanning: while any is kept, a thread reads the descriptors of every process below the
+keeper (`/proc/<pid>/task/*/children`, else every process's parent), and a copy none held in `STRIKES` (2) scans in a
+row goes; a copy kept during a scan isn't struck by it. Never early:
+- a socket a served `sendmsg` passed is held by no process while the message waits in the receiver's queue, however
+  long; its copy is kept while the socket the message went on has anything unread (`SIOCOUTQ` — the kernel frees it
+  when the receiver reads the message, or drops it), up to 30 s (`IN_FLIGHT_MAX`), then collected as any;
+- a scan that can't read a process's descriptors or children (one that made itself non-dumpable: ssh-agent,
+  gpg-agent) strikes nothing — every copy waits until that process is gone. One that ended meanwhile holds nothing.
+
+Scans are paced by what the run does: 50 ms (`INTERVAL`) after a served call, a copy kept or a strike, doubling to
+1 s (`QUIET_MAX`) while nothing happens. So a close's FIN comes ≈ 100 ms late while the run is busy, up to ≈ 1 s after
+a quiet stretch. A port's release is lazy too: a bind that finds its port taken has the copies collected at once
+(`collect_now`, two scans) and, where a copy just went (that collection's, or the scanner's a moment before), tries
+again for up to 200 ms (`RELEASE_WAIT`, `Copies::bind_again`). The socket goes only with its last reference, and
+tarae's copy isn't always that: any process tarae starts holds every descriptor of tarae's from its fork until its
+exec is through. Seen under the test suite's load: the port free 63 µs after the copy went. Where no copy went, the
+port is someone else's and the bind fails at once.
+
+Measured on a Gradle build and its idle daemon (≈ 300–460 descriptors, a test-profile build): a scan takes 3–11 ms.
+At a fixed 50 ms that was 10–22% of a core, idle included; paced, 1.3% and 5.6% in the two builds and 0.8% idle
+(`measure_copies_scan`; the numbers in the design note).
+
 ## The egress proxy
 
 **No listening socket.** For a connection routed out, the session's supervisor makes a `socketpair`: one end replaces
@@ -401,8 +471,8 @@ or not, nothing goes (no rule names an address).
 | **A+** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`) | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill |
 | **A** | user, net, ipc, mnt (`devpts`, `/dev/shm`); no fresh `/proc` | serving | as A+ | the keeper's tree |
 | **B+ / B** | as A+ / A | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | as A+ / A |
-| **C** | none (no unprivileged user namespaces) | serving | the proxy's variable and the pair (6f's F2) | the keeper's tree |
-| **D** | none | plain (today also Docker's default profile, which refuses `pidfd_getfd`: 6f′ — tarae's own copies, M8 — would make it C) | nothing: no socket at all but netlink | the keeper's tree |
+| **C** | none (no unprivileged user namespaces; or served by copies — Docker's default profile, §By copies) | serving (by copies: every socket tarae's) | the proxy's variable and the pair (6f's F2) | the keeper's tree |
+| **D** | none | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | the keeper's tree |
 
 In every served tier opened ports and this machine's own addresses go by the swap (§Sockets and routing) until connect
 leaves the supervisor (Landlock ABI 9's step, D2). The file guarantees (Landlock ABI ≥ 3 full, 2 partial, < 2 none)
