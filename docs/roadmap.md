@@ -49,6 +49,9 @@ The Claude Code IDE protocol (M5) was retired on 2026-10-04, once the chat did a
 
 ## Now: the Linux sandbox keeper
 
+Next on the main line: letting Claude Code run on the user's API credits, per session or role — not a native API
+backend (session `apibill`, a design note first; decided 2026-10-09/10). Then steps 7–10.
+
 The design is [design/sandbox-keeper.md](design/sandbox-keeper.md). It gives every session one long-lived keeper
 that forks its runs, so what a run leaves running is the session's and ends with it, and sessions are kept apart
 from each other. Daemons such as Gradle's stay warm between runs.
@@ -69,13 +72,11 @@ from each other. Daemons such as Gradle's stay warm between runs.
    it chains to that one, http:// or SOCKS5 (host and SNI checks kept; the address checks are that proxy's, said
    in the report).
    Later: an `https://` upstream, and Negotiate/NTLM.
-6. **The transparent proxy** — on Linux where the session has a capable user namespace (tiers A+ and A; stock
-   Ubuntu with tarae's AppArmor profile). Sockets tarae plants in the session's network take every connection and
-   UDP datagram, each keeping its address (TPROXY, set up by tarae's own netlink): no proxy variables, nothing a
-   tool can ignore, IPv6 and UDP included. It replaces step 4's swap and the in-session proxy there. Where it
-   can't run (macOS, Linux without a capable user namespace) the per-run proxy of step 5 stays, the supervisor
-   enforcing it on Linux; where even the supervisor can't run, the network is closed. Inside it: netlink, the
-   session's rules at birth, accepting and checking, DNS, the supervisor slimmed, telling runs apart.
+6. **The transparent proxy** — done (6c–6f′ on main). In tiers A+ and A, sockets tarae plants in the session's
+   network take every connection and UDP datagram (TPROXY), marked per run and program. DNS is answered in the
+   session with synthetic addresses, and no proxy variable is set. Raw TCP to a name and a name's SRV/TXT records
+   each ask on a card of their own. The supervisor is slimmed. Docker's default profile is served by copies in
+   tier C. Elsewhere step 5's per-run proxy stays.
 7. **Sessions kept apart** — tests that one session can't reach another's processes, sockets or files. Also: the
    keepers' memory with many sessions, and tarae's log holding every session's activity. Also: a run asks before
    it reads a file named like a key inside the project (`.env`, `*.pem`, `id_*` — the names in
@@ -175,7 +176,7 @@ protocol — and on shuttle keys.
 ### 6. Plugin API 0.3
 
 One batch with the forge plugin: regions, cards, tools for Claude, a masked prompt, notes, the repository
-([plugins.md](plugins.md)). The database plugin waits for its regions.
+([plugins.md](plugins.md)). The database plugin waits for its regions ([queued](#queued-not-scheduled)).
 
 ### 7. The forge plugin
 
@@ -248,6 +249,23 @@ git tab, search, a short Kubernetes one.
   - Test-code regions and the Cargo helper → pack data and a plugin, when the testing packs are touched.
   - Java debugging → a plugin, once the plugin API has a debug-way hook.
 - **ACP**: hosting other agents inside tarae. Claude is the only agent tarae runs today.
+- **Kubernetes plugin, next parts (P1–P6)**, and a separate **fluxcd plugin**. Contexts follow kubectl, with a
+  context screen. Notes: the `k8s` session's target/sb/.
+- **Database plugin**: steps 0–2 and 8–9 landed; steps 3–7 and 10 wait for plugin API 0.3; DynamoDB on hold.
+  Notes: the `db` session's target/sb/db-plan.md.
+- **Viewport-bounded injections**: branch `viewport-injections` (10 commits past main, last 2026-10-02; draft PR
+  #1 on ethnw/tarae). Rebase and land, or drop: to decide with the user.
+- **Grammar distribution**: branch `grammar-wasm-proto` (15 commits; grammars as WebAssembly on tarae's own
+  runtime, 1.6–2.0× native) against prebuilt native or bundled grammars. Undecided; to decide with binary
+  releases (publishing).
+- **A memory comparison with other editors** (Helix, Neovim with an AI plugin, Zed, VS Code). Method agreed
+  2026-10-03: the same scenario; the editor alone and its whole process tree; measured numbers only; a one-off
+  script.
+- **Raw TCP to an address**: user-written `ip:port` / `cidr:port` rules in `llm.sandbox-hosts` (never a card), for
+  a LAN database or a container's or VM's IP. Waiting for the user's call; 6e+'s design note has what it takes.
+- **Open from step 6**: `go get` sometimes takes 36–40 s in the sandbox (cause unknown);
+  `gradle_builds_in_the_sandbox` fails in the M5 image's tier C (Gradle 8.10.2 starts an ordinary daemon; next
+  frictions batch); a crash-recovery test that failed once.
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
 
