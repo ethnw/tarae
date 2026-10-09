@@ -199,14 +199,13 @@ git tab, search, a short Kubernetes one.
 
 - Programs to apply to once tarae is public and has users (decided 2026-10-09; a Claude Console organization is
   already made):
-  - Claude's startup program.
-  - Anthropic's Cyber Verification Program, as "Open-source project" → "Maintainer of a widely depended-on
-    open-source project". What it needs: a project others depend on; as an organization, incorporated and
-    headquartered in an eligible country (checked by business verification; whether a sole proprietorship counts
-    is to be asked). It also needs a one-to-three-sentence scope ("Security engineering for tarae, an open-source
-    code editor I maintain: building and testing the sandbox that confines an AI coding agent's commands, on my
-    own machines and test VMs") and the security contact above. The hope: it lets the sandbox's own testing
-    (seccomp, fd passing, namespaces) go on without the model's cyber safeguards stopping it.
+  - Claude's startup program, applied for as the organization (the Claude Console organization).
+  - Anthropic's Cyber Verification Program, applied for as an individual, on the open-source track ("Maintainer
+    of a widely depended-on open-source project"; an individual with maintainer authority can apply). What it
+    needs: a project others depend on, a one-to-three-sentence scope ("Security engineering for tarae, an
+    open-source code editor I maintain: building and testing the sandbox that confines an AI coding agent's
+    commands, on my own machines and test VMs"), and the security contact above. The hope: it lets the sandbox's
+    own testing (seccomp, fd passing, namespaces) go on without the model's cyber safeguards stopping it.
 
 ## Alongside, not ordered
 
