@@ -214,13 +214,13 @@ pub(super) fn born_for_probe(root: &Path, ns: Ns, redirect: bool) -> io::Result<
 
 /// The network a keeper born with `ns` gets: the session's, where it has a netns and the probe's landed (`probed`,
 /// D-b: decided once — `tier::Probed.redirect`) — else none (until 6f its runs go out by the swap).
-fn network_for(ns: Ns, probed: &Result<(), String>) -> Option<NetworkFor> {
+pub(super) fn network_for(ns: Ns, probed: &Result<(), String>) -> Option<NetworkFor> {
     (ns.netns() && probed.is_ok()).then_some(NetworkFor::Session)
 }
 
 /// What network a keeper's birth makes: the session's — for the families its `lo` carries, known once it's ready
 /// (`redirect::Network::session`) — or, tests, one given whole.
-enum NetworkFor {
+pub(super) enum NetworkFor {
     Session,
     #[cfg(test)]
     Given(super::redirect::Network),
@@ -6088,6 +6088,38 @@ mod tests {
         assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network");
         k.end();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 6e′: a run has no proxy URL exactly where its keeper is born with the session's network — the decision made
+    /// before there's a keeper (`tier::redirects`, the probe's) is the keeper's own (`network_for`). A run's policy
+    /// made on the real path (`sandbox::policy`: its keeper and Landlock rules made) with the network open: its
+    /// keeper has the network, and its environment no proxy variable.
+    #[test]
+    fn a_run_has_no_proxy_variable_where_its_keeper_has_the_network() {
+        let test = "a_run_has_no_proxy_variable_where_its_keeper_has_the_network";
+        if !network_here(test) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-unproxied-6e2", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+        let p = super::super::policy(&root, &llm, &[]).unwrap();
+        let Some(Ok(c)) = &p.confine else {
+            panic!("no sandbox: {:?}", p.confine.as_ref().map(|r| r.as_ref().err()))
+        };
+        let k = c.keeper.clone().expect("its keeper");
+        let has = lock(&k.network).is_some();
+        let cmd = super::super::command(Some(&p), "true", &[]);
+        let vars: Vec<String> = cmd
+            .get_envs()
+            .filter(|(n, v)| v.is_some() && n.to_string_lossy().to_ascii_lowercase().contains("proxy"))
+            .map(|(n, _)| n.to_string_lossy().into_owned())
+            .collect();
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        assert!(has, "its keeper has the session's network");
+        assert!(p.redirected && p.proxy_url().is_none() && vars.is_empty(), "{} {vars:?}", p.redirected);
     }
 
     /// An answer comes from the address and port the question went to (6e) — what a connected UDP socket takes, and

@@ -1659,6 +1659,9 @@ mod tests;
 // (the packs' proxy lines through the real path, both systems — and the tests' run time limit)
 #[cfg(test)]
 mod packs_tests;
+// (step 6e′'s M5: the tools through the real path, by the run's way out — curl's and cargo's in the checks)
+#[cfg(all(test, target_os = "linux"))]
+mod m5_tests;
 // (step 5g: a run's way out through the upstream proxy, the real path on both systems)
 #[cfg(test)]
 mod upstream_real;

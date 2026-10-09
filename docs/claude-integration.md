@@ -899,6 +899,13 @@ thread of tarae's that confined itself first, and everything it starts stays con
   multicast or broadcast. This machine — its loopback and its own addresses (its LAN's, Docker's bridge's, as
   they were when the command started) — it reaches only on the ports `llm.sandbox-ports` and
   `llm.sandbox-localhost` open. Claude's result says so.
+- **No proxy variable where the session has a network of its own** (tiers A+ and A). Every connection a command
+  makes and every name it looks up is tarae's to take: a name gets an address of the session's own, and a
+  connection's first bytes (TLS's server name, HTTP's `Host`) say where it goes, checked as through the proxy. So
+  a tool goes out as it would anywhere, with nothing to set. Measured with curl, cargo, npm, pip, Go and Gradle. A
+  connection that's neither TLS nor HTTP (ssh, a database client) can't go out yet. Elsewhere (macOS, Linux
+  without that network) the commands' proxy variables name tarae's proxy, and the packs tell the tools that
+  ignore them.
 - **When tarae can't make a command's connections**, the command gets no socket at all — no port on this
   machine, no unix socket, not even the project's — and Claude's result says why. That happens:
   - in a container without `CAP_SYS_PTRACE`: Docker's default filter refuses the calls tarae takes a

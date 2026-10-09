@@ -464,7 +464,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-network",
         kind: Kind::Bool,
-        doc: "Chat: the sandbox lets Claude's commands reach the network beyond this machine, only through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it can't go out; never link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast. This machine's ports — on loopback or its own addresses — only as llm.sandbox-ports and -localhost open them",
+        doc: "Chat: the sandbox lets Claude's commands reach the network beyond this machine, only through tarae's proxy — HTTPS_PROXY, set for every run, where a tool that ignores it can't go out; on Linux where the session has a network of its own, no variable: the proxy takes every connection and answers the names; never link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast. This machine's ports — on loopback or its own addresses — only as llm.sandbox-ports and -localhost open them",
         get: |c| Value::from(c.llm.sandbox_network),
         set: |c, v| c.llm.sandbox_network = b(v),
     },

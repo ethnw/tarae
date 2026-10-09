@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -66,7 +66,7 @@ enum What {
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
 
 /// `--cgroup` (6g): the container in the machine's cgroup namespace (`--cgroupns host`), the hierarchy writable, and
 /// a folder under the container's own cgroup made first, as root — as systemd's `Delegate=yes` makes one — for the
@@ -129,6 +129,34 @@ fn userns(args: &[String]) -> Result<(Option<Userns>, &[String])> {
         }
         _ => Ok((None, args)),
     }
+}
+
+/// A leading `--image NAME`, and the arguments after it: the checks run in that image instead of `rust:<pin>` —
+/// one built from it with the tools a measurement runs (step 6e′'s M5: `target/sb/m5/m5-image.sh`). It runs the
+/// same script, as root, with the same volumes: its `/usr/local/rustup` and the registry are the volumes'.
+fn image_named(args: &[String]) -> Result<(Option<String>, &[String])> {
+    match args {
+        [i, name, rest @ ..] if i == "--image" => {
+            let ok = !name.is_empty()
+                && !name.starts_with(['-', '.', '/', ':'])
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || "._/:-".contains(c));
+            match ok {
+                true => Ok((Some(name.clone()), rest)),
+                false => Err(format!("--image {name}: an image's name — {USAGE}")),
+            }
+        }
+        [i] if i == "--image" => Err(format!("--image: which one? — {USAGE}")),
+        rest => Ok((None, rest)),
+    }
+}
+
+/// `docker run`'s arguments with `image` in the image's place (the fourth from the end: image, `sh`, `-ec`, the
+/// script) — None: as they are.
+fn with_image(mut a: Vec<String>, image: Option<&str>) -> Vec<String> {
+    if let (Some(i), Some(at)) = (image, a.len().checked_sub(4)) {
+        a[at] = i.to_string();
+    }
+    a
 }
 
 /// `docker run`'s arguments with `--userns`'s security options after `run --rm --cap-add SYS_PTRACE`.
@@ -236,6 +264,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let (set, args) = envs(args)?;
     let (ns, args) = userns(args)?;
     let (cgroups, args) = cgroup(args);
+    let (named, args) = image_named(args)?;
     let (platform, what) = ask(args)?;
     let platform = platform.as_deref();
     let root = root();
@@ -273,7 +302,11 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let mut docker = Command::new("docker");
     let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "checks");
-    let args = with_userns(with_envs(docker_args(&root, tree, &pin, platform, &what), &set), ns);
+    let args = with_image(docker_args(&root, tree, &pin, platform, &what), named.as_deref());
+    let args = with_userns(with_envs(args, &set), ns);
+    if let Some(i) = &named {
+        eprintln!("--image: the checks run in {i}");
+    }
     // (the name last: `with_cgroup` puts its options after `run --rm --cap-add SYS_PTRACE`, counted unnamed)
     docker.args(with_name(with_cgroup(args, cgroups), name));
     if let Some(u) = ns {
@@ -1404,6 +1437,31 @@ mod tests {
         assert_eq!(envs(&args(&["clippy"])).unwrap(), (Vec::new(), &args(&["clippy"])[..]));
         for bad in [&["--env", "=x"][..], &["--env", "A B=x"], &["--env", "noequals"], &["--env"]] {
             assert!(envs(&args(bad)).is_err_and(|e| e.contains("--env")), "{bad:?}");
+        }
+    }
+
+    /// `--image NAME` takes the pinned image's place and nothing else's: the script, the volumes and `--env`'s
+    /// values are as without it — the rest read as without it; no name, or one Docker would take for an option or
+    /// a path, is refused.
+    #[test]
+    fn an_image_named_takes_only_the_images_place() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let given = args(&["--image", "tarae-m5:1", "test", "--bin", "tarae"]);
+        let (named, rest) = image_named(&given).unwrap();
+        assert_eq!((named.as_deref(), rest), (Some("tarae-m5:1"), &args(&["test", "--bin", "tarae"])[..]));
+        let plain = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Clippy);
+        let named = with_envs(with_image(plain.clone(), named.as_deref()), &args(&["A=rust:1.99"]));
+        let at = named.iter().position(|v| v == "tarae-m5:1").unwrap();
+        assert_eq!(named[at + 1..at + 3], args(&["sh", "-ec"]), "{named:?}");
+        assert_eq!(named[at - 2..at], args(&["-e", "A=rust:1.99"]), "{named:?}");
+        let mut back = named.clone();
+        back.splice(at - 2..at, []);
+        back[at - 2] = "rust:1.99".into();
+        assert_eq!(back, plain);
+        assert_eq!(with_image(plain.clone(), None), plain);
+        assert_eq!(image_named(&args(&["clippy"])).unwrap(), (None, &args(&["clippy"])[..]));
+        for bad in [&["--image"][..], &["--image", "--rm"], &["--image", "/x"], &["--image", "a b"]] {
+            assert!(image_named(&args(bad)).is_err_and(|e| e.contains("--image")), "{bad:?}");
         }
     }
 

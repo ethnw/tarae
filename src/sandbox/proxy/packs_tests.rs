@@ -66,11 +66,12 @@ pub(super) fn finish(
 const HOST: &str = "repo-5f.example.invalid";
 
 /// The stores' password — the test's own key pair and trust store, nothing else's.
-const STORE: &str = "tarae-fake-store";
+pub(super) const STORE: &str = "tarae-fake-store";
 
 /// The test's HTTPS server: `java Repo.java <address> <keystore> <password> <folder> <seconds>` serves the files
-/// under the folder, says each request on a line (`GET /path`) and its port first (`port N`), and ends itself
-/// when its stdin closes (the test is over, passed or not) or after its seconds.
+/// under the folder (a folder's `index.html` for the folder), says each request on a line (`GET /path`) and its
+/// port first (`port N`), and ends itself when its stdin closes (the test is over, passed or not) or after its
+/// seconds.
 const REPO_JAVA: &str = r#"
 import com.sun.net.httpserver.*;
 import javax.net.ssl.*;
@@ -96,12 +97,14 @@ public class Repo {
             System.out.println(x.getRequestMethod() + " " + p);
             System.out.flush();
             Path f = root.resolve(p.substring(1)).normalize();
+            if (Files.isDirectory(f)) f = f.resolve("index.html");
             byte[] body = f.startsWith(root) && Files.isRegularFile(f) ? Files.readAllBytes(f) : null;
             if (body == null) {
                 x.sendResponseHeaders(404, -1);
             } else if (x.getRequestMethod().equals("HEAD")) {
                 x.sendResponseHeaders(200, -1);
             } else {
+                if (f.toString().endsWith(".html")) x.getResponseHeaders().set("Content-Type", "text/html");
                 x.sendResponseHeaders(200, body.length);
                 x.getResponseBody().write(body);
             }
@@ -138,14 +141,14 @@ pub(super) fn skip(test: &str, why: &str) {
 /// Where the test's outside listens: loopback, taken for beyond in the runs of `root` (macOS) — or this
 /// machine's own address, beyond for a policy that knows none (Linux) — None where there's none.
 #[cfg(not(target_os = "linux"))]
-fn outside_at(root: &Path) -> Option<IpAddr> {
+pub(super) fn outside_at(root: &Path) -> Option<IpAddr> {
     let lo = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     super::TEST_BEYOND.lock().unwrap().push((root.to_path_buf(), lo));
     Some(lo)
 }
 
 #[cfg(target_os = "linux")]
-fn outside_at(_root: &Path) -> Option<IpAddr> {
+pub(super) fn outside_at(_root: &Path) -> Option<IpAddr> {
     // (a connected UDP socket's own address: no packet is sent)
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("192.0.2.1:9").ok()?;
@@ -153,7 +156,7 @@ fn outside_at(_root: &Path) -> Option<IpAddr> {
 }
 
 /// `keytool` with `args`, its failure the test's.
-fn keytool(keytool: &Path, args: &[&str]) {
+pub(super) fn keytool(keytool: &Path, args: &[&str]) {
     let out = Command::new(keytool).args(args).output().unwrap();
     assert!(out.status.success(), "keytool {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
@@ -225,7 +228,7 @@ fn repository(base: &Path, trust: &Path, kt: &Path) {
 /// The test's HTTPS server for `base`'s repository on `ip`, up for `secs` at most: its port, the lines it says
 /// (the requests) as they come, and its stdin — dropped, the server ends (a test that fails too: the drop comes
 /// as it unwinds).
-fn serve(
+pub(super) fn serve(
     base: &Path,
     java: &Path,
     ip: IpAddr,
@@ -331,6 +334,21 @@ fn gradle_resolves_through_the_proxy() {
         p.own_addresses = Some(Vec::new());
     }
     p.watch = crate::sandbox::watch_for(&p);
+    // (6e′: where the session's network takes the run's connections there's no URL and no lines to test —
+    // `m5_tests::m5_gradle` runs Gradle there, without them)
+    #[cfg(target_os = "linux")]
+    if p.redirected {
+        if let Some(Ok(c)) = &p.confine
+            && let Some(k) = &c.keeper
+        {
+            k.end();
+        }
+        std::fs::remove_dir_all(&base).ok();
+        return skip(
+            TEST,
+            "the session's network takes its runs' connections: no proxy lines (6e′) — m5_tests::m5_gradle runs Gradle there",
+        );
+    }
     assert!(p.proxy_url().is_some(), "the run has a proxy URL");
     let args = ["--console=plain", "--stacktrace", "fetch"].map(String::from);
     let mut cmd = crate::sandbox::command(Some(&p), &gradle.to_string_lossy(), &args);

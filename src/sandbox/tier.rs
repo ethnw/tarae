@@ -567,10 +567,33 @@ pub fn get() -> &'static Probed {
 /// nothing goes out) — and without a `/dev/shm` of its own where the project or a place it writes is in this
 /// system's (`in_shm`: a private one would hide them).
 pub fn for_policy(p: &super::Policy) -> Ns {
-    let probed = get();
+    for_policy_in(get(), p)
+}
+
+/// `for_policy` where the probe found `probed`.
+fn for_policy_in(probed: &Probed, p: &super::Policy) -> Ns {
+    ns_for(probed, opens(p), in_shm(p))
+}
+
+/// `for_policy` from what it reads of a policy: whether it opens something, whether it's in `/dev/shm`.
+fn ns_for(probed: &Probed, opens: bool, in_shm: bool) -> Ns {
     let ns = probed.ns;
-    let stuck = probed.served.is_ok() && probed.swap.is_err() && opens(p);
-    Ns { net: ns.net && !stuck, shm: ns.shm && !in_shm(p), ..ns }
+    let stuck = probed.served.is_ok() && probed.swap.is_err() && opens;
+    Ns { net: ns.net && !stuck, shm: ns.shm && !in_shm, ..ns }
+}
+
+/// Whether the keeper of a policy that opens the network takes its runs' connections in the session's network
+/// (TPROXY, A+/A) — its namespaces as `for_policy` gives them such a policy, and the keeper's own rule
+/// (`keeper::network_for`). Then its runs get no proxy URL (6e′, `Policy.redirected`). Probes the first time (a
+/// worker's). Decided before there's a keeper: it must be what the keeper is born with
+/// (`the_proxy_url_is_decided_as_the_keeper_is_born`).
+pub fn redirects() -> bool {
+    redirects_in(get())
+}
+
+/// `redirects` where the probe found `probed`.
+fn redirects_in(probed: &Probed) -> bool {
+    super::keeper::network_for(ns_for(probed, true, false), &probed.redirect).is_some()
 }
 
 /// Whether the project, or a place or a file `p` writes, is in `/dev/shm` (real paths, as a policy has them).
@@ -726,6 +749,72 @@ mod tests {
             wsl1: false,
             dumpable: true,
         }
+    }
+
+    /// 6e′: a run's proxy URL is decided before its keeper is born (`redirects`, through `Here.redirects`), and it
+    /// must be what the keeper is born with — else a run has neither the variable nor the session's network, and
+    /// its report says the proxy takes its connections. For every outcome of the probe (namespaces: the session's
+    /// with or without `pid`, without `net`, none; served or not; the swap or not — the stuck case; the session's
+    /// network landed or not) and every policy that matters (the network closed or open, a port, this machine's
+    /// ports, both), the policy as computed (`policy_in`) has no proxy URL exactly where its network is open and
+    /// its keeper gets the session's network (`keeper::network_for` over `for_policy`'s namespaces).
+    #[test]
+    fn the_proxy_url_is_decided_as_the_keeper_is_born() {
+        let t = std::env::temp_dir().join(format!("tarae-tier-6e2-{}", std::process::id()));
+        std::fs::create_dir_all(t.join("p")).unwrap();
+        let t = std::fs::canonicalize(&t).unwrap();
+        let llm = |network: bool, ports: Vec<u16>, localhost: bool| crate::llm::LlmConfig {
+            sandbox_network: network,
+            sandbox_ports: ports,
+            sandbox_localhost: localhost,
+            ..Default::default()
+        };
+        let llms = [
+            llm(false, vec![], false),
+            llm(true, vec![], false),
+            llm(true, vec![8080], false),
+            llm(true, vec![], true),
+            llm(false, vec![8080], true),
+        ];
+        let nses = [Ns::session(true, true), Ns::session(true, false), Ns::session(false, true), Ns::NONE];
+        let ok = |yes: bool| if yes { Ok(()) } else { Err("not here".to_string()) };
+        let (mut taken, mut cases) = (0, 0);
+        for ns in nses {
+            for (served, swap, redirect) in (0..8).map(|b| (b & 1 != 0, b & 2 != 0, b & 4 != 0)) {
+                let probed = Probed {
+                    ns,
+                    short: None,
+                    served: ok(served),
+                    swap: ok(swap),
+                    redirect: ok(redirect),
+                    cgroups: Err("not asked".into()),
+                    hint: None,
+                };
+                let here = super::super::Here {
+                    tmp: Some(t.clone()),
+                    uid: 501,
+                    os: super::super::Os::Linux,
+                    redirects: redirects_in(&probed),
+                    ..Default::default()
+                };
+                for l in &llms {
+                    let p = super::super::policy_in(&t.join("p"), l, &[], &here);
+                    let born =
+                        super::super::keeper::network_for(for_policy_in(&probed, &p), &probed.redirect);
+                    let keepers = p.network && born.is_some();
+                    let case = format!(
+                        "{probed:?} network={} ports={:?} localhost={}",
+                        p.network, p.ports, p.localhost
+                    );
+                    assert_eq!(p.redirected, keepers, "{case}");
+                    assert_eq!(p.proxy_url().is_none(), !p.network || keepers, "{case}");
+                    (taken, cases) = (taken + usize::from(keepers), cases + 1);
+                }
+            }
+        }
+        // (both answers seen, or the table proves nothing)
+        assert!(taken > 0 && taken < cases, "{taken} of {cases}");
+        std::fs::remove_dir_all(&t).ok();
     }
 
     /// A refused mount is blamed on the AppArmor profile tarae runs under only where that profile's mode refuses —

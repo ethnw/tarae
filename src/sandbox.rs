@@ -521,9 +521,20 @@ impl Guard {
                     // (step 5: the open network goes through tarae's proxy — Linux: a direct connect is
                     // `network-direct`; macOS: Seatbelt opens loopback's ports only, the proxy's among them)
                     (true, here, none) => format!(
-                        ", and reach the network beyond this machine (its loopback and its own addresses) only \
-                         through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it (ssh, a \
-                         database client, Node's fetch without NODE_USE_ENV_PROXY) can't go out; {checks} — {}",
+                        ", and reach the network beyond this machine (its loopback and its own addresses) {}; \
+                         {checks} — {}",
+                        match p.redirected {
+                            // (6e′: the session's network takes every connection and answers every name — no
+                            // variable; what isn't TLS or HTTP names no host to check — E4)
+                            true => "through tarae's proxy, which takes every connection they make and answers \
+                                     their names (no proxy variable is set); one that's neither TLS nor HTTP (ssh, \
+                                     a database client) can't go out"
+                                .to_string(),
+                            false => "only through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that \
+                                      ignores it (ssh, a database client, Node's fetch without NODE_USE_ENV_PROXY) \
+                                      can't go out"
+                                .to_string(),
+                        },
                         match (here, none) {
                             (true, _) => format!("and every port of this machine's{every}"),
                             (false, false) => format!("and this machine's ports {ports} only (llm.sandbox-ports)"),
@@ -716,6 +727,10 @@ pub struct Policy {
     /// supervisor knows the run). Made for the `Here` a policy is made for (`policy_in`), so both systems'
     /// policies pin alike on either (`golden`); `for_project`: this system's.
     pub supervised: bool,
+    /// Linux (6e′): its keeper's session network takes its runs' connections and answers their names (TPROXY, A+/A
+    /// — `tier::redirects`, as `Here.redirects` says): no proxy URL, so no proxy variable nor the packs' proxy
+    /// lines — a tool goes out as it would anywhere. Made for the `Here` (a stand-in's: false), as `supervised`.
+    pub redirected: bool,
     /// The hosts its network reaches through the proxy, as its rules there hold them (`llm.sandbox-hosts`, and
     /// what the user answered for the project and for this run alone — `tools::with_allowed`). Not part of its key
     /// (`policy_key`): an answer mustn't end what an earlier run left (a daemon) — the proxy's newer answers go
@@ -860,6 +875,9 @@ pub struct Here {
     /// couldn't be read.
     #[cfg(target_os = "linux")]
     pub addresses: Option<Vec<std::net::IpAddr>>,
+    /// Linux: a keeper of a policy that opens the network takes its runs' connections in the session's network
+    /// (`tier::redirects`) — asked on a run's way only (`policy_from`: the probe); `now` and stand-ins: false.
+    pub redirects: bool,
     /// Tests: every variable asked (`path`, `var`) — what a policy reads of the environment
     /// (`every_variable_the_policy_reads_reaches_the_run`).
     #[cfg(test)]
@@ -896,6 +914,7 @@ impl Here {
                     crate::log::line("sandbox", "warn", &said);
                 })
                 .ok(),
+            redirects: false,
             #[cfg(test)]
             asked: Default::default(),
             #[cfg(test)]
@@ -2539,11 +2558,11 @@ impl Policy {
     /// port and token of the run's own where it has one (`proxy`: macOS), else, where its supervisor hands its
     /// connections over (`supervised`: Linux), that address (`route::PROXY` — no credential: the supervisor
     /// knows the run). None: the network closed, or no way to the proxy was made — nothing goes beyond this
-    /// machine. (Step 6 changes only this: no URL where the session's network redirects, a run's own one in tier
-    /// C.)
+    /// machine; or the session's network takes its connections (`redirected`, 6e′ — M5: the tools go out without
+    /// one). (Step 6f: a run's own one in tier C.)
     pub fn proxy_url(&self) -> Option<proxy::ProxyUrl> {
         match (&self.proxy, self.supervised) {
-            _ if !self.network => None,
+            _ if !self.network || self.redirected => None,
             (Some(r), _) => Some(r.url()),
             (None, true) => Some(proxy::ProxyUrl {
                 host: route::PROXY.ip().to_string(),
@@ -3201,6 +3220,7 @@ impl Policy {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
+            redirected: false,
             // (with the network off no host is reached, whatever the list says)
             egress: proxy::egress::Egress {
                 any: env.network && env.hosts.is_none(),
@@ -3638,6 +3658,9 @@ pub fn policy_from(
     reads: &[PathBuf],
     here: &Here,
 ) -> Result<Policy, String> {
+    // (Linux: whether its keeper takes its connections in the session's network — the probe's, asked here)
+    #[cfg(target_os = "linux")]
+    let here = &Here { redirects: here.os == Os::Linux && tier::redirects(), ..here.clone() };
     let p = run_policy_in(root, llm, reads, here)?;
     #[cfg(target_os = "linux")]
     let p = confined(p);
@@ -3714,8 +3737,10 @@ fn policy_computed(
             .inspect_err(|e| crate::log::line("sandbox", "warning", &format!("a run's proxy port: {e}")))
             .ok();
     }
-    // (Linux: the supervisor hands the run's connections over)
+    // (Linux: the supervisor hands the run's connections over — in the session's network where its keeper gets
+    // one, taken there: the open network needs no proxy URL)
     p.supervised = here.os == Os::Linux;
+    p.redirected = p.supervised && p.network && here.redirects;
     with_kept(&mut p, &env);
     (p, Found { real_home, above, own })
 }
@@ -7096,6 +7121,67 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// 6e′: where the session's network takes a run's connections (Linux, `Here.redirects` — the probe's, on a
+    /// run's way), the run has no proxy URL and none of what hangs on it — no proxy variable, none of the packs'
+    /// proxy lines (Node's flag, Maven's settings) — and its key isn't that of a run that has them (a daemon
+    /// started with proxy lines isn't reused). Where it doesn't (tier C), as before; the network closed, nothing to
+    /// take; macOS keeps the run's own port whatever `redirects` says.
+    #[test]
+    fn where_the_session_takes_the_connections_a_run_gets_no_proxy_lines() {
+        let made = |os: Os, network: bool, redirects: bool| {
+            let name = format!("tarae-sb-6e2-{os:?}-{network}-{redirects}-{}", std::process::id());
+            let t = profile_path(&std::env::temp_dir()).join(name);
+            std::fs::remove_dir_all(&t).ok();
+            std::fs::create_dir_all(t.join("p")).unwrap();
+            let here = Here { tmp: Some(t.clone()), uid: 501, os, redirects, ..Here::default() };
+            let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
+            let p = policy_in(&t.join("p"), &llm, &[], &here);
+            let cmd = command(Some(&p), "true", &[]);
+            let mut vars: Vec<String> =
+                cmd.get_envs().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+            vars.extend(p.env.iter().map(|(k, _)| k.clone()));
+            let proxied = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NODE_USE_ENV_PROXY", "MAVEN_ARGS"];
+            vars.retain(|v| proxied.contains(&v.as_str()));
+            crate::sorting::sort(&mut vars);
+            vars.dedup();
+            std::fs::remove_dir_all(&t).ok();
+            (p, vars)
+        };
+        let (taken, vars) = made(Os::Linux, true, true);
+        assert!(taken.redirected && taken.supervised, "{taken:?}");
+        assert_eq!((taken.proxy_url(), vars), (None, Vec::<String>::new()));
+        let (tier_c, vars) = made(Os::Linux, true, false);
+        assert!(!tier_c.redirected && tier_c.proxy_url().is_some());
+        for v in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NODE_USE_ENV_PROXY"] {
+            assert!(vars.iter().any(|s| s == v), "tier C: {v} — {vars:?}");
+        }
+        assert_ne!(policy_key(&taken), policy_key(&tier_c), "with the lines or without: two keys");
+        // (and the report says which: no variable to name, or the one a tool mustn't ignore — Linux's report: on
+        // macOS a Linux policy has no port of its own to the proxy, and reads as loopback only)
+        #[cfg(target_os = "linux")]
+        {
+            let said = |p: &Policy| {
+                Guard::In(Box::new(p.clone())).report(&[]).split_whitespace().collect::<Vec<_>>().join(" ")
+            };
+            let (taken_said, tier_c_said) = (said(&taken), said(&tier_c));
+            assert!(
+                taken_said.contains(
+                    "through tarae's proxy, which takes every connection they make and answers their names (no \
+                     proxy variable is set)"
+                ) && !taken_said.contains("HTTPS_PROXY"),
+                "{taken_said}"
+            );
+            assert!(
+                tier_c_said.contains("only through tarae's proxy (HTTPS_PROXY, set for every run)"),
+                "{tier_c_said}"
+            );
+        }
+        let (closed, vars) = made(Os::Linux, false, true);
+        assert!(!closed.redirected && closed.proxy_url().is_none() && vars.is_empty(), "{vars:?}");
+        let (mac, _) = made(Os::Mac, true, true);
+        assert!(!mac.redirected && mac.proxy_url().is_some_and(|u| u.per_run));
+    }
+
     /// A proxy URL that's the same for every run is part of a policy's key (step 5f): a home a daemon lives from
     /// is the key's, so a daemon is never reused by runs whose proxy lines differ from those it started with.
     /// A run's own URL (its port, its token) is not — every run would be a key of its own, and the token would be
@@ -8127,6 +8213,7 @@ mod tests {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
+            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -8206,6 +8293,7 @@ mod tests {
                 tag: None,
                 proxy: None,
                 supervised: Os::HOST == Os::Linux,
+                redirected: false,
                 egress: Default::default(),
                 run_id: 0,
                 session: 0,
@@ -8285,6 +8373,7 @@ mod tests {
             tag: Some(tag.to_string()),
             proxy: None,
             supervised: Os::HOST == Os::Linux,
+            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -8351,6 +8440,7 @@ mod tests {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
+            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -9400,6 +9490,7 @@ mod tests {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
+            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
