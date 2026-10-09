@@ -186,6 +186,9 @@ approve, merge — every write on a card.
 
 One draft pull request.
 
+- A `SECURITY.md` at the repository's root: where to report a vulnerability (a dedicated security address, e.g.
+  `security@` on the homepage's domain, kept current) and how reports are handled.
+
 ### 9. The homepage
 
 tarae.sinabro.io. An animation that feels like several agents working at once, and the README's demo, both from
@@ -193,6 +196,17 @@ one scripted recording: `cargo xtask shot` extended to record frames, Claude's p
 claude, so it can be recorded again when the UI changes. To do: the recording script, the scenes, the site, the
 domain. The scenes are picked with the user: a chat edit and its card, the end-of-turn review, a commit from the
 git tab, search, a short Kubernetes one.
+
+- Programs to apply to once tarae is public and has users (decided 2026-10-09; a Claude Console organization is
+  already made):
+  - Claude's startup program.
+  - Anthropic's Cyber Verification Program, as "Open-source project" → "Maintainer of a widely depended-on
+    open-source project". What it needs: a project others depend on; as an organization, incorporated and
+    headquartered in an eligible country (checked by business verification; whether a sole proprietorship counts
+    is to be asked). It also needs a one-to-three-sentence scope ("Security engineering for tarae, an open-source
+    code editor I maintain: building and testing the sandbox that confines an AI coding agent's commands, on my
+    own machines and test VMs") and the security contact above. The hope: it lets the sandbox's own testing
+    (seccomp, fd passing, namespaces) go on without the model's cyber safeguards stopping it.
 
 ## Alongside, not ordered
 
