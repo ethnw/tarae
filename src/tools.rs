@@ -3718,6 +3718,134 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// cardburden 6: parallel calls of one command stacked a card each, every one read and answered. The front
+    /// run card lists the stacked cards asking for the very same run — `+1 more like it: card#3 — same command,
+    /// unchanged` — and `Y` (only once the card's been drawn whole and settled) runs each, a `card` line each;
+    /// another command's card stays to be answered; one more like it coming after the card settled makes it a
+    /// card to read again, its list replaced. Cards that warn of something don't group, nor do those past the
+    /// sandbox or with none around them (`Offer::groupable`), nor commands the same but for spaces in quotes.
+    /// (The runs are `touch` in the test's own folder.)
+    #[test]
+    fn stacked_cards_for_the_same_run_are_answered_as_one_group() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-group-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.name = "group".into();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let ask = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
+            super::run(
+                ed,
+                super::Call::of(generation, &format!("r{n}"), json!(n)),
+                &json!({ "command": cmd }),
+            )
+            .unwrap();
+        };
+        let (same, other) = ("touch same.txt", "touch other.txt");
+        ask(&mut ed, 1, same);
+        ask(&mut ed, 2, other);
+        ask(&mut ed, 3, same);
+        ed.handle_event(crate::event::Event::Resize);
+        let ids: Vec<u64> = ed.offers.iter().map(|o| o.id).collect();
+        let front = &ed.offers[0];
+        assert_eq!(front.like, [ids[2]], "the same run, not the other command");
+        let said = format!("+1 more like it: card#{} — same command, unchanged", ids[2]);
+        assert!(front.question.ends_with(&said), "{}", front.question);
+        assert!(front.answers(false).contains(&('Y', "All listed")));
+        assert!(ed.offers[1..].iter().all(|o| o.like.is_empty()), "the front's list only");
+        // Not drawn yet: `Y` isn't an answer
+        ed.handle_key("Y".parse().unwrap());
+        assert_eq!(ed.offers.len(), 3);
+        // Drawn, not settled: not yet either (a key as it comes isn't an answer)
+        crate::term::render(&mut ed, &mut Vec::new(), 140, 40).unwrap();
+        ed.handle_key("Y".parse().unwrap());
+        assert_eq!(ed.offers.iter().filter(|o| !o.installing()).count(), 3, "not settled");
+        // Drawn whole and settled — then another like it comes (the review of 6): the list grows, the card is
+        // to be read again (`rev`), its paragraph replaced, not added to; `Y` waits for that
+        let settle = |ed: &mut crate::editor::Editor| {
+            crate::term::render(ed, &mut Vec::new(), 140, 40).unwrap();
+            let o = (ed.offers[0].id, ed.offers[0].rev);
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            o.1
+        };
+        let rev = settle(&mut ed);
+        ask(&mut ed, 4, same);
+        ed.handle_event(crate::event::Event::Resize);
+        let late = ed.offers.last().unwrap().id;
+        let front = &ed.offers[0];
+        assert_eq!(front.like, [ids[2], late]);
+        assert!(front.rev > rev, "to be read again");
+        assert_eq!(front.question.matches("more like it").count(), 1, "{}", front.question);
+        let said = format!("+2 more like it: card#{}, card#{late} — same command, unchanged", ids[2]);
+        assert!(front.question.ends_with(&said), "{}", front.question);
+        ed.handle_key("Y".parse().unwrap());
+        assert_eq!(
+            ed.offers.iter().filter(|o| !o.installing()).count(),
+            4,
+            "not before its new list was seen"
+        );
+        // Seen as it is: `Y` runs the three, the other stays
+        settle(&mut ed);
+        ed.handle_key("Y".parse().unwrap());
+        let up: Vec<u64> = ed.offers.iter().filter(|o| !o.installing()).map(|o| o.id).collect();
+        assert_eq!(up, [ids[1]], "the other command's card stays");
+        let lines = crate::cards::logged_lines("card group · ");
+        for id in [ids[0], ids[2], late] {
+            assert!(
+                lines.iter().any(|l| l.contains(&format!("card#{id} · run · ")) && l.contains(" · Y · ")),
+                "{lines:?}"
+            );
+        }
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !dir.join("same.txt").exists() {
+            assert!(std::time::Instant::now() < end, "it ran");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(!dir.join("other.txt").exists(), "not answered");
+        // Cards that warn of something (reaching beyond this machine) never group
+        ed.offers.clear();
+        ask(&mut ed, 5, "curl -s http://localhost:9");
+        ask(&mut ed, 6, "curl -s http://localhost:9");
+        ed.handle_event(crate::event::Event::Resize);
+        assert_eq!(ed.offers.len(), 2);
+        let warns =
+            |o: &crate::offer::Offer| matches!(&o.what, crate::offer::What::Run(r) if !r.warned.is_empty());
+        assert!(ed.offers.iter().all(warns), "both warn");
+        assert!(ed.offers[0].like.is_empty(), "a warning on it: answered one by one");
+        // The same words but for the spaces inside quotes: another command (`queued`'s key would collapse
+        // them — the review of 6)
+        ed.offers.clear();
+        ask(&mut ed, 7, "touch 'a  b'");
+        ask(&mut ed, 8, "touch 'a b'");
+        ed.handle_event(crate::event::Event::Resize);
+        assert_eq!(ed.offers.len(), 2);
+        assert!(ed.offers[0].like.is_empty(), "not the same command");
+        // No sandbox around them (`llm.sandbox` off: "it runs with all your permissions"): one by one
+        ed.offers.clear();
+        ed.config.llm.sandbox = false;
+        // (a command of its own: one sent again while its run still waits joins that run, no card — `queued`)
+        ask(&mut ed, 9, "touch bare.txt");
+        ask(&mut ed, 10, "touch bare.txt");
+        ed.handle_event(crate::event::Event::Resize);
+        let bare = |o: &crate::offer::Offer| matches!(&o.what, crate::offer::What::Run(r) if r.unprotected);
+        assert!(ed.offers.len() == 2 && ed.offers.iter().all(bare), "both unprotected");
+        assert!(ed.offers[0].like.is_empty(), "no sandbox: answered one by one");
+        ed.offers.clear();
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #87, #5: Claude's calls held back behind a run card are said on it; a second run while the card is up
     /// queues its own card (not refused — Claude sent the refused command again and again), and a yes while
     /// the first runs runs it next. With no card yet but one about to come, `C-q` says so.

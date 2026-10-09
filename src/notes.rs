@@ -500,20 +500,48 @@ pub fn stale_check(ed: &mut Editor) {
 /// The drafts a card names at most.
 const STALE_SHOWN: usize = 6;
 
-/// The card for drafts `ids` whose lines changed since they were pinned: `y` closes them, `n` keeps them.
+/// The card for drafts `ids` whose lines changed since they were pinned: `y` closes them, `r` lists them one
+/// by one, `n` keeps them. One card a session (cardburden 6 — a card each turn's end, before): a later turn's
+/// drafts join the card up, its list grown in place — read again before its `y` counts (`rev`).
 fn stale_card(ed: &mut Editor, ids: Vec<u64>) {
     let notes = &ed.session.notes;
-    let stale: Vec<&Note> = notes
+    let new: Vec<u64> = notes
         .list
         .iter()
-        .filter(|n| {
-            ids.contains(&n.id) && n.thread.iter().any(|e| e.draft) && !notes.stale_asked.contains(&n.id)
-        })
+        .filter(|n| ids.contains(&n.id) && is_draft(n) && !notes.stale_asked.contains(&n.id))
+        .map(|n| n.id)
         .collect();
-    if stale.is_empty() {
+    if new.is_empty() {
         ed.unchanged = true;
         return;
     }
+    ed.session.notes.stale_asked.extend(&new);
+    let up = stale_ids(ed).unwrap_or_default();
+    let all: Vec<u64> =
+        up.iter().chain(&new).copied().filter(|&id| find(ed, id).is_some_and(is_draft)).collect();
+    let (title, q, decided) = stale_text(ed, &all);
+    match stale_offer(ed) {
+        Some(o) => {
+            (o.title, o.question, o.decided) = (title, q, Some(decided));
+            o.what = crate::offer::What::NotesStale { ids: all };
+            o.rev += 1;
+        }
+        None => {
+            let what = crate::offer::What::NotesStale { ids: all };
+            let o = crate::offer::Offer::new(title, &q, "", String::new(), what).deciding(decided);
+            ed.push_offer(o);
+        }
+    }
+}
+
+/// Whether note `n` holds a draft — it waits for `space v s`.
+fn is_draft(n: &Note) -> bool {
+    n.thread.iter().any(|e| e.draft)
+}
+
+/// The stale card's title, its text and the lines saying what it closes (its list), for drafts `ids`.
+fn stale_text(ed: &Editor, ids: &[u64]) -> (String, String, Range<usize>) {
+    let stale: Vec<&Note> = ids.iter().filter_map(|&id| find(ed, id)).collect();
     let k = stale.len();
     let mut q = String::from("Their lines changed since they were pinned — fixed in the chat, maybe:\n");
     for n in stale.iter().take(STALE_SHOWN) {
@@ -522,14 +550,94 @@ fn stale_card(ed: &mut Editor, ids: Vec<u64>) {
         q.push_str(&format!("\n  {at} · {by} · {}", n.gist()));
     }
     if k > STALE_SHOWN {
-        q.push_str(&format!("\n  … {} more", k - STALE_SHOWN));
+        q.push_str(&format!("\n  … {} more — r lists them all", k - STALE_SHOWN));
     }
+    let listed = q.split('\n').count();
     q.push_str("\n\nKept, space v s still sends them.");
-    let ids: Vec<u64> = stale.iter().map(|n| n.id).collect();
-    ed.session.notes.stale_asked.extend(&ids);
-    let title = format!("Close {} on changed lines?", crate::nav::count(k, "draft"));
-    let what = crate::offer::What::NotesStale { ids };
-    ed.push_offer(crate::offer::Offer::new(title, &q, "", String::new(), what));
+    (format!("Close {} on changed lines?", crate::nav::count(k, "draft")), q, 0..listed)
+}
+
+/// Where this session's stale card is: up in front (`offers`), or parked while the session is behind.
+fn stale_offer(ed: &mut Editor) -> Option<&mut crate::offer::Offer> {
+    let is = |o: &crate::offer::Offer| matches!(o.what, crate::offer::What::NotesStale { .. });
+    match ed.background() {
+        true => ed.session.parked.iter_mut().find(|o| is(o)),
+        false => ed.offers.iter_mut().find(|o| is(o)),
+    }
+}
+
+/// The drafts this session's stale card lists — None: no card up.
+fn stale_ids(ed: &mut Editor) -> Option<Vec<u64>> {
+    match &stale_offer(ed)?.what {
+        crate::offer::What::NotesStale { ids } => Some(ids.clone()),
+        _ => None,
+    }
+}
+
+/// The drafts the stale card in front lists — each says `stale ·` while it's up (its line end, its card, the
+/// review rail's count). Empty: none up.
+pub fn stale_shown(ed: &Editor) -> &[u64] {
+    ed.offers
+        .iter()
+        .find_map(|o| match &o.what {
+            crate::offer::What::NotesStale { ids } => Some(ids.as_slice()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Every event: the stale card follows its drafts — one closed or sent since (`C-x` in its list, `space v s`,
+/// `:note-close`) leaves its list; none left, the card goes. Fewer, its `y` closes less than was read: not to
+/// be read again.
+pub fn stale_sync(ed: &mut Editor) {
+    let Some(ids) = stale_ids(ed) else { return };
+    let left: Vec<u64> = ids.iter().copied().filter(|&id| find(ed, id).is_some_and(is_draft)).collect();
+    if left.len() == ids.len() {
+        return;
+    }
+    if left.is_empty() {
+        let is = |o: &crate::offer::Offer| matches!(o.what, crate::offer::What::NotesStale { .. });
+        let gone = match ed.background() {
+            true => ed.session.parked.iter().find(|o| is(o)).map(|o| o.id),
+            false => ed.offers.iter().find(|o| is(o)).map(|o| o.id),
+        };
+        if let Some(id) = gone {
+            ed.card_how(id, "its drafts closed or sent");
+            ed.session.parked.retain(|o| o.id != id);
+            ed.offer_finished(id, Ok(()));
+        }
+        return;
+    }
+    let (title, q, decided) = stale_text(ed, &left);
+    if let Some(o) = stale_offer(ed) {
+        (o.title, o.question, o.decided) = (title, q, Some(decided));
+        o.what = crate::offer::What::NotesStale { ids: left };
+    }
+}
+
+/// The stale drafts list's title (`r` on the card): the notes list of just those, `C-x` closing one.
+pub const STALE: &str = "notes · stale";
+
+/// Whether a picker titled `title` is a list of notes (the notes list, or the stale card's).
+pub fn is_list(title: &str) -> bool {
+    title == NOTES || title == STALE
+}
+
+/// `r` on the stale card: its drafts in the notes list, alone — `enter` goes to one, `C-x` closes it (the
+/// card's list follows, `stale_sync`). No key of the code's changes meaning; the card stays under it.
+pub fn stale_list(ed: &mut Editor) {
+    let items = list_items(ed, STALE);
+    ed.open_picker(crate::picker::Picker::new(STALE, items, false), None);
+}
+
+/// The rows of the list titled `title`: every note, or the stale card's drafts.
+pub fn list_items(ed: &Editor, title: &str) -> Vec<crate::picker::Item> {
+    let mut items = picker_items(ed);
+    if title == STALE {
+        let shown = stale_shown(ed);
+        items.retain(|i| matches!(i.action, crate::picker::Action::Note { id, .. } if shown.contains(&id)));
+    }
+    items
 }
 
 /// The stale drafts card's answer: `y` closes notes `ids` (those still there), `n` keeps them.
@@ -925,6 +1033,15 @@ mod tests {
         ed.session.notes.list.iter().map(Note::gist).collect()
     }
 
+    /// The front card drawn and in sight past its settling time, then `keys` (a weighty card takes them only
+    /// so — the stale card is one since cardburden 6).
+    fn answer(ed: &mut Editor, keys: &str) {
+        crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
+        let o = (ed.offers[0].id, ed.offers[0].rev);
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        feed(ed, keys);
+    }
+
     /// #197: the author fixed what the reviewer found (asked in the chat, not with `space v s`) — the
     /// findings stayed drafts. Now a turn's end offers to close the drafts whose lines changed since they
     /// were pinned: a card naming them, `y` closes them; `n` keeps them, not asked about again. A draft whose
@@ -960,7 +1077,7 @@ mod tests {
         assert!(o.title.contains("2 drafts"), "{}", o.title);
         assert!(o.question.contains("a.rs:2") && o.question.contains("b.rs:2"), "{}", o.question);
         assert!(!o.question.contains("a.rs:4"), "its lines are as they were: {}", o.question);
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         assert_eq!(gists(&ed), ["the author's", "four too"]);
         // Nothing changed since: nothing asked
         turn_done(&mut ed, None);
@@ -971,11 +1088,146 @@ mod tests {
         feed(&mut ed, "Afixed<esc>");
         turn_done(&mut ed, None);
         settle_until(&mut ed, |ed| !ed.offers.is_empty());
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         assert_eq!(gists(&ed), ["the author's", "four too"]);
         turn_done(&mut ed, None);
         settle_for(&mut ed, 300);
         assert!(ed.offers.is_empty(), "asked once");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardburden 6: the stale card was pushed anew at every turn's end. Now one card a session: a later
+    /// turn's stale drafts join it in place — the same card, its list grown, and a `y` before the new list has
+    /// been in sight isn't taken. While it's up each of its drafts says `stale ·` at its line end and on its
+    /// card. `r` lists just them (the notes list, no key of the code's changed); `C-x` there closes one and the
+    /// card's list follows; `y` closes what's left. (The files are the test's own.)
+    #[test]
+    fn one_stale_card_grows_in_place_and_lists_its_drafts() {
+        let dir = std::env::temp_dir().join(format!("tarae-notes-stale-one-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let f = dir.join("a.rs");
+        std::fs::write(&f, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        let mut ed = editor();
+        ed.open(&f).unwrap();
+        for (line, text) in [(2, "two is wrong"), (3, "three too"), (5, "five")] {
+            finding(&mut ed, &dir, &json!({"path": "a.rs", "line": line, "text": text})).unwrap();
+        }
+        // (the author's fix in the turn — made past the card up, which has the keys — then the turn's end)
+        let fix = |ed: &mut Editor, line: usize| {
+            let up = std::mem::take(&mut ed.offers);
+            ed.goto_line(line);
+            feed(ed, "Afixed<esc>");
+            ed.offers = up;
+            turn_done(ed, None);
+        };
+        fix(&mut ed, 1);
+        settle_until(&mut ed, |ed| !ed.offers.is_empty());
+        let (card, rev) = (ed.offers[0].id, ed.offers[0].rev);
+        assert_eq!(ed.offers[0].title, "Close 1 draft on changed lines?");
+        // Its draft says so: at its line end, and on its card (the cursor on its line)
+        ed.goto_line(1);
+        let rows = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 120, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 120, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let screen = rows(&mut ed);
+        assert!(screen.contains("¶ stale · two is wrong"), "{screen}");
+        assert!(screen.contains("stale · its lines changed since it was pinned"), "{screen}");
+        assert!(!screen.contains("stale · three too"), "{screen}");
+        // A later turn: the same card, grown — its `y` waits for the new list to be seen
+        answer(&mut ed, "");
+        fix(&mut ed, 2);
+        settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.title.contains("2 drafts")));
+        assert_eq!(ed.offers.len(), 1, "one card");
+        assert_eq!(ed.offers[0].id, card, "the same card");
+        assert!(ed.offers[0].rev > rev, "to be read again");
+        feed(&mut ed, "y");
+        assert_eq!(
+            gists(&ed),
+            ["two is wrong", "three too", "five"],
+            "not taken before the new list was seen"
+        );
+        // `r`: just its drafts, listed; `C-x` closes one — the card's list follows
+        answer(&mut ed, "r");
+        let p = ed.picker.as_ref().expect("its list");
+        assert_eq!(p.title, STALE);
+        let listed: Vec<&str> = p.items().iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed.iter().all(|l| !l.contains("five")), "{listed:?}");
+        feed(&mut ed, "<C-x>");
+        assert_eq!(gists(&ed), ["two is wrong", "five"]);
+        assert_eq!(ed.picker.as_ref().map(|p| p.items().len()), Some(1), "the list follows");
+        assert_eq!(ed.offers[0].title, "Close 1 draft on changed lines?", "so does the card");
+        feed(&mut ed, "<esc>");
+        answer(&mut ed, "y");
+        assert_eq!(gists(&ed), ["five"]);
+        assert!(ed.offers.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The review of 6: a session behind keeps its stale card parked — a later turn's drafts grow that card
+    /// there, in place (not a second one, nothing put up in front), and once its drafts are closed it goes from
+    /// there too (`stale_sync` behind). (The files are the test's own.)
+    #[test]
+    fn a_stale_card_behind_grows_and_goes_where_it_is_parked() {
+        let dir = std::env::temp_dir().join(format!("tarae-notes-stale-behind-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("back")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let back_root = dir.join("back");
+        std::fs::write(back_root.join("a.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut ed = editor();
+        ed.session.root = dir.clone();
+        let back = ed.session_add(back_root.clone());
+        let mut ids = Vec::new();
+        ed.with_session(back, |ed| {
+            for line in [1, 2] {
+                let args = json!({"path": "a.rs", "line": line, "text": format!("found {line}")});
+                ids.push(finding(ed, &back_root, &args).unwrap().0);
+            }
+        });
+        let parked = |ed: &Editor| -> Vec<(u64, u64, Vec<u64>)> {
+            let l = ed.sessions.iter().find(|l| l.id == back).expect("behind");
+            l.parked
+                .iter()
+                .filter_map(|o| match &o.what {
+                    crate::offer::What::NotesStale { ids } => Some((o.id, o.rev, ids.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        ed.with_session(back, |ed| {
+            assert!(ed.background());
+            stale_card(ed, vec![ids[0]]);
+        });
+        let first = parked(&ed);
+        assert_eq!(first.len(), 1, "parked behind");
+        assert!(ed.offers.is_empty(), "nothing in front");
+        // A later turn behind: the same card, grown, to be read again
+        ed.with_session(back, |ed| stale_card(ed, vec![ids[1]]));
+        let grown = parked(&ed);
+        assert_eq!(grown.len(), 1, "one card");
+        assert_eq!(grown[0].0, first[0].0, "the same card");
+        assert_eq!(grown[0].2, ids, "its list grown");
+        assert!(grown[0].1 > first[0].1);
+        assert!(ed.offers.is_empty(), "nothing in front");
+        // Its drafts closed, still behind: it goes
+        ed.with_session(back, |ed| {
+            close(ed, ids[0]);
+            stale_sync(ed);
+        });
+        assert_eq!(parked(&ed)[0].2, [ids[1]], "its list follows");
+        ed.with_session(back, |ed| {
+            close(ed, ids[1]);
+            stale_sync(ed);
+        });
+        assert!(parked(&ed).is_empty(), "gone from where it was parked");
+        assert!(ed.offers.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -1644,6 +1644,8 @@ impl Editor {
         crate::refactor::next(self);
         crate::codereview::land(self);
         self.offer_view_sync();
+        self.offer_group_sync();
+        crate::notes::stale_sync(self);
         crate::stuck::sync(self);
         self.plugin_front();
         self.schedule_tick();
@@ -2573,7 +2575,10 @@ impl Editor {
             Some(_) => {}
             None => crate::notes::close(self, id),
         }
-        let rest = crate::notes::picker_items(self);
+        let title = self.picker.as_ref().map(|p| p.title.clone()).unwrap_or_default();
+        // (the stale card's list: its card follows first — `notes::stale_sync` — then its rows)
+        crate::notes::stale_sync(self);
+        let rest = crate::notes::list_items(self, &title);
         if let Some(p) = self.picker.as_mut() {
             let at = p.selected;
             p.set_items(rest);
@@ -2629,8 +2634,12 @@ impl Editor {
                     _ => self.git_branch_delete(&name, true),
                 };
             }
-            // A note: `C-x` closes it, `A-x` every note its author began (#197)
-            (Code::Char('x'), ctrl) if p.title == crate::notes::NOTES && (ctrl || key.alt) => {
+            // A note: `C-x` closes it, `A-x` every note its author began (#197) — in the stale card's list
+            // (`notes::STALE`) `C-x` only: the author's others aren't on it
+            (Code::Char('x'), ctrl)
+                if (ctrl && crate::notes::is_list(&p.title))
+                    || (key.alt && p.title == crate::notes::NOTES) =>
+            {
                 let Some(item) = p.current().cloned() else { return };
                 return self.picker_close_notes(&item, !ctrl);
             }

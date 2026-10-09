@@ -94,6 +94,13 @@ Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what
 under it, Claude's calls queued, cards in other sessions — and says it in words: `2 more wait — 1 here, 1 in
 fix-login · space I lists them`.
 
+Claude's calls made at once can stack cards asking for the very same run — the same command, character for
+character, in the same folder, showing the same. The card in front lists those behind it — `+1 more like it: card#53 — same command, unchanged`
+— and `Y` answers it and them, a `y` each (each its own `card` line). Only once the card in front has been in
+sight whole and settled, as its `y` — a card joining the list after that makes it one to read again; never for a
+card that warns of something, nor one past the sandbox (outside it, or with a socket) or with none around it (none
+here, or `llm.sandbox` off). Any other card behind is answered on its own.
+
 A card too tall for the screen is read whole in its own buffer (`v`), the card a bar over the status line that
 says whose keys they are. The card keeps the keys while you read: `j`/`k`, `g e` and the page keys move through
 the text, and its answers answer it. Esc gives them back to the code, and from then on `y` there is a yank, not a
@@ -1114,7 +1121,10 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
   `:notes-clear reviewer`, drops them all.
 - Asked the author to fix them some other way (in the chat), the findings would stay drafts. So when a chat
   turn ends, drafts whose lines changed since they were pinned — yours and its — are named on a card: `y`
-  closes them, `n` keeps them (asked about once).
+  closes them, `r` lists just them (the notes list: `enter` goes to one, `C-x` closes it, the card's list
+  follows), `n` keeps them (each asked about once). One card a session: a later turn's join it, its list grown
+  in place, and its `y` waits until the new list has been in sight. While it's up each says `stale ·` at its
+  line end and on its card, and the review rail's file row says `stale` (all its drafts) or `1 stale`.
 - The rail says how it's doing (`reading… 1m 20s · 14 reads`, then `2 findings ▲1 · 1 answered`) and the
   first line of its verdict. On a narrow rail the time and the reads go on the row under `reading…`.
   `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.

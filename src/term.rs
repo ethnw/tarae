@@ -3881,10 +3881,13 @@ fn draw_text(
                 // Several on the line: how many, then the one the card shows; a draft says so, and a
                 // finding of the reviewer's whose it is (in its colour)
                 let reviewer = n.thread.first().is_some_and(|e| e.by == crate::notes::By::Reviewer);
-                let draft = match (reviewer, n.thread.iter().any(|e| e.draft)) {
-                    (true, _) => "reviewer · ",
-                    (false, true) => "draft · ",
-                    (false, false) => "",
+                // (on the stale card up: `stale ·` — cardburden 6)
+                let stale = crate::notes::stale_shown(editor).contains(&n.id);
+                let draft = match (stale, reviewer, n.thread.iter().any(|e| e.draft)) {
+                    (true, ..) => "stale · ",
+                    (false, true, _) => "reviewer · ",
+                    (false, false, true) => "draft · ",
+                    (false, false, false) => "",
                 };
                 let gist = if count > 1 {
                     format!("{count} notes · {draft}{}", n.gist())
@@ -8392,6 +8395,18 @@ fn review_rail_need(editor: &Editor, r: &crate::codereview::CodeReview) -> usize
     need
 }
 
+/// What file `f`'s row says of its drafts the stale card lists, while it's up (cardburden 6): ` stale` when
+/// all its `drafts` are, else ` 2 stale` — None when none are.
+fn rail_stale(editor: &Editor, f: &crate::codereview::File, drafts: usize) -> Option<String> {
+    let shown = crate::notes::stale_shown(editor);
+    let k = editor.session.notes.list.iter().filter(|n| n.path == f.path && shown.contains(&n.id)).count();
+    match k {
+        0 => None,
+        k if k == drafts => Some(" stale".into()),
+        k => Some(format!(" {k} stale")),
+    }
+}
+
 /// File `f`'s notes waiting to be sent with the review: (your drafts, the reviewer's findings) — a note the
 /// reviewer began is its, whoever answered it since.
 fn rail_drafts(editor: &Editor, f: &crate::codereview::File) -> (usize, usize) {
@@ -8766,6 +8781,10 @@ fn draw_review_rail(
         }
         if found > 0 {
             tail.push(sp(format!(" r{found}"), Style { fg: reviewer_fg, ..bg }));
+        }
+        // (the stale card up: its drafts here — all of them `stale`, else how many — cardburden 6)
+        if let Some(said) = rail_stale(editor, f, k + found) {
+            tail.push(sp(said, Style { fg: ui.virt.fg, ..bg }));
         }
         let tail_w: usize = tail.iter().map(|s| s.text.width()).sum();
         let indent = guides.text.width();
@@ -10562,6 +10581,16 @@ fn note_lines(
             indent: 0,
         });
     }
+    // (on the stale card up — cardburden 6: why the card asks to close it)
+    if crate::notes::stale_shown(editor).contains(&n.id) {
+        out.push(Line::Text {
+            spans: vec![
+                sp("stale · ", dim),
+                sp("its lines changed since it was pinned — the card asks", faint),
+            ],
+            indent: 0,
+        });
+    }
     // The newest three; older ones fold into a count
     const SHOWN: usize = 3;
     let skip = n.thread.len().saturating_sub(SHOWN);
@@ -10905,13 +10934,16 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
                 hints(&[("enter", "open"), ("C-x", "close the buffer"), ("type", "narrow"), ("esc", "close")])
             }
         }
-    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.title == crate::notes::NOTES) {
-        // (`A-x` names whose: the row's author — #197)
+    } else if let Some(p) = editor.picker.as_ref().filter(|p| crate::notes::is_list(&p.title)) {
+        // (`A-x` names whose: the row's author — #197; not in the stale card's list, where it isn't one)
         let by = p
             .current()
             .and_then(|i| crate::notes::of_row(editor, i))
             .and_then(|id| crate::notes::began(editor, id));
         match by {
+            Some(_) if p.title == crate::notes::STALE => {
+                hints(&[("enter", "go to it"), ("C-x", "close it"), ("esc", "back to the card")])
+            }
             Some(by) => {
                 let all = format!("close all the {}'s", by.label());
                 hints(&[("enter", "go to it"), ("C-x", "close it"), ("A-x", &all), ("esc", "close")])
@@ -11552,6 +11584,7 @@ mod tests {
                 gate: Vec::new(),
                 held_changes: Vec::new(),
                 aside: false,
+                like: Vec::new(),
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);
@@ -12411,6 +12444,57 @@ mod tests {
         crate::notes::add(&mut ed, &PathBuf::from("/x").join(name), 0..1, crate::notes::By::You, "draft");
         ed.session.notes.list[0].thread[0].draft = true;
         assert_eq!(rail(&ed, 200), w);
+    }
+
+    /// cardburden 6: while the stale card is up, a file's row in the review rail says how many of its drafts
+    /// the card lists — `1 stale`, or `stale` when all of them are; none, nothing (no card up, nothing either).
+    /// (Paths under `/x`, which isn't there: nothing is read but a try.)
+    #[test]
+    fn the_rail_says_which_drafts_are_stale() {
+        use crate::codereview::{Base, CodeReview, File};
+        let f = File {
+            rel: "a.rs".into(),
+            path: PathBuf::from("/x/a.rs"),
+            added: 2,
+            removed: 1,
+            new: false,
+            gone: false,
+            binary: false,
+        };
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = ropey::Rope::from_str("fn main() {}\n");
+        ed.session.code_review = Some(CodeReview::for_test(Base::Head, PathBuf::from("/x"), vec![f.clone()]));
+        let mut ids = Vec::new();
+        for line in [0, 3] {
+            ids.push(crate::notes::add(&mut ed, &f.path, line..line + 1, crate::notes::By::You, "draft"));
+        }
+        for n in &mut ed.session.notes.list {
+            n.thread[0].draft = true;
+        }
+        let card = |ids: Vec<u64>| {
+            crate::offer::Offer::new(
+                "Close".into(),
+                "q",
+                "",
+                String::new(),
+                crate::offer::What::NotesStale { ids },
+            )
+        };
+        assert_eq!(rail_stale(&ed, &f, 2), None, "no card up");
+        ed.offers.push(card(vec![ids[0]]));
+        assert_eq!(rail_stale(&ed, &f, 2).as_deref(), Some(" 1 stale"));
+        let row = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            render(ed, &mut bytes, 160, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 160, 0);
+            parser.process(&bytes);
+            let s = parser.screen().contents();
+            s.lines().find(|l| l.contains("a.rs") && l.contains("¶2")).map(str::to_string).expect("its row")
+        };
+        assert!(row(&mut ed).contains("¶2 1 stale"), "drawn");
+        ed.offers[0] = card(ids.clone());
+        assert_eq!(rail_stale(&ed, &f, 2).as_deref(), Some(" stale"), "all of them");
+        assert!(row(&mut ed).contains("¶2 stale"));
     }
 
     /// The task panel fits its output (U2): a line or two take a small panel, more grows it — up to half the

@@ -356,6 +356,16 @@ mod tests {
         ),
         ("A card cut to fit", "`v`", "All of it in a buffer — `y` waits until its end was on screen"),
         (
+            "A run card listing others like it",
+            "`Y`",
+            "Run it and the cards it lists — the same run each, read whole first",
+        ),
+        (
+            "The stale drafts card",
+            "`y` `r` `n`",
+            "Close them · list just them (`C-x` closes one) · keep them",
+        ),
+        (
             "Claude's change to several files",
             "`y` `r` `v` `n`",
             "Accept them all · review them one by one · every change in a buffer · decline them all",

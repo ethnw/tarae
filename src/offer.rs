@@ -62,6 +62,25 @@ pub struct Offer {
     /// It stepped aside for what its `h` went to (`codereview::card_highs`): up, but its letters are the code's
     /// again — `C-q` answers it; back when every change it held for has had a look.
     pub aside: bool,
+    /// The front run card's group (cardburden 6): the cards stacked behind it asking for the very same run
+    /// (`same_run`), by id — its last paragraph lists them, and `Y` answers them with it (`offer_group_sync`).
+    pub like: Vec<u64>,
+}
+
+/// How the front run card's last paragraph starts when it lists the cards like it (`offer_group_sync`).
+const LIKE_SAID: &str = "\n\n+";
+
+/// Whether two run cards ask for the very same run (cardburden 6): the same command and folder exactly — the
+/// card says "same command" (the review of 6: `queued`'s key collapses spaces, inside quotes too, and
+/// `touch 'a  b'` isn't `touch 'a b'`) — the same run as `queued` keys it besides, and the same shown: what
+/// each says it reads outside the project, and the files and scripts on it, text and all (nothing changed
+/// between them).
+pub fn same_run(root: &std::path::Path, a: &crate::tools::RunCard, b: &crate::tools::RunCard) -> bool {
+    let key = |r: &crate::tools::RunCard| {
+        let job = crate::tools::Job::Command(r.cmd.clone(), r.cwd.clone());
+        crate::queued::key_of(root, &job, &crate::tools::Extra { grant: None, outside: false })
+    };
+    a.cmd == b.cmd && a.cwd == b.cwd && key(a) == key(b) && a.reads == b.reads && a.shown == b.shown
 }
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
@@ -348,6 +367,7 @@ impl Offer {
             gate: Vec::new(),
             held_changes: Vec::new(),
             aside: false,
+            like: Vec::new(),
         }
     }
 
@@ -417,6 +437,8 @@ impl Offer {
                 | What::Stuck(_)
                 | What::Host(_)
                 | What::Containers(_)
+                // (one `y` closes every draft it lists — cardburden 6: answered once read, its list as it is)
+                | What::NotesStale { .. }
         )
     }
 
@@ -484,11 +506,30 @@ impl Offer {
     /// that do something too).
     pub fn weighty_answer(&self, c: char) -> bool {
         matches!(c, 'y' | 'a' | 'A' | 'D' | 'R' | 'c')
+            || (c == 'Y' && !self.like.is_empty())
             || (c == 's' && (self.stashes() || self.for_session()))
             || (c == 'p' && self.preflights())
             || (c == 'X' && self.aborts())
             || (c == 'f' && self.restart_other())
             || (c == 'w' && self.restart_waits())
+    }
+
+    /// Its run, when it can be one of a group (cardburden 6): a run card still asking, in the sandbox — not
+    /// outside it, no socket granted (Docker's is as much as outside), not where there's none or it's off
+    /// (`unprotected`: "it runs with all your permissions" — the review of 6) — and warning of nothing.
+    pub fn groupable(&self) -> Option<&crate::tools::RunCard> {
+        match &self.what {
+            What::Run(r)
+                if matches!(self.state, OfferState::Asking)
+                    && !r.outside
+                    && r.socket.is_none()
+                    && !r.unprotected
+                    && r.warned.is_empty() =>
+            {
+                Some(r)
+            }
+            _ => None,
+        }
     }
 
     /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
@@ -587,6 +628,10 @@ impl Offer {
     /// (the bring card's `p` runs that one).
     pub fn answers(&self, quick: bool) -> Vec<(char, &'static str)> {
         let mut v = self.answers_all(quick);
+        // (the cards like it, listed on it: `Y` runs each — cardburden 6)
+        if !self.like.is_empty() && matches!(self.state, OfferState::Asking) {
+            v.insert(1.min(v.len()), ('Y', "All listed"));
+        }
         if self.held.is_some() && matches!(self.state, OfferState::Asking) {
             v.retain(|a| !matches!(a.0, 'y' | 'p'));
             if self.highs().is_some() {
@@ -702,7 +747,9 @@ impl Offer {
             }
             W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Don't")],
             W::RestartCancel { .. } => vec![('y', "Call it off"), ('n', "Keep it")],
-            W::NotesStale { .. } | W::NotesClose { .. } => vec![('y', "Close them"), ('n', "Keep them")],
+            // (`r`: the notes list of just these — cardburden 6)
+            W::NotesStale { .. } => vec![('y', "Close them"), ('r', "One by one"), ('n', "Keep them")],
+            W::NotesClose { .. } => vec![('y', "Close them"), ('n', "Keep them")],
             // (throwing them away takes a capital, as removing does)
             W::Recover(_) => vec![('y', "Restore"), ('c', "Compare"), ('D', "Discard"), ('n', "Not now")],
             W::ChangeSet { .. } => {
@@ -943,6 +990,9 @@ impl crate::editor::Editor {
             Code::Char('c') if o.recovers() => crate::recovery::compare(self),
             Code::Char('D') if o.recovers() => self.offer_discard(),
             Code::Char('y') => self.offer_accept(),
+            Code::Char('Y') if !o.like.is_empty() => self.offer_accept_like(),
+            // (the card stays: the list of its drafts over it, closed one by one there)
+            Code::Char('r') if matches!(o.what, What::NotesStale { .. }) => crate::notes::stale_list(self),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
                 self.offer_never()
@@ -978,6 +1028,34 @@ impl crate::editor::Editor {
 
     /// Downloads the front card — it moves to the back while downloading (the next offer comes forward).
     pub fn offer_accept(&mut self) {
+        self.offer_accept_by('y');
+    }
+
+    /// `Y` on a run card listing the cards like it (cardburden 6): `y` on it, then on each card it listed that
+    /// still asks for the same run — the front read whole first (`offer_key`: a weighty answer). Each its own
+    /// run, as its own `y` would be (the same command again joins the one under way — `queued::join`); each
+    /// its own `card` line, `Y`.
+    pub fn offer_accept_like(&mut self) {
+        let Some(front) = self.offers.first() else { return };
+        if !self.offer_seen_whole() {
+            return self.offer_see_all_first();
+        }
+        let (members, run) = (front.like.clone(), front.groupable().cloned());
+        let root = self.session.root.clone();
+        self.offer_accept_by('Y');
+        for id in members {
+            let still = |o: &Offer| {
+                o.id == id && o.groupable().zip(run.as_ref()).is_some_and(|(a, b)| same_run(&root, a, b))
+            };
+            let Some(i) = self.offers.iter().position(still) else { continue };
+            let o = self.offers.remove(i);
+            self.offers.insert(0, o);
+            self.offer_accept_by('Y');
+        }
+    }
+
+    /// `offer_accept`, answered by `key` (its `card` line and how it went say it).
+    fn offer_accept_by(&mut self, key: char) {
         if self.offers.first().is_none_or(Offer::installing) {
             return;
         }
@@ -1013,8 +1091,8 @@ impl crate::editor::Editor {
             return self.offer_refused(why);
         }
         let mut o = self.offers.remove(0);
-        o.said(self.session.label(), "y");
-        self.card_how(o.id, "answered y");
+        o.said(self.session.label(), &key.to_string());
+        self.card_how(o.id, format!("answered {key}"));
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
@@ -1341,6 +1419,43 @@ impl crate::editor::Editor {
         }
         let docs: Vec<_> = self.docs.iter().map(|d| d.id).collect();
         self.offer_views.retain(|(doc, _)| docs.contains(doc));
+    }
+
+    /// Every event: the front run card lists the cards stacked behind it that ask for the very same run
+    /// (`same_run` — groupable each: no warning, nothing past the sandbox), and `Y` answers them with it
+    /// (cardburden 6: parallel calls of one command stacked a card each, every one read and answered). Its
+    /// last paragraph says which — `+2 more like it: card#52, card#53 — same command, unchanged` — and a list
+    /// that changed makes it a new card to read (`rev`): `Y` waits until it's been seen as it is. No other card
+    /// keeps a list.
+    pub(crate) fn offer_group_sync(&mut self) {
+        let root = self.session.root.clone();
+        let want: Vec<u64> = match self.offers.first().and_then(Offer::groupable) {
+            Some(front) => self.offers[1..]
+                .iter()
+                .filter(|o| o.groupable().is_some_and(|r| same_run(&root, front, r)))
+                .map(|o| o.id)
+                .collect(),
+            None => Vec::new(),
+        };
+        for (i, o) in self.offers.iter_mut().enumerate() {
+            let like = if i == 0 { want.clone() } else { Vec::new() };
+            if o.like == like {
+                continue;
+            }
+            if let Some(at) = o.question.rfind(LIKE_SAID).filter(|_| !o.like.is_empty()) {
+                o.question.truncate(at);
+            }
+            if !like.is_empty() {
+                let ids: Vec<String> = like.iter().map(|id| format!("card#{id}")).collect();
+                o.question.push_str(&format!(
+                    "{LIKE_SAID}{} more like it: {} — same command, unchanged",
+                    like.len(),
+                    ids.join(", ")
+                ));
+            }
+            o.like = like;
+            o.rev += 1;
+        }
     }
 
     /// `v` on the front card: a change set's every change, else its whole text.

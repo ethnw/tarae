@@ -433,6 +433,8 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 | A card | `C-q` | Give it the keys from wherever they are (the status line says CARD); Esc goes back, unanswered |
 | No card here | `C-q` | To the session whose Claude waits for you — its card comes up there; nothing waiting, to a session whose turn ended (`done`) |
 | A card cut to fit | `v` | All of it in a buffer — `y` waits until its end was on screen |
+| A run card listing others like it | `Y` | Run it and the cards it lists — the same run each, read whole first |
+| The stale drafts card | `y` `r` `n` | Close them · list just them (`C-x` closes one) · keep them |
 | Claude's change to several files | `y` `r` `v` `n` | Accept them all · review them one by one · every change in a buffer · decline them all |
 | An edit's review | `y` `n` `a` `tab` | Accept this change · reject it · accept all left · next |
 | An edit's review | Esc | Back to the chat, the change unanswered — `C-q` answers it |
