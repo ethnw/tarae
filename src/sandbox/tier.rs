@@ -466,13 +466,11 @@ pub struct Probed {
     pub short: Option<String>,
     /// Whether tarae serves its runs' calls here (`supervisor::unavailable`).
     pub served: Result<(), String>,
-    /// Whether tarae can put a socket of its own in a run's place (`supervisor::swap_unavailable`: the egress
-    /// swap) — or why not. Served without it, a policy that opens something keeps no netns (D-a).
-    pub swap: Result<(), String>,
     /// Whether a keeper of this tarae is born with the session's transparent proxy (`redirect`): the probe's own
     /// keeper got its routes and owned table, or why not (no netns; a module that can't load, a kernel without
     /// `NFT_TPROXY` or the owner flag). Decided once (D-b): a session's own birth whose network fails after this
-    /// passed fails its runs, said — no silent fallback. Until 6f, without it a session's runs go out by the swap.
+    /// passed fails its runs, said — no silent fallback. Without it a session's runs go out by the proxy's variable
+    /// and the pair, their own loopback kept (6f, F3).
     pub redirect: Result<(), String>,
     /// 6g: whether a keeper with that network gets a scope of its own, each run a cgroup of its own below it — where
     /// the scope comes from — or why not (`cgroup::conditions`; without `redirect`, nothing would read it). Decided
@@ -506,12 +504,10 @@ pub fn get() -> &'static Probed {
         #[cfg(test)]
         if std::env::var_os("TARAE_TEST_NO_NS").is_some() {
             let served = super::supervisor::unavailable().map_or(Ok(()), Err);
-            let swap = super::supervisor::swap_unavailable().map_or(Ok(()), Err);
             return Probed {
                 ns: Ns::NONE,
                 short: Some("none asked (TARAE_TEST_NO_NS)".into()),
                 served,
-                swap,
                 redirect: Err("no network namespace".into()),
                 cgroups: Err("no TPROXY network".into()),
                 hint: None,
@@ -538,7 +534,7 @@ pub fn get() -> &'static Probed {
         // (Q5: the network's way and why, beside the tier)
         let way = match &p.redirect {
             Ok(()) => "network: TPROXY (the session's routes and owned table)".to_string(),
-            Err(why) => format!("network: the swap and the session's proxy — no TPROXY: {why}"),
+            Err(why) => format!("network: the session's proxy, by its variable — no TPROXY: {why}"),
         };
         crate::log::line("sandbox", "info", &way);
         // (6g, D4: said here only — nothing is lost without it but what 6d would add)
@@ -553,33 +549,27 @@ pub fn get() -> &'static Probed {
             };
             crate::log::line("sandbox", "info", &runs);
         }
-        if let (Ok(()), Err(why)) = (&p.served, &p.swap) {
-            let said = format!("a policy that opens a port or the network keeps no netns of its own: {why}");
-            crate::log::line("sandbox", "info", &said);
-        }
         p
     })
 }
 
-/// The namespaces the keeper of a policy is born with: the probe's — without `net` where tarae serves the runs
-/// but can't put a socket of its own in a run's place (`Probed.swap`) while the policy opens a port, this
-/// machine's ports or the network (D-a: its runs' sockets would be the session's, where nothing listens and
-/// nothing goes out) — and without a `/dev/shm` of its own where the project or a place it writes is in this
-/// system's (`in_shm`: a private one would hide them).
+/// The namespaces the keeper of a policy is born with: the probe's — without a `/dev/shm` of its own where the
+/// project or a place it writes is in this system's (`in_shm`: a private one would hide them). (Whatever it opens:
+/// a socket of tarae's can always take a run's place — `SETFD`, in the v5.9 header, is older than the 5.14 floor — so
+/// what it opens is reached from the session's netns too. 6f took D-a's "no netns for a policy that opens
+/// something" out with the probe for it.)
 pub fn for_policy(p: &super::Policy) -> Ns {
     for_policy_in(get(), p)
 }
 
 /// `for_policy` where the probe found `probed`.
 fn for_policy_in(probed: &Probed, p: &super::Policy) -> Ns {
-    ns_for(probed, opens(p), in_shm(p))
+    ns_for(probed, in_shm(p))
 }
 
-/// `for_policy` from what it reads of a policy: whether it opens something, whether it's in `/dev/shm`.
-fn ns_for(probed: &Probed, opens: bool, in_shm: bool) -> Ns {
-    let ns = probed.ns;
-    let stuck = probed.served.is_ok() && probed.swap.is_err() && opens;
-    Ns { net: ns.net && !stuck, shm: ns.shm && !in_shm, ..ns }
+/// `for_policy` from what it reads of a policy: whether it's in `/dev/shm`.
+fn ns_for(probed: &Probed, in_shm: bool) -> Ns {
+    Ns { shm: probed.ns.shm && !in_shm, ..probed.ns }
 }
 
 /// Whether the keeper of a policy that opens the network takes its runs' connections in the session's network
@@ -593,18 +583,13 @@ pub fn redirects() -> bool {
 
 /// `redirects` where the probe found `probed`.
 fn redirects_in(probed: &Probed) -> bool {
-    super::keeper::network_for(ns_for(probed, true, false), &probed.redirect).is_some()
+    super::keeper::network_for(ns_for(probed, false), &probed.redirect).is_some()
 }
 
 /// Whether the project, or a place or a file `p` writes, is in `/dev/shm` (real paths, as a policy has them).
 pub fn in_shm(p: &super::Policy) -> bool {
     let shm = Path::new("/dev/shm");
     std::iter::once(&p.root).chain(&p.write).chain(&p.files).any(|w| w.starts_with(shm))
-}
-
-/// Whether `p` opens anything a network namespace would close: the network, this machine's ports, one port.
-pub fn opens(p: &super::Policy) -> bool {
-    p.network || p.localhost || !p.ports.is_empty()
 }
 
 /// A keeper made with every namespace, and a `true` through it; one whose `/proc` didn't mount (D12), again
@@ -637,12 +622,11 @@ fn probe() -> Probed {
         }
         (Err(e), _) => without(e),
     };
-    let swap = super::supervisor::swap_unavailable().map_or(Ok(()), Err);
     let cgroups = match &redirect {
         Ok(()) => super::cgroup::conditions(&super::cgroup::facts()),
         Err(_) => Err("no TPROXY network".into()),
     };
-    Probed { ns, short, served, swap, redirect, cgroups, hint }
+    Probed { ns, short, served, redirect, cgroups, hint }
 }
 
 /// A keeper born with `ns` and, where it has a netns, the session's network: whether the namespaces work, and
@@ -754,8 +738,8 @@ mod tests {
     /// 6e′: a run's proxy URL is decided before its keeper is born (`redirects`, through `Here.redirects`), and it
     /// must be what the keeper is born with — else a run has neither the variable nor the session's network, and
     /// its report says the proxy takes its connections. For every outcome of the probe (namespaces: the session's
-    /// with or without `pid`, without `net`, none; served or not; the swap or not — the stuck case; the session's
-    /// network landed or not) and every policy that matters (the network closed or open, a port, this machine's
+    /// with or without `pid`, without `net`, none; served or not; the session's network landed or not) and every
+    /// policy that matters (the network closed or open, a port, this machine's
     /// ports, both), the policy as computed (`policy_in`) has no proxy URL exactly where its network is open and
     /// its keeper gets the session's network (`keeper::network_for` over `for_policy`'s namespaces).
     #[test]
@@ -780,12 +764,11 @@ mod tests {
         let ok = |yes: bool| if yes { Ok(()) } else { Err("not here".to_string()) };
         let (mut taken, mut cases) = (0, 0);
         for ns in nses {
-            for (served, swap, redirect) in (0..8).map(|b| (b & 1 != 0, b & 2 != 0, b & 4 != 0)) {
+            for (served, redirect) in [(false, false), (false, true), (true, false), (true, true)] {
                 let probed = Probed {
                     ns,
                     short: None,
                     served: ok(served),
-                    swap: ok(swap),
                     redirect: ok(redirect),
                     cgroups: Err("not asked".into()),
                     hint: None,

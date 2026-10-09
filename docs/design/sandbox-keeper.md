@@ -42,9 +42,9 @@ each address it reaches. It leaves four things open:
 | D18 | Another session's loopback listener is refused, even with `llm.sandbox-localhost` |
 | D21 | Later, its own step: the supervisor and the proxy as one confined process per session |
 | D23 | The supervisor and the proxy talk only over a Rust channel (`mpsc`) of typed, owned messages. **Supervisor → proxy**: the traffic end (`OwnedFd`), the session's id, and the connection's rules as a read-only snapshot (an `Arc`, never mutated). **Proxy → supervisor**: `Refused` and log lines. No socketpair between them, and no shared mutable state (no `Mutex` or other cell both sides write). The run's traffic socketpair stays. **Why not a socket**: in one process a socket isolates nothing; the channel keeps the same discipline at no serialization cost. If D21 is ever done, these messages move onto the keeper channel's wire format then (`channel.rs`). The keeper's own channel stays `SOCK_SEQPACKET` + `SCM_RIGHTS`: the keeper is another process |
-| D-c | With the network open, the resolvers `resolv.conf` names are reached on port 53 only: a loopback one (`127.0.0.53`) on this machine, another (GCP's `169.254.169.254`) out (2026-10-07) |
-| D-d | Before the proxy, "out" never reaches link-local addresses (the cloud metadata servers among them), multicast or broadcast, nor their IPv4-mapped forms — but D-c's port 53. Private ranges go out (2026-10-07) |
-| D-e | Tier C goes out by the same swap with the network open (2026-10-07) |
+| D-c | ~~With the network open, the resolvers `resolv.conf` names are reached on port 53 only~~ (2026-10-07) — superseded: through the proxy names are the proxy's (step 5c), in a TPROXY session the session's (6e); 6f took the route's last of it out |
+| D-d | Link-local addresses (the cloud metadata servers among them), multicast and broadcast, and their IPv4-mapped and carried forms, are never reached (2026-10-07; D-c's port-53 exception gone in 6f) |
+| D-e | ~~Tier C goes out by the same swap~~ (2026-10-07) — superseded: tier C goes out by the proxy's variable and the pair (step 5; kept in 6f, F2) |
 | D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused in C (2026-10-07) |
 
 ## The shape
@@ -94,9 +94,9 @@ takes the same flags.
 
 **Which namespaces, per policy** (`tier::for_policy`, so part of the policy key, D14):
 - **Every policy gets the session's netns** (step 4), whatever it opens: tarae routes what it opens out of the
-  netns (§Sockets and routing). Only where the kernel can't put a socket in a run's place (`SECCOMP_ADDFD_FLAG_SETFD`,
-  Linux 5.14: `supervisor::swap_unavailable`, `Probed.swap`) does a served policy that opens the network, this
-  machine's ports or a port keep none (D-a). Such a keeper says `network shared: its policy opens it — <why>`.
+  netns (§Sockets and routing). (D-a, no netns for a served policy that opens something where the kernel can't put
+  a socket in a run's place, went in 6f with its probe: the 5.14 floor — `SECCOMP_ADDFD_FLAG_SETFD`, already in the
+  v5.9 uapi header, is older than it.)
 - **No private `/dev/shm` where the project, a place it writes or a file it writes is under `/dev/shm`** (it would
   hide them from the run). That keeper says `/dev/shm shared: the project or a place it writes is in it`.
 
@@ -285,15 +285,19 @@ addressed `sendto`, `sendmsg` and `sendmmsg` still go to the supervisor, which r
 | loopback (`127/8`, `::1`, mapped, `0.0.0.0`/`::`): a port the session listens on, or one not opened to this machine | **the session** | tarae makes the call on the run's own socket (`pidfd_getfd`); it stays in the session's netns. Not opened, nothing is read; opened, the session's listeners are read from the caller's own `/proc/<tid>/net/{tcp,udp}[6]` |
 | loopback: a port opened by `llm.sandbox-ports`/`-localhost` that nothing in the session listens on (D2) | **this machine** | egress, on a socket of tarae's bound to `lo` |
 | one of this machine's own addresses beyond loopback (its LAN's, Docker's bridge's `172.17.0.1` — every interface's, `getifaddrs` when the run's policy is made: `Policy.own_addresses`; unreadable: every address beyond loopback refused, network open or not — never opened by a port, never out; logged when the policy is made and said in the run's report) | opened port: **this machine** (`OwnAddress`); else refused: `EPERM`, `network-outbound` | egress, on a socket of tarae's bound to no device (one bound to `lo` reaches loopback's addresses only — measured: `ETIMEDOUT`). A service listening on every address isn't reached through them unless its port is opened |
-| a resolver `resolv.conf` names, its port 53, network open (D-c) | loopback one: **this machine**; another (GCP's `169.254.169.254`): **out** | egress. Read once into `Policy.resolvers` (`route::resolvers`, glibc's three) |
-| link-local (with `169.254.169.254`), the cloud metadata servers that aren't (Alibaba Cloud's `100.100.100.200`; AWS's `fd00:ec2::254` and EKS Pod Identity's `fd00:ec2::23`, Google Cloud's `fd20:ce::254`), multicast, broadcast — and those IPv4 ones carried in NAT64's `64:ff9b::/96` or 6to4's `2002::/16` — network open (D-d) | refused: `EPERM`, `network-never` | before any connect. A resolver's port 53 is the one exception, so the metadata server's other ports stay closed |
-| anything else, network open | **out** | egress — direct until the proxy (step 5); private ranges included |
+| a question to port 53, network open, in a TPROXY session (6e) | **the session's**: answered by tarae (port 53 opened by the user, or a run's own server at that address: this machine's / the session's) | `Route::Redirected`: the run's own socket, marked |
+| a resolver `resolv.conf` names, its port 53, network open, through the proxy (step 5c) | refused: `EPERM`, `network-direct`, said as a lookup | names are the proxy's to look up. Read once into `Policy.resolvers` (`route::resolvers`, glibc's three) |
+| link-local (with `169.254.169.254`), the cloud metadata servers that aren't (Alibaba Cloud's `100.100.100.200`; AWS's `fd00:ec2::254` and EKS Pod Identity's `fd00:ec2::23`, Google Cloud's `fd20:ce::254`), multicast, broadcast — and those IPv4 ones carried in NAT64's `64:ff9b::/96` or 6to4's `2002::/16` — network open (D-d) | refused: `EPERM`, `network-never` | before any connect |
+| the proxy's reserved address (`192.0.2.1:3128`), network open, not in a TPROXY session | **the proxy** (`Route::Proxy`) | the pair (§The egress proxy). In a TPROXY session it's the session's own address, a closed port there (6f) |
+| anything else beyond, network open, a TCP connect in a TPROXY session (6d) | **the session's network** (`Route::Redirected`) | the run's own socket, marked; a planted socket takes it, the proxy decides by its host |
+| anything else beyond, network open, otherwise | refused: `EPERM`, `network-direct` | only the proxy and the session's network go out (6f took `Out` — a socket of tarae's connected beyond, unreachable since step 5 — away) |
 | anything else, network closed | refused: `EPERM`, `network-outbound` | as before |
 
-In tier C (`Served`, no netns, D-e) the same table without the session: loopback is this machine's where opened, else
-refused; out is the same swap, replacing tarae's own `lo`-bound socket.
+In tier C (`Served`, no netns) the same table without the session: loopback is this machine's where opened, else
+refused; beyond goes only by the proxy's address.
 
-**The egress swap** (`supervisor::swapped_for`), for Machine, OwnAddress and Out:
+**The egress swap** (`supervisor::swapped_for`), for Machine and OwnAddress (kept until connect leaves the supervisor:
+6f's F1):
 1. tarae makes a socket in its own namespace, of the run's domain, type and protocol (TCP or UDP — any other is
    refused here too), non-blocking as the run's is; for this machine's loopback, bound to `lo`.
 2. It carries what the run set and can read back (`CARRIED`: `SO_REUSEADDR`, `SO_REUSEPORT`, `SO_KEEPALIVE`,
@@ -303,7 +307,7 @@ refused; out is the same swap, replacing tarae's own `lo`-bound socket.
    `TCP_CONGESTION` isn't carried. One that can't be set fails the call.
 3. It records it as put out of the session (`Served.swapped`, by inode; the run's old socket's entry out) and only
    then puts it in place of the
-   run's at the same descriptor number (`SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.14) —
+   run's at the same descriptor number (`SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.9) —
    another thread of the run's calling on that number the moment it's there finds it tarae's, never the
    session's — then makes the call. A failed `ADDFD` takes the record back. A non-blocking connect answers
    `EINPROGRESS` as the run's own would.
@@ -323,12 +327,8 @@ refused; out is the same swap, replacing tarae's own `lo`-bound socket.
    tarae's) and not over this machine's, where the ioctl is refused: not the session's, as anything unreadable.
    Tier C never had it (no session netns: every call is judged as this machine's).
 
-The probe (`supervisor::swap_unavailable`) tries it once: a thread's `getppid` handed to a listener, which swaps
-`/dev/null` into a descriptor number the probe holds. No `unshare(CLONE_FILES)`: Docker's default seccomp profile
-refuses it. **Where the swap is missing** (before 5.14 — D-a: no netns, tier C's path): a route that needs one
-(`OwnAddress`, `Out`) is refused (`EPERM`, `network-outbound`, said with the probe's why), never left to `ADDFD`'s
-errno; this machine's loopback, where opened, is tier C's own socket and goes as ever; the report says loopback only
-(`Policy::loopback_only`).
+(Its probe, `swap_unavailable`, and the refusals where the swap was missing went in 6f: the reason is the 5.14
+floor — `SETFD`, already in the v5.9 uapi header, is older than it.)
 
 Unix sockets by path cross namespaces, so the supervisor's path rule (the session's project and `RunDir`) and ABI 9
 stay their guard. Abstract names are per netns: in `Routed` tarae binds and connects them on the run's own socket,
@@ -380,15 +380,17 @@ names the address and port, and the report says which.
 
 ## Tiers
 
-| Tier | The keeper's namespaces | Supervisor | Leftovers owned by |
-|---|---|---|---|
-| **A+** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`) | serving | the keeper's PID namespace: one kill |
-| **A** | user, net, ipc, mnt (`devpts`, `/dev/shm`); no fresh `/proc` | serving | the keeper's tree |
-| **B+ / B** | as A+ / A | plain (Yama 2/3, inside another listener) | as A+ / A |
-| **C** | none (no unprivileged user namespaces) | serving | the keeper's tree |
-| **D** | none | plain | the keeper's tree |
+| Tier | The keeper's namespaces | Supervisor | Beyond this machine, the network open (6f) | Leftovers owned by |
+|---|---|---|---|---|
+| **A+** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`) | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill |
+| **A** | user, net, ipc, mnt (`devpts`, `/dev/shm`); no fresh `/proc` | serving | as A+ | the keeper's tree |
+| **B+ / B** | as A+ / A | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | as A+ / A |
+| **C** | none (no unprivileged user namespaces) | serving | the proxy's variable and the pair (6f's F2) | the keeper's tree |
+| **D** | none | plain (today also Docker's default profile, which refuses `pidfd_getfd`: 6f′ — tarae's own copies, M8 — would make it C) | nothing: no socket at all but netlink | the keeper's tree |
 
-The file guarantees (Landlock ABI ≥ 3 full, 2 partial, < 2 none) are orthogonal (`linux::availability`).
+In every served tier opened ports and this machine's own addresses go by the swap (§Sockets and routing) until connect
+leaves the supervisor (Landlock ABI 9's step, D2). The file guarantees (Landlock ABI ≥ 3 full, 2 partial, < 2 none)
+are orthogonal (`linux::availability`).
 
 **What C/D still keep apart between sessions**: writes (Landlock), unix sockets by path (the supervisor, ABI 9),
 loopback listeners (D18), abstract sockets and signals from ABI 6, the environment (`runenv.rs`), and leftovers (the
@@ -398,8 +400,8 @@ and `/dev/shm` (`DEVICES` grants them), and below ABI 6 signals. Reads of the re
 are shared in every tier (D16).
 
 **The probe**, once on a worker: Landlock's ABI and the seccomp architecture as today, then a keeper made for real and
-a `true` run through it under a time limit — a timeout is no namespaces, not success — and whether `ADDFD`'s `SETFD`
-is taken. What failure says:
+a `true` run through it under a time limit — a timeout is no namespaces, not success — and, with a netns, whether
+the session's network lands (TPROXY). What failure says:
 
 | Seen | Why |
 |---|---|
@@ -489,7 +491,7 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      - `a_command_cant_signal_the_keeper`, by a keeper with a TERM handler;
      - `a_runs_pid_comes_from_its_pidfd`;
      - `an_open_policys_keeper_has_no_netns_yet` (since step 4:
-       `an_opened_policys_keeper_has_its_netns_where_the_swap_works`);
+       `an_opened_policys_keeper_has_its_netns_where_the_swap_works` — since 6f `an_opened_policys_keeper_has_its_netns`);
      - `in_plain_mode_a_run_reaches_only_its_own_loopback`;
      - `tier::tests::the_probe_says_why` and `the_probe_here`.
    - **Every step-2 test runs in the probe's tier.** The test helpers `keeper::outer_pid` and `seen_by_runs` translate
@@ -521,7 +523,7 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      | `the_never_reached_are_refused` (D-d; multicast, so a break sends nothing) | D-d's check removed |
      | `in_tier_c_the_network_open_goes_out_too` (D-e) | C's out-bound connect left on its `lo`-bound socket |
      | `a_routed_runs_own_connect_is_refused_by_the_kernel` (ABI ≥ 4) | `Routed`'s rules leaving TCP unhandled |
-     | `the_swap_is_probed` | answering without `SETFD` |
+     | `the_swap_is_probed` (gone in 6f with the probe) | answering without `SETFD` |
      | `the_families_are_what_glibc_counts` (the decision, pure) | IPv4 never counted |
      | `an_ipv4_lookup_finds_an_address_in_the_session` | no `SESSION_V4` on `lo`: `getaddrinfo -2`; IPv4 never counted |
      | `an_ipv6_lookup_finds_an_address_where_tarae_has_ipv6` (the family forced at the birth: the test containers have no IPv6; without it, nothing found) | no `SESSION_V6` on `lo`: `getaddrinfo -2` |
@@ -531,7 +533,7 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      | `a_socket_put_out_of_the_session_isnt_listened_on` (C and the netns; after a refused connect, and after `connect(AF_UNSPEC)` undid one made) | the swapped check in `listen` skipped: `listen=0` |
      | `a_swapped_socket_is_taraes_before_the_run_holds_it` (a second thread connects the same number to loopback while the supervisor pauses right after `add_fd` — `Policy.swap_pause`, test-only) | the swap recorded after `add_fd`: the second connect was made on tarae's socket and reached the user's loopback listener (`lo=0 out=106`) |
      | `route::tests::unread_own_addresses_only_refuse` (own addresses unread: an opened port on any address refused, nothing out) | an unread list counted as "mine": `93.184.216.34:3000` became `OwnAddress` |
-     | `without_the_swap_nothing_goes_beyond_loopback` (tier C, the swap forced missing — `Policy.test_swap_missing`: out refused and said, the loopback port reached, the report loopback only) | the swap's check skipped: the connection arrived out |
+     | `without_the_swap_nothing_goes_beyond_loopback` (gone in 6f: no kernel at or above the 5.14 floor lacks the swap) (tier C, the swap forced missing — `Policy.test_swap_missing`: out refused and said, the loopback port reached, the report loopback only) | the swap's check skipped: the connection arrived out |
      | `a_socket_from_outside_the_session_is_refused` (two TCP sockets and a unix one made outside, handed over a unix socket in the project: connect to loopback, listen, abstract name) | the netns check always passing: `connect=0 listen=0 abstract=0` — the user's listener and an abstract name of this machine's reached |
      | `route::tests::the_route_table`'s metadata rows (`route::METADATA`: Alibaba's, EKS Pod Identity's, Google's IPv6; NAT64 and mapped forms; Alibaba's neighbours out) | the non-link-local list dropped |
      | `linux::tests::the_report_says_how_linux_differs`'s unread case ("connect to nothing but this machine's loopback … llm.sandbox-network notwithstanding") | the report's unread case skipped |

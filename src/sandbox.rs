@@ -776,10 +776,6 @@ pub struct Policy {
     /// that swapped it goes on — the window another thread of the run's calls into.
     #[cfg(all(test, target_os = "linux"))]
     pub swap_pause: Option<std::time::Duration>,
-    /// Tests (Linux): why no socket of tarae's can take a run's place, said as `supervisor::swap_unavailable`
-    /// would on a kernel without `SETFD` (`swap_missing`) — every kernel here has it.
-    #[cfg(all(test, target_os = "linux"))]
-    pub test_swap_missing: Option<String>,
     /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
     /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
     #[cfg(target_os = "linux")]
@@ -2725,20 +2721,16 @@ impl Policy {
 
     /// Linux, a served run: why it reaches nothing but this machine's loopback, where it doesn't — this
     /// machine's own addresses couldn't be read when the policy was made (`own_addresses`: `route` refuses every
-    /// other address), or no socket of tarae's can take a run's place on this kernel (`swap_missing`: the
-    /// supervisor refuses what would need one). macOS, the network open: the run has no port of its own to tarae's
-    /// proxy, or the proxy can't tell this machine's own addresses from the network's. None elsewhere.
+    /// other address). macOS, the network open: the run has no port of its own to tarae's proxy, or the proxy
+    /// can't tell this machine's own addresses from the network's. None elsewhere.
     pub fn loopback_only(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
-            if self.own_addresses.is_none() {
-                return Some(
-                    "tarae couldn't read this machine's own addresses, so it can't tell them from the network's \
-                     and refuses every other address"
-                        .into(),
-                );
-            }
-            self.swap_missing().map(|why| format!("{why}, so nothing goes beyond it"))
+            self.own_addresses.is_none().then(|| {
+                "tarae couldn't read this machine's own addresses, so it can't tell them from the network's and \
+                 refuses every other address"
+                    .into()
+            })
         }
         #[cfg(not(target_os = "linux"))]
         match &self.proxy {
@@ -2751,17 +2743,6 @@ impl Policy {
             ),
             Some(_) => None,
         }
-    }
-
-    /// Linux: why tarae can't put a socket of its own in a run's place here (`supervisor::swap_unavailable`) —
-    /// None where it can. Tests: `test_swap_missing` says it instead.
-    #[cfg(target_os = "linux")]
-    pub fn swap_missing(&self) -> Option<String> {
-        #[cfg(test)]
-        if let Some(why) = &self.test_swap_missing {
-            return Some(why.clone());
-        }
-        supervisor::swap_unavailable()
     }
 
     /// Linux: the tier its runs go at, `partial` below Landlock ABI 3 (`linux::Confine.tier`, as `confine`
@@ -3247,8 +3228,6 @@ impl Policy {
             own_addresses: env.own_addresses.clone(),
             #[cfg(all(test, target_os = "linux"))]
             swap_pause: None,
-            #[cfg(all(test, target_os = "linux"))]
-            test_swap_missing: None,
             #[cfg(target_os = "linux")]
             confine: None,
         }

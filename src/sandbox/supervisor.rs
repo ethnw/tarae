@@ -187,12 +187,19 @@ impl Served {
             ports: &self.ports,
             network: self.network,
             resolvers: &self.resolvers,
-            // (the network open goes through tarae's egress proxy: step 5)
-            proxy: self.network.then_some(super::route::PROXY),
+            // (the network open goes through tarae's egress proxy, step 5 — where the session's own network doesn't
+            // take it: a TPROXY session's runs are told of no proxy (6e′), and one that names it itself goes as any
+            // connect beyond, to the planted socket — 6f)
+            proxy: (self.network && !self.taken()).then_some(super::route::PROXY),
             // (6d takes TCP: a datagram beyond goes as before — refused, said — but DNS, the session's own: 6e)
-            redirect: self.marks.is_some() && self.netns() && kind == libc::SOCK_STREAM,
-            names: self.marks.is_some() && self.netns(),
+            redirect: self.taken() && kind == libc::SOCK_STREAM,
+            names: self.taken(),
         }
+    }
+
+    /// Whether the session's own network takes what goes beyond (its keeper has a TPROXY network: the marks).
+    fn taken(&self) -> bool {
+        self.marks.is_some() && self.netns()
     }
 
     fn netns(&self) -> bool {
@@ -415,7 +422,10 @@ fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
 /// The run's seccomp listener.
 struct Listener(OwnedFd);
 
-/// `SECCOMP_IOCTL_NOTIF_ID_VALID` as kernels before 5.17 numbered it (`_IOR`) — later ones take it too.
+/// `SECCOMP_IOCTL_NOTIF_ID_VALID` as it was first numbered (`_IOR`, v5.0's uapi header). The header has named it
+/// `_IOW` since v5.9; the kernel's handler, which isn't in the headers, kept taking the old number (`_WRONG_DIR`, as
+/// the 6f review has it — and every run of tarae's on 6.1, 6.8 and 7.3 sent it). Which kernel's handler first took
+/// `_IOW` the uapi headers alone don't say, so the old number stays: it's the one taken from 5.0 on.
 const ID_VALID: libc::Ioctl = libc::_IOR::<u64>(b'!' as u32, 2);
 
 impl Listener {
@@ -470,7 +480,7 @@ impl Listener {
     }
 
     /// Puts `fd` among call `id`'s caller's descriptors — at number `at` in place of what's there (as `dup2`:
-    /// `SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.14), else at the lowest free one: the number it got there.
+    /// `SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.9), else at the lowest free one: the number it got there.
     fn add_fd(&self, id: u64, fd: &OwnedFd, at: Option<u32>, cloexec: bool) -> io::Result<i64> {
         let mut add = libc::seccomp_notif_addfd {
             id,
@@ -824,12 +834,12 @@ fn cloexec(c: &Caller, n: u64) -> bool {
         .is_some_and(|f| f & libc::O_CLOEXEC as u32 != 0)
 }
 
-/// The socket a call routed `Machine`, `OwnAddress` or `Out` (`route`) is made on: the caller's descriptor `n`
-/// (`sock`) as it is where it's already that — a socket of tarae's bound alike put there before, or in tier C
-/// (`Served`) one tarae made for this machine's loopback — else a socket of tarae's own made in its namespace, carrying what the run
-/// set (its `O_NONBLOCK`, close-on-exec, `CARRIED`), bound to the loopback device for `Machine` (to none for
-/// `OwnAddress` and `Out`), put in place of the run's at `n` (`SECCOMP_ADDFD_FLAG_SETFD`) before any call is made
-/// on it. Refused (`EADDRNOTAVAIL`, said as `network-bound`): a socket the run bound (its source address can't
+/// The socket a call routed `Machine` or `OwnAddress` (`route`) is made on — this machine, its port opened: the
+/// caller's descriptor `n` (`sock`) as it is where it's already that — a socket of tarae's bound alike put there
+/// before, or in tier C (`Served`) one tarae made for this machine's loopback — else a socket of tarae's own made
+/// in its namespace, carrying what the run set (its `O_NONBLOCK`, close-on-exec, `CARRIED`), bound to the loopback
+/// device for `Machine` (to none for `OwnAddress`), put in place of the run's at `n` (`SECCOMP_ADDFD_FLAG_SETFD`)
+/// before any call is made on it. (Kept for opened ports until connect leaves the supervisor: 6f's F1.) Refused (`EADDRNOTAVAIL`, said as `network-bound`): a socket the run bound (its source address can't
 /// move namespaces), filtered (a BPF filter can't be read back) or bound to a device in the session, or one of
 /// tarae's already put there bound otherwise; a connected stream: `EISCONN`, as the kernel says it. A socket it bound to every address
 /// and a port the kernel picked (`any_port`) goes as one it never bound: the new one gets its own port.
@@ -976,16 +986,7 @@ fn routed_socket(
             }
             Ok(sock)
         }
-        Route::Machine | Route::OwnAddress | Route::Out => {
-            // (a swap where this kernel can't make one — before 5.14, D-a's tier C: refused and said, not its
-            // `ADDFD`'s errno; tier C's own socket for this machine's loopback needs none)
-            let needs_swap = route != Route::Machine || p.net == RunNet::Routed;
-            if needs_swap && let Some(why) = p.swap_missing() {
-                let target = format!("remote:{to} — {why}: nothing goes beyond this machine's loopback");
-                return refuse(p, c, "network-outbound", target).map(|_| sock);
-            }
-            swapped_for(l, n, p, c, (fd, sock), route, to)
-        }
+        Route::Machine | Route::OwnAddress => swapped_for(l, n, p, c, (fd, sock), route, to),
         Route::Refused(Refusal::Closed) => {
             refuse(p, c, "network-outbound", format!("remote:{to}")).map(|_| sock)
         }
@@ -1048,8 +1049,7 @@ fn marked(p: &Served, c: &Caller, sock: &OwnedFd) -> Result<(), i32> {
 /// the same descriptor (`SECCOMP_ADDFD_FLAG_SETFD`), recorded as tarae's before the run holds it; the proxy's end
 /// handed to the proxy in a message with the run's rules (D23). The run's connect answers 0: connected — its
 /// `O_NONBLOCK` as it had it. TCP only; a socket the run bound (its source can't move), one connected already,
-/// or one of tarae's put there before isn't taken; without the swap (before 5.14) nothing goes beyond this
-/// machine's loopback, said.
+/// or one of tarae's put there before isn't taken.
 fn proxied(
     l: &Listener,
     n: &libc::seccomp_notif,
@@ -1058,10 +1058,6 @@ fn proxied(
     (fd, sock): (u64, OwnedFd),
     to: SocketAddr,
 ) -> Answer {
-    if let Some(why) = p.swap_missing() {
-        let target = format!("remote:{to} — {why}: nothing goes beyond this machine's loopback");
-        return refuse(p, c, "network-outbound", target);
-    }
     let (domain, kind) = (sockopt(&sock, libc::SO_DOMAIN)?, sockopt(&sock, libc::SO_TYPE)?);
     if (kind, sockopt(&sock, libc::SO_PROTOCOL)?) != (libc::SOCK_STREAM, libc::IPPROTO_TCP) {
         return refuse(
@@ -1120,78 +1116,6 @@ fn proxied(
     // (the proxy gone, the run's end reads its end at once: nothing goes out)
     super::proxy::get().send(super::proxy::ToProxy::Connection(to_proxy));
     Ok(0)
-}
-
-/// Whether tarae can put a socket of its own in a run's place here (`SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.14) —
-/// None when it can, else why not. Asked once: a thread of its own hands its `getppid` to a listener, which
-/// puts `/dev/null` with `SETFD` at a number the probe holds (its own `/dev/zero`); the thread checks that
-/// number is `/dev/null` now.
-pub fn swap_unavailable() -> Option<String> {
-    static WHY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    WHY.get_or_init(|| swap_probe().err()).clone()
-}
-
-fn swap_probe() -> Result<(), String> {
-    // (the number swapped is one of the probe's own: `/dev/zero`'s, which becomes `/dev/null`'s, and goes)
-    let reserved = OwnedFd::from(std::fs::File::open("/dev/zero").map_err(|e| e.to_string())?);
-    let at = reserved.as_raw_fd();
-    let (tx, rx) = std::sync::mpsc::channel::<io::Result<RawFd>>();
-    let thread = crate::event::thread("tarae-swapprobe", move || -> Result<bool, String> {
-        let nr = |n: libc::c_long| n as u32;
-        let op = |code: u32, k: u32, jt: u8, jf: u8| libc::sock_filter { code: code as u16, jt, jf, k };
-        let mut prog = [
-            op(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
-            op(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, nr(libc::SYS_getppid), 0, 1),
-            op(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_USER_NOTIF, 0, 0),
-            op(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW, 0, 0),
-        ];
-        let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() };
-        // SAFETY: this thread's own filter (it ends with the thread), a program that outlives the call.
-        let fd = unsafe {
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                let _ = tx.send(Err(io::Error::last_os_error()));
-                return Ok(false);
-            }
-            let flags = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
-            libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, flags, &raw const fprog)
-        };
-        if fd < 0 {
-            let _ = tx.send(Err(io::Error::last_os_error()));
-            return Ok(false);
-        }
-        let _ = tx.send(Ok(fd as RawFd));
-        // SAFETY: the call the listener answers.
-        unsafe { libc::getppid() };
-        let (mut there, mut null) =
-            (MaybeUninit::<libc::stat>::uninit(), MaybeUninit::<libc::stat>::uninit());
-        // SAFETY: stat buffers the calls fill, read only once filled.
-        let same = unsafe {
-            libc::fstat(at, there.as_mut_ptr()) == 0
-                && libc::stat(c"/dev/null".as_ptr(), null.as_mut_ptr()) == 0
-                && there.assume_init().st_rdev == null.assume_init().st_rdev
-        };
-        Ok(same)
-    });
-    let listener = match rx.recv() {
-        // SAFETY: the listener the thread made, tarae's now.
-        Ok(Ok(fd)) => Listener(unsafe { OwnedFd::from_raw_fd(fd) }),
-        Ok(Err(e)) => return Err(format!("no seccomp listener to try it on: {e}")),
-        Err(_) => return Err("the probe's thread ended".into()),
-    };
-    let Some(n) = listener.next() else { return Err("the probe's call never came".into()) };
-    let null = std::fs::File::open("/dev/null").map_err(|e| e.to_string())?;
-    let put = listener.add_fd(n.id, &OwnedFd::from(null), Some(at as u32), true);
-    listener.answer(n.id, Ok(0));
-    let seen = thread.join().map_err(|_| "the probe's thread panicked".to_string())??;
-    // (`/dev/null` at its number now, or still `/dev/zero`: closed either way)
-    drop(reserved);
-    match (put, seen) {
-        (Ok(_), true) => Ok(()),
-        (Ok(_), false) => Err("a socket put in a run's place wasn't there".into()),
-        (Err(e), _) => Err(format!(
-            "this kernel can't put a socket in a run's place (SECCOMP_ADDFD_FLAG_SETFD, Linux 5.14): {e}"
-        )),
-    }
 }
 
 /// `socket()` for an internet family: a stream or datagram socket (TCP, UDP — not raw, ICMP's, SCTP or

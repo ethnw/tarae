@@ -8,10 +8,12 @@
 //! (D2). Without a netns of its own (tier C) loopback is this machine's, reached only where it's opened. This
 //! machine's own addresses beyond loopback (its LAN's, Docker's bridge's) are this machine too, in every tier:
 //! reached only where the port's opened — a service listening on every address isn't reached through them. Beyond
-//! this machine: out with the network open, but never to link-local addresses, the cloud metadata servers tarae
-//! knows of (most are link-local; `never` lists the others), multicast or broadcast (D-d); refused with it closed. The resolvers `resolv.conf` names are reached
-//! on port 53 only, with the network open (D-c): a loopback one (systemd-resolved's `127.0.0.53`) on this
-//! machine, another (GCP's `169.254.169.254`) out.
+//! this machine, with the network open, only two ways go: the session's own network (TPROXY: a TCP connect and a
+//! name asked, `Redirected`) and tarae's egress proxy at its reserved address (`Proxy`); anything else beyond is
+//! refused as direct — and never to link-local addresses, the cloud metadata servers tarae knows of (most are
+//! link-local; `never` lists the others), multicast or broadcast (D-d). With it closed, refused. (6f took `Out` —
+//! a socket of tarae's connected beyond with no proxy — and step 4's resolvers reached as they are (D-c) out: no
+//! session went that way since the proxy, step 5.)
 //!
 //! (macOS has no supervisor: only the address checks — `never`, `this_machine` — serve there, its proxy's)
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -29,8 +31,6 @@ pub enum Route {
     /// its own namespace, bound to no device (bound to `lo` it reaches loopback's addresses only), in place of
     /// the run's.
     OwnAddress,
-    /// Beyond this machine: a socket of tarae's in its own namespace in place of the run's (the egress swap).
-    Out,
     /// Beyond this machine where the session's network takes it (6d, TPROXY): the run's own socket, marked as its
     /// run's (`marks.rs`), the call made in the session — whose rules hand it to a planted socket, tarae's egress
     /// proxy then deciding its host as it does a CONNECT's.
@@ -52,8 +52,8 @@ pub enum Refusal {
     Closed,
     /// An address never reached: link-local, the cloud metadata servers, multicast, broadcast (D-d).
     Never,
-    /// Beyond this machine directly, while the network goes through the proxy: only the proxy goes out (a tool
-    /// that ignores `HTTPS_PROXY` can't).
+    /// Beyond this machine by no way that goes out: only the proxy (a tool that ignores `HTTPS_PROXY` can't) and the
+    /// session's own network (TCP, names) do.
     Direct,
 }
 
@@ -66,10 +66,11 @@ pub struct Reach<'a> {
     pub ports: &'a [u16],
     /// Beyond this machine (`llm.sandbox-network`).
     pub network: bool,
-    /// The resolvers `resolv.conf` names, each at its port 53 (`resolvers`).
+    /// The resolvers `resolv.conf` names, each at its port 53 (`resolvers`): through the proxy, a lookup sent to
+    /// one is refused as direct and said as a lookup (the proxy looks names up).
     pub resolvers: &'a [SocketAddr],
-    /// The network goes through the proxy at this address (`PROXY`): a connect there is `Proxy`, and beyond
-    /// this machine nothing else goes out.
+    /// The network goes through the proxy at this address (`PROXY`): a connect there is `Proxy`. None where the
+    /// session's own network takes what goes beyond (6f: a TPROXY session's runs aren't told of it — 6e′).
     pub proxy: Option<SocketAddr>,
     /// The session's own network takes what goes beyond (6d: its keeper has a TPROXY network — `redirect.rs` — and
     /// the call is a TCP socket's: the supervisor's to say): there, beyond this machine is `Redirected` rather than
@@ -151,7 +152,7 @@ fn carried(v6: Ipv6Addr) -> Option<Ipv4Addr> {
 
 /// Where a call naming `to` goes, from a run whose sockets are in the session's own network namespace or
 /// not (`netns`), under `reach`. `listens`: whether the session listens at `to`'s port on its loopback —
-/// asked only where the answer turns on it (an opened port, a resolver's). `mine`: whether an address beyond
+/// asked only where the answer turns on it (an opened port, port 53 where the session answers names). `mine`: whether an address beyond
 /// loopback is one of this machine's own (its LAN's, a bridge's — Docker's `172.17.0.1`), where a listener on
 /// every address answers as on loopback: reached as loopback's opened ports are, never the session's — asked
 /// only where it decides; None where it can't be told (the addresses unread): refused, never opened.
@@ -190,7 +191,7 @@ pub fn route(
     if resolver && reach.proxy.is_some() {
         return Route::Refused(Refusal::Direct);
     }
-    let opened = reach.localhost || reach.ports.contains(&to.port()) || (reach.network && resolver);
+    let opened = reach.localhost || reach.ports.contains(&to.port());
     if this_machine(ip) {
         return match (netns, opened) {
             (true, false) => Route::Session,
@@ -206,12 +207,12 @@ pub fn route(
             Some(false) => {}
         }
     }
-    match (reach.network, resolver || !never(ip)) {
+    match (reach.network, never(ip)) {
         (false, _) => Route::Refused(Refusal::Closed),
-        (true, true) if netns && reach.redirect && !resolver => Route::Redirected,
-        (true, true) if reach.proxy.is_some() => Route::Refused(Refusal::Direct),
-        (true, true) => Route::Out,
-        (true, false) => Route::Refused(Refusal::Never),
+        (true, true) => Route::Refused(Refusal::Never),
+        // (beyond this machine only the session's network goes, and the proxy at its address: above)
+        (true, false) if netns && reach.redirect => Route::Redirected,
+        (true, false) => Route::Refused(Refusal::Direct),
     }
 }
 
@@ -259,8 +260,10 @@ mod tests {
 
     /// Every row of step 4's table (`target/sb/step4-plan.md` §3), in the session's netns and without one (C):
     /// loopback stays the session's unless opened and nothing of the session's listens there; opened, it's this
-    /// machine's; without a netns it's this machine's where opened, else refused; beyond: out with the network
-    /// open, never to link-local, multicast or broadcast, but a resolver's port 53 out or here.
+    /// machine's; without a netns it's this machine's where opened, else refused. Beyond, with the network open but
+    /// neither the proxy nor the session's network (the next tests' ways): refused as direct — nothing else goes out
+    /// (6f: `Out` gone) — and never to link-local, multicast or broadcast. A resolver's address is as any other
+    /// (6f: step 4's D-c gone): loopback's the session's, GCP's never reached.
     #[test]
     fn the_route_table() {
         let resolvers: Vec<SocketAddr> = ["127.0.0.53:53", "169.254.169.254:53"].map(at).into();
@@ -297,13 +300,14 @@ mod tests {
             ("0.0.0.0:3000", port, false, Machine, Machine),
             ("[::]:3000", closed, false, Session, Refused(Closed)),
             ("127.1.2.3:3000", port, false, Machine, Machine),
-            // 6, 7: a loopback resolver — this machine with the network open, the session's with it closed
-            ("127.0.0.53:53", open, false, Machine, Machine),
-            ("127.0.0.53:53", open, true, Session, Machine),
+            // 6, 7: a loopback resolver is loopback: the session's, this machine's only where opened
+            ("127.0.0.53:53", open, false, Session, Refused(Closed)),
+            ("127.0.0.53:53", open, true, Session, Refused(Closed)),
             ("127.0.0.53:53", closed, false, Session, Refused(Closed)),
+            ("127.0.0.53:53", port, false, Session, Refused(Closed)),
             ("127.0.0.53:80", open, false, Session, Refused(Closed)),
-            // 8, 9: GCP's resolver is the metadata server: its port 53 out, no other port of it (D-c, D-d)
-            ("169.254.169.254:53", open, false, Out, Out),
+            // 8, 9: GCP's resolver is the metadata server: never reached, port 53 too (D-d)
+            ("169.254.169.254:53", open, false, Refused(Never), Refused(Never)),
             ("169.254.169.254:80", open, false, Refused(Never), Refused(Never)),
             ("169.254.169.254:443", open, false, Refused(Never), Refused(Never)),
             ("169.254.169.254:54", open, false, Refused(Never), Refused(Never)),
@@ -316,8 +320,8 @@ mod tests {
             ("[64:ff9b::6464:64c8]:80", open, false, Refused(Never), Refused(Never)),
             ("[fd00:ec2::23]:80", open, false, Refused(Never), Refused(Never)),
             ("[fd20:ce::254]:80", open, false, Refused(Never), Refused(Never)),
-            ("100.100.100.201:80", open, false, Out, Out),
-            ("100.64.0.1:443", open, false, Out, Out),
+            ("100.100.100.201:80", open, false, Refused(Direct), Refused(Direct)),
+            ("100.64.0.1:443", open, false, Refused(Direct), Refused(Direct)),
             ("169.254.1.1:443", open, false, Refused(Never), Refused(Never)),
             ("[fe80::1]:443", open, false, Refused(Never), Refused(Never)),
             ("224.0.0.1:5353", open, false, Refused(Never), Refused(Never)),
@@ -330,21 +334,21 @@ mod tests {
             ("[64:ff9b::e000:1]:5353", open, false, Refused(Never), Refused(Never)),
             ("[2002:a9fe:a9fe::1]:80", open, false, Refused(Never), Refused(Never)),
             ("[2002:ffff:ffff::]:67", open, false, Refused(Never), Refused(Never)),
-            ("[64:ff9b::5db8:d822]:443", open, false, Out, Out),
-            ("[2002:5db8:d822::1]:443", open, false, Out, Out),
-            ("[64:ff9b:1::a9fe:a9fe]:80", open, false, Out, Out),
-            // 10: beyond, the network open — private ranges too
-            ("93.184.216.34:443", open, false, Out, Out),
-            ("10.0.0.5:22", open, false, Out, Out),
-            ("192.168.1.2:8080", open, false, Out, Out),
-            ("[2001:db8::1]:443", open, false, Out, Out),
+            ("[64:ff9b::5db8:d822]:443", open, false, Refused(Direct), Refused(Direct)),
+            ("[2002:5db8:d822::1]:443", open, false, Refused(Direct), Refused(Direct)),
+            ("[64:ff9b:1::a9fe:a9fe]:80", open, false, Refused(Direct), Refused(Direct)),
+            // 10: beyond, the network open, no way out — private ranges too
+            ("93.184.216.34:443", open, false, Refused(Direct), Refused(Direct)),
+            ("10.0.0.5:22", open, false, Refused(Direct), Refused(Direct)),
+            ("192.168.1.2:8080", open, false, Refused(Direct), Refused(Direct)),
+            ("[2001:db8::1]:443", open, false, Refused(Direct), Refused(Direct)),
             // 11: the network closed — opened ports are this machine's only
             ("93.184.216.34:443", closed, false, Refused(Closed), Refused(Closed)),
             ("93.184.216.34:3000", port, false, Refused(Closed), Refused(Closed)),
             ("93.184.216.34:443", localhost, false, Refused(Closed), Refused(Closed)),
             ("169.254.169.254:53", closed, false, Refused(Closed), Refused(Closed)),
             // 12: an IPv4-mapped address is its IPv4 one
-            ("[::ffff:93.184.216.34]:443", open, false, Out, Out),
+            ("[::ffff:93.184.216.34]:443", open, false, Refused(Direct), Refused(Direct)),
         ];
         let none = |_| Some(false);
         for (to, reach, listening, netns, c) in rows {
@@ -438,15 +442,15 @@ mod tests {
             ("93.184.216.34:443", proxied, Redirected, Refused(Direct)),
             ("[2606:2800:220:1::1]:443", proxied, Redirected, Refused(Direct)),
             ("10.0.0.5:22", proxied, Redirected, Refused(Direct)),
-            ("93.184.216.34:443", open, Redirected, Out),
-            ("[::ffff:93.184.216.34]:80", open, Redirected, Out),
+            ("93.184.216.34:443", open, Redirected, Refused(Direct)),
+            ("[::ffff:93.184.216.34]:80", open, Redirected, Refused(Direct)),
             ("192.0.2.1:3128", proxied, Proxy, Proxy),
             ("127.0.0.1:3000", proxied, Session, Refused(Closed)),
             ("192.168.1.5:8888", proxied, Refused(Closed), Refused(Closed)),
             ("169.254.169.254:80", proxied, Refused(Never), Refused(Never)),
             ("[fe80::1]:443", open, Refused(Never), Refused(Never)),
             ("10.0.0.2:53", proxied, Refused(Direct), Refused(Direct)),
-            ("10.0.0.2:53", open, Out, Out),
+            ("10.0.0.2:53", open, Redirected, Refused(Direct)),
             ("93.184.216.34:443", closed, Refused(Closed), Refused(Closed)),
         ];
         for (to, reach, netns, c) in rows {
@@ -509,6 +513,16 @@ mod tests {
                 (route(at(to), true, &reach, || false, own), route(at(to), false, &reach, || false, own));
             assert_eq!(got, (netns, c), "{to} under {reach:?}");
         }
+        // (6f: a TPROXY session's own reach — no proxy, its runs told of none: the proxy's old address is a connect
+        // beyond like any, the session's to take; a datagram beyond still refused as direct, never let out)
+        let taken = Reach { proxy: None, ..open };
+        let taken_datagram = Reach { redirect: false, ..taken };
+        let at_old = at("192.0.2.1:3128");
+        assert_eq!(route(at_old, true, &taken, || false, own), Redirected, "the old proxy address");
+        assert_eq!(route(at_old, true, &open, || false, own), Proxy, "where there's still a proxy");
+        for to in ["93.184.216.34:443", "[2606:2800:220:1::1]:443", "192.0.2.1:3128"] {
+            assert_eq!(route(at(to), true, &taken_datagram, || false, own), Refused(Direct), "{to}");
+        }
         // (a run's own server listening at that very loopback address comes first — before an opened port too; for
         // an address beyond this machine whether the session listens isn't asked)
         let asked = std::cell::Cell::new(0);
@@ -565,9 +579,9 @@ mod tests {
             ("192.168.1.5:8888", port, OwnAddress),
             ("172.17.0.1:2375", localhost, OwnAddress),
             ("192.168.1.5:8888", closed, Refused(Closed)),
-            ("192.168.1.5:53", open, OwnAddress),
+            ("192.168.1.5:53", open, Refused(Closed)),
             ("[fe80::42]:8888", open_port, Refused(Never)),
-            ("192.168.1.6:8888", open, Out),
+            ("192.168.1.6:8888", open, Refused(Direct)),
         ];
         for (to, reach, want) in rows {
             for netns in [true, false] {

@@ -489,9 +489,8 @@ impl Keeper {
         Ok(k)
     }
 
-    /// Its tier and namespaces in words (`:procs`, the log): `A+ (user net ipc pid mnt)`, and why its network
-    /// is this machine's (D-a: served, this kernel can't swap a socket in), and a mirror its `lo` couldn't take
-    /// (`lo_missing`). Not `tier::get`'s: the probe's own keeper says this while the probe is under way.
+    /// Its tier and namespaces in words (`:procs`, the log): `A+ (user net ipc pid mnt)`, and a mirror its `lo`
+    /// couldn't take (`lo_missing`). Not `tier::get`'s: the probe's own keeper says this while the probe is under way.
     pub fn said(&self) -> String {
         let served = super::supervisor::unavailable().is_none();
         let tier = super::tier::Tier::of(self.ns, served).said();
@@ -506,12 +505,7 @@ impl Keeper {
                 missing.join(" or ")
             ),
         };
-        match (self.ns.user && !self.ns.net && served, super::supervisor::swap_unavailable()) {
-            (true, Some(why)) => {
-                format!("{tier} ({}; network shared: its policy opens it — {why})", self.ns.said())
-            }
-            _ => format!("{tier} ({}{lo})", self.ns.said()),
-        }
+        format!("{tier} ({}{lo})", self.ns.said())
     }
 
     /// Reads what the keeper says, until its channel ends.
@@ -4693,40 +4687,27 @@ mod tests {
     }
 
     /// A policy that opens a port, this machine's ports or the network gets the session's network namespace as
-    /// one that opens nothing does — its calls routed out of it (step 4) — where tarae can put a socket of its
-    /// own in a run's place (`supervisor::swap_unavailable`); where it can't, none (D-a), and the keeper says
-    /// why. A keeper of the other key is superseded.
+    /// one that opens nothing does — its calls routed out of it (step 4): a socket of tarae's can always take a
+    /// run's place (6f: `SETFD` is older than the 5.14 floor, so D-a's "no netns" is gone). A keeper of the
+    /// other key is superseded.
     #[test]
-    fn an_opened_policys_keeper_has_its_netns_where_the_swap_works() {
+    fn an_opened_policys_keeper_has_its_netns() {
         use super::super::tier;
-        if !namespaced("an_opened_policys_keeper_has_its_netns_where_the_swap_works") {
+        if !namespaced("an_opened_policys_keeper_has_its_netns") {
             return;
         }
-        let swaps = super::super::supervisor::swap_unavailable().is_none();
         let (closed, _, r1) = project_in("netns-closed", Vec::new(), None, &[]);
         let (open, _, r2) = project_in("netns-open", vec![9], None, &[]);
+        let open = super::super::Policy { network: true, localhost: true, ..open };
         let (closed_ns, open_ns) = (tier::for_policy(&closed), tier::for_policy(&open));
-        let served = super::super::supervisor::unavailable().is_none();
-        assert_eq!(
-            (closed_ns.net, open_ns.net),
-            (ns().net, ns().net && (swaps || !served)),
-            "swaps: {swaps}"
-        );
-        assert!(tier::opens(&super::super::Policy { localhost: true, ..closed.clone() }));
-        assert!(tier::opens(&super::super::Policy { network: true, ..closed.clone() }));
+        assert_eq!((closed_ns.net, open_ns.net), (ns().net, ns().net));
         let root = std::env::temp_dir().join(format!("tarae-keeper-netns-{}", std::process::id()));
         let net = |pid: u32| std::fs::read_link(format!("/proc/{pid}/ns/net")).unwrap();
         let a = ready(&root, Some("closed"), closed_ns).unwrap();
         assert_ne!(net(a.pid), net(std::process::id()), "the session's own");
         let b = ready(&root, Some("open"), open_ns).unwrap();
         assert_ne!(a.pid, b.pid, "another keeper");
-        match open_ns.net {
-            true => assert_ne!(net(b.pid), net(std::process::id()), "the session's own, routed"),
-            false => {
-                assert_eq!(net(b.pid), net(std::process::id()), "this machine's: no swap here");
-                assert!(b.said().contains("network shared"), "{}", b.said());
-            }
-        }
+        assert_ne!(net(b.pid), net(std::process::id()), "the session's own, routed");
         assert!(gone_within(&a, END_WITHIN), "the idle one superseded ends");
         b.end();
         for r in [r1, r2] {
@@ -5085,19 +5066,20 @@ mod tests {
     /// Step 5: with the network open a run's connect to the proxy's address holds a real TCP socket of its own
     /// family — every option a client sets on it works (a unix socket in its place broke Python's `TCP_NODELAY`,
     /// M5) and its `O_NONBLOCK` is kept — and what it sends goes through tarae's proxy to the host it names, in
-    /// tier C (D-e) and the session's netns alike. The outside is a listener of the test's on this machine's own
-    /// address, named for the proxy (`proxy::TEST_NAMES`), beyond this machine for a policy made with no own
-    /// addresses.
+    /// tier C (D-e) and a netns without TPROXY alike (in a TPROXY session the address isn't the proxy's:
+    /// `in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own`). The outside is a listener of the test's on this
+    /// machine's own address, named for the proxy (`proxy::TEST_NAMES`), beyond this machine for a policy made with
+    /// no own addresses.
     #[test]
     fn a_proxied_connect_holds_a_tcp_socket() {
-        let Some(tiers) = served_tiers("a_proxied_connect_holds_a_tcp_socket") else { return };
+        let Some(tiers) = served_tiers("a_proxied_connect_holds_a_tcp_socket", false) else { return };
         let Some(ip) = outside() else { return };
-        for (tier, ns) in tiers {
+        for (tier, ns, network) in tiers {
             let (at, served) = answering(&format!("{ip}:0"), "out hello");
             let host = format!("outside-{tier}.test");
             super::super::proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
             let name = format!("proxied-{tier}");
-            let k = keeper_in(&name, ns);
+            let k = keeper_for(&name, ns, network);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             // (the network open to any host — `llm.sandbox-hosts = "any"`, as `policy_in` makes it)
             let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
@@ -5123,16 +5105,52 @@ mod tests {
         }
     }
 
+    /// 6f: in a TPROXY session the proxy's reserved address (`route::PROXY`) is no longer the proxy — its runs are
+    /// told of none (6e′). It's the session's own address (`SESSION_V4`, on its `lo`; the session's rules return its
+    /// own addresses before any tproxy), where nothing listens at that port: a run that names it itself meets a
+    /// closed port of the session's, refused by the session (`ECONNREFUSED`) as one on its loopback is — the
+    /// supervisor's pair isn't taken, and nothing reaches the host a request through it names, though the run's
+    /// rules allow any.
+    #[test]
+    fn in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own() {
+        let test = "in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, served) = answering(&format!("{ip}:0"), "out hello");
+        let host = "old-proxy-6f.test";
+        super::super::proxy::TEST_NAMES.lock().unwrap().push((host.into(), at));
+        let k = keeper("old-proxy-6f");
+        let (p, c, root) = redirected_project("old-proxy-6f", &k, 6_000_101, |_| {});
+        let env = [
+            ("TARAE_TO", super::super::route::PROXY.to_string()),
+            ("TARAE_HOST", format!("{host}:{}", at.port())),
+        ];
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let to = super::super::route::PROXY.to_string();
+        let (connected, _) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
+        let (said, refused) = served_said(&k, (&p, &c, &root), "proxied", &env);
+        let reached = served.recv_timeout(Duration::from_millis(500)).is_ok();
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(connected, libc::ECONNREFUSED.to_string(), "a closed port of the session's own");
+        assert!(
+            !reached && !said.ends_with("reply=out hello"),
+            "the host reached through it: {said} {refused:?}"
+        );
+    }
+
     /// Step 5e: a host a run's rules don't name (`llm.sandbox-hosts = []`) is held at the proxy — reached through
     /// the supervisor's TCP pair as macOS's runs reach it through their ports — and the main loop is asked, for
     /// that run; the session's answer lets it through, and the session's next run reaches the host unasked. The
-    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier C and the netns alike.
+    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier C and a netns without TPROXY alike.
     #[test]
     fn an_unknown_host_waits_for_the_answer() {
         use super::super::proxy::{self, FromProxy, Scope, ToProxy};
-        let Some(tiers) = served_tiers("an_unknown_host_waits_for_the_answer") else { return };
+        let Some(tiers) = served_tiers("an_unknown_host_waits_for_the_answer", false) else { return };
         let Some(ip) = outside() else { return };
-        for (tier, ns) in tiers {
+        for (tier, ns, network) in tiers {
             // (the outside answers two requests: the first run's, then the next's)
             let l = std::net::TcpListener::bind((ip, 0)).unwrap();
             let at = l.local_addr().unwrap();
@@ -5148,7 +5166,7 @@ mod tests {
             let host = format!("ask-{tier}.test");
             proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
             let name = format!("asked-{tier}");
-            let k = keeper_in(&name, ns);
+            let k = keeper_for(&name, ns, network);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let session = proxy::session_of(&p.root);
             let (asks, asked) = std::sync::mpsc::channel();
@@ -5209,15 +5227,15 @@ mod tests {
     /// arrives); the datagram is refused as before (UDP: 6e's).
     #[test]
     fn a_direct_connect_is_refused_with_the_proxy() {
-        let Some(tiers) = served_tiers("a_direct_connect_is_refused_with_the_proxy") else { return };
+        let Some(tiers) = served_tiers("a_direct_connect_is_refused_with_the_proxy", true) else { return };
         let Some(ip) = outside() else { return };
-        for (tier, ns) in tiers {
+        for (tier, ns, network) in tiers {
             let l = std::net::TcpListener::bind((ip, 0)).unwrap();
             l.set_nonblocking(true).unwrap();
             let udp = std::net::UdpSocket::bind((ip, 0)).unwrap();
             udp.set_nonblocking(true).unwrap();
             let name = format!("direct-{tier}");
-            let k = keeper_in(&name, ns);
+            let k = keeper_for(&name, ns, network);
             let redirected = lock(&k.network).is_some();
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
@@ -5256,49 +5274,6 @@ mod tests {
         }
     }
 
-    /// Where no socket of tarae's can take a run's place (a kernel before 5.14 — D-a: tier C; forced here, every
-    /// kernel tried has it), the network open reaches nothing beyond this machine's loopback: a connect to the
-    /// proxy is refused (`EPERM`, `network-outbound`) and said with why, and the report says loopback only; an
-    /// opened port on loopback — tier C's own socket, no swap — is still reached.
-    #[test]
-    fn without_the_swap_nothing_goes_beyond_loopback() {
-        if super::super::supervisor::unavailable().is_some() || open_rules("without_the_swap").is_none() {
-            return;
-        }
-        let (lo_at, lo_served) = answering("127.0.0.1:0", "machine hello");
-        let k = keeper_in("no-swap", Ns::NONE);
-        let (p, c, root) = project_served("no-swap", Vec::new(), Some(&k), &[], Ok(()));
-        let why = "this kernel can't put a socket in a run's place (a test's stand-in)";
-        let p = Arc::new(super::super::Policy {
-            network: true,
-            ports: vec![lo_at.port()],
-            own_addresses: Some(Vec::new()),
-            test_swap_missing: Some(why.into()),
-            ..p
-        });
-        let to = super::super::route::PROXY.to_string();
-        let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
-        let (lo_said, _) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &lo_at.to_string())]);
-        assert_eq!((said, lo_said), (libc::EPERM.to_string(), "reached machine hello".into()), "{refused:?}");
-        let d = refused.iter().find(|d| d.op == "network-outbound").unwrap_or_else(|| panic!("{refused:?}"));
-        assert!(d.plain().starts_with(&format!("connecting to {to} — {why}")), "{}", d.plain());
-        assert_eq!(d.port_here(), None, "beyond this machine: no port to open");
-        assert!(lo_served.recv_timeout(Duration::from_secs(5)).is_ok());
-        let made = super::super::Policy { confine: Some(Ok(c.clone())), ..(*p).clone() };
-        let report = super::super::Guard::In(Box::new(made)).report(&[]);
-        let report = report.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            report.contains(&format!(
-                "connect to nothing but this machine's loopback, its ports {} only (llm.sandbox-ports) — {why}, so \
-                 nothing goes beyond it, llm.sandbox-network notwithstanding",
-                lo_at.port()
-            )),
-            "{report}"
-        );
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
     /// A socket the run bound to a port of its own isn't swapped: its source address can't leave the session —
     /// refused with `EADDRNOTAVAIL`, said as such; nothing arrives outside. One bound to every address and a port
     /// the kernel picks (`0.0.0.0:0`, as Rust's and Java's datagram sockets are) goes out as an unbound one.
@@ -5334,17 +5309,18 @@ mod tests {
     /// Step 5c (Q4, closing what D-c opened): with the network through the proxy a resolver `resolv.conf` names
     /// (a stand-in of the test's on this machine's loopback, on its own port) isn't reached — names are the
     /// proxy's to look up, and an open port 53 would be a way out no host rule sees. The datagram is refused,
-    /// said as a name lookup, and nothing arrives; in tier C and the session's netns alike. (Measured first: no
+    /// said as a name lookup, and nothing arrives; in tier C and a netns without TPROXY alike (with it, names are the
+    /// session's: 6e). (Measured first: no
     /// tool going through the proxy looked a name up itself — `measure_through_the_proxy`.)
     #[test]
     fn under_the_proxy_a_resolver_isnt_reached() {
-        let Some(tiers) = served_tiers("under_the_proxy_a_resolver_isnt_reached") else { return };
-        for (tier, ns) in tiers {
+        let Some(tiers) = served_tiers("under_the_proxy_a_resolver_isnt_reached", false) else { return };
+        for (tier, ns, network) in tiers {
             let resolver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             resolver.set_nonblocking(true).unwrap();
             let at = resolver.local_addr().unwrap();
             let name = format!("resolver-{tier}");
-            let k = keeper_in(&name, ns);
+            let k = keeper_for(&name, ns, network);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = Arc::new(super::super::Policy { network: true, resolvers: vec![at], ..p });
             let (said, refused) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &at.to_string())]);
@@ -5374,17 +5350,33 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The served tiers here, each run's keeper born in them: tier C's (no namespaces), and the session's netns
-    /// where this system gives one — None where nothing's served.
-    fn served_tiers(test: &str) -> Option<Vec<(&'static str, Ns)>> {
+    /// The served tiers here, each run's keeper born in them (`keeper_for`), with the session's network or not:
+    /// tier C's (no namespaces); the session's netns where this system gives one, born without the session's network
+    /// — a netns without TPROXY, whose runs go out by the proxy's variable and the pair (6f's F3); and, with `tproxy`,
+    /// that netns with the session's network where this system gives it (the swap's ways are the same there; the
+    /// proxy's address isn't the proxy's — 6f). None where nothing's served.
+    fn served_tiers(test: &str, tproxy: bool) -> Option<Vec<(&'static str, Ns, bool)>> {
         if super::super::supervisor::unavailable().is_some() || open_rules(test).is_none() {
             return None;
         }
-        let mut tiers = vec![("c", Ns::NONE)];
+        let mut tiers = vec![("c", Ns::NONE, false)];
         if ns().net {
-            tiers.push(("netns", ns()));
+            tiers.push(("netns", ns(), false));
+            if tproxy && super::super::tier::get().redirect.is_ok() {
+                tiers.push(("tproxy", ns(), true));
+            }
         }
         Some(tiers)
+    }
+
+    /// `keeper_in`, born with the session's network where `network` asks it and this system gives it — else
+    /// without it, whatever the probe found.
+    fn keeper_for(test: &str, ns: Ns, network: bool) -> Arc<Keeper> {
+        if network {
+            return keeper_in(test, ns);
+        }
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-{test}", std::process::id()));
+        Keeper::born_lo(&root, None, ns, Families::here(), false, None, None).expect("a keeper starts")
     }
 
     /// This machine's own address beyond loopback (a container's, a LAN's, Docker's bridge's) is this machine,
@@ -5393,15 +5385,15 @@ mod tests {
     /// addresses as a policy reads them when it's made (`Here::now`).
     #[test]
     fn this_machines_own_address_is_reached_only_where_opened() {
-        let Some(tiers) = served_tiers("this_machines_own_address_is_reached_only_where_opened") else {
+        let Some(tiers) = served_tiers("this_machines_own_address_is_reached_only_where_opened", true) else {
             return;
         };
         let Some(ip) = outside() else { return };
         let own = super::super::Here::now().addresses;
         assert!(own.as_ref().is_some_and(|a| a.contains(&ip.into())), "{ip} among {own:?}");
-        for (tier, ns) in tiers {
+        for (tier, ns, network) in tiers {
             let name = format!("own-{tier}");
-            let k = keeper_in(&name, ns);
+            let k = keeper_for(&name, ns, network);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = super::super::Policy { own_addresses: own.clone(), ..p };
             let (at, served) = answering(&format!("{ip}:0"), "machine hello");
@@ -5428,11 +5420,13 @@ mod tests {
     /// session's netns alike. (A run's own listener: `two_runs_share_the_sessions_loopback`.)
     #[test]
     fn a_socket_put_out_of_the_session_isnt_listened_on() {
-        let Some(tiers) = served_tiers("a_socket_put_out_of_the_session_isnt_listened_on") else { return };
+        let Some(tiers) = served_tiers("a_socket_put_out_of_the_session_isnt_listened_on", true) else {
+            return;
+        };
         let Some(ip) = outside() else { return };
-        for (tier, ns) in tiers {
+        for (tier, ns, network) in tiers {
             let name = format!("swaplisten-{tier}");
-            let k = keeper_in(&name, ns);
+            let k = keeper_for(&name, ns, network);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let closed = std::net::TcpListener::bind((ip, 0)).unwrap();
             let to = closed.local_addr().unwrap().to_string();
@@ -5701,16 +5695,6 @@ mod tests {
         }
         assert_eq!(said[0], format!("v6={SESSION_V6},::1 lookup6=1"), "with IPv6 mirrored");
         assert!(said[1].starts_with("v6=::1 lookup6=getaddrinfo"), "without: {}", said[1]);
-    }
-
-    /// The probe finds tarae can put a socket of its own in a run's place (every kernel here is past 5.14) —
-    /// where it serves at all.
-    #[test]
-    fn the_swap_is_probed() {
-        if super::super::supervisor::unavailable().is_some() {
-            return;
-        }
-        assert_eq!(super::super::supervisor::swap_unavailable(), None);
     }
 
     // ── step 6c: the session's network, made at its keeper's birth ─────────────────────────────────────────
