@@ -6,7 +6,7 @@ use super::*;
 
 /// Where the session's network found it was going (a documentation address: nothing's there — tarae connects by
 /// the name's own addresses, the resolver's stand-in).
-fn beyond(port: u16) -> SocketAddr {
+pub(super) fn beyond(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), port)
 }
 
@@ -17,7 +17,7 @@ fn planted(p: &Proxy, run: u64, rules: Egress, original: SocketAddr) -> (TcpStre
 }
 
 /// `planted`, its session's names `names` (6e).
-fn planted_in(
+pub(super) fn planted_in(
     p: &Proxy,
     run: u64,
     rules: Egress,
@@ -39,8 +39,7 @@ fn planted_in(
 /// 6e: a connection to an address of the session's names is to the name it was given to — before any byte: a plain
 /// request naming that name reaches it; one naming another host is refused (403), said — never taken as another's
 /// (a run can't send its connection somewhere by naming one host in DNS and another in its request); an address of
-/// the pool no name was given is reset, said; and what names no host (a raw connection) is refused, said with the
-/// name its address was given to (E4: its card is 6e+'s).
+/// the pool no name was given is reset, said. (A raw connection to the name: `raw`.)
 #[test]
 fn a_synthetic_address_is_its_names() {
     let out = outside(web);
@@ -62,15 +61,6 @@ fn a_synthetic_address_is_its_names() {
     let (mut c, d) = planted_in(&f.proxy, 1, any(), unnamed, &names);
     assert!(was_reset(&mut c), "an address no name was given");
     assert!(said(&d).contains("no name was given"), "said");
-    let ssh = SocketAddr::new(at.ip(), 22);
-    let (mut c, d) = planted_in(&f.proxy, 1, any(), ssh, &names);
-    c.write_all(b"SSH-2.0-OpenSSH_9.9\r\n\r\n").unwrap();
-    assert!(was_reset(&mut c));
-    let target = said(&d);
-    assert!(
-        target.starts_with("web.test:22: neither TLS nor a request") && target.contains("raw TCP"),
-        "{target}"
-    );
 }
 
 /// 6e: DNS over TCP to a port 53 is answered by the session, every question on the connection in order (M7: glibc's
@@ -106,7 +96,7 @@ fn dns_over_tcp_answers_every_question_on_a_connection() {
 }
 
 /// Whether the run's end was reset: its read fails `ECONNRESET` — not an end of data a tool would take as an answer.
-fn was_reset(c: &mut TcpStream) -> bool {
+pub(super) fn was_reset(c: &mut TcpStream) -> bool {
     let mut b = [0u8; 64];
     loop {
         match c.read(&mut b) {
@@ -169,9 +159,9 @@ fn a_host_not_allowed_resets_a_taken_connection() {
     assert_eq!(out.accepted.load(Ordering::SeqCst), 0, "nothing reached the outside");
 }
 
-/// What names no host is refused and said — reset: bytes that are neither TLS nor a request tarae reads (ssh's
-/// banner), nothing at all within the head's time (a server that speaks first), a request naming an address (403:
-/// rules name hosts); and a cloud metadata server's own name, whatever the rules say.
+/// What names no host is refused and said — reset: to an address no name was given (F6), bytes that are neither TLS
+/// nor a request tarae reads (ssh's banner), nothing at all within the head's time (a server that speaks first); a
+/// request naming an address (403: rules name hosts); and a cloud metadata server's own name, whatever the rules say.
 #[test]
 fn what_names_no_host_is_refused() {
     let out = outside(echo);
@@ -183,6 +173,7 @@ fn what_names_no_host_is_refused() {
     assert!(was_reset(&mut c));
     let target = said(&d);
     assert!(target.starts_with("203.0.113.7:22: neither TLS nor a request tarae reads"), "{target}");
+    assert!(target.contains("no name was given") && f.asks.try_recv().is_err(), "never asked: {target}");
     let (mut c, d) = planted(&f.proxy, 1, any(), beyond(3306));
     assert!(was_reset(&mut c), "a server that speaks first: nothing sent, reset");
     assert!(said(&d).contains("nothing sent within"));

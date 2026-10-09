@@ -1548,6 +1548,16 @@ impl Denial {
                 Some((at, why)) => format!("reaching {at} — {why}"),
                 None => format!("reaching {t}"),
             },
+            // (6e+: raw TCP the user's answer would let through — `host:port: why`)
+            "network-raw" => match t.split_once(": ") {
+                Some((at, why)) => format!("a raw connection to {at} — {why}"),
+                None => format!("a raw connection to {t}"),
+            },
+            // (6e+: a name's records the user's answer would let it look up — `SRV _x._tcp.name: why`)
+            "network-lookup" => match t.split_once(": ") {
+                Some((asked, why)) => format!("looking up {asked} — {why}"),
+                None => format!("looking up {t}"),
+            },
             "network-bound" => match t.strip_prefix("remote:").and_then(|t| t.split_once(' ')) {
                 Some((at, why)) => format!("connecting to {at} {why}"),
                 None => self.shown(),
@@ -8047,6 +8057,26 @@ mod tests {
         );
         let golden = include_str!("snapshots/sandbox_report.txt");
         assert!(golden.contains("llm.sandbox-network and llm.sandbox-hosts open more"));
+    }
+
+    /// 6e+: a raw connection or a name's records refused say so in the report, each in its own words and op — the
+    /// host:port or the question first (as the proxy sends them: `serve_raw`'s reset, the held lookup's refusal),
+    /// then why; a target without its why said whole.
+    #[test]
+    fn the_report_says_why_raw_tcp_or_a_lookup_was_refused() {
+        let raw = |target: &str| denial(proxy::RAW_OP, target).reported();
+        assert_eq!(
+            raw("db.test:5432: the user refused it — tarae refused it: the tool sees its connection reset"),
+            "a raw connection to db.test:5432 — the user refused it — tarae refused it: the tool sees its connection \
+             reset (network-raw, touch)"
+        );
+        assert_eq!(raw("db.test:5432"), "a raw connection to db.test:5432 (network-raw, touch)");
+        let lookup = |target: &str| denial(proxy::LOOKUP_OP, target).reported();
+        assert_eq!(
+            lookup("SRV _mongodb._tcp.cluster.test: the user refused it for this session"),
+            "looking up SRV _mongodb._tcp.cluster.test — the user refused it for this session (network-lookup, touch)"
+        );
+        assert_eq!(lookup("TXT cluster.test"), "looking up TXT cluster.test (network-lookup, touch)");
     }
 
     /// Seatbelt's words in plain ones (its network denials name only the port: measured) — and its own

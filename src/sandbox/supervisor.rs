@@ -2287,6 +2287,7 @@ mod tests {
         super::super::proxy::get().send(super::super::proxy::ToProxy::Answer {
             session,
             run: p1.run_id,
+            kind: super::super::proxy::Kind::Host,
             host,
             port: 80,
             scope,

@@ -137,6 +137,23 @@ fn token(s: &[u8]) -> bool {
     !s.is_empty() && s.iter().all(|&c| tchar(c))
 }
 
+/// Whether `b` — a connection's first bytes, before its blank line — can still start an origin-form request line: a
+/// method (a token no longer than the longest of `METHODS`), one space, a path (`/`). ssh's banner, a database's
+/// binary startup, Redis's commands can't — told at once rather than waited on.
+fn may_start(b: &[u8]) -> bool {
+    let longest = METHODS.iter().map(|m| m.len()).max().unwrap_or(0);
+    let sp = b.iter().position(|&c| c == b' ');
+    let method = &b[..sp.unwrap_or(b.len())];
+    if method.len() > longest || !method.iter().all(|&c| tchar(c)) {
+        return false;
+    }
+    match sp {
+        None => true,
+        Some(0) => false,
+        Some(i) => b.get(i + 1).is_none_or(|&c| c == b'/'),
+    }
+}
+
 /// A head in `buf` — what a client sent so far: the request, None while its blank line hasn't come (and
 /// `HEAD_MAX` isn't reached), or why it's refused.
 pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
@@ -209,11 +226,15 @@ pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
 /// A plain-http request as a client sends it to its server (origin form: `GET /path HTTP/1.1` and its `Host`) —
 /// what the session's network hands tarae (6d), its connection having gone to `port`: the request `head` would make
 /// of it in absolute form, its host its one `Host`'s. A port `Host` names must be `port`; without one, `port` is it
-/// (`Host` leaves out only the scheme's default, which is the port it went to). None while its blank line hasn't come;
-/// `CONNECT` and every other refusal as `head`'s, and: a target that isn't a path, no `Host` or two of them.
+/// (`Host` leaves out only the scheme's default, which is the port it went to). None while its blank line hasn't come
+/// and what came can still start a request line (`may_start`: 6e+, so raw TCP is told at its first bytes); `CONNECT`
+/// and every other refusal as `head`'s, and: a target that isn't a path, no `Host` or two of them.
 pub fn origin(buf: &[u8], port: u16) -> Result<Option<Head>, Refusal> {
     let window = &buf[..buf.len().min(HEAD_MAX)];
     let Some(end) = find(window, b"\r\n\r\n") else {
+        if !may_start(window) {
+            return Err(Refusal::Malformed("its first bytes can't start a request line"));
+        }
         return if buf.len() >= HEAD_MAX { Err(Refusal::TooLong) } else { Ok(None) };
     };
     let head_bytes = &window[..end + 4];

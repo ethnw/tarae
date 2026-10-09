@@ -654,6 +654,19 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   in `sandbox.json`; `:sandbox-allowed` lists hosts (always, this session) and `:sandbox-disallow host
   name:port` takes one back — for the runs going on too. A host refused (unanswered, or `n`) is offered on
   `space m s` as well. While the network is off, the list does nothing
+- **Raw connections and service records** (Linux, where tarae takes a session's connections). A command
+  connecting to a host it looked up with something that isn't TLS or HTTP — ssh, a database client, Redis, a
+  server that speaks first — gets its own card, "Let a command open a raw connection to …?", saying tarae can't
+  see what passes. Only a list entry with that port (`"db.example.com:5432"`) lets it through unasked; neither
+  `"any"` nor an entry without a port does. A lookup of a host's SRV or TXT records (MongoDB's `mongodb+srv://`) is
+  made by tarae. A name tarae already looks up, by the rules or your yes, gets its service records without a card:
+  one the list names (or every name, with `"any"`), or one you said `y` or `s` to on its host or raw card — its
+  records show the DNS's operators nothing they don't see already, and every host they name is still asked about
+  when connected to. Any other name gets a card, the lookup held meanwhile — answered within about 5 s, it gets the
+  records; later, from its next try. Both cards answer `y`, `s` or `n` (no `A`: write the
+  entry in `llm.sandbox-hosts` instead), and `:sandbox-allowed` lists an `s` as `raw name:port` or `lookup name`,
+  taken back by `:sandbox-disallow` with the same words. A raw connection to an address no name was looked up for
+  is refused
 - **Through your own proxy.** Where tarae itself goes out through a proxy — `HTTPS_PROXY`, `HTTP_PROXY` or
   `ALL_PROXY` in the environment you started it from, lowercase forms first, as curl reads them — tarae's proxy
   goes on through that one, with the `user:password` its URL carries. Through an `http://` one a tunnel becomes a

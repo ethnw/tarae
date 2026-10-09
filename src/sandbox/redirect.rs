@@ -679,7 +679,8 @@ mod linux {
                 }
             },
         };
-        let q = proxy::NameQuestion { payload: payload.to_vec(), asker, names: names.clone(), reply };
+        let q =
+            proxy::NameQuestion { payload: payload.to_vec(), asker, names: names.clone(), reply, tcp: false };
         proxy::get().send(proxy::ToProxy::Question(q));
         Ok(())
     }

@@ -689,10 +689,17 @@ impl crate::editor::Editor {
                     items.push(row(format!("socket {}", s.display()), format!("connects · {when}")));
                 }
             }
-            // (hosts: the project's, and this session's — not a conversation's)
-            let kept_hosts = kept.hosts.iter().map(|h| (h, "always"));
-            for ((h, p), when) in kept_hosts.chain(session_hosts.iter().map(|h| (h, "this session"))) {
-                items.push(row(format!("host {h}:{p}"), format!("reaches · {when}")));
+            // (hosts: the project's, and this session's — not a conversation's; raw and lookups only the session's)
+            for (h, p) in &kept.hosts {
+                items.push(row(format!("host {h}:{p}"), "reaches · always".into()));
+            }
+            for (kind, h, p) in &session_hosts {
+                let verb = match kind {
+                    crate::sandbox::proxy::Kind::Host => "reaches",
+                    crate::sandbox::proxy::Kind::Raw => "raw TCP",
+                    crate::sandbox::proxy::Kind::Lookup => "looks up records",
+                };
+                items.push(row(crate::hosts::listed(*kind, h, *p), format!("{verb} · this session")));
             }
             match items.is_empty() {
                 true => Err(FillError::Nothing("nothing allowed past the defaults in this project".into())),
@@ -704,27 +711,30 @@ impl crate::editor::Editor {
         self.open_picker(p, Some(fill));
     }
 
-    /// `:sandbox-disallow <path | port N | socket path | host name:port>` — taken back (this conversation, this
-    /// session and kept): Claude asks again before reading there, its commands can't write there or connect
-    /// there, a host is asked again (its runs going on too — the proxy is told).
+    /// `:sandbox-disallow <path | port N | socket path | host name:port | raw name:port | lookup name>` — taken
+    /// back (this conversation, this session and kept): Claude asks again before reading there, its commands can't
+    /// write there or connect there, a host (raw TCP to it, its records) is asked again (its runs going on too — the
+    /// proxy is told).
     pub fn sandbox_disallow(&mut self, what: &str) -> Result<(), String> {
         let what = what.trim().to_string();
-        let host = what.strip_prefix("host ").and_then(host_port);
+        let host = crate::hosts::unlisted(&what);
         if !what.starts_with('/')
             && !what.starts_with("port ")
             && !what.starts_with("socket /")
             && host.is_none()
         {
-            return Err("usage: :sandbox-disallow <path | port N | socket path | host name:port> — as \
-                        :sandbox-allowed lists it"
-                .into());
+            return Err(
+                "usage: :sandbox-disallow <path | port N | socket path | host name:port | raw name:port | \
+                        lookup name> — as :sandbox-allowed lists it"
+                    .into(),
+            );
         }
         if let Some(c) = self.session.chat.as_mut() {
             c.allowed.remove(&what);
         }
-        if let Some((h, p)) = host {
-            self.session.hosts.retain(|(sh, sp)| *sh != h || *sp != p);
-            crate::hosts::taken(&self.session, &h, p);
+        if let Some((kind, h, p)) = host {
+            self.session.hosts.retain(|(sk, sh, sp)| (*sk, sh, *sp) != (kind, &h, p));
+            crate::hosts::taken(&self.session, kind, &h, p);
         }
         let taken = what.clone();
         keep_later(self, move |a| a.remove(&taken));
@@ -819,13 +829,14 @@ pub(crate) mod tests {
         // Taken back
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         (ed.session.root, ed.allow_path) = (root.clone(), Some(path.clone()));
-        ed.session.hosts.push(("static.example.invalid".into(), 443));
+        use crate::sandbox::proxy::Kind;
+        ed.session.hosts.push((Kind::Host, "static.example.invalid".into(), 443));
         crate::hosts::SENT.with(|s| s.borrow_mut().clear());
         ed.sandbox_disallow("host static.example.invalid:443").unwrap();
         assert!(ed.session.hosts.is_empty(), "the session's");
         let taken = crate::hosts::SENT.with(|s| {
             s.borrow().iter().any(|m| {
-                matches!(m, crate::sandbox::proxy::ToProxy::Taken { session, host, port: 443 }
+                matches!(m, crate::sandbox::proxy::ToProxy::Taken { session, kind: Kind::Host, host, port: 443 }
                     if *session == crate::sandbox::proxy::session_of(&root) && host == "static.example.invalid")
             })
         });

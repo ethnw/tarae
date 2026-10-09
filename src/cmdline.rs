@@ -81,7 +81,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     ),
     c(&["project-untrust"], Arg::None, "Stop running what this project's .tarae.toml sets"),
     c(&["sandbox-allowed"], Arg::None, "What Claude may do past the defaults — take one back"),
-    c(&["sandbox-disallow"], Arg::None, "Take back a path or port :sandbox-allowed lists"),
+    c(&["sandbox-disallow"], Arg::None, "Take back what :sandbox-allowed lists"),
     c(&["sandbox-blocked"], Arg::None, "What the sandbox blocked in Claude's last run: open it"),
     c(&["sandbox-env"], Arg::None, "Your environment's names Claude's commands get, and don't"),
     c(&["chat-screen"], Arg::None, "Send the screen, as text, with your next chat message"),

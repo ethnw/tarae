@@ -56,8 +56,9 @@ fn a_search_candidate_of_a_name_with_dots_is_nxdomain_unless_named() {
 /// E1 (b) and Q3: a name the rules name is looked up for real (and its lookup kept a while: asked again, answered at
 /// once from what it came to); any other gets the map's address unlooked-up, both families from one index, AAAA only
 /// where the session carries IPv6; through an upstream nothing is looked up. HTTPS/SVCB an empty NOERROR; another
-/// type REFUSED and said with the name; another class REFUSED; a metadata server's own name NXDOMAIN, said;
-/// `localhost` loopback; a name that isn't one NXDOMAIN, the root REFUSED.
+/// type (MX, but SRV and TXT — `records_are_looked_up_for_the_name_they_are_about`) REFUSED and said with the name;
+/// another class REFUSED; a metadata server's own name NXDOMAIN, said; `localhost` loopback; a name that isn't one
+/// NXDOMAIN, the root REFUSED.
 #[test]
 fn a_name_gets_its_answer() {
     let s = session();
@@ -75,11 +76,9 @@ fn a_name_gets_its_answer() {
     assert!(matches!(through, Plan::Now(Answer::Addresses(_))), "through the upstream: never looked up");
     assert_eq!(p("a.test", dns::TYPE_HTTPS), (Plan::Now(Answer::Empty), None));
     assert_eq!(p("a.test", dns::TYPE_SVCB).0, Plan::Now(Answer::Empty));
-    let (txt, said) = p("a.test", 16);
-    assert_eq!(txt, Plan::Now(Answer::Rcode(dns::REFUSED)));
-    assert!(said.unwrap().starts_with("a.test (TXT): "), "said with its name");
-    let (srv, said) = p("_mongodb._tcp.db.test", 33);
-    assert_eq!((srv, said.is_some()), (Plan::Now(Answer::Rcode(dns::REFUSED)), true));
+    let (mx, said) = p("a.test", 15);
+    assert_eq!(mx, Plan::Now(Answer::Rcode(dns::REFUSED)));
+    assert!(said.unwrap().starts_with("a.test (MX): "), "said with its name");
     let chaos = plan(&ask_in("version.bind", 16, 3), &s, named, NOT_THROUGH);
     assert_eq!((chaos.0, chaos.1.is_some()), (Plan::Now(Answer::Rcode(dns::REFUSED)), true));
     let (meta, said) = p("metadata.google.internal", dns::TYPE_A);
@@ -92,6 +91,42 @@ fn a_name_gets_its_answer() {
         "an address isn't a name"
     );
     assert_eq!(p("", 2).0, Plan::Now(Answer::Rcode(dns::REFUSED)), "the root");
+}
+
+/// 6e+ (F1, F2): an SRV or TXT question is looked up by tarae for the name it's about — an SRV owner's without its
+/// leading `_` labels, a TXT's as asked — with no card where the rules name that name, else asked first. Service
+/// labels with no name under them aren't a name (NXDOMAIN); through an upstream refused, said (tarae looks nothing
+/// up); a search candidate not named NXDOMAIN, as for an address (E6).
+#[test]
+fn records_are_looked_up_for_the_name_they_are_about() {
+    let s = session();
+    let p = |n: &str, t: u16| plan(&ask(n, t), &s, named, NOT_THROUGH);
+    let records = |base: &str, ask: bool| (Plan::Records { base: base.into(), ask }, None);
+    assert_eq!(p("_mongodb._tcp.db.corp.example", dns::TYPE_SRV), records("db.corp.example", false), "named");
+    assert_eq!(p("db.corp.example", dns::TYPE_TXT), records("db.corp.example", false));
+    assert_eq!(p("_mongodb._tcp.cluster0.mongo.test", dns::TYPE_SRV), records("cluster0.mongo.test", true));
+    assert_eq!(p("_dmarc.mongo.test", dns::TYPE_TXT), records("_dmarc.mongo.test", true), "TXT: as asked");
+    assert_eq!(p("_mongodb._tcp", dns::TYPE_SRV), (Plan::Now(Answer::Rcode(dns::NXDOMAIN)), None));
+    let through = plan(&ask("_x._tcp.github.com", dns::TYPE_SRV), &s, named, |_| true);
+    assert_eq!(through.0, Plan::Now(Answer::Rcode(dns::REFUSED)));
+    assert!(through.1.unwrap().contains("through the proxy tarae uses"));
+    let candidate = p("_x._tcp.db.mongo.test.other.example", dns::TYPE_SRV).0;
+    assert_eq!(candidate, Plan::Now(Answer::Rcode(dns::NXDOMAIN)), "a search candidate");
+    assert_eq!(base(dns::TYPE_SRV, "_a._b._c.d.test"), "d.test");
+    assert_eq!(base(dns::TYPE_SRV, "_a.b_c.test"), "b_c.test");
+}
+
+/// What tarae's lookup of a name's records comes to, answered (6e+): the records as they came, their TTL at most
+/// the map's; NODATA and NXDOMAIN as they came; a lookup that failed SERVFAIL (the client asks again).
+#[test]
+fn records_are_answered_as_they_came() {
+    let srv = dns::Record::Srv { priority: 0, weight: 5, port: 27017, target: "db1.test".into() };
+    let r = |ttl| records(dns::Found::Records(vec![srv.clone()], ttl));
+    assert_eq!(r(60), (Answer::Records(vec![srv.clone()]), 60));
+    assert_eq!(r(86_400), (Answer::Records(vec![srv.clone()]), TTL), "capped");
+    assert_eq!(records(dns::Found::Empty), (Answer::Empty, 0));
+    assert_eq!(records(dns::Found::No), (Answer::Rcode(dns::NXDOMAIN), 0));
+    assert_eq!(records(dns::Found::Failed), (Answer::Rcode(dns::SERVFAIL), 0));
 }
 
 /// What a real lookup comes to (E1): no such name NXDOMAIN; a failure SERVFAIL (the client tries again); a name

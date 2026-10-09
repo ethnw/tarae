@@ -180,9 +180,10 @@ pub struct Session {
     /// Its Claude's conversation compacted since tarae started — how often, the last one, and whether one
     /// came behind and it hasn't been in front since (`compaction.rs`).
     pub compacted: crate::compaction::Compacted,
-    /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit) —
-    /// what `:sandbox-allowed` lists and takes back; the proxy holds the answers itself (`hosts.rs`).
-    pub hosts: Vec<(String, u16)>,
+    /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit) — over
+    /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:sandbox-allowed` lists and
+    /// takes back; the proxy holds the answers itself (`hosts.rs`).
+    pub hosts: Vec<(crate::sandbox::proxy::Kind, String, u16)>,
     /// Its id for tarae's proxy, with the root it was worked out for (`proxy_id`).
     proxy_id: std::cell::RefCell<(PathBuf, u64)>,
 }

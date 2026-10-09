@@ -489,7 +489,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:project-trust` |  | Look again at what this project's .tarae.toml runs, and trust it or not |
 | `:project-untrust` |  | Stop running what this project's .tarae.toml sets |
 | `:sandbox-allowed` |  | What Claude may do past the defaults — take one back |
-| `:sandbox-disallow` |  | Take back a path or port :sandbox-allowed lists |
+| `:sandbox-disallow` |  | Take back what :sandbox-allowed lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |
 | `:sandbox-env` |  | Your environment's names Claude's commands get, and don't |
 | `:chat-screen` |  | Send the screen, as text, with your next chat message |

@@ -11,6 +11,8 @@ use super::*;
 
 // (6d: a run's connection the session's network took to a planted socket)
 mod planted;
+// (6e+: raw TCP to a name, and a name's SRV/TXT records — asked)
+mod asked;
 // (step 5g: the proxy chaining to the one tarae itself goes out by — a stand-in upstream on loopback)
 mod upstream;
 
@@ -22,6 +24,7 @@ fn limits() -> Limits {
     Limits {
         head_time: Duration::from_millis(300),
         hello_time: Duration::from_millis(300),
+        silent: Duration::from_millis(300),
         hold: WAIT,
         connect: Duration::from_secs(2),
         per_session: 256,
@@ -179,6 +182,11 @@ struct Fixture {
 }
 
 fn start(resolve: Resolve, limits: Limits) -> Fixture {
+    start_with(resolve, limits, Arc::new(|_: &str, _| dns::Found::Failed))
+}
+
+/// `start`, a name's records found by `records` (6e+).
+fn start_with(resolve: Resolve, limits: Limits, records: records::Records) -> Fixture {
     let (tx, asks) = mpsc::channel();
     // (a name is, of its first address's family, where `resolve` finds it — else it isn't)
     let finds = resolve.clone();
@@ -186,7 +194,7 @@ fn start(resolve: Resolve, limits: Limits) -> Fixture {
         Ok(a) if !a.is_empty() => answering::Exists::Yes { v4: a[0].is_ipv4(), v6: a[0].is_ipv6() },
         _ => answering::Exists::No,
     });
-    Fixture { proxy: Proxy::start(resolve, lookup, tx, limits), asks }
+    Fixture { proxy: Proxy::start(resolve, lookup, records, tx, limits), asks }
 }
 
 /// Rules naming these hosts, the test's loopback taken for beyond this machine, no own address.
@@ -1151,14 +1159,28 @@ fn a_run_answer_leaves_the_other_runs_asked() {
         assert!(Instant::now() < by, "the second run's connection never waited");
         std::thread::yield_now();
     }
-    let answer =
-        |run| ToProxy::Answer { session: 20, run, host: "ask.test".into(), port: 443, scope: Scope::Run };
+    let answer = |run| ToProxy::Answer {
+        kind: Kind::Host,
+        session: 20,
+        run,
+        host: "ask.test".into(),
+        port: 443,
+        scope: Scope::Run,
+    };
     f.proxy.send(answer(1));
     assert_eq!(status(&mut one), 200);
     let asked = f.asks.recv_timeout(WAIT).expect("the other run is asked");
     assert_eq!(
         asked,
-        FromProxy::Ask { session: 20, run: 2, host: "ask.test".into(), port: 443, process: "curl".into() }
+        FromProxy::Ask {
+            session: 20,
+            run: 2,
+            kind: Kind::Host,
+            host: "ask.test".into(),
+            port: 443,
+            process: "curl".into(),
+            asked: vec![]
+        }
     );
     f.proxy.send(answer(2));
     assert_eq!(status(&mut two), 200);
@@ -1180,7 +1202,15 @@ fn a_question_whose_connection_gave_up_is_asked_again() {
     let asked = f.asks.recv_timeout(WAIT).expect("asked again");
     assert_eq!(
         asked,
-        FromProxy::Ask { session: 21, run: 1, host: "ask.test".into(), port: 443, process: "curl".into() }
+        FromProxy::Ask {
+            session: 21,
+            run: 1,
+            kind: Kind::Host,
+            host: "ask.test".into(),
+            port: 443,
+            process: "curl".into(),
+            asked: vec![]
+        }
     );
 }
 
@@ -1225,11 +1255,23 @@ fn an_unknown_host_is_held_and_asked() {
         c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
         let asked = f.asks.recv_timeout(WAIT).expect("asked");
         let process = "curl".into();
-        assert_eq!(asked, FromProxy::Ask { session, run: 1, host: "ask.test".into(), port: 443, process });
+        assert_eq!(
+            asked,
+            FromProxy::Ask {
+                session,
+                run: 1,
+                kind: Kind::Host,
+                host: "ask.test".into(),
+                port: 443,
+                process,
+                asked: vec![]
+            }
+        );
         (c, d)
     };
     let (mut c, _) = ask_it(1);
     f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
         session: 1,
         run: 1,
         host: "ask.test".into(),
@@ -1239,6 +1281,7 @@ fn an_unknown_host_is_held_and_asked() {
     assert_eq!(status(&mut c), 200);
     let (mut c, d) = ask_it(2);
     f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
         session: 2,
         run: 1,
         host: "ask.test".into(),
@@ -1275,6 +1318,7 @@ fn a_session_answer_lets_the_runs_next_connections_through() {
     c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
     assert!(f.asks.recv_timeout(WAIT).is_ok());
     f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
         session: 5,
         run: 1,
         host: "ask.test".into(),
@@ -1291,6 +1335,7 @@ fn a_session_answer_lets_the_runs_next_connections_through() {
     c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
     assert!(f.asks.recv_timeout(WAIT).is_ok());
     f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
         session: 6,
         run: 1,
         host: "ask.test".into(),
@@ -1303,7 +1348,15 @@ fn a_session_answer_lets_the_runs_next_connections_through() {
     let again = f.asks.recv_timeout(WAIT).expect("another run is asked again");
     assert_eq!(
         again,
-        FromProxy::Ask { session: 6, run: 2, host: "ask.test".into(), port: 443, process: "curl".into() }
+        FromProxy::Ask {
+            session: 6,
+            run: 2,
+            kind: Kind::Host,
+            host: "ask.test".into(),
+            port: 443,
+            process: "curl".into(),
+            asked: vec![]
+        }
     );
     drop(c);
     // "Always for the project" reaches the session's runs here (the main loop keeps it for the next rules)
@@ -1311,7 +1364,14 @@ fn a_session_answer_lets_the_runs_next_connections_through() {
     c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
     assert!(f.asks.recv_timeout(WAIT).is_ok());
     let project = Scope::Project;
-    f.proxy.send(ToProxy::Answer { session: 12, run: 1, host: "ask.test".into(), port: 443, scope: project });
+    f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
+        session: 12,
+        run: 1,
+        host: "ask.test".into(),
+        port: 443,
+        scope: project,
+    });
     assert_eq!(status(&mut c), 200);
     let (mut c, _) = connection(&f.proxy, 12, 2, rules(&[]));
     assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 200);
@@ -1325,7 +1385,7 @@ fn answered(hosts: &[&str]) -> Egress {
 }
 
 fn answer_for(session: u64, run: u64, scope: Scope) -> ToProxy {
-    ToProxy::Answer { session, run, host: "ask.test".into(), port: 443, scope }
+    ToProxy::Answer { kind: Kind::Host, session, run, host: "ask.test".into(), port: 443, scope }
 }
 
 /// The user's latest answer for a session wins over what came before: after `n`, a session allow (a grant from
@@ -1350,7 +1410,7 @@ fn an_allow_after_a_refusal_lets_it_through() {
     assert!(f.asks.try_recv().is_err(), "asked once");
     // A refusal lifted for a run gone again with the host (`:sandbox-blocked`'s `y`): that run goes, another asks
     f.proxy.send(answer_for(30, 3, Scope::Refused));
-    f.proxy.send(ToProxy::Lifted { session: 30, host: "ask.test".into(), port: 443 });
+    f.proxy.send(ToProxy::Lifted { kind: Kind::Host, session: 30, host: "ask.test".into(), port: 443 });
     let (mut c, _) = connection(&f.proxy, 30, 4, answered(&["ask.test"]));
     assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 200, "the run whose rules name it");
     let (mut c, _) = connection(&f.proxy, 30, 5, rules(&[]));
@@ -1374,7 +1434,7 @@ fn a_host_taken_back_is_asked_again() {
     f.proxy.send(answer_for(32, 1, Scope::Session));
     assert_eq!(status(&mut c), 200);
     for session in [31, 32] {
-        f.proxy.send(ToProxy::Taken { session, host: "ask.test".into(), port: 443 });
+        f.proxy.send(ToProxy::Taken { kind: Kind::Host, session, host: "ask.test".into(), port: 443 });
         let (mut c, _) = connection(&f.proxy, session, 2, answered(&["ask.test"]));
         c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
         let asked = f.asks.recv_timeout(WAIT).unwrap_or_else(|_| panic!("session {session}: asked again"));
@@ -1478,6 +1538,7 @@ fn past_the_open_questions_a_host_is_refused_at_once() {
     other.write_all(connect_head("three.test:443").as_bytes()).unwrap();
     assert!(f.asks.recv_timeout(WAIT).is_ok(), "another session's own questions");
     f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
         session: 34,
         run: 1,
         host: "one.test".into(),
@@ -1505,6 +1566,7 @@ fn two_sessions_rules_stay_apart() {
     c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
     assert!(f.asks.recv_timeout(WAIT).is_ok());
     f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
         session: 7,
         run: 1,
         host: "ask.test".into(),
@@ -1517,7 +1579,15 @@ fn two_sessions_rules_stay_apart() {
     let asked = f.asks.recv_timeout(WAIT).expect("the other session is asked");
     assert_eq!(
         asked,
-        FromProxy::Ask { session: 8, run: 1, host: "ask.test".into(), port: 443, process: "curl".into() }
+        FromProxy::Ask {
+            session: 8,
+            run: 1,
+            kind: Kind::Host,
+            host: "ask.test".into(),
+            port: 443,
+            process: "curl".into(),
+            asked: vec![]
+        }
     );
     drop(c);
     // A session that ended takes its answers with it
@@ -1527,7 +1597,15 @@ fn two_sessions_rules_stay_apart() {
     let asked = f.asks.recv_timeout(WAIT).expect("asked again once its session ended");
     assert_eq!(
         asked,
-        FromProxy::Ask { session: 7, run: 2, host: "ask.test".into(), port: 443, process: "curl".into() }
+        FromProxy::Ask {
+            session: 7,
+            run: 2,
+            kind: Kind::Host,
+            host: "ask.test".into(),
+            port: 443,
+            process: "curl".into(),
+            asked: vec![]
+        }
     );
 }
 
@@ -1544,7 +1622,14 @@ fn the_proxy_knows_only_what_a_message_carries() {
     b.write_all(connect_head("example.invalid:443").as_bytes()).unwrap();
     assert!(f.asks.recv_timeout(WAIT).is_ok());
     let host = "example.invalid".to_string();
-    f.proxy.send(ToProxy::Answer { session: 10, run: 2, host, port: 443, scope: Scope::Refused });
+    f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
+        session: 10,
+        run: 2,
+        host,
+        port: 443,
+        scope: Scope::Refused,
+    });
     assert_eq!(status(&mut b), 403);
     assert!(said_host(&b_said).contains("refused"));
     let _c = tunnel(&f.proxy, 11, 3, rules(&["example.invalid"]), "example.invalid:443");

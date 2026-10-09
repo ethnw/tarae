@@ -3314,6 +3314,7 @@ mod tests {
             }
             "asked" => helper_asked(&std::env::var("TARAE_TO").unwrap_or_default()),
             "named" => helper_named(&std::env::var("TARAE_NAME").unwrap_or_default()),
+            "raw" => helper_raw(&std::env::var("TARAE_NAME").unwrap_or_default()),
             "searched" => helper_searched(&std::env::var("TARAE_TO").unwrap_or_default()),
             // (6e: a run's own DNS server at the session's 127.0.0.1:53 — `ready` once bound, then one question
             // answered NOTIMP, its ID and question echoed: an answer only it gives)
@@ -3756,6 +3757,37 @@ mod tests {
         let mut reply = String::new();
         let _ = std::io::BufReader::new(&s).read_line(&mut reply);
         format!("addr={} reply={}", at.ip(), reply.trim_end())
+    }
+
+    /// `raw` (6e+): `name` looked up as a tool does (`getaddrinfo`), its first address connected to at `$TARAE_PORT`,
+    /// `$TARAE_SEND` and a line end sent (none set: a client that waits for its server to speak), and the first line
+    /// back: `addr=<the address> reply=<the line>` — `reply=reset` where the connection was reset — or what failed.
+    fn helper_raw(name: &str) -> String {
+        use std::io::{BufRead, Write};
+        use std::net::ToSocketAddrs;
+        let port: u16 = std::env::var("TARAE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let first = match (name, port).to_socket_addrs() {
+            Ok(mut a) => a.next(),
+            Err(e) => return format!("lookup={e}"),
+        };
+        let Some(at) = first else { return "lookup=none".into() };
+        let s = match std::net::TcpStream::connect_timeout(&at, Duration::from_secs(5)) {
+            Ok(s) => s,
+            Err(e) => return format!("addr={} connect={}", at.ip(), tried::<()>(Err(e))),
+        };
+        // (past the proxy's hold: the user's answer is the test's, at once)
+        s.set_read_timeout(Some(Duration::from_secs(25))).ok();
+        if let Ok(line) = std::env::var("TARAE_SEND") {
+            let _ = (&s).write_all(format!("{line}\r\n").as_bytes());
+        }
+        let mut reply = String::new();
+        let reply = match std::io::BufReader::new(&s).read_line(&mut reply) {
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reset".to_string(),
+            Ok(0) => "closed".into(),
+            Ok(_) => reply.trim_end().to_string(),
+            Err(e) => e.to_string(),
+        };
+        format!("addr={} reply={reply}", at.ip())
     }
 
     /// `ask` (6e): a DNS question for `$TARAE_NAME`'s `$TARAE_TYPE` record (default A) sent to `to` on a connected
@@ -5188,7 +5220,14 @@ mod tests {
             let answer = std::thread::spawn(move || {
                 let ask = asked.recv_timeout(Duration::from_secs(10)).ok()?;
                 let FromProxy::Ask { run, host, port, .. } = ask.clone();
-                proxy::get().send(ToProxy::Answer { session, run, host, port, scope: Scope::Session });
+                proxy::get().send(ToProxy::Answer {
+                    session,
+                    run,
+                    kind: proxy::Kind::Host,
+                    host,
+                    port,
+                    scope: Scope::Session,
+                });
                 Some((ask, asked))
             });
             let env = [
@@ -5991,10 +6030,10 @@ mod tests {
 
     /// Each question is its run's (6e, `SO_RCVMARK`): a served run's question to port 53 — the session's to answer —
     /// goes on its own socket, marked by its supervisor, and the DNS socket reads the mark back with it. Two runs of
-    /// one session each ask for a TXT record (REFUSED: Q3), and each refusal is said in its own run's report, never
-    /// the other's. On a kernel that reads no datagram's mark (before 5.19, D5 — here E5's stand-in, the sockets made
-    /// without asking), the question is the session's: answered as one, said in no run's report, and the session's
-    /// start says why once.
+    /// one session each ask for an MX record (REFUSED: Q3 — SRV and TXT are 6e+'s lookups), and each refusal is said
+    /// in its own run's report, never the other's. On a kernel that reads no datagram's mark (before 5.19, D5 — here
+    /// E5's stand-in, the sockets made without asking), the question is the session's: answered as one, said in no
+    /// run's report, and the session's start says why once.
     #[test]
     fn each_question_is_its_runs() {
         let test = "each_question_is_its_runs";
@@ -6002,20 +6041,20 @@ mod tests {
             return;
         }
         let captured = crate::log::capture();
-        // (run `run` asks for `txt-<run>.test`'s TXT record: REFUSED — what it said, and its report)
-        let txt = |k: &Keeper, run: u64| {
+        // (run `run` asks for `mx-<run>.test`'s MX record: REFUSED — what it said, and its report)
+        let mx = |k: &Keeper, run: u64| {
             let p = redirected_project(&format!("question-6e-{run}"), k, run, |_| {});
-            let name = format!("txt-{run}.test");
-            let env = [("TARAE_TO", "203.0.113.7:53"), ("TARAE_NAME", name.as_str()), ("TARAE_TYPE", "16")];
+            let name = format!("mx-{run}.test");
+            let env = [("TARAE_TO", "203.0.113.7:53"), ("TARAE_NAME", name.as_str()), ("TARAE_TYPE", "15")];
             let said = served_said(k, (&p.0, &p.1, &p.2), "ask", &env);
             std::fs::remove_dir_all(&p.2).ok();
             said
         };
         let named = |report: &[super::super::Denial], run: u64| {
-            report.iter().any(|d| d.target.starts_with(&format!("txt-{run}.test (TXT): ")))
+            report.iter().any(|d| d.target.starts_with(&format!("mx-{run}.test (MX): ")))
         };
         let k = keeper("question-6e");
-        let ((said1, report1), (said2, report2)) = (txt(&k, 6_000_051), txt(&k, 6_000_053));
+        let ((said1, report1), (said2, report2)) = (mx(&k, 6_000_051), mx(&k, 6_000_053));
         k.end();
         assert!(said1.starts_with("rcode=5 ") && said2.starts_with("rcode=5 "), "REFUSED: {said1}; {said2}");
         assert!(named(&report1, 6_000_051) && !named(&report1, 6_000_053), "its own: {report1:?}");
@@ -6029,7 +6068,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-question-d5", std::process::id()));
         let given = Some(NetworkFor::Given(network));
         let k = Keeper::born_lo(&root, None, ns(), here, false, given, None).expect("a keeper starts");
-        let (said, report) = txt(&k, 6_000_052);
+        let (said, report) = mx(&k, 6_000_052);
         k.end();
         assert!(said.starts_with("rcode=5 "), "answered as the session's: {said}");
         assert!(!named(&report, 6_000_052), "no run's to say it in: {report:?}");
@@ -6070,6 +6109,132 @@ mod tests {
         assert!(said.ends_with("reply=out hello"), "reached: {said}");
         let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
         assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 6e+ (Q2): raw TCP from a run to a name it looked up in the session — an ssh-like client that speaks first, and
+    /// one that waits for its server (SMTP's) — is held at the proxy and the main loop asked, as raw (`Kind::Raw`, the
+    /// host and port), though the run's rules allow any host (F5); the user's `y` lets it through to the outside, from
+    /// tarae's network, what it sent first passed on; their `n` resets it, said in the run's report as raw. The test
+    /// stands in for the main loop (`proxy::TEST_ASKS`).
+    #[test]
+    fn raw_tcp_to_a_name_goes_on_the_users_yes() {
+        use super::super::proxy::{self, FromProxy, Kind, Scope, ToProxy};
+        let test = "raw_tcp_to_a_name_goes_on_the_users_yes";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, served) = answering(&format!("{ip}:0"), "out hello");
+        let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+        let first_at = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((s, _)) = l.accept() {
+                let _ = io::Write::write_all(&mut &s, b"220 first-6eplus.test\r\n");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+        let names = [("raw-6eplus.test", at), ("first-6eplus.test", first_at), ("no-6eplus.test", at)];
+        proxy::TEST_NAMES.lock().unwrap().extend(names.map(|(n, a)| (n.to_string(), a)));
+        let k = keeper("raw-6eplus");
+        let (p, c, root) = redirected_project("raw-6eplus", &k, 6_000_111, |_| {});
+        let session = proxy::session_of(&p.root);
+        let (asks, asked) = std::sync::mpsc::channel();
+        proxy::TEST_ASKS.lock().unwrap().push((session, asks));
+        // (the main loop, stood in: `y` for this run, but `n` for `no-6eplus.test`)
+        let main = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(a) = asked.recv_timeout(Duration::from_secs(30)) {
+                let FromProxy::Ask { run, kind, host, port, .. } = a.clone();
+                let scope = if host == "no-6eplus.test" { Scope::Refused } else { Scope::Run };
+                proxy::get().send(ToProxy::Answer { session, run, kind, host, port, scope });
+                seen.push(a);
+                if seen.len() == 3 {
+                    break;
+                }
+            }
+            seen
+        });
+        let raw = |name: &str, port: u16, send: Option<&str>| {
+            let port = port.to_string();
+            let mut env = vec![("TARAE_NAME", name), ("TARAE_PORT", port.as_str())];
+            env.extend(send.map(|s| ("TARAE_SEND", s)));
+            served_said(&k, (&p, &c, &root), "raw", &env)
+        };
+        let (said, refused) = raw("raw-6eplus.test", at.port(), Some("SSH-2.0-tarae_6eplus"));
+        assert!(said.ends_with(" reply=out hello"), "through on its yes: {said} {refused:?}");
+        let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
+        assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network");
+        let (said, refused) = raw("first-6eplus.test", first_at.port(), None);
+        assert!(
+            said.ends_with(" reply=220 first-6eplus.test"),
+            "the server's first words: {said} {refused:?}"
+        );
+        let (said, refused) = raw("no-6eplus.test", at.port(), Some("SSH-2.0-tarae_6eplus"));
+        assert!(said.ends_with(" reply=reset"), "refused: {said}");
+        let raw_said = |d: &&super::super::Denial| d.op == proxy::RAW_OP;
+        let said_raw: Vec<_> = refused.iter().filter(raw_said).map(|d| d.target.clone()).collect();
+        let why = format!("no-6eplus.test:{}: the user refused it", at.port());
+        assert!(said_raw.iter().any(|t| t.starts_with(&why)), "said as raw: {refused:?}");
+        let seen = main.join().unwrap();
+        let hosts: Vec<(Kind, &str)> = seen
+            .iter()
+            .map(|a| {
+                let FromProxy::Ask { kind, host, .. } = a;
+                (*kind, host.as_str())
+            })
+            .collect();
+        let want =
+            [(Kind::Raw, "raw-6eplus.test"), (Kind::Raw, "first-6eplus.test"), (Kind::Raw, "no-6eplus.test")];
+        assert_eq!(hosts, want, "each asked as raw");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 6e+ (Q3, F1–F3): a run's SRV question for a name its rules don't allow is held — no answer — while the main loop
+    /// is asked (`Kind::Lookup`, the name its records are about); the user's yes answers it with tarae's records (here
+    /// the stand-in's, `proxy::TEST_RECORDS`). A name the rules allow is answered with no question to the main loop.
+    #[test]
+    fn a_names_records_wait_for_the_users_yes() {
+        use super::super::proxy::{self, FromProxy, Kind, Scope, ToProxy, dns};
+        let test = "a_names_records_wait_for_the_users_yes";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let srv = |name: &str| {
+            let r = dns::Record::Srv { priority: 0, weight: 0, port: 27017, target: format!("db1.{name}") };
+            (format!("_mongodb._tcp.{name}"), dns::TYPE_SRV, dns::Found::Records(vec![r], 60))
+        };
+        proxy::TEST_RECORDS.lock().unwrap().extend([srv("asked-6eplus.test"), srv("allowed-6eplus.test")]);
+        let k = keeper("lookup-6eplus");
+        let host = proxy::egress::Pattern::parse("allowed-6eplus.test").unwrap();
+        let only = |p: &mut super::super::Policy| {
+            p.egress = proxy::egress::Egress { hosts: vec![host], ..Default::default() }
+        };
+        let (p, c, root) = redirected_project("lookup-6eplus", &k, 6_000_121, only);
+        let session = proxy::session_of(&p.root);
+        let (asks, asked) = std::sync::mpsc::channel();
+        proxy::TEST_ASKS.lock().unwrap().push((session, asks));
+        let main = std::thread::spawn(move || {
+            let a = asked.recv_timeout(Duration::from_secs(10)).ok()?;
+            let FromProxy::Ask { run, kind, host, port, .. } = a.clone();
+            proxy::get().send(ToProxy::Answer { session, run, kind, host, port, scope: Scope::Run });
+            Some((a, asked))
+        });
+        let ask = |name: &str| {
+            let env = [("TARAE_TO", "203.0.113.7:53"), ("TARAE_NAME", name), ("TARAE_TYPE", "33")];
+            served_said(&k, (&p, &c, &root), "ask", &env)
+        };
+        let (said, refused) = ask("_mongodb._tcp.asked-6eplus.test");
+        assert_eq!(said, "rcode=0 answers=1 addr=none", "answered on the yes: {refused:?}");
+        let (a, asked) = main.join().unwrap().expect("the main loop asked");
+        let FromProxy::Ask { kind, host, port, asked: questions, .. } = a;
+        assert_eq!((kind, host.as_str(), port), (Kind::Lookup, "asked-6eplus.test", 0));
+        assert_eq!(questions, ["SRV _mongodb._tcp.asked-6eplus.test"]);
+        let (said, refused) = ask("_mongodb._tcp.allowed-6eplus.test");
+        assert_eq!(said, "rcode=0 answers=1 addr=none", "allowed: answered at once — {refused:?}");
+        assert!(asked.try_recv().is_err(), "no question for a name the rules allow");
         k.end();
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6295,7 +6460,14 @@ mod tests {
         let p2 = Arc::new(super::super::Policy { run_id: reached_run, egress, ..(*p1).clone() });
         let session = proxy::session_of(&p1.root);
         let (host, port, scope) = ("refused-6d.test".to_string(), 80, Scope::Refused);
-        proxy::get().send(ToProxy::Answer { session, run: refused_run, host, port, scope });
+        proxy::get().send(ToProxy::Answer {
+            session,
+            run: refused_run,
+            kind: proxy::Kind::Host,
+            host,
+            port,
+            scope,
+        });
         let to = |host: &'static str| [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", host)];
         let (mut one, first, refused1) =
             served_helper(&k, (&p1, &c, &root), "origin", &to("refused-6d.test"));

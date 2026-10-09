@@ -23,6 +23,8 @@ pub mod answering;
 pub mod dns;
 pub mod egress;
 pub mod parse;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod records;
 pub mod relay;
 pub mod upstream;
 
@@ -51,6 +53,24 @@ pub const HOST_OP: &str = "network-host";
 /// The op of the upstream proxy's failure (step 5g: the one tarae itself goes out by — unreachable, its 407, its
 /// refusal): not tarae's, and no answer of the user's would lift it.
 pub const UPSTREAM_OP: &str = "network-upstream";
+
+/// The op of a raw connection refused (6e+, Q2): the user said no, didn't answer in time, or had too many questions
+/// up — the card asks again at its next try (`:sandbox-blocked` offers no grant: a host's wouldn't let it through).
+pub const RAW_OP: &str = "network-raw";
+
+/// The op of a record lookup refused (6e+, Q3): as `RAW_OP`, for a name's SRV/TXT.
+pub const LOOKUP_OP: &str = "network-lookup";
+
+/// What the user is asked about (6e+, F4, F7): each kept apart — a yes for one isn't a yes for another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// A host reached over TLS or HTTP, checked by its name (the host card).
+    Host,
+    /// Raw TCP to a host:port (Q2) — neither TLS nor HTTP: tarae can't see what passes.
+    Raw,
+    /// A name's SRV/TXT records looked up by tarae (Q3) — its port 0.
+    Lookup,
+}
 
 /// A run's connection, as the supervisor hands it (Linux): the proxy's end of the TCP pair whose other end is
 /// in the run's place.
@@ -92,6 +112,8 @@ pub struct NameQuestion {
     pub asker: answering::Asker,
     pub names: Arc<answering::Session>,
     pub reply: Reply,
+    /// It came over TCP — its answer is never cut to a datagram's size (`dns::fitted`).
+    pub tcp: bool,
 }
 
 /// How far an answer of the user's reaches.
@@ -132,14 +154,14 @@ pub enum ToProxy {
     /// systems (the main loop, `hosts::run_ended`) a question asked for it goes to whoever still waits.
     RunEnded { run: u64 },
     /// The user's answer to an `Ask`, or a grant from what a run was refused (main loop). An allow takes the place
-    /// of a refusal before it, and a refusal of an allow.
-    Answer { session: u64, run: u64, host: String, port: u16, scope: Scope },
+    /// of a refusal before it, and a refusal of an allow — of the same kind.
+    Answer { session: u64, run: u64, kind: Kind, host: String, port: u16, scope: Scope },
     /// The user took back an answer for the session or the project (`:sandbox-disallow`): the host is asked
     /// again — whatever the runs' rules answered when they were made.
-    Taken { session: u64, host: String, port: u16 },
+    Taken { session: u64, kind: Kind, host: String, port: u16 },
     /// The user let a run go again with the host (`:sandbox-blocked`'s `y`): the session's latest answer goes —
     /// a refusal no longer holds; a run's rules that name it let it through, the others ask.
-    Lifted { session: u64, host: String, port: u16 },
+    Lifted { session: u64, kind: Kind, host: String, port: u16 },
     /// The session ended: its answers go.
     SessionEnded { session: u64 },
 }
@@ -147,9 +169,10 @@ pub enum ToProxy {
 /// What goes out, to the main loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromProxy {
-    /// A host the run's rules don't name: the user is asked (a card); the connection waits up to `Limits::hold`.
-    /// `process`: what asked (the run's process, as its report names it).
-    Ask { session: u64, run: u64, host: String, port: u16, process: String },
+    /// A host the run's rules don't name (of `kind`): the user is asked (a card); the connection, or a lookup's
+    /// question, waits up to `Limits::hold`. `process`: what asked (the run's process, as its report names it);
+    /// `asked`: a lookup's questions so far (`SRV _mongodb._tcp.db.example`) — sent again as one more comes.
+    Ask { session: u64, run: u64, kind: Kind, host: String, port: u16, process: String, asked: Vec<String> },
 }
 
 /// The user's latest answer for a host in a session — before what a run's rules carried from when they were made.
@@ -168,6 +191,9 @@ pub struct Limits {
     pub head_time: Duration,
     /// To a tunnel's ClientHello's end (and a second one's after a HelloRetryRequest).
     pub hello_time: Duration,
+    /// W (6e+, F8): how long a connection to a named host may send nothing before it's taken for raw TCP — a
+    /// server that speaks first (MySQL, SMTP).
+    pub silent: Duration,
     /// How long a connection waits on the user's answer.
     pub hold: Duration,
     /// To an address's answer.
@@ -186,6 +212,9 @@ impl Default for Limits {
         Limits {
             head_time: Duration::from_secs(10),
             hello_time: Duration::from_secs(10),
+            // (M14, deb12: M5's tools' first byte came within 192 ms of the connect — a JVM's first TLS connection —
+            // idle or busy; ten times that, capped at 1 s)
+            silent: Duration::from_secs(1),
             // (below cargo's 30 s HTTP timeout and git's low-speed limit: the tool is still waiting)
             hold: Duration::from_secs(20),
             connect: Duration::from_secs(10),
@@ -206,33 +235,29 @@ enum Verdict {
 /// What the dispatcher reads: the messages, and its own connections' questions.
 enum In {
     Msg(ToProxy),
-    /// A connection whose setting doesn't name its host: the answers so far, else the user's (`id`: the waiter's;
-    /// `answered`: its rules had the user's yes when they were made).
+    /// A connection (or a lookup's question) whose setting doesn't name what it asks for: the answers so far, else
+    /// the user's (`id`: the waiter's; `answered`: its rules had the user's yes when they were made; `asked`: a
+    /// lookup's question, as its card lists it).
     Decide {
-        session: u64,
+        key: Key,
         run: u64,
-        host: String,
-        port: u16,
         process: String,
         answered: bool,
+        asked: Option<String>,
         id: u64,
         reply: Sender<Verdict>,
-        /// Its connection, to tell whether it's still there when its run ends.
+        /// Its connection, to tell whether it's still there when its run ends (a lookup's: none).
         alive: Option<TcpStream>,
     },
-    /// A connection that stopped waiting (its hold ran out): no longer a waiter.
+    /// A waiter that stopped waiting (its hold ran out): no longer one.
     GaveUp {
-        session: u64,
-        host: String,
-        port: u16,
+        key: Key,
         id: u64,
     },
-    /// Test-only: how many connections wait on a question.
+    /// Test-only: how many wait on a question.
     #[cfg(test)]
     Waiting {
-        session: u64,
-        host: String,
-        port: u16,
+        key: Key,
         reply: Sender<usize>,
     },
     /// A tunnel ended.
@@ -259,16 +284,17 @@ pub struct Proxy {
 
 impl Proxy {
     /// The proxy's dispatcher, started: names looked up by `resolve` (and, for a session's questions, by `lookup`:
-    /// 6e's E1), the user asked through `asks`.
+    /// 6e's E1; their SRV/TXT by `records`: 6e+), the user asked through `asks`.
     pub fn start(
         resolve: Resolve,
         lookup: answering::Lookup,
+        records: records::Records,
         asks: Sender<FromProxy>,
         limits: Limits,
     ) -> Proxy {
         let (tx, rx) = mpsc::channel();
         let state = State {
-            shared: Shared { resolve, lookup, limits, tx: tx.clone() },
+            shared: Shared { resolve, lookup, records, limits, tx: tx.clone() },
             asks,
             runs: HashMap::new(),
             per_session: HashMap::new(),
@@ -289,8 +315,14 @@ impl Proxy {
     /// Test-only: how many connections wait on the user's answer for `host:port` in `session`.
     #[cfg(test)]
     fn waiting(&self, session: u64, host: &str, port: u16) -> usize {
+        self.waiting_for(Key::new(session, Kind::Host, host, port))
+    }
+
+    /// Test-only: how many wait on the user's answer for `key`.
+    #[cfg(test)]
+    fn waiting_for(&self, key: Key) -> usize {
         let (reply, n) = mpsc::channel();
-        let _ = self.tx.send(In::Waiting { session, host: host.into(), port, reply });
+        let _ = self.tx.send(In::Waiting { key, reply });
         n.recv().unwrap_or(0)
     }
 }
@@ -300,8 +332,24 @@ impl Proxy {
 struct Shared {
     resolve: Resolve,
     lookup: answering::Lookup,
+    records: records::Records,
     limits: Limits,
     tx: Sender<In>,
+}
+
+/// What an answer is for: a session's host:port (a lookup's name at port 0) of a kind.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    session: u64,
+    kind: Kind,
+    host: String,
+    port: u16,
+}
+
+impl Key {
+    fn new(session: u64, kind: Kind, host: &str, port: u16) -> Key {
+        Key { session, kind, host: host.to_string(), port }
+    }
 }
 
 /// A macOS run's: what each of its connections gets, and its listener's stop (dropped: the listener closes).
@@ -321,18 +369,36 @@ struct State {
     runs: HashMap<u64, Run>,
     per_session: HashMap<u64, usize>,
     total: usize,
-    /// (session, host, port): the user's latest answer for the session (or the project, or taken back).
-    latest: HashMap<(u64, String, u16), Latest>,
-    /// (session, run, host, port) let go for that run.
-    run_allowed: HashSet<(u64, u64, String, u16)>,
-    /// The questions out, each with the connections waiting on it.
-    waiting: HashMap<(u64, String, u16), Question>,
+    /// The user's latest answer for the session (or the project, or taken back).
+    latest: HashMap<Key, Latest>,
+    /// (run, what) let go for that run.
+    run_allowed: HashSet<(u64, Key)>,
+    /// The questions out, each with what waits on it.
+    waiting: HashMap<Key, Question>,
 }
 
-/// A question out: the run it was asked for (the card names it), and the connections waiting on it.
+/// A question out: the run it was asked for and what asked (the card names them), a lookup's questions so far, and
+/// what waits on it.
 struct Question {
     run: u64,
+    process: String,
+    asked: Vec<String>,
     waiters: Vec<Waiter>,
+}
+
+impl Question {
+    /// The user asked about `key` for it.
+    fn ask(&self, key: &Key) -> FromProxy {
+        FromProxy::Ask {
+            session: key.session,
+            run: self.run,
+            kind: key.kind,
+            host: key.host.clone(),
+            port: key.port,
+            process: self.process.clone(),
+            asked: self.asked.clone(),
+        }
+    }
 }
 
 /// A connection waiting on the user's answer: its id, its run, what asked, where its verdict goes, and its
@@ -422,30 +488,28 @@ impl State {
                     }
                 }
                 In::Msg(ToProxy::RunEnded { run }) => self.run_ended(run),
-                In::Msg(ToProxy::Answer { session, run, host, port, scope }) => {
-                    self.answer(session, run, host, port, scope)
+                In::Msg(ToProxy::Answer { session, run, kind, host, port, scope }) => {
+                    self.answer(Key { session, kind, host, port }, run, scope)
                 }
-                In::Msg(ToProxy::Taken { session, host, port }) => {
-                    self.latest.insert((session, host, port), Latest::Taken);
+                In::Msg(ToProxy::Taken { session, kind, host, port }) => {
+                    self.latest.insert(Key { session, kind, host, port }, Latest::Taken);
                 }
-                In::Msg(ToProxy::Lifted { session, host, port }) => {
-                    self.latest.remove(&(session, host, port));
+                In::Msg(ToProxy::Lifted { session, kind, host, port }) => {
+                    self.latest.remove(&Key { session, kind, host, port });
                 }
                 In::Msg(ToProxy::SessionEnded { session }) => {
-                    self.latest.retain(|(s, ..), _| *s != session);
-                    self.run_allowed.retain(|(s, ..)| *s != session);
-                    self.waiting.retain(|(s, ..), _| *s != session);
+                    self.latest.retain(|k, _| k.session != session);
+                    self.run_allowed.retain(|(_, k)| k.session != session);
+                    self.waiting.retain(|k, _| k.session != session);
                 }
-                In::Decide { session, run, host, port, process, answered, id, reply, alive } => {
-                    self.decide((session, host, port), answered, Waiter { id, run, process, reply, alive })
+                In::Decide { key, run, process, answered, asked, id, reply, alive } => {
+                    self.decide(key, answered, asked, Waiter { id, run, process, reply, alive })
                 }
                 #[cfg(test)]
-                In::Waiting { session, host, port, reply } => {
-                    let _ =
-                        reply.send(self.waiting.get(&(session, host, port)).map_or(0, |q| q.waiters.len()));
+                In::Waiting { key, reply } => {
+                    let _ = reply.send(self.waiting.get(&key).map_or(0, |q| q.waiters.len()));
                 }
-                In::GaveUp { session, host, port, id } => {
-                    let key = (session, host, port);
+                In::GaveUp { key, id } => {
                     if let Some(q) = self.waiting.get_mut(&key) {
                         q.waiters.retain(|w| w.id != id);
                         if q.waiters.is_empty() {
@@ -528,9 +592,10 @@ impl State {
     /// A run's question for a name, the session's to answer (6e, `answering`): a name its rules name — or the user
     /// said yes to, for the session or the run, at any port — is looked up for real first (E1), on a thread of its
     /// own (at most `LOOKUPS` at once: past them SERVFAIL, the client asks again); what a run's report should hear
-    /// of it is said on its sender.
+    /// of it is said on its sender. Its SRV/TXT (6e+) are looked up by tarae, the user asked first where the rules
+    /// don't allow the name (`records`).
     fn question(&mut self, q: NameQuestion) {
-        let NameQuestion { payload, asker, names, reply } = q;
+        let NameQuestion { payload, asker, names, reply, tcp } = q;
         let question = match dns::question(&payload) {
             Ok(question) => question,
             Err(dns::Refused::Dropped) => return,
@@ -538,10 +603,16 @@ impl State {
         };
         let (plan, said) = match &asker {
             answering::Asker::Run { run, session, rules, .. } => {
+                // (the user's yes for the name, of any kind, at any port: a name tarae looks up for real anyway (E1) —
+                // its SRV/TXT show the DNS's operators nothing new, so they need no lookup card (F1); every host they
+                // name is still asked about at connect. Raw and host answers stay apart from each other (F4).)
                 let yes = |n: &str| {
                     let allowed = |l: &Latest| *l == Latest::Allowed;
-                    self.latest.iter().any(|((s, h, _), l)| s == session && h == n && allowed(l))
-                        || self.run_allowed.iter().any(|(s, r, h, _)| s == session && r == run && h == n)
+                    self.latest.iter().any(|(k, l)| k.session == *session && k.host == n && allowed(l))
+                        || self
+                            .run_allowed
+                            .iter()
+                            .any(|(r, k)| k.session == *session && r == run && k.host == n)
                 };
                 let named = |n: &str| rules.names(n) || yes(n);
                 // (through an upstream at any port of the name: tarae resolves nothing — E1)
@@ -553,15 +624,29 @@ impl State {
         if let (Some(said), answering::Asker::Run { process, told, .. }) = (said, &asker) {
             let _ = told.send(Denial { process: process.clone(), op: OP.into(), target: said });
         }
+        // (lookups at once; and questions held on a card at once — past those, none answered: the client asks again)
+        static LOOKING: AtomicU64 = AtomicU64::new(0);
+        const LOOKUPS: u64 = 32;
+        static HELD: AtomicU64 = AtomicU64::new(0);
+        const HELD_MAX: u64 = 64;
+        let busy = |n: &AtomicU64, max| {
+            let busy = n.fetch_add(1, Ordering::Relaxed) >= max;
+            if busy {
+                n.fetch_sub(1, Ordering::Relaxed);
+            }
+            busy
+        };
+        let servfail =
+            |question: &dns::Question| dns::answer(question, &dns::Answer::Rcode(dns::SERVFAIL), 0);
         match plan {
             answering::Plan::Now(a) => reply(dns::answer(&question, &a, answering::TTL)),
+            answering::Plan::Records { ask: true, .. } if busy(&HELD, HELD_MAX) => {}
+            answering::Plan::LookUp(_) | answering::Plan::Records { ask: false, .. }
+                if busy(&LOOKING, LOOKUPS) =>
+            {
+                reply(servfail(&question))
+            }
             answering::Plan::LookUp(name) => {
-                static LOOKING: AtomicU64 = AtomicU64::new(0);
-                const LOOKUPS: u64 = 32;
-                if LOOKING.fetch_add(1, Ordering::Relaxed) >= LOOKUPS {
-                    LOOKING.fetch_sub(1, Ordering::Relaxed);
-                    return reply(dns::answer(&question, &dns::Answer::Rcode(dns::SERVFAIL), 0));
-                }
                 let lookup = self.shared.lookup.clone();
                 let spawned = std::thread::Builder::new().name("tarae-proxy-name".into()).spawn(move || {
                     let e = lookup(&name);
@@ -573,16 +658,60 @@ impl State {
                     LOOKING.fetch_sub(1, Ordering::Relaxed);
                 }
             }
+            answering::Plan::Records { base, ask } => {
+                let counted = if ask { &HELD } else { &LOOKING };
+                // (a question no run's — before 5.19 — has no run to ask for: refused, as before 6e+)
+                let answering::Asker::Run { run, session, process, told, .. } = asker else {
+                    counted.fetch_sub(1, Ordering::Relaxed);
+                    return reply(dns::answer(&question, &dns::Answer::Rcode(dns::REFUSED), 0));
+                };
+                let shared = self.shared.clone();
+                let spawned =
+                    std::thread::Builder::new().name("tarae-proxy-records".into()).spawn(move || {
+                        let asked = format!("{} {}", answering::type_said(question.qtype), question.name);
+                        // (F3: held while the card waits — no answer; the client asks again, and its retry waits too)
+                        let decided = match ask {
+                            false => Decided::Go,
+                            true => {
+                                let key = Key::new(session, Kind::Lookup, &base, 0);
+                                let a = Asking {
+                                    key,
+                                    run,
+                                    process: process.clone(),
+                                    answered: false,
+                                    alive: None,
+                                };
+                                held(&shared, a, Some(asked.clone()), NOT_LOOKED_UP)
+                            }
+                        };
+                        let a = match decided {
+                            Decided::Go => {
+                                answering::records((shared.records)(&question.name, question.qtype))
+                            }
+                            Decided::No(why) => {
+                                let target = format!("{asked}: {why}");
+                                let _ = told.send(Denial { process, op: LOOKUP_OP.into(), target });
+                                (dns::Answer::Rcode(dns::REFUSED), 0)
+                            }
+                            Decided::Gone => (dns::Answer::Rcode(dns::REFUSED), 0),
+                        };
+                        counted.fetch_sub(1, Ordering::Relaxed);
+                        reply(dns::fitted(&question, &a.0, a.1, !tcp));
+                    });
+                if spawned.is_err() {
+                    counted.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
         }
     }
 
-    /// The answers so far for a host a connection's setting doesn't name — the user's latest for the session,
-    /// the run's own, then what its rules carried (`answered`) — else the user asked, once a host, at most
-    /// `Limits::questions` hosts of a session at once.
-    fn decide(&mut self, key: (u64, String, u16), answered: bool, waiter: Waiter) {
-        let (session, run) = (key.0, waiter.run);
+    /// The answers so far for what a connection's setting doesn't name — the user's latest for the session,
+    /// the run's own, then what its rules carried (`answered`) — else the user asked, once a host (a lookup's
+    /// next question, `asked`, joins its card), at most `Limits::questions` of a session at once.
+    fn decide(&mut self, key: Key, answered: bool, asked: Option<String>, waiter: Waiter) {
+        let (session, run) = (key.session, waiter.run);
         let latest = self.latest.get(&key).copied();
-        let ran = self.run_allowed.contains(&(session, run, key.1.clone(), key.2));
+        let ran = self.run_allowed.contains(&(run, key.clone()));
         let verdict = match latest {
             Some(Latest::Refused) => Some(Verdict::No("the user refused it for this session".into())),
             Some(Latest::Allowed) => Some(Verdict::Go),
@@ -594,17 +723,27 @@ impl State {
             let _ = waiter.reply.send(v);
             return;
         }
-        if !self.waiting.contains_key(&key) {
-            let max = self.shared.limits.questions;
-            if self.waiting.keys().filter(|(s, ..)| *s == session).count() >= max {
-                let why = format!("{max} hosts already wait for the user's answer");
-                let _ = waiter.reply.send(Verdict::No(why));
-                return;
+        match self.waiting.get_mut(&key) {
+            Some(q) => {
+                if let Some(a) = asked.filter(|a| !q.asked.contains(a)) {
+                    q.asked.push(a);
+                    let _ = self.asks.send(q.ask(&key));
+                }
+                q.waiters.push(waiter);
             }
-            let (host, port, process) = (key.1.clone(), key.2, waiter.process.clone());
-            let _ = self.asks.send(FromProxy::Ask { session, run, host, port, process });
+            None => {
+                let max = self.shared.limits.questions;
+                if self.waiting.keys().filter(|k| k.session == session).count() >= max {
+                    let why = format!("{max} hosts already wait for the user's answer");
+                    let _ = waiter.reply.send(Verdict::No(why));
+                    return;
+                }
+                let process = waiter.process.clone();
+                let q = Question { run, process, asked: asked.into_iter().collect(), waiters: vec![waiter] };
+                let _ = self.asks.send(q.ask(&key));
+                self.waiting.insert(key, q);
+            }
         }
-        self.waiting.entry(key).or_insert_with(|| Question { run, waiters: Vec::new() }).waiters.push(waiter);
     }
 
     /// Run `run` ended (reaped — the main loop says so on both systems; macOS's port closes with it): what it
@@ -613,9 +752,9 @@ impl State {
     /// daemon keeps its run) — asked again: none waits out its hold with no card.
     fn run_ended(&mut self, run: u64) {
         self.runs.remove(&run);
-        self.run_allowed.retain(|(_, r, ..)| *r != run);
+        self.run_allowed.retain(|(r, _)| *r != run);
         let asks = &self.asks;
-        self.waiting.retain(|(session, host, port), q| {
+        self.waiting.retain(|key, q| {
             q.waiters.retain(|w| {
                 let live = w.run != run || w.alive.as_ref().is_some_and(open);
                 if !live {
@@ -626,30 +765,22 @@ impl State {
             if q.run == run
                 && let Some(next) = q.waiters.iter().find(|w| w.run != run).or(q.waiters.first())
             {
-                q.run = next.run;
-                let (host, process) = (host.clone(), next.process.clone());
-                let _ = asks.send(FromProxy::Ask {
-                    session: *session,
-                    run: next.run,
-                    host,
-                    port: *port,
-                    process,
-                });
+                (q.run, q.process) = (next.run, next.process.clone());
+                let _ = asks.send(q.ask(key));
             }
             !q.waiters.is_empty()
         });
     }
 
-    /// The user's answer: kept as far as it reaches, and the connections waiting on it let go or refused.
-    fn answer(&mut self, session: u64, run: u64, host: String, port: u16, scope: Scope) {
-        let key = (session, host, port);
+    /// The user's answer: kept as far as it reaches, and what waits on it let go or refused.
+    fn answer(&mut self, key: Key, run: u64, scope: Scope) {
         let verdict = match scope {
             Scope::Refused => Verdict::No("the user refused it".into()),
             _ => Verdict::Go,
         };
         match scope {
             Scope::Run => {
-                self.run_allowed.insert((session, run, key.1.clone(), port));
+                self.run_allowed.insert((run, key.clone()));
             }
             Scope::Session | Scope::Project => {
                 self.latest.insert(key.clone(), Latest::Allowed);
@@ -667,8 +798,9 @@ impl State {
         // (an answer for one run leaves the others' connections waiting: the user is asked for the next one's)
         if let Some(next) = rest.first() {
             let (run, process) = (next.run, next.process.clone());
-            let _ = self.asks.send(FromProxy::Ask { session, run, host: key.1.clone(), port, process });
-            self.waiting.insert(key, Question { run, waiters: rest });
+            let q = Question { run, process, asked: q.asked, waiters: rest };
+            let _ = self.asks.send(q.ask(&key));
+            self.waiting.insert(key, q);
         }
     }
 }
@@ -835,19 +967,47 @@ enum Decided {
 }
 
 /// Whether connection `c` may reach `name:port` (`default`: its scheme's port, which a rule without one names): its
-/// rules, else the answers so far and the user's (`In::Decide`), waited for up to `Limits::hold`.
+/// rules, else the answers so far and the user's (`held`).
 fn decided(c: &Conn, shared: &Shared, name: &str, port: u16, default: u16) -> Decided {
     if c.rules.allows(name, port, default) {
         return Decided::Go;
     }
+    let key = Key::new(c.session, Kind::Host, name, port);
+    held(shared, c.asking(key, c.rules.answered(name, port)), None, NOT_A_HOST)
+}
+
+/// Why a host wasn't let through when the user didn't answer — its rules don't name it.
+const NOT_A_HOST: &str = "not among the hosts it may reach (llm.sandbox-hosts)";
+/// The same of raw TCP (F5).
+const NOT_RAW: &str = "raw TCP — no rule naming its port lets it through (a host:port in llm.sandbox-hosts)";
+/// The same of a lookup (F1).
+const NOT_LOOKED_UP: &str = "its records — the name isn't among the hosts it may reach (llm.sandbox-hosts)";
+
+/// What waits on the user's answer: what for (`key`), its run and process, whether its rules carried the user's yes,
+/// and its connection (to tell whether it's still there when its run ends).
+struct Asking {
+    key: Key,
+    run: u64,
+    process: String,
+    answered: bool,
+    alive: Option<TcpStream>,
+}
+
+impl Conn {
+    fn asking(&self, key: Key, answered: bool) -> Asking {
+        let alive = self.stream.try_clone().ok();
+        Asking { key, run: self.run, process: self.process.clone(), answered, alive }
+    }
+}
+
+/// The answers so far for `a`, else the user's (`In::Decide`; a lookup's question `asked` joins its card), waited for
+/// up to `Limits::hold` — then refused, `not_named` saying why it was asked.
+fn held(shared: &Shared, a: Asking, asked: Option<String>, not_named: &str) -> Decided {
     static WAITERS: AtomicU64 = AtomicU64::new(0);
     let id = WAITERS.fetch_add(1, Ordering::Relaxed);
     let (reply, verdict) = mpsc::channel();
-    let (session, host, process) = (c.session, name.to_string(), c.process.clone());
-    let answered = c.rules.answered(name, port);
-    let alive = c.stream.try_clone().ok();
-    let ask =
-        In::Decide { session, run: c.run, host: host.clone(), port, process, answered, id, reply, alive };
+    let Asking { key, run, process, answered, alive } = a;
+    let ask = In::Decide { key: key.clone(), run, process, answered, asked, id, reply, alive };
     if shared.tx.send(ask).is_err() {
         return Decided::Gone;
     }
@@ -855,11 +1015,10 @@ fn decided(c: &Conn, shared: &Shared, name: &str, port: u16, default: u16) -> De
         Ok(Verdict::Go) => Decided::Go,
         Ok(Verdict::No(why)) => Decided::No(why),
         Err(_) => {
-            // (no longer waiting: the next connection to it asks again)
-            let _ = shared.tx.send(In::GaveUp { session, host, port, id });
+            // (no longer waiting: the next one asks again)
+            let _ = shared.tx.send(In::GaveUp { key, id });
             Decided::No(format!(
-                "not among the hosts it may reach (llm.sandbox-hosts); the user was asked and didn't answer within \
-                 {} s",
+                "{not_named}; the user was asked and didn't answer within {} s",
                 shared.limits.hold.as_secs_f32()
             ))
         }
@@ -889,8 +1048,9 @@ fn reset(c: &Conn, op: &str, target: &str) {
 /// is where it was going (`original`). From there as a CONNECT's: never a metadata server's own name, the host's
 /// rules and the user's answer, the connection made by name (`egress::reach`, through the upstream where there is
 /// one), the relay. Refused: a TLS one reset (`reset`), a plain request answered 403 as the proxy answers one — each
-/// said with its host and why. What's neither TLS nor a request tarae reads (ssh's banner, a server that speaks first)
-/// can't name a host: refused, said.
+/// said with its host and why. What's neither TLS nor a request tarae reads (ssh's banner), or sends nothing within W
+/// (`Limits::silent`: a server that speaks first), is raw TCP (6e+, `serve_raw`) where its address was given to a
+/// name; to any other address it names no host: refused, said (F6).
 fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
     let limits = shared.limits;
     let s = &c.stream;
@@ -921,15 +1081,21 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
     };
     let mut buf = Vec::new();
     let some = |b: &[u8]| (!b.is_empty()).then_some(());
-    match read_until(s, &mut buf, Instant::now() + limits.head_time, some) {
+    // (to a name, silence past W is a server that speaks first: raw)
+    let first_by = if mapped.is_some() { limits.silent } else { limits.head_time };
+    match read_until(s, &mut buf, Instant::now() + first_by, some) {
         Ok(()) => {}
-        Err(true) => {
-            let why = format!(
-                "{at}: nothing sent within {} s — tarae decides by the host a connection names (TLS or HTTP)",
-                limits.head_time.as_secs_f32()
-            );
-            return reset(&c, OP, &why);
-        }
+        Err(true) => match mapped {
+            Some(name) => return serve_raw(&c, shared, &name, port, buf),
+            None => {
+                let why = format!(
+                    "{at}: nothing sent within {} s — tarae decides by the host a connection names (TLS or HTTP), \
+                     and an address no name was given to names none",
+                    limits.head_time.as_secs_f32()
+                );
+                return reset(&c, OP, &why);
+            }
+        },
         Err(false) => return,
     }
     // (a TLS record's first byte: a handshake)
@@ -966,15 +1132,17 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
                 Request::Connect { .. } => return,
             },
             Ok(Ok(None)) | Err(false) => return,
-            Ok(Err(r)) => {
-                // (E4: a raw connection to a named host — its card is 6e+'s)
-                let raw = match mapped {
-                    Some(_) => " — a raw TCP connection to a named host isn't taken yet",
-                    None => "",
-                };
-                let why = format!("{at}: neither TLS nor a request tarae reads ({}){raw}", r.said());
-                return reset(&c, OP, &why);
-            }
+            Ok(Err(r)) => match mapped {
+                Some(name) => return serve_raw(&c, shared, &name, port, buf),
+                None => {
+                    let why = format!(
+                        "{at}: neither TLS nor a request tarae reads ({}), to an address no name was given to — \
+                         raw TCP goes only to a name the command looked up",
+                        r.said()
+                    );
+                    return reset(&c, OP, &why);
+                }
+            },
             Err(true) => {
                 let why = format!("{at}: no whole request head within {} s", limits.head_time.as_secs_f32());
                 return reset(&c, OP, &why);
@@ -1050,6 +1218,39 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
     }
 }
 
+/// Raw TCP to `name:port` (6e+, Q2) — a connection to the address the run's lookup of `name` was given, whose first
+/// bytes (`first`) were neither TLS nor a request tarae reads, or that sent nothing within W. A rule naming that port
+/// lets it through (F5: one without a port, or "any", doesn't — they were written for what tarae checks by name);
+/// else the user's raw answers (F4: never the host card's), else the raw card, held. Then connected by name as a
+/// tunnel is (`egress::reach`: the address checks, the upstream's CONNECT where there is one) and spliced, `first`
+/// going first. Refused: reset, said.
+fn serve_raw(c: &Conn, shared: &Shared, name: &str, port: u16, first: Vec<u8>) {
+    let limits = shared.limits;
+    if route::never_named(name) {
+        return reset(c, OP, &format!("{name}:{port}: a cloud metadata server's own name — never reached"));
+    }
+    if !c.rules.allows_raw(name, port) {
+        let key = Key::new(c.session, Kind::Raw, name, port);
+        match held(shared, c.asking(key, false), None, NOT_RAW) {
+            Decided::Go => {}
+            Decided::No(why) => return reset(c, RAW_OP, &format!("{name}:{port}: {why}")),
+            Decided::Gone => return,
+        }
+    }
+    let up = match egress::reach(&c.rules, &shared.resolve, name, port, true, limits.connect) {
+        Ok(r) => r.stream,
+        Err(NotReached::Refused(r)) => return reset(c, OP, &format!("{name}:{port}: {}", r.why)),
+        Err(NotReached::Upstream(var, f)) => {
+            return reset(c, UPSTREAM_OP, &format!("{name}:{port}: {}", f.said(var)));
+        }
+    };
+    let _ = c.stream.set_read_timeout(None);
+    let Ok(client) = c.stream.try_clone() else { return };
+    if let relay::End::Closed(why) = relay::relay(client, up, None, limits.hello_time, &first, None, false) {
+        tell(c, &format!("{name}:{port}: {why} — the connection closed"));
+    }
+}
+
 /// The most questions one DNS-over-TCP connection asks before tarae closes it.
 const QUESTIONS_PER_CONNECTION: usize = 64;
 
@@ -1080,12 +1281,13 @@ fn serve_names(c: &Conn, shared: &Shared, names: &Arc<answering::Session>) {
             rules: c.rules.clone(),
             told: c.told.clone(),
         };
-        let q = NameQuestion { payload, asker, names: names.clone(), reply };
+        let q = NameQuestion { payload, asker, names: names.clone(), reply, tcp: true };
         if shared.tx.send(In::Msg(ToProxy::Question(q))).is_err() {
             return;
         }
-        // (a message that isn't a question gets nothing: the connection ends)
-        let Ok(answer) = rx.recv_timeout(shared.limits.connect) else { return };
+        // (a message that isn't a question gets nothing: the connection ends; a lookup held on its card is waited
+        // for, and its lookup)
+        let Ok(answer) = rx.recv_timeout(shared.limits.hold + shared.limits.connect) else { return };
         if (&c.stream).write_all(&dns::framed(&answer)).is_err() {
             return;
         }
@@ -1535,9 +1737,22 @@ pub fn get() -> &'static Proxy {
         });
         #[cfg(not(test))]
         let lookup = looked_up;
-        Proxy::start(resolve, lookup, asks, Limits::default())
+        // (tests: `TEST_RECORDS`'s, else none came — never the network)
+        #[cfg(test)]
+        let records: records::Records = Arc::new(|name: &str, qtype| {
+            let all = TEST_RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+            let found = all.iter().find(|(n, t, _)| n == name && *t == qtype).map(|(.., f)| f.clone());
+            found.unwrap_or(dns::Found::Failed)
+        });
+        #[cfg(not(test))]
+        let records = records::system();
+        Proxy::start(resolve, lookup, records, asks, Limits::default())
     })
 }
+
+/// Tests: what the proxy `get` gives finds of a name's records of a type (6e+) — the network never asked.
+#[cfg(test)]
+pub static TEST_RECORDS: std::sync::Mutex<Vec<(String, u16, dns::Found)>> = std::sync::Mutex::new(Vec::new());
 
 /// Tests: names the proxy `get` gives looks up here first — a listener of the test's standing for the outside
 /// (Linux: on this machine's own address; macOS: on loopback, taken for beyond by `TEST_BEYOND`) — a name, as

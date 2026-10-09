@@ -235,6 +235,27 @@ fn what_isnt_a_request_to_its_server_is_refused() {
     assert!(refused(b"GET / HTTP/1.1\r\nHost: a.example\r\nX\x01: y\r\n\r\n", 80).is_some());
 }
 
+/// 6e+: first bytes that can't start a request line are refused at once, before any blank line — so raw TCP (ssh's
+/// banner, Postgres's binary startup, a Redis command) is told at its first bytes, not after the head's time. A
+/// request still coming — a method so far, its space, its path's `/` — is "more".
+#[test]
+fn what_cant_start_a_request_is_refused_at_once() {
+    let cant = Some(Refusal::Malformed("its first bytes can't start a request line"));
+    for raw in [
+        &b"SSH-2.0-OpenSSH_9.9\r\n"[..],
+        &[0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f],
+        b"*1\r\n$4\r\nPING\r\n",
+        b"PING\r\n",
+    ] {
+        assert_eq!(origin(raw, 80).err(), cant, "{raw:?}");
+    }
+    assert_eq!(origin(b"GET http", 80).err(), cant, "absolute form, told at its first letter");
+    assert_eq!(origin(b" GET", 80).err(), cant);
+    for more in [&b""[..], b"G", b"OPTIONS", b"GET ", b"GET /index.ht"] {
+        assert_eq!(origin(more, 80), Ok(None), "{more:?}");
+    }
+}
+
 /// Whatever a request to its server holds, `origin` answers a request, "more", or a refusal — never a panic: a
 /// request it answers ends at the first blank line of what was sent, its host a name as `name` makes it (or an
 /// address) at the port it connected to. The hand-made request mutated 100,000 times, some grown past `HEAD_MAX`.

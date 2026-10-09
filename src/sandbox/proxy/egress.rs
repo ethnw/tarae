@@ -109,6 +109,14 @@ impl Egress {
         self.any || self.hosts.iter().any(|p| p.matches(host, port, default))
     }
 
+    /// Whether the setting lets raw TCP go to `host:port` without asking (6e+, F5): only a rule naming that port —
+    /// one without a port names a scheme's (443, 80), and "any" was chosen for what tarae checks by name; raw bytes
+    /// it can't.
+    pub fn allows_raw(&self, host: &str, port: u16) -> bool {
+        let at = |p: &Pattern| matches!(p, Pattern::Name(_, Some(_)) | Pattern::Under(_, Some(_)));
+        self.hosts.iter().any(|p| at(p) && p.matches(host, port, port))
+    }
+
     /// Whether the user's answers, as the run's policy had them, let `host:port` go.
     pub fn answered(&self, host: &str, port: u16) -> bool {
         self.answered.iter().any(|(h, p)| h == host && *p == port)

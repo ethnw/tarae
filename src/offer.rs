@@ -209,6 +209,12 @@ pub enum What {
     /// A host a run's rules don't name, its connection held by tarae's proxy (`hosts.rs`): `y` this run, `s`
     /// this session, `A` always in this project, `n` refused for this session. Gone with its run.
     Host(Box<crate::hosts::Ask>),
+    /// Raw TCP to a host:port no rule naming its port lets through (6e+, `hosts.rs`): `y` this run, `s` this
+    /// session, `n` refused for this session — no `A`. Gone with its run.
+    HostRaw(Box<crate::hosts::Ask>),
+    /// A name's SRV/TXT records, for a name the rules don't allow (6e+, `hosts.rs`), the run's question held: as
+    /// `HostRaw`.
+    Lookup(Box<crate::hosts::Ask>),
     /// Containers made on an engine while a stopped run of Claude's went, under names not its own
     /// (`containers.rs`): `y` stops them, by name · `n` leaves them running.
     Containers(Box<crate::containers::Ask>),
@@ -272,7 +278,9 @@ impl What {
             // (about containers as they were then: they run on, the restart's tarae doesn't know them)
             | What::Containers(_)
             // (its run ends with the restart)
-            | What::Host(_) => Lost,
+            | What::Host(_)
+            | What::HostRaw(_)
+            | What::Lookup(_) => Lost,
         }
     }
 }
@@ -436,16 +444,18 @@ impl Offer {
                 | What::Recover(_)
                 | What::Stuck(_)
                 | What::Host(_)
+                | What::HostRaw(_)
+                | What::Lookup(_)
                 | What::Containers(_)
                 // (one `y` closes every draft it lists — cardburden 6: answered once read, its list as it is)
                 | What::NotesStale { .. }
         )
     }
 
-    /// The host it asks about, if it's that card.
+    /// The host it asks about, if it's that card — or a raw connection's, or a lookup's (6e+).
     pub fn host(&self) -> Option<&crate::hosts::Ask> {
         match &self.what {
-            What::Host(a) => Some(a),
+            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => Some(a),
             _ => None,
         }
     }
@@ -615,6 +625,8 @@ impl Offer {
                     | What::NotesClose { .. }
                     // (its session's: a key of another session's never answers it)
                     | What::Host(_)
+                    | What::HostRaw(_)
+                    | What::Lookup(_)
                     | What::Containers(_)
             )
     }
@@ -757,6 +769,8 @@ impl Offer {
             }
             W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
             W::Host(_) => vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")],
+            // (F7: no `A` — a lasting allow is the user's own line in llm.sandbox-hosts)
+            W::HostRaw(_) | W::Lookup(_) => vec![('y', "This run"), ('s', "This session"), ('n', "No")],
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
         }
     }
@@ -802,6 +816,8 @@ impl Offer {
             W::Recover(_) => "recover",
             W::Stuck(_) => "stuck",
             W::Host(_) => "host",
+            W::HostRaw(_) => "host-raw",
+            W::Lookup(_) => "lookup",
             W::Containers(_) => "containers",
         }
     }
@@ -877,7 +893,8 @@ impl crate::editor::Editor {
         // repository's commands — a submodule's card would take its parent's place: one each, `git_trust_check`)
         // (a host's card is joined by `hosts::asked` itself — by its host, never by its title)
         let own = o.asker().is_some()
-            || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_) | What::Host(_));
+            || o.host().is_some()
+            || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_));
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
@@ -1172,7 +1189,9 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 crate::stuck::stop(self, &s);
             }
-            What::Host(a) => crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run),
+            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
+                crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run)
+            }
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
         }
     }
@@ -1187,7 +1206,9 @@ impl crate::editor::Editor {
         self.card_how(o.id, "answered s");
         self.card_answered(o.id);
         match o.what {
-            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session),
+            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
+                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session)
+            }
             What::Grant { grant, run } => {
                 crate::blocked::grant_answer(self, o.id, grant, *run, Some(crate::allow::Scope::Session))
             }
@@ -1678,7 +1699,9 @@ impl crate::editor::Editor {
             What::NotesClose { by, ids } => crate::notes::close_by_answer(self, o.id, by, ids, false),
             What::Recover(f) => crate::recovery::not_now(self, *f),
             What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
-            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused),
+            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
+                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused)
+            }
             What::Containers(a) => crate::containers::answer(self, o.id, *a, false),
         }
     }

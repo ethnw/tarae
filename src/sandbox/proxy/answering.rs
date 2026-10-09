@@ -11,6 +11,9 @@
 //! - Q3: A/AAAA from the map (AAAA only where the session carries IPv6, else NODATA); PTR of a pool address from the
 //!   map, any other NXDOMAIN; HTTPS/SVCB an empty NOERROR; the rest REFUSED, said with the name. A metadata server's
 //!   own name NXDOMAIN, said. `localhost` and below it: loopback.
+//! - 6e+ (F1, F2): SRV and TXT looked up by tarae itself and answered with what came — at once where the rules allow
+//!   the name they're about (an SRV owner's without its service labels), else after the user's yes on the lookup
+//!   card; through an upstream proxy, REFUSED.
 //!
 //! Pure here: `plan` decides, `after` finishes what needed a lookup; the proxy holds the user's answers, looks up,
 //! and sends.
@@ -125,6 +128,12 @@ pub enum Plan {
     Now(Answer),
     /// The name looked up for real first (E1), then `after`.
     LookUp(String),
+    /// SRV or TXT records (6e+): looked up by tarae (`records.rs`), then `records` — `base`: the name they're about
+    /// (`base`, F2); `ask`: the rules don't allow it, so the user is asked first (F1).
+    Records {
+        base: String,
+        ask: bool,
+    },
 }
 
 /// What a question gets (`plan`), and what the run's report says of it (None: nothing — an answer like any other).
@@ -170,6 +179,21 @@ pub fn plan(
     match q.qtype {
         dns::TYPE_A | dns::TYPE_AAAA => {}
         dns::TYPE_HTTPS | dns::TYPE_SVCB => return now(Answer::Empty),
+        dns::TYPE_SRV | dns::TYPE_TXT => {
+            let b = base(q.qtype, &name);
+            if through(&b) {
+                return refused(format!(
+                    "{name} ({}): through the proxy tarae uses, names are that proxy's — tarae looks up no records",
+                    type_said(q.qtype)
+                ));
+            }
+            let named = named(&b);
+            // (E6's candidate, as for an address)
+            if !named && candidate(&b, &s.search) {
+                return now(Answer::Rcode(dns::NXDOMAIN));
+            }
+            return (Plan::Records { base: b, ask: !named }, None);
+        }
         t => {
             return refused(format!(
                 "{name} ({}): tarae answers a name's addresses only (A, AAAA) — its other records aren't asked for \
@@ -213,6 +237,30 @@ fn synthetic(qtype: u16, name: &str, s: &Session) -> Answer {
         dns::TYPE_AAAA if !s.v6 => Answer::Empty,
         dns::TYPE_AAAA => Answer::Addresses(vec![IpAddr::V6(s.names.give(name).v6)]),
         _ => Answer::Addresses(vec![IpAddr::V4(s.names.give(name).v4)]),
+    }
+}
+
+/// The name a record question is about (F2): an SRV owner's without its leading `_` labels (RFC 2782's
+/// `_service._proto.name` — `_mongodb._tcp.cluster0.example.net` is `cluster0.example.net`'s), a TXT's as asked.
+/// `name` is one `parse::name` took: its last label starts with a letter, so something is left.
+pub fn base(qtype: u16, name: &str) -> String {
+    let mut rest = name;
+    while qtype == dns::TYPE_SRV
+        && let Some(after) = rest.strip_prefix('_').and_then(|r| r.split_once('.')).map(|(_, a)| a)
+    {
+        rest = after;
+    }
+    rest.to_string()
+}
+
+/// What a record question's answer is, from tarae's lookup (6e+): the records as they came, their TTL at most
+/// `TTL`; NODATA, NXDOMAIN as they came; a lookup that failed SERVFAIL (the client asks again).
+pub fn records(found: dns::Found) -> (Answer, u32) {
+    match found {
+        dns::Found::Records(r, ttl) => (Answer::Records(r), ttl.min(TTL)),
+        dns::Found::Empty => (Answer::Empty, 0),
+        dns::Found::No => (Answer::Rcode(dns::NXDOMAIN), 0),
+        dns::Found::Truncated | dns::Found::Failed => (Answer::Rcode(dns::SERVFAIL), 0),
     }
 }
 
@@ -261,7 +309,7 @@ fn shown(name: &str) -> &str {
     if name.is_empty() { "." } else { name }
 }
 
-fn type_said(t: u16) -> String {
+pub fn type_said(t: u16) -> String {
     match t {
         2 => "NS".into(),
         5 => "CNAME".into(),

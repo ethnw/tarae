@@ -356,7 +356,14 @@ fn an_unknown_host_waits_for_the_answer() {
     let ask = asked.recv_timeout(Duration::from_secs(10)).expect("the main loop asked");
     let FromProxy::Ask { run, host, port: at, process, .. } = ask;
     assert_eq!((run, host.as_str(), at, process.as_str()), (p.run_id, name, port, "curl"));
-    super::get().send(ToProxy::Answer { session, run, host: name.into(), port, scope: Scope::Session });
+    super::get().send(ToProxy::Answer {
+        kind: super::Kind::Host,
+        session,
+        run,
+        host: name.into(),
+        port,
+        scope: Scope::Session,
+    });
     let (_, out, _) = finish(s, 30);
     ended();
     let (h, l) = seen.join().unwrap();

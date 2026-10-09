@@ -374,9 +374,25 @@ their IPv4-mapped forms, and what the session's rules don't allow; **connects to
 second lookup); with CONNECT, the SNI must name the CONNECT host; then relays. Every refusal lands in the session's run
 report with the name and why. **No TLS interception.**
 
+**Raw TCP and a name's records, in a TPROXY session (6e+, `target/sb/step6eplus-design.md`).** A connection to an
+address of the session's names whose first bytes are neither a ClientHello nor what can start an origin-form request
+(`parse::origin`'s `may_start`: ssh's banner, a database's startup), or that sends nothing within W
+(`Limits::silent`, 1 s after M14: a server that speaks first), is raw: a rule naming that port lets it through
+(`Egress::allows_raw` — a rule without a port, or `any`, doesn't), else the user's raw answers, else the raw card
+(`What::HostRaw`), held as the host card holds a connection. Let through, it's connected by the name as a tunnel is and
+spliced, what it sent meanwhile first. Raw to an address no name was given stays refused. A run's SRV or TXT question is
+looked up by tarae itself (`records.rs`: `resolv.conf`'s nameservers, UDP then TCP where cut short; the response read
+by `dns::response`, names compressed, bounded) for the name it's about (an SRV owner's without its `_` labels): at once
+where tarae already looks that name up — the rules name it (or `any`), or the user said yes to it on a host or raw
+card (E1: its records show the DNS's operators nothing new; every host they name is still asked about at connect) —
+else held — no answer, the client asks again — while the lookup card (`What::Lookup`) asks. Through an upstream proxy
+no lookup is made. Host and raw answers are kept apart (`proxy::Kind`): a yes for a host over TLS isn't one for raw
+bytes to it, nor the other way round.
+
 **Named limits**: domain fronting (SNI and the inner `Host` can differ); Encrypted Client Hello hides the real SNI;
-only TLS and CONNECT go out — plain `http://` and raw TCP beyond this machine (ssh) are refused unless a session rule
-names the address and port, and the report says which.
+through the proxy's address only TLS (CONNECT) and plain `http://` go out; raw TCP is only a TPROXY session's, and what
+passes on it isn't checked — only that it goes to the name the run looked up; to another machine by its address, raw
+or not, nothing goes (no rule names an address).
 
 ## Tiers
 

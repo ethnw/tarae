@@ -48,7 +48,15 @@ fn running(s: &mut crate::session::Session, cmd: &str) -> u64 {
 
 /// The proxy asking, for run `run` of the project at `root`.
 fn ask(root: &Path, run: u64, host: &str) -> FromProxy {
-    FromProxy::Ask { session: session_of(root), run, host: host.into(), port: 443, process: "curl".into() }
+    FromProxy::Ask {
+        session: session_of(root),
+        run,
+        kind: Kind::Host,
+        host: host.into(),
+        port: 443,
+        process: "curl".into(),
+        asked: vec![],
+    }
 }
 
 fn hosts_cards(o: &[Offer]) -> Vec<&Ask> {
@@ -73,7 +81,7 @@ fn sent() -> Vec<ToProxy> {
 
 fn answered(m: &ToProxy) -> Option<(u64, u64, String, u16, Scope)> {
     match m {
-        ToProxy::Answer { session, run, host, port, scope } => {
+        ToProxy::Answer { kind: Kind::Host, session, run, host, port, scope } => {
             Some((*session, *run, host.clone(), *port, *scope))
         }
         _ => None,
@@ -173,14 +181,14 @@ fn each_answer_reaches_as_far_as_its_key() {
         assert!(hosts_cards(&ed.offers).is_empty(), "{k}: answered");
         let told: Vec<_> = sent().iter().filter_map(answered).collect();
         assert_eq!(told, [(session, run, HOST.to_string(), 443, scope)], "{k}");
-        let listed = ed.session.hosts.contains(&(HOST.to_string(), 443));
+        let listed = ed.session.hosts.contains(&(Kind::Host, HOST.to_string(), 443));
         // (`s` lists it; `A` keeps it for the project instead, the `s` before still listed; `n` takes it off)
         assert_eq!(listed, matches!(scope, Scope::Session | Scope::Project), "{k}: the session's list");
     }
     let tell = ed.session.checkpoints.tell.join("\n");
     assert!(tell.contains(&format!("reach {HOST}:443 — for this session")), "{tell}");
     assert!(tell.contains(&format!("reach {HOST}:443 — in this project")), "{tell}");
-    assert!(tell.contains(&format!("refused your commands {HOST}:443 for this session")), "{tell}");
+    assert!(tell.contains(&format!("refused your commands to reach {HOST}:443 for this session")), "{tell}");
     // `A`'s keeping, on a worker: the project's hosts, read back as the next run's policy reads them
     let path = ed.allow_path.clone().unwrap();
     let end = Instant::now() + std::time::Duration::from_secs(5);
@@ -236,14 +244,14 @@ fn a_grant_from_a_refused_run_reaches_as_far_as_its_key() {
     granted(&mut ed, HOST, 443, crate::allow::Scope::Once);
     let lifted = sent();
     assert!(
-        matches!(&lifted[..], [ToProxy::Lifted { session: s, host, port: 443 }] if *s == session && host == HOST),
+        matches!(&lifted[..], [ToProxy::Lifted { kind: Kind::Host, session: s, host, port: 443 }] if *s == session && host == HOST),
         "lifted, not taken"
     );
     granted(&mut ed, HOST, 443, crate::allow::Scope::Session);
     granted(&mut ed, HOST, 443, crate::allow::Scope::Always);
     let told: Vec<_> = sent().iter().filter_map(answered).map(|t| (t.0, t.4)).collect();
     assert_eq!(told, [(session, Scope::Session), (session, Scope::Project)]);
-    assert_eq!(ed.session.hosts, [(HOST.to_string(), 443)]);
+    assert_eq!(ed.session.hosts, [(Kind::Host, HOST.to_string(), 443)]);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -264,14 +272,18 @@ fn a_project_opened_through_a_link_is_one_session_to_both() {
     assert_eq!(ed.session.proxy_id(), theirs, "one session to both");
     let _ = sent();
     ed.sandbox_disallow(&format!("host {HOST}:443")).unwrap();
-    let taken = sent().into_iter().any(|m| matches!(m, ToProxy::Taken { session, .. } if session == theirs));
+    let taken = sent()
+        .into_iter()
+        .any(|m| matches!(m, ToProxy::Taken { kind: Kind::Host, session, .. } if session == theirs));
     assert!(taken, "the take-back reaches the proxy's session");
     let left = FromProxy::Ask {
         session: theirs,
         run: 999_997,
+        kind: Kind::Host,
         host: HOST.into(),
         port: 443,
         process: "java".into(),
+        asked: Vec::new(),
     };
     asked(&mut ed, left);
     assert!(
@@ -302,8 +314,10 @@ fn a_registry_is_named_on_the_hosts_card() {
         card(Ask {
             session: 1,
             run: 2,
+            kind: Kind::Host,
             host: host.into(),
             port,
+            asked: Vec::new(),
             process: "cargo".into(),
             label: "cargo build".into(),
             users: false,
@@ -329,6 +343,113 @@ fn a_registry_is_named_on_the_hosts_card() {
         (a.why, crate::cards::decide(&a.request), o.answers(false))
     };
     assert_eq!(decided(&named), decided(&plain));
+}
+
+/// The proxy asking about `kind` for run `run` of the project at `root`: `host:port`, a lookup's questions.
+fn ask_of(root: &Path, run: u64, kind: Kind, host: &str, port: u16, asked: &[&str]) -> FromProxy {
+    let asked = asked.iter().map(|s| s.to_string()).collect();
+    FromProxy::Ask {
+        session: session_of(root),
+        run,
+        kind,
+        host: host.into(),
+        port,
+        process: "psql".into(),
+        asked,
+    }
+}
+
+fn told_of(m: &ToProxy) -> Option<(Kind, String, u16, Scope)> {
+    match m {
+        ToProxy::Answer { kind, host, port, scope, .. } => Some((*kind, host.clone(), *port, *scope)),
+        _ => None,
+    }
+}
+
+/// 6e+ (F4, F7): raw TCP to a host:port is its own card (`host-raw`), beside the host card for the same host:port —
+/// its warning that tarae can't see what passes in the warning colour; `y` this run, `s` this session, `n` — no `A`
+/// (a lasting allow is the user's own line in `llm.sandbox-hosts`): `A` answers nothing, and says so. `s` is listed
+/// as raw, Claude told; `:sandbox-disallow raw host:port` takes it back, as raw.
+#[test]
+fn raw_tcp_is_its_own_card_without_always() {
+    let (mut ed, dir, _, run, _) = two("raw");
+    let front = dir.join("front");
+    asked(&mut ed, ask_of(&front, run, Kind::Host, HOST, 5432, &[]));
+    asked(&mut ed, ask_of(&front, run, Kind::Raw, HOST, 5432, &[]));
+    assert_eq!(hosts_cards(&ed.offers).len(), 2, "kept apart from the host card");
+    let raw = ed.offers.iter().position(|o| o.kind() == "host-raw").expect("its kind");
+    ed.offers.swap(0, raw);
+    let o = &ed.offers[0];
+    assert_eq!(o.title, format!("Let a command open a raw connection to {HOST}?"));
+    let warning = o.question.lines().nth(2).unwrap();
+    assert!(warning.starts_with("Not TLS or HTTP: tarae can't see what passes"), "{}", o.question);
+    assert_eq!(o.warning, Some(2..3), "in the warning colour");
+    let keys: Vec<char> = o.answers(false).iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, ['y', 's', 'n']);
+    let _ = sent();
+    settled(&mut ed);
+    key(&mut ed, 'A');
+    assert_eq!(hosts_cards(&ed.offers).len(), 2, "`A` answers nothing");
+    assert!(sent().iter().all(|m| told_of(m).is_none()));
+    key(&mut ed, 's');
+    let told: Vec<_> = sent().iter().filter_map(told_of).collect();
+    assert_eq!(told, [(Kind::Raw, HOST.to_string(), 5432, Scope::Session)]);
+    assert_eq!(ed.session.hosts, [(Kind::Raw, HOST.to_string(), 5432)]);
+    let tell = ed.session.checkpoints.tell.join("\n");
+    assert!(tell.contains(&format!("open raw connections to {HOST}:5432 — for this session")), "{tell}");
+    assert_eq!(hosts_cards(&ed.offers)[0].kind, Kind::Host, "the host card still up");
+    ed.sandbox_disallow(&format!("raw {HOST}:5432")).unwrap();
+    assert!(ed.session.hosts.is_empty());
+    let taken = sent();
+    assert!(matches!(&taken[..], [ToProxy::Taken { kind: Kind::Raw, host, port: 5432, .. }] if host == HOST));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 6e+ (F2, F7): a name's records are one card for the name (`lookup`) whatever the types asked — the proxy asking
+/// again with the next question grows its list, said anew; `y` `s` `n`, no `A`. `n` refuses them for the session,
+/// Claude told; the card goes when its run ends, as the others do.
+#[test]
+fn a_lookup_is_one_card_for_its_name() {
+    let (mut ed, dir, _, run, _) = two("lookup");
+    let front = dir.join("front");
+    let srv = "SRV _mongodb._tcp.cluster.example.invalid";
+    let txt = "TXT cluster.example.invalid";
+    asked(&mut ed, ask_of(&front, run, Kind::Lookup, "cluster.example.invalid", 0, &[srv]));
+    let rev = ed.offers[0].rev;
+    asked(&mut ed, ask_of(&front, run, Kind::Lookup, "cluster.example.invalid", 0, &[srv, txt]));
+    assert_eq!(hosts_cards(&ed.offers).len(), 1, "one card for the name");
+    let o = &ed.offers[0];
+    assert_eq!((o.kind(), o.rev > rev), ("lookup", true));
+    assert_eq!(o.title, "Let a command look up the service records of cluster.example.invalid?");
+    assert!(
+        o.question.starts_with(&format!("{srv}, {txt}\nasked by psql in `cargo build`")),
+        "{}",
+        o.question
+    );
+    assert!(o.question.lines().nth(2).unwrap().starts_with("tarae asks the network's DNS for them"));
+    let a = o.asked.clone().unwrap();
+    let types = vec!["SRV".to_string(), "TXT".to_string()];
+    let want = crate::cards::Request::Lookup { name: "cluster.example.invalid".into(), types };
+    assert_eq!((a.why, a.request), (crate::cards::Why::Lookup, want));
+    let _ = sent();
+    settled(&mut ed);
+    key(&mut ed, 'n');
+    let told: Vec<_> = sent().iter().filter_map(told_of).collect();
+    assert_eq!(told, [(Kind::Lookup, "cluster.example.invalid".to_string(), 0, Scope::Refused)]);
+    let tell = ed.session.checkpoints.tell.join("\n");
+    assert!(
+        tell.contains("refused your commands to look up cluster.example.invalid's service records"),
+        "{tell}"
+    );
+    asked(
+        &mut ed,
+        ask_of(&front, run, Kind::Lookup, "other.example.invalid", 0, &["TXT other.example.invalid"]),
+    );
+    let up: Vec<(u64, &str)> = hosts_cards(&ed.offers).iter().map(|a| (a.run, a.host.as_str())).collect();
+    assert_eq!(up, [(run, "other.example.invalid")], "its card up before its run ends");
+    run_ended(&mut ed, Some(run));
+    assert!(hosts_cards(&ed.offers).is_empty(), "gone with its run");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Its run reaped, the card for it goes, and the proxy is told (`RunEnded`): whoever else still waits on that
