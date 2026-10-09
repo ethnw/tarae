@@ -3319,6 +3319,26 @@ mod tests {
                 helper_within(&std::env::var("TARAE_TO").unwrap_or_default())
             }
             "asked" => helper_asked(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "named" => helper_named(&std::env::var("TARAE_NAME").unwrap_or_default()),
+            "searched" => helper_searched(&std::env::var("TARAE_TO").unwrap_or_default()),
+            // (6e: a run's own DNS server at the session's 127.0.0.1:53 — `ready` once bound, then one question
+            // answered NOTIMP, its ID and question echoed: an answer only it gives)
+            "dnsserver" => {
+                let s = match std::net::UdpSocket::bind("127.0.0.1:53") {
+                    Ok(s) => s,
+                    Err(e) => return println!("helper: bind={}", tried::<()>(Err(e))),
+                };
+                println!("helper: ready");
+                s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                let mut b = [0u8; 512];
+                let Ok((n, from)) = s.recv_from(&mut b) else { return println!("helper: nothing asked") };
+                let mut a = b[..n].to_vec();
+                if a.len() >= 4 {
+                    (a[2], a[3]) = (0x80 | (a[2] & 0x79), 0x84);
+                }
+                format!("answered={}", tried(s.send_to(&a, from)))
+            }
+            "ask" => helper_ask(&std::env::var("TARAE_TO").unwrap_or_default()),
             // (6d: a TCP socket made in the run's network and its number said — then held, unconnected, until
             // `$TARAE_GO` is there, 5 s at most, for the test to take it)
             "socket" => {
@@ -3720,6 +3740,124 @@ mod tests {
             Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reached reset".into(),
             Err(_) => "reached open".into(),
         }
+    }
+
+    /// `named` (6e): `name` looked up as a tool does (`getaddrinfo` — glibc's resolver, its `resolv.conf`, and
+    /// `$LOCALDOMAIN`/`$RES_OPTIONS` where set), its first address connected to at port 80, and a plain request for
+    /// `name` sent there: `addr=<the address> reply=<the first line back>`, or `lookup=<why>`, or the connect's errno.
+    fn helper_named(name: &str) -> String {
+        use std::io::{BufRead, Write};
+        use std::net::ToSocketAddrs;
+        let first = match (name, 80).to_socket_addrs() {
+            Ok(mut a) => a.next(),
+            Err(e) => return format!("lookup={e}"),
+        };
+        let Some(at) = first else { return "lookup=none".into() };
+        let s = match std::net::TcpStream::connect_timeout(&at, Duration::from_secs(5)) {
+            Ok(s) => s,
+            Err(e) => return format!("addr={} connect={}", at.ip(), tried::<()>(Err(e))),
+        };
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let _ = (&s).write_all(format!("GET / HTTP/1.1\r\nHost: {name}\r\n\r\n").as_bytes());
+        let mut reply = String::new();
+        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
+        format!("addr={} reply={}", at.ip(), reply.trim_end())
+    }
+
+    /// `ask` (6e): a DNS question for `$TARAE_NAME`'s `$TARAE_TYPE` record (default A) sent to `to` on a connected
+    /// UDP socket — which takes an answer only from the address and port it asked — or over TCP (`$TARAE_TCP` set):
+    /// `rcode=<n> answers=<n> addr=<the first A/AAAA's>`, or what failed.
+    fn helper_ask(to: &str) -> String {
+        let name = std::env::var("TARAE_NAME").unwrap_or_default();
+        let qtype: u16 = std::env::var("TARAE_TYPE").ok().and_then(|t| t.parse().ok()).unwrap_or(1);
+        let tcp = std::env::var_os("TARAE_TCP").is_some();
+        ask_raw(to, &name, qtype, tcp).unwrap_or_else(|e| e)
+    }
+
+    /// `searched` (6e, E6): `$TARAE_NAME` looked up as glibc does under `ndots:5` with `$TARAE_SEARCH` its search
+    /// domain (M7: every glibc client did) — the candidate `<name>.<search>` asked first of `$TARAE_TO`, the name as
+    /// written only if that was NXDOMAIN — and the address taken connected to at port 80, a plain request for the name
+    /// sent: `candidate=<rcode> addr=<the address> reply=<the first line back>`.
+    fn helper_searched(to: &str) -> String {
+        use std::io::{BufRead, Write};
+        let name = std::env::var("TARAE_NAME").unwrap_or_default();
+        let search = std::env::var("TARAE_SEARCH").unwrap_or_default();
+        let candidate = ask_raw(to, &format!("{name}.{search}"), 1, false);
+        let first = |said: &str| said.strip_prefix("rcode=0 answers=1 addr=").map(str::to_string);
+        let (code, addr) = match candidate {
+            Ok(said) => match first(&said) {
+                Some(a) => ("0".to_string(), Some(a)),
+                None => (said.split(' ').next().unwrap_or("").replace("rcode=", ""), None),
+            },
+            Err(e) => return e,
+        };
+        let addr = match addr {
+            Some(a) => a,
+            None => match ask_raw(to, &name, 1, false).map(|s| first(&s)) {
+                Ok(Some(a)) => a,
+                Ok(None) => return format!("candidate={code} name=unanswered"),
+                Err(e) => return e,
+            },
+        };
+        let Ok(ip) = addr.parse::<std::net::IpAddr>() else { return format!("not an address: {addr}") };
+        let s = match std::net::TcpStream::connect_timeout(&(ip, 80).into(), Duration::from_secs(5)) {
+            Ok(s) => s,
+            Err(e) => return format!("candidate={code} addr={addr} connect={}", tried::<()>(Err(e))),
+        };
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let _ = (&s).write_all(format!("GET / HTTP/1.1\r\nHost: {name}\r\n\r\n").as_bytes());
+        let mut reply = String::new();
+        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
+        format!("candidate={code} addr={addr} reply={}", reply.trim_end())
+    }
+
+    /// A DNS question for `name`'s `qtype` record sent to `to` (over TCP where `tcp`): `rcode=<n> answers=<n>
+    /// addr=<the first A/AAAA's>` — Err: what failed, said.
+    fn ask_raw(to: &str, name: &str, qtype: u16, tcp: bool) -> Result<String, String> {
+        use std::io::{Read, Write};
+        let mut q = vec![0x6e, 0x6e, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for l in name.split('.').filter(|l| !l.is_empty()) {
+            q.push(l.len() as u8);
+            q.extend_from_slice(l.as_bytes());
+        }
+        q.push(0);
+        q.extend(qtype.to_be_bytes());
+        q.extend([0, 1]);
+        let wait = Some(Duration::from_secs(3));
+        let failed = |e: io::Error| tried::<()>(Err(e));
+        let a = if tcp {
+            let Ok(to) = to.parse::<std::net::SocketAddr>() else {
+                return Err(format!("not an address: {to}"));
+            };
+            let mut s = std::net::TcpStream::connect_timeout(&to, Duration::from_secs(3)).map_err(failed)?;
+            s.set_read_timeout(wait).ok();
+            let mut framed = (q.len() as u16).to_be_bytes().to_vec();
+            framed.extend(&q);
+            let mut len = [0u8; 2];
+            s.write_all(&framed).and_then(|()| s.read_exact(&mut len)).map_err(failed)?;
+            let mut a = vec![0u8; usize::from(u16::from_be_bytes(len))];
+            s.read_exact(&mut a).map_err(failed)?;
+            a
+        } else {
+            let any = if to.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" };
+            let s = std::net::UdpSocket::bind(any).and_then(|s| s.connect(to).map(|()| s)).map_err(failed)?;
+            s.set_read_timeout(wait).ok();
+            let mut b = [0u8; 512];
+            let n = s.send(&q).and_then(|_| s.recv(&mut b)).map_err(failed)?;
+            b[..n].to_vec()
+        };
+        if a.len() < 12 || a[..2] != q[..2] {
+            return Err(format!("not its answer ({} bytes)", a.len()));
+        }
+        let answers = u16::from_be_bytes([a[6], a[7]]);
+        // (the first record's data: past the question — echoed — its name pointer, type, class, TTL and length)
+        let rdata = a.get(q.len() + 12..).unwrap_or_default();
+        let addr = match rdata.len() {
+            4 => std::net::Ipv4Addr::from(<[u8; 4]>::try_from(rdata).unwrap()).to_string(),
+            16 => std::net::Ipv6Addr::from(<[u8; 16]>::try_from(rdata).unwrap()).to_string(),
+            _ => "none".into(),
+        };
+        Ok(format!("rcode={} answers={answers} addr={addr}", a[3] & 0x0f))
     }
 
     /// `asked`: a datagram to `$TARAE_TO` on a connected UDP socket — as glibc's resolver sends its questions — and
@@ -5620,8 +5758,10 @@ mod tests {
     }
 
     /// A keeper is born with the session's network before any run: its owned table holds the session's ruleset
-    /// (3 rules leaving and 3 coming in for both families, and 2 and 5 more for each its `lo` carries — 7 and 13
-    /// with both), its routes and policy rule are there, and a run's own connect beyond the session — on its own
+    /// (4 rules leaving and 5 coming in for both families, and 2 and 6 more for each its `lo` carries — 8 and 17
+    /// with both: 6e's DNS over TCP one more each way, its own servers' two), its routes and policy rule are there, and
+    /// a run's own connect
+    /// beyond the session — on its own
     /// socket, no supervisor — lands on a planted socket, which refuses it until 6d (accepted, reset, counted).
     #[test]
     fn the_session_has_its_network_before_any_run() {
@@ -5632,7 +5772,7 @@ mod tests {
         let k = keeper("network");
         let here = Families::here();
         let carried = [here.v4 && !k.lo_missing.v4, here.v6 && !k.lo_missing.v6].map(usize::from);
-        let (out, pre) = (3 + 2 * (carried[0] + carried[1]), 3 + 5 * (carried[0] + carried[1]));
+        let (out, pre) = (4 + 2 * (carried[0] + carried[1]), 5 + 6 * (carried[0] + carried[1]));
         let state = network_state(&k);
         assert!(
             state.starts_with("generation ") && state.contains(&format!(", out {out}, pre {pre}")),
@@ -5863,6 +6003,255 @@ mod tests {
         k.end();
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&own_root).ok();
+    }
+
+    /// Each question is its run's (6e, `SO_RCVMARK`): a served run's question to port 53 — the session's to answer —
+    /// goes on its own socket, marked by its supervisor, and the DNS socket reads the mark back with it. Two runs of
+    /// one session each ask for a TXT record (REFUSED: Q3), and each refusal is said in its own run's report, never
+    /// the other's. On a kernel that reads no datagram's mark (before 5.19, D5 — here E5's stand-in, the sockets made
+    /// without asking), the question is the session's: answered as one, said in no run's report, and the session's
+    /// start says why once.
+    #[test]
+    fn each_question_is_its_runs() {
+        let test = "each_question_is_its_runs";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let captured = crate::log::capture();
+        // (run `run` asks for `txt-<run>.test`'s TXT record: REFUSED — what it said, and its report)
+        let txt = |k: &Keeper, run: u64| {
+            let p = redirected_project(&format!("question-6e-{run}"), k, run, |_| {});
+            let name = format!("txt-{run}.test");
+            let env = [("TARAE_TO", "203.0.113.7:53"), ("TARAE_NAME", name.as_str()), ("TARAE_TYPE", "16")];
+            let said = served_said(k, (&p.0, &p.1, &p.2), "ask", &env);
+            std::fs::remove_dir_all(&p.2).ok();
+            said
+        };
+        let named = |report: &[super::super::Denial], run: u64| {
+            report.iter().any(|d| d.target.starts_with(&format!("txt-{run}.test (TXT): ")))
+        };
+        let k = keeper("question-6e");
+        let ((said1, report1), (said2, report2)) = (txt(&k, 6_000_051), txt(&k, 6_000_053));
+        k.end();
+        assert!(said1.starts_with("rcode=5 ") && said2.starts_with("rcode=5 "), "REFUSED: {said1}; {said2}");
+        assert!(named(&report1, 6_000_051) && !named(&report1, 6_000_053), "its own: {report1:?}");
+        assert!(named(&report2, 6_000_053) && !named(&report2, 6_000_051), "its own: {report2:?}");
+        // (E5's stand-in: the planted UDP sockets made as before 5.19)
+        let here = Families::here();
+        let network = super::super::redirect::Network {
+            no_rcvmark: true,
+            ..super::super::redirect::Network::session(here.v4, here.v6)
+        };
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-question-d5", std::process::id()));
+        let given = Some(NetworkFor::Given(network));
+        let k = Keeper::born_lo(&root, None, ns(), here, false, given, None).expect("a keeper starts");
+        let (said, report) = txt(&k, 6_000_052);
+        k.end();
+        assert!(said.starts_with("rcode=5 "), "answered as the session's: {said}");
+        assert!(!named(&report, 6_000_052), "no run's to say it in: {report:?}");
+        let lines = captured.lines().join("\n");
+        assert!(
+            lines.contains("read no datagram's mark (Protocol not available"),
+            "said at the start: {lines}"
+        );
+    }
+
+    /// A name asked in the session reaches its host (6e): a tool's lookup (`getaddrinfo`, glibc, the resolver its
+    /// `resolv.conf` names — whichever: every question to a port 53 is the session's) gets an address of the session's
+    /// names, and its connection there names the host before any byte — the proxy reaches it by name, from tarae's
+    /// network. The name is one the run's rules name, so tarae looked it up for real first (E1, the test's stand-in
+    /// resolver).
+    #[test]
+    fn a_name_asked_in_the_session_reaches_its_host() {
+        let test = "a_name_asked_in_the_session_reaches_its_host";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, served) = answering(&format!("{ip}:0"), "out hello");
+        super::super::proxy::TEST_NAMES.lock().unwrap().push(("named-6e.test".into(), at));
+        let k = keeper("named-6e");
+        let host = super::super::proxy::egress::Pattern::parse("named-6e.test").unwrap();
+        let only = |p: &mut super::super::Policy| {
+            p.egress = super::super::proxy::egress::Egress { hosts: vec![host], ..Default::default() }
+        };
+        let (p, c, root) = redirected_project("named-6e", &k, 6_000_061, only);
+        let (said, refused) = served_said(&k, (&p, &c, &root), "named", &[("TARAE_NAME", "named-6e.test")]);
+        let addr: Option<std::net::IpAddr> =
+            said.strip_prefix("addr=").and_then(|s| s.split(' ').next()?.parse().ok());
+        assert!(
+            addr.is_some_and(super::super::names::in_pool),
+            "an address of the session's: {said} {refused:?}"
+        );
+        assert!(said.ends_with("reply=out hello"), "reached: {said}");
+        let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
+        assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An answer comes from the address and port the question went to (6e) — what a connected UDP socket takes, and
+    /// nothing else: the loopback stub (`127.0.0.53`), GCP's (`169.254.169.254`), a LAN's (`10.0.0.2`), each answered
+    /// from the session's names by one DNS socket (`IP_PKTINFO`'s address, its port 53); and over TCP to the stub
+    /// (R6e's rules take it before loopback's return). None of them is reached: they're documentation stand-ins, and
+    /// the answers are the session's own addresses.
+    #[test]
+    fn an_answer_comes_from_the_address_asked() {
+        let test = "an_answer_comes_from_the_address_asked";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let k = keeper("asked-6e");
+        // (rules naming no host: the name gets its address unlooked-up — E1's lookups are another test's)
+        let none = |p: &mut super::super::Policy| p.egress = super::super::proxy::egress::Egress::default();
+        let (p, c, root) = redirected_project("asked-6e", &k, 6_000_071, none);
+        let ask = |to: &str, tcp: bool| {
+            let mut env = vec![("TARAE_TO", to), ("TARAE_NAME", "asked-6e.test")];
+            if tcp {
+                env.push(("TARAE_TCP", "1"));
+            }
+            served_said(&k, (&p, &c, &root), "ask", &env).0
+        };
+        let given = lock(&k.network).as_ref().unwrap().names.names.give("asked-6e.test").v4;
+        let want = format!("rcode=0 answers=1 addr={given}");
+        let captured = crate::log::capture();
+        for to in ["127.0.0.53:53", "169.254.169.254:53", "10.0.0.2:53"] {
+            let got = ask(to, false);
+            let said = |l: &String| l.contains("names") || l.contains("supervisor") || l.contains("planted");
+            let log: Vec<String> = captured.lines().into_iter().filter(said).collect();
+            assert_eq!(got, want, "UDP to {to}: {log:#?}");
+        }
+        assert_eq!(ask("127.0.0.53:53", true), want, "TCP to the stub");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// E6 (b): under `ndots:5` with a search domain, a tool asks the search list's candidate first
+    /// (`github.com.<search>`) — not named by the rules, so NXDOMAIN without a lookup — and then the name as written:
+    /// `github.com` reaches github.com, never `github.com.<search>`. The run asks as glibc does under `ndots:5`
+    /// (`searched`: M7 saw every glibc client ask so); tarae reads the search domain from its network's `search` (as
+    /// `resolv.conf` gives both in a real session). (The run's glibc took neither `LOCALDOMAIN` nor `RES_OPTIONS`
+    /// from its environment here — set, not in secure mode — so the order is the helper's, said plainly.)
+    #[test]
+    fn under_ndots_a_name_as_written_wins_over_its_search_candidate() {
+        let test = "under_ndots_a_name_as_written_wins_over_its_search_candidate";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
+        super::super::proxy::TEST_NAMES.lock().unwrap().push(("github.com".into(), at));
+        let here = Families::here();
+        let network = super::super::redirect::Network {
+            search: vec!["other-6e.example".into()],
+            ..super::super::redirect::Network::session(here.v4, here.v6)
+        };
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-ndots-6e", std::process::id()));
+        let given = Some(NetworkFor::Given(network));
+        let k = Keeper::born_lo(&root, None, ns(), here, false, given, None).expect("a keeper starts");
+        let host = super::super::proxy::egress::Pattern::parse("github.com").unwrap();
+        let only = |p: &mut super::super::Policy| {
+            p.egress = super::super::proxy::egress::Egress { hosts: vec![host], ..Default::default() }
+        };
+        let (p, c, project) = redirected_project("ndots-6e", &k, 6_000_081, only);
+        let env =
+            [("TARAE_TO", "10.0.0.2:53"), ("TARAE_NAME", "github.com"), ("TARAE_SEARCH", "other-6e.example")];
+        let (said, refused) = served_said(&k, (&p, &c, &project), "searched", &env);
+        assert!(said.starts_with("candidate=3 "), "the candidate NXDOMAIN: {said} {refused:?}");
+        assert!(said.ends_with("reply=out hello"), "github.com reached: {said} {refused:?}");
+        let names = lock(&k.network).as_ref().unwrap().names.clone();
+        let ip_said: Option<std::net::IpAddr> =
+            said.split(" addr=").nth(1).and_then(|s| s.split(' ').next()?.parse().ok());
+        assert_eq!(
+            ip_said.and_then(|ip| names.names.name_of(ip)).as_deref(),
+            Some("github.com"),
+            "its address github.com's"
+        );
+        k.end();
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    /// Where the session answers names, a server of the session's own and a port the user opened still come first
+    /// (6e review): (a) a run serving DNS at the session's `127.0.0.1:53` — its bind is the supervisor's, tarae's —
+    /// answers another run's question there, never tarae (prerouting delivers a question a session's own socket is
+    /// bound for to it; the route leaves it the session's); (b) a run whose policy opens port 53 reaches this
+    /// machine's own server at `127.0.0.1:53` (the test's, in its container) as before 6e. Each answer is one only
+    /// that server gives: NOTIMP (4) from the run's, SERVFAIL (2) from this machine's; tarae's would be NOERROR.
+    #[test]
+    fn a_sessions_own_server_and_an_opened_port_53_come_first() {
+        let test = "a_sessions_own_server_and_an_opened_port_53_come_first";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let k = keeper("own-dns-6e");
+        let (p, c, root) = redirected_project("own-dns-6e", &k, 6_000_091, |_| {});
+        let (mut lines, pid, refused) = served_helper(&k, (&p, &c, &root), "dnsserver", &[]);
+        assert_eq!(
+            said_next(&mut lines),
+            "ready",
+            "its bind at 53: {:?}",
+            refused.try_iter().collect::<Vec<_>>()
+        );
+        let env = [("TARAE_TO", "127.0.0.1:53"), ("TARAE_NAME", "own-6e.test")];
+        let (asked, _) = served_said(&k, (&p, &c, &root), "ask", &env);
+        assert_eq!(asked, "rcode=4 answers=0 addr=none", "the run's own server answered");
+        assert_eq!(said_next(&mut lines), "answered=ok");
+        lines.for_each(drop);
+        crate::spawn::wait(pid).unwrap();
+        // (b) this machine's own server, the port opened
+        let this_machine = match std::net::UdpSocket::bind("127.0.0.1:53") {
+            Ok(s) => s,
+            Err(e) => {
+                let line = format!(
+                    "{}sandbox::keeper::tests::{test} — (b) left out: this machine's 127.0.0.1:53 can't be bound \
+                     here ({e})\n",
+                    crate::test_results::SELF_SKIP
+                );
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+                k.end();
+                return;
+            }
+        };
+        std::thread::spawn(move || {
+            let mut b = [0u8; 512];
+            if let Ok((n, from)) = this_machine.recv_from(&mut b) {
+                let mut a = b[..n].to_vec();
+                if a.len() >= 4 {
+                    (a[2], a[3]) = (0x80 | (a[2] & 0x79), 0x82);
+                }
+                let _ = this_machine.send_to(&a, from);
+            }
+        });
+        let opened = |p: &mut super::super::Policy| p.ports = vec![53];
+        let (p, c, root2) = redirected_project("opened-dns-6e", &k, 6_000_092, opened);
+        let (asked, _) = served_said(&k, (&p, &c, &root2), "ask", &env);
+        assert_eq!(asked, "rcode=2 answers=0 addr=none", "this machine's own server answered");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&root2).ok();
+    }
+
+    /// E2: a question with no mark tarae gave — from a run tarae doesn't serve — is answered REFUSED at once (its
+    /// lookup ends as fast as a refused one) and said in the log, never answered as anyone's.
+    #[test]
+    fn an_unmarked_question_is_refused() {
+        let test = "an_unmarked_question_is_refused";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let captured = crate::log::capture();
+        let k = keeper("unmarked-q-6e");
+        let (_, c, root) = project_served("unmarked-q-6e", vec![], Some(&k), &[], Err("not served".into()));
+        let env = [("TARAE_TO", "203.0.113.53:53"), ("TARAE_NAME", "unmarked-6e.test")];
+        let said = helper_through(&k, c.rules_fd(), c.net, "ask", &env, Some(&root));
+        assert_eq!(said, "rcode=5 answers=0 addr=none", "REFUSED");
+        let lines = captured.lines().join("\n");
+        assert!(
+            lines.contains("a question for 203.0.113.53:53 from ") && lines.contains("answered REFUSED"),
+            "{lines}"
+        );
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Each connection is its own run's (6d): two runs of one session at once, of one program, each connecting
@@ -6803,7 +7192,9 @@ mod tests {
     /// get `ENETUNREACH` at once — is refused as quickly and as plainly as by a closed port, never left to its own
     /// time limits: its connect reset (`ECONNRESET` on its first read), a datagram it asks on a connected UDP socket
     /// answered port unreachable (`ECONNREFUSED`), and so its name lookup gives up at once — glibc asks on connected
-    /// sockets (`RES_OPTIONS` keeps one that would wait to 2 s). 6e flips the lookup half: names answered by tarae.
+    /// sockets (`RES_OPTIONS` keeps one that would wait to 2 s). Since 6e an unserved run's question is answered
+    /// REFUSED (E2: its mark isn't one tarae gave) — even `asked`'s header alone, whose ID and flags can be read — and
+    /// its lookup ends as fast.
     #[test]
     fn an_unserved_runs_way_out_fails_fast() {
         let test = "an_unserved_runs_way_out_fails_fast";
@@ -6819,11 +7210,9 @@ mod tests {
             said.rsplit_once("ms=").and_then(|(_, n)| n.parse::<u128>().ok()).unwrap_or(u128::MAX)
         };
         assert_eq!(run("within", &[("TARAE_TO", "203.0.113.7:443")]), "reached reset", "the connect");
+        let t0 = Instant::now();
         let asked = run("asked", &[("TARAE_TO", "203.0.113.53:53")]);
-        assert!(
-            asked.starts_with(&format!("{} ", libc::ECONNREFUSED)) && ms(&asked) < 500,
-            "the datagram: {asked}"
-        );
+        assert!(asked == "answered" && t0.elapsed() < Duration::from_secs(1), "the datagram: {asked}");
         let env = [("TARAE_NAME", "tarae-6c.example"), ("RES_OPTIONS", "timeout:2 attempts:1")];
         let lookup = run("lookup_timed", &env);
         assert!(lookup.starts_with("lookup=getaddrinfo ") && ms(&lookup) < 1000, "the lookup: {lookup}");
@@ -6980,7 +7369,7 @@ mod tests {
         use super::super::redirect::Kind;
         let v4 = Families { v4: true, v6: false };
         let codes = |k: &[Kind]| k.iter().map(|k| k.code()).collect::<Vec<u8>>();
-        let asked = [Kind::Route, Kind::Netfilter, Kind::Tcp4, Kind::Udp4];
+        let asked = [Kind::Route, Kind::Netfilter, Kind::Tcp4, Kind::Udp4, Kind::Dns4];
         assert_eq!(planted_kinds(v4, &codes(&asked), 0), Ok(asked.to_vec()));
         let with_raw = [&asked[..], &[Kind::Icmp4]].concat();
         assert_eq!(planted_kinds(v4, &codes(&with_raw), 0), Ok(with_raw.clone()), "the raw socket besides");
@@ -6993,7 +7382,7 @@ mod tests {
             ("one missing", codes(&asked[..3])),
             ("one extra", codes(&[&asked[..], &[Kind::Tcp6]].concat())),
             ("one twice", codes(&[&asked[..], &[Kind::Udp4]].concat())),
-            ("out of order", codes(&[Kind::Netfilter, Kind::Route, Kind::Tcp4, Kind::Udp4])),
+            ("out of order", codes(&[Kind::Netfilter, Kind::Route, Kind::Tcp4, Kind::Udp4, Kind::Dns4])),
             ("the raw socket twice", codes(&[&with_raw[..], &[Kind::Icmp4]].concat())),
             ("a kind that isn't one", [codes(&asked), vec![9]].concat()),
         ];

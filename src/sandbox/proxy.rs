@@ -17,6 +17,10 @@
 //! host and server-name checks as ever, the addresses the upstream's — and its failures said apart
 //! (`UPSTREAM_OP`). A cloud metadata server's own name is refused whichever way (`route::never_named`).
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // (the session's names are Linux's)
+pub mod answering;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod dns;
 pub mod egress;
 pub mod parse;
 pub mod relay;
@@ -73,6 +77,21 @@ pub struct Planted {
     pub process: String,
     pub rules: Arc<Egress>,
     pub told: Sender<Denial>,
+    /// Its session's names (6e): a connection to a synthetic address is to the name it was given to.
+    pub names: Arc<answering::Session>,
+}
+
+/// Where a question's answer goes (6e): a datagram from the address asked, or a DNS-over-TCP connection's.
+pub type Reply = Box<dyn FnOnce(Vec<u8>) + Send>;
+
+/// A run's DNS question, the session's to answer (6e, Linux: TPROXY) — the message as it came, whose it is, the
+/// session's names, and where the answer goes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct NameQuestion {
+    pub payload: Vec<u8>,
+    pub asker: answering::Asker,
+    pub names: Arc<answering::Session>,
+    pub reply: Reply,
 }
 
 /// How far an answer of the user's reaches.
@@ -96,6 +115,8 @@ pub enum ToProxy {
     /// Linux (6d): a run's connection the session's network took to a planted socket — no request of a proxy's in
     /// it: its host is what its first bytes name.
     Planted(Planted),
+    /// Linux (6e): a run's question for a name, the session's to answer.
+    Question(NameQuestion),
     /// macOS: a run's own listener (`127.0.0.1:0`, its port the only one its profile opens) and the token its
     /// proxy URL carries as the password.
     RunStarts {
@@ -237,11 +258,17 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// The proxy's dispatcher, started: names looked up by `resolve`, the user asked through `asks`.
-    pub fn start(resolve: Resolve, asks: Sender<FromProxy>, limits: Limits) -> Proxy {
+    /// The proxy's dispatcher, started: names looked up by `resolve` (and, for a session's questions, by `lookup`:
+    /// 6e's E1), the user asked through `asks`.
+    pub fn start(
+        resolve: Resolve,
+        lookup: answering::Lookup,
+        asks: Sender<FromProxy>,
+        limits: Limits,
+    ) -> Proxy {
         let (tx, rx) = mpsc::channel();
         let state = State {
-            shared: Shared { resolve, limits, tx: tx.clone() },
+            shared: Shared { resolve, lookup, limits, tx: tx.clone() },
             asks,
             runs: HashMap::new(),
             per_session: HashMap::new(),
@@ -272,6 +299,7 @@ impl Proxy {
 #[derive(Clone)]
 struct Shared {
     resolve: Resolve,
+    lookup: answering::Lookup,
     limits: Limits,
     tx: Sender<In>,
 }
@@ -346,6 +374,8 @@ struct Conn {
     /// Linux (6d): where a connection the session's network took was going — None: a proxy's own connection (it
     /// names its host in its request).
     original: Option<std::net::SocketAddr>,
+    /// Linux (6e): its session's names, where the session's network took it.
+    names: Option<Arc<answering::Session>>,
 }
 
 impl State {
@@ -362,6 +392,7 @@ impl State {
                         told: c.told,
                         token: None,
                         original: None,
+                        names: None,
                     };
                     self.admit(conn);
                 }
@@ -375,9 +406,11 @@ impl State {
                         told: p.told,
                         token: None,
                         original: Some(p.original),
+                        names: Some(p.names),
                     };
                     self.admit(conn);
                 }
+                In::Msg(ToProxy::Question(q)) => self.question(q),
                 In::Msg(ToProxy::RunStarts { run, session, process, listener, token, rules, told }) => {
                     let Ok((stop_r, stop_w)) = io::pipe() else { continue };
                     let tx = self.shared.tx.clone();
@@ -443,6 +476,7 @@ impl State {
                         told: r.told.clone(),
                         token: Some(r.token.clone()),
                         original: None,
+                        names: None,
                     };
                     self.admit(conn);
                 }
@@ -487,6 +521,57 @@ impl State {
             self.total -= 1;
             if let Some(n) = self.per_session.get_mut(&session) {
                 *n -= 1;
+            }
+        }
+    }
+
+    /// A run's question for a name, the session's to answer (6e, `answering`): a name its rules name — or the user
+    /// said yes to, for the session or the run, at any port — is looked up for real first (E1), on a thread of its
+    /// own (at most `LOOKUPS` at once: past them SERVFAIL, the client asks again); what a run's report should hear
+    /// of it is said on its sender.
+    fn question(&mut self, q: NameQuestion) {
+        let NameQuestion { payload, asker, names, reply } = q;
+        let question = match dns::question(&payload) {
+            Ok(question) => question,
+            Err(dns::Refused::Dropped) => return,
+            Err(dns::Refused::Answered { id, flags, rcode }) => return reply(dns::refusal(id, flags, rcode)),
+        };
+        let (plan, said) = match &asker {
+            answering::Asker::Run { run, session, rules, .. } => {
+                let yes = |n: &str| {
+                    let allowed = |l: &Latest| *l == Latest::Allowed;
+                    self.latest.iter().any(|((s, h, _), l)| s == session && h == n && allowed(l))
+                        || self.run_allowed.iter().any(|(s, r, h, _)| s == session && r == run && h == n)
+                };
+                let named = |n: &str| rules.names(n) || yes(n);
+                // (through an upstream at any port of the name: tarae resolves nothing — E1)
+                let through = |n: &str| rules.upstream.may_go_through(n);
+                answering::plan(&question, &names, named, through)
+            }
+            answering::Asker::Session => answering::plan(&question, &names, |_| false, |_| false),
+        };
+        if let (Some(said), answering::Asker::Run { process, told, .. }) = (said, &asker) {
+            let _ = told.send(Denial { process: process.clone(), op: OP.into(), target: said });
+        }
+        match plan {
+            answering::Plan::Now(a) => reply(dns::answer(&question, &a, answering::TTL)),
+            answering::Plan::LookUp(name) => {
+                static LOOKING: AtomicU64 = AtomicU64::new(0);
+                const LOOKUPS: u64 = 32;
+                if LOOKING.fetch_add(1, Ordering::Relaxed) >= LOOKUPS {
+                    LOOKING.fetch_sub(1, Ordering::Relaxed);
+                    return reply(dns::answer(&question, &dns::Answer::Rcode(dns::SERVFAIL), 0));
+                }
+                let lookup = self.shared.lookup.clone();
+                let spawned = std::thread::Builder::new().name("tarae-proxy-name".into()).spawn(move || {
+                    let e = lookup(&name);
+                    names.remember(&name, e);
+                    LOOKING.fetch_sub(1, Ordering::Relaxed);
+                    reply(dns::answer(&question, &answering::after(&question, &names, e), answering::TTL));
+                });
+                if spawned.is_err() {
+                    LOOKING.fetch_sub(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -810,13 +895,37 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
     let limits = shared.limits;
     let s = &c.stream;
     let port = original.port();
+    // (6e: DNS over TCP, the session's to answer)
+    if port == route::RESOLVER_PORT
+        && let Some(names) = c.names.clone()
+    {
+        return serve_names(&c, shared, &names);
+    }
+    // (6e: an address of the session's pool is the name it was given to — one no name has isn't a host)
+    let mapped = match &c.names {
+        Some(n) if crate::sandbox::names::in_pool(original.ip()) => match n.names.name_of(original.ip()) {
+            Some(name) => Some(name),
+            None => {
+                let why = format!(
+                    "{original}: an address of tarae's names that no name was given — a lookup gives it"
+                );
+                return reset(&c, OP, &why);
+            }
+        },
+        _ => None,
+    };
+    // (how a refusal before its host is read names it: by its name where the address had one)
+    let at = match &mapped {
+        Some(name) => format!("{name}:{port}"),
+        None => original.to_string(),
+    };
     let mut buf = Vec::new();
     let some = |b: &[u8]| (!b.is_empty()).then_some(());
     match read_until(s, &mut buf, Instant::now() + limits.head_time, some) {
         Ok(()) => {}
         Err(true) => {
             let why = format!(
-                "{original}: nothing sent within {} s — tarae decides by the host a connection names (TLS or HTTP)",
+                "{at}: nothing sent within {} s — tarae decides by the host a connection names (TLS or HTTP)",
                 limits.head_time.as_secs_f32()
             );
             return reset(&c, OP, &why);
@@ -833,10 +942,9 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
         }) {
             Ok(Ok(Some(n))) => (n, std::mem::take(&mut buf), None),
             Ok(Ok(None)) | Err(false) => return,
-            Ok(Err(e)) => return reset(&c, OP, &format!("{original}: {}", e.said())),
+            Ok(Err(e)) => return reset(&c, OP, &format!("{at}: {}", e.said())),
             Err(true) => {
-                let why =
-                    format!("{original}: no whole ClientHello within {} s", limits.hello_time.as_secs_f32());
+                let why = format!("{at}: no whole ClientHello within {} s", limits.hello_time.as_secs_f32());
                 return reset(&c, OP, &why);
             }
         }
@@ -859,12 +967,16 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
             },
             Ok(Ok(None)) | Err(false) => return,
             Ok(Err(r)) => {
-                let why = format!("{original}: neither TLS nor a request tarae reads ({})", r.said());
+                // (E4: a raw connection to a named host — its card is 6e+'s)
+                let raw = match mapped {
+                    Some(_) => " — a raw TCP connection to a named host isn't taken yet",
+                    None => "",
+                };
+                let why = format!("{at}: neither TLS nor a request tarae reads ({}){raw}", r.said());
                 return reset(&c, OP, &why);
             }
             Err(true) => {
-                let why =
-                    format!("{original}: no whole request head within {} s", limits.head_time.as_secs_f32());
+                let why = format!("{at}: no whole request head within {} s", limits.head_time.as_secs_f32());
                 return reset(&c, OP, &why);
             }
         }
@@ -880,6 +992,12 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
             }
         }
     };
+    // (6e: its first bytes name the host its address was given to, or it's refused — never another's)
+    if let Some(m) = &mapped
+        && *m != name
+    {
+        return refuse(403, OP, format!("it connected to the address given to {m}"));
+    }
     if route::never_named(&name) {
         let why = "a cloud metadata server's own name — never reached".to_string();
         return refuse(403, OP, why);
@@ -929,6 +1047,48 @@ fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
             ),
         ),
         relay::End::Closed(why) => tell(&c, &format!("{name}:{port}: {why} — the connection closed")),
+    }
+}
+
+/// The most questions one DNS-over-TCP connection asks before tarae closes it.
+const QUESTIONS_PER_CONNECTION: usize = 64;
+
+/// DNS over TCP to a port 53 (6e): every question on the connection answered in order (M7: glibc's `use-vc` sends A
+/// and AAAA on one), each as a datagram's (`State::question`, as the connection's run's) — each within `head_time`
+/// of the last, at most `QUESTIONS_PER_CONNECTION`.
+fn serve_names(c: &Conn, shared: &Shared, names: &Arc<answering::Session>) {
+    let s = &c.stream;
+    let mut buf = Vec::new();
+    for _ in 0..QUESTIONS_PER_CONNECTION {
+        let whole = |b: &[u8]| {
+            let len = usize::from(u16::from_be_bytes([*b.first()?, *b.get(1)?]));
+            (b.len() >= 2 + len).then_some(2 + len)
+        };
+        let Ok(end) = read_until(s, &mut buf, Instant::now() + shared.limits.head_time, whole) else {
+            return;
+        };
+        let payload = buf[2..end].to_vec();
+        buf.drain(..end);
+        let (tx, rx) = mpsc::channel();
+        let reply: Reply = Box::new(move |a| {
+            let _ = tx.send(a);
+        });
+        let asker = answering::Asker::Run {
+            run: c.run,
+            session: c.session,
+            process: c.process.clone(),
+            rules: c.rules.clone(),
+            told: c.told.clone(),
+        };
+        let q = NameQuestion { payload, asker, names: names.clone(), reply };
+        if shared.tx.send(In::Msg(ToProxy::Question(q))).is_err() {
+            return;
+        }
+        // (a message that isn't a question gets nothing: the connection ends)
+        let Ok(answer) = rx.recv_timeout(shared.limits.connect) else { return };
+        if (&c.stream).write_all(&dns::framed(&answer)).is_err() {
+            return;
+        }
     }
 }
 
@@ -1363,7 +1523,19 @@ pub fn get() -> &'static Proxy {
         });
         #[cfg(not(test))]
         let resolve = system;
-        Proxy::start(resolve, asks, Limits::default())
+        let looked_up = answering::system();
+        // (tests: a name of `TEST_NAMES` is, of its address's family)
+        #[cfg(test)]
+        let lookup: answering::Lookup = Arc::new(move |name: &str| {
+            let names = TEST_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+            match names.iter().find(|(n, _)| n == name) {
+                Some((_, at)) => answering::Exists::Yes { v4: at.is_ipv4(), v6: at.is_ipv6() },
+                None => looked_up(name),
+            }
+        });
+        #[cfg(not(test))]
+        let lookup = looked_up;
+        Proxy::start(resolve, lookup, asks, Limits::default())
     })
 }
 

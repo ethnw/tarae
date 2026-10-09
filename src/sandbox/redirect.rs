@@ -62,8 +62,9 @@ const TCP: u8 = 6;
 const UDP: u8 = 17;
 
 /// A socket the keeper makes for the session's network (`Msg::Planted`'s kinds, each its byte): the two netlink
-/// sockets tarae sends on, the planted ones — and a raw ICMP one the birth made before the keeper's capability drop
-/// (it needs `CAP_NET_RAW` to be made), for `Taken`'s answers; where the birth couldn't make it, none.
+/// sockets tarae sends on, the planted ones, a DNS one a family (6e: unbound — tarae binds it at port 53, a port below
+/// what a capless keeper may bind) — and a raw ICMP one the birth made before the keeper's capability drop (it needs
+/// `CAP_NET_RAW` to be made), for `Taken`'s answers; where the birth couldn't make it, none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Route,
@@ -73,11 +74,22 @@ pub enum Kind {
     Udp4,
     Udp6,
     Icmp4,
+    Dns4,
+    Dns6,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] =
-        [Kind::Route, Kind::Netfilter, Kind::Tcp4, Kind::Tcp6, Kind::Udp4, Kind::Udp6, Kind::Icmp4];
+    pub const ALL: [Kind; 9] = [
+        Kind::Route,
+        Kind::Netfilter,
+        Kind::Tcp4,
+        Kind::Tcp6,
+        Kind::Udp4,
+        Kind::Udp6,
+        Kind::Icmp4,
+        Kind::Dns4,
+        Kind::Dns6,
+    ];
 
     pub fn code(self) -> u8 {
         Kind::ALL.iter().position(|k| *k == self).unwrap_or(0) as u8
@@ -90,7 +102,7 @@ impl Kind {
     /// Where a planted one is: the session's own address of its family, at its protocol's port — None: a netlink one.
     pub fn at(self) -> Option<SocketAddr> {
         let (ip, port) = match self {
-            Kind::Route | Kind::Netfilter | Kind::Icmp4 => return None,
+            Kind::Route | Kind::Netfilter | Kind::Icmp4 | Kind::Dns4 | Kind::Dns6 => return None,
             Kind::Tcp4 => (IpAddr::V4(SESSION_V4), TCP_PORT),
             Kind::Tcp6 => (IpAddr::V6(SESSION_V6), TCP_PORT),
             Kind::Udp4 => (IpAddr::V4(SESSION_V4), UDP_PORT),
@@ -100,16 +112,29 @@ impl Kind {
     }
 
     /// The kinds the keeper makes where its `lo` carries `v4` and `v6`'s addresses: both netlink sockets, and the
-    /// planted ones of those families (`Icmp4` comes as well where the birth made it).
+    /// planted and DNS ones of those families (`Icmp4` comes as well where the birth made it).
     pub fn wanted(v4: bool, v6: bool) -> Vec<Kind> {
         let mut k = vec![Kind::Route, Kind::Netfilter];
         if v4 {
-            k.extend([Kind::Tcp4, Kind::Udp4]);
+            k.extend([Kind::Tcp4, Kind::Udp4, Kind::Dns4]);
         }
         if v6 {
-            k.extend([Kind::Tcp6, Kind::Udp6]);
+            k.extend([Kind::Tcp6, Kind::Udp6, Kind::Dns6]);
         }
         k
+    }
+
+    /// Where a DNS one is bound (by tarae): the session's own address of its family, port 53 — not every address:
+    /// that would hold port 53 at loopback too, where a run's own server may bind (6e review). Questions to other
+    /// addresses reach the planted UDP socket; the answer goes out on this one, its source the address asked
+    /// (`IP_PKTINFO`) and its port 53. None: not a DNS one.
+    pub fn dns_at(self) -> Option<SocketAddr> {
+        let port = crate::sandbox::route::RESOLVER_PORT;
+        match self {
+            Kind::Dns4 => Some(SocketAddr::new(IpAddr::V4(SESSION_V4), port)),
+            Kind::Dns6 => Some(SocketAddr::new(IpAddr::V6(SESSION_V6), port)),
+            _ => None,
+        }
     }
 }
 
@@ -117,6 +142,13 @@ impl Kind {
 pub struct Network {
     pub routes: Vec<Batch>,
     pub rules: Batch,
+    /// The search list the session's runs' resolver uses (`/etc/resolv.conf`'s, read at the birth — the runs see
+    /// this machine's): what the session's answering reads a name's candidates by (6e, E6).
+    pub search: Vec<String>,
+    /// Tests: the planted UDP sockets made as on a kernel before 5.19 — no `SO_RCVMARK` (D5; E5's stand-in on a
+    /// kernel that has it).
+    #[cfg(test)]
+    pub no_rcvmark: bool,
 }
 
 impl Network {
@@ -127,7 +159,14 @@ impl Network {
     pub fn session(v4: bool, v6: bool) -> Network {
         let carried = [(Family::V4, v4), (Family::V6, v6)];
         let routes = carried.iter().filter(|(_, c)| *c).map(|(f, _)| routes(*f)).collect();
-        Network { routes, rules: ruleset(v4, v6) }
+        let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+        Network {
+            routes,
+            rules: ruleset(v4, v6),
+            search: crate::sandbox::route::search(&conf),
+            #[cfg(test)]
+            no_rcvmark: false,
+        }
     }
 }
 
@@ -161,8 +200,12 @@ fn l4proto(p: u8) -> Vec<Expr> {
 }
 
 fn udp_dport(p: u16) -> Vec<Expr> {
+    dport(UDP, p)
+}
+
+fn dport(proto: u8, p: u16) -> Vec<Expr> {
     then(
-        l4proto(UDP),
+        l4proto(proto),
         [
             Expr::Payload { base: Base::Transport, offset: 2, len: 2, dreg: Reg::R1 },
             Expr::Cmp { sreg: Reg::R1, data: nft::port(p) },
@@ -217,10 +260,15 @@ fn tproxied(family: Family, first: Vec<Expr>, to: IpAddr, port: u16) -> Vec<Expr
 /// `route` chain and the prerouting `filter` chain, t1's rules with the sets split into one rule per element, and a
 /// last rule in prerouting that drops what no rule took. Every table and chain as nft's `create` (`EXCL`): one there
 /// already is refused, never adopted. A family's own rules (its addresses, its tproxy) only where it's carried
-/// (`v4`, `v6`); with both, it's the batch nft sent for it, byte for byte (r6d's `create-batch-6d`).
+/// (`v4`, `v6`); with both, it's the batch nft sent for it, byte for byte (r6e2's `create-batch-6e2`).
 ///
 /// The mark (6d): output keeps the one a packet's socket carries — its run's, tarae's to give — and adds `MARK`;
-/// prerouting sets none, so the planted socket reads the run's (`tcp_fwmark_accept`; a datagram's is 6e's).
+/// prerouting sets none, so the planted socket reads the run's (`tcp_fwmark_accept`, a datagram's `SO_RCVMARK`).
+///
+/// DNS (6e): a question to any address's port 53 — UDP or TCP, the loopback resolvers' too (`127.0.0.53`) — is the
+/// session's to answer: taken before the loopback's return, to tarae's DNS socket or, over TCP, the planted TCP one
+/// (whose original port says it's DNS) — but a question to an address and port 53 that a socket of the session's own
+/// is bound to (not transparent: not tarae's) is delivered to it, a run's own DNS server reached as before 6e.
 pub fn ruleset(v4: bool, v6: bool) -> Batch {
     let (s4, s6) = (IpAddr::V4(SESSION_V4), IpAddr::V6(SESSION_V6));
     let (lo4, lo6) = (IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST));
@@ -232,10 +280,11 @@ pub fn ruleset(v4: bool, v6: bool) -> Batch {
     t.chain(TABLE, "out", Hook::Output, -150, ChainKind::Route);
     t.chain(TABLE, "pre", Hook::Prerouting, -150, ChainKind::Filter);
     // (each rule with the family it's for — None: both)
-    // What leaves: DNS marked and let go as it is (its own tproxy rule takes it back in); loopback and the
+    // What leaves: DNS (UDP and TCP) marked and let go as it is (its own tproxy rules take it back in); loopback and the
     // session's addresses left alone; the rest of TCP and UDP marked — routed through `lo` into prerouting
     let out = [
         (both, then(then(udp_dport(53), keep_mark()), [ret()])),
+        (both, then(then(dport(TCP, 53), keep_mark()), [ret()])),
         (f4, then(daddr(lo4, 1), [ret()])),
         (f4, then(daddr(s4, 4), [ret()])),
         (f6, then(daddr(lo6, 16), [ret()])),
@@ -244,13 +293,19 @@ pub fn ruleset(v4: bool, v6: bool) -> Batch {
         (both, then(l4proto(UDP), keep_mark())),
     ];
     // What comes in: a packet of a connection a transparent socket already holds stays with it; DNS to the
-    // planted UDP sockets; loopback and the session's own addresses left alone; the rest of TCP and UDP to the
+    // planted UDP sockets, over TCP to the planted TCP ones; loopback and the session's own addresses left alone; the rest of TCP and UDP to the
     // planted sockets; and what no rule took — neither TCP nor UDP — dropped. Each with the mark it came with
     let pre = [
         (both, then(then(l4proto(TCP), transparent(1)), [accept()])),
         (both, then(then(l4proto(UDP), transparent(1)), [accept()])),
+        // (a question to port 53 that a socket of the session's own — not transparent: not tarae's DNS one — is
+        // bound to is that server's: a run's own DNS server, reached as before 6e)
+        (both, then(then(udp_dport(53), transparent(0)), [accept()])),
+        (both, then(then(dport(TCP, 53), transparent(0)), [accept()])),
         (f4, tproxied(Family::V4, udp_dport(53), s4, UDP_PORT)),
         (f6, tproxied(Family::V6, udp_dport(53), s6, UDP_PORT)),
+        (f4, tproxied(Family::V4, dport(TCP, 53), s4, TCP_PORT)),
+        (f6, tproxied(Family::V6, dport(TCP, 53), s6, TCP_PORT)),
         (f4, then(daddr(lo4, 1), [ret()])),
         (f4, then(daddr(s4, 4), [ret()])),
         (f6, then(daddr(lo6, 16), [ret()])),
@@ -294,6 +349,7 @@ mod linux {
 
     use super::{Kind, Network};
     use crate::sandbox::marks::Marks;
+    use crate::sandbox::proxy::{self, answering, dns};
     use crate::sandbox::tier::{BirthError, BirthStep};
 
     /// How long tarae waits for the kernel's answers to each change while making the session's network.
@@ -320,6 +376,10 @@ mod linux {
         /// Which run a connection is, by the mark its socket carries (6d): given by the runs' supervisors, read by
         /// `Taken`.
         pub marks: Arc<Marks>,
+        /// The session's names (6e): its map, its runs' search list — what the egress proxy answers its questions
+        /// with and reads a connection's host from (`Taken`'s hooks hold them; the tests read them here).
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub names: Arc<answering::Session>,
         /// The raw ICMP socket the birth made in the session's netns (`Kind::Icmp4`), where it could: `Taken`
         /// answers refused datagrams on it, and the tests send on it (`what_isnt_tcp_or_udp_meets_the_final_drop`).
         #[cfg_attr(not(test), allow(dead_code))]
@@ -328,16 +388,16 @@ mod linux {
 
     /// A socket of `kind` for the session's network, made in this netns (the keeper's, before any run —
     /// `Msg::Plant`): a netlink one, or a planted one — a TCP listener or a bound UDP socket at `kind.at()`, an
-    /// IPv6 one IPv6 only. None of it needs a capability: what does (tarae's sends, `IP_TRANSPARENT`) is tarae's,
-    /// with its own over this netns.
+    /// IPv6 one IPv6 only — or a DNS one, a UDP socket left unbound. None of it needs a capability: what does (tarae's
+    /// sends, `IP_TRANSPARENT`, binding port 53) is tarae's, with its own over this netns.
     pub fn open(kind: Kind) -> io::Result<OwnedFd> {
         let (domain, ty, proto) = match kind {
             Kind::Route => (libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE),
             Kind::Netfilter => (libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_NETFILTER),
             Kind::Tcp4 => (libc::AF_INET, libc::SOCK_STREAM, 0),
             Kind::Tcp6 => (libc::AF_INET6, libc::SOCK_STREAM, 0),
-            Kind::Udp4 => (libc::AF_INET, libc::SOCK_DGRAM, 0),
-            Kind::Udp6 => (libc::AF_INET6, libc::SOCK_DGRAM, 0),
+            Kind::Udp4 | Kind::Dns4 => (libc::AF_INET, libc::SOCK_DGRAM, 0),
+            Kind::Udp6 | Kind::Dns6 => (libc::AF_INET6, libc::SOCK_DGRAM, 0),
             // (it takes `CAP_NET_RAW`, which the keeper dropped: only its birth makes it — `Birth::child`)
             Kind::Icmp4 => return Err(io::Error::from_raw_os_error(libc::EPERM)),
         };
@@ -501,7 +561,27 @@ mod linux {
         };
         for (kind, fd) in &planted {
             transparent(*kind, fd.as_fd())
+                .and_then(|()| match kind.dns_at() {
+                    Some(at) => bound(fd.as_fd(), at),
+                    None => Ok(()),
+                })
                 .map_err(|e| failed(BirthStep::Planted, errno(&e), &format!("its {kind:?} socket: {e}")))?;
+        }
+        #[cfg(test)]
+        let refused = network.no_rcvmark;
+        #[cfg(not(test))]
+        let refused = false;
+        let udp =
+            planted.iter().filter(|(k, _)| matches!(k, Kind::Udp4 | Kind::Udp6 | Kind::Dns4 | Kind::Dns6));
+        if let Some(e) = udp.filter_map(|(_, fd)| asks_marks(fd.as_fd(), refused).err()).next() {
+            crate::log::line(
+                "sandbox",
+                "info",
+                &format!(
+                    "the session's planted UDP sockets read no datagram's mark ({e}: before Linux 5.19) — every \
+                     datagram is the session's, none a run's (D5)"
+                ),
+            );
         }
         if let Some(icmp) = &icmp {
             sends_only(icmp.as_fd())
@@ -515,15 +595,204 @@ mod linux {
         nf.apply(&network.rules, Instant::now() + ANSWERED_WITHIN)
             .map_err(|e| failed(BirthStep::Rules, errno_of(&e), &e.to_string()))?;
         let marks = Arc::new(Marks::new());
-        let to_proxy: Handoff = {
-            let marks = marks.clone();
-            Arc::new(move |c, original| to_proxy(&marks, c, original))
+        // (6e: the session's names, answered by the egress proxy — each reply from the address asked, on the DNS
+        // socket of its family)
+        let v6 = planted.iter().any(|(k, _)| *k == Kind::Dns6);
+        let names = Arc::new(answering::Session::new(network.search.clone(), v6));
+        let reply_on = |want: Kind| {
+            let fd = planted.iter().find(|(k, _)| *k == want)?;
+            fd.1.try_clone().ok().map(Arc::new)
         };
-        let taken = Taken::start(planted, icmp.clone(), Arc::new(accept_one), Some(to_proxy), SAID_EVERY)
-            .map_err(|e| {
+        let replies = [reply_on(Kind::Dns4), reply_on(Kind::Dns6)];
+        let to_proxy: Handoff = {
+            let (marks, names) = (marks.clone(), names.clone());
+            Arc::new(move |c, original| to_proxy(&marks, &names, c, original))
+        };
+        let datagrams: Datagrams = {
+            let (marks, names) = (marks.clone(), names.clone());
+            Arc::new(move |d, payload| question(&marks, &names, &replies, d, payload))
+        };
+        let handled = (Some(to_proxy), Some(datagrams));
+        let taken =
+            Taken::start(planted, icmp.clone(), Arc::new(accept_one), handled, SAID_EVERY).map_err(|e| {
                 failed(BirthStep::Planted, errno(&e), &format!("its planted sockets' thread: {e}"))
             })?;
-        Ok(Made { route, nf, taken, marks, icmp })
+        Ok(Made { route, nf, taken, marks, names, icmp })
+    }
+
+    /// What a datagram arriving at a planted UDP socket or a DNS one gets — given the payload it carries; Err:
+    /// refused, with what the log says of it (answered ICMP port unreachable).
+    pub(super) type Datagrams = Arc<dyn Fn(&Datagram, &[u8]) -> Result<(), String> + Send + Sync>;
+
+    /// A datagram `d` (carrying `payload`) that arrived for a port 53 — a question (6e): to the egress proxy, which
+    /// answers it as its asker's (by its mark: E2, the run's rules — or, on a kernel that reads no mark, D5, the
+    /// session's), the answer sent from the address asked on the DNS socket of its family (`replies`: v4, v6). Any
+    /// other port, refused as before; a question with a mark tarae didn't give (or a run's with nothing of it served
+    /// any more), answered REFUSED at once and said.
+    fn question(
+        marks: &Marks,
+        names: &Arc<answering::Session>,
+        replies: &[Option<Arc<OwnedFd>>; 2],
+        d: &Datagram,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        let (Some(from), Some(orig)) = (d.from, d.orig) else { return Err(whose(marks, d.mark)) };
+        if orig.port() != crate::sandbox::route::RESOLVER_PORT {
+            return Err(whose(marks, d.mark));
+        }
+        let Some(sock) = replies[usize::from(orig.is_ipv6())].clone() else {
+            return Err(format!("{}: no DNS socket of its family", whose(marks, d.mark)));
+        };
+        let reply: proxy::Reply = Box::new(move |answer: Vec<u8>| {
+            let _ = reply_from(sock.as_fd(), orig, from, &answer);
+        });
+        let asker = match d.mark {
+            None => answering::Asker::Session,
+            Some(m) => match marks.owner(m).and_then(|o| Some((o.told.upgrade()?, o))) {
+                Some((told, o)) => answering::Asker::Run {
+                    run: o.run,
+                    session: o.session,
+                    process: o.process,
+                    rules: o.rules,
+                    told: (*told).clone(),
+                },
+                // (E2: no run's — answered REFUSED at once, so its lookup ends as fast as a refused one; said in the
+                // log, the first and then at each power of two: an unserved run asking in a loop can't fill it)
+                None => {
+                    match dns::question(payload) {
+                        Ok(q) => reply(dns::answer(&q, &dns::Answer::Rcode(dns::REFUSED), 0)),
+                        Err(dns::Refused::Answered { id, flags, .. }) => {
+                            reply(dns::refusal(id, flags, dns::REFUSED))
+                        }
+                        Err(dns::Refused::Dropped) => {}
+                    }
+                    static UNMARKED: AtomicU64 = AtomicU64::new(0);
+                    let n = UNMARKED.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n.is_power_of_two() {
+                        let line = format!(
+                            "the session's names: a question for {orig} from {from} — {}; answered REFUSED ({n} so far)",
+                            whose(marks, d.mark)
+                        );
+                        crate::log::line("sandbox", "info", &line);
+                    }
+                    return Ok(());
+                }
+            },
+        };
+        let q = proxy::NameQuestion { payload: payload.to_vec(), asker, names: names.clone(), reply };
+        proxy::get().send(proxy::ToProxy::Question(q));
+        Ok(())
+    }
+
+    /// `answer` sent on the DNS socket `sock` to `to`, from `src` — the address and port the question was sent to:
+    /// `IP_PKTINFO`'s address (a transparent socket may send from one that isn't its machine's), the socket's own
+    /// port (53). A connected client takes nothing from another address or port.
+    fn reply_from(
+        sock: BorrowedFd,
+        src: std::net::SocketAddr,
+        to: std::net::SocketAddr,
+        answer: &[u8],
+    ) -> io::Result<()> {
+        let (dest, dest_len) = address(to);
+        let mut control = [0u64; 8];
+        let mut iov = libc::iovec { iov_base: answer.as_ptr().cast_mut().cast(), iov_len: answer.len() };
+        // SAFETY: a zeroed msghdr pointed at buffers of ours, live for the call; the one control message written
+        // within the buffer, at the header's own data offset.
+        unsafe {
+            let mut m: libc::msghdr = std::mem::zeroed();
+            m.msg_name = (&raw const dest).cast_mut().cast();
+            m.msg_namelen = dest_len;
+            m.msg_iov = &raw mut iov;
+            m.msg_iovlen = 1;
+            m.msg_control = control.as_mut_ptr().cast();
+            let (level, kind, len) = match src.ip() {
+                std::net::IpAddr::V4(_) => (libc::SOL_IP, libc::IP_PKTINFO, size_of::<libc::in_pktinfo>()),
+                std::net::IpAddr::V6(_) => {
+                    (libc::SOL_IPV6, libc::IPV6_PKTINFO, size_of::<libc::in6_pktinfo>())
+                }
+            };
+            m.msg_controllen = libc::CMSG_SPACE(len as u32) as _;
+            let c = libc::CMSG_FIRSTHDR(&m);
+            (*c).cmsg_level = level;
+            (*c).cmsg_type = kind;
+            (*c).cmsg_len = libc::CMSG_LEN(len as u32) as _;
+            match src.ip() {
+                std::net::IpAddr::V4(v4) => {
+                    let info = libc::in_pktinfo {
+                        ipi_ifindex: 0,
+                        ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(v4.octets()) },
+                        ipi_addr: libc::in_addr { s_addr: 0 },
+                    };
+                    std::ptr::write_unaligned(libc::CMSG_DATA(c).cast(), info);
+                }
+                std::net::IpAddr::V6(v6) => {
+                    let info = libc::in6_pktinfo {
+                        ipi6_addr: libc::in6_addr { s6_addr: v6.octets() },
+                        ipi6_ifindex: 0,
+                    };
+                    std::ptr::write_unaligned(libc::CMSG_DATA(c).cast(), info);
+                }
+            }
+            if libc::sendmsg(sock.as_raw_fd(), &m, libc::MSG_DONTWAIT) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// A DNS socket bound at `at` (`Kind::dns_at`: the session's own address of its family, port 53) — by tarae, whose
+    /// capabilities over the session's netns let it bind a port below 1024; an IPv6 one IPv6 only.
+    fn bound(fd: BorrowedFd, at: std::net::SocketAddr) -> io::Result<()> {
+        let one: libc::c_int = 1;
+        // SAFETY: an int and an address of the kernel's layout, ours for each call, on our socket.
+        unsafe {
+            if at.is_ipv6()
+                && libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_V6ONLY,
+                    (&raw const one).cast(),
+                    4,
+                ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let (sa, len) = address(at);
+            if libc::bind(fd.as_raw_fd(), (&raw const sa).cast(), len) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Whose a datagram is, by the mark it was read with (`SO_RCVMARK`): a run's — its program's — or, with a mark
+    /// tarae didn't give (none, the output chain's alone), no one's; on a kernel that reads none (before 5.19, D5),
+    /// the session's.
+    fn whose(marks: &Marks, mark: Option<u32>) -> String {
+        match mark {
+            None => "the session's: this kernel reads no datagram's mark".into(),
+            Some(m) => match marks.owner(m) {
+                Some(o) => format!("run {}'s {}", o.run, o.process),
+                None => format!("its mark {m:#x} isn't one tarae gave"),
+            },
+        }
+    }
+
+    /// `asm-generic/socket.h`'s (5.19): each datagram read with its mark, as a control message (`SO_MARK`'s type).
+    const SO_RCVMARK: i32 = 75;
+
+    /// A planted UDP socket asked to read each datagram's mark (`SO_RCVMARK`) — whose run it is. A kernel before
+    /// 5.19 refuses it (`ENOPROTOOPT`); so does `refused`, the tests' stand-in for one (E5).
+    fn asks_marks(fd: BorrowedFd, refused: bool) -> io::Result<()> {
+        if refused {
+            return Err(io::Error::from_raw_os_error(libc::ENOPROTOOPT));
+        }
+        let one: libc::c_int = 1;
+        // SAFETY: an int, ours for the call, on a socket we hold.
+        let r = unsafe {
+            libc::setsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, SO_RCVMARK, (&raw const one).cast(), 4)
+        };
+        if r != 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
     /// Where a connection the planted socket accepted goes (6d): to the egress proxy, with its run's rules and
@@ -533,8 +802,13 @@ mod linux {
     pub(super) type Handoff =
         Arc<dyn Fn(OwnedFd, std::net::SocketAddr) -> Result<(), (OwnedFd, String)> + Send + Sync>;
 
-    /// `Handoff`'s, for the session's `marks`: connection `c`, going to `original`.
-    fn to_proxy(marks: &Marks, c: OwnedFd, original: std::net::SocketAddr) -> Result<(), (OwnedFd, String)> {
+    /// `Handoff`'s, for the session's `marks` and `names`: connection `c`, going to `original`.
+    fn to_proxy(
+        marks: &Marks,
+        names: &Arc<answering::Session>,
+        c: OwnedFd,
+        original: std::net::SocketAddr,
+    ) -> Result<(), (OwnedFd, String)> {
         let planted = [Kind::Tcp4, Kind::Tcp6].iter().any(|k| k.at() == Some(original));
         if planted {
             return Err((c, "a connection to the planted socket itself".into()));
@@ -559,6 +833,7 @@ mod linux {
             process: o.process,
             rules: o.rules,
             told: (*told).clone(),
+            names: names.clone(),
         });
         // (the proxy gone, the connection goes with the message: its run reads its end)
         crate::sandbox::proxy::get().send(p);
@@ -601,7 +876,7 @@ mod linux {
     /// reads it.)
     fn transparent(kind: Kind, fd: BorrowedFd) -> io::Result<()> {
         let (level, transparent, origdst) = match kind {
-            Kind::Tcp4 | Kind::Udp4 => (libc::SOL_IP, libc::IP_TRANSPARENT, IP_RECVORIGDSTADDR),
+            Kind::Tcp4 | Kind::Udp4 | Kind::Dns4 => (libc::SOL_IP, libc::IP_TRANSPARENT, IP_RECVORIGDSTADDR),
             _ => (libc::SOL_IPV6, IPV6_TRANSPARENT, IPV6_RECVORIGDSTADDR),
         };
         let set = |name: i32| {
@@ -611,7 +886,7 @@ mod linux {
             if r != 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
         };
         set(transparent)?;
-        if matches!(kind, Kind::Udp4 | Kind::Udp6) {
+        if matches!(kind, Kind::Udp4 | Kind::Udp6 | Kind::Dns4 | Kind::Dns6) {
             set(origdst)?;
         }
         Ok(())
@@ -692,10 +967,8 @@ mod linux {
                 let (what, how) = match (self.tcp, why) {
                     (true, Some(why)) => ("a connection", format!("{why}; reset")),
                     (true, None) => ("a connection", "reset".into()),
-                    // (6e answers them)
-                    (false, _) => {
-                        ("a datagram", "answered port unreachable: nothing takes datagrams before 6e".into())
-                    }
+                    (false, Some(why)) => ("a datagram", format!("{why}; answered port unreachable")),
+                    (false, None) => ("a datagram", "answered port unreachable".into()),
                 };
                 let to = to.map_or_else(|| "somewhere it didn't say".into(), |a| a.to_string());
                 crate::log::line(
@@ -742,13 +1015,14 @@ mod linux {
 
     impl Taken {
         /// The thread that serves what lands on `planted`: taking connections by `accept`, each handed on
-        /// (`handoff`, 6d — None: none, every one refused) or refused; answering refused datagrams on `icmp`;
-        /// saying the refusals at most `every` (`SAID_EVERY`) per socket after its first.
+        /// (`handoff`, 6d — None: none, every one refused) or refused; each datagram given to `datagrams` (6e — None:
+        /// every one refused), a refused one answered on `icmp`; saying the refusals at most `every` (`SAID_EVERY`)
+        /// per socket after its first.
         fn start(
             planted: Vec<(Kind, OwnedFd)>,
             icmp: Option<Arc<OwnedFd>>,
             accept: Accept,
-            handoff: Option<Handoff>,
+            (handoff, datagrams): (Option<Handoff>, Option<Datagrams>),
             every: Duration,
         ) -> io::Result<Taken> {
             let (stop_r, stop_w) = io::pipe()?;
@@ -763,7 +1037,7 @@ mod linux {
             let seeing = seen.clone();
             let stop = OwnedFd::from(stop_r);
             crate::event::thread("tarae-planted", move || {
-                refuse(planted, stop, seeing, icmp, accept, handoff, every)
+                refuse(planted, stop, seeing, icmp, accept, (handoff, datagrams), every)
             });
             Ok(Taken { _stop: stop_w.into(), seen })
         }
@@ -820,15 +1094,17 @@ mod linux {
         }
     }
 
-    /// A datagram as `received` read it: who sent it, where it was going (`ORIGDSTADDR`), how long it was.
-    struct Datagram {
-        from: Option<std::net::SocketAddr>,
-        orig: Option<std::net::SocketAddr>,
-        len: usize,
+    /// A datagram as `received` read it: who sent it, where it was going (`ORIGDSTADDR`), how long it was, and the
+    /// mark it came with (`SO_RCVMARK` — None where the socket reads none: before 5.19).
+    pub(super) struct Datagram {
+        pub from: Option<std::net::SocketAddr>,
+        pub orig: Option<std::net::SocketAddr>,
+        pub len: usize,
+        pub mark: Option<u32>,
     }
 
-    /// A datagram read from `fd` into `buf` and dropped, its sender and its original destination from its control
-    /// message (`IP_ORIGDSTADDR`, `IPV6_ORIGDSTADDR` — `RECVORIGDSTADDR` asked).
+    /// A datagram read from `fd` into `buf`, its sender, and from its control messages its original destination
+    /// (`IP_ORIGDSTADDR`, `IPV6_ORIGDSTADDR` — `RECVORIGDSTADDR` asked) and its mark (`SO_MARK`'s — `SO_RCVMARK`).
     fn received(fd: BorrowedFd, buf: &mut [u8]) -> io::Result<Datagram> {
         let mut control = [0u64; 16];
         let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
@@ -847,20 +1123,23 @@ mod linux {
             if n < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let mut got = Datagram { from: read_address(&name), orig: None, len: n as usize };
+            let mut got = Datagram { from: read_address(&name), orig: None, len: n as usize, mark: None };
             let mut c = libc::CMSG_FIRSTHDR(&m);
             while !c.is_null() {
-                let orig = matches!(
-                    ((*c).cmsg_level, (*c).cmsg_type),
-                    (libc::SOL_IP, IP_RECVORIGDSTADDR) | (libc::SOL_IPV6, IPV6_RECVORIGDSTADDR)
-                );
-                if orig {
-                    let mut ss: libc::sockaddr_storage = std::mem::zeroed();
-                    let data = libc::CMSG_DATA(c);
-                    let len = ((*c).cmsg_len as usize).saturating_sub(data as usize - c as usize);
-                    std::ptr::copy_nonoverlapping(data, (&raw mut ss).cast(), len.min(size_of_val(&ss)));
-                    got.orig = read_address(&ss);
-                    break;
+                let data = libc::CMSG_DATA(c);
+                let len = ((*c).cmsg_len as usize).saturating_sub(data as usize - c as usize);
+                match ((*c).cmsg_level, (*c).cmsg_type) {
+                    (libc::SOL_IP, IP_RECVORIGDSTADDR) | (libc::SOL_IPV6, IPV6_RECVORIGDSTADDR) => {
+                        let mut ss: libc::sockaddr_storage = std::mem::zeroed();
+                        std::ptr::copy_nonoverlapping(data, (&raw mut ss).cast(), len.min(size_of_val(&ss)));
+                        got.orig = read_address(&ss);
+                    }
+                    (libc::SOL_SOCKET, libc::SO_MARK) if len >= 4 => {
+                        let mut v = [0u8; 4];
+                        std::ptr::copy_nonoverlapping(data, v.as_mut_ptr(), 4);
+                        got.mark = Some(u32::from_ne_bytes(v));
+                    }
+                    _ => {}
                 }
                 c = libc::CMSG_NXTHDR(&m, c);
             }
@@ -944,7 +1223,7 @@ mod linux {
         seen: Arc<Seen>,
         icmp: Option<Arc<OwnedFd>>,
         accept: Accept,
-        handoff: Option<Handoff>,
+        (handoff, datagrams): (Option<Handoff>, Option<Datagrams>),
         every: Duration,
     ) {
         let mut buf = vec![0u8; 64 * 1024];
@@ -1032,7 +1311,14 @@ mod linux {
                             reset(c);
                         }
                     }
-                } else {
+                } else if let Some(d) = &datagram {
+                    // (6e: a datagram given to the session's answering — Err: refused, with why)
+                    if let Some(given) = &datagrams {
+                        match given(d, &buf[..d.len.min(buf.len())]) {
+                            Ok(()) => continue,
+                            Err(said) => why = Some(said),
+                        }
+                    }
                     record(orig);
                 }
                 if let (Some(icmp), Some(d)) = (&icmp, datagram)
@@ -1065,7 +1351,8 @@ mod linux {
                 Err(io::Error::from_raw_os_error(libc::EMFILE))
             });
             let taken =
-                Taken::start(vec![(Kind::Tcp4, OwnedFd::from(l))], None, accept, None, SAID_EVERY).unwrap();
+                Taken::start(vec![(Kind::Tcp4, OwnedFd::from(l))], None, accept, (None, None), SAID_EVERY)
+                    .unwrap();
             std::thread::sleep(Duration::from_millis(500));
             let n = tries.load(Ordering::Relaxed);
             assert!(
@@ -1094,7 +1381,7 @@ mod linux {
                 vec![(Kind::Udp4, OwnedFd::from(planted))],
                 None,
                 Arc::new(accept_one),
-                None,
+                (None, None),
                 every,
             )
             .unwrap();
@@ -1155,8 +1442,10 @@ mod tests {
     }
 
     /// The session's network is, message for message, what nft and ip sent the kernel for it: the ruleset the batch
-    /// nft sent for M1's `split.nft` as 6d changed it — output keeping a mark it finds, prerouting setting none —
-    /// written as `create`s and `add rule`s (`create-batch-6d`; the acks tarae asks aside), each family's routes the
+    /// nft sent for M1's `split.nft` as 6d changed it — output keeping a mark it finds, prerouting setting none — and
+    /// 6e (TCP to port 53 kept for the session; a question a session's own server is bound for delivered to it),
+    /// written as `create`s and `add rule`s (`create-batch-6e2`; the acks
+    /// tarae asks aside), each family's routes the
     /// three changes ip sent (`route-default`, `rule-fwmark…-bit` — bit 0 under its mask, 6d — and `route-local`; ip
     /// numbers its by the clock). Both families carried: that's what was captured.
     #[test]
@@ -1164,8 +1453,8 @@ mod tests {
         let n = Network::session(true, true);
         assert_bytes(
             &without_acks(n.rules.bytes()),
-            &fixture::last_sent("create-batch-6d"),
-            "create-batch-6d",
+            &fixture::last_sent("create-batch-6e2"),
+            "create-batch-6e2",
         );
         for (batch, f) in n.routes.iter().zip(["4", "6"]) {
             let theirs: Vec<u8> = ["route-default{f}", "rule-fwmark{f}-bit", "route-local{f}"]
@@ -1190,13 +1479,13 @@ mod tests {
 
     /// A family the session's `lo` doesn't carry gets no routes and none of its own rules — the rest are the captured
     /// ruleset's, byte for byte and in its order (no capture holds the one-family sets themselves: they're the
-    /// two-family batch less one family's 7 rules — 2 leaving, 5 coming in); without a family, no routes at all.
+    /// two-family batch less one family's 8 rules — 2 leaving, 6 coming in); without a family, no routes at all.
     #[test]
     fn a_family_not_carried_gets_no_rules_and_no_routes() {
         let both = messages(ruleset(true, true).bytes());
         for (v4, v6) in [(true, false), (false, true)] {
             let one = messages(ruleset(v4, v6).bytes());
-            assert_eq!(one.len() + 7, both.len(), "v4 {v4}, v6 {v6}");
+            assert_eq!(one.len() + 8, both.len(), "v4 {v4}, v6 {v6}");
             let mut rest = both.iter();
             assert!(
                 one.iter().all(|m| rest.any(|b| b == m)),
@@ -1219,13 +1508,23 @@ mod tests {
         for k in Kind::ALL {
             assert_eq!(Kind::from_code(k.code()), Some(k));
         }
-        assert_eq!(Kind::from_code(7), None);
+        assert_eq!(Kind::from_code(9), None);
         assert_eq!(Kind::Icmp4.at(), None, "the raw socket is at no address");
         assert_eq!(Kind::Tcp4.at(), Some("192.0.2.1:15001".parse().unwrap()));
         assert_eq!(Kind::Udp6.at(), Some("[2001:db8::1]:15053".parse().unwrap()));
         assert_eq!(Kind::Route.at(), None);
+        assert_eq!((Kind::Dns4.at(), Kind::Dns6.at()), (None, None), "made unbound: tarae binds them");
+        assert_eq!(
+            Kind::Dns4.dns_at(),
+            Some("192.0.2.1:53".parse().unwrap()),
+            "the session's own, not every address"
+        );
+        assert_eq!(Kind::Dns6.dns_at(), Some("[2001:db8::1]:53".parse().unwrap()));
         assert_eq!(Kind::wanted(false, false), [Kind::Route, Kind::Netfilter]);
-        assert_eq!(Kind::wanted(true, true).len(), 6);
-        assert_eq!(Kind::wanted(false, true), [Kind::Route, Kind::Netfilter, Kind::Tcp6, Kind::Udp6]);
+        assert_eq!(Kind::wanted(true, true).len(), 8, "and the raw one: 9, one message (`channel`'s test)");
+        assert_eq!(
+            Kind::wanted(false, true),
+            [Kind::Route, Kind::Netfilter, Kind::Tcp6, Kind::Udp6, Kind::Dns6]
+        );
     }
 }

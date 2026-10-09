@@ -54,6 +54,15 @@ sent create-batch-6d
 # r6d's policy rule: bit 0 under its mask (`fwmark 0x1/0x1`)
 sent rule-fwmark4-bit
 sent rule-fwmark6-bit
+# r6e: 6e's — TCP to port 53, the loopback resolvers too, kept for the session; the whole ruleset so
+sent keep-out-dns-tcp
+sent keep-pre-dns-tcp4
+sent keep-pre-dns-tcp6
+sent create-batch-6e
+# r6e2 (6e's review): a question to port 53 a session's own socket is bound to goes to it
+sent own-pre-dns-udp
+sent own-pre-dns-tcp
+sent create-batch-6e2
 # the kernel's answers
 recv err-exists
 recv err-eperm

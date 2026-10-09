@@ -29,18 +29,18 @@ fn hellos() -> Vec<&'static [u8]> {
     tunnels.map(|(_, raw, ..)| &raw[head(raw).unwrap().unwrap().len..]).collect()
 }
 
-/// A small fixed-seed generator: the loops are the same every run.
-struct Rng(u64);
+/// A small fixed-seed generator: the loops are the same every run (the DNS parser's loop too — `dns/tests.rs`).
+pub(in crate::sandbox::proxy) struct Rng(pub(in crate::sandbox::proxy) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(in crate::sandbox::proxy) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(in crate::sandbox::proxy) fn below(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
     }
 }
@@ -48,7 +48,7 @@ impl Rng {
 /// One to three of: a bit flipped, a byte set to one that means something to a parser, cut, extended, a
 /// 2- or 3-byte field set to a length that matters, a slice copied in, a slice taken out — and now and then a
 /// run of one byte put in, half to twice `cap` long, so inputs grow past the parser's limit wherever it is.
-fn mutate(rng: &mut Rng, b: &mut Vec<u8>, cap: usize) {
+pub(in crate::sandbox::proxy) fn mutate(rng: &mut Rng, b: &mut Vec<u8>, cap: usize) {
     const BYTES: &[u8] = b" :\r\n[]%@./?#=0x\t\x00\xff\x16\x03";
     const LENGTHS: [u32; 7] = [0, 1, 0x4000, 0x4001, 0xffff, 0xff_ffff, 0x10000];
     for _ in 0..1 + rng.below(3) {

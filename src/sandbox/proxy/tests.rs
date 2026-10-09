@@ -180,7 +180,13 @@ struct Fixture {
 
 fn start(resolve: Resolve, limits: Limits) -> Fixture {
     let (tx, asks) = mpsc::channel();
-    Fixture { proxy: Proxy::start(resolve, tx, limits), asks }
+    // (a name is, of its first address's family, where `resolve` finds it — else it isn't)
+    let finds = resolve.clone();
+    let lookup: answering::Lookup = Arc::new(move |name: &str| match finds(name, 0) {
+        Ok(a) if !a.is_empty() => answering::Exists::Yes { v4: a[0].is_ipv4(), v6: a[0].is_ipv6() },
+        _ => answering::Exists::No,
+    });
+    Fixture { proxy: Proxy::start(resolve, lookup, tx, limits), asks }
 }
 
 /// Rules naming these hosts, the test's loopback taken for beyond this machine, no own address.

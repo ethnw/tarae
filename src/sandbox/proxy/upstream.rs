@@ -370,18 +370,32 @@ fn no_proxy(v: &str) -> Vec<Direct> {
 }
 
 impl Upstreams {
-    /// How a request to `host:port` (a name as `parse::name` makes it) goes: a tunnel's or a plain one's.
-    pub fn way(&self, host: &str, port: u16, tunnel: bool) -> Way<'_> {
-        let direct = self.direct.iter().any(|d| match d {
+    /// Whether `NO_PROXY`'s entry `d` sends `host` direct at `port` (None: at every port).
+    fn direct_at(d: &Direct, host: &str, port: Option<u16>) -> bool {
+        match d {
             Direct::All => true,
             Direct::Name(n, at) => {
                 let named = host == n
                     || (host.len() > n.len()
                         && host.ends_with(n.as_str())
                         && host[..host.len() - n.len()].ends_with('.'));
-                named && at.is_none_or(|p| p == port)
+                named && (at.is_none() || (port.is_some() && *at == port))
             }
-        });
+        }
+    }
+
+    /// Whether a request for `host` may go through an upstream — at any port, a tunnel or a plain one (6e, E1:
+    /// tarae then looks the name up for nothing — the upstream resolves it). No only where no upstream is named, or
+    /// `NO_PROXY` sends the name direct at every port; an entry for some of its ports leaves the others through, so
+    /// it's yes — a real lookup is what E1 keeps from names that may go out another way.
+    pub fn may_go_through(&self, host: &str) -> bool {
+        (self.tunnel.is_some() || self.plain.is_some())
+            && !self.direct.iter().any(|d| Self::direct_at(d, host, None))
+    }
+
+    /// How a request to `host:port` (a name as `parse::name` makes it) goes: a tunnel's or a plain one's.
+    pub fn way(&self, host: &str, port: u16, tunnel: bool) -> Way<'_> {
+        let direct = self.direct.iter().any(|d| Self::direct_at(d, host, Some(port)));
         let choice = if tunnel { &self.tunnel } else { &self.plain };
         match choice {
             _ if direct => Way::Direct,

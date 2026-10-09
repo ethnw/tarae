@@ -13,15 +13,96 @@ fn beyond(port: u16) -> SocketAddr {
 /// What the planted socket hands the proxy for a run's connection, stood in: a TCP pair, one end in the message
 /// with these rules and where it was going — the run's end back, and the sender its refusals come on.
 fn planted(p: &Proxy, run: u64, rules: Egress, original: SocketAddr) -> (TcpStream, Receiver<Denial>) {
+    planted_in(p, run, rules, original, &Arc::new(answering::Session::new(Vec::new(), true)))
+}
+
+/// `planted`, its session's names `names` (6e).
+fn planted_in(
+    p: &Proxy,
+    run: u64,
+    rules: Egress,
+    original: SocketAddr,
+    names: &Arc<answering::Session>,
+) -> (TcpStream, Receiver<Denial>) {
     let l = TcpListener::bind((LO, 0)).unwrap();
     let run_end = TcpStream::connect(l.local_addr().unwrap()).unwrap();
     let (ours, _) = l.accept().unwrap();
     run_end.set_read_timeout(Some(WAIT)).unwrap();
     let (told, said) = mpsc::channel();
     let fd = ours.into();
-    let m = Planted { fd, original, run, session: 1, process: "cargo".into(), rules: Arc::new(rules), told };
+    let (rules, names) = (Arc::new(rules), names.clone());
+    let m = Planted { fd, original, run, session: 1, process: "cargo".into(), rules, told, names };
     assert!(p.send(ToProxy::Planted(m)));
     (run_end, said)
+}
+
+/// 6e: a connection to an address of the session's names is to the name it was given to — before any byte: a plain
+/// request naming that name reaches it; one naming another host is refused (403), said — never taken as another's
+/// (a run can't send its connection somewhere by naming one host in DNS and another in its request); an address of
+/// the pool no name was given is reset, said; and what names no host (a raw connection) is refused, said with the
+/// name its address was given to (E4: its card is 6e+'s).
+#[test]
+fn a_synthetic_address_is_its_names() {
+    let out = outside(web);
+    let (resolve, _) = resolver(vec![("web.test", vec![vec![out.at]]), ("other.test", vec![vec![out.at]])]);
+    let f = start(resolve, limits());
+    let names = Arc::new(answering::Session::new(Vec::new(), true));
+    let at = SocketAddr::new(IpAddr::V4(names.names.give("web.test").v4), 80);
+    let any = || Egress { any: true, ..rules(&[]) };
+    let (mut c, _) = planted_in(&f.proxy, 1, any(), at, &names);
+    c.write_all(b"GET / HTTP/1.1\r\nHost: web.test\r\n\r\n").unwrap();
+    assert_eq!(status(&mut c), 200, "its own name");
+    let (mut c, d) = planted_in(&f.proxy, 1, any(), at, &names);
+    c.write_all(b"GET / HTTP/1.1\r\nHost: other.test\r\n\r\n").unwrap();
+    assert_eq!(status(&mut c), 403, "another name");
+    let target = said(&d);
+    assert!(target.starts_with("other.test:80: it connected to the address given to web.test"), "{target}");
+    assert_eq!(out.accepted.load(Ordering::SeqCst), 1, "the other name never reached");
+    let unnamed = SocketAddr::new("198.19.0.7".parse().unwrap(), 80);
+    let (mut c, d) = planted_in(&f.proxy, 1, any(), unnamed, &names);
+    assert!(was_reset(&mut c), "an address no name was given");
+    assert!(said(&d).contains("no name was given"), "said");
+    let ssh = SocketAddr::new(at.ip(), 22);
+    let (mut c, d) = planted_in(&f.proxy, 1, any(), ssh, &names);
+    c.write_all(b"SSH-2.0-OpenSSH_9.9\r\n\r\n").unwrap();
+    assert!(was_reset(&mut c));
+    let target = said(&d);
+    assert!(
+        target.starts_with("web.test:22: neither TLS nor a request") && target.contains("raw TCP"),
+        "{target}"
+    );
+}
+
+/// 6e: DNS over TCP to a port 53 is answered by the session, every question on the connection in order (M7: glibc's
+/// `use-vc` sends A and AAAA on one, and fails if the second goes unanswered) — each answer its question's, from the
+/// session's names.
+#[test]
+fn dns_over_tcp_answers_every_question_on_a_connection() {
+    let (resolve, _) = resolver(Vec::new());
+    let f = start(resolve, limits());
+    let names = Arc::new(answering::Session::new(Vec::new(), true));
+    let (mut c, _) = planted_in(&f.proxy, 1, rules(&[]), beyond(53), &names);
+    let ask = |id: u16, qtype: u16| {
+        let mut m = id.to_be_bytes().to_vec();
+        m.extend([1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 4, b't', b'e', b's', b't', 0]);
+        m.extend(qtype.to_be_bytes());
+        m.extend([0, 1]);
+        dns::framed(&m)
+    };
+    c.write_all(&[ask(0x0a0a, dns::TYPE_A), ask(0x0b0b, dns::TYPE_AAAA)].concat()).unwrap();
+    let given = names.names.give("a.test");
+    for (id, rdata) in [(0x0a0a_u16, given.v4.octets().to_vec()), (0x0b0b, given.v6.octets().to_vec())] {
+        let mut len = [0u8; 2];
+        c.read_exact(&mut len).unwrap();
+        let mut a = vec![0u8; usize::from(u16::from_be_bytes(len))];
+        c.read_exact(&mut a).unwrap();
+        assert_eq!(
+            (u16::from_be_bytes([a[0], a[1]]), &a[6..8]),
+            (id, &[0, 1][..]),
+            "one answer, its question's"
+        );
+        assert!(a.ends_with(&rdata), "its address from the map");
+    }
 }
 
 /// Whether the run's end was reset: its read fails `ECONNRESET` — not an end of data a tool would take as an answer.

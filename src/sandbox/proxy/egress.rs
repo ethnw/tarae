@@ -114,6 +114,20 @@ impl Egress {
         self.answered.iter().any(|(h, p)| h == host && *p == port)
     }
 
+    /// Whether the setting or the user's answers it carries name `host` at any port — what a name asked of the
+    /// session (6e, no port yet) is looked up for real by (E1).
+    pub fn names(&self, host: &str) -> bool {
+        let named = |p: &Pattern| match p {
+            Pattern::Name(n, _) => n == host,
+            Pattern::Under(d, _) => {
+                host.len() > d.len()
+                    && host.ends_with(d.as_str())
+                    && host[..host.len() - d.len()].ends_with('.')
+            }
+        };
+        self.any || self.hosts.iter().any(named) || self.answered.iter().any(|(h, _)| h == host)
+    }
+
     /// Why `ip` is never reached through the proxy — None: it may be. As `route`: never (link-local, the cloud
     /// metadata servers, multicast, broadcast, those carried in NAT64 or 6to4), this machine (loopback, none),
     /// this machine's own addresses beyond loopback — all when those couldn't be read.

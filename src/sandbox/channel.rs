@@ -17,8 +17,9 @@ use super::tier::RunNet;
 
 /// The longest record.
 pub const MSG_MAX: usize = 1 << 20;
-/// The most descriptors a record carries.
-pub const FDS_MAX: usize = 8;
+/// The most descriptors a record carries (6e: the session's network in one `Planted` — two netlink, two planted and
+/// a DNS socket a family, the raw ICMP one: 9).
+pub const FDS_MAX: usize = 10;
 /// The most items a list holds.
 pub const LIST_MAX: usize = 4096;
 /// The longest name a run gives itself (`PR_SET_NAME`: the kernel's 15 bytes).
@@ -612,6 +613,7 @@ mod tests {
             Msg::Plant { v4: true, v6: true },
             Msg::Planted { kinds: vec![0, 1, 2, 4], errno: 0 },
             Msg::Planted { kinds: vec![0, 1, 2, 3, 4, 5, 6], errno: 0 },
+            Msg::Planted { kinds: vec![0, 1, 2, 4, 7, 3, 5, 8, 6], errno: 0 },
             Msg::Planted { kinds: vec![0], errno: libc::EMFILE },
         ]
     }
@@ -630,11 +632,14 @@ mod tests {
         };
         assert_eq!(decode(&record(&[0, 1, 5]), 3), Ok(Msg::Planted { kinds: vec![0, 1, 5], errno: 0 }));
         assert_eq!(decode(&record(&[0, 1, 5]), 2), Err(Refused("descriptors its kind doesn't take")));
-        assert_eq!(decode(&record(&[0, 7]), 2), Err(Refused("a socket kind that isn't one")));
+        assert_eq!(decode(&record(&[0, 9]), 2), Err(Refused("a socket kind that isn't one")));
         assert_eq!(decode(&record(&[0, 2, 2]), 3), Err(Refused("a socket kind twice")));
-        let nine = [0u8; 9];
-        assert!(decode(&record(&nine), 9).is_err(), "past FDS_MAX");
-        assert!(encode(&Msg::Planted { kinds: vec![7], errno: 0 }).is_err(), "tarae's side refuses it too");
+        let past = [0u8; FDS_MAX + 1];
+        assert!(decode(&record(&past), FDS_MAX + 1).is_err(), "past FDS_MAX");
+        assert!(encode(&Msg::Planted { kinds: vec![9], errno: 0 }).is_err(), "tarae's side refuses it too");
+        // (the whole session's network, both families and the raw socket: one message)
+        let whole = [0u8, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(decode(&record(&whole), 9), Ok(Msg::Planted { kinds: whole.to_vec(), errno: 0 }));
     }
 
     /// A small fixed-seed generator: the loop is the same every run.

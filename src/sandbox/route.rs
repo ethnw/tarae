@@ -73,9 +73,12 @@ pub struct Reach<'a> {
     pub proxy: Option<SocketAddr>,
     /// The session's own network takes what goes beyond (6d: its keeper has a TPROXY network — `redirect.rs` — and
     /// the call is a TCP socket's: the supervisor's to say): there, beyond this machine is `Redirected` rather than
-    /// refused as direct — every way out is the proxy's to decide. A resolver's port 53 is as it was until 6e answers
-    /// names in the session, and so are datagrams.
+    /// refused as direct — every way out is the proxy's to decide. Datagrams but DNS stay as they were (refused).
     pub redirect: bool,
+    /// The session answers names itself (6e: its keeper has a TPROXY network): a question to any address's port 53 —
+    /// UDP or TCP, a loopback resolver's too, a resolver `resolv.conf` names or not — is `Redirected`, with the
+    /// network open: the session's rules take it to a planted socket, where tarae answers it. Nothing of it leaves.
+    pub names: bool,
 }
 
 /// The port a resolver is reached on.
@@ -163,6 +166,24 @@ pub fn route(
     if reach.proxy.is_some_and(|p| plain(p.ip()) == ip && p.port() == to.port()) {
         return Route::Proxy;
     }
+    // (6e: a name asked is the session's to answer, wherever the question is addressed — but the session's own
+    // server and what the user opened come first: a server of a run's listening at that very loopback address and
+    // port 53 is the session's (`listens`, which at port 53 is the caller's word for that address alone: tarae's DNS
+    // socket is at every address); port 53 opened (`llm.sandbox-ports`, `-localhost`) is this machine's own server,
+    // on loopback or one of its own addresses, as before 6e)
+    if netns && reach.names && reach.network && to.port() == RESOLVER_PORT {
+        let opened = reach.localhost || reach.ports.contains(&to.port());
+        if this_machine(ip) && listens() {
+            return Route::Session;
+        }
+        if opened && this_machine(ip) {
+            return Route::Machine;
+        }
+        if opened && !never(ip) && mine(ip) == Some(true) {
+            return Route::OwnAddress;
+        }
+        return Route::Redirected;
+    }
     let resolver = reach.resolvers.iter().any(|r| plain(r.ip()) == ip && r.port() == to.port());
     // (through the proxy names are looked up by the proxy: no tool measured that goes through it looked one up
     // itself — step 5c's Q4 — and an open port 53 would be a way out no rule sees)
@@ -210,6 +231,24 @@ pub fn resolvers(conf: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
+/// The search list `resolv.conf`'s text gives, as glibc reads it: the last `search` or `domain` line's names (each
+/// line replaces the one before), lowercase, no trailing dot, at most 6 (its `MAXDNSRCH`); `.` alone is none.
+pub fn search(conf: &str) -> Vec<String> {
+    let mut list = Vec::new();
+    for l in conf.lines() {
+        let mut words = l.split_whitespace();
+        if matches!(words.next(), Some("search" | "domain")) {
+            list = words
+                .take_while(|w| !w.starts_with('#') && !w.starts_with(';'))
+                .map(|w| w.trim_end_matches('.').to_ascii_lowercase())
+                .filter(|w| !w.is_empty())
+                .take(6)
+                .collect();
+        }
+    }
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +271,7 @@ mod tests {
             resolvers: &resolvers,
             proxy: None,
             redirect: false,
+            names: false,
         };
         let port = Reach { ports: &[3000], ..closed };
         let localhost = Reach { localhost: true, ..closed };
@@ -343,6 +383,7 @@ mod tests {
             resolvers: &resolvers,
             proxy: None,
             redirect: false,
+            names: false,
         };
         let proxied = Reach { network: true, proxy: Some(PROXY), ..closed };
         use Refusal::*;
@@ -385,6 +426,7 @@ mod tests {
             resolvers: &resolvers,
             proxy: None,
             redirect: true,
+            names: false,
         };
         let proxied = Reach { network: true, proxy: Some(PROXY), ..closed };
         let open = Reach { network: true, ..closed };
@@ -414,6 +456,79 @@ mod tests {
         }
     }
 
+    /// Where the session answers names (6e), a question to any address's port 53 is the session's — `Redirected`, to
+    /// a planted socket where tarae answers it — whoever it's addressed to: a resolver `resolv.conf` names (the
+    /// loopback stub, GCP's link-local one, a LAN's), one it doesn't, loopback's `::1`; a datagram to another port
+    /// stays refused. With the network closed it's as before (the session's own loopback: its question reaches the
+    /// planted socket unmarked, and is refused there), and without a netns (C) there's nothing to answer it.
+    #[test]
+    fn where_the_session_answers_names_every_question_is_its_own() {
+        let resolvers: Vec<SocketAddr> =
+            ["127.0.0.53:53", "169.254.169.254:53", "10.0.0.2:53"].map(at).into();
+        let closed = Reach {
+            localhost: false,
+            ports: &[],
+            network: false,
+            resolvers: &resolvers,
+            proxy: None,
+            redirect: true,
+            names: true,
+        };
+        let open = Reach { network: true, proxy: Some(PROXY), ..closed };
+        let datagram = Reach { redirect: false, ..open };
+        // (port 53 opened by the user: this machine's own server comes first)
+        let port53 = Reach { ports: &[53], ..datagram };
+        let every_port = Reach { localhost: true, ..datagram };
+        let own = |ip: IpAddr| Some(ip == "192.168.1.5".parse::<IpAddr>().unwrap());
+        use Refusal::*;
+        use Route::*;
+        // (to, reach, in the session's netns, in C)
+        let rows: Vec<(&str, Reach, Route, Route)> = vec![
+            ("127.0.0.53:53", open, Redirected, Refused(Direct)),
+            ("169.254.169.254:53", open, Redirected, Refused(Direct)),
+            ("10.0.0.2:53", datagram, Redirected, Refused(Direct)),
+            ("8.8.8.8:53", datagram, Redirected, Refused(Direct)),
+            ("[::1]:53", datagram, Redirected, Refused(Closed)),
+            ("[2001:4860:4860::8888]:53", open, Redirected, Refused(Direct)),
+            ("93.184.216.34:443", datagram, Refused(Direct), Refused(Direct)),
+            ("93.184.216.34:443", open, Redirected, Refused(Direct)),
+            ("127.0.0.53:80", open, Session, Refused(Closed)),
+            ("127.0.0.53:53", closed, Session, Refused(Closed)),
+            ("10.0.0.2:53", closed, Refused(Closed), Refused(Closed)),
+            // (opened by the user: this machine's own server — loopback's, one of its own addresses' — not the
+            // session's answer; beyond this machine an opened port means nothing)
+            ("127.0.0.53:53", port53, Machine, Refused(Direct)),
+            ("127.0.0.1:53", port53, Machine, Machine),
+            ("[::1]:53", every_port, Machine, Machine),
+            ("192.168.1.5:53", port53, OwnAddress, OwnAddress),
+            ("192.168.1.5:53", datagram, Redirected, Refused(Closed)),
+            ("8.8.8.8:53", port53, Redirected, Refused(Direct)),
+        ];
+        for (to, reach, netns, c) in rows {
+            let got =
+                (route(at(to), true, &reach, || false, own), route(at(to), false, &reach, || false, own));
+            assert_eq!(got, (netns, c), "{to} under {reach:?}");
+        }
+        // (a run's own server listening at that very loopback address comes first — before an opened port too; for
+        // an address beyond this machine whether the session listens isn't asked)
+        let asked = std::cell::Cell::new(0);
+        let listens = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert_eq!(route(at("127.0.0.1:53"), true, &open, listens, own), Session, "its own server");
+        assert_eq!(route(at("127.0.0.1:53"), true, &port53, listens, own), Session, "before an opened port");
+        assert_eq!(route(at("[::1]:53"), true, &datagram, listens, own), Session);
+        assert_eq!(
+            route(at("127.0.0.1:53"), false, &open, listens, own),
+            Refused(Closed),
+            "no netns: as before"
+        );
+        let asked_before = asked.get();
+        assert_eq!(route(at("10.0.0.2:53"), true, &open, listens, own), Redirected);
+        assert_eq!(asked.get(), asked_before, "beyond this machine: not asked");
+    }
+
     /// This machine's own addresses beyond loopback (its LAN's, Docker's bridge's) are this machine: reached on
     /// an opened port (from no device: `OwnAddress`), the session listening or not; else refused — never out
     /// with the network open, never the session's. A link-local one is never reached. Whether an address is its own is asked only where it
@@ -428,6 +543,7 @@ mod tests {
             resolvers: &resolvers,
             proxy: None,
             redirect: false,
+            names: false,
         };
         let port = Reach { ports: &[8888], ..closed };
         let open = Reach { network: true, ..closed };
@@ -488,6 +604,7 @@ mod tests {
             resolvers: &resolvers,
             proxy: None,
             redirect: false,
+            names: false,
         };
         let port = Reach { ports: &[3000], ..closed };
         let open = Reach { network: true, ..closed };
@@ -528,5 +645,19 @@ mod tests {
         let got: Vec<String> = resolvers(conf).iter().map(|r| r.to_string()).collect();
         assert_eq!(got, ["127.0.0.53:53", "[fe80::1]:53", "8.8.8.8:53"]);
         assert!(resolvers("").is_empty());
+    }
+
+    /// The search list as glibc reads it: the last `search` or `domain` line wins whole, its names lowercase and
+    /// without their trailing dot, at most six, a comment ending the line; systemd-resolved's `search .` is none.
+    #[test]
+    fn the_search_list_is_read_as_glibc_reads_it() {
+        let gce = "nameserver 169.254.169.254\nsearch asia-northeast3-a.c.p.internal c.p.internal google.internal\n";
+        assert_eq!(search(gce), ["asia-northeast3-a.c.p.internal", "c.p.internal", "google.internal"]);
+        let replaced = "search old.example\ndomain Corp.Example.\noptions ndots:5\n";
+        assert_eq!(search(replaced), ["corp.example"]);
+        assert!(search("nameserver 127.0.0.53\nsearch .\n").is_empty(), "the stub's `.`");
+        assert_eq!(search("search a b c d e f g h # the rest\n").len(), 6);
+        assert_eq!(search("search a.example # comment\n"), ["a.example"]);
+        assert!(search("").is_empty());
     }
 }

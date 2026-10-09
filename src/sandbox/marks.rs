@@ -81,19 +81,24 @@ impl Marks {
     }
 
     /// `owner`'s mark — its run and program's, given at the first connect seen, the same after; past `PER_RUN`
-    /// programs of its run, the run's shared one (`others`). None: none left (past 2³¹ of them in one session).
+    /// programs of its run, the run's shared one (`others`). None: none left (past 2³¹ of them in one session). A
+    /// mark given again whose sender is gone (its run's supervisor ended, and a supervisor of the same run id asks)
+    /// takes the asker's owner whole — its rules, session and sender: what it connects or asks is judged by its own
+    /// rules and said in its own report, never by the ended one's.
     pub fn mark(&self, mut owner: Owner) -> Option<u32> {
         let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut key = (owner.run, Some(owner.process.clone()));
-        if let Some(m) = i.by_key.get(&key) {
-            return Some(*m);
-        }
-        if i.per_run.get(&owner.run).copied().unwrap_or(0) >= PER_RUN {
+        if i.per_run.get(&owner.run).copied().unwrap_or(0) >= PER_RUN && !i.by_key.contains_key(&key) {
             key = (owner.run, None);
-            if let Some(m) = i.by_key.get(&key) {
-                return Some(*m);
-            }
             owner.process = others(owner.run);
+        }
+        if let Some(&m) = i.by_key.get(&key) {
+            if let Some((kept, _)) = i.by_mark.get_mut(&m)
+                && kept.told.strong_count() == 0
+            {
+                *kept = owner;
+            }
+            return Some(m);
         }
         let m = i.next.checked_add(2).filter(|m| *m != 0)?;
         i.next = m;
@@ -213,6 +218,36 @@ mod tests {
         let i = marks.inner.lock().unwrap();
         assert_eq!((i.by_mark.len(), i.by_key.len(), i.order.len()), (KEPT, KEPT, KEPT));
         assert_eq!(i.per_run.len(), KEPT, "what's given up isn't counted for its run");
+    }
+
+    /// A mark given again keeps its owner while that one's sender is there, and takes the asker's whole where it's
+    /// gone — a supervisor of the same run id after the first ended: its own rules, session and sender, so what it
+    /// connects or asks is judged by its rules and said in its report, never by the ended one's.
+    #[test]
+    fn a_mark_given_again_takes_a_live_owner_whole() {
+        let marks = Marks::new();
+        let first = Arc::new(std::sync::mpsc::channel().0);
+        let old_rules = Arc::new(Egress::default());
+        let new_rules = Arc::new(Egress { any: true, ..Egress::default() });
+        let old = Owner { told: Arc::downgrade(&first), rules: old_rules.clone(), ..owner(1, "cargo") };
+        let m = marks.mark(old).unwrap();
+        let second = Arc::new(std::sync::mpsc::channel().0);
+        let new = || Owner {
+            told: Arc::downgrade(&second),
+            rules: new_rules.clone(),
+            session: 8,
+            ..owner(1, "cargo")
+        };
+        assert_eq!(marks.mark(new()), Some(m));
+        let kept = marks.owner(m).unwrap();
+        assert!(Arc::ptr_eq(&kept.told.upgrade().unwrap(), &first), "live: its sender kept");
+        assert!(Arc::ptr_eq(&kept.rules, &old_rules), "live: its rules kept");
+        drop(first);
+        assert_eq!(marks.mark(new()), Some(m), "the same mark");
+        let revived = marks.owner(m).unwrap();
+        assert!(Arc::ptr_eq(&revived.told.upgrade().unwrap(), &second), "the asker's sender");
+        assert!(Arc::ptr_eq(&revived.rules, &new_rules), "the asker's rules");
+        assert_eq!(revived.session, 8, "the asker's session");
     }
 
     /// One run can't take the session's marks from the others: past `PER_RUN` programs (a run renaming itself in a

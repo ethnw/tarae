@@ -189,8 +189,9 @@ impl Served {
             resolvers: &self.resolvers,
             // (the network open goes through tarae's egress proxy: step 5)
             proxy: self.network.then_some(super::route::PROXY),
-            // (6d takes TCP: a datagram beyond goes as before — refused, said — until 6e answers UDP in the session)
+            // (6d takes TCP: a datagram beyond goes as before — refused, said — but DNS, the session's own: 6e)
             redirect: self.marks.is_some() && self.netns() && kind == libc::SOCK_STREAM,
+            names: self.marks.is_some() && self.netns(),
         }
     }
 
@@ -640,13 +641,46 @@ fn routed(p: &Served, c: &Caller, to: SocketAddr, kind: i32) -> Route {
     if p.resolvers.iter().any(|r| r.ip().to_canonical() == to.ip().to_canonical() && r.port() == to.port()) {
         RESOLVER_CALLS.fetch_add(1, Relaxed);
     }
-    super::route::route(
-        to,
-        p.netns(),
-        &p.reach(kind),
-        || session_listens(c, to.port(), kind),
-        |ip| p.mine(ip),
-    )
+    // (at port 53, where the session answers names, only a server at that very address — or at every address — is the
+    // session's own: tarae's DNS socket is at the session's own address, which any port-53 check would find — 6e)
+    let listens = || match to.port() == super::route::RESOLVER_PORT {
+        true => session_listens_at(c, to, kind),
+        false => session_listens(c, to.port(), kind),
+    };
+    super::route::route(to, p.netns(), &p.reach(kind), listens, |ip| p.mine(ip))
+}
+
+/// Whether the session has a server at `to` itself (6e, port 53): a TCP listener (`kind` stream) or a bound UDP socket
+/// at that address or at every address — not merely one on its port somewhere: tarae's DNS socket is at the session's
+/// own address, port 53, and isn't a run's server at loopback.
+fn session_listens_at(c: &Caller, to: SocketAddr, kind: i32) -> bool {
+    let (tables, listen) = match kind {
+        libc::SOCK_STREAM => (["tcp", "tcp6"], Some("0A")),
+        _ => (["udp", "udp6"], None),
+    };
+    tables.iter().any(|t| {
+        let rows = std::fs::read_to_string(format!("/proc/{}/net/{t}", c.tid)).unwrap_or_default();
+        listening_at(&rows, to, listen)
+    })
+}
+
+/// Whether a `/proc/net/{tcp,udp}[6]` table holds a row at `to` (its address as the table writes it: each 32-bit word
+/// in this machine's order, `%08X`) or at every address, on `to`'s port (in `state`, when given).
+fn listening_at(rows: &str, to: SocketAddr, state: Option<&str>) -> bool {
+    let hex = |b: &[u8]| -> String {
+        b.chunks(4).map(|w| format!("{:08X}", u32::from_ne_bytes(w.try_into().unwrap_or_default()))).collect()
+    };
+    let (at, any) = match to.ip().to_canonical() {
+        std::net::IpAddr::V4(v4) => (hex(&v4.octets()), "00000000".to_string()),
+        std::net::IpAddr::V6(v6) => (hex(&v6.octets()), "0".repeat(32)),
+    };
+    let port = format!("{:04X}", to.port());
+    rows.lines().skip(1).any(|row| {
+        let mut cols = row.split_whitespace().skip(1);
+        let (Some(local), Some(_), Some(st)) = (cols.next(), cols.next(), cols.next()) else { return false };
+        let Some((addr, p)) = local.rsplit_once(':') else { return false };
+        p == port && (addr == at || addr == any) && state.is_none_or(|s| s == st)
+    })
 }
 
 /// Tests (Q4's measure): calls naming a resolver's port 53, every run's.
@@ -1774,6 +1808,30 @@ mod tests {
         assert!(listening_on(udp, 53, None) && !listening_on(udp, 54, None));
         assert!(!listening_on("  sl  local_address\n", 53, None), "the header alone");
         assert!(!listening_on("garbage\n 0: x y z\n", 53, None));
+    }
+
+    /// 6e: at port 53 the session's own server is one at that very address, or at every address — not tarae's DNS
+    /// socket, at the session's own address (`192.0.2.1`), which a port-only check would take for one at loopback.
+    /// The rows as a little-endian machine writes them (`127.0.0.1` is `0100007F`; `192.0.2.1` `010200C0`).
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn a_server_at_port_53_is_the_sessions_only_at_its_address() {
+        let at = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let tarae_only = "   sl  local_address rem_address   st\n   1: 010200C0:0035 00000000:0000 07\n";
+        assert!(
+            !listening_at(tarae_only, at("127.0.0.1:53"), None),
+            "tarae's DNS socket isn't a server at loopback"
+        );
+        assert!(listening_on(tarae_only, 53, None), "(a port-only check would take it for one)");
+        let udp = format!("{tarae_only}   2: 0100007F:0035 00000000:0000 07\n");
+        assert!(listening_at(&udp, at("127.0.0.1:53"), None), "a run's own at 127.0.0.1");
+        assert!(!listening_at(&udp, at("127.0.0.53:53"), None), "not at 127.0.0.53");
+        let tcp = "  sl  local_address rem_address   st\n   0: 00000000:0035 00000000:0000 0A\n";
+        assert!(listening_at(tcp, at("127.0.0.53:53"), Some("0A")), "at every address: a run's");
+        let tcp6 = "  sl  local_address                         remote_address                        st\n\
+                    \x20  0: 00000000000000000000000001000000:0035 00000000000000000000000000000000:0000 0A\n";
+        assert!(listening_at(tcp6, at("[::1]:53"), Some("0A")), "at ::1");
+        assert!(!listening_at(tcp6, at("[::1]:54"), Some("0A")));
     }
 
     /// Yama: tarae serves its runs at `ptrace_scope` 0 and 1 (and without Yama), at 2 only holding

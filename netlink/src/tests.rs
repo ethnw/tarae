@@ -41,7 +41,11 @@ fn l4proto(p: u8) -> Vec<Expr> {
 }
 
 fn udp_dport(p: u16) -> Vec<Expr> {
-    let mut e = l4proto(UDP);
+    dport(UDP, p)
+}
+
+fn dport(proto: u8, p: u16) -> Vec<Expr> {
+    let mut e = l4proto(proto);
     e.extend([
         Expr::Payload { base: Base::Transport, offset: 2, len: 2, dreg: Reg::R1 },
         Expr::Cmp { sreg: Reg::R1, data: nft::port(p) },
@@ -285,6 +289,28 @@ fn each_message_is_byte_for_byte_what_nft_sent() {
         (
             "keep-pre-udp6",
             one_rule("tarae", "pre", &tproxied_as_is(Family::V6, l4proto(UDP), SESSION_V6, 15053)),
+        ),
+        // (6e: TCP to port 53 — the loopback resolvers' too — kept for the session, to the planted TCP socket)
+        (
+            "keep-out-dns-tcp",
+            one_rule("tarae", "out", &then(then(dport(TCP, 53), keep_mark()), [rv.clone()])),
+        ),
+        (
+            "keep-pre-dns-tcp4",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V4, dport(TCP, 53), SESSION_V4, 15001)),
+        ),
+        (
+            "keep-pre-dns-tcp6",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V6, dport(TCP, 53), SESSION_V6, 15001)),
+        ),
+        // (6e's review: a question to port 53 a session's own socket — not transparent — is bound to goes to it)
+        (
+            "own-pre-dns-udp",
+            one_rule("tarae", "pre", &then(then(dport(UDP, 53), transparent(0)), [accept.clone()])),
+        ),
+        (
+            "own-pre-dns-tcp",
+            one_rule("tarae", "pre", &then(then(dport(TCP, 53), transparent(0)), [accept.clone()])),
         ),
     ];
     for (case, ours) in cases.into_iter().chain(kept) {
