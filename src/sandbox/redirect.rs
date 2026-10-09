@@ -8,18 +8,20 @@
 //! The ruleset is tarae's — the crate knows nf_tables, tarae knows the session (`ruleset`, `routes`), held against
 //! what nft and ip sent for the same.
 //!
-//! Until 6d nothing reads the planted sockets: served runs still go out by the swap and the pair (the rules return
-//! loopback and the session's addresses, and the swap takes a run's connect beyond before a packet leaves), so what
-//! lands there is a bug for them — refused (`Taken`) and said in the log.
+//! From 6d, a served run's connect beyond is made on its own socket, marked by its supervisor as its run's
+//! (`marks.rs`; `route::Route::Redirected`). The rules keep that mark — output adds the route rule's bit to it,
+//! prerouting sets none — and the planted socket reads it back (`tcp_fwmark_accept`): `Taken` hands a connection whose
+//! mark tarae gave to the egress proxy (`proxy::Planted`), which decides its host as a CONNECT's. Anything else that
+//! lands there is refused and said in the log: a connect to the planted address itself, a mark tarae didn't give.
 //!
-//! The interim, until 6d (TCP) and 6e (UDP, DNS): a run tarae doesn't serve — a tier without the supervisor (B+, B),
-//! or a test's own-sockets run — used to fail at once beyond loopback (no route: `ENETUNREACH`). Now what it sends
-//! there lands on a planted socket, so `Taken` makes the refusal as quick and as plain as a closed port's: a connection
-//! is accepted and reset (`ECONNRESET` on its first read or write), a datagram answered with ICMP port unreachable
-//! from the raw socket the birth made in the session's netns (`Kind::Icmp4`) — a connected UDP socket, glibc's
-//! resolver's among them, gets `ECONNREFUSED` at once rather than waiting out its timeout. Pinned by
-//! `an_unserved_runs_way_out_fails_fast` (keeper.rs) — whose lookup half 6e flips: names answered there by tarae.
-//! (IPv6 datagrams aren't answered yet: no ICMPv6 socket — these machines' sessions carry no IPv6 to test it on.)
+//! What's still refused there, until 6e (UDP, DNS): datagrams, and the connections of a run tarae doesn't serve — a
+//! tier without the supervisor (B+, B), or a test's own-sockets run — which used to fail at once beyond loopback (no
+//! route: `ENETUNREACH`). `Taken` makes the refusal as quick and as plain as a closed port's: a connection is accepted
+//! and reset (`ECONNRESET` on its first read or write), a datagram answered with ICMP port unreachable from the raw
+//! socket the birth made in the session's netns (`Kind::Icmp4`) — a connected UDP socket, glibc's resolver's among
+//! them, gets `ECONNREFUSED` at once rather than waiting out its timeout. Pinned by `an_unserved_runs_way_out_fails_fast`
+//! (keeper.rs) — whose lookup half 6e flips: names answered there by tarae. (IPv6 datagrams aren't answered yet: no
+//! ICMPv6 socket — these machines' sessions carry no IPv6 to test it on.)
 //!
 //! Any refusal while making it ends the session's start — never a retry (review, 2026-10-08): route changes are
 //! partial and none replaces what's there, so a retry in that netns would meet its own half; a half-made network is
@@ -47,7 +49,10 @@ pub const TABLE: &str = "tarae";
 /// Where the planted TCP sockets listen and the planted UDP sockets are bound, at the session's own addresses.
 pub const TCP_PORT: u16 = 15001;
 pub const UDP_PORT: u16 = 15053;
-/// The mark the output chain puts on what leaves (and prerouting on what it takes), and the table it looks up.
+/// The mark's bit the output chain adds to what leaves (`keep_mark`) — what sends it to table 100 — and that table.
+/// A socket's own mark (6d: tarae's, its run's — `marks.rs`) never carries it: a socket marked with it would meet the
+/// route rule at its first lookup, before the output chain, and IPv4 would take the destination itself as its source
+/// (M12, `target/sb/step6d-design.md`).
 const MARK: u32 = 1;
 const MARKED: u8 = 100;
 /// `lo`'s index in every network namespace (the kernel's `LOOPBACK_IFINDEX`): no `RTM_GETLINK` needed.
@@ -127,11 +132,12 @@ impl Network {
 }
 
 /// The routes TPROXY needs for `family`: everything leaving by `lo` (main), and a marked packet taken as this
-/// machine's own (`fwmark 1 lookup 100`, `local default dev lo table 100`).
+/// machine's own (`fwmark 0x1/0x1 lookup 100`, `local default dev lo table 100`). The rule looks at `MARK`'s bit
+/// alone (6d): the output chain adds it to a run's mark, whose other bits are its own (M12 measured this rule).
 pub fn routes(family: Family) -> Batch {
     let mut c = Changes::new();
     c.default_route(family, route::MAIN, RouteKind::Unicast, LO);
-    c.fwmark_rule(family, MARK, None, MARKED);
+    c.fwmark_rule(family, MARK, Some(MARK), MARKED);
     c.default_route(family, MARKED, RouteKind::Local, LO);
     c.end()
 }
@@ -179,9 +185,12 @@ fn daddr(a: IpAddr, bytes: u32) -> Vec<Expr> {
     )
 }
 
-fn set_mark() -> Vec<Expr> {
+/// The packet's mark kept, `MARK` added (`meta mark set meta mark or 0x1`): what a run's socket carries (6d) stays,
+/// and an unmarked one leaves with `MARK` alone.
+fn keep_mark() -> Vec<Expr> {
     vec![
-        Expr::Immediate { dreg: Reg::R1, data: nft::mark(MARK) },
+        Expr::Meta { key: MetaKey::Mark, dreg: Reg::R1 },
+        Expr::Bitwise { sreg: Reg::R1, dreg: Reg::R1, mask: nft::mark(!MARK), xor: nft::mark(MARK) },
         Expr::MetaSet { key: MetaKey::Mark, sreg: Reg::R1 },
     ]
 }
@@ -193,21 +202,25 @@ fn transparent(is: u8) -> Vec<Expr> {
     ]
 }
 
-/// Handed to the transparent socket at `to`:`port`, marked, accepted — for `family`'s packets matching `first`.
+/// Handed to the transparent socket at `to`:`port`, accepted, its mark as it came — for `family`'s packets matching
+/// `first`.
 fn tproxied(family: Family, first: Vec<Expr>, to: IpAddr, port: u16) -> Vec<Expr> {
     let tproxy = [
         Expr::Immediate { dreg: Reg::R1, data: nft::address(to) },
         Expr::Immediate { dreg: Reg::R2, data: nft::port(port) },
         Expr::Tproxy { family, addr: Reg::R1, port: Reg::R2 },
     ];
-    then(then(then(then(nfproto(family), first), tproxy), set_mark()), [Expr::Verdict(Verdict::Accept)])
+    then(then(then(nfproto(family), first), tproxy), [Expr::Verdict(Verdict::Accept)])
 }
 
 /// The session's whole ruleset, one transaction: the owned table (it goes with tarae's socket — P4), the output
 /// `route` chain and the prerouting `filter` chain, t1's rules with the sets split into one rule per element, and a
 /// last rule in prerouting that drops what no rule took. Every table and chain as nft's `create` (`EXCL`): one there
 /// already is refused, never adopted. A family's own rules (its addresses, its tproxy) only where it's carried
-/// (`v4`, `v6`); with both, it's the batch nft sent for M1's ruleset, byte for byte.
+/// (`v4`, `v6`); with both, it's the batch nft sent for it, byte for byte (r6d's `create-batch-6d`).
+///
+/// The mark (6d): output keeps the one a packet's socket carries — its run's, tarae's to give — and adds `MARK`;
+/// prerouting sets none, so the planted socket reads the run's (`tcp_fwmark_accept`; a datagram's is 6e's).
 pub fn ruleset(v4: bool, v6: bool) -> Batch {
     let (s4, s6) = (IpAddr::V4(SESSION_V4), IpAddr::V6(SESSION_V6));
     let (lo4, lo6) = (IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST));
@@ -222,20 +235,20 @@ pub fn ruleset(v4: bool, v6: bool) -> Batch {
     // What leaves: DNS marked and let go as it is (its own tproxy rule takes it back in); loopback and the
     // session's addresses left alone; the rest of TCP and UDP marked — routed through `lo` into prerouting
     let out = [
-        (both, then(then(udp_dport(53), set_mark()), [ret()])),
+        (both, then(then(udp_dport(53), keep_mark()), [ret()])),
         (f4, then(daddr(lo4, 1), [ret()])),
         (f4, then(daddr(s4, 4), [ret()])),
         (f6, then(daddr(lo6, 16), [ret()])),
         (f6, then(daddr(s6, 16), [ret()])),
-        (both, then(l4proto(TCP), set_mark())),
-        (both, then(l4proto(UDP), set_mark())),
+        (both, then(l4proto(TCP), keep_mark())),
+        (both, then(l4proto(UDP), keep_mark())),
     ];
     // What comes in: a packet of a connection a transparent socket already holds stays with it; DNS to the
     // planted UDP sockets; loopback and the session's own addresses left alone; the rest of TCP and UDP to the
-    // planted sockets; and what no rule took — neither TCP nor UDP — dropped
+    // planted sockets; and what no rule took — neither TCP nor UDP — dropped. Each with the mark it came with
     let pre = [
-        (both, then(then(then(l4proto(TCP), transparent(1)), set_mark()), [accept()])),
-        (both, then(then(then(l4proto(UDP), transparent(1)), set_mark()), [accept()])),
+        (both, then(then(l4proto(TCP), transparent(1)), [accept()])),
+        (both, then(then(l4proto(UDP), transparent(1)), [accept()])),
         (f4, tproxied(Family::V4, udp_dport(53), s4, UDP_PORT)),
         (f6, tproxied(Family::V6, udp_dport(53), s6, UDP_PORT)),
         (f4, then(daddr(lo4, 1), [ret()])),
@@ -280,6 +293,7 @@ mod linux {
     use tarae_netlink::{Error, Protocol, Socket};
 
     use super::{Kind, Network};
+    use crate::sandbox::marks::Marks;
     use crate::sandbox::tier::{BirthError, BirthStep};
 
     /// How long tarae waits for the kernel's answers to each change while making the session's network.
@@ -293,9 +307,9 @@ mod linux {
     const IP_RECVORIGDSTADDR: i32 = 20;
 
     /// The session's network, made: tarae's two netlink sockets into its netns — the owned table goes with `nf`
-    /// (P4), so both are kept for the session's life and let go with its keeper (`Keeper::gone`) — and what
-    /// refuses what lands on the planted sockets until 6d. Held for that; in 6c only the tests read them (6d's
-    /// accept and P1's checks will).
+    /// (P4), so both are kept for the session's life and let go with its keeper (`Keeper::gone`) — what serves what
+    /// lands on the planted sockets (`Taken`: a connection tarae marked to the egress proxy, the rest refused), and
+    /// the session's marks its runs' supervisors give (6d).
     pub struct Made {
         #[cfg_attr(not(test), allow(dead_code))]
         pub route: Socket,
@@ -303,6 +317,9 @@ mod linux {
         pub nf: Socket,
         #[cfg_attr(not(test), allow(dead_code))]
         pub taken: Taken,
+        /// Which run a connection is, by the mark its socket carries (6d): given by the runs' supervisors, read by
+        /// `Taken`.
+        pub marks: Arc<Marks>,
         /// The raw ICMP socket the birth made in the session's netns (`Kind::Icmp4`), where it could: `Taken`
         /// answers refused datagrams on it, and the tests send on it (`what_isnt_tcp_or_udp_meets_the_final_drop`).
         #[cfg_attr(not(test), allow(dead_code))]
@@ -497,10 +514,65 @@ mod linux {
         }
         nf.apply(&network.rules, Instant::now() + ANSWERED_WITHIN)
             .map_err(|e| failed(BirthStep::Rules, errno_of(&e), &e.to_string()))?;
-        let taken = Taken::start(planted, icmp.clone(), Arc::new(accept_one), SAID_EVERY).map_err(|e| {
-            failed(BirthStep::Planted, errno(&e), &format!("its planted sockets' thread: {e}"))
-        })?;
-        Ok(Made { route, nf, taken, icmp })
+        let marks = Arc::new(Marks::new());
+        let to_proxy: Handoff = {
+            let marks = marks.clone();
+            Arc::new(move |c, original| to_proxy(&marks, c, original))
+        };
+        let taken = Taken::start(planted, icmp.clone(), Arc::new(accept_one), Some(to_proxy), SAID_EVERY)
+            .map_err(|e| {
+                failed(BirthStep::Planted, errno(&e), &format!("its planted sockets' thread: {e}"))
+            })?;
+        Ok(Made { route, nf, taken, marks, icmp })
+    }
+
+    /// Where a connection the planted socket accepted goes (6d): to the egress proxy, with its run's rules and
+    /// sender, when it carries a mark tarae gave (`Marks::owner` — the supervisor's, at the run's connect) — else
+    /// back, with why it's refused: a connect to the planted address itself, or a mark tarae didn't give (a socket
+    /// that never went through the supervisor: it shouldn't exist).
+    pub(super) type Handoff =
+        Arc<dyn Fn(OwnedFd, std::net::SocketAddr) -> Result<(), (OwnedFd, String)> + Send + Sync>;
+
+    /// `Handoff`'s, for the session's `marks`: connection `c`, going to `original`.
+    fn to_proxy(marks: &Marks, c: OwnedFd, original: std::net::SocketAddr) -> Result<(), (OwnedFd, String)> {
+        let planted = [Kind::Tcp4, Kind::Tcp6].iter().any(|k| k.at() == Some(original));
+        if planted {
+            return Err((c, "a connection to the planted socket itself".into()));
+        }
+        let mark = mark_of(c.as_fd());
+        let Some(o) = marks.owner(mark) else {
+            let why =
+                format!("its mark {mark:#x} isn't one tarae gave — it didn't go through tarae's supervisor");
+            return Err((c, why));
+        };
+        // (a run's sender lives with its supervisor, as long as a process of the run — or one it left — is served:
+        // a connection arriving after that has no one to tell, nor anyone of the run to connect)
+        let Some(told) = o.told.upgrade() else {
+            let why = format!("run {}'s {}: the run is over and nothing of it is served", o.run, o.process);
+            return Err((c, why));
+        };
+        let p = crate::sandbox::proxy::ToProxy::Planted(crate::sandbox::proxy::Planted {
+            fd: c,
+            original,
+            run: o.run,
+            session: o.session,
+            process: o.process,
+            rules: o.rules,
+            told: (*told).clone(),
+        });
+        // (the proxy gone, the connection goes with the message: its run reads its end)
+        crate::sandbox::proxy::get().send(p);
+        Ok(())
+    }
+
+    /// A socket's mark (`SO_MARK`) — 0 where it can't be read.
+    fn mark_of(fd: BorrowedFd) -> u32 {
+        let (mut v, mut len) = (0u32, size_of::<u32>() as libc::socklen_t);
+        // SAFETY: an int and its length, ours for the call, on a socket we hold.
+        let r = unsafe {
+            libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, (&raw mut v).cast(), &mut len)
+        };
+        if r == 0 { v } else { 0 }
     }
 
     /// `linux/icmp.h`'s `ICMP_FILTER`, at `SOL_RAW`: a bit per ICMP type a raw socket isn't given.
@@ -524,8 +596,9 @@ mod linux {
     }
 
     /// A planted socket made transparent — tproxy delivers to it what was addressed elsewhere — and, a UDP one,
-    /// each datagram's original destination read with it (`RECVORIGDSTADDR`). `IP_TRANSPARENT` needs
-    /// `CAP_NET_ADMIN` over the socket's netns: tarae's.
+    /// each datagram's original destination read with it (`RECVORIGDSTADDR`). `IP_TRANSPARENT` needs `CAP_NET_ADMIN`
+    /// over the socket's netns: tarae's. (Whose run a datagram is — its mark, `SO_RCVMARK` — is 6e's, with what
+    /// reads it.)
     fn transparent(kind: Kind, fd: BorrowedFd) -> io::Result<()> {
         let (level, transparent, origdst) = match kind {
             Kind::Tcp4 | Kind::Udp4 => (libc::SOL_IP, libc::IP_TRANSPARENT, IP_RECVORIGDSTADDR),
@@ -609,15 +682,20 @@ mod linux {
             Telling { at, tcp, said: false, unsaid: 0, since: Instant::now(), last: None }
         }
 
-        /// One refused, going to `to`: said if it's the socket's first, else counted.
-        fn refused(&mut self, to: Option<std::net::SocketAddr>, every: Duration) {
+        /// One refused, going to `to` — `why`, where something said (a connection the egress proxy wasn't given:
+        /// `Handoff`): said if it's the socket's first, else counted.
+        fn refused(&mut self, to: Option<std::net::SocketAddr>, why: Option<&str>, every: Duration) {
             self.last = to;
             if !self.said {
                 self.said = true;
                 self.since = Instant::now();
-                let (what, how) = match self.tcp {
-                    true => ("a connection", "reset"),
-                    false => ("a datagram", "answered port unreachable"),
+                let (what, how) = match (self.tcp, why) {
+                    (true, Some(why)) => ("a connection", format!("{why}; reset")),
+                    (true, None) => ("a connection", "reset".into()),
+                    // (6e answers them)
+                    (false, _) => {
+                        ("a datagram", "answered port unreachable: nothing takes datagrams before 6e".into())
+                    }
                 };
                 let to = to.map_or_else(|| "somewhere it didn't say".into(), |a| a.to_string());
                 crate::log::line(
@@ -625,7 +703,7 @@ mod linux {
                     "warn",
                     &format!(
                         "the session's planted socket at {} refused {what} for {to} ({how}) — more are counted, said \
-                         every {:.1} s: nothing takes them before step 6d (TCP) and 6e (UDP)",
+                         every {:.1} s",
                         self.at,
                         every.as_secs_f32()
                     ),
@@ -663,12 +741,14 @@ mod linux {
     }
 
     impl Taken {
-        /// The thread that refuses what lands on `planted`: answering on `icmp`, taking connections by `accept`,
+        /// The thread that serves what lands on `planted`: taking connections by `accept`, each handed on
+        /// (`handoff`, 6d — None: none, every one refused) or refused; answering refused datagrams on `icmp`;
         /// saying the refusals at most `every` (`SAID_EVERY`) per socket after its first.
         fn start(
             planted: Vec<(Kind, OwnedFd)>,
             icmp: Option<Arc<OwnedFd>>,
             accept: Accept,
+            handoff: Option<Handoff>,
             every: Duration,
         ) -> io::Result<Taken> {
             let (stop_r, stop_w) = io::pipe()?;
@@ -682,7 +762,9 @@ mod linux {
             let seen = Arc::new(Seen::default());
             let seeing = seen.clone();
             let stop = OwnedFd::from(stop_r);
-            crate::event::thread("tarae-planted", move || refuse(planted, stop, seeing, icmp, accept, every));
+            crate::event::thread("tarae-planted", move || {
+                refuse(planted, stop, seeing, icmp, accept, handoff, every)
+            });
             Ok(Taken { _stop: stop_w.into(), seen })
         }
 
@@ -862,6 +944,7 @@ mod linux {
         seen: Arc<Seen>,
         icmp: Option<Arc<OwnedFd>>,
         accept: Accept,
+        handoff: Option<Handoff>,
         every: Duration,
     ) {
         let mut buf = vec![0u8; 64 * 1024];
@@ -903,13 +986,10 @@ mod linux {
                     seen.count.fetch_add(1, Ordering::Relaxed) + 1
                 };
                 let got = match tcp {
-                    true => accept(fd.as_fd()).map(|c| {
-                        let orig = own_address(c.as_fd());
-                        (record(orig), orig, Some(c), None)
-                    }),
-                    false => received(fd.as_fd(), &mut buf).map(|d| (record(d.orig), d.orig, None, Some(d))),
+                    true => accept(fd.as_fd()).map(|c| (own_address(c.as_fd()), Some(c), None)),
+                    false => received(fd.as_fd(), &mut buf).map(|d| (d.orig, None, Some(d))),
                 };
-                let (_, orig, connection, datagram) = match got {
+                let (orig, connection, datagram) = match got {
                     Ok(got) => {
                         stalled = false;
                         got
@@ -935,8 +1015,25 @@ mod linux {
                         continue;
                     }
                 };
+                // (6d: a connection whose mark tarae gave goes to the egress proxy; what comes back is refused)
+                let mut why = None;
                 if let Some(c) = connection {
-                    reset(c);
+                    match (&handoff, orig) {
+                        (Some(to_proxy), Some(at)) => match to_proxy(c, at) {
+                            Ok(()) => continue,
+                            Err((c, said)) => {
+                                why = Some(said);
+                                record(orig);
+                                reset(c);
+                            }
+                        },
+                        _ => {
+                            record(orig);
+                            reset(c);
+                        }
+                    }
+                } else {
+                    record(orig);
                 }
                 if let (Some(icmp), Some(d)) = (&icmp, datagram)
                     && let (Some(std::net::SocketAddr::V4(from)), Some(std::net::SocketAddr::V4(orig))) =
@@ -944,7 +1041,7 @@ mod linux {
                 {
                     let _ = unreachable(icmp.as_fd(), from, orig, d.len);
                 }
-                telling.refused(orig, every);
+                telling.refused(orig, why.as_deref(), every);
             }
         }
     }
@@ -967,7 +1064,8 @@ mod linux {
                 counted.fetch_add(1, Ordering::Relaxed);
                 Err(io::Error::from_raw_os_error(libc::EMFILE))
             });
-            let taken = Taken::start(vec![(Kind::Tcp4, OwnedFd::from(l))], None, accept, SAID_EVERY).unwrap();
+            let taken =
+                Taken::start(vec![(Kind::Tcp4, OwnedFd::from(l))], None, accept, None, SAID_EVERY).unwrap();
             std::thread::sleep(Duration::from_millis(500));
             let n = tries.load(Ordering::Relaxed);
             assert!(
@@ -992,9 +1090,14 @@ mod linux {
             let at = planted.local_addr().unwrap();
             let captured = crate::log::capture();
             let every = Duration::from_millis(200);
-            let taken =
-                Taken::start(vec![(Kind::Udp4, OwnedFd::from(planted))], None, Arc::new(accept_one), every)
-                    .unwrap();
+            let taken = Taken::start(
+                vec![(Kind::Udp4, OwnedFd::from(planted))],
+                None,
+                Arc::new(accept_one),
+                None,
+                every,
+            )
+            .unwrap();
             let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             for _ in 0..SENT {
                 sender.send_to(b"x", at).unwrap();
@@ -1052,17 +1155,22 @@ mod tests {
     }
 
     /// The session's network is, message for message, what nft and ip sent the kernel for it: the ruleset the batch
-    /// nft sent for M1's `split.nft` written as `create`s and `add rule`s (`create-batch`; the acks tarae asks
-    /// aside), each family's routes the three changes ip sent (`route-default`, `rule-fwmark`, `route-local`; ip
+    /// nft sent for M1's `split.nft` as 6d changed it — output keeping a mark it finds, prerouting setting none —
+    /// written as `create`s and `add rule`s (`create-batch-6d`; the acks tarae asks aside), each family's routes the
+    /// three changes ip sent (`route-default`, `rule-fwmark…-bit` — bit 0 under its mask, 6d — and `route-local`; ip
     /// numbers its by the clock). Both families carried: that's what was captured.
     #[test]
     fn the_sessions_network_is_what_nft_and_ip_sent() {
         let n = Network::session(true, true);
-        assert_bytes(&without_acks(n.rules.bytes()), &fixture::last_sent("create-batch"), "create-batch");
+        assert_bytes(
+            &without_acks(n.rules.bytes()),
+            &fixture::last_sent("create-batch-6d"),
+            "create-batch-6d",
+        );
         for (batch, f) in n.routes.iter().zip(["4", "6"]) {
-            let theirs: Vec<u8> = ["route-default", "rule-fwmark", "route-local"]
+            let theirs: Vec<u8> = ["route-default{f}", "rule-fwmark{f}-bit", "route-local{f}"]
                 .iter()
-                .flat_map(|c| without_seqs(&fixture::last_sent(&format!("{c}{f}"))))
+                .flat_map(|c| without_seqs(&fixture::last_sent(&c.replace("{f}", f))))
                 .collect();
             assert_bytes(&without_seqs(batch.bytes()), &theirs, &format!("routes v{f}"));
         }

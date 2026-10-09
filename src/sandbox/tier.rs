@@ -152,10 +152,14 @@ pub enum BirthStep {
     Planted,
     Routes,
     Rules,
+    /// 6d: the session's netns keeps a connection's mark on what accepts it (`tcp_fwmark_accept`) — written by the
+    /// birth's child before its capability drop (on the birth pipe, the one network step there): without it the
+    /// planted socket can't tell whose a connection is. A read-only `/proc/sys` (a container's) refuses it.
+    Fwmark,
 }
 
 impl BirthStep {
-    const ALL: [BirthStep; 15] = [
+    const ALL: [BirthStep; 16] = [
         BirthStep::Clone,
         BirthStep::Map,
         BirthStep::Go,
@@ -171,6 +175,7 @@ impl BirthStep {
         BirthStep::Planted,
         BirthStep::Routes,
         BirthStep::Rules,
+        BirthStep::Fwmark,
     ];
 
     pub fn code(self) -> u8 {
@@ -198,12 +203,16 @@ impl BirthStep {
             BirthStep::Planted => "making its planted sockets",
             BirthStep::Routes => "sending its routes",
             BirthStep::Rules => "sending its rules",
+            BirthStep::Fwmark => "keeping a connection's mark where it's accepted (tcp_fwmark_accept)",
         }
     }
 
-    /// A step of the session's network (tarae's, after `Ready`) — not of its namespaces.
+    /// A step of the session's network — tarae's after `Ready`, and `Fwmark` the child's — not of its namespaces.
     pub fn network(self) -> bool {
-        matches!(self, BirthStep::Netns | BirthStep::Planted | BirthStep::Routes | BirthStep::Rules)
+        matches!(
+            self,
+            BirthStep::Netns | BirthStep::Planted | BirthStep::Routes | BirthStep::Rules | BirthStep::Fwmark
+        )
     }
 
     /// A mount of the birth's.

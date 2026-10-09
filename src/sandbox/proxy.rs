@@ -61,6 +61,20 @@ pub struct Connection {
     pub told: Sender<Denial>,
 }
 
+/// A run's connection the session's network took (6d, Linux: TPROXY, `redirect::Taken`): the connection the planted
+/// socket accepted, where it was going (`original`: its own address, as tproxy keeps it), and its run's — by the mark
+/// its supervisor gave its socket (`marks.rs`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct Planted {
+    pub fd: OwnedFd,
+    pub original: std::net::SocketAddr,
+    pub run: u64,
+    pub session: u64,
+    pub process: String,
+    pub rules: Arc<Egress>,
+    pub told: Sender<Denial>,
+}
+
 /// How far an answer of the user's reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -79,6 +93,9 @@ pub enum Scope {
 pub enum ToProxy {
     /// Linux: a run's connection, from the supervisor.
     Connection(Connection),
+    /// Linux (6d): a run's connection the session's network took to a planted socket — no request of a proxy's in
+    /// it: its host is what its first bytes name.
+    Planted(Planted),
     /// macOS: a run's own listener (`127.0.0.1:0`, its port the only one its profile opens) and the token its
     /// proxy URL carries as the password.
     RunStarts {
@@ -326,6 +343,9 @@ struct Conn {
     told: Sender<Denial>,
     /// macOS: the password its requests must carry.
     token: Option<String>,
+    /// Linux (6d): where a connection the session's network took was going — None: a proxy's own connection (it
+    /// names its host in its request).
+    original: Option<std::net::SocketAddr>,
 }
 
 impl State {
@@ -341,6 +361,20 @@ impl State {
                         rules: c.rules,
                         told: c.told,
                         token: None,
+                        original: None,
+                    };
+                    self.admit(conn);
+                }
+                In::Msg(ToProxy::Planted(p)) => {
+                    let conn = Conn {
+                        stream: TcpStream::from(p.fd),
+                        run: p.run,
+                        session: p.session,
+                        process: p.process,
+                        rules: p.rules,
+                        told: p.told,
+                        token: None,
+                        original: Some(p.original),
                     };
                     self.admit(conn);
                 }
@@ -408,6 +442,7 @@ impl State {
                         rules: r.rules.clone(),
                         told: r.told.clone(),
                         token: Some(r.token.clone()),
+                        original: None,
                     };
                     self.admit(conn);
                 }
@@ -424,9 +459,15 @@ impl State {
                 true => format!("past {} connections at once for the session", limits.per_session),
                 false => format!("past {} connections at once in all", limits.total),
             };
-            // (a fresh connection's send buffer is empty: this doesn't wait)
-            let _ = c.stream.set_nonblocking(true);
-            answer(&c.stream, 503, &why, "");
+            // (a fresh connection's send buffer is empty: this doesn't wait; one the session's network took isn't a
+            // proxy's client — it's reset)
+            match c.original {
+                Some(at) => return reset(&c, OP, &format!("{at}: {why}")),
+                None => {
+                    let _ = c.stream.set_nonblocking(true);
+                    answer(&c.stream, 503, &why, "");
+                }
+            }
             tell(&c, &why);
             return;
         }
@@ -699,8 +740,203 @@ fn read_until<T>(
     }
 }
 
+/// What a connection's host comes to.
+enum Decided {
+    Go,
+    /// Refused — why, a refusal the user's answer would lift (`HOST_OP`).
+    No(String),
+    /// The dispatcher's gone: nothing to say.
+    Gone,
+}
+
+/// Whether connection `c` may reach `name:port` (`default`: its scheme's port, which a rule without one names): its
+/// rules, else the answers so far and the user's (`In::Decide`), waited for up to `Limits::hold`.
+fn decided(c: &Conn, shared: &Shared, name: &str, port: u16, default: u16) -> Decided {
+    if c.rules.allows(name, port, default) {
+        return Decided::Go;
+    }
+    static WAITERS: AtomicU64 = AtomicU64::new(0);
+    let id = WAITERS.fetch_add(1, Ordering::Relaxed);
+    let (reply, verdict) = mpsc::channel();
+    let (session, host, process) = (c.session, name.to_string(), c.process.clone());
+    let answered = c.rules.answered(name, port);
+    let alive = c.stream.try_clone().ok();
+    let ask =
+        In::Decide { session, run: c.run, host: host.clone(), port, process, answered, id, reply, alive };
+    if shared.tx.send(ask).is_err() {
+        return Decided::Gone;
+    }
+    match verdict.recv_timeout(shared.limits.hold) {
+        Ok(Verdict::Go) => Decided::Go,
+        Ok(Verdict::No(why)) => Decided::No(why),
+        Err(_) => {
+            // (no longer waiting: the next connection to it asks again)
+            let _ = shared.tx.send(In::GaveUp { session, host, port, id });
+            Decided::No(format!(
+                "not among the hosts it may reach (llm.sandbox-hosts); the user was asked and didn't answer within \
+                 {} s",
+                shared.limits.hold.as_secs_f32()
+            ))
+        }
+    }
+}
+
+/// A connection the session's network took, refused (6d): reset as it's closed (`SO_LINGER` 0) — no proxy's answer
+/// would mean anything to a client that thinks it reached its server — and said, the reset with it: the tool reports
+/// "connection reset", not tarae's words.
+fn reset(c: &Conn, op: &str, target: &str) {
+    let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+    // SAFETY: a linger struct of ours for the call, on a socket we hold (closed when the connection's dropped).
+    unsafe {
+        libc::setsockopt(
+            c.stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&raw const linger).cast(),
+            size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    tell_op(c, op, &format!("{target} — tarae refused it: the tool sees its connection reset"));
+}
+
+/// A run's connection the session's network took (6d, `ToProxy::Planted`), start to end. Its first bytes name its
+/// host — a TLS ClientHello's server name, else a plain request's `Host` (origin form, `parse::origin`) — and its port
+/// is where it was going (`original`). From there as a CONNECT's: never a metadata server's own name, the host's
+/// rules and the user's answer, the connection made by name (`egress::reach`, through the upstream where there is
+/// one), the relay. Refused: a TLS one reset (`reset`), a plain request answered 403 as the proxy answers one — each
+/// said with its host and why. What's neither TLS nor a request tarae reads (ssh's banner, a server that speaks first)
+/// can't name a host: refused, said.
+fn serve_planted(c: Conn, shared: &Shared, original: std::net::SocketAddr) {
+    let limits = shared.limits;
+    let s = &c.stream;
+    let port = original.port();
+    let mut buf = Vec::new();
+    let some = |b: &[u8]| (!b.is_empty()).then_some(());
+    match read_until(s, &mut buf, Instant::now() + limits.head_time, some) {
+        Ok(()) => {}
+        Err(true) => {
+            let why = format!(
+                "{original}: nothing sent within {} s — tarae decides by the host a connection names (TLS or HTTP)",
+                limits.head_time.as_secs_f32()
+            );
+            return reset(&c, OP, &why);
+        }
+        Err(false) => return,
+    }
+    // (a TLS record's first byte: a handshake)
+    let tls = buf[0] == 22;
+    let (name, first, plain) = if tls {
+        let by = Instant::now() + limits.hello_time;
+        match read_until(s, &mut buf, by, |b| match parse::server_name(b) {
+            Ok(None) => None,
+            r => Some(r),
+        }) {
+            Ok(Ok(Some(n))) => (n, std::mem::take(&mut buf), None),
+            Ok(Ok(None)) | Err(false) => return,
+            Ok(Err(e)) => return reset(&c, OP, &format!("{original}: {}", e.said())),
+            Err(true) => {
+                let why =
+                    format!("{original}: no whole ClientHello within {} s", limits.hello_time.as_secs_f32());
+                return reset(&c, OP, &why);
+            }
+        }
+    } else {
+        match read_until(s, &mut buf, Instant::now() + limits.head_time, |b| match parse::origin(b, port) {
+            Ok(None) => None,
+            r => Some(r),
+        }) {
+            Ok(Ok(Some(h))) => match h.request {
+                Request::Plain { method, host: Host::Name(n), head, body, .. } => {
+                    let rest = buf.split_off(h.len);
+                    (n, rest, Some((method, head, body)))
+                }
+                Request::Plain { host: Host::Addr(a), .. } => {
+                    let why = format!("{a}:{port}: an address, not a name — rules name hosts");
+                    answer(s, 403, &why, "");
+                    return tell(&c, &why);
+                }
+                Request::Connect { .. } => return,
+            },
+            Ok(Ok(None)) | Err(false) => return,
+            Ok(Err(r)) => {
+                let why = format!("{original}: neither TLS nor a request tarae reads ({})", r.said());
+                return reset(&c, OP, &why);
+            }
+            Err(true) => {
+                let why =
+                    format!("{original}: no whole request head within {} s", limits.head_time.as_secs_f32());
+                return reset(&c, OP, &why);
+            }
+        }
+    };
+    // (a TLS client gets a reset; a plain one the answer a proxy gives it)
+    let refuse = |status: u16, op: &str, why: String| {
+        let why = format!("{name}:{port}: {why}");
+        match tls {
+            true => reset(&c, op, &why),
+            false => {
+                answer(s, status, &why, "");
+                tell_op(&c, op, &why);
+            }
+        }
+    };
+    if route::never_named(&name) {
+        let why = "a cloud metadata server's own name — never reached".to_string();
+        return refuse(403, OP, why);
+    }
+    match decided(&c, shared, &name, port, if tls { 443 } else { 80 }) {
+        Decided::Go => {}
+        Decided::No(why) => return refuse(403, HOST_OP, why),
+        Decided::Gone => return,
+    }
+    let Reached { stream: up, through } =
+        match egress::reach(&c.rules, &shared.resolve, &name, port, tls, limits.connect) {
+            Ok(r) => r,
+            Err(NotReached::Refused(r)) => return refuse(r.status, OP, r.why),
+            Err(NotReached::Upstream(var, f)) => return refuse(502, UPSTREAM_OP, f.said(var)),
+        };
+    // (a plain request's head as the proxy sends one on — to an http upstream in absolute form, its credentials)
+    let body = match plain {
+        Some((method, head, body)) => {
+            let head = match &through {
+                Some(u) if u.proto == Proto::Http => {
+                    u.plain_head(&parse::absolute(method, &Host::Name(name.clone()), port, &head))
+                }
+                _ => head,
+            };
+            if relay_send(&up, &head).is_err() {
+                return;
+            }
+            Some(parse::Body::new(body))
+        }
+        None => None,
+    };
+    let _ = c.stream.set_read_timeout(None);
+    let Ok(client) = c.stream.try_clone() else { return };
+    let plain_through = through.as_ref().is_some_and(|u| u.proto == Proto::Http) && !tls;
+    let sni = tls.then_some(name.as_str());
+    match relay::relay(client, up, sni, limits.hello_time, &first, body, plain_through) {
+        relay::End::Done => {}
+        relay::End::Upstream407(a) => {
+            let Some(u) = &through else { return };
+            let f = egress::upstream_said(u, &name, port, Failed::of_407(&a, u.has_credentials()));
+            tell_op(&c, UPSTREAM_OP, &format!("{name}:{port}: {}", f.said(u.var)));
+        }
+        relay::End::Dropped(n) => tell(
+            &c,
+            &format!(
+                "{name}:{port}: {n} bytes sent after its request were dropped — one request per connection"
+            ),
+        ),
+        relay::End::Closed(why) => tell(&c, &format!("{name}:{port}: {why} — the connection closed")),
+    }
+}
+
 /// One connection, start to end.
 fn serve(c: Conn, shared: &Shared) {
+    if let Some(original) = c.original {
+        return serve_planted(c, shared, original);
+    }
     let limits = shared.limits;
     let s = &c.stream;
     let mut buf = Vec::new();
@@ -785,31 +1021,10 @@ fn serve(c: Conn, shared: &Shared) {
         answer(s, 403, &why, "");
         tell_op(&c, HOST_OP, &why);
     };
-    if !c.rules.allows(&name, port, default) {
-        static WAITERS: AtomicU64 = AtomicU64::new(0);
-        let id = WAITERS.fetch_add(1, Ordering::Relaxed);
-        let (reply, verdict) = mpsc::channel();
-        let (session, host, process) = (c.session, name.clone(), c.process.clone());
-        let answered = c.rules.answered(&name, port);
-        let alive = c.stream.try_clone().ok();
-        let ask =
-            In::Decide { session, run: c.run, host: host.clone(), port, process, answered, id, reply, alive };
-        if shared.tx.send(ask).is_err() {
-            return;
-        }
-        match verdict.recv_timeout(limits.hold) {
-            Ok(Verdict::Go) => {}
-            Ok(Verdict::No(why)) => return refuse_host(why),
-            Err(_) => {
-                // (no longer waiting: the next connection to it asks again)
-                let _ = shared.tx.send(In::GaveUp { session, host, port, id });
-                return refuse_host(format!(
-                    "not among the hosts it may reach (llm.sandbox-hosts); the user was asked and didn't answer \
-                     within {} s",
-                    limits.hold.as_secs_f32()
-                ));
-            }
-        }
+    match decided(&c, shared, &name, port, default) {
+        Decided::Go => {}
+        Decided::No(why) => return refuse_host(why),
+        Decided::Gone => return,
     }
     let tunnel = matches!(h.request, Request::Connect { .. });
     let Reached { stream: up, through } =

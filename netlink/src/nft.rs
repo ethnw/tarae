@@ -115,6 +115,9 @@ pub enum Expr {
     Cmp { sreg: Reg, data: Vec<u8> },
     /// Puts `data` in `dreg`.
     Immediate { dreg: Reg, data: Vec<u8> },
+    /// `dreg = (sreg & mask) ^ xor`, over `mask`'s length (nft's boolean `bitwise`: `meta mark or 0x1` is mask
+    /// `!0x1`, xor `0x1`) — `mask` and `xor` the same length.
+    Bitwise { sreg: Reg, dreg: Reg, mask: Vec<u8>, xor: Vec<u8> },
     /// The rule's verdict.
     Verdict(Verdict),
     /// Hands the packet to the transparent socket at the address in `addr` and the port in `port` (that family's).
@@ -251,6 +254,15 @@ fn expr(b: &mut Vec<u8>, e: &Expr) {
         Expr::Immediate { dreg, data: v } => data(b, "immediate", &|b| {
             put_be32(b, 1, dreg.0);
             value(b, 2, v);
+        }),
+        // (nft 1.1.3's order: the registers, the operation — 0, the boolean one —, the length, mask, xor)
+        Expr::Bitwise { sreg, dreg, mask, xor } => data(b, "bitwise", &|b| {
+            put_be32(b, 1, sreg.0);
+            put_be32(b, 2, dreg.0);
+            put_be32(b, 6, 0);
+            put_be32(b, 3, mask.len() as u32);
+            value(b, 4, mask);
+            value(b, 5, xor);
         }),
         Expr::Verdict(v) => data(b, "immediate", &|b| {
             let code: i32 = match v {

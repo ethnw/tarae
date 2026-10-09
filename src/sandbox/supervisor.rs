@@ -161,7 +161,9 @@ fn result(r: isize) -> Answer {
 pub struct Served {
     policy: Arc<Policy>,
     net: RunNet,
-    refused: std::sync::mpsc::Sender<Denial>,
+    /// Shared so a mark (6d) can hold it weakly: the run's refusal thread (`sandbox::told`) ends once the supervisor
+    /// does — no process of the run left — whatever the session's marks keep.
+    refused: Arc<std::sync::mpsc::Sender<Denial>>,
     swapped: std::sync::Mutex<std::collections::HashMap<u64, Route>>,
     /// The sockets the run bound to every address and a port the kernel picks (`0.0.0.0:0`, `[::]:0` — what
     /// Rust's `UdpSocket` and Java's `DatagramSocket` do before sending): by inode. Such a socket goes out as
@@ -172,10 +174,14 @@ pub struct Served {
     run: u64,
     session: u64,
     egress: Arc<super::proxy::egress::Egress>,
+    /// The session's marks (6d), where its keeper has the session's network (TPROXY): what goes beyond is the run's
+    /// own socket marked with its run's (`Route::Redirected`) — None: no such network, beyond is the proxy's pair.
+    marks: Option<Arc<super::marks::Marks>>,
 }
 
 impl Served {
-    fn reach(&self) -> Reach<'_> {
+    /// What its policy opens, for a call on a socket of `kind` (`SO_TYPE`).
+    fn reach(&self, kind: i32) -> Reach<'_> {
         Reach {
             localhost: self.localhost,
             ports: &self.ports,
@@ -183,6 +189,8 @@ impl Served {
             resolvers: &self.resolvers,
             // (the network open goes through tarae's egress proxy: step 5)
             proxy: self.network.then_some(super::route::PROXY),
+            // (6d takes TCP: a datagram beyond goes as before — refused, said — until 6e answers UDP in the session)
+            redirect: self.marks.is_some() && self.netns() && kind == libc::SOCK_STREAM,
         }
     }
 
@@ -311,11 +319,12 @@ pub fn totals() -> Totals {
 /// thread a confined one made would be confined too, and its own calls would wait on itself). It waits for
 /// the run's listener (taken from the run's process: `sandbox::keeper`), then answers that run's calls until no
 /// process of it is left, its refusals out on `refused`. The sender dropped unsent: it ends. `net`: `Served` or
-/// `Routed` (`Served`).
+/// `Routed` (`Served`). `marks`: the session's (6d), where its network takes what goes beyond.
 pub fn serve(
     policy: Arc<Policy>,
     net: RunNet,
     refused: std::sync::mpsc::Sender<Denial>,
+    marks: Option<Arc<super::marks::Marks>>,
 ) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
     let session = policy.session;
@@ -328,12 +337,13 @@ pub fn serve(
     let policy = Arc::new(Served {
         policy,
         net,
-        refused,
+        refused: Arc::new(refused),
         swapped: Default::default(),
         any_port: Default::default(),
         run,
         session,
         egress,
+        marks,
     });
     std::thread::Builder::new().name("tarae-serve".into()).spawn(move || {
         quiet_signals();
@@ -630,7 +640,13 @@ fn routed(p: &Served, c: &Caller, to: SocketAddr, kind: i32) -> Route {
     if p.resolvers.iter().any(|r| r.ip().to_canonical() == to.ip().to_canonical() && r.port() == to.port()) {
         RESOLVER_CALLS.fetch_add(1, Relaxed);
     }
-    super::route::route(to, p.netns(), &p.reach(), || session_listens(c, to.port(), kind), |ip| p.mine(ip))
+    super::route::route(
+        to,
+        p.netns(),
+        &p.reach(kind),
+        || session_listens(c, to.port(), kind),
+        |ip| p.mine(ip),
+    )
 }
 
 /// Tests (Q4's measure): calls naming a resolver's port 53, every run's.
@@ -908,7 +924,7 @@ fn routed_socket(
     to: SocketAddr,
 ) -> Result<OwnedFd, i32> {
     match route {
-        Route::Session => {
+        Route::Session | Route::Redirected => {
             // (one of tarae's put in the session's place can't come back to it)
             if p.swapped.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&inode(&sock)?) {
                 let why =
@@ -919,6 +935,10 @@ fn routed_socket(
             if !in_session(c, &sock) {
                 let why = format!("remote:{to} on a socket from outside the session");
                 return refuse(p, c, "network-bound", why).map(|_| sock);
+            }
+            // (beyond: the session's rules take it to a planted socket, which reads whose it is by its mark)
+            if route == Route::Redirected {
+                marked(p, c, &sock)?;
             }
             Ok(sock)
         }
@@ -954,6 +974,39 @@ fn routed_socket(
             refuse(p, c, "network-direct", why).map(|_| sock)
         }
     }
+}
+
+/// The run's socket `sock`, about to go beyond the session (`Route::Redirected`), marked as its run's (6d, `marks.rs`):
+/// the caller's run and program's mark, given at its first such call — unless the socket carries one already (it
+/// was marked at an earlier call, or another run's process connected it first: a run can't set or clear a mark, so
+/// any it carries is tarae's), kept as it is. `SO_MARK` needs `CAP_NET_ADMIN` over the socket's netns — tarae's
+/// over the session's. No marks left (past 2³¹ in a session): refused, said.
+fn marked(p: &Served, c: &Caller, sock: &OwnedFd) -> Result<(), i32> {
+    let Some(marks) = &p.marks else { return Ok(()) };
+    if sockopt(sock, libc::SO_MARK)? != 0 {
+        return Ok(());
+    }
+    let owner = super::marks::Owner {
+        run: p.run,
+        session: p.session,
+        process: c.name(),
+        rules: p.egress.clone(),
+        told: Arc::downgrade(&p.refused),
+    };
+    let Some(mark) = marks.mark(owner) else {
+        return refuse(
+            p,
+            c,
+            "network-outbound",
+            "the session's marks ran out — a new session has its own".into(),
+        )
+        .map(drop);
+    };
+    // SAFETY: an int, ours for the call, on a socket we hold.
+    let r = unsafe {
+        libc::setsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, (&raw const mark).cast(), 4)
+    };
+    result(r as isize).map(drop)
 }
 
 /// A connect to the egress proxy's address (`Route::Proxy`): a loopback TCP pair of tarae's (`proxy::pair`) —
@@ -1028,7 +1081,7 @@ fn proxied(
         session: p.session,
         process: c.name(),
         rules: p.egress.clone(),
-        told: p.refused.clone(),
+        told: (*p.refused).clone(),
     };
     // (the proxy gone, the run's end reads its end at once: nothing goes out)
     super::proxy::get().send(super::proxy::ToProxy::Connection(to_proxy));
@@ -2171,6 +2224,142 @@ mod tests {
         let said = text.lines().find_map(|l| l.split_once("scene: ").map(|(_, s)| s.to_string()));
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(said.as_deref(), Some("w1=0 w2=1 w3=1 stale=yes same=yes"), "{text}\n{err}");
+    }
+
+    /// 6d: what a run left running connects as its run, after the run is gone — through the session's planted
+    /// socket. Its connect still reaches the supervisor of the run that started it (the filter is inherited), which
+    /// marks the socket as that run's (`marks.rs`): the proxy judges it by that run's rules, and the refusal goes to
+    /// the project's run going then (`sandbox::tell`), as the supervisor's own refusals of a leftover do. Run 1's
+    /// rules name only `first-6d.test`, which it reaches itself first (its mark given then), and the user refused
+    /// `left-6d.test` for the session; run 2's rules name `left-6d.test`, and run 2 reaches it (its mark the newest).
+    /// Run 1 leaves a child that, once run 1 is over and while run 2 goes, asks for `left-6d.test`: it's refused —
+    /// run 1's rules, by run 1's older mark, not the session's newest run's — the outside reached twice (the runs'
+    /// own), and the refusal is in run 2's report, naming the host, never in run 1's. In a TPROXY session only.
+    #[test]
+    fn what_a_run_left_connects_as_its_run() {
+        let test = "what_a_run_left_connects_as_its_run";
+        if !served(test) {
+            return;
+        }
+        let probed = super::super::tier::get();
+        if probed.redirect.is_err() || !probed.ns.netns() {
+            let why = probed.redirect.clone().err().unwrap_or_else(|| "no network namespace".into());
+            assert!(
+                !std::env::var("TARAE_EXPECT_NETWORK").is_ok_and(|n| n == "tproxy"),
+                "{test}: TPROXY expected here — {why}"
+            );
+            let line = format!(
+                "{}sandbox::supervisor::tests::{test} — no TPROXY here: {why}\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        }
+        // (the outside: a listener on this machine's own address, beyond for a policy that knows no own address)
+        let ip = {
+            let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+            s.connect("192.0.2.1:9").unwrap();
+            s.local_addr().unwrap().ip()
+        };
+        let outside = std::net::TcpListener::bind((ip, 0)).unwrap();
+        let at = outside.local_addr().unwrap();
+        let reached = Arc::new(AtomicU64::new(0));
+        let counting = reached.clone();
+        std::thread::spawn(move || {
+            for s in outside.incoming().flatten() {
+                counting.fetch_add(1, Relaxed);
+                // (the request's head read whole first: a socket closed with bytes unread — or with them still to
+                // come — is reset, and the reply can be lost before the proxy relays it: under load, it was)
+                let mut head = io::BufReader::new(&s);
+                let mut line = String::new();
+                while io::BufRead::read_line(&mut head, &mut line).is_ok_and(|n| n > 0)
+                    && !line.trim().is_empty()
+                {
+                    line.clear();
+                }
+                let _ = io::Write::write_all(&mut &s, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        for name in ["left-6d.test", "first-6d.test"] {
+            super::super::proxy::TEST_NAMES.lock().unwrap().push((name.into(), at));
+        }
+        let s = Scratch::new("left-6d");
+        let with = |hosts: &[&str]| {
+            let egress = super::super::proxy::egress::Egress {
+                hosts: hosts
+                    .iter()
+                    .map(|h| super::super::proxy::egress::Pattern::parse(h).unwrap())
+                    .collect(),
+                ..Default::default()
+            };
+            Policy {
+                network: true,
+                own_addresses: Some(Vec::new()),
+                egress,
+                ..s.policy(Vec::new(), false, Vec::new())
+            }
+        };
+        let (p1, p2) = (with(&["first-6d.test"]), with(&["left-6d.test"]));
+        let session = super::super::proxy::session_of(&p1.root);
+        let (host, scope) = ("left-6d.test".to_string(), super::super::proxy::Scope::Refused);
+        super::super::proxy::get().send(super::super::proxy::ToProxy::Answer {
+            session,
+            run: p1.run_id,
+            host,
+            port: 80,
+            scope,
+        });
+        // (inside `bash -c '…'`: no single quote of its own)
+        let ask_for = |host: &str| {
+            format!(
+                r#"exec 3<>/dev/tcp/203.0.113.7/80 && printf "GET / HTTP/1.1\r\nHost: {host}\r\n\r\n" >&3 &&
+                head -1 <&3"#
+            )
+        };
+        let (ask, first) = (ask_for("left-6d.test"), ask_for("first-6d.test"));
+        // (what a run writes, in its project: the only place it may)
+        let (go, left, own) = (s.base.join("out/go"), s.root.join("left"), s.root.join("own"));
+        // (run 1 reaches a host of its own rules first — its mark given then, before run 2's — and leaves the child)
+        let leaves = format!(
+            r#"bash -c '{first}' > /dev/null
+            ( bash -c 'while [ ! -e "$GO" ]; do sleep 0.05; done; {ask} > "$LEFT"' & ); exit 0"#
+        );
+        crate::spawn::wait(run_in(&p1, &leaves, &[("GO", &go), ("LEFT", &left)])).unwrap();
+        assert!(until(|| p1.watch.as_ref().is_some_and(|w| w.ended())), "run 1's end seen");
+        let r2 = run_in(&p2, &format!(r#"bash -c '{ask} > "$OWN"; sleep 3'"#), &[("OWN", &own)]);
+        assert!(
+            until(|| std::fs::read_to_string(&own).is_ok_and(|t| !t.is_empty())),
+            "run 2 reached it — its file {:?}, its report {:?}, the outside reached {}",
+            std::fs::read_to_string(&own),
+            p2.watch.as_ref().unwrap().blocked().seen,
+            reached.load(Relaxed)
+        );
+        std::fs::write(&go, "").unwrap();
+        // (its answer waited for, and said below either way)
+        until(|| std::fs::read_to_string(&left).is_ok_and(|t| !t.is_empty()));
+        let host_said = |p: &Policy| {
+            let b = p.watch.as_ref().unwrap().blocked();
+            b.seen
+                .iter()
+                .filter(|d| d.op == super::super::proxy::HOST_OP && d.target.starts_with("left-6d.test:80: "))
+                .count()
+        };
+        until(|| host_said(&p2) > 0);
+        crate::spawn::wait(r2).unwrap();
+        let said = (
+            std::fs::read_to_string(&own).unwrap().trim().to_string(),
+            std::fs::read_to_string(&left).unwrap_or_default().trim().to_string(),
+            reached.load(Relaxed),
+            host_said(&p1),
+            host_said(&p2),
+        );
+        // (the outside reached twice: run 1's own first connection, run 2's — never the child's)
+        let expected = ("HTTP/1.1 200 OK".to_string(), "HTTP/1.1 403 Forbidden".to_string(), 2, 0, 1);
+        assert_eq!(
+            said, expected,
+            "(run 2's reply, the child's, the outside reached, run 1's report, run 2's)"
+        );
+        super::super::end_leftovers(Some(&s.root));
     }
 
     /// An op's result as the probe says it: `ok`, or `err` and the errno.

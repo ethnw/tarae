@@ -42,6 +42,9 @@ mod handed;
 pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
+// (6d: the session's marks — which run a connection is — given on Linux; the table built and tested everywhere)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod marks;
 // (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
 // (the session's transparent proxy: its ruleset built everywhere — its golden runs on macOS too —, sent on Linux)

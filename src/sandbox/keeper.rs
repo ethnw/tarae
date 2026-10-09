@@ -1011,7 +1011,9 @@ impl Keeper {
         if !matches!(net, RunNet::Served | RunNet::Routed) {
             return Err(io::Error::other("a run not served starts on its own (start)"));
         }
-        let to = super::supervisor::serve(policy, net, refused)?;
+        // (6d: where its session has the TPROXY network, beyond is the run's own socket marked as its run's)
+        let marks = lock(&self.network).as_ref().map(|n| n.marks.clone());
+        let to = super::supervisor::serve(policy, net, refused, marks)?;
         let (started, ours) = self.start_with(cmd, comm, rules, net, super::tier::runs_refuse_userns())?;
         let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
         let pidfd = started.pidfd.clone();
@@ -1113,7 +1115,8 @@ struct Birth {
     /// Tests: the mirrors put on a device that isn't there, to see them fail.
     off_lo: bool,
     /// The session's network is made (`redirect`): a raw ICMP socket is made in its netns too, while the child still
-    /// has the capability that takes (`CAP_NET_RAW`) — `Taken` answers refused datagrams on it.
+    /// has the capability that takes (`CAP_NET_RAW`) — `Taken` answers refused datagrams on it — and its
+    /// `tcp_fwmark_accept` set (6d: `BirthStep::Fwmark`).
     icmp: bool,
     /// Tests: what its read-only step does instead (`CgroupfsSeam`, by the keeper's root).
     #[cfg(test)]
@@ -1282,7 +1285,8 @@ impl Birth {
     /// goes out), a fresh `/proc` with a PID namespace, its own `devpts` with its `ptmx` over `/dev/ptmx`, its
     /// own `/dev/shm` (D10), `lo` up, and every capability dropped — each checked; a failure said and it exits.
     /// With the session's network (`icmp`), a raw ICMP socket made in its netns before the drop: where it is (above
-    /// the descriptors the child moves, not close-on-exec), else -1 — a socket that can't be made is done without.
+    /// the descriptors the child moves, not close-on-exec), else -1 — a socket that can't be made is done without —
+    /// and its netns's `tcp_fwmark_accept` set, which it can't be born without (6d).
     ///
     /// # Safety
     /// The birth's child's: raw calls only (a copy of a multithreaded process).
@@ -1413,6 +1417,15 @@ impl Birth {
                         raw = libc::fcntl(r, libc::F_DUPFD, 10);
                         libc::close(r);
                     }
+                    // 6d: a connection keeps its mark where the planted socket accepts it — its run's, tarae's to
+                    // give (`marks.rs`); this netns's own setting, written while the child still has the
+                    // capability over it
+                    let at = c"/proc/sys/net/ipv4/tcp_fwmark_accept";
+                    let f = libc::open(at.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                    if f < 0 || libc::write(f, b"1".as_ptr().cast(), 1) != 1 {
+                        self.failed(BirthStep::Fwmark, errno());
+                    }
+                    libc::close(f);
                 }
             }
             if let Err(e) = capabilities_dropped(self.last_cap) {
@@ -3285,6 +3298,7 @@ mod tests {
             }
             "listen" => return helper_listen(),
             "connect" => helper_connect(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "origin" => helper_origin(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swap" => helper_swap(&std::env::var("TARAE_TO").unwrap_or_default()),
             "proxied" => helper_proxied(&std::env::var("TARAE_TO").unwrap_or_default()),
             "bound" => helper_bound(&std::env::var("TARAE_TO").unwrap_or_default()),
@@ -3305,6 +3319,19 @@ mod tests {
                 helper_within(&std::env::var("TARAE_TO").unwrap_or_default())
             }
             "asked" => helper_asked(&std::env::var("TARAE_TO").unwrap_or_default()),
+            // (6d: a TCP socket made in the run's network and its number said — then held, unconnected, until
+            // `$TARAE_GO` is there, 5 s at most, for the test to take it)
+            "socket" => {
+                // SAFETY: a plain call; the socket is this process's until it ends.
+                let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+                println!("helper: fd={fd}");
+                let go = std::env::var_os("TARAE_GO").unwrap_or_default();
+                let by = Instant::now() + Duration::from_secs(5);
+                while !Path::new(&go).exists() && Instant::now() < by {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return;
+            }
             "lookup_timed" => {
                 let name = std::env::var("TARAE_NAME").unwrap_or_default();
                 let t0 = Instant::now();
@@ -3624,6 +3651,53 @@ mod tests {
         let mut line = String::new();
         let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
         format!("reached {}", line.trim())
+    }
+
+    /// `origin` (6d): a plain request for `$TARAE_HOST` sent as a client sends it to its server (origin form) on a
+    /// TCP socket of its own connected to `$TARAE_TO` — the run trying `SO_MARK` on it before (`setmark`: its errno,
+    /// 0 had it worked) and clearing it after (`clear`) — and what it says: `peer=<its peer> reply=<the first line
+    /// back> setmark=<errno> mark=<even|odd|0> clear=<errno>`, or the connect's errno.
+    fn helper_origin(to: &str) -> String {
+        use std::io::{BufRead, Write};
+        let sa = sockaddr(to);
+        let host = std::env::var("TARAE_HOST").unwrap_or_default();
+        let mark = |fd: i32| {
+            let (mut v, mut len) = (0u32, 4 as libc::socklen_t);
+            // SAFETY: an int and its length, ours for the call.
+            unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_MARK, (&raw mut v).cast(), &mut len) };
+            v
+        };
+        let set = |fd: i32, v: u32| {
+            // SAFETY: an int, ours for the call.
+            let r =
+                unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_MARK, (&raw const v).cast(), 4) };
+            if r == 0 { 0 } else { errno_now() }
+        };
+        // SAFETY: plain calls on a socket this makes; an address of its size.
+        let (fd, setmark, r) = unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            let setmark = set(fd, 0x40);
+            let r =
+                libc::connect(fd, (&raw const sa).cast(), size_of::<libc::sockaddr_in>() as libc::socklen_t);
+            (fd, setmark, if r == 0 { 0 } else { errno_now() })
+        };
+        // SAFETY: the socket made above, ours from here.
+        let s = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+        if r != 0 {
+            return r.to_string();
+        }
+        let m = match mark(fd) {
+            0 => "0",
+            m if m & 1 == 0 => "even",
+            _ => "odd",
+        };
+        let clear = set(fd, 0);
+        let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let _ = (&s).write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes());
+        let mut reply = String::new();
+        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
+        format!("peer={peer} reply={} setmark={setmark} mark={m} clear={clear}", reply.trim_end())
     }
 
     /// `within`: `$TARAE_TO` reached within 2 s, and what it does with a connection that says nothing — `reached
@@ -4991,7 +5065,10 @@ mod tests {
 
     /// Step 5: with the network through the proxy, a connect beyond this machine that doesn't go through it — a
     /// tool that ignores `HTTPS_PROXY` — is refused (`EPERM`, `network-direct`) and said in words that name the
-    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier C and the netns alike.
+    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier C and the netns alike —
+    /// but where the session's network takes what goes beyond (6d, TPROXY), the connect isn't the supervisor's to
+    /// refuse: it reaches a planted socket, the proxy's to decide by the host it names (here none: still nothing
+    /// arrives); the datagram is refused as before (UDP: 6e's).
     #[test]
     fn a_direct_connect_is_refused_with_the_proxy() {
         let Some(tiers) = served_tiers("a_direct_connect_is_refused_with_the_proxy") else { return };
@@ -5003,18 +5080,30 @@ mod tests {
             udp.set_nonblocking(true).unwrap();
             let name = format!("direct-{tier}");
             let k = keeper_in(&name, ns);
+            let redirected = lock(&k.network).is_some();
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
             let to = l.local_addr().unwrap().to_string();
-            let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
-            assert_eq!(said, libc::EPERM.to_string(), "{tier}: {refused:?}");
-            let d =
-                refused.iter().find(|d| d.op == "network-direct").unwrap_or_else(|| panic!("{refused:?}"));
-            assert!(
-                d.plain().contains(&format!("{to} directly")) && d.plain().contains("HTTPS_PROXY"),
-                "{}",
-                d.plain()
-            );
+            if redirected {
+                let (said, refused) = served_said(&k, (&p, &c, &root), "within", &[("TARAE_TO", &to)]);
+                assert_eq!(
+                    said, "reached open",
+                    "{tier}: on a planted socket, waiting for a host — {refused:?}"
+                );
+                assert!(!refused.iter().any(|d| d.op == "network-direct"), "{tier}: {refused:?}");
+            } else {
+                let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
+                assert_eq!(said, libc::EPERM.to_string(), "{tier}: {refused:?}");
+                let d = refused
+                    .iter()
+                    .find(|d| d.op == "network-direct")
+                    .unwrap_or_else(|| panic!("{refused:?}"));
+                assert!(
+                    d.plain().contains(&format!("{to} directly")) && d.plain().contains("HTTPS_PROXY"),
+                    "{}",
+                    d.plain()
+                );
+            }
             let udp_to = udp.local_addr().unwrap().to_string();
             let (said, refused) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &udp_to)]);
             assert!(!said.starts_with("answer="), "{tier}: {said}");
@@ -5602,6 +5691,270 @@ mod tests {
         );
         k.end();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── step 6d: accept, attribute, check ──────────────────────────────────────────────────────────────────
+
+    /// A served run's policy in a session with the TPROXY network, `change`d: the network open to any host, this
+    /// machine's own addresses none (the test's outside, on one of them, is beyond), run `run`.
+    fn redirected_project(
+        name: &str,
+        k: &Keeper,
+        run: u64,
+        change: impl FnOnce(&mut super::super::Policy),
+    ) -> (Arc<super::super::Policy>, super::super::linux::Confine, PathBuf) {
+        let (p, c, root) = project_served(name, Vec::new(), Some(k), &[], Ok(()));
+        let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
+        let mut p =
+            super::super::Policy { network: true, own_addresses: Some(Vec::new()), egress, run_id: run, ..p };
+        change(&mut p);
+        (Arc::new(p), c, root)
+    }
+
+    /// P2 and P3 for TCP (6d): a served run's connect beyond the session goes on its own socket — its peer the
+    /// address it named, never a pair's or a swap's — marked by its supervisor as its run's, and the planted socket
+    /// hands it to the egress proxy, which reaches the host its request names; what the outside sees comes from
+    /// tarae's network, not the session's. The run can neither mark its own socket nor clear the mark tarae gave
+    /// (`EPERM`: M12), and that mark leaves bit 0 to the output chain (M12: with it, IPv4 took the destination as its
+    /// source — this connect would fail). Nothing lands refused on the planted socket.
+    #[test]
+    fn a_runs_connection_beyond_reaches_its_host_through_the_planted_socket() {
+        let test = "a_runs_connection_beyond_reaches_its_host_through_the_planted_socket";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, served) = answering(&format!("{ip}:0"), "out hello");
+        super::super::proxy::TEST_NAMES.lock().unwrap().push(("planted-6d.test".into(), at));
+        let k = keeper("planted-6d");
+        let (p, c, root) = redirected_project("planted-6d", &k, 6_000_001, |_| {});
+        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "planted-6d.test")];
+        let (said, refused) = served_said(&k, (&p, &c, &root), "origin", &env);
+        let e = libc::EPERM;
+        let expected = format!("peer=203.0.113.7:80 reply=out hello setmark={e} mark=even clear={e}");
+        assert_eq!(said, expected, "{refused:?}");
+        let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
+        assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network, not the session's");
+        assert_eq!(lock(&k.network).as_ref().map(|m| m.taken.count()), Some(0), "nothing refused there");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A run's mark outlives it (what it left running connects as its run), but not what's kept for it (6d): once no
+    /// process of the run is served, its refusals' sender is gone — the receiving end disconnected, so its
+    /// `tarae-refused` thread (`sandbox::told`, `for d in rx`) ends, and its policy with it — while the session's
+    /// marks still name the run. (A mark held the sender itself: every run's thread lived for the session's life.)
+    #[test]
+    fn a_runs_refusals_end_with_it_though_its_mark_is_kept() {
+        let test = "a_runs_refusals_end_with_it_though_its_mark_is_kept";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
+        super::super::proxy::TEST_NAMES.lock().unwrap().push(("ended-6d.test".into(), at));
+        let k = keeper("ended-6d");
+        let run = 6_000_031;
+        let (p, c, root) = redirected_project("ended-6d", &k, run, |_| {});
+        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "ended-6d.test")];
+        let (mut lines, pid, refused) = served_helper(&k, (&p, &c, &root), "origin", &env);
+        let said = said_next(&mut lines);
+        lines.for_each(drop);
+        crate::spawn::wait(pid).unwrap();
+        assert!(said.contains("reply=out hello"), "{said}");
+        let ended = refused.recv_timeout(Duration::from_secs(5));
+        assert!(
+            matches!(ended, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+            "its sender gone with the run: {ended:?}"
+        );
+        let kept = lock(&k.network).as_ref().map(|m| m.marks.of_run(run).len());
+        assert_eq!(kept, Some(1), "its mark kept");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A connection carrying the mark of a run that's over — nothing of it served, its refusals' sender gone — is
+    /// reset on the planted socket and said in the log, never handed to the proxy: no one would hear its refusal, and
+    /// no process of that run could have made it. Only tarae can mark a socket, so the test does what tarae's side
+    /// can: it takes a socket an unserved run made in the session's network (`pidfd_getfd`, as the supervisor does),
+    /// gives it the ended run's mark (`SO_MARK`, `CAP_NET_ADMIN` over the session's netns) and asks for a host that
+    /// run's rules allow (any) — whose outside answers if the connection gets through.
+    #[test]
+    fn a_connection_marked_for_a_run_thats_over_is_reset() {
+        use std::io::{BufRead, Write};
+        let test = "a_connection_marked_for_a_run_thats_over_is_reset";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (own_at, _own) = answering(&format!("{ip}:0"), "out hello");
+        let (late_at, late) = answering(&format!("{ip}:0"), "late hello");
+        for (name, at) in [("over-6d.test", own_at), ("late-6d.test", late_at)] {
+            super::super::proxy::TEST_NAMES.lock().unwrap().push((name.into(), at));
+        }
+        let captured = crate::log::capture();
+        let k = keeper("over-6d");
+        let run = 6_000_041;
+        let (p, c, root) = redirected_project("over-6d", &k, run, |_| {});
+        // (the run's own connection gives its mark; then the run ends, and its sender with it)
+        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "over-6d.test")];
+        let (mut lines, pid, refused) = served_helper(&k, (&p, &c, &root), "origin", &env);
+        let said = said_next(&mut lines);
+        lines.for_each(drop);
+        crate::spawn::wait(pid).unwrap();
+        assert!(said.contains("reply=out hello"), "{said}");
+        let ended = refused.recv_timeout(Duration::from_secs(5));
+        assert!(matches!(ended, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)), "{ended:?}");
+        let marks = lock(&k.network).as_ref().map(|m| m.marks.of_run(run)).unwrap_or_default();
+        let [(mark, _)] = marks[..] else { panic!("one mark for the run: {marks:?}") };
+        // (a socket in the session's network, from a run tarae doesn't serve: unmarked, unconnected)
+        let (_, own, own_root) =
+            project_served("over-6d-own", vec![], Some(&k), &[], Err("not served".into()));
+        let go = own_root.join("go");
+        let cmd = helper_cmd("socket", &[("TARAE_GO", go.to_str().unwrap())], Some(&own_root));
+        let s = k.start(&cmd, &crate::landlock::thread_name(), own.rules_fd(), own.net).unwrap();
+        let held = s.spawned.pid;
+        let mut out = io::BufReader::new(s.spawned.stdout.unwrap()).lines().map_while(Result::ok);
+        let n: i32 =
+            said_next(&mut out).strip_prefix("fd=").and_then(|n| n.parse().ok()).expect("its socket");
+        // SAFETY: a plain call for a process of our own runs'.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, held, 0) };
+        assert!(pidfd >= 0, "pidfd_open: {}", io::Error::last_os_error());
+        // SAFETY: the descriptor just opened, ours from here.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
+        let sock = super::super::supervisor::pidfd_getfd(&pidfd, n).expect("the run's socket taken");
+        let sa = sockaddr("203.0.113.7:80");
+        // SAFETY: an int, then an address of its size, on the socket we hold.
+        let (set, connected) = unsafe {
+            let set = libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                (&raw const mark).cast(),
+                4,
+            );
+            let len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            (set, libc::connect(sock.as_raw_fd(), (&raw const sa).cast(), len))
+        };
+        assert_eq!(
+            (set, connected),
+            (0, 0),
+            "marked {mark:#x} and connected: {}",
+            io::Error::last_os_error()
+        );
+        std::fs::write(&go, "").unwrap();
+        crate::spawn::wait(held).unwrap();
+        let s = std::net::TcpStream::from(sock);
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        // (a reset that lands before the request is the write's error, and the read then sees the end)
+        let wrote = (&s).write_all(b"GET / HTTP/1.1\r\nHost: late-6d.test\r\n\r\n");
+        let mut reply = String::new();
+        let got = match wrote.and_then(|()| io::BufReader::new(&s).read_line(&mut reply)) {
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reset".to_string(),
+            Ok(0) => "closed".into(),
+            Ok(_) => reply.trim().to_string(),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(got, "reset", "the outside reached: {:?}", late.try_recv());
+        assert!(late.try_recv().is_err(), "the outside not reached");
+        let log = captured.lines().join("\n");
+        let why = format!("run {run}'s ");
+        assert!(log.contains(&why) && log.contains("the run is over and nothing of it is served"), "{log}");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&own_root).ok();
+    }
+
+    /// Each connection is its own run's (6d): two runs of one session at once, of one program, each connecting
+    /// beyond — one to a host the user refused for the session, one to a host its own rules name — and each is
+    /// judged by its own run's rules, its refusal in its own run's report, never the other's: the planted socket
+    /// tells them apart by the mark each run's supervisor gave.
+    #[test]
+    fn each_connection_is_its_runs() {
+        use super::super::proxy::{self, Scope, ToProxy};
+        let test = "each_connection_is_its_runs";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let Some(ip) = outside() else { return };
+        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
+        proxy::TEST_NAMES.lock().unwrap().push(("reached-6d.test".into(), at));
+        let k = keeper("runs-6d");
+        let (refused_run, reached_run) = (6_000_011, 6_000_012);
+        // (each run its own rules — the one naming no host, the other naming the host it reaches — so a connection
+        // taken for the other run's meets rules that aren't its own; the refused host is the user's answer, below)
+        let none = |p: &mut super::super::Policy| p.egress = proxy::egress::Egress::default();
+        let (p1, c, root) = redirected_project("runs-6d", &k, refused_run, none);
+        let host = proxy::egress::Pattern::parse("reached-6d.test").unwrap();
+        let egress = proxy::egress::Egress { hosts: vec![host], ..Default::default() };
+        let p2 = Arc::new(super::super::Policy { run_id: reached_run, egress, ..(*p1).clone() });
+        let session = proxy::session_of(&p1.root);
+        let (host, port, scope) = ("refused-6d.test".to_string(), 80, Scope::Refused);
+        proxy::get().send(ToProxy::Answer { session, run: refused_run, host, port, scope });
+        let to = |host: &'static str| [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", host)];
+        let (mut one, first, refused1) =
+            served_helper(&k, (&p1, &c, &root), "origin", &to("refused-6d.test"));
+        let (mut two, second, refused2) =
+            served_helper(&k, (&p2, &c, &root), "origin", &to("reached-6d.test"));
+        let (said1, said2) = (said_next(&mut one), said_next(&mut two));
+        one.for_each(drop);
+        two.for_each(drop);
+        crate::spawn::wait(first).unwrap();
+        crate::spawn::wait(second).unwrap();
+        let (refused1, refused2): (Vec<_>, Vec<_>) =
+            (refused1.try_iter().collect(), refused2.try_iter().collect());
+        assert!(said1.contains("reply=HTTP/1.1 403 Forbidden"), "{said1}");
+        assert!(said2.contains("reply=out hello"), "{said2}");
+        assert!(
+            refused1.iter().any(|d| d.op == proxy::HOST_OP && d.target.starts_with("refused-6d.test:80: ")),
+            "the refused run's own report: {refused1:?}"
+        );
+        assert!(refused2.is_empty(), "nothing in the other run's: {refused2:?}");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// What lands on the planted socket but isn't a run's connection tarae marked is refused there — reset, and said
+    /// in the log with why: a connection a served run made to the planted address itself (the output chain leaves the
+    /// session's own addresses alone: it reaches the listener as any local one), and one from a run tarae doesn't
+    /// serve, its socket never marked by a supervisor — even with a served run's mark given in the session before.
+    /// (A session each: a planted socket says its first refusal and counts the rest — `SAID_EVERY`.)
+    #[test]
+    fn what_tarae_didnt_mark_is_refused_on_the_planted_socket() {
+        let test = "what_tarae_didnt_mark_is_refused_on_the_planted_socket";
+        if !network_here(test) || !routed_here(test) {
+            return;
+        }
+        let captured = crate::log::capture();
+        let k = keeper("itself-6d");
+        let (p, c, root) = redirected_project("itself-6d", &k, 6_000_021, |_| {});
+        let planted = SESSION_V4.to_string() + ":15001";
+        let (said, _) = served_said(&k, (&p, &c, &root), "within", &[("TARAE_TO", &planted)]);
+        assert_eq!(said, "reached reset", "the planted address itself");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        let k = keeper("unmarked-6d");
+        let (p, c, root) = redirected_project("unmarked-6d", &k, 6_000_022, |_| {});
+        // (a served run's mark given in the session first: an unmarked connection still finds no owner)
+        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "nowhere-6d.test")];
+        served_said(&k, (&p, &c, &root), "origin", &env);
+        let (_, own, own_root) =
+            project_served("unmarked-6d-own", vec![], Some(&k), &[], Err("not served".into()));
+        let said = helper_through(
+            &k,
+            own.rules_fd(),
+            own.net,
+            "within",
+            &[("TARAE_TO", "203.0.113.7:443")],
+            Some(&own_root),
+        );
+        assert_eq!(said, "reached reset", "a run tarae doesn't serve");
+        let lines = captured.lines().join("\n");
+        assert!(lines.contains("a connection to the planted socket itself; reset"), "{lines}");
+        assert!(lines.contains("for 203.0.113.7:443 (its mark 0x1 isn't one tarae gave"), "{lines}");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&own_root).ok();
     }
 
     // ── step 6g: a cgroup per run ──────────────────────────────────────────────────────────────────────────

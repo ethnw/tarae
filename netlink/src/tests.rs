@@ -70,6 +70,15 @@ fn set_mark() -> Vec<Expr> {
     ]
 }
 
+/// The mark the packet has, kept, with bit 0 added (6d: `meta mark set meta mark or 0x1`).
+fn keep_mark() -> Vec<Expr> {
+    vec![
+        Expr::Meta { key: MetaKey::Mark, dreg: Reg::R1 },
+        Expr::Bitwise { sreg: Reg::R1, dreg: Reg::R1, mask: nft::mark(!1), xor: nft::mark(1) },
+        Expr::MetaSet { key: MetaKey::Mark, sreg: Reg::R1 },
+    ]
+}
+
 fn transparent(is: u8) -> Vec<Expr> {
     vec![
         Expr::Socket { key: SocketKey::Transparent, dreg: Reg::R1 },
@@ -237,7 +246,48 @@ fn each_message_is_byte_for_byte_what_nft_sent() {
             ),
         ),
     ];
-    for (case, ours) in cases {
+    // (6d: output keeps a mark it finds and adds bit 0 — `bitwise`; prerouting's rules set none)
+    let tproxied_as_is = |f: Family, more: Vec<Expr>, at: IpAddr, p: u16| {
+        then(then(then(nfproto(f), more), tproxy(at, p)), [accept.clone()])
+    };
+    let kept: Vec<(&str, Batch)> = vec![
+        ("keep-out-tcp", one_rule("tarae", "out", &then(l4proto(TCP), keep_mark()))),
+        ("keep-out-udp", one_rule("tarae", "out", &then(l4proto(UDP), keep_mark()))),
+        ("keep-out-dns", one_rule("tarae", "out", &then(then(udp_dport(53), keep_mark()), [rv.clone()]))),
+        (
+            "keep-pre-socket-tcp",
+            one_rule("tarae", "pre", &then(then(l4proto(TCP), transparent(1)), [accept.clone()])),
+        ),
+        (
+            "keep-pre-socket-udp",
+            one_rule("tarae", "pre", &then(then(l4proto(UDP), transparent(1)), [accept.clone()])),
+        ),
+        (
+            "keep-pre-dns4",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V4, udp_dport(53), SESSION_V4, 15053)),
+        ),
+        (
+            "keep-pre-dns6",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V6, udp_dport(53), SESSION_V6, 15053)),
+        ),
+        (
+            "keep-pre-tcp4",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V4, l4proto(TCP), SESSION_V4, 15001)),
+        ),
+        (
+            "keep-pre-tcp6",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V6, l4proto(TCP), SESSION_V6, 15001)),
+        ),
+        (
+            "keep-pre-udp4",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V4, l4proto(UDP), SESSION_V4, 15053)),
+        ),
+        (
+            "keep-pre-udp6",
+            one_rule("tarae", "pre", &tproxied_as_is(Family::V6, l4proto(UDP), SESSION_V6, 15053)),
+        ),
+    ];
+    for (case, ours) in cases.into_iter().chain(kept) {
         assert_bytes(&without_acks(ours.bytes()), &fixture::last_sent(case), case);
     }
 }

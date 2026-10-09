@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::egress::Pattern;
 use super::*;
 
+// (6d: a run's connection the session's network took to a planted socket)
+mod planted;
 // (step 5g: the proxy chaining to the one tarae itself goes out by — a stand-in upstream on loopback)
 mod upstream;
 
