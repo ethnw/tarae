@@ -8298,7 +8298,6 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_key_reached_through_another_mount_is_closed_there() {
-        use std::os::unix::process::CommandExt;
         let test = "a_key_reached_through_another_mount_is_closed_there";
         if !keys_tested_here(test) {
             return;
@@ -8310,8 +8309,39 @@ mod tests {
         }
         let second = t.join("second");
         std::fs::create_dir_all(&second).unwrap();
+        let inside = "sandbox::tests::a_key_reached_through_another_mount_inside";
+        let env = [("TARAE_TEST_ROOT", root.as_os_str()), ("TARAE_TEST_SECOND", second.as_os_str())];
+        let said = with_a_second_bind(inside, Some((&root, &second)), &env).unwrap_or_else(|e| panic!("{e}"));
+        assert!(said.contains("1 passed"), "{said}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Linux: the test `inside` (an ignored one) run by the test binary with `env` — with `bind` (from, to), in a user
+    /// and mount namespace of its own where `from` is bound at `to` too before its exec, as a desktop's second mount
+    /// would be there already (a test never mounts in its own process). Its output once it passed; Err: the namespace
+    /// or the bind refused here (`Refused`, why), or the test failed (its output).
+    #[cfg(not(target_os = "macos"))]
+    fn with_a_second_bind(
+        inside: &str,
+        bind: Option<(&Path, &Path)>,
+        env: &[(&str, &std::ffi::OsStr)],
+    ) -> Result<String, SecondBind> {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", inside, "--ignored", "--test-threads=1", "--nocapture"])
+            .envs(env.iter().copied());
+        let ran = |out: std::io::Result<std::process::Output>| {
+            let out = out.map_err(|e| SecondBind::Refused(e.to_string()))?;
+            let said =
+                format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            match out.status.success() {
+                true => Ok(said),
+                false => Err(SecondBind::Failed(said)),
+            }
+        };
+        let Some((from, to)) = bind else { return ran(cmd.output()) };
         let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
-        let (from, to) = (c(&root), c(&second));
+        let (from, to) = (c(from), c(to));
         // SAFETY: plain calls.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         let maps = [
@@ -8319,11 +8349,6 @@ mod tests {
             (c"/proc/self/uid_map", format!("{uid} {uid} 1\n").into_bytes()),
             (c"/proc/self/gid_map", format!("{gid} {gid} 1\n").into_bytes()),
         ];
-        let inside = "sandbox::tests::a_key_reached_through_another_mount_inside";
-        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-        cmd.args(["--exact", inside, "--ignored", "--test-threads=1", "--nocapture"])
-            .env("TARAE_TEST_ROOT", &root)
-            .env("TARAE_TEST_SECOND", &second);
         // SAFETY: raw calls on the child's own namespaces and strings made before the fork.
         unsafe {
             cmd.pre_exec(move || {
@@ -8346,11 +8371,179 @@ mod tests {
                 Ok(())
             })
         };
-        let out = cmd.output().unwrap();
-        let said =
-            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        ran(cmd.output())
+    }
+
+    /// Why `with_a_second_bind` didn't pass.
+    #[cfg(not(target_os = "macos"))]
+    #[derive(Debug)]
+    enum SecondBind {
+        /// The namespace or the bind refused here (a container without the capability, an AppArmor rule).
+        Refused(String),
+        /// The test inside failed: its output.
+        Failed(String),
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    impl std::fmt::Display for SecondBind {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                SecondBind::Refused(why) => write!(f, "no second bind here: {why}"),
+                SecondBind::Failed(said) => write!(f, "{said}"),
+            }
+        }
+    }
+
+    /// For real, on Linux in every tier (7e): home reached through another mount of its filesystem — toolbox's host
+    /// root at `/run/host` — isn't read there, as it isn't at its own place: Landlock's rules hold inodes, and what
+    /// holds that mount is granted whole by `/`'s rule, so home's path through it is a hole too. What else that mount
+    /// and its folder hold still reads, and the project in home reads through either way (its own rule). Two second
+    /// mounts, each where it can be made: a bind in a namespace of the test binary's own (`with_a_second_bind`: a
+    /// stand-in `run/host/home/u` in the test's own folder) — refused in C/D, whose containers can't make one — and
+    /// the checkout's target volume mounted again by `cargo xtask linux` (`TARAE_TEST_SECOND_MOUNT`, any tier). Each
+    /// sees its break too: with the other ways not looked at (`TARAE_TEST_NO_HOLES_ELSEWHERE`, in its child) the fake
+    /// key is read through the second mount — so a pass is the reads refused, not the report alone.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_home_reached_through_another_mount_is_closed_there() {
+        let test = "a_home_reached_through_another_mount_is_closed_there";
+        if !keys_tested_here(test) {
+            return;
+        }
+        // (a skip only when neither second mount could be had)
+        let skip = |why: &str| {
+            let line = format!("{}sandbox::tests::{test} — {why}\n", crate::test_results::SELF_SKIP);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        };
+        let mut refused = None;
+        // (a folder of its own in a volume other runs of the checkout may share)
+        let nanos =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        let ours = format!("tarae-sb-home-{}-{nanos}", std::process::id());
+        // A bind in a namespace of the test's own: the fake home at the stand-in for `/run/host/home/u`
+        let t = profile_path(&std::env::temp_dir()).join(&ours);
+        let (home, second) = home_files(&t.join("home"), &t.join("run/host/home/u"));
+        // (the run as it is passes; broken, the key reads through the second mount)
+        let check = |home: &Path, second: &Path, bind: Option<(&Path, &Path)>| -> Result<(), SecondBind> {
+            let inside = "sandbox::tests::a_home_reached_through_another_mount_inside";
+            let env = [("TARAE_TEST_HOME", home.as_os_str()), ("TARAE_TEST_SECOND", second.as_os_str())];
+            let said = with_a_second_bind(inside, bind, &env)?;
+            assert!(said.contains("1 passed"), "{said}");
+            let broken = [&env[..], &[("TARAE_TEST_NO_HOLES_ELSEWHERE", std::ffi::OsStr::new("1"))]].concat();
+            match with_a_second_bind(inside, bind, &broken) {
+                Err(SecondBind::Failed(said)) => {
+                    assert!(said.contains(READ_THROUGH) && said.contains("tarae-fake-token"), "{said}")
+                }
+                other => panic!("broken, the key isn't read through {}: {other:?}", second.display()),
+            }
+            Ok(())
+        };
+        match check(&home, &second, Some((&home, &second))) {
+            Ok(()) => {}
+            // (where tier A+ is said to be, a namespace of the test's own can be made: refused is a failure there)
+            Err(SecondBind::Refused(why)) if std::env::var_os("TARAE_EXPECT_TIER").is_none() => {
+                refused = Some(why)
+            }
+            Err(e) => panic!("{e}"),
+        }
         std::fs::remove_dir_all(&t).ok();
+        // The target volume mounted twice by `cargo xtask linux`: the fake home in it, reached at the other mount
+        let Some((one, two)) = std::env::var("TARAE_TEST_SECOND_MOUNT").ok().and_then(|v| {
+            let (one, two) = v.split_once(':')?;
+            Some((PathBuf::from(one), PathBuf::from(two)))
+        }) else {
+            if let Some(why) = refused {
+                skip(&format!(
+                    "no bind of its own ({why}), and no second mount given (`cargo xtask linux` gives one)"
+                ));
+            }
+            return;
+        };
+        let (home, second) = home_files(&one.join(&ours).join("home"), &two.join(&ours).join("home"));
+        check(&home, &second, None).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::remove_dir_all(one.join(&ours)).ok();
+    }
+
+    /// What `home_through_second_mount` says when a run read home's key through the second mount.
+    #[cfg(not(target_os = "macos"))]
+    const READ_THROUGH: &str = "home's key read through the second mount";
+
+    /// A fake home at `home` for `a_home_reached_through_another_mount_is_closed_there` — a key and a note (each a
+    /// fake token) and a project — and beside it in its folder, and in `second`'s folder, files of the mount's
+    /// that are no one's home (`run-text`); `second` made, to bind at where none is mounted yet. Real paths.
+    #[cfg(not(target_os = "macos"))]
+    fn home_files(home: &Path, second: &Path) -> (PathBuf, PathBuf) {
+        let beside = |at: &Path| at.parent().unwrap().join("other.txt");
+        for (f, text) in [
+            (home.join(".ssh/id_ed25519"), "tarae-fake-token"),
+            (home.join("notes.txt"), "tarae-fake-token"),
+            (home.join("project/src/main.rs"), "project-text"),
+            (beside(home), "run-text"),
+            (beside(second), "run-text"),
+        ] {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, text).unwrap();
+        }
+        std::fs::create_dir_all(second).ok();
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+        (real(home), real(second.parent().unwrap()).join(second.file_name().unwrap()))
+    }
+
+    /// The other half of `a_home_reached_through_another_mount_is_closed_there`: in its namespace, the fake home
+    /// `TARAE_TEST_HOME` bound at `TARAE_TEST_SECOND` too.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    #[ignore = "run by a_home_reached_through_another_mount_is_closed_there, in a mount namespace of its own"]
+    fn a_home_reached_through_another_mount_inside() {
+        let (Some(home), Some(second)) =
+            (std::env::var_os("TARAE_TEST_HOME"), std::env::var_os("TARAE_TEST_SECOND"))
+        else {
+            return;
+        };
+        home_through_second_mount(Path::new(&home), Path::new(&second));
+    }
+
+    /// A run whose home is the fake `home` (`home_files`), reached at `second` through another mount: no file of home
+    /// read nor its folder listed either way, what's beside it in both mounts read, the project read either way, the
+    /// mount said in the report.
+    #[cfg(not(target_os = "macos"))]
+    fn home_through_second_mount(home: &Path, second: &Path) {
+        let root = home.join("project");
+        let mut p = key_policy(&root);
+        p.reads.home = Some(home.to_path_buf());
+        // (the fake home sits where runs may write — the temp folder, the target folder: that grant would read it
+        // whatever `/`'s does, as it would a real home there)
+        let (a, b) = (home.parent().unwrap(), second.parent().unwrap());
+        p.write.retain(|w| !a.starts_with(w) && !b.starts_with(w));
+        p.files.retain(|f| !f.starts_with(a) && !f.starts_with(b));
+        let c = confined(Policy { run: RunDir::new().ok(), ..p });
+        let Some(Ok(conf)) = &c.confine else { panic!("{:?}", c.confine) };
+        let (h, s) = (home.display(), second.display());
+        // (the reads first: what a run gets is what this test is for — the key through the second mount first)
+        let (ok, out, err) = sh_confined(&c, &root, &format!("cat {s}/.ssh/id_ed25519"));
+        assert!(
+            !ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED),
+            "{READ_THROUGH}: {out} {err}"
+        );
+        for script in [format!("cat {h}/.ssh/id_ed25519"), format!("cat {s}/notes.txt"), format!("ls {s}")] {
+            let (ok, out, err) = sh_confined(&c, &root, &script);
+            assert!(
+                !ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED),
+                "{script}: {out} {err}"
+            );
+        }
+        for (script, want) in [
+            (format!("cat {}/other.txt", a.display()), "run-text"),
+            (format!("cat {}/other.txt", b.display()), "run-text"),
+            ("cat src/main.rs".to_string(), "project-text"),
+            (format!("cat {s}/project/src/main.rs"), "project-text"),
+        ] {
+            let (ok, out, err) = sh_confined(&c, &root, &script);
+            assert!(ok && out == want, "{script}: {out} {err}");
+        }
+        assert!(conf.holes_elsewhere.iter().any(|m| second.starts_with(m)), "{:?}", conf.holes_elsewhere);
+        let (_, notes) = c.linux_said().unwrap_or_else(|| panic!("{:?}", c.confine));
+        assert!(notes.contains("through another mount of its filesystem"), "{notes}");
     }
 
     /// The other half of `a_key_reached_through_another_mount_is_closed_there`: in its namespace, the project bound

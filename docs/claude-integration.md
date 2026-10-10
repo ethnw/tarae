@@ -1069,6 +1069,11 @@ thread of tarae's that confined itself first, and everything it starts stays con
   fails. The same when another mount of the key's filesystem reaches it — a second bind of the workspace, toolbox's
   `/run/host`, a btrfs top level, `/` for a project seen through a bind — and the key's way through that mount is
   closed as its own (the kernel's rules follow files, not paths, so a mount over one path alone wouldn't keep it).
+  So is everything else a command doesn't read — your home folder, the places kept from reads, the settings read
+  from a copy: its way through another mount (toolbox's `/run/host/home/<you>`, a bind of `$HOME` or of a folder in
+  it elsewhere, the source of a mount inside it) is closed too, in every tier; a mount with too many entries on the
+  way to open the rest one by one is closed whole — unless a place Claude's commands may use is in it — and Claude's
+  result says which.
   A key with a name outside the project (a hard link tarae can't see) is named in Claude's result: it may be
   readable there. Either way a key made during a command is closed from the next one.
 - **So what a first build makes there is made first.** Before a command runs, tarae makes, empty, what the

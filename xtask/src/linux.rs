@@ -589,7 +589,12 @@ fn docker_args(root: &Path, tree: Tree, pin: &str, platform: Option<&str>, what:
         }
         Tree::Streamed => a.push("-i".to_string()),
     }
-    mount(&mut a, format!("{}:/target", target_volume(root, pin, platform)));
+    let target = target_volume(root, pin, platform);
+    mount(&mut a, format!("{target}:/target"));
+    // (and again where toolbox mounts the host's root: the sandbox's tests reach a fake home through it — a second
+    // mount of one filesystem, which a container without `--userns` can't make itself — `SECOND_MOUNT`)
+    mount(&mut a, format!("{target}:{SECOND_TARGET}"));
+    a.extend(["-e".to_string(), format!("TARAE_TEST_SECOND_MOUNT={SECOND_MOUNT}")]);
     mount(&mut a, "tarae-registry:/usr/local/cargo/registry".into());
     // (seeded from the image the first time: the file's components and targets are fetched once)
     let of = platform.map(|p| format!("-{}", p.replace('/', "-"))).unwrap_or_default();
@@ -600,6 +605,13 @@ fn docker_args(root: &Path, tree: Tree, pin: &str, platform: Option<&str>, what:
     a.extend([image(pin), "sh".into(), "-ec".into(), script(tree, what)]);
     a
 }
+
+/// Where the target volume is mounted a second time (`docker_args`).
+const SECOND_TARGET: &str = "/run/host/target";
+
+/// The folder the sandbox's tests make their fake homes in, and the same folder through the second mount
+/// (`TARAE_TEST_SECOND_MOUNT`, 7e) — made by the script, writable by `--as-user`'s user too.
+const SECOND_MOUNT: &str = "/target/tarae-second-mount:/run/host/target/tarae-second-mount";
 
 /// The label naming the checkout a target volume is for.
 const CHECKOUT_LABEL: &str = "tarae.checkout";
@@ -1284,7 +1296,8 @@ fn script(tree: Tree, what: &What) -> String {
     // (home made first: `--env HOME=/work` names one the clone hasn't made yet)
     let mut s = String::from(
         "mkdir -p \"$HOME\"\n\
-         git config --global --add safe.directory '*'\n",
+         git config --global --add safe.directory '*'\n\
+         mkdir -p /target/tarae-second-mount && chmod 1777 /target/tarae-second-mount\n",
     );
     s.push_str(match tree {
         Tree::Mounted(_) => {
@@ -1695,6 +1708,13 @@ mod tests {
         assert_ne!(amd, target_volume(r, "1.99.0", Some("linux/arm64")));
         assert_eq!(amd.len(), target_volume(r, "1.99.0", None).len(), "the same form: pruned alike");
         assert!(a.contains(&format!("{amd}:/target")), "{a:?}");
+        // (and again, the sandbox's tests reaching a fake home through it — the folder made where both see it)
+        assert!(a.contains(&format!("{amd}:/run/host/target")), "{a:?}");
+        let second = format!("TARAE_TEST_SECOND_MOUNT={SECOND_MOUNT}");
+        assert!(a.windows(2).any(|w| w == ["-e", second.as_str()]), "{a:?}");
+        let (one, two) = SECOND_MOUNT.split_once(':').unwrap();
+        assert_eq!(one.strip_prefix("/target"), two.strip_prefix(SECOND_TARGET), "one folder, two ways");
+        assert!(a.last().unwrap().contains(&format!("chmod 1777 {one}\n")), "{a:?}");
         assert!(a.contains(&"tarae-rustup-1.99.0-linux-amd64:/usr/local/rustup".to_string()), "{a:?}");
         assert!(a.contains(&"tarae-registry:/usr/local/cargo/registry".to_string()), "{a:?}");
         assert_eq!(

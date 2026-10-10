@@ -124,6 +124,11 @@ pub struct Confine {
     pub split_why: Option<String>,
     /// The other mounts of a key's filesystem that reach it (`other_ways`) — its paths through them closed as its own.
     pub elsewhere: Vec<PathBuf>,
+    /// The other mounts that reach what runs don't read — home, the kept places, the files read from a copy
+    /// (`ways_into_holes`, 7e) — its paths through them holes too.
+    pub holes_elsewhere: Vec<PathBuf>,
+    /// Of those, the mounts closed whole: too many entries on the way to split (`WAY_ENTRIES_MAX`).
+    pub closed_whole: Vec<PathBuf>,
     /// The keys with a name outside the project (`There.unseen`), relative to it — said.
     pub unseen: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
@@ -585,14 +590,94 @@ pub fn covers_said(c: &Confine) -> String {
                         command."
             .to_string(),
     };
-    format!("{how}{elsewhere}{unseen}")
+    let tilde =
+        |places: &[PathBuf]| places.iter().map(|p| crate::allow::tilde(p)).collect::<Vec<_>>().join(", ");
+    let holes = match c.holes_elsewhere.as_slice() {
+        [] => String::new(),
+        places => format!(
+            " {} reach{} what it doesn't read (home, its kept places) through another mount of its filesystem: \
+             it's closed there too.",
+            tilde(places),
+            if places.len() == 1 { "es" } else { "" }
+        ),
+    };
+    let whole = match c.closed_whole.as_slice() {
+        [] => String::new(),
+        places => format!(
+            " {} {} closed whole: too many entries on the way to open the rest of {} one by one.",
+            tilde(places),
+            if places.len() == 1 { "is" } else { "are" },
+            if places.len() == 1 { "it" } else { "them" }
+        ),
+    };
+    format!("{how}{elsewhere}{holes}{whole}{unseen}")
+}
+
+/// More entries than this in the folders on the way down from a mount to a hole's path through it, and the mount is
+/// closed whole instead (`ways_into_holes`): each entry is a rule of the run's (a run's rules are a few hundred).
+pub const WAY_ENTRIES_MAX: usize = 1024;
+
+/// The other ways into what a run doesn't read (`holes`: home, its kept places, the files read from a copy, the
+/// ptys not its own) through mount table `table` (7e): each hole's path through every other mount of its filesystem
+/// that reaches it (`other_ways`) — Landlock's rules hold inodes, so a folder granted whole above such a mount (`/run`
+/// over toolbox's `/run/host`) would read the hole there. A mount inside a hole is part of it, and the other ways to
+/// what it shows too (`~/.ssh` a bind of `/data/ssh`, which `/` holds). Those paths are holes too (no rule, the folders
+/// on the way opened entry by entry); where those folders, from the mount down, hold more than `WAY_ENTRIES_MAX`
+/// entries, the mount itself is — but never one at or above a place the run is granted (`granted`: there it'd be no
+/// hole at all, that grant's own place, so its path into the hole is opened entry by entry however many there are).
+/// Each: the paths made holes, the mounts they come through, and those closed whole.
+fn ways_into_holes(
+    table: &Mounts<'_>,
+    holes: &[PathBuf],
+    granted: &[&Path],
+) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+    let (mut paths, mut through_mounts, mut whole) = (Vec::new(), Vec::new(), Vec::new());
+    // (the mounts inside each hole — a hole's own submounts, whose filesystems may be reached elsewhere)
+    let inner =
+        table.iter().map(|(_, _, at)| at).filter(|at| holes.iter().any(|h| at.starts_with(h) && *at != h));
+    let holes: Vec<PathBuf> = holes.iter().chain(inner).cloned().collect();
+    for (at, through) in holes.iter().flat_map(|h| ways_through(table, h)) {
+        // (the folders opened entry by entry below the mount: the path's own and each above it, up to the mount's)
+        let mut entries = 0;
+        for dir in through.ancestors().skip(1).take_while(|d| d.starts_with(&at)) {
+            entries += std::fs::read_dir(dir).map_or(0, |d| d.take(WAY_ENTRIES_MAX + 1 - entries).count());
+            if entries > WAY_ENTRIES_MAX {
+                break;
+            }
+        }
+        let holds_a_grant = granted.iter().any(|g| g.starts_with(&at));
+        match entries > WAY_ENTRIES_MAX && !holds_a_grant {
+            true => {
+                whole.push(at.clone());
+                paths.push(at.clone());
+            }
+            false => paths.push(through),
+        }
+        through_mounts.push(at);
+    }
+    for v in [&mut paths, &mut through_mounts, &mut whole] {
+        crate::sorting::sort(v);
+        v.dedup();
+    }
+    (paths, through_mounts, whole)
 }
 
 /// The other mounts in mount table `table` (a `mountinfo`) that reach `key`: those of its filesystem (the same
-/// device) whose root holds the key's place in that filesystem — beside the mount it's seen through (the deepest
-/// holding it, the last such listed; one whose way to it is that same path, mounted over, isn't another). Each: its
-/// mount point, and the key's path through it.
-pub fn other_ways(table: &str, key: &Path) -> Vec<(PathBuf, PathBuf)> {
+/// device) whose root holds the key's place in that filesystem, or lies inside it (a folder key — home — whose
+/// subfolder is bound elsewhere: that mount shows that much of it) — beside the mount it's seen through (the deepest
+/// holding it, the last such listed; one whose way to it is within that same path, mounted over, isn't another).
+/// Each: its mount point, and the key's path through it (the mount point itself for one inside it).
+/// Tests: a table's text in; runs read it once for every hole and key (`mounts`, `ways_through`).
+#[cfg(test)]
+fn other_ways(table: &str, key: &Path) -> Vec<(PathBuf, PathBuf)> {
+    ways_through(&mounts(table), key)
+}
+
+/// A mount table's lines (`mountinfo`): each mount's device, root in its filesystem, and mount point, in order.
+type Mounts<'a> = Vec<(&'a str, PathBuf, PathBuf)>;
+
+/// `table` read (`Mounts`).
+fn mounts(table: &str) -> Mounts<'_> {
     // (`\ooo` escapes a space, a tab, a newline and a backslash)
     let path = |s: &str| {
         let b = s.as_bytes();
@@ -614,13 +699,17 @@ pub fn other_ways(table: &str, key: &Path) -> Vec<(PathBuf, PathBuf)> {
         }
         PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(out))
     };
-    let mounts: Vec<(&str, PathBuf, PathBuf)> = table
+    table
         .lines()
         .filter_map(|l| {
             let mut f = l.split(' ').skip(2);
             Some((f.next()?, path(f.next()?), path(f.next()?)))
         })
-        .collect();
+        .collect()
+}
+
+/// `other_ways` in mounts already read.
+fn ways_through(mounts: &Mounts<'_>, key: &Path) -> Vec<(PathBuf, PathBuf)> {
     let Some((seen, (dev, root, at))) = mounts
         .iter()
         .enumerate()
@@ -635,9 +724,15 @@ pub fn other_ways(table: &str, key: &Path) -> Vec<(PathBuf, PathBuf)> {
         .iter()
         .enumerate()
         .filter(|(i, (d, _, _))| *i != seen && d == dev)
-        .filter_map(|(_, (_, r, a))| Some((a.clone(), a.join(inside.strip_prefix(r).ok()?))))
-        // (one whose way to it is the key's own path is that same place, mounted over: not another way)
-        .filter(|(_, through)| through != key)
+        .filter_map(|(_, (_, r, a))| match inside.strip_prefix(r) {
+            Ok(rest) => Some((a.clone(), a.join(rest))),
+            // (a mount of a folder inside it — `~/.ssh` bound elsewhere, the key a folder: home — shows that much of
+            // it, the whole mount)
+            Err(_) if r.starts_with(&inside) => Some((a.clone(), a.clone())),
+            Err(_) => None,
+        })
+        // (one whose way to it is within the key's own path is that same place, mounted over: not another way)
+        .filter(|(_, through)| !through.starts_with(key))
         .collect()
 }
 
@@ -959,8 +1054,9 @@ pub(super) fn confine_in(
     // read it through whatever grant holds that way. Its path through each such mount is closed as a key's is, and
     // its folders can't be whole then (the project's folder rule would open it through any way), so no mounts for
     // that run
-    let ways: Vec<(PathBuf, PathBuf)> = match &own.table {
-        Some(table) => keys.iter().flat_map(|k| other_ways(table, k)).collect(),
+    let table = own.table.as_deref().map(mounts);
+    let ways: Vec<(PathBuf, PathBuf)> = match &table {
+        Some(table) => keys.iter().flat_map(|k| ways_through(table, k)).collect(),
         None => Vec::new(),
     };
     // (the break-once: other mounts not looked at — a key reached through a second one reads there)
@@ -999,9 +1095,45 @@ pub(super) fn confine_in(
         // too where one of those is the other way)
         false => keys.extend(ways.into_iter().map(|(_, through)| through)),
     }
+    // What a run doesn't read is a hole in its rules — and so is its path through each other mount that reaches it
+    // (`ways_into_holes`, 7e), in every grant but one of a place that way holds (the project reached through it reads
+    // by its own rule); a mount is closed whole only where no grant sits at or under it — `/` and the write places
+    // can't skip their way into the hole that way
+    let read_holes: Vec<PathBuf> =
+        p.reads.home.iter().chain(&p.reads.kept).chain(&hidden).chain(&pts_hole).cloned().collect();
+    let run_dir = p.run.as_ref().map(|d| d.path());
+    let granted: Vec<&Path> = [Path::new("/"), &p.root]
+        .into_iter()
+        .chain(run_dir)
+        .chain(p.write.iter().chain(&p.files).chain(&p.reads.allow).chain(&p.reads.log).map(PathBuf::as_path))
+        .chain(DEVICES.iter().map(|(d, _)| Path::new(d)))
+        .collect();
+    // (the break-once of `granted`: a mount at or above a grant closed whole all the same)
+    #[cfg(test)]
+    let granted = match std::env::var_os("TARAE_TEST_CLOSE_OVER_GRANTS") {
+        Some(_) => Vec::new(),
+        None => granted,
+    };
+    let (ways_in, holes_elsewhere, closed_whole) = match &table {
+        Some(table) => ways_into_holes(table, &read_holes, &granted),
+        None => Default::default(),
+    };
+    // (the break-once: other mounts not looked at — home reached through a second one reads there)
+    #[cfg(test)]
+    let ways_in = match std::env::var_os("TARAE_TEST_NO_HOLES_ELSEWHERE") {
+        Some(_) => Vec::new(),
+        None => ways_in,
+    };
     let mut unread: Vec<PathBuf> = Vec::new();
     let mut grant = |r: &mut Ruleset, path: &Path, access: u64, holes: &[PathBuf]| {
-        grant_around(r, path, access, holes, &keys, &mut unread)
+        let more: Vec<&PathBuf> = ways_in.iter().filter(|w| !path.starts_with(w)).collect();
+        match more.is_empty() {
+            true => grant_around(r, path, access, holes, &keys, &mut unread),
+            false => {
+                let holes: Vec<PathBuf> = holes.iter().chain(more).cloned().collect();
+                grant_around(r, path, access, &holes, &keys, &mut unread)
+            }
+        }
     };
     match &p.reads.home {
         Some(home) => {
@@ -1097,6 +1229,8 @@ pub(super) fn confine_in(
         covers: covers.unwrap_or_default(),
         split_why,
         elsewhere,
+        holes_elsewhere,
+        closed_whole,
         unseen: unseen.iter().map(|k| k.strip_prefix(&p.root).unwrap_or(k).to_path_buf()).collect(),
         kept: Arc::new(kept),
         keeper: None,
@@ -1696,6 +1830,13 @@ mod tests {
                        3 1 8:1 /home /home rw - ext4 /dev/sda1 rw\n";
         let host = p("/run/host", "/run/host/home/u/p/.env");
         assert_eq!(ways(toolbox, "/home/u/p/.env"), [host], "toolbox's host root");
+        let sub = format!("{toolbox}4 1 8:1 /home/u/.aws /mnt/x rw - ext4 /dev/sda1 rw\n");
+        let home = [p("/run/host", "/run/host/home/u"), p("/mnt/x", "/mnt/x")];
+        assert_eq!(
+            ways(&sub, "/home/u"),
+            home,
+            "a folder: a bind of a folder inside it shows that much of it"
+        );
         let fedora =
             "1 0 0:30 /root / rw - btrfs /dev/vda3 rw\n2 1 0:30 /home /home rw - btrfs /dev/vda3 rw\n";
         assert!(ways(fedora, "/home/u/p/.env").is_empty(), "subvolumes that don't hold it");
@@ -1761,6 +1902,132 @@ mod tests {
             );
         }
         assert!(rule(&real.join("src")).is_some_and(|a| a & landlock::READ_FILE != 0), "beside it, read");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What a run doesn't read, reached through another mount of its filesystem (7e, `ways_into_holes`) — home bound
+    /// at a stand-in for toolbox's `/run/host/home/u`, a file read from a copy bound with its folder — is a hole there
+    /// too: no rule at or under its path through that mount, the folders on the way none of their own, while what's
+    /// beside them, the project and the system are granted. A mount whose way down holds more than
+    /// `WAY_ENTRIES_MAX` entries is closed whole, said — but not one a grant sits at or under, whose own rule would
+    /// skip it. A bind of a folder inside home elsewhere, and the source of a mount inside home, are holes too.
+    #[test]
+    fn a_hole_reached_through_another_mount_is_a_hole_there() {
+        let dir = std::env::temp_dir().join(format!("tarae-holes-elsewhere-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir = {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::canonicalize(&dir).unwrap()
+        };
+        // (the binds stood for by folders alike: what's mounted is only read from the table)
+        let (home, host) = (dir.join("home"), dir.join("run/host"));
+        let bound = host.join("home/u");
+        let wide = dir.join("wide");
+        let files = [
+            "home/.ssh/id_ed25519",
+            "home/project/src/main.rs",
+            "run/other.txt",
+            "run/host/etc/os-release",
+            "run/host/home/u/.ssh/id_ed25519",
+            "cfg/.netrc",
+            "cfg/other",
+            "run/host/cfg/.netrc",
+            "run/host/cfg/other",
+            "home/.aws/credentials",
+            "mnt/x/credentials",
+            "mnt/other",
+            "home/.gnupg/key",
+            "data/gnupg/key",
+            "data/other",
+        ];
+        for f in files {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(f), "tarae-fake-token").unwrap();
+        }
+        let line = |n: u32, root: &Path, at: &Path| {
+            format!("{n} 1 0:50 {} {} rw - overlay o rw\n", root.display(), at.display())
+        };
+        let table = format!("1 0 0:50 / / rw - overlay o rw\n{}", line(2, &home, &bound));
+        let confine = |p: &Policy, table: String| {
+            let own = Own { table: Some(table), ..Default::default() };
+            let r = Ruleset::written(3).unwrap();
+            confine_in(r, p, Err("not watched".into()), false, Ok(()), RunNet::Served, own).unwrap()
+        };
+        let rule = |c: &Confine, at: &Path| {
+            let all = c.granted().iter().filter(|(p, _)| p == at).map(|(_, a)| *a);
+            all.reduce(|a, b| a | b)
+        };
+        let reads = |c: &Confine, at: &Path| rule(c, at).is_some_and(|a| a & landlock::READ_FILE != 0);
+        let mut p = Policy {
+            run: crate::sandbox::RunDir::new().ok(),
+            ..Policy::for_project(&Env { root: home.join("project"), ..Default::default() })
+        };
+        p.reads.home = Some(home.clone());
+        // (the stand-ins are in the temp folder, where runs write: that grant would read them whatever `/`'s does)
+        p.write.retain(|w| !dir.starts_with(w));
+        // Home through the bind: no rule at or under it there, none of their own on the way; beside it, read
+        let c = confine(&p, table.clone());
+        assert_eq!(c.holes_elsewhere, std::slice::from_ref(&bound));
+        assert!(c.closed_whole.is_empty(), "{:?}", c.closed_whole);
+        assert!(c.granted().iter().all(|(at, _)| !at.starts_with(&bound)), "{:?}", c.granted());
+        for at in [Path::new("/"), &dir, &dir.join("run"), &host, &host.join("home")] {
+            assert_eq!(rule(&c, at), None, "{}", at.display());
+        }
+        for at in [&dir.join("run/other.txt"), &host.join("etc"), &home.join("project")] {
+            assert!(reads(&c, at), "{}: {:?}", at.display(), rule(&c, at));
+        }
+        assert!(c.granted().iter().any(|(at, a)| at.starts_with("/usr") && a & landlock::READ_FILE != 0));
+        // Too many entries on the way down from a mount: that mount closed whole
+        for i in 0..=WAY_ENTRIES_MAX {
+            std::fs::create_dir_all(wide.join(i.to_string())).unwrap();
+        }
+        let c = confine(&p, format!("{table}{}", line(3, &dir, &wide)));
+        assert_eq!(c.holes_elsewhere, [bound.clone(), wide.clone()]);
+        assert_eq!(c.closed_whole, std::slice::from_ref(&wide));
+        assert!(c.granted().iter().all(|(at, _)| !at.starts_with(&wide)), "closed whole");
+        assert!(covers_said(&c).contains("closed whole: too many entries"), "{}", covers_said(&c));
+        // ... but never a mount a grant sits at or under — that grant's own place, no hole at all to it: a place runs
+        // write in there keeps home's path through it a hole, opened entry by entry however many there are
+        let mut write_wide = p.clone();
+        write_wide.write.push(wide.clone());
+        let c = confine(&write_wide, format!("{table}{}", line(3, &dir, &wide)));
+        assert_eq!(rule(&c, &wide), None, "the write place split around home's path through it");
+        assert!(c.closed_whole.is_empty(), "{:?}", c.closed_whole);
+        assert!(rule(&c, &wide.join("0")).is_some_and(|a| a & landlock::WRITE_FILE != 0), "the rest written");
+        assert!(c.granted().iter().all(|(at, _)| !at.starts_with(wide.join("home"))), "home through it");
+        // A bind of a folder inside home elsewhere (`~/.aws` at a stand-in for `/mnt/x`): that whole mount a hole; and
+        // a mount inside home (`~/.gnupg` a bind of `/data/gnupg`, which `/` holds): what it shows a hole there too
+        let (x, gnupg) = (dir.join("mnt/x"), dir.join("data/gnupg"));
+        let both =
+            format!("{table}{}{}", line(3, &home.join(".aws"), &x), line(4, &gnupg, &home.join(".gnupg")));
+        let c = confine(&p, both);
+        // (no rule at or under either, nor on the folders on the way to it, which would read it whole)
+        for at in [&x, &gnupg] {
+            let below = |(g, _): &(PathBuf, u64)| g.starts_with(at);
+            assert!(!c.granted().iter().any(below), "{}: {:?}", at.display(), c.granted());
+            for up in at.ancestors().skip(1).take_while(|u| u.starts_with(&dir)) {
+                assert_eq!(rule(&c, up), None, "{} on the way to {}", up.display(), at.display());
+            }
+        }
+        for (mount, why) in
+            [(Path::new("/"), "the source of ~/.gnupg"), (&x, "~/.aws bound"), (&bound, "home bound")]
+        {
+            assert!(c.holes_elsewhere.iter().any(|m| m == mount), "{why}: {:?}", c.holes_elsewhere);
+        }
+        assert!(reads(&c, &dir.join("mnt/other")) && reads(&c, &dir.join("data/other")), "beside them, read");
+        // A file read from a copy (no home here): its path through a bind of its folder is a hole too
+        let netrc = dir.join("cfg/.netrc");
+        p.reads.home = None;
+        p.reads.copies.hidden = vec![(netrc.clone(), "NETRC".into())];
+        let c = confine(
+            &p,
+            format!("1 0 0:50 / / rw - overlay o rw\n{}", line(2, &dir.join("cfg"), &host.join("cfg"))),
+        );
+        assert_eq!(c.holes_elsewhere, [host.join("cfg")]);
+        for at in [&netrc, &host.join("cfg/.netrc")] {
+            assert_eq!(rule(&c, at), None, "{}", at.display());
+        }
+        assert!(reads(&c, &host.join("cfg/other")) && reads(&c, &dir.join("cfg/other")), "beside it, read");
         std::fs::remove_dir_all(&dir).ok();
     }
 
