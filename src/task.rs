@@ -274,6 +274,8 @@ pub struct Run {
     pub state: State,
     /// (is stderr, line).
     pub output: Vec<(bool, String)>,
+    /// Every line's bytes it printed, a newline each — what was cut from `output` too.
+    pub output_bytes: usize,
     pub started: Instant,
     pub took: Option<Duration>,
     pid: Option<u32>,
@@ -367,6 +369,7 @@ impl Run {
             self.keep(0);
             (self.section, self.cut) = (self.output.len(), None);
         }
+        self.output_bytes += line.len() + 1;
         self.output.push((err, line));
     }
 
@@ -416,6 +419,7 @@ impl Run {
             task,
             state: State::Passed,
             output: Vec::new(),
+            output_bytes: 0,
             started: Instant::now(),
             took: None,
             pid: None,
@@ -944,6 +948,7 @@ impl Editor {
             task,
             state: State::Running,
             output: Vec::new(),
+            output_bytes: 0,
             started: Instant::now(),
             took: None,
             pid: Some(pid),

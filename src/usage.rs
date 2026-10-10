@@ -19,6 +19,12 @@
 //!
 //! Kept in memory per session (`Session.usage`); a conversation's turns, cost so far and cache go with it in
 //! `$state/chats/` (`chats.rs`), so one continued (`:restart`, `C-p`) comes back with them.
+//!
+//! What tarae itself sends — each tool result of its own, each user message and its editor context — is
+//! measured as it goes (`tokens` lines in the log, sizes only; `:usage`'s table of tool results): every later
+//! request reads it again, so that's where a turn's cost grows.
+
+use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
@@ -259,6 +265,8 @@ pub struct Conv {
     /// Compacted since its latest request: what the context holds now (`post_tokens`) — until the next
     /// request says.
     pub compacted_to: Option<u64>,
+    /// What tarae's own tools handed it since tarae started, by tool: (calls, bytes) — `:usage`'s table.
+    pub tool_results: BTreeMap<String, (u64, u64)>,
 }
 
 /// Warm (time left) · cold (since when) · not reported.
@@ -598,8 +606,43 @@ impl Usage {
             first_next: false,
             cost_so_far: v["cost_so_far"].as_f64(),
             compacted_to: v["compacted_to"].as_u64(),
+            tool_results: BTreeMap::new(),
         });
     }
+
+    /// A result of tarae's tool `tool` went to session `session`'s conversation: `sent` bytes — of `output`, a
+    /// run's whole output. One `tokens` log line, and counted for `:usage`.
+    pub fn tool_result(&mut self, session: &str, tool: &str, sent: usize, output: Option<usize>) {
+        let extra = output.map(|o| format!(" output={o}")).unwrap_or_default();
+        size_line(session, &format!("tool={tool}"), sent, &extra);
+        if let Some(c) = &mut self.conv {
+            let (calls, bytes) = c.tool_results.entry(tool.to_string()).or_default();
+            *calls += 1;
+            *bytes += sent as u64;
+        }
+    }
+}
+
+// ── Sizes ───────────────────────────────────────────────────────────────────
+
+/// Bytes a token is, about (English and code) — sizes said before claude counts them.
+const BYTES_PER_TOKEN: usize = 4;
+
+/// The `tokens` log line for `bytes` of `what` (`tool=search`, `message`) sent to session `session`'s
+/// conversation, `extra` after. Sizes only, never content.
+fn size_line(session: &str, what: &str, bytes: usize, extra: &str) {
+    let est = bytes / BYTES_PER_TOKEN;
+    crate::log::line(
+        "tokens",
+        "info",
+        &format!("session={session} {what} bytes={bytes} est_tokens={est}{extra}"),
+    );
+}
+
+/// A user message went to session `session`'s conversation: `bytes` in all, `context` of them the editor
+/// context (with what rides along: notes, a screen, what was pointed at).
+pub fn message_sent(session: &str, bytes: usize, context: usize) {
+    size_line(session, "message", bytes, &format!(" context={context}"));
 }
 
 /// The turns of every session that ended today (local time).
@@ -693,7 +736,7 @@ fn limits_section(u: &Usage, limits: &crate::limits::Limits, now_ms: u64) -> Str
                 ]
             })
             .collect();
-        out += &table(&["window", "used", "resets", "as of", "from"], &rows);
+        out += &table(&["window", "used", "resets", "as of", "from"], &rows, 2);
     }
     if let Some(plan) = &limits.plan {
         out += &format!("\nPlan: {plan}.\n");
@@ -787,6 +830,7 @@ pub fn report(
         out += &table(
             &["time", "model", "input", "cache write", "cache read", "output", "hit", "API price"],
             &rows,
+            2,
         );
     }
     if let Some(c) = &u.conv {
@@ -804,6 +848,8 @@ pub fn report(
                 "Not known: this conversation's first request wasn't seen here (it was continued).\n".into()
             }
         };
+        out += "\n## Tool results\n\n";
+        out += &tool_table(&c.tool_results);
     }
     let today_all = today(all.iter().map(|(_, u)| *u), now_ms);
     out += "\n## Today\n\n";
@@ -824,8 +870,26 @@ pub fn report(
     out
 }
 
-/// A Markdown table, its columns padded (numbers right-aligned — all but the first two).
-fn table(head: &[&str], rows: &[Vec<String>]) -> String {
+/// What tarae's own tools handed the conversation, by tool, the most bytes first (Claude's own Read, Grep and
+/// Edit aren't tarae's to count).
+fn tool_table(by: &BTreeMap<String, (u64, u64)>) -> String {
+    if by.is_empty() {
+        return "None of tarae's tools has answered in this conversation since tarae started.\n".into();
+    }
+    let est = |b: u64| tokens(b / BYTES_PER_TOKEN as u64);
+    let mut tools: Vec<(&String, &(u64, u64))> = by.iter().collect();
+    crate::sorting::by_key(&mut tools, |(_, (_, bytes))| std::cmp::Reverse(*bytes));
+    let mut rows: Vec<Vec<String>> =
+        tools.iter().map(|(t, (n, b))| vec![t.to_string(), n.to_string(), tokens(*b), est(*b)]).collect();
+    let (n, b) = by.values().fold((0, 0), |(n, b), (cn, cb)| (n + cn, b + cb));
+    rows.push(vec!["total".into(), n.to_string(), tokens(b), est(b)]);
+    let mut out = "Since tarae started — every request after one reads it again:\n\n".to_string();
+    out += &table(&["tool", "calls", "bytes", "≈ tokens"], &rows, 1);
+    out
+}
+
+/// A Markdown table, its columns padded (numbers right-aligned — all but the first `left`).
+fn table(head: &[&str], rows: &[Vec<String>], left: usize) -> String {
     use unicode_width::UnicodeWidthStr as _;
     let widths: Vec<usize> = (0..head.len())
         .map(|c| rows.iter().map(|r| r[c].width()).chain([head[c].width()]).max().unwrap_or(0))
@@ -833,13 +897,13 @@ fn table(head: &[&str], rows: &[Vec<String>]) -> String {
     let line = |cells: Vec<String>| format!("| {} |\n", cells.join(" | "));
     let pad = |c: usize, s: &str| {
         let gap = " ".repeat(widths[c] - s.width());
-        if c < 2 { format!("{s}{gap}") } else { format!("{gap}{s}") }
+        if c < left { format!("{s}{gap}") } else { format!("{gap}{s}") }
     };
     let mut out = line(head.iter().enumerate().map(|(c, h)| pad(c, h)).collect());
     let rule = widths
         .iter()
         .enumerate()
-        .map(|(c, w)| if c < 2 { "-".repeat(*w) } else { format!("{}:", "-".repeat(w - 1)) });
+        .map(|(c, w)| if c < left { "-".repeat(*w) } else { format!("{}:", "-".repeat(w - 1)) });
     out += &line(rule.collect());
     for r in rows {
         out += &line(r.iter().enumerate().map(|(c, s)| pad(c, s)).collect());

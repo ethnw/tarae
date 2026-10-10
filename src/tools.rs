@@ -40,6 +40,10 @@ pub struct Call {
     request_id: String,
     id: Value,
     rev: crate::mcp::Rev,
+    /// The tool it calls — its answer's size is logged and counted by it (`usage::Usage::tool_result`).
+    tool: String,
+    /// A `run`'s: its whole output's bytes, said beside what its answer sends.
+    pub(crate) output: Option<usize>,
     /// A `run`'s or `run_tests`' way from the ask to its end (`trace.rs`) — its card, the sandbox, the run
     /// carry it on; logged at the end, or where it was dropped.
     pub(crate) trace: Option<crate::trace::RunTrace>,
@@ -75,7 +79,16 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
         Ok(rev) => rev,
         Err(e) => return Some(json!({ "jsonrpc": "2.0", "id": id, "error": e })),
     };
-    let call = || Call { generation, request_id: request_id.to_string(), id: id.clone(), rev, trace: None };
+    let tool = msg["params"]["name"].as_str().unwrap_or_default();
+    let call = || Call {
+        generation,
+        request_id: request_id.to_string(),
+        id: id.clone(),
+        rev,
+        tool: tool.to_string(),
+        output: None,
+        trace: None,
+    };
     let method = msg["method"].as_str().unwrap_or_default();
     let result = match method {
         "tools/list" => {
@@ -155,6 +168,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 }
                 other => Err(format!("no tool {}", other.unwrap_or_default())),
             };
+            sized(ed, tool, &r, None);
             Ok(content(r))
         }
         m => crate::mcp::common(m, msg, rev, json!({ "tools": {} })).ok_or_else(|| crate::mcp::not_found(m)),
@@ -194,6 +208,14 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
     schema
 }
 
+/// A result of `tool` going to the chat of `ed.session`: its size logged and counted — `output`, a run's whole
+/// output beside it.
+fn sized(ed: &mut Editor, tool: &str, r: &Result<String, String>, output: Option<usize>) {
+    let (Ok(text) | Err(text)) = r;
+    let session = ed.session.label().to_string();
+    ed.session.usage.tool_result(&session, tool, text.len(), output);
+}
+
 /// A tool's text as MCP content (Err = a tool error Claude can correct).
 pub(crate) fn content(r: Result<String, String>) -> Value {
     match r {
@@ -218,13 +240,24 @@ impl Call {
             request_id: String::new(),
             id: json!(id),
             rev: Default::default(),
+            tool: String::new(),
+            output: None,
             trace: None,
         }
     }
 
     /// Call `id` (`request_id` its control request's) of chat process `generation`.
     pub fn of(generation: u64, request_id: &str, id: Value) -> Call {
-        Call { generation, request_id: request_id.into(), id, rev: Default::default(), trace: None }
+        let request_id = request_id.into();
+        Call {
+            generation,
+            request_id,
+            id,
+            rev: Default::default(),
+            tool: String::new(),
+            output: None,
+            trace: None,
+        }
     }
 }
 
@@ -256,6 +289,7 @@ fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
         None => {}
         Some(session) if session == ed.session.id => {
             ed.session.tool_waits.retain(|w| !w.is(call.generation, &call.id));
+            sized(ed, &call.tool, &r, call.output);
             let response = response(&call, r);
             crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
         }
@@ -2747,7 +2781,8 @@ pub fn run_done(ed: &mut Editor) {
         return told(ed, head, text);
     }
     let joined = std::mem::take(&mut r.joined);
-    let Some(call) = r.chat.take() else { return };
+    let Some(mut call) = r.chat.take() else { return };
+    call.output = Some(r.output_bytes);
     let snap = r.snap.take();
     let r = &*r;
     let items = &r.places;
@@ -2757,7 +2792,8 @@ pub fn run_done(ed: &mut Editor) {
         .into_iter()
         .map(|j| {
             let how = Waited::of(r.started, r.queued.as_ref(), Some((j.asked, j.running)));
-            (j.call, run_report(&ed.session.root, r, items, how))
+            let call = Call { output: Some(r.output_bytes), ..j.call };
+            (call, run_report(&ed.session.root, r, items, how))
         })
         .collect();
     let first =
@@ -4011,6 +4047,115 @@ mod tests {
             at += found + 1;
         }
         assert!(line.starts_with("claude's run: printf"), "{line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Where a conversation's tokens go is measured before anything is made cheaper (docs/roadmap.md "Cost-
+    /// efficient by default"): a stand-in turn — a message, two tool results answered at once and a run
+    /// answered at its end — gives one `tokens` log line each, sizes only (the bytes Claude got, a run's whole
+    /// output beside them, the message's editor context), and `:usage` counts the same by tool.
+    #[test]
+    fn what_tarae_hands_claude_is_measured_by_size() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-tokcost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        // (its own session name: the log is shared by tests running beside it)
+        let name = format!("tokcost-{}", std::process::id());
+        ed.session.name = name.clone();
+        assert_eq!(ed.session.label(), name);
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        ed.session.usage.fresh("tokcost-conversation");
+        let log = crate::log::capture();
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        assert!(crate::chat::submit(&mut ed, "where do the tokens go?", None, None), "sent");
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        // Two answered at once
+        let mut sent = Vec::new();
+        for (id, tool, args) in [
+            (1, "plan", json!({ "steps": [{ "text": "measure", "status": "doing" }] })),
+            (2, "ui", json!({})),
+        ] {
+            let msg = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": tool, "arguments": args } });
+            let answer = super::mcp(&mut ed, generation, &format!("r{id}"), &msg).expect("answered at once");
+            sent.push((tool, answer["result"]["content"][0]["text"].as_str().unwrap().len()));
+        }
+        // A run of more lines than go back whole, answered at its end
+        let msg = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": "run", "arguments": { "command": "seq 1 1000" } } });
+        assert!(super::mcp(&mut ed, generation, "r3", &msg).is_none(), "it waits for its end");
+        let said = || super::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(3)).cloned());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while said().is_none() {
+            assert!(std::time::Instant::now() < end, "timed out");
+            if !ed.offers.is_empty() {
+                ed.offer_accept();
+            }
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        let text = said().unwrap().1.unwrap();
+        assert!(text.starts_with("exit 0") && text.contains("… 750 lines …"), "{text}");
+        sent.push(("run", text.len()));
+        // (1..=1000, a newline each: what the command printed, all of it)
+        let whole: usize = (1..=1000).map(|n: usize| n.to_string().len() + 1).sum();
+
+        let lines: Vec<String> =
+            log.lines().into_iter().filter(|l| l.contains(&format!("session={name} "))).collect();
+        let num = |l: &str, key: &str| -> usize {
+            let at = l.find(key).unwrap_or_else(|| panic!("{key} in {l}")) + key.len();
+            l[at..].split(' ').next().unwrap().parse().unwrap()
+        };
+        assert_eq!(lines.len(), 4, "a message and three tool results: {lines:#?}");
+        assert!(lines.iter().all(|l| l.starts_with("tokens  info  ")), "{lines:#?}");
+        // The message: its editor context a part of it — sizes, never its words
+        let message = &lines[0];
+        assert!(message.contains(" message ") && !message.contains("tokens go"), "{message}");
+        let (bytes, context) = (num(message, "bytes="), num(message, "context="));
+        assert!(0 < context && context < bytes, "{message}");
+        // Each tool result: the bytes Claude got, in the order they went; the run's whole output beside them
+        for (line, (tool, bytes)) in lines[1..].iter().zip(&sent) {
+            assert!(line.contains(&format!(" tool={tool} ")), "{tool}: {line}");
+            assert_eq!(num(line, "bytes="), *bytes, "{line}");
+            assert_eq!(num(line, "est_tokens="), bytes / 4, "{line}");
+            assert_eq!(line.contains(" output="), *tool == "run", "{line}");
+        }
+        let run = &lines[3];
+        assert_eq!(num(run, "output="), whole, "{run}");
+        assert!(num(run, "bytes=") < whole, "a run of 1000 lines isn't sent whole: {run}");
+
+        // `:usage`: the same counts, by tool, the most bytes first, and their total
+        let report = crate::usage::report(&name, &ed.session.usage, &ed.limits, &[], crate::usage::now_ms());
+        let table = report.split("## Tool results\n").nth(1).unwrap_or_else(|| panic!("{report}"));
+        let rows: Vec<Vec<&str>> = table
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| tool") && !l.starts_with("| -"))
+            .map(|l| l.trim_matches('|').split('|').map(str::trim).collect())
+            .collect();
+        let mut by_bytes = sent.clone();
+        crate::sorting::by_key(&mut by_bytes, |(_, b)| std::cmp::Reverse(*b));
+        let total: usize = sent.iter().map(|(_, b)| b).sum();
+        let want: Vec<Vec<String>> = by_bytes
+            .iter()
+            .map(|(t, b)| (t.to_string(), 1, *b))
+            .chain([("total".to_string(), 3, total)])
+            .map(|(t, n, b)| {
+                let said = |b: usize| crate::usage::tokens(b as u64);
+                vec![t, n.to_string(), said(b), said(b / 4)]
+            })
+            .collect();
+        assert_eq!(rows, want, "{table}");
+        drop(log);
         std::fs::remove_dir_all(&dir).ok();
     }
 

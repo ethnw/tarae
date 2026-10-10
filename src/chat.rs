@@ -1493,6 +1493,7 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
             format!("{context}\n{}", blocks.join("\n"))
         }
     };
+    let session = ed.session.label().to_string();
     let Some(c) = &mut ed.session.chat else { return false };
     let Some(p) = &mut c.proc else { return false };
     // What happened to its edits since (a turn undone): Claude's memory still has them
@@ -1523,6 +1524,7 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
         c.msgs.push(Msg::new(Role::Note, format!("claude: {e} — press enter to retry"), ""));
         return false;
     }
+    crate::usage::message_sent(&session, content.len(), context.len());
     c.sent.extend(sent);
     c.hop = 0;
     c.follow.new_turn();

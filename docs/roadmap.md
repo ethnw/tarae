@@ -231,6 +231,19 @@ git tab, search, a short Kubernetes one.
 
 ### Queued, not scheduled
 
+- **Cost-efficient by default.** Every tool call re-reads the whole conversation, so what tarae's own tools return
+  and what each message carries is most of a turn's cost. Principles (decided with the user 2026-10-10):
+  invisible by default; a summary never hides the original (it can always be fetched); thrift doesn't depend on
+  billing — one setting, user config only, `llm.thrift = "off" | "normal" | "strong"` (default `"normal"`):
+  normal = the invisible ones for everyone (summaries with the original fetchable, ranges, a stable prefix);
+  strong = also tighter output and a quiet hint to start fresh at ~30 % context (never a card); off = the
+  originals as they are. Billing changes no behaviour: the first switch to the API only adds a one-time hint that
+  the setting exists. Measure first — the `tokens` lines in tarae.log (sizes per tool result and per message's
+  editor context, by session) and `:usage`'s table of tool results by tool. Ideas, to be ranked by that
+  measurement:
+  - run output summarized from the packs' test-result parsing, the full log fetchable;
+  - read and search tools returning ranges by default, with "more";
+  - a stable prompt prefix: the volatile editor context last, and small.
 - **The lineup** ([design/async.md](design/async.md) phases 2–4): one scheduler for heavy runs across sessions,
   exclusive runs (perf) on a quiet machine, the queue position shown, resources declared by language packs, and
   language-server work that holds a resource. Measured again after sandbox validation. As of 2026-10-08, build
