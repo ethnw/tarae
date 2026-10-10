@@ -643,7 +643,8 @@ impl Guard {
                     }
                     None => String::new(),
                 };
-                // (macOS, 7a — names from the data, `secretnames`; Linux's are 7b's)
+                // (7a, 7b — names from the data, `secretnames`; what a file made beside one does on Linux is
+                // `linux::unread_said`'s, in the notes)
                 let keys = match p.keys.is_some() {
                     true => {
                         " In the project it can't read a file named like a key or a token (but templates and \
@@ -2467,7 +2468,8 @@ pub fn protected_in(root: &Path, path: &Path) -> bool {
 
 /// Whether `path` (real) is a file named like a key (`secretnames`, its exceptions taken out) in the project at
 /// `root`, not below a folder of tools' output (`outputs`: a package's test keys in `node_modules`) — what the
-/// macOS profile keeps a run from reading (7a), in Rust: the report names what it denied.
+/// macOS profile keeps a run from reading (7a) and Linux's rules leave out (`linux::there`, 7b), in Rust:
+/// the report names what it denied.
 pub fn key_named_in(root: &Path, path: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(root) else { return false };
     let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
@@ -2969,20 +2971,28 @@ fn caches_in(c: &crate::sandboxpack::Caches, home: &Path) -> (CachesSaid, Vec<Pa
 /// `Editor.sandbox_here`: `policy_from`.)
 #[cfg(test)]
 pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Result<Policy, String> {
-    policy_from(root, llm, reads, &Here::now())
+    let w = crate::tools::Widened { llm: llm.clone(), reads: reads.to_vec(), ..Default::default() };
+    policy_from(root, w, &Here::now())
 }
 
-/// `policy` with what `here` says of tarae's surroundings (`Editor.sandbox_here`: a test's own).
-pub fn policy_from(
-    root: &Path,
-    llm: &crate::llm::LlmConfig,
-    reads: &[PathBuf],
-    here: &Here,
-) -> Result<Policy, String> {
+/// `policy`, these files named like keys opened as the user's grant from the run's panel opens them
+/// (`allow::Grant::Key`, through `tools::with_allowed`).
+#[cfg(test)]
+pub fn policy_opening(root: &Path, llm: &crate::llm::LlmConfig, keys: &[PathBuf]) -> Result<Policy, String> {
+    let open = crate::allow::Allowed { keys: keys.to_vec(), ..Default::default() };
+    policy_from(root, crate::tools::with_allowed(llm, &[&open], None), &Here::now())
+}
+
+/// The policy for the run about to start with the settings and grants `w` (`tools::with_allowed`) and what
+/// `here` says of tarae's surroundings (`Editor.sandbox_here`: a test's own).
+pub fn policy_from(root: &Path, w: crate::tools::Widened, here: &Here) -> Result<Policy, String> {
     // (Linux: whether its keeper takes its connections in the session's network — the probe's, asked here)
     #[cfg(target_os = "linux")]
     let here = &Here { redirects: here.os == Os::Linux && tier::redirects(), ..here.clone() };
-    let p = run_policy_in(root, llm, reads, here)?;
+    let mut p = run_policy_in(root, &w.llm, &w.reads, here)?;
+    // (what no setting carries goes on before Linux's rules are made from the policy: a file named like a key
+    // the user opened is left out of what they close — 7b)
+    w.onto(&mut p);
     #[cfg(target_os = "linux")]
     let p = confined(p);
     Ok(p)
@@ -3061,7 +3071,7 @@ fn policy_computed(
     // (Linux: the supervisor hands the run's connections over — in the session's network where its keeper gets
     // one, taken there: the open network needs no proxy URL)
     p.supervised = here.os == Os::Linux;
-    p.keys = (here.os == Os::Mac).then(Vec::new);
+    p.keys = Some(Vec::new());
     p.redirected = p.supervised && p.network && here.redirects;
     with_kept(&mut p, &env);
     (p, Found { real_home, above, own })
@@ -5917,12 +5927,14 @@ mod tests {
     /// Files named like keys in the project (7a, names from the data — `secretnames`): the profile denies their
     /// reads below the root, after the allows, by name in any case and only by parameters — but its exceptions
     /// (a `.env`'s template, a public key), what's below tools' output and the file the user opened; the rule
-    /// in Rust (`reads_allow`) agrees; the report names the file and how it opens; Linux's policy (`keys` None,
-    /// 7b) closes none of them yet and says nothing of it.
+    /// in Rust (`reads_allow`) agrees; the report names the file and how it opens. Every policy closes them, on
+    /// both systems (7b: Linux's rules — `linux::tests::keys_are_found_where_they_are`); one that doesn't (`keys`
+    /// None, a test's) says nothing of it.
     #[test]
     fn files_named_like_keys_are_closed_but_the_exceptions() {
         let root = Path::new("/Users/u/p");
-        let mac = Policy { keys: Some(Vec::new()), ..Policy::for_project(&env(root)) };
+        let mac = Policy::for_project(&env(root));
+        assert_eq!(mac.keys, Some(Vec::new()), "closed, whatever the system");
         let text = mac.profile();
         let deny = text.lines().find(|l| l.contains("(deny file-read-data file-read-xattr (require-all"));
         let deny = deny.unwrap_or_else(|| panic!("{text}"));
@@ -5947,7 +5959,7 @@ mod tests {
         assert!(text.find(open).is_some_and(|o| o > text.find(deny).unwrap()), "{text}");
         assert!(granted.params().contains(&("Y0".into(), env_file.display().to_string())));
         assert!(reads(&granted, ".env") && !reads(&granted, ".env.local"));
-        // The report: the file and how it opens — not where it's open, and nothing on Linux
+        // The report: the file and how it opens — not where it's open, and nothing where they aren't closed
         let refused =
             [Denial { process: "cat".into(), op: "file-read-data".into(), target: "/Users/u/p/.env".into() }];
         let said = |p: &Policy| Guard::In(Box::new(p.clone())).kept(&refused).0;
@@ -5955,13 +5967,12 @@ mod tests {
                     command needs it, tell the user: the run's panel (space m s) lets your commands read that file.";
         assert!(said(&mac).contains(line), "{}", said(&mac));
         assert!(!said(&granted).contains("named like a key"), "{}", said(&granted));
-        let linux = Policy::for_project(&env(root));
-        let linux = Policy { keys: None, ..linux };
-        assert!(reads(&linux, ".env") && !said(&linux).contains("named like a key"));
-        assert!(!linux.profile().contains("[pP][eE][mM]"));
+        let open = Policy { keys: None, ..mac.clone() };
+        assert!(reads(&open, ".env") && !said(&open).contains("named like a key"));
+        assert!(!open.profile().contains("[pP][eE][mM]"));
         let summary = |p: &Policy| Guard::In(Box::new(p.clone())).report(&[]);
         assert!(summary(&mac).contains("In the project it can't read a file named like a key or a token"));
-        assert!(!summary(&linux).contains("named like a key"));
+        assert!(!summary(&open).contains("named like a key"));
     }
 
     /// What a run never reads holds without any pack — `KEPT_FLOOR` beside `allow::SECRETS`, Claude's own,
@@ -7760,9 +7771,37 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// A project for the real-Seatbelt tests of files named like keys (7a), in the test's own temp folder: each
-    /// file's whole text a fake token — what a run that reads it prints. (Its folder, its project.)
-    #[cfg(target_os = "macos")]
+    /// Whether the real-sandbox tests of files named like keys run here — else the test says it skips itself and
+    /// why: inside a sandbox on macOS (Seatbelt can't start there), without Landlock on Linux. Any ABI: nothing
+    /// here needs more than 1 (there every link and rename across folders is refused, which the tests take as
+    /// refused too).
+    fn keys_tested_here(test: &str) -> bool {
+        let test = format!("sandbox::tests::{test}");
+        #[cfg(target_os = "macos")]
+        return !skipped_inside(&test);
+        #[cfg(not(target_os = "macos"))]
+        match crate::landlock::abi() {
+            Ok(_) => true,
+            Err(e) => {
+                let line =
+                    format!("{}{test} — needs Landlock, this kernel: {e}\n", crate::test_results::SELF_SKIP);
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+                false
+            }
+        }
+    }
+
+    /// What a refused open says: Seatbelt's EPERM, Landlock's EACCES.
+    const KEY_DENIED: &str =
+        if cfg!(target_os = "macos") { "Operation not permitted" } else { "Permission denied" };
+
+    /// The policy a run in the project at `root` gets, its environment as tarae's runs have it.
+    fn key_policy(root: &Path) -> Policy {
+        Policy::for_project(&Env { root: root.to_path_buf(), run_env: run_env_here(), ..Env::default() })
+    }
+
+    /// A project for the real-sandbox tests of files named like keys (7a, 7b), in the test's own temp folder:
+    /// each file's whole text a fake token — what a run that reads it prints. (Its folder, its project.)
     fn key_files(tag: &str) -> (PathBuf, PathBuf) {
         let t =
             profile_path(&std::env::temp_dir()).join(format!("tarae-sb-keys-{tag}-{}", std::process::id()));
@@ -7783,48 +7822,92 @@ mod tests {
         (t, root)
     }
 
-    /// `script` run in `root` under `p`: whether it ended well, and its output and errors.
-    #[cfg(target_os = "macos")]
+    /// `script` run in `root` under `p` — on Linux its rules made now, as each run's are (`confined`): whether it
+    /// ended well, and its output and errors.
     fn sh_under(p: &Policy, root: &Path, script: &str) -> (bool, String, String) {
-        let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
-        let out = c.current_dir(root).stdin(Stdio::null()).output().unwrap();
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-        (out.status.success(), text(&out.stdout), text(&out.stderr))
+        #[cfg(target_os = "macos")]
+        {
+            let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
+            let out = c.current_dir(root).stdin(Stdio::null()).output().unwrap();
+            (out.status.success(), text(&out.stdout), text(&out.stderr))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let p = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            c.current_dir(root).stdin(Stdio::null());
+            let s = spawn(Some(&p), &c).unwrap_or_else(|e| panic!("{e}: {:?}", p.confine));
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let (mut o, mut e) = (s.stdout.expect("its stdout"), s.stderr.expect("its stderr"));
+            std::thread::scope(|sc| {
+                sc.spawn(|| std::io::Read::read_to_end(&mut e, &mut err));
+                let _ = std::io::Read::read_to_end(&mut o, &mut out);
+            });
+            let ok = crate::spawn::wait(s.pid).is_ok_and(|st| st.success());
+            (ok, text(&out), text(&err))
+        }
     }
 
-    /// For real, on macOS (7a): a run can't read a file in the project named like a key — at the top or deep, in
-    /// any case — nor through a link to it or a copy of it; it sees that it's there; the rule in Rust agrees.
-    #[cfg(target_os = "macos")]
+    /// For real (7a, 7b): a run can't read a file in the project named like a key — at the top or deep, in any
+    /// case — nor through a link to it or a copy of it; it sees that it's there; the rule in Rust agrees. On
+    /// Linux (Landlock's rules hold the file, not its name) not after a rename or a hard link either, in its
+    /// folder or to one that reads.
     #[test]
     fn a_run_cant_read_a_key_named_file() {
-        if skipped_inside("sandbox::tests::a_run_cant_read_a_key_named_file") {
+        if !keys_tested_here("a_run_cant_read_a_key_named_file") {
             return;
         }
         let (t, root) = key_files("closed");
-        let p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+        let p = key_policy(&root);
         for f in [".env", "deep/er/Server.PEM"] {
             let (ok, out, err) = sh_under(&p, &root, &format!("cat {f}"));
-            assert!(
-                !ok && !out.contains("tarae-fake-token") && err.contains("Operation not permitted"),
-                "{f}: {err}"
-            );
+            assert!(!ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED), "{f}: {out} {err}");
             assert!(!p.reads_allow(&root.join(f)), "{f}: the rule in Rust");
         }
         let (ok, out, err) = sh_under(&p, &root, "test -f .env && ln -s .env l && cat l; cp .env c; cat c");
         assert!(!ok && !out.contains("tarae-fake-token") && root.join("l").exists(), "{out} {err}");
+        #[cfg(not(target_os = "macos"))]
+        for script in [
+            "ln deep/er/Server.PEM src/h; cat src/h",
+            "mv deep/er src/er; cat src/er/Server.PEM",
+            "mv .env moved && cat moved",
+        ] {
+            let (ok, out, err) = sh_under(&p, &root, script);
+            assert!(!ok && !out.contains("tarae-fake-token"), "{script}: {out} {err}");
+        }
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// For real, on macOS (7a): what's named like a key but isn't one is read — the data's exceptions (a `.env`'s
+    /// For real (7a, 7b): a file named like a key inside a protected name — `.cargo/credentials`, a real token — is
+    /// closed as well; what's beside it is read.
+    #[test]
+    fn a_key_inside_a_protected_folder_is_closed() {
+        if !keys_tested_here("a_key_inside_a_protected_folder_is_closed") {
+            return;
+        }
+        let (t, root) = key_files("protected");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        for f in [".cargo/credentials", ".cargo/config.toml"] {
+            std::fs::write(root.join(f), "tarae-fake-token").unwrap();
+        }
+        let p = key_policy(&root);
+        let (ok, out, err) = sh_under(&p, &root, "cat .cargo/credentials");
+        assert!(!ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED), "{out} {err}");
+        let (ok, out, err) = sh_under(&p, &root, "cat .cargo/config.toml");
+        assert!(ok && out == "tarae-fake-token", "beside it: {err}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real (7a, 7b): what's named like a key but isn't one is read — the data's exceptions (a `.env`'s
     /// template, a public key), a package's test key below tools' output, a name that only shares a part.
-    #[cfg(target_os = "macos")]
     #[test]
     fn an_exception_to_the_key_names_is_read() {
-        if skipped_inside("sandbox::tests::an_exception_to_the_key_names_is_read") {
+        if !keys_tested_here("an_exception_to_the_key_names_is_read") {
             return;
         }
         let (t, root) = key_files("except");
-        let p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+        let p = key_policy(&root);
         for f in [".env.example", "id_ed25519.pub", "node_modules/pkg/test.pem", "src/env.rs"] {
             let (ok, out, err) = sh_under(&p, &root, &format!("cat {f}"));
             assert!(ok && out == "tarae-fake-token", "{f}: {err}");
@@ -7833,27 +7916,71 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// For real, on macOS (7a): the user's grant from the run's panel (`allow::Grant::Key`, kept as `A` keeps it)
-    /// opens that one file — another named like a key stays closed.
-    #[cfg(target_os = "macos")]
+    /// For real (7a, 7b): the user's grant from the run's panel (`allow::Grant::Key`, kept as `A` keeps it) opens
+    /// that one file — another named like a key stays closed, in its folder too.
     #[test]
     fn a_granted_key_file_is_read() {
-        if skipped_inside("sandbox::tests::a_granted_key_file_is_read") {
+        if !keys_tested_here("a_granted_key_file_is_read") {
             return;
         }
         let (t, root) = key_files("granted");
+        std::fs::write(root.join("deep/er/other.key"), "tarae-fake-token").unwrap();
         let store = t.join("state/sandbox.json");
-        let g = crate::allow::Grant::Key(root.join(".env"));
+        let g = crate::allow::Grant::Key(root.join("deep/er/Server.PEM"));
         crate::allow::keep(&store, &root, |a| a.add(&g)).unwrap();
         let kept = crate::allow::Store::read(Some(&store)).get(&root);
         let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
-        let mut p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+        let mut p = key_policy(&root);
         w.onto(&mut p);
-        assert_eq!(p.keys, Some(vec![root.join(".env")]));
-        let (ok, out, err) = sh_under(&p, &root, "cat .env");
+        assert_eq!(p.keys, Some(vec![root.join("deep/er/Server.PEM")]));
+        let (ok, out, err) = sh_under(&p, &root, "cat deep/er/Server.PEM");
         assert!(ok && out == "tarae-fake-token", "{err}");
-        let (ok, _, err) = sh_under(&p, &root, "cat deep/er/Server.PEM");
-        assert!(!ok && err.contains("Operation not permitted"), "{err}");
+        for f in [".env", "deep/er/other.key"] {
+            let (ok, _, err) = sh_under(&p, &root, &format!("cat {f}"));
+            assert!(!ok && err.contains(KEY_DENIED), "{f}: {err}");
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on Linux (7b): a file a run makes in a folder holding a file named like a key — that folder's
+    /// own rule, all but reading files (Landlock grants only: a rule that let the new file be read would let the
+    /// key be) — is written but can't be read until the next run, whose rules give it its own; in a folder
+    /// holding none it's read at once. So is one it replaces there — a new file under the old name, a save by
+    /// rename's — though it was read before; and a file opened to read and write as it's made there (`sed -i`'s
+    /// temporary, `mkstemp`) is refused, so `sed -i` changes nothing. The report names those folders, says all
+    /// three.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_file_made_or_replaced_beside_a_key_is_read_from_the_next_run() {
+        if !keys_tested_here("a_file_made_or_replaced_beside_a_key_is_read_from_the_next_run") {
+            return;
+        }
+        let (t, root) = key_files("later");
+        let p = key_policy(&root);
+        let script = "printf made > new.txt && printf made > src/new.txt && cat src/new.txt && cat new.txt";
+        let (ok, out, err) = sh_under(&p, &root, script);
+        assert!(!ok && out == "made" && err.contains(KEY_DENIED), "{out} {err}");
+        assert_eq!(std::fs::read_to_string(root.join("new.txt")).unwrap(), "made", "written");
+        let (ok, out, err) = sh_under(&p, &root, "cat new.txt");
+        assert!(ok && out == "made", "the next run: {err}");
+        // Replaced by a rename over it, read just before: not read again in that run
+        let script = "cat .env.example && printf replaced > t && mv t .env.example && cat .env.example";
+        let (ok, out, err) = sh_under(&p, &root, script);
+        assert!(!ok && out == "tarae-fake-token" && err.contains(KEY_DENIED), "{out} {err}");
+        let (ok, out, err) = sh_under(&p, &root, "cat .env.example");
+        assert!(ok && out == "replaced", "the next run: {out} {err}");
+        // `sed -i`: its temporary file, opened to read and write as it's made, is refused — the file stays as it was
+        let (ok, _, err) = sh_under(&p, &root, "sed -i s/fake/replaced/ id_ed25519.pub");
+        assert!(!ok && err.contains("temporary file") && err.contains(KEY_DENIED), "{err}");
+        let (ok, out, err) = sh_under(&p, &root, "cat id_ed25519.pub");
+        assert!(ok && out == "tarae-fake-token", "unchanged: {out} {err}");
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let (_, notes) = c.linux_said().unwrap_or_else(|| panic!("{:?}", c.confine));
+        let said = "A file it makes or replaces in the project's top folder, deep/, deep/er/ (a save by rename, mv \
+                    over it) can't be read until its next command, and one it opens there to read and write as it \
+                    makes it is refused (sed -i's temporary file, mkstemp's): on Linux a folder holding a file \
+                    named like a key can't let what's new in it be read";
+        assert!(notes.contains(said), "{notes}");
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -9186,8 +9313,7 @@ mod tests {
     const FAKE: &str = "tarae-fake-token";
 
     /// What a run gets of this process's environment with the default settings — as a real policy's
-    /// (`env_in`); a policy made by hand gets nothing of it. (Seatbelt's tests'; Linux's have their own.)
-    #[cfg(target_os = "macos")]
+    /// (`env_in`); a policy made by hand gets nothing of it.
     fn run_env_here() -> runenv::RunEnv {
         run_env_of(&Here::now(), &crate::llm::LlmConfig::default())
     }

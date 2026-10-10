@@ -29,8 +29,8 @@ pub struct Allowed {
     pub hosts: Vec<(String, u16)>,
     /// macOS: Claude's commands may open the terminals (`/dev/ttys*`) — every one (`Grant::Terminals`).
     pub terminals: bool,
-    /// macOS: files named like keys inside the project Claude's commands may read — each that file, by its real
-    /// path (`Grant::Key`, 7a).
+    /// Files named like keys inside the project Claude's commands may read — each that file, by its real path
+    /// (`Grant::Key`; macOS 7a, Linux 7b).
     pub keys: Vec<PathBuf>,
 }
 
@@ -148,8 +148,8 @@ pub enum Grant {
     /// macOS: open the terminals (`sandbox::TERMINALS`) — all of them, the user's own too: Seatbelt can't
     /// tell a pty a run made (expect, `script`, a pty test) from the user's shells.
     Terminals,
-    /// macOS: read that file in the project, named like a key (`sandbox::key_named_in`) — that one file, its
-    /// real path (7a).
+    /// Read that file in the project, named like a key (`sandbox::key_named_in`) — that one file, its real path
+    /// (macOS 7a, Linux 7b).
     Key(PathBuf),
 }
 

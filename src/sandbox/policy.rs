@@ -71,8 +71,9 @@ pub struct Policy {
     pub sockets: Vec<PathBuf>,
     /// macOS: the terminals (`TERMINALS`) open to it, every one — the project's grant (`allow::Grant::Terminals`).
     pub terminals: bool,
-    /// macOS: files named like keys inside the project (`key_named_in` — `.env`, `*.pem`, as data) are closed to
-    /// it, but these the user opened, each that file (`allow::Grant::Key`; real paths). None on Linux (7b).
+    /// Files named like keys inside the project (`key_named_in` — `.env`, `*.pem`, as data) are closed to it, but
+    /// these the user opened, each that file (`allow::Grant::Key`; real paths) — macOS by the profile (7a), Linux
+    /// by Landlock's rules around them (`linux::there`, 7b). None: closed to it nowhere (a test's policy).
     pub keys: Option<Vec<PathBuf>>,
     /// The folders the checkout's build tool named that stay closed, and why (`asked_dir_verdict`) — said with
     /// the result and on the panel — and who named them (`builds-said`: `cargo`).
@@ -375,10 +376,11 @@ impl Policy {
             let notes = format!(
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
                  it before your next run), and the terminal multiplexers' folders in /tmp stay \
-                 writable.{userns}{}{}{}",
+                 writable.{userns}{}{}{}{}",
                 linux::notes(c.abi, c.ns, c.ptys.is_some()),
                 linux::made_said(&c.made, &self.root),
-                linux::kept_said(&c.kept, &self.root)
+                linux::kept_said(&c.kept, &self.root),
+                linux::unread_said(&c.unread, &self.root)
             );
             return Some((net, notes));
         }
@@ -809,7 +811,7 @@ impl Policy {
             granted: Vec::new(),
             sockets: Vec::new(),
             terminals: false,
-            keys: (Os::HOST == Os::Mac).then(Vec::new),
+            keys: Some(Vec::new()),
             refused,
             refused_asked,
             named_by: env.builder.who.clone(),

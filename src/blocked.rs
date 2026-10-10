@@ -90,7 +90,7 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
             });
         }
         let read = d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER;
-        // A file named like a key in the project (macOS, 7a): that one file — no folder of it (the project is
+        // A file named like a key in the project (7a, 7b): that one file — no folder of it (the project is
         // read anyway; what's closed is the name)
         let key = file && read && crate::sandbox::key_named_in(&crate::sandbox::profile_path(root), &target);
         if key {

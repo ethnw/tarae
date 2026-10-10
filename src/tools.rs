@@ -2128,14 +2128,14 @@ pub struct Widened {
     pub hosts: Vec<(String, u16)>,
     /// macOS: the terminals open to it (`allow::Grant::Terminals`).
     pub terminals: bool,
-    /// macOS: the files named like keys in the project open to it (`allow::Grant::Key`).
+    /// The files named like keys in the project open to it (`allow::Grant::Key`).
     pub keys: Vec<PathBuf>,
 }
 
 impl Widened {
     /// What no setting carries, onto the policy made from `llm`: how the result says what was allowed, the
     /// sockets, the hosts its proxy rules let through, the terminals, the files named like keys (where the
-    /// policy closes them: macOS).
+    /// policy closes them: `Policy.keys`).
     pub fn onto(self, p: &mut crate::sandbox::Policy) {
         (p.granted, p.sockets, p.egress.answered) = (self.granted, self.sockets, self.hosts);
         p.terminals = self.terminals;
@@ -2470,8 +2470,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
             let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
             let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
-            let mut p = crate::sandbox::policy_from(&root, &w.llm, &w.reads, &here)?;
-            w.onto(&mut p);
+            let mut p = crate::sandbox::policy_from(&root, w, &here)?;
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
             told = crate::tokens::to_tell(&p.reads.copies.told, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)

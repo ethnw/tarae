@@ -9,14 +9,17 @@
 //! and making folders there would let `.git` be renamed away: measured, `what_a_folder_holding_a_protected_
 //! name_may_be_given`): reads everywhere but home (home a hole in `/`), in home
 //! the project and its places (`Reads`) around what's kept and the token files the tools read copies of;
-//! writes in the project around every protected name that's there (`protected_there`) and
+//! writes in the project around every protected name that's there (`there`) and
 //! `llm.sandbox-protect`, in the run's folder, the temp and toolchain folders, the single files cargo and
 //! Gradle's wrapper write (those there now), and the devices programs use (`DEVICES`, measured).
 //!
 //! What Landlock can't keep, said in the report (`linux_notes`): a protected name a run makes anew where
 //! nothing is protected yet (a path that isn't there has no rule); the terminal multiplexers' folders in
 //! `/tmp` (splitting `/tmp` would refuse every new file there, and Java writes its temp files in `/tmp`
-//! whatever `TMPDIR` says); a single file not there yet (cargo's SQLite journal). The network: what a run
+//! whatever `TMPDIR` says); a single file not there yet (cargo's SQLite journal); a file made or replaced in a
+//! folder holding one named like a key, read only from the next run — and refused if opened to read and write
+//! as it's made (`sed -i`'s temporary file) (the folder's own rule can't read files without
+//! opening the key — `grant_around`, 7b). The network: what a run
 //! reaches by address tarae decides, as macOS's profile does (`supervisor.rs`) — where it can't here,
 //! seccomp refuses every socket but netlink, this machine's ports and the project's unix sockets too. Under
 //! that, Landlock refuses a run's own TCP bind and connect (ABI 4), its connect to a unix socket by path
@@ -111,6 +114,9 @@ pub struct Confine {
     pub ptys: Option<Arc<super::ptys::Ptys>>,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
+    /// The folders a run makes files in but can't read them back until its next run — each holds a file named
+    /// like a key, or one below it (`grant_around`, 7b).
+    pub unread: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
     pub kept: Arc<Kept>,
     /// The session's keeper, which forks the run (`sandbox::confined` finds or makes it) — None until then.
@@ -162,6 +168,7 @@ impl PartialEq for Confine {
             && self.net == other.net
             && self.no_userns == other.no_userns
             && self.closed == other.closed
+            && self.unread == other.unread
             && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.kept, &other.kept)
             && Arc::ptr_eq(&self.rules, &other.rules)
@@ -256,7 +263,7 @@ impl Kept {
         Kept { dirs: Vec::new(), restored: Default::default() }
     }
 
-    /// The fileless folders at and under each folder of `found` (`protected_there`). Links aren't followed.
+    /// The fileless folders at and under each folder of `found` (`there`). Links aren't followed.
     /// Blocks (a worker's).
     pub fn of(found: &[PathBuf]) -> Kept {
         use std::os::unix::fs::PermissionsExt;
@@ -357,7 +364,7 @@ pub fn makeable(name: &str) -> bool {
             .any(|p| p.split_once('/').is_some_and(|(first, _)| first.eq_ignore_ascii_case(name)))
 }
 
-/// What to make first in the project at `root` whose protected names are `found` (`protected_there`), by
+/// What to make first in the project at `root` whose protected names are `found` (`there`), by
 /// `packs`: (path, a folder) — each pack's `first-made` folders in every folder holding one of its names (a name
 /// of several parts: the folder holding its first), its files in the outermost such folders, those that
 /// aren't there (nor a link) and are `makeable`. Asks the disk only whether each is there.
@@ -450,30 +457,129 @@ fn grant(r: &mut Ruleset, path: &Path, access: u64, holes: &[PathBuf]) -> io::Re
     Ok(())
 }
 
-/// The protected names (`protected_in`) that are there in the project at `root`, each the path where one
-/// starts — not looked for below one, nor in tools' output (`outputs`, where those names are let through) —
-/// and `extra` (`llm.sandbox-protect`) that are there. Links aren't followed.
-pub fn protected_there(root: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+/// What a file's own folder can't give and leave it unread: reading files (and running them — a script is
+/// read by what runs it).
+const READS_FILES: u64 = landlock::READ_FILE | landlock::EXECUTE;
+
+/// `grant`, and around `keys` too — files a run doesn't read (`There.keys`, 7b): none of them gets a rule, and
+/// each folder on the way down to one gets `access` but `READS_FILES` for itself (listed, written, its entries
+/// made and removed — a folder on the way to a hole gets nothing of its own, as in `grant`) while its other
+/// entries get theirs one by one. Landlock grants only, so that folder's own rule is what a file made in it
+/// later gets: written, not read until the next run's rules (`unread` records each such folder that takes new
+/// files, for the report — `unread_said`).
+fn grant_around(
+    r: &mut Ruleset,
+    path: &Path,
+    access: u64,
+    holes: &[PathBuf],
+    keys: &[PathBuf],
+    unread: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    if keys.iter().any(|k| k == path) {
+        return Ok(());
+    }
+    if holes.iter().any(|h| path.starts_with(h)) || !keys.iter().any(|k| k.starts_with(path)) {
+        return grant(r, path, access, holes);
+    }
+    let own = access & !READS_FILES;
+    if own != 0 && !holes.iter().any(|h| h.starts_with(path)) {
+        match r.allow(path, own) {
+            Ok(true) if own & landlock::MAKE_REG != 0 && !unread.iter().any(|u| u == path) => {
+                unread.push(path.to_path_buf())
+            }
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) => {}
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(path) else { return Ok(()) };
+    for e in entries.flatten() {
+        grant_around(r, &e.path(), access, holes, keys, unread)?;
+    }
+    Ok(())
+}
+
+/// What the report says of the folders a file made in can't be read during the run (`grant_around`'s
+/// `unread`) — nothing when there's none.
+pub fn unread_said(unread: &[PathBuf], root: &Path) -> String {
+    const SAID: usize = 6;
+    if unread.is_empty() {
+        return String::new();
+    }
+    let mut names: Vec<String> = unread
+        .iter()
+        .take(SAID)
+        .map(|p| match p.strip_prefix(root) {
+            Ok(rel) if rel.as_os_str().is_empty() => "the project's top folder".to_string(),
+            Ok(rel) => format!("{}/", rel.display()),
+            Err(_) => format!("{}/", crate::allow::tilde(p)),
+        })
+        .collect();
+    if unread.len() > SAID {
+        names.push(format!("{} more", unread.len() - SAID));
+    }
+    format!(
+        " A file it makes or replaces in {} (a save by rename, mv over it) can't be read until its next command, \
+         and one it opens there to read and write as it makes it is refused (sed -i's temporary file, mkstemp's): \
+         on Linux a folder holding a file named like a key can't let what's new in it be read and keep that file \
+         closed.",
+        names.join(", ")
+    )
+}
+
+/// What a run's rules are made around in the project at `root` (`There`), found in one walk.
+pub fn there(root: &Path, extra: &[PathBuf], open: &[PathBuf]) -> There {
+    // (`within`: below a protected name — only keys looked for there, no protected name again)
+    fn walk(root: &Path, dir: &Path, open: &[PathBuf], within: bool, out: &mut There) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for e in entries.flatten() {
             let path = e.path();
-            if super::protected_in(root, &path) {
-                out.push(path);
-                continue;
+            let Ok(t) = e.file_type() else { continue };
+            let protected = !within && super::protected_in(root, &path);
+            if protected {
+                out.protected.push(path.clone());
             }
-            let folder = e.file_type().is_ok_and(|t| t.is_dir());
-            if folder && !super::outputs().iter().any(|o| e.file_name() == o.as_str()) {
-                walk(root, &path, out);
+            if t.is_dir() {
+                let name = e.file_name();
+                let objects = name == "objects" && dir.file_name().is_some_and(|d| d == ".git");
+                if !objects && !super::outputs().iter().any(|o| name == o.as_str()) {
+                    walk(root, &path, open, within || protected, out);
+                }
+            } else if t.is_file()
+                && crate::secretnames::is_secret(&e.file_name().to_string_lossy())
+                && !open.contains(&path)
+            {
+                out.keys.push(path);
             }
         }
     }
-    let mut out: Vec<PathBuf> = extra.iter().filter(|p| p.symlink_metadata().is_ok()).cloned().collect();
-    walk(root, root, &mut out);
+    let protected = extra.iter().filter(|p| p.symlink_metadata().is_ok()).cloned().collect();
+    let mut out = There { protected, keys: Vec::new() };
+    walk(root, root, open, false, &mut out);
     out
 }
 
-/// The folders in the project at `root` that `grant` splits around `found` (`protected_there`): each one's
+/// What `there` finds, links not followed, nothing looked for in tools' output (`outputs`, where those names are
+/// let through).
+pub struct There {
+    /// The protected names (`protected_in`) that are there, each the path where one starts (none looked for
+    /// below one), and `extra` (`llm.sandbox-protect`) that are there.
+    pub protected: Vec<PathBuf>,
+    /// The files named like keys (`secretnames`: the data's names but its exceptions — `sandbox::key_named_in`)
+    /// but those the user opened (`allow::Grant::Key`, 7b), inside protected names too (`.cargo/credentials`, a
+    /// `.pem` under `.github/`). Files only: a folder named like one isn't. Not looked at: tools' output, and
+    /// `.git/objects` — git's own names, thousands of them, read every run (a file named like a key put there
+    /// stays readable on Linux, unlike macOS).
+    pub keys: Vec<PathBuf>,
+}
+
+/// The protected names (`There.protected`) that are there in the project at `root` — tests'.
+#[cfg(test)]
+pub fn protected_there(root: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
+    there(root, extra, &[]).protected
+}
+
+/// The folders in the project at `root` that `grant` splits around `found` (`There.protected`): each one's
 /// folders up to the root, the root too.
 fn closed_folders(root: &Path, found: &[PathBuf]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -582,6 +688,17 @@ pub(super) fn confine_in(
     // (every pty is a file the reads would reach — reading one takes what's typed in another terminal)
     let pts = Path::new("/dev/pts");
     let pts_hole: Vec<PathBuf> = ptys.map(|_| pts.to_path_buf()).into_iter().collect();
+    // The project's protected names, and its files named like keys (7b): no place granted around those reads
+    // them — each folder on the way down opened entry by entry (`grant_around`); every other folder stays one rule
+    let There { protected: found, mut keys } =
+        there(&p.root, &p.protect, p.keys.as_deref().unwrap_or_default());
+    if p.keys.is_none() {
+        keys.clear();
+    }
+    let mut unread: Vec<PathBuf> = Vec::new();
+    let mut grant = |r: &mut Ruleset, path: &Path, access: u64, holes: &[PathBuf]| {
+        grant_around(r, path, access, holes, &keys, &mut unread)
+    };
     match &p.reads.home {
         Some(home) => {
             grant(&mut r, Path::new("/"), READ, &[std::slice::from_ref(home), &pts_hole].concat())?;
@@ -609,8 +726,6 @@ pub(super) fn confine_in(
         }
         None => grant(&mut r, Path::new("/"), READ, &[hidden.as_slice(), &pts_hole].concat())?,
     }
-    let abs: Vec<PathBuf> = p.protect.clone();
-    let found = protected_there(&p.root, &abs);
     let made = match make_first {
         true => make(to_make(&p.root, &found, &crate::packs::made_beside())),
         false => Made::none(),
@@ -662,6 +777,7 @@ pub(super) fn confine_in(
         true => Kept::none(),
         false => Kept::of(&found),
     };
+    crate::sorting::sort(&mut unread);
     Ok(Confine {
         abi,
         audit,
@@ -673,6 +789,7 @@ pub(super) fn confine_in(
         ptys: None,
         made: Arc::new(made),
         closed,
+        unread,
         kept: Arc::new(kept),
         keeper: None,
         rules: Arc::new(r),
@@ -1182,6 +1299,117 @@ mod tests {
         assert_eq!(found, want);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// The files named like keys that are there (7b), found in the protected names' walk (`there`) — inside a
+    /// protected name too (`.cargo/credentials`, a hook's key in `.git`), but in tools' output, in `.git/objects`
+    /// (not walked), the data's exceptions, a folder or a link so named, the one the user opened; no protected
+    /// name looked for below one; and the rules around them (`grant_around`): none for the file, each folder on
+    /// the way down all but reading files for itself (so it takes new files it can't read: `unread`), everything
+    /// else whole — and a folder holding a protected name nothing of its own, as before. A read grant gives those
+    /// folders their listing only, and takes no new file.
+    #[test]
+    fn keys_are_found_where_they_are() {
+        let dir = std::env::temp_dir().join(format!("tarae-keys-found-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in [
+            ".env",
+            ".env.example",
+            "Cargo.toml",
+            ".cargo/credentials",
+            ".git/hooks/x.pem",
+            ".git/objects/ab/y.pem",
+            ".cargo/sub/Cargo.toml",
+            "src/main.rs",
+            "src/tls/server.KEY",
+            "src/tls/ca.pub",
+            "node_modules/p/test.pem",
+            "open/id_rsa",
+            "named.pem/inside.rs",
+        ] {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(f), "tarae-fake-token").unwrap();
+        }
+        std::os::unix::fs::symlink(dir.join("src/main.rs"), dir.join("link.pem")).unwrap();
+        let There { protected: mut holes, keys: mut found } = there(&dir, &[], &[dir.join("open/id_rsa")]);
+        holes.sort();
+        found.sort();
+        let at = |fs: &[&str]| fs.iter().map(|f| dir.join(f)).collect::<Vec<_>>();
+        assert_eq!(found, at(&[".cargo/credentials", ".env", ".git/hooks/x.pem", "src/tls/server.KEY"]));
+        assert_eq!(holes, at(&[".cargo", ".git", "Cargo.toml"]), "none below a protected name");
+        // The project's grant: around the protected names and the keys
+        let mut r = Ruleset::written(3).unwrap();
+        let all = landlock::ALL & landlock::handled(3);
+        let mut unread = Vec::new();
+        grant_around(&mut r, &dir, all, &holes, &found, &mut unread).unwrap();
+        let rule = |r: &Ruleset, f: &str| r.added.iter().find(|(p, _)| *p == dir.join(f)).map(|(_, a)| *a);
+        for f in ["", ".env", "src/tls/server.KEY", ".cargo", ".git", "Cargo.toml"] {
+            assert_eq!(rule(&r, f), None, "{f:?}");
+        }
+        for f in ["src", "src/tls"] {
+            assert_eq!(rule(&r, f), Some(all & !READS_FILES), "{f}");
+        }
+        for f in ["src/main.rs", "src/tls/ca.pub", ".env.example", "node_modules", "open", "named.pem"] {
+            assert!(rule(&r, f).is_some_and(|a| a & landlock::READ_FILE != 0), "{f}: whole");
+        }
+        assert_eq!(unread, at(&["src", "src/tls"]));
+        // A read grant: the folders on the way listed, nothing taken
+        let (mut r, mut unread) = (Ruleset::written(3).unwrap(), Vec::new());
+        grant_around(&mut r, &dir, READ, &[], &found, &mut unread).unwrap();
+        for f in ["", ".cargo", ".git", ".git/hooks", "src", "src/tls"] {
+            assert_eq!(rule(&r, f), Some(landlock::READ_DIR), "{f:?}");
+        }
+        for f in [".cargo/credentials", ".git/hooks/x.pem"] {
+            assert_eq!(rule(&r, f), None, "{f}");
+        }
+        for f in [".cargo/sub", ".git/objects", "Cargo.toml"] {
+            assert!(rule(&r, f).is_some_and(|a| a & landlock::READ_FILE != 0), "{f}: read whole");
+        }
+        assert!(unread.is_empty(), "{unread:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What finding the project's protected names and files named like keys costs each run before it starts
+    /// (7b, `there`), on this repository's checkout (`.git` walked but its objects) — medians of 20.
+    #[test]
+    fn perf_the_projects_walk() {
+        if crate::test_results::unoptimized("sandbox::linux::tests::perf_the_projects_walk") {
+            return;
+        }
+        let root = std::env::current_dir().unwrap();
+        let mut times = Vec::new();
+        let mut found = (0, 0);
+        for _ in 0..20 {
+            let at = std::time::Instant::now();
+            let t = there(&root, &[], &[]);
+            times.push(at.elapsed().as_secs_f64() * 1000.0);
+            found = (t.protected.len(), t.keys.len());
+        }
+        times.sort_by(f64::total_cmp);
+        let line = format!(
+            "the project's walk ({}: {} protected, {} keys): {:.2} ms — median of 20\n",
+            root.display(),
+            found.0,
+            found.1,
+            times[times.len() / 2]
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+    }
+
+    /// What the report says of the folders new files can't be read in (7b): each, the project's own as its top
+    /// folder, one outside it by its path — a few, then how many more — and that a file replaced there is one
+    /// too, and one opened to read and write as it's made is refused; nothing when there's none.
+    #[test]
+    fn the_folders_new_files_go_unread_in_are_said() {
+        let root = Path::new("/w/p");
+        assert_eq!(unread_said(&[], root), "");
+        let said = unread_said(&[root.to_path_buf(), root.join("deep/er"), PathBuf::from("/tmp")], root);
+        let want = " A file it makes or replaces in the project's top folder, deep/er/, /tmp/ (a save by rename, \
+                    mv over it) can't be read until its next command, and one it opens there to read and write as \
+                    it makes it is refused (sed -i's temporary file, mkstemp's)";
+        assert!(said.starts_with(want), "{said}");
+        let many: Vec<PathBuf> = (0..8).map(|i| root.join(format!("d{i}"))).collect();
+        assert!(unread_said(&many, root).contains("d5/, 2 more (a save"), "{}", unread_said(&many, root));
     }
 
     /// What rights on a folder holding a protected name give, the kernel asked (its entries granted one by

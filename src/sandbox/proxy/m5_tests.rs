@@ -416,7 +416,10 @@ fn fetches(tool: &str) {
         sandbox_localhost: true,
         ..Default::default()
     };
-    let mut p = crate::sandbox::policy(&root, &llm, &[]).unwrap();
+    // (7b: its trust files are named like keys, `*.pem`, `*.p12` — closed to a run until the user opens each from
+    // the run's panel, `allow::Grant::Key`, as a project with them would)
+    let open = ["repo.pem", "trust.p12"].map(|f| root.join(f)).into_iter().filter(|f| f.exists());
+    let mut p = crate::sandbox::policy_opening(&root, &llm, &open.collect::<Vec<_>>()).unwrap();
     // (this machine's own address stands for the outside: a policy that knows none)
     p.own_addresses = Some(Vec::new());
     p.watch = crate::sandbox::watch_for(&p);

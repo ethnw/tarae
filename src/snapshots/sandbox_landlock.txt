@@ -1,6 +1,13 @@
 ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
     0x0005 $HOME/.cargo/config.toml
     0x0005 $HOME/work/.cargo/config.toml
+    0x0005 $ROOT/.env.example
+    0x0005 $ROOT/Cargo.toml
+    0x0005 $ROOT/go.mod
+    0x0005 $ROOT/src/tls/opened.key
+    0x0008 $ROOT
+    0x0008 $ROOT/src
+    0x0008 $ROOT/src/tls
     0x000d $BASE/cargo-moved
     0x000d $BASE/gradle-moved
     0x000d $BASE/rustup-moved
@@ -16,7 +23,6 @@ ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
     0x000d $HOME/.rustup
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
-    0x000d $ROOT
     0x000d $RUN
     0x000d $TMP
     0x000d /dev
@@ -25,11 +31,14 @@ ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
     0x4006 /dev/null
     0x4006 /dev/tty
     0x4006 /dev/zero
+    0x4007 $ROOT/.env.example
     0x4007 $ROOT/go.mod
+    0x4007 $ROOT/src/tls/opened.key
+    0x7ffa $ROOT/src
+    0x7ffa $ROOT/src/tls
     0x7fff $BASE/tmp
     0x7fff $HOME/.cache/tarae/run-homes/go-build/$KEY
     0x7fff $HOME/.cargo/build/ab/cdef0123
-    0x7fff $ROOT/src
     0x7fff $RUN
     0x7fff $TMP
     0x7fff /dev/pts
@@ -37,6 +46,13 @@ ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
 ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
     0x0005 $HOME/.cargo/config.toml
     0x0005 $HOME/work/.cargo/config.toml
+    0x0005 $ROOT/.env.example
+    0x0005 $ROOT/Cargo.toml
+    0x0005 $ROOT/go.mod
+    0x0005 $ROOT/src/tls/opened.key
+    0x0008 $ROOT
+    0x0008 $ROOT/src
+    0x0008 $ROOT/src/tls
     0x000d $BASE/cargo-moved
     0x000d $BASE/gradle-moved
     0x000d $BASE/rustup-moved
@@ -52,7 +68,6 @@ ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
     0x000d $HOME/.rustup
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
-    0x000d $ROOT
     0x000d $RUN
     0x000d $TMP
     0x000d /dev
@@ -61,11 +76,14 @@ ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
     0x4006 /dev/null
     0x4006 /dev/tty
     0x4006 /dev/zero
+    0x4007 $ROOT/.env.example
     0x4007 $ROOT/go.mod
+    0x4007 $ROOT/src/tls/opened.key
+    0x7ffa $ROOT/src
+    0x7ffa $ROOT/src/tls
     0x7fff $BASE/tmp
     0x7fff $HOME/.cache/tarae/run-homes/go-build/$KEY
     0x7fff $HOME/.cargo/build/ab/cdef0123
-    0x7fff $ROOT/src
     0x7fff $RUN
     0x7fff $TMP
     0x7fff /dev/pts
@@ -73,6 +91,13 @@ ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
 ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
     0x0005 $HOME/.cargo/config.toml
     0x0005 $HOME/work/.cargo/config.toml
+    0x0005 $ROOT/.env.example
+    0x0005 $ROOT/Cargo.toml
+    0x0005 $ROOT/go.mod
+    0x0005 $ROOT/src/tls/opened.key
+    0x0008 $ROOT
+    0x0008 $ROOT/src
+    0x0008 $ROOT/src/tls
     0x000d $BASE/cargo-moved
     0x000d $BASE/gradle-moved
     0x000d $BASE/rustup-moved
@@ -88,7 +113,6 @@ ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
     0x000d $HOME/.rustup
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
-    0x000d $ROOT
     0x000d $RUN
     0x000d $TMP
     0x000d /dev
@@ -97,11 +121,14 @@ ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
     0xc006 /dev/null
     0xc006 /dev/tty
     0xc006 /dev/zero
+    0xc007 $ROOT/.env.example
     0xc007 $ROOT/go.mod
+    0xc007 $ROOT/src/tls/opened.key
+    0xfffa $ROOT/src
+    0xfffa $ROOT/src/tls
     0xffff $BASE/tmp
     0xffff $HOME/.cache/tarae/run-homes/go-build/$KEY
     0xffff $HOME/.cargo/build/ab/cdef0123
-    0xffff $ROOT/src
     0xffff $RUN
     0xffff $TMP
     0xffff /dev/pts
@@ -109,6 +136,13 @@ ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
 ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
     0x0005 $HOME/.cargo/config.toml
     0x0005 $HOME/work/.cargo/config.toml
+    0x0005 $ROOT/.env.example
+    0x0005 $ROOT/Cargo.toml
+    0x0005 $ROOT/go.mod
+    0x0005 $ROOT/src/tls/opened.key
+    0x0008 $ROOT
+    0x0008 $ROOT/src
+    0x0008 $ROOT/src/tls
     0x000d $BASE/cargo-moved
     0x000d $BASE/gradle-moved
     0x000d $BASE/rustup-moved
@@ -124,7 +158,6 @@ ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
     0x000d $HOME/.rustup
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
-    0x000d $ROOT
     0x000d $RUN
     0x000d $TMP
     0x000d /dev
@@ -133,11 +166,14 @@ ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
     0xc006 /dev/null
     0xc006 /dev/tty
     0xc006 /dev/zero
+    0xc007 $ROOT/.env.example
     0xc007 $ROOT/go.mod
+    0xc007 $ROOT/src/tls/opened.key
+    0xfffa $ROOT/src
+    0xfffa $ROOT/src/tls
     0xffff $BASE/tmp
     0xffff $HOME/.cache/tarae/run-homes/go-build/$KEY
     0xffff $HOME/.cargo/build/ab/cdef0123
-    0xffff $ROOT/src
     0xffff $RUN
     0xffff $TMP
     0xffff /dev/pts
@@ -145,6 +181,13 @@ ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
 ABI 10: handles files 0x1ffff · network 0xf · scopes 0x3
     0x0005 $HOME/.cargo/config.toml
     0x0005 $HOME/work/.cargo/config.toml
+    0x0005 $ROOT/.env.example
+    0x0005 $ROOT/Cargo.toml
+    0x0005 $ROOT/go.mod
+    0x0005 $ROOT/src/tls/opened.key
+    0x0008 $ROOT
+    0x0008 $ROOT/src
+    0x0008 $ROOT/src/tls
     0x000d $BASE/cargo-moved
     0x000d $BASE/gradle-moved
     0x000d $BASE/rustup-moved
@@ -160,7 +203,6 @@ ABI 10: handles files 0x1ffff · network 0xf · scopes 0x3
     0x000d $HOME/.rustup
     0x000d $HOME/go
     0x000d $HOME/go/pkg/mod
-    0x000d $ROOT
     0x000d $RUN
     0x000d $TMP
     0x000d /dev
@@ -169,11 +211,14 @@ ABI 10: handles files 0x1ffff · network 0xf · scopes 0x3
     0xc006 /dev/null
     0xc006 /dev/tty
     0xc006 /dev/zero
+    0xc007 $ROOT/.env.example
     0xc007 $ROOT/go.mod
+    0xc007 $ROOT/src/tls/opened.key
+    0xfffa $ROOT/src
+    0xfffa $ROOT/src/tls
     0xffff $BASE/tmp
     0xffff $HOME/.cache/tarae/run-homes/go-build/$KEY
     0xffff $HOME/.cargo/build/ab/cdef0123
-    0xffff $ROOT/src
     0xffff $RUN
     0xffff $TMP
     0xffff /dev/pts

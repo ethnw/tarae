@@ -1,7 +1,8 @@
 //! File names that look like keys and tokens (`.env`, `*.pem`, `id_rsa` …), as data —
 //! `runtime/secret-names.txt`: never copied for recovery (`recovery.rs`), never read or found through a
 //! plugin's `project` permission (`plugin/perm.rs`, `plugin/io.rs`), closed to Claude's commands inside the
-//! project on macOS (`sandbox::key_regexes`). Its `!` lines are exceptions (`.env.example`, `*.pub`).
+//! project (`sandbox::key_regexes` on macOS, `sandbox::linux::there` on Linux). Its `!` lines are
+//! exceptions (`.env.example`, `*.pub`).
 
 use std::path::Path;
 

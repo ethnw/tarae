@@ -434,13 +434,20 @@ fn the_packs_say_what_the_core_said() {
 
 /// Landlock's rules for the stand-in home's policy, in the fixture's folder and `/dev` (outside them they're
 /// the machine's) — what Linux enforces, from the same policy — for the ABIs that change what's handled:
-/// each one's handled rights, then its rules. Written down, not made: any kernel pins every ABI.
+/// each one's handled rights, then its rules. Written down, not made: any kernel pins every ABI. Its project
+/// holds files named like keys (7b): one at the top, one deep, one opened (`allow::Grant::Key`) and an exception
+/// — no rule for the closed ones, their folders all but reading files.
 #[cfg(target_os = "linux")]
 #[test]
 fn landlocks_rules_are_pinned() {
     use crate::landlock;
     let f = Fixture::new("landlock", Os::Linux, &[]);
-    let p = f.policy(&crate::llm::LlmConfig::default());
+    for k in [".env", ".env.example", "src/tls/server.pem", "src/tls/opened.key"] {
+        std::fs::create_dir_all(f.root.join(k).parent().unwrap()).unwrap();
+        std::fs::write(f.root.join(k), "tarae-fake-token").unwrap();
+    }
+    let mut p = f.policy(&crate::llm::LlmConfig::default());
+    p.keys = Some(vec![f.root.join("src/tls/opened.key")]);
     let run = p.run.as_deref();
     let ours = |path: &Path| {
         path.starts_with(&f.base)

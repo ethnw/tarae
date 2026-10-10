@@ -618,6 +618,22 @@ impl Editor {
 mod tests {
     use super::*;
 
+    /// Whether `test` (its name in this module) skips itself, saying why: it needs a real pty, and inside macOS's
+    /// sandbox a pty's other end doesn't open (EPERM, measured — `sandbox::TERMINALS`) — the test would fail, or
+    /// wait forever on output that never comes.
+    fn no_pty_here(test: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        return crate::sandbox::skipped_inside_for(
+            &format!("terminal::tests::{test}"),
+            "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
+        );
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = test;
+            false
+        }
+    }
+
     #[test]
     fn keys_as_terminal_bytes() {
         let k = |code, ctrl, alt| encode(Key { code, ctrl, alt }, false).unwrap();
@@ -638,6 +654,9 @@ mod tests {
     /// A real program on a real pty: what it prints lands on the screen, bold and all; its exit code is kept.
     #[test]
     fn a_program_on_a_pty() {
+        if no_pty_here("a_program_on_a_pty") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         let argv =
@@ -664,6 +683,9 @@ mod tests {
     /// at most) and prints it with ESC as `E`.
     #[test]
     fn a_program_asking_what_the_terminal_is_gets_an_answer() {
+        if no_pty_here("a_program_asking_what_the_terminal_is_gets_an_answer") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         let script =
@@ -688,6 +710,9 @@ mod tests {
     /// program is the test's own `sleep`.)
     #[test]
     fn space_t_gives_a_shown_terminal_the_keys_and_hides_it_only_from_inside() {
+        if no_pty_here("space_t_gives_a_shown_terminal_the_keys_and_hides_it_only_from_inside") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 10".into()], Vec::new());
@@ -729,12 +754,8 @@ mod tests {
         assert_eq!(inside_env(given.clone(), true), given, "a value it's given stays");
         // (said, not inherited: a test run inside tarae's sandbox has it from there already)
         assert_eq!(inside_env(Vec::new(), true), [("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())]);
-        // (the terminal is a pty: inside macOS's sandbox its other end doesn't open — EPERM, measured)
-        #[cfg(target_os = "macos")]
-        if crate::sandbox::skipped_inside_for(
-            "terminal::tests::inside_a_sandbox_the_terminals_git_status_leaves_the_index_alone",
-            "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
-        ) {
+        // (the terminal is a pty)
+        if no_pty_here("inside_a_sandbox_the_terminals_git_status_leaves_the_index_alone") {
             return;
         }
         let dir = std::env::temp_dir().join(format!("tarae-term-git-{}", std::process::id()));
@@ -789,6 +810,9 @@ mod tests {
     /// before the worker hands the terminal over, and a quick program prints (or exits) in between.
     #[test]
     fn output_before_the_terminal_is_in_place_is_kept() {
+        if no_pty_here("output_before_the_terminal_is_in_place_is_kept") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         (ed.terminal_generation, ed.session.terminal_run) = (7, 7);
@@ -808,6 +832,9 @@ mod tests {
     /// terminal window closes.
     #[test]
     fn dropping_the_terminal_hangs_up_the_program_in_front() {
+        if no_pty_here("dropping_the_terminal_hangs_up_the_program_in_front") {
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("tarae-terminal-hangup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (config, _) = crate::config::parse("");
@@ -910,6 +937,9 @@ mod tests {
     /// its next output clears the highlight.
     #[test]
     fn a_drag_selects_and_copies() {
+        if no_pty_here("a_drag_selects_and_copies") {
+            return;
+        }
         let mut ed = run_until("printf 'hello world\\nsecond line\\n'; sleep 30", |ed| shows(ed, "second"));
         ed.terminal_mouse(MouseKind::Down, Some((1, 5)), false);
         ed.terminal_mouse(MouseKind::Drag, Some((0, 6)), false);
@@ -932,6 +962,9 @@ mod tests {
     /// arrow keys.
     #[test]
     fn the_mouse_goes_to_a_program_that_asks() {
+        if no_pty_here("the_mouse_goes_to_a_program_that_asks") {
+            return;
+        }
         let script = "stty raw -echo; printf '\\033[?1000h\\033[?1006hready'; cat -v";
         let mut ed = run_until(script, |ed| shows(ed, "ready"));
         ed.terminal_mouse(MouseKind::Down, Some((3, 7)), false);
@@ -971,6 +1004,9 @@ mod tests {
     /// (`ESC [?2004h`), newlines as Enter.
     #[test]
     fn a_paste_is_marked_when_the_program_asks() {
+        if no_pty_here("a_paste_is_marked_when_the_program_asks") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         // (raw: cat gets the end marker too — it has no newline after it)
@@ -1002,6 +1038,9 @@ mod tests {
     /// Keys go to the program while it has them (the buffer is untouched); `C-\\` gives them back.
     #[test]
     fn keys_go_to_the_program_until_ctrl_backslash() {
+        if no_pty_here("keys_go_to_the_program_until_ctrl_backslash") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         // (an interactive shell keeps its history on exit — not in the user's ~/.bash_history)
@@ -1059,6 +1098,9 @@ mod tests {
     /// slot's row, with the running badge — the terminal staying in front.
     #[test]
     fn a_preflight_behind_the_terminal_shows_its_tab_at_once() {
+        if no_pty_here("a_preflight_behind_the_terminal_shows_its_tab_at_once") {
+            return;
+        }
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         let dir = std::env::temp_dir().join(format!("tarae-preflight-behind-{}", std::process::id()));
@@ -1104,6 +1146,9 @@ mod tests {
     /// the screen, and Esc goes back to the code — which ends it.
     #[test]
     fn the_terminal_fills_the_screen_and_its_escape_stays_on_it() {
+        if no_pty_here("the_terminal_fills_the_screen_and_its_escape_stays_on_it") {
+            return;
+        }
         use crate::sizes::Zoom;
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);

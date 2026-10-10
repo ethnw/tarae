@@ -8,7 +8,8 @@
 //!
 //! tarae keeps its own master of each, so a pty the run let go is still that inode: while the run holds one, what
 //! its processes hold is looked at (`/proc/<pid>/fd`, as `copies` collects) — one none of them holds is emptied,
-//! set as new and locked, and goes back to the pool (`settle`); one whose master the run closed while something of
+//! set as new and locked, and goes back to the pool (`settle` — judged only by a look begun after it was handed);
+//! one whose master the run closed while something of
 //! it still holds the other end is hung up as without tarae — tarae closes its master too — and is gone. So a run
 //! has `POOL` at a time; past them, every one held, it's refused, said.
 
@@ -44,6 +45,9 @@ struct Entry {
     /// Its other end, `O_PATH` (no terminal opened): the inode the rules grant.
     slave: OwnedFd,
     state: State,
+    /// The looks at what the run holds begun when it was last handed (`Inner.looks`): only a look begun after
+    /// that judges it (`settle`).
+    handed: u64,
 }
 
 /// What the run's processes hold of one pty.
@@ -64,6 +68,8 @@ struct Inner {
     /// A new pty's settings, its other end's (`tcgetattr`), what one going back to the pool is set to.
     defaults: Option<libc::termios>,
     ended: bool,
+    /// The looks at what the run holds begun (`look`) — what a hand-over is stamped with (`Entry.handed`).
+    looks: u64,
 }
 
 #[cfg(test)]
@@ -112,7 +118,7 @@ impl Entry {
             (master, n)
         };
         let slave = peer(master.as_fd(), libc::O_PATH)?;
-        Ok(Entry { n, master: Some(master), slave, state: State::Free })
+        Ok(Entry { n, master: Some(master), slave, state: State::Free, handed: 0 })
     }
 
     /// Back as a new one, for the next pty the run makes: what waits on either side emptied, its other end's
@@ -192,7 +198,7 @@ impl Ptys {
             })();
             read.ok()
         });
-        Ptys { inner: Mutex::new(Inner { entries, defaults, ended: false }), woken: Condvar::new() }
+        Ptys { inner: Mutex::new(Inner { entries, defaults, ended: false, looks: 0 }), woken: Condvar::new() }
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -209,9 +215,10 @@ impl Ptys {
     /// looked at) is the run's again.
     pub fn known(&self, n: u32) -> bool {
         let mut inner = self.inner();
+        let looks = inner.looks;
         let Some(e) = inner.entry(n) else { return false };
         if e.state == State::Free {
-            e.state = State::Handed;
+            (e.state, e.handed) = (State::Handed, looks);
             if let Some(m) = &e.master {
                 let _ = lock(m.as_fd(), false);
             }
@@ -228,8 +235,23 @@ impl Ptys {
         if let Some(n) = self.take_free() {
             return Some(n);
         }
-        self.settle(&holders(tree)?);
+        let (began, held) = self.look(tree);
+        self.settle(began, &held?);
         self.take_free()
+    }
+
+    /// One look at what the processes below `tree` hold (`holders`, read with no lock held): the looks begun, this
+    /// one counted — what `settle` judges a pty by — and what it saw.
+    fn look(&self, tree: u32) -> (u64, Option<HashMap<u32, Held>>) {
+        let began = self.begin();
+        (began, holders(tree))
+    }
+
+    /// A look begins: the looks begun, this one counted.
+    fn begin(&self) -> u64 {
+        let mut inner = self.inner();
+        inner.looks += 1;
+        inner.looks
     }
 
     fn take_free(&self) -> Option<u32> {
@@ -252,9 +274,12 @@ impl Ptys {
 
     /// Pty `n` taken (`take`) is in the run's place now: looked at from here on.
     pub fn handed_over(&self, n: u32) {
-        if let Some(e) = self.inner().entry(n) {
-            e.state = State::Handed;
+        let mut inner = self.inner();
+        let looks = inner.looks;
+        if let Some(e) = inner.entry(n) {
+            (e.state, e.handed) = (State::Handed, looks);
         }
+        drop(inner);
         self.woken.notify_all();
     }
 
@@ -279,14 +304,16 @@ impl Ptys {
             .unwrap_or_else(|| Err(io::Error::from_raw_os_error(libc::EIO)))
     }
 
-    /// Each handed pty by what the run holds of it (`held`, by number): its master — still the run's; neither end
-    /// — back to the pool, new; only the other end — hung up (tarae's master closed: what holds that end reads its
-    /// end, as without tarae) and gone. How many went back.
-    pub fn settle(&self, held: &HashMap<u32, Held>) -> usize {
+    /// Each pty handed before look `began` (`look`) by what the run held of it then (`held`, by number): its master
+    /// — still the run's; neither end — back to the pool, new; only the other end — hung up (tarae's master closed:
+    /// what holds that end reads its end, as without tarae) and gone. One handed since that look began isn't in
+    /// what it saw — `/proc` was read before it was there — so it isn't judged: taken back, the run would hold it and
+    /// be handed it again, past `POOL`. How many went back.
+    pub fn settle(&self, began: u64, held: &HashMap<u32, Held>) -> usize {
         let mut inner = self.inner();
         let defaults = inner.defaults;
         let mut back = 0;
-        for e in inner.entries.iter_mut().filter(|e| e.state == State::Handed) {
+        for e in inner.entries.iter_mut().filter(|e| e.state == State::Handed && e.handed < began) {
             match held.get(&e.n).copied().unwrap_or_default() {
                 Held { master: true, .. } => {}
                 Held { slave: true, .. } => e.gone(),
@@ -317,8 +344,8 @@ impl Ptys {
                     return;
                 }
                 drop(inner);
-                if let Some(held) = holders(tree) {
-                    ptys.settle(&held);
+                if let (began, Some(held)) = ptys.look(tree) {
+                    ptys.settle(began, &held);
                 }
             }
         });
@@ -417,7 +444,7 @@ mod tests {
         // SAFETY: a few bytes from a buffer of ours to a descriptor we hold.
         unsafe { libc::write(end.as_raw_fd(), b"left\n".as_ptr().cast(), 5) };
         drop(end);
-        assert_eq!(p.settle(&HashMap::new()), 1, "nothing holds it: back");
+        assert_eq!(p.settle(p.begin(), &HashMap::new()), 1, "nothing holds it: back");
         assert!(p.peer(a, libc::O_RDWR).is_err(), "back, and locked");
         assert_eq!(p.take_free(), Some(a), "the same pty again");
         let mut pending = [0u8; 8];
@@ -432,12 +459,39 @@ mod tests {
         p.handed_over(a);
         let end = p.peer(a, libc::O_RDWR | libc::O_NONBLOCK).unwrap();
         let held = HashMap::from([(a, Held { master: false, slave: true })]);
-        assert_eq!(p.settle(&held), 0);
+        assert_eq!(p.settle(p.begin(), &held), 0);
         hung_up(end.as_fd()).expect("its other end hung up");
         assert!(!p.known(a), "gone");
         let b = p.take_free().unwrap();
         assert_ne!(b, a);
         assert!(p.take_free().is_none(), "two of two");
+        p.end();
+    }
+
+    /// The race a look runs (`look`: `/proc` read with no lock held): it began before a pty was handed over, so what
+    /// it saw doesn't have that pty — yet the run holds it. Judged by that look, it'd go back to the pool and be
+    /// handed again: two of the run's descriptors on one pty, past `POOL`. So only a
+    /// look begun after the hand-over judges it — that one, seeing it held, keeps it; one seeing it let go takes it
+    /// back. A pty taken again while a look ran (`known`) is the same.
+    #[test]
+    fn a_look_begun_before_a_hand_over_doesnt_take_that_pty_back() {
+        let p = Ptys::open(1);
+        let Some(a) = p.take_free() else {
+            return eprintln!(
+                "a_look_begun_before_a_hand_over_doesnt_take_that_pty_back: skipped — no pty here"
+            );
+        };
+        let began = p.begin();
+        p.handed_over(a);
+        assert_eq!(p.settle(began, &HashMap::new()), 0, "the look began before it was the run's");
+        assert_eq!(p.take_free(), None, "still the run's: not handed again");
+        let held = HashMap::from([(a, Held { master: true, slave: false })]);
+        assert_eq!(p.settle(p.begin(), &held), 0, "a later look that sees it held keeps it");
+        assert_eq!(p.settle(p.begin(), &HashMap::new()), 1, "one that sees it let go takes it back");
+        let began = p.begin();
+        assert!(p.known(a), "back in the pool, the run's again");
+        assert_eq!(p.settle(began, &HashMap::new()), 0, "taken again after the look began");
+        assert_eq!(p.take_free(), None);
         p.end();
     }
 
