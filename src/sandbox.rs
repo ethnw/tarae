@@ -48,6 +48,8 @@ pub mod marks;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod names;
 mod policy;
+#[cfg(target_os = "linux")]
+pub mod ptys;
 // (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
 // (the session's transparent proxy: its ruleset built everywhere — its golden runs on macOS too —, sent on Linux)
@@ -1399,6 +1401,8 @@ impl Denial {
                 )
             }
             "file-make-in" => format!("making a new file in {t}"),
+            // (Linux, 3b: past the ptys tarae opened for the run — `sandbox::ptys`)
+            "pty-make" => format!("making more terminals than a run holds at a time ({t})"),
             "signal" if t.is_empty() => "signalling a process outside the run's own processes".into(),
             // (Seatbelt names it `others [name(pid)] signum:N` — F2, measured)
             "signal" => match seatbelt_process(&t) {
@@ -3827,9 +3831,9 @@ pub fn spawn_as(
             w.owned_by(owner(0));
         }
         let started = match c.net {
-            net @ (tier::RunNet::Served | tier::RunNet::Routed | tier::RunNet::Copied) => {
+            tier::RunNet::Served | tier::RunNet::Routed | tier::RunNet::Copied => {
                 let serve = std::sync::Arc::new(p.clone());
-                k.start_served(cmd, &comm, c.rules_fd(), net, serve.clone(), told(serve))?
+                k.start_served(cmd, &comm, c, serve.clone(), told(serve))?
             }
             net => k.start(cmd, &comm, c.rules_fd(), net)?,
         };

@@ -348,7 +348,7 @@ impl Policy {
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
                  it before your next run), and the terminal multiplexers' folders in /tmp stay \
                  writable.{userns}{}{}{}",
-                linux::notes(c.abi, c.ns),
+                linux::notes(c.abi, c.ns, c.ptys.is_some()),
                 linux::made_said(&c.made, &self.root),
                 linux::kept_said(&c.kept, &self.root)
             );

@@ -1,0 +1,22 @@
+ABI 4:
+    0x0005 /dev/<each entry but pts>
+    0x000d /dev/<each entry but pts>
+    0x4006 /dev/full
+    0x4006 /dev/null
+    0x4006 /dev/pts/$PTY1
+    0x4006 /dev/pts/$PTY2
+    0x4006 /dev/pts/ptmx
+    0x4006 /dev/tty
+    0x4006 /dev/zero
+    0x7fff /dev/shm
+ABI 6:
+    0x0005 /dev/<each entry but pts>
+    0x000d /dev/<each entry but pts>
+    0xc006 /dev/full
+    0xc006 /dev/null
+    0xc006 /dev/pts/$PTY1
+    0xc006 /dev/pts/$PTY2
+    0xc006 /dev/pts/ptmx
+    0xc006 /dev/tty
+    0xc006 /dev/zero
+    0xffff /dev/shm

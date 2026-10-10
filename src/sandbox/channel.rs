@@ -96,6 +96,8 @@ pub struct Run {
     pub held: bool,
     /// It makes no user namespace (`tier::runs_refuse_userns`, Q4): its seccomp filter refuses one.
     pub no_userns: bool,
+    /// Its way to a pty's other end is tarae's (`tier::Ns::serves_ptys`, 3b): its filter hands those calls over.
+    pub ptys: bool,
 }
 
 impl Run {
@@ -226,7 +228,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             bytes(&mut b, &r.cwd);
             bytes(&mut b, &r.comm);
             let net = NETS.iter().position(|n| *n == r.net).unwrap_or(0) as u8;
-            b.extend([net, r.held as u8, r.no_userns as u8]);
+            b.extend([net, r.held as u8, r.no_userns as u8, r.ptys as u8]);
             valid_run(r)?;
         }
         Msg::Signal { id, sig } => {
@@ -421,6 +423,7 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                 net: *NETS.get(usize::from(r.u8()?)).ok_or(Refused("a network mode it doesn't know"))?,
                 held: r.flag()?,
                 no_userns: r.flag()?,
+                ptys: r.flag()?,
             };
             valid_run(&run)?;
             Msg::Run(run)
@@ -585,6 +588,7 @@ mod tests {
                 held,
                 // (one way and the other, by the net mode: both values on the wire)
                 no_userns: net == RunNet::Routed,
+                ptys: net == RunNet::Served,
             })
         };
         vec![

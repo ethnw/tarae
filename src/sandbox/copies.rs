@@ -365,7 +365,7 @@ fn holders(tree: u32) -> Look {
 /// The processes below `tree` (not itself), and whether every one's children could be read: by each thread's
 /// `children` (`/proc/<pid>/task/<tid>/children`) — or, where the kernel has none of those for `tree`
 /// (`CONFIG_PROC_CHILDREN`), by every process's parent.
-fn below(tree: u32) -> (Vec<u32>, bool) {
+pub(super) fn below(tree: u32) -> (Vec<u32>, bool) {
     let children = |pid: u32| -> io::Result<Vec<u32>> {
         let mut out = Vec::new();
         for t in std::fs::read_dir(format!("/proc/{pid}/task"))?.flatten() {

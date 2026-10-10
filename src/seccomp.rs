@@ -97,7 +97,8 @@ enum Op {
 
 /// The checks, in order — each jumps only forward: to the next, over a block that isn't its call's, or to an
 /// answer. The last block is `socket()`'s; any other call is allowed. `no_userns`: no new user namespace.
-fn ops(arch: u32, mode: Mode, no_userns: bool) -> Vec<Op> {
+/// `ptys` (served only): the calls on the way to a pty's other end go to tarae too (`sandbox::ptys`).
+fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
     let nr = |n: libc::c_long| n as u32;
     let served = matches!(mode, Mode::Served | Mode::Routed | Mode::Copied);
     let copied = mode == Mode::Copied;
@@ -128,6 +129,19 @@ fn ops(arch: u32, mode: Mode, no_userns: bool) -> Vec<Op> {
             for n in [libc::SYS_socketpair, libc::SYS_accept, libc::SYS_accept4] {
                 ops.push(Op::Is(nr(n), To::Tarae, To::Next));
             }
+        }
+        // A pty made from `/dev/ptmx` is unlocked, numbered or its other end opened through these first — tarae
+        // puts one its rules grant in its place (an ioctl's request is an `unsigned int`: the low half is all
+        // the kernel reads)
+        if ptys {
+            ops.extend([
+                Op::Is(nr(libc::SYS_ioctl), To::Next, To::Skip(4)),
+                Op::Load(arg_low(1)),
+                Op::Is(libc::TIOCSPTLCK as u32, To::Tarae, To::Next),
+                Op::Is(libc::TIOCGPTN as u32, To::Tarae, To::Next),
+                Op::Is(libc::TIOCGPTPEER as u32, To::Tarae, To::Next),
+                Op::Load(NR), // (back to the call's number for the next block)
+            ]);
         }
     } else {
         ops.extend([
@@ -228,8 +242,8 @@ fn outside_ops(arch: u32) -> Vec<Op> {
 }
 
 /// `ops` for `mode` as classic BPF (`assemble`).
-fn program(arch: u32, mode: Mode, no_userns: bool) -> Vec<libc::sock_filter> {
-    assemble(&ops(arch, mode, no_userns))
+fn program(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<libc::sock_filter> {
+    assemble(&ops(arch, mode, no_userns, ptys))
 }
 
 /// `ops` as classic BPF, the four answers after them — falling off the last check is allowed.
@@ -273,7 +287,7 @@ pub fn available() -> bool {
 /// Puts the filter for `mode` on the calling thread (`Filter::new`, then `Filter::apply`).
 #[cfg(test)]
 pub fn apply(mode: Mode, no_userns: bool) -> io::Result<Option<OwnedFd>> {
-    Filter::new(mode, no_userns)?.apply()
+    Filter::new(mode, no_userns, false)?.apply()
 }
 
 /// A run's filter, made before it's put on — the keeper's run puts it on in the child of a raw `clone3`, which
@@ -285,12 +299,13 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// The filter for `mode` — `no_userns`: no new user namespace either (`tier::runs_refuse_userns`).
-    pub fn new(mode: Mode, no_userns: bool) -> io::Result<Filter> {
+    /// The filter for `mode` — `no_userns`: no new user namespace either (`tier::runs_refuse_userns`); `ptys`:
+    /// tarae serves the way to a pty's other end (`tier::Ns::serves_ptys`).
+    pub fn new(mode: Mode, no_userns: bool, ptys: bool) -> io::Result<Filter> {
         let arch = ARCH.ok_or_else(|| {
             io::Error::new(io::ErrorKind::Unsupported, "no seccomp filter for this architecture")
         })?;
-        Ok(Filter { prog: program(arch, mode, no_userns), mode })
+        Ok(Filter { prog: program(arch, mode, no_userns, ptys), mode })
     }
 
     /// Puts it on the calling thread — and what it starts from now on — for good. Sets `no_new_privs` first
@@ -515,7 +530,31 @@ mod tests {
     /// The program for `mode` (new user namespaces refused or not: `no_userns`) run over one call as the kernel
     /// would (classic BPF: loads, a mask, jumps, returns) — the program this architecture's, the call `call_arch`'s.
     fn eval_with(mode: Mode, no_userns: bool, call_arch: u32, nr: i64, args: &[u64]) -> u32 {
-        eval_prog(&program(ARCH.unwrap(), mode, no_userns), call_arch, nr, args)
+        eval_prog(&program(ARCH.unwrap(), mode, no_userns, false), call_arch, nr, args)
+    }
+
+    /// 3b: with `ptys` (served, by copies too) the three calls on the way to a pty's other end go to tarae —
+    /// whatever the request's high half, which the kernel doesn't read — and no other ioctl, nor any open; without
+    /// it, or not served, they're the run's.
+    #[test]
+    fn the_way_to_a_ptys_other_end_goes_to_tarae() {
+        let arch = ARCH.unwrap();
+        let (allow, tarae) = (ALLOW, libc::SECCOMP_RET_USER_NOTIF);
+        let ask = |mode, ptys, nr, args: &[u64]| eval_prog(&program(arch, mode, false, ptys), arch, nr, args);
+        for mode in [Mode::Served, Mode::Copied] {
+            for c in [libc::TIOCSPTLCK, libc::TIOCGPTN, libc::TIOCGPTPEER] {
+                assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, c, 0x1000]), tarae, "{mode:?} {c:#x}");
+                assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, c | 1 << 32, 0x1000]), tarae, "high half");
+                assert_eq!(ask(mode, false, libc::SYS_ioctl, &[3, c, 0x1000]), allow, "{mode:?} without");
+            }
+            for other in [libc::TIOCGWINSZ, libc::TCGETS, libc::TIOCSCTTY, libc::FIONREAD] {
+                assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, other]), allow, "{other:#x}");
+            }
+            assert_eq!(ask(mode, true, libc::SYS_openat, &[3, 0x1000, 2]), allow, "no open");
+            // (the blocks after it still see the call's number)
+            assert_eq!(ask(mode, true, libc::SYS_connect, &[3]), tarae);
+        }
+        assert_eq!(ask(Mode::Plain, true, libc::SYS_ioctl, &[3, libc::TIOCGPTN]), allow, "not served");
     }
 
     /// `prog` run over one call as the kernel would.

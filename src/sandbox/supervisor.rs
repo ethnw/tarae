@@ -218,6 +218,10 @@ pub struct Served {
     marks: Option<Arc<super::marks::Marks>>,
     /// By copies (`RunNet::Copied`, 6f′): tarae's copy of every socket the run has — None: taken.
     copies: Option<Arc<super::copies::Copies>>,
+    /// The ptys its rules grant (3b, `linux::Confine::ptys`): what it gets in place of those it makes.
+    ptys: Option<Arc<super::ptys::Ptys>>,
+    /// Its keeper, below which its processes are (what they hold of its ptys: `ptys::holders`).
+    tree: u32,
 }
 
 impl Served {
@@ -330,8 +334,8 @@ impl std::ops::Deref for Served {
 }
 
 /// The calls a supervisor answers, as its counts name them.
-const KINDS: [&str; 9] =
-    ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "socketpair", "accept"];
+const KINDS: [&str; 10] =
+    ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "socketpair", "accept", "pty"];
 
 fn kind(nr: i32) -> usize {
     match nr as libc::c_long {
@@ -343,6 +347,7 @@ fn kind(nr: i32) -> usize {
         libc::SYS_listen => 6,
         libc::SYS_socketpair => 7,
         libc::SYS_accept | libc::SYS_accept4 => 8,
+        libc::SYS_ioctl => 9,
         _ => 5,
     }
 }
@@ -441,12 +446,14 @@ pub fn totals() -> Totals {
 /// process of it is left, its refusals out on `refused`. The sender dropped unsent: it ends. `net`: `Served`,
 /// `Routed` or `Copied` (`Served`). `marks`: the session's (6d), where its network takes what goes beyond. `tree`:
 /// its keeper, below which its processes are (by copies: what's read for the sockets they hold, `copies.rs`).
+/// `ptys`: its pool, where its filter hands over the way to a pty's other end (`pty_ioctl`).
 pub fn serve(
     policy: Arc<Policy>,
     net: RunNet,
     refused: std::sync::mpsc::Sender<Denial>,
     marks: Option<Arc<super::marks::Marks>>,
     tree: u32,
+    ptys: Option<Arc<super::ptys::Ptys>>,
 ) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
     let session = policy.session;
@@ -467,7 +474,12 @@ pub fn serve(
         egress,
         marks,
         copies: (net == RunNet::Copied).then(|| super::copies::Copies::new(tree)),
+        ptys,
+        tree,
     });
+    if let Some(ptys) = &policy.ptys {
+        ptys.watch(tree);
+    }
     std::thread::Builder::new().name("tarae-serve".into()).spawn(move || {
         quiet_signals();
         let Ok(fd) = rx.recv() else { return };
@@ -487,6 +499,7 @@ pub fn serve(
                 libc::SYS_socketpair => l.answer(n.id, socketpair(&l, &n, &policy)),
                 libc::SYS_bind => l.answer(n.id, bind(&l, &n, &policy)),
                 libc::SYS_listen => l.answer(n.id, listen(&l, &n, &policy)),
+                libc::SYS_ioctl => l.answer(n.id, pty_ioctl(&l, &n, &policy)),
                 // (a connect or a send may wait — as long as the caller would have)
                 _ => {
                     let (on, p, stats) = (l.clone(), policy.clone(), run.clone());
@@ -505,6 +518,10 @@ pub fn serve(
                 }
             }
             took(&run, k, at);
+        }
+        // (no process of the run left: its ptys go, the watch with them)
+        if let Some(ptys) = &policy.ptys {
+            ptys.end();
         }
         let said = run.now();
         if said.calls.iter().any(|&c| c > 0) {
@@ -1279,6 +1296,56 @@ fn proxied(
     // (the proxy gone, the run's end reads its end at once: nothing goes out)
     super::proxy::get().send(super::proxy::ToProxy::Connection(to_proxy));
     Ok(0)
+}
+
+/// A pty call its filter handed over (3b, `sandbox::ptys`: `TIOCSPTLCK`, `TIOCGPTN`, `TIOCGPTPEER`) on the run's
+/// descriptor. A master (`/dev/ptmx`'s; `pts/ptmx`'s through a container's link) whose pty isn't one of its pool's
+/// is one the run just made: a pty of the pool goes in its place (`SETFD` closes the run's) — tarae's master's open
+/// file. Then the call is answered for the pool's pty: its number written where the run asked for it; unlocked
+/// (locking again: `EINVAL`); its other end opened by tarae and put among the run's descriptors. Decided on what
+/// `/proc` says of the descriptor, read before the call is checked to still wait — nothing in the run's memory
+/// decides. Not a master: `ENOTTY`, as the kernel says it (those three are a master's). Every pty of the pool held
+/// by the run (`Ptys::take` looks): `EACCES`, said.
+fn pty_ioctl(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
+    let args = n.data.args;
+    let Some(ptys) = &p.ptys else { return Err(libc::ENOTTY) };
+    // (an ioctl's descriptor and request are `unsigned int`s: the low halves are what the kernel reads)
+    let (fd, request, arg) = (u64::from(args[0] as u32), args[1] as u32, args[2]);
+    let c = Caller::open(l, n)?;
+    let master = matches!(c.link(fd)?.as_str(), "/dev/ptmx" | "/dev/pts/ptmx");
+    let info = std::fs::read_to_string(format!("/proc/{}/fdinfo/{fd}", c.tid)).map_err(|_| libc::EBADF)?;
+    let index = super::ptys::tty_index(&info).filter(|_| master).ok_or(libc::ENOTTY)?;
+    l.valid(n.id).map_err(|_| libc::ESRCH)?;
+    let at = match ptys.known(index) {
+        true => index,
+        false => {
+            let Some(at) = ptys.take(p.tree) else {
+                return refuse_with(p, &c, libc::EACCES, "pty-make", super::ptys::POOL.to_string());
+            };
+            let put = ptys.with_master(at, |m| l.add_fd(n.id, m, Some(fd as u32), cloexec(&c, fd)));
+            match put {
+                Some(Ok(_)) => ptys.handed_over(at),
+                put => {
+                    ptys.give_back(at);
+                    return Err(put.and_then(|r| r.err()).map_or(libc::EIO, |e| errno(&e)));
+                }
+            }
+            at
+        }
+    };
+    if request == libc::TIOCGPTN as u32 {
+        c.write(arg, &at.to_ne_bytes()).map(|()| 0)
+    } else if request == libc::TIOCSPTLCK as u32 {
+        match c.read(arg, 4)?.as_slice() {
+            [0, 0, 0, 0] => ptys.unlock(at).map(|()| 0).map_err(|e| errno(&e)),
+            _ => Err(libc::EINVAL),
+        }
+    } else if request == libc::TIOCGPTPEER as u32 {
+        let peer = ptys.peer(at, arg as i32).map_err(|e| errno(&e))?;
+        l.add_fd(n.id, &peer, None, arg as i32 & libc::O_CLOEXEC != 0).map_err(|e| errno(&e))
+    } else {
+        Err(libc::ENOTTY)
+    }
 }
 
 /// `socket()` for an internet family: a stream or datagram socket (TCP, UDP — not raw, ICMP's, SCTP or
@@ -3834,9 +3901,12 @@ mod tests {
             "v6" => {
                 let c = p.confine.take()?.ok()?;
                 let r = linux::ruleset_for(c.net, abi).ok()?;
+                let (serve, ptys) = (c.serve.clone(), c.ptys.clone());
                 let mut bare =
-                    linux::confine_in(r, &p, Err("not watched".into()), true, c.serve.clone(), c.net).ok()?;
+                    linux::confine_in(r, &p, Err("not watched".into()), true, serve, c.net, ptys.as_deref())
+                        .ok()?;
                 bare.keeper = c.keeper;
+                bare.ptys = ptys;
                 p.confine = Some(Ok(bare));
             }
             "v1" | "v3" => {

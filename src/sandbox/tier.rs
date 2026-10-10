@@ -88,6 +88,14 @@ impl Ns {
         }
     }
 
+    /// Whether a run of a keeper born with these, its sockets going as `net` says, gets only the ptys it makes
+    /// (3b, `sandbox::ptys`): without a `devpts` of the session's own (no `user`: C/D) and served — `D`'s runs
+    /// (`Plain`: no supervisor) keep this system's `/dev/pts`, said. One answer for its rules (`linux::confine`)
+    /// and its filter (the keeper's run).
+    pub fn serves_ptys(self, net: RunNet) -> bool {
+        !self.user && matches!(net, RunNet::Served | RunNet::Copied)
+    }
+
     /// In the log's words: `user net ipc pid mnt`, or `none`.
     pub fn said(self) -> String {
         if !self.user {

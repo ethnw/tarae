@@ -449,9 +449,16 @@ fn landlocks_rules_are_pinned() {
     let mut out = String::new();
     for abi in [3, 4, 6, 9, 10] {
         let r = landlock::Ruleset::written(abi).unwrap();
-        let c =
-            linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), super::tier::RunNet::Served)
-                .unwrap();
+        let c = linux::confine_in(
+            r,
+            &p,
+            Err("not watched".into()),
+            false,
+            Ok(()),
+            super::tier::RunNet::Served,
+            None,
+        )
+        .unwrap();
         let (fs, net, scopes) = (landlock::handled(abi), landlock::handled_net(abi), landlock::scopes(abi));
         out += &format!("ABI {abi}: handles files {fs:#07x} · network {net:#x} · scopes {scopes:#x}\n");
         let mut rules: Vec<String> = c
@@ -465,4 +472,57 @@ fn landlocks_rules_are_pinned() {
         out.extend(rules);
     }
     pinned("sandbox_landlock.txt", &out);
+}
+
+/// The rules of a run with its own ptys (3b, `sandbox::ptys`), pinned by shape: what this machine's `/dev` holds
+/// is read entry by entry around `/dev/pts` (one line, `/dev/<each entry but pts>`), the pool's ptys by inode
+/// (`$PTY1`, `$PTY2`, in number order); nothing else of `/dev/pts` but its `ptmx`.
+#[cfg(target_os = "linux")]
+#[test]
+fn landlocks_rules_with_ptys_are_pinned() {
+    use crate::landlock;
+    let f = Fixture::new("landlock-ptys", Os::Linux, &[]);
+    let p = f.policy(&crate::llm::LlmConfig::default());
+    let pool = super::ptys::Ptys::open(2);
+    let mut numbers = Vec::new();
+    pool.each(|_, n| {
+        numbers.push(n);
+        Ok(())
+    })
+    .unwrap();
+    if numbers.len() < 2 {
+        eprintln!("landlocks_rules_with_ptys_are_pinned: skipped — this system gave {} ptys", numbers.len());
+        return;
+    }
+    numbers.sort();
+    let mut out = String::new();
+    for abi in [4, 6] {
+        let r = landlock::Ruleset::written(abi).unwrap();
+        let served = super::tier::RunNet::Served;
+        let c =
+            linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), served, Some(&pool)).unwrap();
+        let read = (landlock::EXECUTE | landlock::READ_FILE | landlock::READ_DIR) & landlock::handled(abi);
+        out += &format!("ABI {abi}:\n");
+        let mut rules: Vec<String> = c
+            .granted()
+            .iter()
+            .filter(|(path, _)| path.starts_with("/dev"))
+            .map(|(path, access)| {
+                let shown =
+                    match numbers.iter().position(|n| *path == Path::new("/dev/pts").join(n.to_string())) {
+                        Some(i) => format!("/dev/pts/$PTY{}", i + 1),
+                        // (a file's read has no `READ_DIR`: two lines, files' and folders')
+                        None if path.parent() == Some(Path::new("/dev")) && *access & !read == 0 => {
+                            "/dev/<each entry but pts>".into()
+                        }
+                        None => path.display().to_string(),
+                    };
+                format!("    {access:#06x} {shown}\n")
+            })
+            .collect();
+        rules.sort();
+        rules.dedup();
+        out.extend(rules);
+    }
+    pinned("sandbox_landlock_ptys.txt", &out);
 }

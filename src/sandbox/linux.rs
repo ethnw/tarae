@@ -43,7 +43,8 @@ const WRITE_ONE: u64 = landlock::READ_FILE | landlock::WRITE_FILE | landlock::TR
 
 /// Devices programs use, and how (measured, `target/sb/measure-devices.sh`: cargo, go, npm, Maven, Gradle, a
 /// pty, Python's multiprocessing): `/dev/null` read, written, created-and-truncated and asked `isatty`;
-/// terminals for a pty test (`/dev/ptmx`, then its `/dev/pts/N`, with their ioctls); POSIX semaphores and
+/// terminals for a pty test (`/dev/ptmx`, then its `/dev/pts/N`, with their ioctls — this system's `/dev/pts`
+/// only the ptys tarae opened for the run, where it serves them: `sandbox::ptys`); POSIX semaphores and
 /// shared memory as files in `/dev/shm` (made and removed — macOS's profile allows them too). Reading the
 /// rest of `/dev` (`/dev/urandom`) is the reads' (outside home).
 pub(super) const DEVICES: [(&str, u64); 7] = [
@@ -105,6 +106,9 @@ pub struct Confine {
     /// with other sessions' (`notes`): their processes without a PID namespace of its own (A+, B+ have one), IPC
     /// and terminals without the session's (C/D), `/dev/shm` without its own.
     pub ns: super::tier::Ns,
+    /// The ptys its run may open of this system's `/dev/pts` (3b, `tier::serves_ptys`) — what the supervisor puts
+    /// in place of those the run makes; None: all of it (D) or the session's own (A+ … B).
+    pub ptys: Option<Arc<super::ptys::Ptys>>,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
@@ -514,7 +518,15 @@ pub fn confine(
     }
     // (what the keeper's runs take for their filter — the same once-read answer `Keeper::start` gives them)
     let no_userns = super::tier::runs_refuse_userns();
-    confine_in(r, p, audit, make_first, serve, net).map(|c| Confine { no_userns, tier, ns, ..c })
+    let ptys = keeper.is_some() && ns.serves_ptys(net);
+    let ptys = ptys.then(|| Arc::new(super::ptys::Ptys::open(super::ptys::POOL)));
+    confine_in(r, p, audit, make_first, serve, net, ptys.as_deref()).map(|c| Confine {
+        no_userns,
+        tier,
+        ns,
+        ptys,
+        ..c
+    })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
@@ -554,6 +566,8 @@ pub(super) fn session_devices(
 }
 
 /// `confine`, the rules added to `r` (the golden's are only written down: `Ruleset::written`), made for `net`.
+/// `ptys`: the run gets only these of this system's `/dev/pts` (3b: none of it read nor written but them, and
+/// `ptmx` — `sandbox::ptys`); without, all of it.
 pub(super) fn confine_in(
     mut r: Ruleset,
     p: &Policy,
@@ -561,12 +575,16 @@ pub(super) fn confine_in(
     make_first: bool,
     serve: Result<(), String>,
     net: RunNet,
+    ptys: Option<&super::ptys::Ptys>,
 ) -> io::Result<Confine> {
     let abi = r.abi();
     let hidden: Vec<PathBuf> = p.reads.copies.hidden.iter().map(|(f, _)| f.clone()).collect();
+    // (every pty is a file the reads would reach — reading one takes what's typed in another terminal)
+    let pts = Path::new("/dev/pts");
+    let pts_hole: Vec<PathBuf> = ptys.map(|_| pts.to_path_buf()).into_iter().collect();
     match &p.reads.home {
         Some(home) => {
-            grant(&mut r, Path::new("/"), READ, std::slice::from_ref(home))?;
+            grant(&mut r, Path::new("/"), READ, &[std::slice::from_ref(home), &pts_hole].concat())?;
             // In home: the project, where it writes, what's allowed — none inside a kept place (but the
             // project, when one holds it), and around what's kept or read from a copy below them
             let kept = &p.reads.kept;
@@ -589,7 +607,7 @@ pub(super) fn confine_in(
                 grant(&mut r, log, landlock::READ_FILE, &[])?;
             }
         }
-        None => grant(&mut r, Path::new("/"), READ, &hidden)?,
+        None => grant(&mut r, Path::new("/"), READ, &[hidden.as_slice(), &pts_hole].concat())?,
     }
     let abs: Vec<PathBuf> = p.protect.clone();
     let found = protected_there(&p.root, &abs);
@@ -628,7 +646,15 @@ pub(super) fn confine_in(
         grant(&mut r, f, WRITE_ONE, &protected_in(f))?;
     }
     for (d, access) in DEVICES {
+        if ptys.is_some() && Path::new(d) == pts {
+            continue;
+        }
         grant(&mut r, Path::new(d), access, &protected_in(Path::new(d)))?;
+    }
+    if let Some(ptys) = ptys {
+        // (`/dev/ptmx` is a link to it in a container, where `grant` gives a link no rule)
+        grant(&mut r, &pts.join("ptmx"), WRITE_ONE, &[])?;
+        ptys.each(|fd, n| r.allow_at(fd, &pts.join(n.to_string()), WRITE_ONE).map(drop))?;
     }
     // (`REMOVE_DIR` reaches into the protected folders too: what it could take there is noted, made again
     // after the run — `Kept`)
@@ -644,6 +670,7 @@ pub(super) fn confine_in(
         no_userns: false,
         tier: "",
         ns: super::tier::Ns::NONE,
+        ptys: None,
         made: Arc::new(made),
         closed,
         kept: Arc::new(kept),
@@ -698,9 +725,10 @@ pub fn made_said(made: &Made, root: &Path) -> String {
 /// of its session's own (`ns`: A+, B+ have one), the other sessions' processes in sight — Landlock keeps their
 /// environment and tracing in its domain, not their command lines nor `setpriority`
 /// (`keeper::tests::two_sessions_cant_reach_each_others_processes`); without the session's namespaces (C/D),
-/// this system's SysV IPC, `/dev/shm` and every pty — the user's own terminals too —, and `/dev/shm` alone
-/// where the session has none of its own (`keeper::tests::two_sessions_cant_reach_each_others_sockets`).
-pub fn notes(abi: u32, ns: super::tier::Ns) -> String {
+/// this system's SysV IPC, `/dev/shm` and — not served (`ptys` false: D) — every pty, the user's own terminals
+/// too; served, only the terminals it makes (3b). `/dev/shm` alone where the session has none of its own
+/// (`keeper::tests::two_sessions_cant_reach_each_others_sockets`).
+pub fn notes(abi: u32, ns: super::tier::Ns, ptys: bool) -> String {
     let mut s = match abi {
         n if n < 6 => format!(
             " This kernel's Landlock (ABI {n}) can't keep a command's signals to its own processes (6 does)."
@@ -714,6 +742,12 @@ pub fn notes(abi: u32, ns: super::tier::Ns) -> String {
         );
     }
     match (ns.user, ns.shm) {
+        (false, _) if ptys => s.push_str(&format!(
+            " Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and \
+             the user's other programs: it can read and write the shared memory they keep there. Of the \
+             terminals (/dev/pts) it opens only those it makes, up to {} at a time.",
+            super::ptys::POOL
+        )),
         (false, _) => s.push_str(
             " Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other \
              sessions' commands and the user's other programs: it can read and write the shared memory they \
@@ -1998,6 +2032,52 @@ mod tests {
             said,
             [format!("removing {lock} — a folder holding protected names keeps its files on Linux")]
         );
+    }
+
+    /// 3b's rules, pinned where the golden can't (its `/dev` is the machine's, the pool's numbers the moment's):
+    /// with a pool nothing under `/dev/pts` is granted but its `ptmx` and the pool's ptys, each `WRITE_ONE` —
+    /// the reads and the devices go around it (`/dev` itself no rule of its own); without, `/dev/pts` whole and
+    /// `/dev` read as one (or within `/`'s one rule), as before.
+    #[test]
+    fn with_its_ptys_a_run_is_granted_no_other_pty() {
+        let root = std::env::temp_dir().join(format!("tarae-pty-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = Policy::for_project(&Env { root: root.clone(), ..Default::default() });
+        let rules = |ptys: Option<&crate::sandbox::ptys::Ptys>| {
+            let r = Ruleset::written(4).unwrap();
+            confine_in(r, &p, Err("not watched".into()), false, Ok(()), RunNet::Served, ptys).unwrap()
+        };
+        let pool = crate::sandbox::ptys::Ptys::open(2);
+        // (as ABI 4 handles them: `IOCTL_DEV` is 5's)
+        let one = WRITE_ONE & landlock::handled(4);
+        let mut want = vec![(PathBuf::from("/dev/pts/ptmx"), one)];
+        pool.each(|_, n| {
+            want.push((PathBuf::from(format!("/dev/pts/{n}")), one));
+            Ok(())
+        })
+        .unwrap();
+        if want.len() < 3 || !Path::new("/dev/pts/ptmx").exists() {
+            eprintln!("with_its_ptys_a_run_is_granted_no_other_pty: skipped — no ptys here");
+            return;
+        }
+        let with = rules(Some(&pool));
+        let mut pts: Vec<(PathBuf, u64)> =
+            with.granted().iter().filter(|(path, _)| path.starts_with("/dev/pts")).cloned().collect();
+        pts.sort();
+        want.sort();
+        assert_eq!(pts, want);
+        // (`/` itself is one rule where home isn't known — the reads hole nothing then)
+        let dev = |c: &Confine| {
+            c.granted().iter().any(|(path, _)| path == Path::new("/dev") || path == Path::new("/"))
+        };
+        assert!(!dev(&with), "/ and /dev granted entry by entry around /dev/pts");
+        let without = rules(None);
+        let whole = without
+            .granted()
+            .iter()
+            .any(|(path, a)| path == Path::new("/dev/pts") && *a == landlock::ALL & landlock::handled(4));
+        assert!(whole && dev(&without), "{:?}", without.granted());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Without an audit log, what a run refused is read from its error lines: Landlock's "Permission

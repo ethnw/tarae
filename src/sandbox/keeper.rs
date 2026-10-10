@@ -894,7 +894,7 @@ impl Keeper {
             return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
         }
         let no_userns = super::tier::runs_refuse_userns();
-        self.start_with(cmd, comm, rules, net, no_userns).map(|(s, _)| s)
+        self.start_with(cmd, comm, rules, net, no_userns, false).map(|(s, _)| s)
     }
 
     /// Tests: `start`, new user namespaces refused (`no_userns`) as asked rather than as this system decides.
@@ -907,12 +907,13 @@ impl Keeper {
         net: RunNet,
         no_userns: bool,
     ) -> io::Result<Started> {
-        self.start_with(cmd, comm, rules, net, no_userns).map(|(s, _)| s)
+        self.start_with(cmd, comm, rules, net, no_userns, false).map(|(s, _)| s)
     }
 
     /// `start`, served or not; with a handoff socket when served or held (a keeper in a PID namespace — its
     /// run waits for tarae to know its pid): tarae's end of it comes back. `no_userns`: its filter refuses new
-    /// user namespaces (`tier::runs_refuse_userns`).
+    /// user namespaces (`tier::runs_refuse_userns`); `ptys`: its way to a pty's other end goes to its supervisor
+    /// (served, a pool granted in `rules` — 3b).
     fn start_with(
         &self,
         cmd: &std::process::Command,
@@ -920,6 +921,7 @@ impl Keeper {
         rules: BorrowedFd,
         net: RunNet,
         no_userns: bool,
+        ptys: bool,
     ) -> io::Result<(Started, Option<Arc<OwnedFd>>)> {
         use std::os::unix::ffi::OsStrExt;
         // (its own sockets only inside the network namespace that holds them to `lo`)
@@ -954,6 +956,7 @@ impl Keeper {
             net,
             held: self.ns.pid,
             no_userns,
+            ptys,
         };
         let stdin = open_null(libc::O_RDONLY)?;
         let (out_r, out_w) = io::pipe()?;
@@ -991,23 +994,25 @@ impl Keeper {
     /// its listener comes on that pair (`SCM_RIGHTS`, `hand_over` — no `pidfd_getfd`, which Docker's default profile
     /// refuses), read on a thread of its own (the main loop doesn't wait for it), handed to the supervisor, and
     /// one byte said back: the run goes on to its exec. Anything failing there closes the pair, and the run
-    /// fails at its handoff. `net`: `Served`, or `Routed` (its own sockets in the session's netns).
+    /// fails at its handoff. Its rules, how its sockets go (`Served`, or `Routed`: its own in the session's netns)
+    /// and its ptys (3b) are `c`'s.
     pub fn start_served(
         &self,
         cmd: &std::process::Command,
         comm: &str,
-        rules: BorrowedFd,
-        net: RunNet,
+        c: &super::linux::Confine,
         policy: Arc<super::Policy>,
         refused: std::sync::mpsc::Sender<super::Denial>,
     ) -> io::Result<Started> {
+        let net = c.net;
         if !matches!(net, RunNet::Served | RunNet::Routed | RunNet::Copied) {
             return Err(io::Error::other("a run not served starts on its own (start)"));
         }
         // (6d: where its session has the TPROXY network, beyond is the run's own socket marked as its run's)
         let marks = lock(&self.network).as_ref().map(|n| n.marks.clone());
-        let to = super::supervisor::serve(policy, net, refused, marks, self.pid)?;
-        let (started, ours) = self.start_with(cmd, comm, rules, net, super::tier::runs_refuse_userns())?;
+        let to = super::supervisor::serve(policy, net, refused, marks, self.pid, c.ptys.clone())?;
+        let no_userns = super::tier::runs_refuse_userns();
+        let (started, ours) = self.start_with(cmd, comm, c.rules_fd(), net, no_userns, c.ptys.is_some())?;
         let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
         crate::event::thread("tarae-handoff", move || {
             let Ok(listener) = recv_listener(&ours) else { return };
@@ -2373,7 +2378,7 @@ impl Exec {
             RunNet::Plain => crate::seccomp::Mode::Plain,
             RunNet::Copied => crate::seccomp::Mode::Copied,
         };
-        let filter = crate::seccomp::Filter::new(mode, run.no_userns)?;
+        let filter = crate::seccomp::Filter::new(mode, run.no_userns, run.ptys)?;
         let c = |s: &[u8]| CString::new(s).unwrap_or_default();
         let argv: Vec<CString> = run.argv.iter().map(|a| c(a)).collect();
         let envp: Vec<CString> = run.envp.iter().map(|e| c(e)).collect();
@@ -2803,7 +2808,7 @@ mod tests {
             if ! { : 4<>/dev/tcp/192.0.2.1/9; } 2>/dev/null; then printf ' refused'; fi";
         cmd.args(["-c", script]).env("P", port.to_string()).current_dir(&root);
         let name = crate::landlock::thread_name();
-        let s = k.start_served(&cmd, &name, c.rules_fd(), c.net, Arc::new(p), tx).unwrap();
+        let s = k.start_served(&cmd, &name, &c, Arc::new(p), tx).unwrap();
         let mut out = String::new();
         io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
         let mut err = String::new();
@@ -3157,14 +3162,7 @@ mod tests {
             let keeper_served = served.then(|| {
                 median_ms(50, || {
                     let s = k
-                        .start_served(
-                            &cmd,
-                            &crate::landlock::thread_name(),
-                            c.rules_fd(),
-                            c.net,
-                            policy.clone(),
-                            tx.clone(),
-                        )
+                        .start_served(&cmd, &crate::landlock::thread_name(), &c, policy.clone(), tx.clone())
                         .unwrap();
                     crate::spawn::wait(s.spawned.pid).unwrap();
                 })
@@ -3436,6 +3434,8 @@ mod tests {
                 }
                 Err(e) => format!("pty={}", tried::<()>(Err(e))),
             },
+            "ptys" => ptys_tried(),
+            "pty-refusals" => pty_refusals_tried(),
             "mounts" => {
                 let shm = format!("/dev/shm/tarae-helper-{}", std::process::id());
                 let made = std::fs::write(&shm, "x").and_then(|()| std::fs::remove_file(&shm));
@@ -4837,6 +4837,137 @@ mod tests {
         }
     }
 
+    /// The `ptys` helper (3b): each way a run reaches a pty, `ok` or its errno — `own` (one made as libc's
+    /// `openpty` does: `/dev/ptmx`, unlocked, named, its `/dev/pts/N` opened), `peer` (its other end through
+    /// `TIOCGPTPEER`), `reopen` (`own`'s other end again through `/proc/self/fd`), `read`/`write`
+    /// (`$TARAE_TO`: a pty of another's), `fresh` (own's closed, a master made and — before any call that tarae
+    /// sees — its number read from `fdinfo` and opened: whether its number is `own`'s, `reused` says), `then`
+    /// (that master numbered and opened as `own` was).
+    fn ptys_tried() -> String {
+        use std::os::unix::fs::OpenOptionsExt;
+        let open = |path: &str, read: bool, write: bool| {
+            let mut o = std::fs::OpenOptions::new();
+            o.read(read).write(write).custom_flags(libc::O_NOCTTY).open(path)
+        };
+        let own = pty_opened();
+        let number = |path: &str| path.rsplit('/').next().and_then(|n| n.parse::<u32>().ok());
+        let own_n = own.as_ref().ok().and_then(|(_, _, p)| number(p));
+        let reopen = match &own {
+            Ok((_, s, _)) => tried(open(&format!("/proc/self/fd/{}", s.as_raw_fd()), true, true)),
+            Err(_) => "unmade".into(),
+        };
+        // SAFETY: plain calls on descriptors this makes and owns.
+        let peer = unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            let m = (m >= 0).then(|| OwnedFd::from_raw_fd(m));
+            match m {
+                Some(m) if libc::unlockpt(m.as_raw_fd()) == 0 => {
+                    let s = libc::ioctl(m.as_raw_fd(), libc::TIOCGPTPEER, libc::O_RDWR | libc::O_NOCTTY);
+                    tried((s >= 0).then(|| OwnedFd::from_raw_fd(s)).ok_or_else(io::Error::last_os_error))
+                }
+                _ => tried::<()>(Err(io::Error::last_os_error())),
+            }
+        };
+        let other = std::env::var("TARAE_TO").unwrap_or_default();
+        let (read, write) = (tried(open(&other, true, false)), tried(open(&other, false, true)));
+        let own = tried(own.map(drop));
+        // SAFETY: as above.
+        let (fresh, reused, then) = unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            let m = (m >= 0).then(|| OwnedFd::from_raw_fd(m));
+            let info =
+                m.as_ref().map(|m| std::fs::read_to_string(format!("/proc/self/fdinfo/{}", m.as_raw_fd())));
+            let n = info.and_then(|i| super::super::ptys::tty_index(&i.ok()?));
+            let fresh = match n {
+                Some(n) => tried(open(&format!("/dev/pts/{n}"), true, true)),
+                None => "unmade".into(),
+            };
+            let mut name = [0 as libc::c_char; 64];
+            let then = match &m {
+                Some(m)
+                    if libc::unlockpt(m.as_raw_fd()) == 0
+                        && libc::ptsname_r(m.as_raw_fd(), name.as_mut_ptr(), name.len()) == 0 =>
+                {
+                    tried(open(&std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy(), true, true))
+                }
+                _ => tried::<()>(Err(io::Error::last_os_error())),
+            };
+            (fresh, n.is_some() && n == own_n, then)
+        };
+        format!(
+            "own={own} peer={peer} reopen={reopen} read={read} write={write} fresh={fresh} reused={reused} then={then}"
+        )
+    }
+
+    /// The `pty-refusals` helper (3b): the supervisor's own refusals, each `ok` or its errno — `nonmaster` (a pty
+    /// call on `/dev/null`), `relock` (a master made, then locked again), `seq` (of 100 ptys made and closed one
+    /// after another, how many opened), `held` (ptys then made and kept until one is refused — how many), `past`
+    /// (that refusal's errno), `hangup` (a shell reading a pty's other end ends once the run closes its master —
+    /// `hung` if not within 3 s).
+    fn pty_refusals_tried() -> String {
+        let null = std::fs::File::open("/dev/null").expect("/dev/null");
+        let mut n: libc::c_uint = 0;
+        // SAFETY: plain calls on descriptors this makes and owns; ints for the calls to read and fill.
+        let (nonmaster, relock) = unsafe {
+            let r = libc::ioctl(null.as_raw_fd(), libc::TIOCGPTN, &mut n);
+            let nonmaster = tried((r == 0).then_some(()).ok_or_else(io::Error::last_os_error));
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            let m = (m >= 0).then(|| OwnedFd::from_raw_fd(m));
+            let lock: libc::c_int = 1;
+            let relock = match &m {
+                Some(m) => {
+                    let r = libc::ioctl(m.as_raw_fd(), libc::TIOCSPTLCK, &lock);
+                    tried((r == 0).then_some(()).ok_or_else(io::Error::last_os_error))
+                }
+                None => "unmade".into(),
+            };
+            (nonmaster, relock)
+        };
+        let seq = (0..100).filter(|_| pty_opened().is_ok()).count();
+        let mut held = Vec::new();
+        let past = loop {
+            match pty_opened() {
+                Ok(pty) => held.push(pty),
+                Err(e) => break tried::<()>(Err(e)),
+            }
+            if held.len() > 2 * super::super::ptys::POOL {
+                break "never".into();
+            }
+        };
+        let kept = held.len();
+        drop(held);
+        // (a shell reading the other end; its master closed — tarae's too, once it sees the run's go)
+        let hangup = match pty_opened() {
+            Ok((m, s, _)) => {
+                let sh = std::process::Command::new("sh")
+                    .args(["-c", "read x"])
+                    .stdin(std::process::Stdio::from(s))
+                    .stdout(std::process::Stdio::null())
+                    .spawn();
+                drop(m);
+                match sh {
+                    Ok(mut sh) => {
+                        let until = Instant::now() + Duration::from_secs(3);
+                        while sh.try_wait().ok().flatten().is_none() && Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        match sh.try_wait() {
+                            Ok(Some(_)) => "ok".to_string(),
+                            _ => {
+                                let _ = sh.kill();
+                                let _ = sh.wait();
+                                "hung".into()
+                            }
+                        }
+                    }
+                    Err(e) => tried::<()>(Err(e)),
+                }
+            }
+            Err(e) => tried::<()>(Err(e)),
+        };
+        format!("nonmaster={nonmaster} relock={relock} seq={seq} held={kept} past={past} hangup={hangup}")
+    }
+
     /// A pty opened (`/dev/ptmx`): its master, its slave, the slave's path.
     fn pty_opened() -> io::Result<(OwnedFd, OwnedFd, String)> {
         // SAFETY: plain calls on descriptors this makes and owns; a name buffer of its size.
@@ -5486,18 +5617,27 @@ mod tests {
 
         /// The test binary on `helper` doing `what` (with `env` set) as a run of this session's, in its project.
         fn helper(&self, what: &str, env: &[(&str, &str)]) -> Started {
+            // (what the supervisor refuses is said on a channel no one reads here)
+            self.helper_told(what, env).0
+        }
+
+        /// `helper`, and what its supervisor refused it (served; else nothing ever comes).
+        fn helper_told(
+            &self,
+            what: &str,
+            env: &[(&str, &str)],
+        ) -> (Started, std::sync::mpsc::Receiver<super::super::Denial>) {
             let cmd = helper_cmd(what, env, Some(&self.root));
             let (c, name) = (&self.confine, crate::landlock::thread_name());
-            match c.net {
+            let (told, refused) = std::sync::mpsc::channel();
+            let started = match c.net {
                 RunNet::Served | RunNet::Routed | RunNet::Copied => {
-                    // (what the supervisor refuses is said on a channel no one reads here)
-                    let told = std::sync::mpsc::channel().0;
                     let p = Arc::new(self.policy.clone());
-                    self.keeper.start_served(&cmd, &name, c.rules_fd(), c.net, p, told)
+                    self.keeper.start_served(&cmd, &name, c, p, told)
                 }
                 RunNet::Own | RunNet::Plain => self.keeper.start(&cmd, &name, c.rules_fd(), c.net),
-            }
-            .unwrap()
+            };
+            (started.unwrap(), refused)
         }
 
         fn end(self) {
@@ -5538,6 +5678,7 @@ mod tests {
         io::Read::read_to_string(&mut hold.spawned.stderr.take().unwrap(), &mut rest).unwrap();
         crate::spawn::wait(hold.spawned.pid).unwrap();
         let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier);
+        let ptys = mine.confine.ptys.is_some();
         // What the report says a run of this session's can't be kept from (`linux_said`'s notes)
         let mut p = mine.policy.clone();
         p.confine = Some(Ok(mine.confine.clone()));
@@ -5573,6 +5714,9 @@ mod tests {
         // Step 8's: without a network of the session's own the loopback is this system's — a port the policy
         // doesn't open is refused (this one's opens none), one it opens would be shared. Pinned as it is.
         let loopback = Refused;
+        // 3b: without a `devpts` of the session's own a served run opens only the ptys it makes (`ptys.rs`)
+        assert_eq!(ptys, ns.serves_ptys(net), "{line}");
+        let pty = if ptys { Refused } else { Shared };
         // (attempt, in the session's own namespace for it, without one)
         let table = [
             ("tcp", ns.net, Unnamed, loopback),
@@ -5580,7 +5724,7 @@ mod tests {
             ("path", false, Refused, Refused),
             ("ipc", ns.user, Unnamed, Shared),
             ("shm", ns.shm, Unnamed, Shared),
-            ("pty", ns.user, Unnamed, Shared),
+            ("pty", ns.user, Unnamed, pty),
         ];
         // Where the report says each that's shared
         let said_of = |what: &str| {
@@ -5608,8 +5752,75 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
-        // …and nothing says it where it isn't so
+        // …and nothing says it where it isn't so — the ptys kept apart said as such
         assert_eq!(notes.contains("other sessions' commands"), !(ns.user && ns.shm), "{line}");
+        assert_eq!(notes.contains("the user's own too"), !ns.user && !ptys, "{line}");
+        assert_eq!(notes.contains("it opens only those it makes"), ptys, "{line}");
+    }
+
+    /// 3b: without a `devpts` of the session's own (C, by copies too) a run reaches the ptys it makes — as libc's
+    /// `openpty` makes them (the session-mounts helper's pty), through `TIOCGPTPEER`, again through `/proc/self/fd`
+    /// — and no other: a terminal of the user's is neither read (what's typed there) nor written, and a master it
+    /// made whose number it read without asking tarae (`fdinfo`: no call tarae sees) is refused its other end —
+    /// that pty isn't one the rules grant (Landlock grants inodes), nor ever has a pool pty's number (tarae holds
+    /// those). The same master asked for its number as programs do is then the pool's, and opens.
+    #[test]
+    fn a_run_opens_only_the_ptys_it_makes() {
+        let test = "a_run_opens_only_the_ptys_it_makes";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let s = Apart::new("ptys");
+        if s.confine.ptys.is_none() {
+            let why = if s.keeper.ns.user { "its session has a devpts of its own" } else { "not served" };
+            eprintln!("{test}: skipped — tier {}: {why}", s.confine.tier);
+            s.end();
+            return;
+        }
+        let (_m, _s, other) = pty_opened().expect("a pty of this process's: another terminal of the user's");
+        let said = helper_said(s.helper("ptys", &[("TARAE_TO", &other)]));
+        let tier = s.confine.tier;
+        s.end();
+        let _ = io::Write::write_all(&mut io::stderr(), format!("tier {tier}: {said}\n").as_bytes());
+        let refused = libc::EACCES;
+        // (`reused`: tarae holds the pool's masters, so a fresh pty never gets a pool pty's number while the run goes)
+        let want = format!(
+            "own=ok peer=ok reopen=ok read={refused} write={refused} fresh={refused} reused=false then=ok"
+        );
+        assert_eq!(said, want);
+    }
+
+    /// 3b, the pool at a time: a pty call on a descriptor that isn't a master is the kernel's `ENOTTY`; locking a
+    /// pool pty again is `EINVAL`; ptys made and closed one after another go back to the pool — 100 all open; held
+    /// at once, the one past `POOL` is `EACCES`, and the refusal is said (`pty-make`, in plain words) once; a pty
+    /// whose master the run closed is hung up for what still reads its other end, as without tarae (whose own
+    /// master would hold it up).
+    #[test]
+    fn a_run_holds_its_ptys_at_a_time() {
+        let test = "a_run_holds_its_ptys_at_a_time";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let s = Apart::new("pty-refusals");
+        if s.confine.ptys.is_none() {
+            eprintln!("{test}: skipped — tier {}: its ptys aren't tarae's to serve", s.confine.tier);
+            s.end();
+            return;
+        }
+        let (started, refused) = s.helper_told("pty-refusals", &[]);
+        let said = helper_said(started);
+        s.end();
+        let pool = super::super::ptys::POOL;
+        let want = format!(
+            "nonmaster={} relock={} seq=100 held={pool} past={} hangup=ok",
+            libc::ENOTTY,
+            libc::EINVAL,
+            libc::EACCES
+        );
+        assert_eq!(said, want);
+        let told: Vec<String> = refused.try_iter().map(|d| format!("{} {}", d.op, d.plain())).collect();
+        let once = format!("pty-make making more terminals than a run holds at a time ({pool})");
+        assert_eq!(told, [once], "the one refusal, said");
     }
 
     /// D10 under Landlock: the session's own `/dev/pts` and `/dev/shm` sit over this system's, where a rule
@@ -6021,7 +6232,7 @@ mod tests {
         .current_dir(root);
         let (tx, rx) = std::sync::mpsc::channel();
         let name = crate::landlock::thread_name();
-        let s = k.start_served(&cmd, &name, c.rules_fd(), c.net, p.clone(), tx).unwrap();
+        let s = k.start_served(&cmd, &name, c, p.clone(), tx).unwrap();
         let pid = s.spawned.pid;
         let lines =
             io::BufRead::lines(std::io::BufReader::new(s.spawned.stdout.unwrap())).map_while(Result::ok);
