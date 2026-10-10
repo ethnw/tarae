@@ -3478,6 +3478,7 @@ mod tests {
             "udp" => helper_udp(&std::env::var("TARAE_TO").unwrap_or_default()),
             "within" => helper_within(&std::env::var("TARAE_TO").unwrap_or_default()),
             "cgroupwrites" => helper_cgroup_writes(),
+            "reach" => helper_reach(&std::env::var("TARAE_TO").unwrap_or_default()),
             // (`within` once `$TARAE_GO` is there — what the test wanted in place first is: 5 s at most)
             "within_when" => {
                 let go = std::env::var_os("TARAE_GO").unwrap_or_default();
@@ -5034,6 +5035,196 @@ mod tests {
         assert!(own_args >= 1 && own_env >= 1, "the run doesn't find its own markers: {line}");
         assert_eq!(env, 0, "an environment read outside the session: {line}");
         assert_eq!(args, usize::from(!pid_ns), "{line}");
+    }
+
+    /// The other session's stand-in's markers: in its arguments (how a run finds it) and its environment. Made
+    /// up where they're used, so no command line or environment here carries them whole.
+    fn apart_marker(what: &str) -> String {
+        format!("apart-{what}-{}", "marker")
+    }
+
+    /// `reach`: another session's run, `$TARAE_TO` (its pid as tarae sees it) — named by that number if it is
+    /// the one carrying `apart_marker("arg")` where this run looks, else found by the marker among what it sees,
+    /// else out of its sight. Then each attempt on it, `ok` or its errno: its command line and environment read
+    /// (`ok` only with the marker in it), `setpriority` to 7, `PTRACE_SEIZE` (ended with this process: no
+    /// stop), `SIGCONT`. Out of sight, whether the number names anything here (`kill 0`'s errno, `own` where
+    /// it's one of its own session's). `own=N`: the processes the look found carrying this helper's own
+    /// argument — its control: a look that reads nothing finds none.
+    fn helper_reach(to: &str) -> String {
+        let marked = |pid: &str, marker: &str| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|c| String::from_utf8_lossy(&c).contains(marker))
+        };
+        let pids: Vec<String> = std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            .collect();
+        let own = pids.iter().filter(|p| marked(p, "sandbox::keeper::tests::helper")).count();
+        let arg = apart_marker("arg");
+        let seen = match marked(to, &arg) {
+            true => Some(to.to_string()),
+            false => pids.into_iter().find(|p| marked(p, &arg)),
+        };
+        let Some(t) = seen else {
+            let number = match Path::new(&format!("/proc/{to}")).exists() {
+                true => "own".to_string(),
+                // SAFETY: signal 0 only asks.
+                false => tried(io_result(unsafe { libc::kill(to.parse().unwrap_or(0), 0) })),
+            };
+            return format!("seen=no number={number} own={own}");
+        };
+        let read = |file: &str, marker: &str| match std::fs::read(format!("/proc/{t}/{file}")) {
+            Ok(c) if String::from_utf8_lossy(&c).contains(marker) => "ok".to_string(),
+            Ok(_) => "unmarked".to_string(),
+            Err(e) => tried::<()>(Err(e)),
+        };
+        let pid: libc::pid_t = t.parse().unwrap();
+        // SAFETY: plain calls on a pid; a seized tracee is let go when this process ends, never stopped.
+        let (prio, ptrace, kill) = unsafe {
+            (
+                libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, 7),
+                libc::ptrace(libc::PTRACE_SEIZE, pid, 0, 0) as libc::c_int,
+                libc::kill(pid, libc::SIGCONT),
+            )
+        };
+        format!(
+            "seen=yes cmdline={} environ={} setpriority={} ptrace={} kill={} own={own}",
+            read("cmdline", &arg),
+            read("environ", &apart_marker("env")),
+            tried(io_result(prio)),
+            tried(io_result(ptrace)),
+            tried(io_result(kill)),
+        )
+    }
+
+    /// A libc call's `-1` as its errno.
+    fn io_result(r: libc::c_int) -> io::Result<()> {
+        if r == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    /// What one session's run got trying another session's.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Reach {
+        /// Out of its sight (its session's own PID namespace): no number of its names it — nothing to try.
+        Unnamed,
+        /// Named, and the kernel refused it.
+        Refused,
+        /// Named, and it went through: shared between sessions here — known, and the report must say it.
+        Shared,
+    }
+
+    /// Step 7: two sessions' keepers side by side, a run of each — from one, everything a process can do to
+    /// another of the same user: kill/signal, ptrace attach, its `/proc/<pid>/{cmdline,environ}` read,
+    /// `setpriority`. Each tier's expectation is the table: A+ names nothing of the other session (its own PID
+    /// namespace); without one (A, C/D) the other run is in sight and Landlock keeps ptrace and the environment
+    /// (a ptrace-mode read) in the run's own domain, signals from ABI 6 — what goes through is shared, pinned as
+    /// shared and said (the user's decision 2026-10-10). The stand-in is the test's own; what a `setpriority` it
+    /// was let do is checked on it from here, and it's alive after.
+    #[test]
+    fn two_sessions_cant_reach_each_others_processes() {
+        use Reach::*;
+        let test = "two_sessions_cant_reach_each_others_processes";
+        let Some(rules) = open_rules(test) else { return };
+        let abi = crate::landlock::abi().unwrap();
+        let (mine, theirs) = (keeper("apart-mine"), keeper("apart-theirs"));
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 60; :", &apart_marker("arg")]).env("TARAE_APART", apart_marker("env"));
+        let target = theirs.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
+        let pid = target.spawned.pid;
+        let stat = || std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let nice =
+            || stat().rsplit_once(')').and_then(|(_, s)| s.split_whitespace().nth(16).map(String::from));
+        let by = Instant::now() + Duration::from_secs(5);
+        let cmdline = || std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        while !String::from_utf8_lossy(&cmdline()).contains(&apart_marker("arg")) && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let before = nice();
+        let said = helper_through(
+            &mine,
+            rules.fd(),
+            RunNet::Plain,
+            "reach",
+            &[("TARAE_TO", &pid.to_string())],
+            None,
+        );
+        let after = nice();
+        // SAFETY: signal 0 only asks; then the stand-in's group (`setsid`: it and its `sleep`) is ended.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        crate::spawn::wait(pid).ok();
+        let pid_ns = mine.ns.pid;
+        let probed = super::super::tier::get();
+        let (user_ns, tier) = (mine.ns.user, probed.tier().said());
+        let why = probed.short.as_deref().map(|w| format!(" — {w}")).unwrap_or_default();
+        // What the report says a run of this session's can't be kept from (`linux_said`'s notes), its rules made
+        // with its keeper as a project's run's are
+        let plain = Err("not served".into());
+        let (mut p, c, _root) = project_served("apart", Vec::new(), Some(&mine), &[], plain);
+        p.confine = Some(Ok(c));
+        let (_, notes) = p.linux_said().unwrap();
+        mine.end();
+        theirs.end();
+        let got: std::collections::HashMap<&str, &str> =
+            said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let line = format!("tier {tier}{why} (Landlock ABI {abi}): {said}\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        assert!(before.is_some() && alive, "the stand-in ran and outlived the attempts: {before:?} {line}");
+        assert!(got["own"] != "0", "the look finds the run's own helper — else it reads nothing: {line}");
+        let verdict = |what: &str| match (got["seen"], got.get(what).copied()) {
+            ("no", _) => Unnamed,
+            (_, Some("ok")) => Shared,
+            (_, Some(n)) if n.bytes().all(|b| b.is_ascii_digit()) => Refused,
+            (_, other) => panic!("{what}: {other:?} — {line}"),
+        };
+        // From ABI 6 Landlock keeps a run's signals to its own processes (its scope); below, they're shared
+        let signal = if abi >= 6 { Refused } else { Shared };
+        // (attempt, A+: its own PID namespace, A: the session's namespaces but that one, C/D: none)
+        let table = [
+            ("cmdline", Unnamed, Shared, Shared),
+            ("environ", Unnamed, Refused, Refused),
+            ("ptrace", Unnamed, Refused, Refused),
+            ("kill", Unnamed, signal, signal),
+            ("setpriority", Unnamed, Shared, Shared),
+        ];
+        // Where the report says each that's shared
+        let said_of = |what: &str| match what {
+            "kill" => notes.contains("can't keep a command's signals to its own processes"),
+            "cmdline" => {
+                notes.contains("another session's commands") && notes.contains("their command lines")
+            }
+            "setpriority" => notes.contains("another session's commands") && notes.contains("their priority"),
+            _ => false,
+        };
+        // …and nothing says it where it isn't so
+        assert_eq!(notes.contains("another session's commands"), !pid_ns, "{notes}");
+        for (what, a_plus, a, c_d) in table {
+            let want = match (pid_ns, user_ns) {
+                (true, _) => a_plus,
+                (false, true) => a,
+                (false, false) => c_d,
+            };
+            assert_eq!(verdict(what), want, "{what}: {line}");
+            if want == Shared {
+                assert!(
+                    said_of(what),
+                    "{what} is shared between sessions here, and the report doesn't say so: {line}"
+                );
+            }
+        }
+        // What the kernel let it do is what happened to the stand-in
+        let moved = Some("7".to_string());
+        assert_eq!(
+            after == moved && before != moved,
+            verdict("setpriority") == Shared,
+            "{before:?} → {after:?}: {line}"
+        );
+        if !pid_ns {
+            assert_eq!(got["seen"], "yes", "in sight without a PID namespace of its own: {line}");
+        }
     }
 
     /// D10 under Landlock: the session's own `/dev/pts` and `/dev/shm` sit over this system's, where a rule
