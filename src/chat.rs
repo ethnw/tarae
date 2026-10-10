@@ -340,6 +340,9 @@ pub struct Chat {
     /// What its conversation ran on before a switch of billing, model or effort since the last message went
     /// (`switchcost.rs`) — the line over the input says what the next one costs; sending clears it.
     pub switched: Option<crate::switchcost::Setup>,
+    /// The turn under way was refused for money (`billing::refusal`) — acted on at its end (`money_out`), gone
+    /// with a turn cut off instead (claude's exit, a new chat).
+    pub money: Option<crate::billing::Money>,
 }
 
 /// Where a command of Claude's ran (cardburden 4), from its run's own record — its guard (`Guard::where_ran`),
@@ -514,6 +517,7 @@ impl Chat {
             settings: Default::default(),
             billing: None,
             switched: None,
+            money: None,
         }
     }
 
@@ -930,6 +934,8 @@ pub fn reset(ed: &mut Editor) {
     c.conversation = None;
     c.resume = None;
     c.switched = None;
+    // (a refusal for money read in a turn the new chat cut off is that turn's — `money_out` never sees it)
+    c.money = None;
     // (a billing waiting for the last conversation's turn to end goes with it)
     ed.session.billing_next = None;
     ed.session.usage.new_conversation();
@@ -1151,6 +1157,13 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 ed.limit_hit(&window, resets_at_ms);
             }
         }
+        // (refused for money: said, and the plan offered, at the turn's end — `billing.rs`)
+        StreamEv::Money(m) => {
+            if c.state != State::Idle {
+                c.money = Some(m);
+            }
+            ed.unchanged = true;
+        }
         // (a retry said in place of the one before it — the turn's, not a row each)
         StreamEv::Retry(r) => {
             let said = r.said();
@@ -1242,6 +1255,12 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             let (calls, took) = (c.calls.len(), c.started.elapsed());
             c.state = State::Idle;
             c.calls.clear();
+            // (refused for money on the key, the turn ending on its error — not stopped, not answered after
+            // all: said in tarae's words instead — `money_out`)
+            let money = c
+                .money
+                .take()
+                .filter(|_| ed.session.billing == crate::billing::Billing::Api && r.is_err() && !c.stopping);
             let how = match &r {
                 Ok(_) => Ok(()),
                 Err(_) if c.stopping => Err("stopped".to_string()),
@@ -1268,6 +1287,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                     crate::uistate::claude::cite(c);
                     c.msgs.push(Msg::new(Role::Note, format!("{secs:.1}s"), ""));
                 }
+                Err(_) if money.is_some() => {}
                 Err(e) => {
                     let e = if std::mem::take(&mut c.stopping) { "stopped".to_string() } else { e };
                     c.msgs.push(Msg::new(Role::Note, e, ""));
@@ -1309,6 +1329,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 let resets = ed.limits.get(window, crate::usage::now_ms()).and_then(|r| r.resets_at_ms);
                 ed.limit_hit(window, resets);
             }
+            if let Some(m) = money {
+                ed.money_out(m);
+            }
             // (a billing that waited for the turn's end — the limit card's `y` mid-turn)
             crate::billing::turn_over(ed);
             send_queued(ed);
@@ -1317,6 +1340,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             c.proc = None;
             c.follow.gaze = None;
             c.calls.clear();
+            // (a refusal for money read in the turn this exit cut off is that turn's alone)
+            c.money = None;
             // The conversation is gone from claude: a fresh one, the rows still shown
             if err.contains("No conversation found") && c.resume.is_some() {
                 c.resume = None;

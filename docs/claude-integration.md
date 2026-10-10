@@ -1192,10 +1192,11 @@ security add-generic-password -a "$USER" -s tarae.anthropic-api-key -w
 ```
 
 **Switch a session** with `:session-billing api` (and back with `:session-billing subscription`; with no word it
-says which the session is on). If its Claude is running, it stops and starts again on the new billing, continuing
-the same conversation. The first turn after a switch writes the whole conversation to the prompt cache again: the
-plan's cache and your API organization's aren't shared. While Claude answers, the switch is refused; switch after
-the turn, or stop it with `C-c`. New sessions take `llm.billing` (`"subscription"` by default), and each session
+says which the session is on). It first looks for the key's Keychain item, as `$` and the cards do; when it isn't
+there, an error says how to add it and nothing changes. If its Claude is running, it stops and starts again on the
+new billing, continuing the same conversation. The first turn after a switch writes the whole conversation to the
+prompt cache again: the plan's cache and your API organization's aren't shared. While Claude answers, the switch
+is refused; switch after the turn, or stop it with `C-c`. New sessions take `llm.billing` (`"subscription"` by default), and each session
 keeps its own across `:restart` and the next start. The reviewer follows its session unless
 `llm.reviewer-billing` says `"subscription"` or `"api"`. These settings, like `llm.environment-key`, are read
 from your own config only: a project's `.tarae.toml` or `.tarae.local.toml` is refused them, and says so. A
@@ -1228,6 +1229,16 @@ running session's Claude, a card asks: `y` this session on your key, `a` new ses
 the window resets (kept across starts, and it lapses by itself), `n` wait. It says what the first message on the
 key costs. `y` while Claude still answers switches at the end of the turn. A refused 5-hour window is a toast.
 Esc never answers either card.
+
+**When the key runs out.** When an API session's request is refused for money, the chat says so in place of
+Claude Code's error: `API credits ran out` (your Console organization's prepaid credits; Claude Code's
+`Credit balance is too low`, or a `billing_error`), or `API spend limit reached · until the 1st` (the API's
+monthly spend cap, or a spend limit you set, with the day the API names). A rate limit's 429 isn't one of these:
+the spend cap's 429 is told apart by its own words in the API's error, which a throttle doesn't have. Unless the
+plan refuses the session right now too (its 5-hour or weekly window said `rejected`; the chat then says that as
+well), a card offers the plan back: `y` this session, its conversation resumed on the plan (the line over the
+input says what the next message costs, as for any switch), `n` stay on the key. Esc never answers it. There's one
+such card per session at a time.
 
 **How the key reaches Claude.** tarae never reads it. An API session's claude gets a key helper in its
 `--settings`: `/usr/bin/security find-generic-password -a <you> -s tarae.anthropic-api-key -w`. Claude Code runs

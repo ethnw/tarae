@@ -350,6 +350,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         // (its words are its verdict, read whole at the end; the rest is the chat's business)
         StreamEv::Thinking
         | StreamEv::Retry(_)
+        | StreamEv::Money(_)
         | StreamEv::Thought(_)
         | StreamEv::Text(_)
         | StreamEv::ToolResult { .. }

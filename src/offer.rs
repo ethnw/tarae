@@ -222,8 +222,9 @@ pub enum What {
     /// (`containers.rs`): `y` stops them, by name · `n` leaves them running.
     Containers(Box<crate::containers::Ask>),
     /// `$` in the session list on a session with a conversation going (`billing.rs`): `y` switches its billing to
-    /// `to`, the card having said what the next message costs · `n` keeps it.
-    BillingSwitch { session: crate::event::SessionId, to: crate::billing::Billing },
+    /// `to`, the card having said what the next message costs · `n` keeps it. `money`: the key was refused for
+    /// money (`Editor::money_out`) — the plan offered back, `y` this session · `n` stay.
+    BillingSwitch { session: crate::event::SessionId, to: crate::billing::Billing, money: bool },
     /// The plan's weekly window refused a session's Claude (`billing.rs`): `y` that session on your key · `a` new
     /// sessions and the reviewer too, until the reset (when it's known) · `n` waits. Its session's.
     Limit(Box<crate::billing::LimitAsk>),
@@ -816,6 +817,7 @@ impl Offer {
             // (F7: no `A` — a lasting allow is the user's own line in llm.sandbox-hosts)
             W::HostRaw(_) | W::Lookup(_) => vec![('y', "This run"), ('s', "This session"), ('n', "No")],
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
+            W::BillingSwitch { money: true, .. } => vec![('y', "This session"), ('n', "Stay")],
             W::BillingSwitch { .. } => vec![('y', "Switch"), ('n', "Keep it")],
             W::Limit(_) if self.limit_all() => {
                 vec![('y', "This session"), ('a', "New sessions too"), ('n', "Wait")]
@@ -1250,7 +1252,7 @@ impl crate::editor::Editor {
                 crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run)
             }
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
-            What::BillingSwitch { session, to } => self.switch_answer(id, session, to),
+            What::BillingSwitch { session, to, .. } => self.switch_answer(id, session, to),
             What::Limit(a) => self.limit_answer(id, *a, false),
         }
     }
@@ -1791,7 +1793,7 @@ impl crate::editor::Editor {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused)
             }
             What::Containers(a) => crate::containers::answer(self, o.id, *a, false),
-            What::BillingSwitch { session, to } => {
+            What::BillingSwitch { session, to, .. } => {
                 let name = std::iter::once(&self.session)
                     .chain(&self.sessions)
                     .find(|l| l.id == session)

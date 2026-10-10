@@ -16,9 +16,11 @@ use crate::editor::Editor;
 /// `got.key`, and says `apiKeyHelper` as its credential then (else `none`) — or what `init.source` (its answer to
 /// `initialize`) and `turn.source` (each turn's `init`) say. Every line it's sent goes to `stdin`; a message is
 /// answered with a turn's `init` and its result — unless `turn.hold` is there (nothing), or `turn.wait` (the
-/// `init`, then the result only once interrupted, as Claude Code ends a turn it's told to stop). `turn.limit`: a
-/// line it says before the result (a `rate_limit_event`); `turn.refused`: the result is an error with its words;
-/// `turn.exit`: told to stop, it exits instead — the turn without a result.
+/// `init`, then the result only once interrupted, as Claude Code ends a turn it's told to stop). `turn.limit`:
+/// lines it says before the result (a `rate_limit_event`, an assistant message carrying `error`);
+/// `turn.refused`: the result is an error with its words;
+/// `turn.exit`: told to stop, it exits instead — the turn without a result; `turn.die`: it exits after
+/// `turn.limit`'s lines, unasked.
 const STAND_IN: &str = r#"s=''; r=-
 while [ $# -gt 0 ]; do case "$1" in --settings) s="$2";; --resume) r="$2";; esac; shift; done
 printf '%s %s\n' "$r" "$s" >> starts
@@ -38,6 +40,7 @@ while read -r line; do
     *'"type":"user"'*) [ -f turn.hold ] || {
       printf '{"type":"system","subtype":"init","session_id":"%s","apiKeySource":"%s","model":"m"}\n' "$id" "$tsrc"
       [ -f turn.limit ] && cat turn.limit
+      [ -f turn.die ] && exit 4
       if [ -f turn.refused ]; then
         printf '{"type":"result","subtype":"success","is_error":true,"result":"%s","session_id":"%s"}\n' "$(cat turn.refused)" "$id"
       elif [ ! -f turn.wait ]; then
@@ -140,6 +143,12 @@ fn idle(ed: &Editor) -> bool {
     ed.session.chat.as_ref().is_some_and(|c| !c.busy())
 }
 
+/// `:session-billing api` — on the key once the key check (`api_check`, on a worker) has found it.
+fn on_key(ed: &mut Editor) {
+    ed.session_billing("api").unwrap();
+    until(ed, "the session on the key", |ed| ed.session.billing == Billing::Api);
+}
+
 /// Every file under `dir`, read whole.
 fn files_in(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut out = Vec::new();
@@ -169,7 +178,7 @@ fn an_api_sessions_key_goes_through_its_helper_and_never_through_tarae() {
     // (a key of tarae's environment, passed on by "keep" — but not to an API session's claude)
     ed.config.llm.keep_env_key = true;
     ed.claude_env = Some(crate::llm::Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-env".into())]));
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     crate::chat::open(&mut ed);
     send(&mut ed, "hello");
     until(&mut ed, "the turn's end", |ed| idle(ed) && ed.session.usage.key_source.is_some());
@@ -231,7 +240,7 @@ fn switching_billing_resumes_the_same_conversation_and_the_spare_follows() {
     assert_eq!(before.len(), 2, "the spare and the chat: {before:?}");
     assert!(before.iter().all(|(r, s)| r.is_none() && s.get("apiKeyHelper").is_none()), "{before:?}");
     assert!(ed.session_billing("dollars").is_err());
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     until(&mut ed, "the chat's and the spare's new claude", |_| place.starts().len() == 4);
     let after = &place.starts()[2..];
     let chat = after.iter().find(|(r, _)| r.as_deref() == Some("conv-1")).expect("the chat resumed conv-1");
@@ -263,7 +272,7 @@ fn a_credential_other_than_its_billings_stops_claude_and_says_so() {
     let place = Place::new("wrong");
     let mut ed = place.editor();
     let log = crate::log::capture();
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     std::fs::write(place.root.join("turn.source"), "ANTHROPIC_API_KEY").unwrap();
     // (its turn ends only once interrupted)
     std::fs::write(place.root.join("turn.wait"), "").unwrap();
@@ -297,7 +306,7 @@ fn a_credential_other_than_its_billings_stops_claude_and_says_so() {
 fn the_asks_claude_is_billed_and_checked_as_the_chats() {
     let place = Place::new("ask");
     let mut ed = place.editor();
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     std::fs::write(place.root.join("turn.source"), "none").unwrap();
     crate::llm::ask(&mut ed, "rename it").unwrap();
     until(&mut ed, "the ask stopped", |ed| ed.session.review.is_none());
@@ -312,7 +321,7 @@ fn the_asks_claude_is_billed_and_checked_as_the_chats() {
 fn billing_is_kept_with_its_session_and_a_new_one_takes_the_setting() {
     let place = Place::new("kept");
     let mut ed = place.editor();
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     let carried = crate::worktree::snapshot(&ed);
     let mut back = place.editor();
     assert_eq!(back.session.billing, Billing::Subscription);
@@ -511,7 +520,7 @@ fn dollar_in_the_list_asks_first_on_a_conversation_saying_what_it_costs() {
     until(&mut ed, "the weakness kept as said", |_| Kept::read(Some(kept.clone())).weakness_told);
     let mut again = fresh.editor();
     again.billing_kept = Kept::read(Some(kept.clone()));
-    again.session_billing("api").unwrap();
+    on_key(&mut again);
     assert!(!toasts(&again).contains(WEAKNESS), "said once ever");
 }
 
@@ -537,7 +546,7 @@ fn a_switch_says_what_the_next_message_costs_until_it_goes() {
     ];
     ed.session.chat.as_mut().unwrap().models = models.clone();
     ed.config.llm.model = Some("opus".into());
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     let said = "bills api — Claude runs on your API key from now — next message rewrites ≈ $1.20";
     assert!(toasts(&ed).contains(said), "{}", toasts(&ed));
     let line = ed.switch_line();
@@ -577,7 +586,7 @@ fn a_switch_says_what_the_next_message_costs_until_it_goes() {
     until(&mut ed, "the turn", idle);
     // A cold cache: nothing extra
     cache(&mut ed, "claude-fable-5-1", 150_000, 2 * crate::usage::Ttl::Hour1.ms());
-    ed.session_billing("api").unwrap();
+    on_key(&mut ed);
     let line = ed.switch_line().unwrap();
     assert!(
         line.starts_with("next message costs nothing extra — cold since ")
@@ -661,13 +670,17 @@ fn a_weekly_refusal_asks_once_and_a_reaches_new_sessions_until_the_reset() {
 }
 
 /// The limit card's `y` while Claude still answers: the key pays once the turn is over — the chat goes on it
-/// then, the conversation resumed. A reset not known: no `a` (until when?).
+/// then, the conversation resumed. A reset not known: no `a` (until when?). `:session-billing api` meanwhile is
+/// refused as it's typed.
 #[test]
 fn the_limit_cards_yes_mid_turn_waits_for_the_turns_end() {
     let place = Place::new("limit-mid");
     let mut ed = talking(&place);
     std::fs::write(place.root.join("turn.wait"), "").unwrap();
     send(&mut ed, "long");
+    // (`:session-billing api` meanwhile: refused at once, before any key check)
+    let refused = ed.session_billing("api").map_err(|e| e.contains("answering"));
+    assert_eq!(refused, Err(true), "refused as it's typed, not later as a toast");
     yes_mid_turn(&mut ed);
     crate::chat::stop(&mut ed);
     until(&mut ed, "the turn's end", |ed| idle(ed) && ed.session.billing == Billing::Api);
@@ -796,8 +809,8 @@ fn a_new_session_asks_who_pays_near_the_weekly_limit() {
 
 /// Where the key can't be used (a stand-in Keychain query that doesn't find it), nothing offers or keeps it: a
 /// weekly refusal says to wait and how to add the key — no card; a new session near the limit isn't asked, and
-/// `a` kept from before reaches neither it (its line says why) nor the reviewer; `$` in the list says why and
-/// stays on the plan. A key gone between the limit card and its `a`: nothing switched, nothing kept.
+/// `a` kept from before reaches neither it (its line says why) nor the reviewer; `$` in the list and
+/// `:session-billing api` say why and stay on the plan. A key gone between the limit card and its `a`: nothing switched, nothing kept.
 #[test]
 fn where_the_key_cant_be_used_nothing_offers_or_keeps_it() {
     let place = Place::new("no-key");
@@ -837,6 +850,11 @@ fn where_the_key_cant_be_used_nothing_offers_or_keeps_it() {
     ed.session_list_key('$');
     until(&mut ed, "`$` refused", |ed| toasts(ed).contains(add));
     assert_eq!(ed.session.billing, Billing::Subscription);
+    // `:session-billing api` the same: said why and how to add the key, nothing changed
+    ed.toasts.clear();
+    ed.session_billing("api").unwrap();
+    until(&mut ed, "`:session-billing api` refused", |ed| toasts(ed).contains(add));
+    assert_eq!(ed.session.billing, Billing::Subscription, "nothing changed");
     // The key there for the card, gone by its `a`
     ed.api_key_query = query(true);
     ed.limit_hit("seven_day", Some(week + 1000));
@@ -848,6 +866,20 @@ fn where_the_key_cant_be_used_nothing_offers_or_keeps_it() {
     assert_eq!(ed.session.billing, Billing::Subscription);
     assert_eq!(ed.billing_kept.api_until_ms, None, "nothing kept");
     assert!(!kept.exists(), "nothing written");
+}
+
+/// What's kept of billing is written by the last save asked of its file: one finishing late is skipped — but only
+/// against its own file's; another file's newer save (another state folder, as tests side by side have) never
+/// skips it.
+#[test]
+fn a_late_save_is_skipped_only_against_its_own_file() {
+    let (a, b) = (Path::new("/state-a/billing.json"), Path::new("/state-b/billing.json"));
+    let mut written = Vec::new();
+    assert!(newest(&mut written, b, 2), "b's save 2 first");
+    assert!(newest(&mut written, a, 1), "a's save 1 after it: another file's — written");
+    assert!(newest(&mut written, a, 3));
+    assert!(!newest(&mut written, a, 1), "a's own older save, finishing late: skipped");
+    assert!(newest(&mut written, b, 4));
 }
 
 /// What a create card is made from, by hand (no git asked): a branch `feat` from main.
@@ -879,4 +911,215 @@ fn restarting_claude_from_procs_resumes_its_conversation() {
     crate::chat::restart_process(&mut ed);
     until(&mut ed, "claude again", |_| place.starts().len() == 2);
     assert_eq!(place.starts()[1].0.as_deref(), Some("conv-1"), "{:?}", place.starts());
+}
+
+// ── The key, out of money ───────────────────────────────────────────────────
+
+// What claude says when a request fails — the shapes from the sources (`target/sb/apibill-src/`): an assistant
+// message carrying `error` (`sdk-ts-sdk.d.ts` `SDKAssistantMessage`, `SDKAssistantMessageError`), then the turn's
+// failed `result` (`api_error_status`); the words from Claude Code's errors reference (`Credit balance is too
+// low`, `Request rejected (429)`) and the platform's rate limits page (the spend cap's message). Made up: the ids,
+// the dates, and the `API Error: <status>` before the API's message.
+
+const CREDITS: &str = "Credit balance is too low";
+const SPEND_CAP: &str = "API Error: 429 You have reached your API usage limits: your organization has crossed its \
+                         monthly API usage threshold, set based on your organization's API tier. You will regain \
+                         access on 2026-11-01 at 00:00 UTC.";
+const THROTTLE: &str = "API Error: Request rejected (429) · this may be a temporary capacity issue. If it persists, \
+                        check https://status.claude.com.";
+
+/// An assistant message carrying `error` — Claude Code's stand-in answer to a failed request.
+fn assistant_error(category: &str, text: &str) -> Value {
+    json!({"type": "assistant", "error": category, "parent_tool_use_id": null, "session_id": "conv-1",
+           "message": {"id": "msg-err-1", "model": "<synthetic>", "role": "assistant",
+                       "content": [{"type": "text", "text": text}]}})
+}
+
+/// A turn's failed result.
+fn failed(text: &str, status: u64) -> Value {
+    json!({"type": "result", "subtype": "success", "is_error": true, "result": text, "api_error_status": status,
+           "session_id": "conv-1"})
+}
+
+/// The stand-in's next turns fail with `text`: an assistant `error` of `category` first, then the result.
+fn failing(place: &Place, category: &str, text: &str) {
+    std::fs::write(place.root.join("turn.limit"), assistant_error(category, text).to_string() + "\n")
+        .unwrap();
+    std::fs::write(place.root.join("turn.refused"), text).unwrap();
+}
+
+/// Money, told from a throttle: `billing_error` or Claude Code's credit words are the credits; the spend cap is
+/// its own words — a 429 `rate_limit` like a throttle's, which says none of them; a limit you set below the cap (a
+/// 400) is one too. The day the API names, as said; a line that isn't an error is nothing, whatever its words.
+#[test]
+fn money_is_told_from_a_throttle_by_what_claude_reports() {
+    assert_eq!(refusal(&failed(CREDITS, 400)), Some(Money::Credits));
+    assert_eq!(refusal(&assistant_error("billing_error", "anything")), Some(Money::Credits));
+    let cap = Money::Spend { until: Some("2026-11-01".into()) };
+    assert_eq!(refusal(&failed(SPEND_CAP, 429)), Some(cap.clone()));
+    assert_eq!(refusal(&assistant_error("rate_limit", SPEND_CAP)), Some(cap.clone()));
+    assert_eq!(cap.said(), "API spend limit reached · until the 1st");
+    assert_eq!(refusal(&assistant_error("rate_limit", THROTTLE)), None, "a throttle");
+    assert_eq!(refusal(&failed(THROTTLE, 429)), None, "a throttle");
+    let set = "API Error: 400 You have reached your specified API usage limits. You will regain access on \
+               2026-10-15 at 00:00 UTC.";
+    assert_eq!(refusal(&failed(set, 400)).unwrap().said(), "API spend limit reached · until 2026-10-15");
+    let no_day = "API Error: 429 {\"error_code\":\"enforced_spend_limit_reached\"}";
+    assert_eq!(refusal(&failed(no_day, 429)).unwrap().said(), "API spend limit reached");
+    assert_eq!(Money::Credits.said(), "API credits ran out");
+    // (not an error: Claude's own words about credits, a result that went well)
+    let words = json!({"type": "assistant", "message": {"content": [{"type": "text", "text": CREDITS}]}});
+    assert_eq!(refusal(&words), None);
+    assert_eq!(refusal(&json!({"type": "result", "is_error": false, "result": CREDITS})), None);
+}
+
+/// An API session's claude refused for its credits: the chat says `API credits ran out` in place of claude's
+/// words, and a card offers the plan back — `y` this session · `n` stay, Esc never answers; `y` resumes the same
+/// conversation on the plan, the line over the input saying what the next message costs, as for any switch. A
+/// throttle's 429 before it: claude's words only, nothing offered.
+#[test]
+fn credits_running_out_offers_the_plan_back() {
+    let place = Place::new("credits");
+    let mut ed = talking(&place);
+    on_key(&mut ed);
+    until(&mut ed, "the chat on the key", |_| place.starts().len() == 2);
+    failing(&place, "rate_limit", THROTTLE);
+    send(&mut ed, "one");
+    until(&mut ed, "the turn", idle);
+    assert_eq!(notes(&ed).last().map(String::as_str), Some(THROTTLE));
+    assert!(ed.offers.is_empty(), "a throttle offers nothing");
+    failing(&place, "billing_error", CREDITS);
+    send(&mut ed, "two");
+    until(&mut ed, "the turn and its card", |ed| idle(ed) && !ed.offers.is_empty());
+    assert_eq!(notes(&ed).last().map(String::as_str), Some("API credits ran out"));
+    assert!(!notes(&ed).iter().any(|n| n == CREDITS), "tarae's words, not claude's: {:?}", notes(&ed));
+    let o = ed.offers[0].clone();
+    assert!(o.title.ends_with(": API credits ran out"), "{}", o.title);
+    assert!(o.question.contains("Continue this conversation on your plan?"), "{}", o.question);
+    assert!(o.question.contains("The next message"), "{}", o.question);
+    assert_eq!(o.answers(false), [('y', "This session"), ('n', "Stay")]);
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Esc);
+    assert_eq!(ed.offers.len(), 1, "Esc never answers it");
+    key(&mut ed, crate::key::Code::Char('y'));
+    assert_eq!(ed.session.billing, Billing::Subscription);
+    until(&mut ed, "the conversation resumed on the plan", |_| place.starts().len() == 3);
+    let (resume, settings) = place.starts()[2].clone();
+    assert_eq!(resume.as_deref(), Some("conv-1"));
+    assert_eq!(settings["apiKeyHelper"], Value::Null, "no key's helper: {settings}");
+    let line = ed.switch_line().unwrap_or_default();
+    assert!(line.starts_with("next message") && line.contains("(billing changed)"), "{line}");
+}
+
+/// The spend cap: `API spend limit reached · until the 1st`. While the plan refuses the session too (its weekly
+/// window `rejected`) that's said beside it and nothing's offered; once it doesn't, the card — one a session
+/// however many turns fail, and why; `n` stays on the key. A subscription session refused for money ran on a key it
+/// shouldn't have (`checked`'s): claude's words only.
+#[test]
+fn a_spend_cap_offers_the_plan_only_where_the_plan_takes_it() {
+    let place = Place::new("spend");
+    let mut ed = talking(&place);
+    failing(&place, "billing_error", CREDITS);
+    send(&mut ed, "on the plan");
+    until(&mut ed, "the turn", idle);
+    assert_eq!(notes(&ed).last().map(String::as_str), Some(CREDITS), "a subscription's: claude's words");
+    assert!(ed.offers.is_empty());
+    on_key(&mut ed);
+    until(&mut ed, "the chat on the key", |_| place.starts().len() == 2);
+    failing(&place, "rate_limit", SPEND_CAP);
+    let now = crate::usage::now_ms();
+    let refused = crate::limits::Reading {
+        window: "seven_day".into(),
+        percent: Some(100),
+        resets_at_ms: Some(now + 3 * 86_400_000),
+        status: Some(crate::limits::Status::Rejected),
+        seen_at_ms: now,
+        from: crate::limits::Source::Event,
+    };
+    ed.limits.seen(crate::limits::Report { readings: vec![refused], ..Default::default() });
+    send(&mut ed, "one");
+    until(&mut ed, "the turn", idle);
+    let note = notes(&ed).last().cloned().unwrap_or_default();
+    assert!(
+        note.starts_with(
+            "API spend limit reached · until the 1st — and the plan refuses it too (weekly limit"
+        ),
+        "{note}"
+    );
+    assert!(ed.offers.is_empty(), "the plan refuses too: nothing to offer");
+    // The plan takes it again: the card, one however many turns fail
+    ed.limits = crate::limits::Limits::default();
+    send(&mut ed, "two");
+    until(&mut ed, "the turn and its card", |ed| idle(ed) && !ed.offers.is_empty());
+    assert!(
+        ed.offers[0].title.ends_with(": API spend limit reached · until the 1st"),
+        "{}",
+        ed.offers[0].title
+    );
+    // (a card of the same title is one anyway — `push_offer`; the credits' title isn't the spend limit's)
+    failing(&place, "billing_error", CREDITS);
+    send(&mut ed, "three");
+    until(&mut ed, "the turn", idle);
+    assert_eq!(notes(&ed).last().map(String::as_str), Some("API credits ran out"));
+    assert_eq!(ed.offers.len(), 1, "one card a session");
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Char('n'));
+    assert!(ed.offers.is_empty());
+    assert_eq!(ed.session.billing, Billing::Api, "n stays on the key");
+}
+
+/// A refusal for money counts only for the turn it ends, on its error: a turn that's answered after all, or one
+/// you stopped, says what it says and offers nothing; a turn cut off — claude exiting, a new chat — leaves nothing
+/// behind: the next one, failing for another reason, says its own error.
+#[test]
+fn a_money_refusal_counts_only_for_the_turn_it_ends() {
+    let place = Place::new("money-turn");
+    let mut ed = talking(&place);
+    on_key(&mut ed);
+    until(&mut ed, "the chat on the key", |_| place.starts().len() == 2);
+    let error_line = assistant_error("billing_error", CREDITS).to_string() + "\n";
+    std::fs::write(place.root.join("turn.limit"), &error_line).unwrap();
+    // Answered after all
+    send(&mut ed, "answered");
+    until(&mut ed, "the turn", idle);
+    assert!(notes(&ed).last().is_some_and(|n| n.ends_with('s')), "the turn's time: {:?}", notes(&ed));
+    assert!(ed.offers.is_empty(), "an answered turn offers nothing");
+    // Stopped
+    std::fs::write(place.root.join("turn.wait"), "").unwrap();
+    send(&mut ed, "stopped");
+    until(&mut ed, "the refusal read", |ed| ed.session.chat.as_ref().unwrap().money.is_some());
+    crate::chat::stop(&mut ed);
+    until(&mut ed, "the turn", idle);
+    assert_eq!(notes(&ed).last().map(String::as_str), Some("stopped"));
+    assert!(ed.offers.is_empty(), "a turn you stopped offers nothing");
+    // Cut off: claude exits after the error, the turn without its end
+    std::fs::remove_file(place.root.join("turn.wait")).unwrap();
+    std::fs::write(place.root.join("turn.die"), "").unwrap();
+    send(&mut ed, "cut off");
+    until(&mut ed, "claude gone", |ed| idle(ed) && !ed.session.chat.as_ref().unwrap().running());
+    std::fs::remove_file(place.root.join("turn.die")).unwrap();
+    std::fs::remove_file(place.root.join("turn.limit")).unwrap();
+    std::fs::write(place.root.join("turn.refused"), "Overloaded").unwrap();
+    send(&mut ed, "next");
+    until(&mut ed, "the next turn", |ed| {
+        idle(ed) && notes(ed).iter().any(|n| n == "Overloaded" || n == "API credits ran out")
+    });
+    assert_eq!(notes(&ed).last().map(String::as_str), Some("Overloaded"), "{:?}", notes(&ed));
+    assert!(ed.offers.is_empty(), "nothing left over from the turn claude's exit cut off");
+    // Cut off by a new chat: the refusal read, then `C-l` before the turn's end
+    std::fs::remove_file(place.root.join("turn.refused")).unwrap();
+    std::fs::write(place.root.join("turn.limit"), &error_line).unwrap();
+    std::fs::write(place.root.join("turn.wait"), "").unwrap();
+    send(&mut ed, "before the new chat");
+    until(&mut ed, "the refusal read", |ed| ed.session.chat.as_ref().unwrap().money.is_some());
+    crate::chat::reset(&mut ed);
+    std::fs::remove_file(place.root.join("turn.wait")).unwrap();
+    std::fs::remove_file(place.root.join("turn.limit")).unwrap();
+    std::fs::write(place.root.join("turn.refused"), "Overloaded").unwrap();
+    send(&mut ed, "in the new chat");
+    until(&mut ed, "the new chat's turn", |ed| {
+        idle(ed) && notes(ed).iter().any(|n| n == "Overloaded" || n == "API credits ran out")
+    });
+    assert_eq!(notes(&ed).last().map(String::as_str), Some("Overloaded"), "{:?}", notes(&ed));
+    assert!(ed.offers.is_empty(), "nothing left over from the turn the new chat cut off");
 }

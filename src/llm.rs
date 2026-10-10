@@ -658,6 +658,8 @@ pub enum StreamEv {
     Limits(crate::limits::Report),
     /// A request failed and claude retries it (`system/api_retry`).
     Retry(crate::limits::Retry),
+    /// A request refused for money — the key's credits or spend limit (`billing::refusal`); before its `Done`.
+    Money(crate::billing::Money),
     /// End of a turn — final text or error (not logged in·stopped etc.).
     Done(Result<String, String>),
     /// The process exited (for the chat panel — last stderr line).
@@ -705,6 +707,11 @@ pub fn pump(
                 // (what it costs — the same line may carry a tool call or the turn's end too)
                 if let Some(u) = usage_line(&ev, crate::usage::now_ms())
                     && !send(u)
+                {
+                    break;
+                }
+                if let Some(m) = crate::billing::refusal(&ev)
+                    && !send(StreamEv::Money(m))
                 {
                     break;
                 }
@@ -1423,6 +1430,7 @@ fn start(
             // ask runs without tools, and its conversation isn't kept
             StreamEv::Requesting(_)
             | StreamEv::Retry(_)
+            | StreamEv::Money(_)
             | StreamEv::Usage(_)
             | StreamEv::Answered(_)
             | StreamEv::Initialized { .. }

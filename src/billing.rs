@@ -27,6 +27,9 @@
 //!   and the ask: their claude stopped) and says what claude reported. Detection, not prevention: `init` comes
 //!   with the turn, so one request may have gone out already — keeping a project's credential out is
 //!   `claudetrust`'s.
+//! - **Out of money, said** (`refusal`): an API session's request refused for its credits or its spend limit —
+//!   the chat says so in tarae's words, and, unless the plan refuses it too right now, a card offers the plan
+//!   back (`money_out`).
 //! - **macOS only for now**: the key is in the login Keychain. Elsewhere an API session is refused, said why (the
 //!   Secret Service's `secret-tool` helper is a later change).
 
@@ -234,6 +237,70 @@ pub fn checked(billing: Billing, keep_env_key: bool, role: Role, reported: Optio
     ))
 }
 
+/// Why the key's request was refused for money (`refusal`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Money {
+    /// The Console organization's prepaid credits ran out.
+    Credits,
+    /// Its spend limit — the tier's monthly cap, or one set below it: until the day the API named (`YYYY-MM-DD`;
+    /// None: not named).
+    Spend { until: Option<String> },
+}
+
+impl Money {
+    /// `API credits ran out` · `API spend limit reached · until the 1st`.
+    pub fn said(&self) -> String {
+        match self {
+            Money::Credits => "API credits ran out".into(),
+            Money::Spend { until: None } => "API spend limit reached".into(),
+            // (the tier's cap pauses until the first of the next month, 00:00 UTC — the rate limits page)
+            Money::Spend { until: Some(d) } if d.ends_with("-01") => {
+                "API spend limit reached · until the 1st".into()
+            }
+            Money::Spend { until: Some(d) } => format!("API spend limit reached · until {d}"),
+        }
+    }
+}
+
+/// The spend limit's words in the API's error, which claude's error text carries: the tier's cap (a 429,
+/// `rate_limit_error` like a throttle's, but `error_code: enforced_spend_limit_reached` and no `retry-after`, so
+/// never retried into success) and a limit you set (a 400) — the platform's rate limits page. A throttle's 429
+/// says none of them (Claude Code's `Request rejected (429)`).
+const SPEND_WORDS: [&str; 4] = [
+    "enforced_spend_limit_reached",
+    "reached your API usage limits",
+    "reached your specified API usage limits",
+    "reached your specified workspace API usage limits",
+];
+
+/// A stream line saying a request was refused for money — None: not that. Claude Code reports it as an assistant
+/// message carrying `error` (`SDKAssistantMessageError`: `billing_error`, or `rate_limit` for any 429) with its
+/// text, and as the turn's failed `result`: `Credit balance is too low` (the errors reference), or the spend
+/// limit's own words (`SPEND_WORDS`) — the category alone can't tell a spend cap from a throttle.
+pub fn refusal(ev: &Json) -> Option<Money> {
+    let (category, text) = match ev["type"].as_str()? {
+        "assistant" => {
+            let blocks = ev["message"]["content"].as_array().into_iter().flatten();
+            (ev["error"].as_str()?, blocks.filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"))
+        }
+        "result" if ev["is_error"] == true => ("", ev["result"].as_str()?.to_string()),
+        _ => return None,
+    };
+    if SPEND_WORDS.iter().any(|w| text.contains(w)) {
+        // ("You will regain access on 2026-09-01 at 00:00 UTC.")
+        let until = text.split_once("access on ").and_then(|(_, rest)| rest.get(..10)).filter(|d| {
+            d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() })
+        });
+        return Some(Money::Spend { until: until.map(String::from) });
+    }
+    (category == "billing_error" || text.contains("Credit balance is too low")).then_some(Money::Credits)
+}
+
+/// Why a switch waits: the session's Claude is answering.
+fn answering(name: &str) -> String {
+    format!("{name}'s Claude is answering — C-c stops it, or switch after its turn")
+}
+
 /// The plan's weekly window at this percent or more: a new session's card asks who pays (D2) · from this, your
 /// key comes first (still a choice).
 pub const LIMIT_ASK: u32 = 80;
@@ -274,22 +341,38 @@ impl Kept {
     fn save(&self, jobs: &crate::event::Jobs) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static ASKED: AtomicU64 = AtomicU64::new(0);
-        static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+        static WRITTEN: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
         let Some(path) = self.path.clone() else { return };
         let seq = ASKED.fetch_add(1, Ordering::Relaxed) + 1;
         let text = serde_json::json!({ "api_until": self.api_until_ms, "weakness_told": self.weakness_told })
             .to_string();
         jobs.background(move || {
-            let Ok(mut last) = WRITTEN.lock() else { return };
-            if seq < *last {
+            let Ok(mut written) = WRITTEN.lock() else { return };
+            if !newest(&mut written, &path, seq) {
                 return;
             }
-            *last = seq;
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
             let _ = crate::disk::write_atomic(&path, |w| std::io::Write::write_all(w, text.as_bytes()));
         });
+    }
+}
+
+/// Whether save `seq` of `path` is the newest asked of that file so far, `written` keeping each file's last —
+/// then it's written. Per file: another file's newer save (another tarae state folder — tests run side by side)
+/// never skips this one's.
+fn newest(written: &mut Vec<(std::path::PathBuf, u64)>, path: &std::path::Path, seq: u64) -> bool {
+    match written.iter_mut().find(|(p, _)| p == path) {
+        Some((_, last)) if seq < *last => false,
+        Some((_, last)) => {
+            *last = seq;
+            true
+        }
+        None => {
+            written.push((path.to_path_buf(), seq));
+            true
+        }
     }
 }
 
@@ -405,11 +488,9 @@ impl Editor {
             );
             return (Billing::Api, None, Some(note));
         }
-        let model = self.config.llm.model.clone().unwrap_or_default().to_lowercase();
-        let family =
-            ["opus", "sonnet"].into_iter().find(|f| model.contains(f)).map(|f| format!("seven_day_{f}"));
-        let weekly = std::iter::once(crate::limits::WEEKLY.to_string())
-            .chain(family)
+        let weekly = self
+            .weekly_windows()
+            .into_iter()
             .filter_map(|w| self.limits.get(&w, now))
             .max_by_key(|r| (r.status == Some(Status::Rejected), r.percent));
         let asks = self.config.llm.billing == Billing::Subscription && self.api_usable();
@@ -437,6 +518,25 @@ impl Editor {
         }
     }
 
+    /// The plan's weekly windows a session's Claude counts against: the account's, and the chosen model's
+    /// family's (`seven_day_opus` for an Opus session).
+    fn weekly_windows(&self) -> Vec<String> {
+        let model = self.config.llm.model.clone().unwrap_or_default().to_lowercase();
+        let family =
+            ["opus", "sonnet"].into_iter().find(|f| model.contains(f)).map(|f| format!("seven_day_{f}"));
+        std::iter::once(crate::limits::WEEKLY.to_string()).chain(family).collect()
+    }
+
+    /// The plan's window refusing a session's Claude right now — the 5-hour or a weekly one (`weekly_windows`)
+    /// said `rejected` and not reset since. None: none is, or nothing's known.
+    fn plan_refused(&self) -> Option<&crate::limits::Reading> {
+        let now = crate::usage::now_ms();
+        std::iter::once("five_hour".to_string())
+            .chain(self.weekly_windows())
+            .filter_map(|w| self.limits.get(&w, now))
+            .find(|r| r.status == Some(crate::limits::Status::Rejected))
+    }
+
     /// What a claude of `role` is started with on `billing`: the key's helper for `Api` (a test's stand-in,
     /// `api_key_helper`, if it gives one) — Err: why an API session can't start here.
     pub fn credential(&self, billing: Billing, role: Role) -> Result<Credential, String> {
@@ -461,8 +561,9 @@ impl Editor {
         }
     }
 
-    /// `:session-billing api|subscription` — the session in front's (`billing_set`). A project's key binding never
-    /// runs it: `config.rs` leaves such a binding out of `.tarae.toml` and `.tarae.local.toml`, said.
+    /// `:session-billing api|subscription` — the session in front's (`billing_set`); to the key only once
+    /// `api_check` finds it usable (else an error says why and how to add it, nothing changed). A project's key
+    /// binding never runs it: `config.rs` leaves such a binding out of `.tarae.toml` and `.tarae.local.toml`, said.
     pub fn session_billing(&mut self, arg: &str) -> Result<(), String> {
         let arg = arg.trim();
         if arg.is_empty() {
@@ -471,7 +572,19 @@ impl Editor {
             return Ok(());
         }
         let billing = Billing::parse(arg).ok_or("usage: :session-billing api|subscription")?;
-        self.billing_set(self.session.id, billing, false)
+        let sid = self.session.id;
+        if billing == Billing::Subscription {
+            return self.billing_set(sid, billing, false);
+        }
+        if self.session.chat.as_ref().is_some_and(|c| c.busy()) {
+            return Err(answering(&self.session.name));
+        }
+        self.api_check(self.events.jobs(), move |ed, usable| {
+            if let Err(e) = usable.and_then(|()| ed.billing_set(sid, billing, false)) {
+                ed.set_error(e);
+            }
+        });
+        Ok(())
     }
 
     /// Session `sid` bills `to` from now: kept with it (the session list), its claude — if it runs — stopped and
@@ -503,7 +616,7 @@ impl Editor {
             return Ok(false);
         }
         if self.session.chat.as_ref().is_some_and(|c| c.busy()) {
-            return Err(format!("{name}'s Claude is answering — C-c stops it, or switch after its turn"));
+            return Err(answering(&name));
         }
         self.switching();
         self.session.billing = to;
@@ -532,7 +645,7 @@ impl Editor {
             Billing::Api => Billing::Subscription,
         };
         if l.chat.as_ref().is_some_and(|c| c.busy()) {
-            return Err(format!("{}'s Claude is answering — C-c stops it, or switch after its turn", l.name));
+            return Err(answering(&l.name));
         }
         match to {
             Billing::Api => self.api_check(self.events.jobs(), move |ed, usable| {
@@ -593,7 +706,7 @@ impl Editor {
             _ => q += ".",
         }
         let mut o = self.weakness_on(q, to);
-        o.what = crate::offer::What::BillingSwitch { session: self.session.id, to };
+        o.what = crate::offer::What::BillingSwitch { session: self.session.id, to, money: false };
         o.title = title;
         o
     }
@@ -606,7 +719,7 @@ impl Editor {
             q += &format!("\n\n{WEAKNESS}");
             at..at + 1
         });
-        let what = crate::offer::What::BillingSwitch { session: self.session.id, to };
+        let what = crate::offer::What::BillingSwitch { session: self.session.id, to, money: false };
         let mut o = crate::offer::Offer::new(String::new(), &q, "Switching…", "Couldn't switch".into(), what)
             .asked(crate::cards::Asked::new(crate::cards::Why::Spend, crate::cards::Request::Own));
         if let Some(lines) = warn {
@@ -753,6 +866,45 @@ impl Editor {
             "Waiting for the plan's {} window{resets}; $ in space W moves a session to your key",
             crate::limits::label(&ask.window)
         ));
+    }
+
+    // ── The key, out of money ───────────────────────────────────────────────
+
+    /// The session in front's chat claude was refused for money (`refusal`), its turn over, the session on the
+    /// key (the chat calls it for those only — a subscription session's claude refused for money ran on a key it
+    /// shouldn't have: `checked`'s, and claude's words stay): said in the chat — and, unless the plan refuses it
+    /// too right now (`plan_refused`: said beside it instead), a card offers the plan back: `y` this session, its
+    /// conversation resumed · `n` stays. One such card a session at a time.
+    pub fn money_out(&mut self, m: Money) {
+        let said = m.said();
+        crate::log::line("claude", "warn", &said);
+        let refused = self.plan_refused().map(crate::limits::said);
+        if let Some(c) = self.session.chat.as_mut() {
+            c.note(&match &refused {
+                Some(r) => format!("{said} — and the plan refuses it too ({r})"),
+                None => said.clone(),
+            });
+        }
+        let sid = self.session.id;
+        let up = self.offers.iter().any(|o| {
+            matches!(o.what, crate::offer::What::BillingSwitch { session, money: true, .. } if session == sid)
+        });
+        if refused.is_some() || up {
+            return;
+        }
+        let cost = self.billing_cost(Billing::Subscription);
+        let mut q = format!(
+            "Your key can't pay for more now. Continue this conversation on your plan?\n\nThe next message {}",
+            cost.said(Billing::Subscription)
+        );
+        q += match cost {
+            crate::switchcost::Cost::Warm { .. } => " — the key's cache isn't your plan's.",
+            _ => ".",
+        };
+        let mut o = self.weakness_on(q, Billing::Subscription);
+        o.title = format!("{}: {said}", self.session.name);
+        o.what = crate::offer::What::BillingSwitch { session: sid, to: Billing::Subscription, money: true };
+        self.push_offer(o);
     }
 }
 
