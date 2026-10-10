@@ -3435,6 +3435,7 @@ mod tests {
                 Err(e) => format!("pty={}", tried::<()>(Err(e))),
             },
             "ptys" => ptys_tried(),
+            "files" => files_tried(),
             "pty-refusals" => pty_refusals_tried(),
             "mounts" => {
                 let shm = format!("/dev/shm/tarae-helper-{}", std::process::id());
@@ -5601,6 +5602,47 @@ mod tests {
     impl Apart {
         fn new(name: &str) -> Apart {
             let (policy, root) = project_policy(name, Vec::new(), &[]);
+            Apart::of(name, policy, root)
+        }
+
+        /// A session for the checkout at `root` (real) with what a run of its gets to write but its project, as
+        /// `policy_from` gives it, in `home` (real, standing for one): its own folder (`RunDir`) in tarae's
+        /// cache's `runs`, where every session's are, a kept run home of its project's and the home a daemon of
+        /// its policy lives from (`with_kept`) — each made, as a run that needs it would. Reads confined to
+        /// `home` but for the repository's other checkouts (`allow::checkouts`), as a run's are.
+        fn writing(name: &str, root: &Path, home: &Path) -> Apart {
+            let cache = home.join(".cache/tarae");
+            let (runs, homes) = (cache.join("runs"), cache.join("run-homes"));
+            let key = super::super::project_key(root);
+            let env = super::super::Env {
+                root: root.to_path_buf(),
+                tmp: Some(super::super::profile_path(&std::env::temp_dir())),
+                runs: Some(runs.clone()),
+                kept_homes: vec![("kept".into(), homes.join("kept").join(&key))],
+                daemon_homes: vec![("daemon".into(), homes.join("daemon").join(&key))],
+                reads: super::super::Reads {
+                    home: Some(home.to_path_buf()),
+                    allow: crate::allow::checkouts(root),
+                    ..Default::default()
+                },
+                run_env: super::super::run_env_of(
+                    &super::super::Here::now(),
+                    &crate::llm::LlmConfig::default(),
+                ),
+                ..Default::default()
+            };
+            // (a folder of its own: the checkout's top holds `.git`, granted entry by entry — `linux::confine`)
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            let mut policy = super::super::Policy::for_project(&env);
+            super::super::with_kept(&mut policy, &env);
+            policy.run = Some(super::super::RunDir::new_in(&runs).unwrap());
+            for k in &policy.kept {
+                std::fs::create_dir_all(&k.home).unwrap();
+            }
+            Apart::of(name, policy, root.to_path_buf())
+        }
+
+        fn of(name: &str, policy: super::super::Policy, root: PathBuf) -> Apart {
             let keeper = keeper_in(name, super::super::tier::for_policy(&policy));
             let (abi, served) = (crate::landlock::abi().unwrap(), super::super::linux::served_here());
             let confine = super::super::linux::confine(
@@ -5638,6 +5680,14 @@ mod tests {
                 RunNet::Own | RunNet::Plain => self.keeper.start(&cmd, &name, c.rules_fd(), c.net),
             };
             (started.unwrap(), refused)
+        }
+
+        /// Where a run of this session's writes, but the temp folders (`writing`'s): what, the folder.
+        fn writes(&self) -> Vec<(&'static str, PathBuf)> {
+            let kept = |daemon| self.policy.kept.iter().find(|k| k.daemon == daemon).unwrap().home.clone();
+            let run = self.policy.run.as_ref().unwrap().path().to_path_buf();
+            let checkout = self.root.join("src");
+            vec![("checkout", checkout), ("run", run), ("kept", kept(false)), ("daemon", kept(true))]
         }
 
         fn end(self) {
@@ -5756,6 +5806,114 @@ mod tests {
         assert_eq!(notes.contains("other sessions' commands"), !(ns.user && ns.shm), "{line}");
         assert_eq!(notes.contains("the user's own too"), !ns.user && !ptys, "{line}");
         assert_eq!(notes.contains("it opens only those it makes"), ptys, "{line}");
+    }
+
+    /// Step 7: two sessions side by side, files — from a run of one into each place a run of the other writes
+    /// but the temp folders (shared, D16): its checkout, its run's own folder (in the same `runs` as this one's,
+    /// as every session's are), its project's kept run home, the home a daemon of its policy lives from — in
+    /// each a file made and the one there written. Landlock grants a run its own session's places only, in every
+    /// tier alike (namespaces keep nothing of files here), so each is refused. The trying run writes its own of
+    /// each first: a try that writes nothing would pass. The repository's other checkouts are read by design
+    /// (D16) — pinned as shared, with a folder beside them in home refused: reads are confined there, so the
+    /// read is the policy's grant, not an open home.
+    #[test]
+    fn two_sessions_cant_write_each_others_files() {
+        let test = "two_sessions_cant_write_each_others_files";
+        if open_rules(test).is_none() {
+            return;
+        }
+        // (under this crate's `target/`, standing for home: outside the temp folders, where every run writes)
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/tarae-apart-files-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let home = std::fs::canonicalize(&home).unwrap();
+        let (main, wt) = crate::allow::tests::repo_with_worktree(&home);
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let (mine, theirs) =
+            (Apart::writing("files-mine", &main, &home), Apart::writing("files-theirs", &wt, &home));
+        let (own, others) = (mine.writes(), theirs.writes());
+        for (_, dir) in own.iter().chain(&others) {
+            std::fs::write(dir.join("there"), "").unwrap();
+        }
+        std::fs::write(elsewhere.join("there"), "").unwrap();
+        let listed = |l: &[(&str, PathBuf)]| -> String {
+            l.iter().map(|(w, d)| format!("{w}={}\n", d.display())).collect()
+        };
+        let reads = [("checkout", wt.join("src/there")), ("elsewhere", elsewhere.join("there"))];
+        let said = helper_said(mine.helper(
+            "files",
+            &[("TARAE_OWN", &listed(&own)), ("TARAE_TO", &listed(&others)), ("TARAE_READS", &listed(&reads))],
+        ));
+        // What landed in the other session's places, seen from here
+        let landed: Vec<PathBuf> = others
+            .iter()
+            .flat_map(|(_, d)| std::fs::read_dir(d).into_iter().flatten().flatten())
+            .map(|e| e.path())
+            .filter(|f| match f.file_name().and_then(|n| n.to_str()) {
+                Some("there") => std::fs::metadata(f).is_ok_and(|m| m.len() > 0),
+                _ => true,
+            })
+            .collect();
+        let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier);
+        mine.end();
+        theirs.end();
+        std::fs::remove_dir_all(&home).ok();
+        let got: std::collections::HashMap<&str, &str> =
+            said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let line = format!("tier {tier} ({ns:?}, {net:?}): {said}\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        let mut wrong = Vec::new();
+        for (what, _) in &own {
+            for how in ["make", "write"] {
+                if got[&*format!("own-{what}-{how}")] != "ok" {
+                    wrong.push(format!("its own {what}: {how} not ok — the try reaches nothing"));
+                }
+                // (Landlock's refusal: EACCES)
+                if got[&*format!("{what}-{how}")] != "13" {
+                    wrong.push(format!("the other session's {what}: {how} not refused"));
+                }
+            }
+        }
+        if got["checkout-read"] != "ok" {
+            wrong.push("the repository's other checkout isn't read (D16: shared)".into());
+        }
+        if got["elsewhere-read"] != "13" {
+            wrong
+                .push("a folder in home that's no checkout is read: the checkout's read pins nothing".into());
+        }
+        assert!(wrong.is_empty() && landed.is_empty(), "{wrong:#?}\nlanded: {landed:?}\n{line}");
+    }
+
+    /// The `files` helper: in each `$TARAE_OWN` folder, then each `$TARAE_TO` one (`what=folder` lines), a file
+    /// made and `there` appended to; each `$TARAE_READS` file read — `[own-]what-make=… what-write=… what-read=…`.
+    fn files_tried() -> String {
+        let list = |var: &str| {
+            let v = std::env::var(var).unwrap_or_default();
+            v.lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(w, p)| (w.to_string(), PathBuf::from(p)))
+                .collect::<Vec<_>>()
+        };
+        let mut said = Vec::new();
+        for (pre, var) in [("own-", "TARAE_OWN"), ("", "TARAE_TO")] {
+            for (what, dir) in list(var) {
+                let made = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dir.join(format!("made-{}", std::process::id())));
+                let written = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(dir.join("there"))
+                    .and_then(|mut f| io::Write::write_all(&mut f, b"x"));
+                said.push(format!("{pre}{what}-make={} {pre}{what}-write={}", tried(made), tried(written)));
+            }
+        }
+        for (what, file) in list("TARAE_READS") {
+            said.push(format!("{what}-read={}", tried(std::fs::read(file))));
+        }
+        said.join(" ")
     }
 
     /// 3b: without a `devpts` of the session's own (C, by copies too) a run reaches the ptys it makes — as libc's
