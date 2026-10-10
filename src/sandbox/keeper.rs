@@ -3076,6 +3076,15 @@ mod tests {
         files: &[&str],
         serve: Result<(), String>,
     ) -> (super::super::Policy, super::super::linux::Confine, PathBuf) {
+        let (p, root) = project_policy(name, ports, files);
+        let abi = crate::landlock::abi().unwrap();
+        let c =
+            super::super::linux::confine(&p, abi, Err("not watched".into()), false, keeper, serve).unwrap();
+        (p, c, root)
+    }
+
+    /// A project's policy with these ports open and these (empty) files: (the policy, the project).
+    fn project_policy(name: &str, ports: Vec<u16>, files: &[&str]) -> (super::super::Policy, PathBuf) {
         let root = std::env::temp_dir().join(format!("tarae-keeper-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
@@ -3089,11 +3098,7 @@ mod tests {
             run_env: super::super::run_env_of(&super::super::Here::now(), &crate::llm::LlmConfig::default()),
             ..Default::default()
         };
-        let p = super::super::Policy::for_project(&env);
-        let abi = crate::landlock::abi().unwrap();
-        let c =
-            super::super::linux::confine(&p, abi, Err("not watched".into()), false, keeper, serve).unwrap();
-        (p, c, root)
+        (super::super::Policy::for_project(&env), root)
     }
 
     /// The median of `n` times `f` took, in ms.
@@ -3479,6 +3484,24 @@ mod tests {
             "within" => helper_within(&std::env::var("TARAE_TO").unwrap_or_default()),
             "cgroupwrites" => helper_cgroup_writes(),
             "reach" => helper_reach(&std::env::var("TARAE_TO").unwrap_or_default()),
+            // (step 7: another session's run holding what it holds until `done` is in its folder — 30 s at most)
+            "hold" => {
+                let h = held("theirs");
+                println!("helper: {}", h.said);
+                let by = Instant::now() + Duration::from_secs(30);
+                while !Path::new("done").exists() && Instant::now() < by {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return (h.undo)();
+            }
+            "sockets" => {
+                let own = held("mine");
+                let theirs = helper_try(&std::env::var("TARAE_TO").unwrap_or_default());
+                let mine = helper_try(&own.said);
+                (own.undo)();
+                let mine: String = mine.split_whitespace().map(|w| format!(" own-{w}")).collect();
+                format!("{theirs}{mine}")
+            }
             // (`within` once `$TARAE_GO` is there — what the test wanted in place first is: 5 s at most)
             "within_when" => {
                 let go = std::env::var_os("TARAE_GO").unwrap_or_default();
@@ -5114,6 +5137,8 @@ mod tests {
         Refused,
         /// Named, and it went through: shared between sessions here — known, and the report must say it.
         Shared,
+        /// Never there: the other session's run can't make one here, so there's nothing of a session's to reach.
+        Unmade,
     }
 
     /// Step 7: two sessions' keepers side by side, a run of each — from one, everything a process can do to
@@ -5225,6 +5250,366 @@ mod tests {
         if !pid_ns {
             assert_eq!(got["seen"], "yes", "in sight without a PID namespace of its own: {line}");
         }
+    }
+
+    /// What a session's run holds for another session's to try (`held`): `said` names each as `helper_try`
+    /// reads it — `what=<where>`, or `what=no<errno>` where it couldn't be made here; `undo` takes away what
+    /// would outlive the run (the segment, the files).
+    struct Held {
+        said: String,
+        undo: Box<dyn FnOnce()>,
+        _pty: Option<(OwnedFd, OwnedFd, String)>,
+    }
+
+    /// `tag`'s things, made by this process: a TCP listener on `127.0.0.1`, an abstract unix one, one at
+    /// `apart-<tag>.sock` in its folder — each answering every connection with `apart_marker("<tag>-sock")` —,
+    /// a SysV shared memory segment at a key of its own and a file in `/dev/shm`, both holding
+    /// `apart_marker("<tag>-mem")`, and a pty (its path, its `devpts` and its device number).
+    fn held(tag: &str) -> Held {
+        use std::os::linux::net::SocketAddrExt as _;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::net::{SocketAddr, UnixListener};
+        fn answering<L: Send + 'static, S: io::Write + 'static>(
+            l: L,
+            accept: fn(&L) -> io::Result<S>,
+            answer: String,
+        ) {
+            std::thread::spawn(move || {
+                while let Ok(mut s) = accept(&l) {
+                    let _ = io::Write::write_all(&mut s, answer.as_bytes());
+                }
+            });
+        }
+        let no = |e: io::Error| format!("no{}", tried::<()>(Err(e)));
+        let answer = apart_marker(&format!("{tag}-sock"));
+        let pid = std::process::id();
+        let tcp = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => {
+                let port = l.local_addr().unwrap().port();
+                answering(l, |l| l.accept().map(|(s, _)| s), answer.clone());
+                port.to_string()
+            }
+            Err(e) => no(e),
+        };
+        let name = format!("tarae-apart-{tag}-{pid}");
+        let abs =
+            match SocketAddr::from_abstract_name(name.as_bytes()).and_then(|a| UnixListener::bind_addr(&a)) {
+                Ok(l) => {
+                    answering(l, |l| l.accept().map(|(s, _)| s), answer.clone());
+                    name
+                }
+                Err(e) => no(e),
+            };
+        let sock = std::env::current_dir().unwrap().join(format!("apart-{tag}.sock"));
+        let path = match UnixListener::bind(&sock) {
+            Ok(l) => {
+                answering(l, |l| l.accept().map(|(s, _)| s), answer);
+                sock.display().to_string()
+            }
+            Err(e) => no(e),
+        };
+        let mem = apart_marker(&format!("{tag}-mem"));
+        let key = 0x7a40_0000 | ((tag.len() as i32) << 16) | (pid as i32 & 0xffff);
+        // SAFETY: a segment of its own (4096 bytes, the marker far less), written while attached here; `undo`
+        // removes it.
+        let id = unsafe { libc::shmget(key, 4096, libc::IPC_CREAT | libc::IPC_EXCL | 0o600) };
+        let ipc = match id {
+            -1 => no(io::Error::last_os_error()),
+            id => {
+                // SAFETY: as above.
+                unsafe {
+                    let at = libc::shmat(id, std::ptr::null(), 0);
+                    assert!(at as isize != -1, "{}", io::Error::last_os_error());
+                    std::ptr::copy_nonoverlapping(mem.as_ptr(), at.cast::<u8>(), mem.len());
+                    libc::shmdt(at);
+                }
+                format!("{key}:{id}")
+            }
+        };
+        let file = PathBuf::from(format!("/dev/shm/tarae-apart-{tag}-{pid}"));
+        let shm = match std::fs::write(&file, &mem).and_then(|()| std::fs::metadata(&file)) {
+            Ok(m) => format!("{}:{}:{}", file.display(), m.dev(), m.ino()),
+            Err(e) => no(e),
+        };
+        let (pty, opened) = match pty_opened() {
+            Ok(p) => {
+                let m = std::fs::metadata(&p.2).unwrap();
+                (format!("{}:{}:{}", p.2, m.dev(), m.rdev()), Some(p))
+            }
+            Err(e) => (no(e), None),
+        };
+        let undo = move || {
+            if id != -1 {
+                // SAFETY: removes the segment made above.
+                unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
+            }
+            std::fs::remove_file(&file).ok();
+            std::fs::remove_file(&sock).ok();
+        };
+        Held {
+            said: format!("tag={tag} tcp={tcp} abstract={abs} path={path} ipc={ipc} shm={shm} pty={pty}"),
+            undo: Box::new(undo),
+            _pty: opened,
+        }
+    }
+
+    /// Each of what `said` names (`held`'s) tried from here: `ok` when it's reached — the holder's marker read
+    /// back (a socket's answer, the segment's or the file's text), or a pty opened —, `unseen` where nothing of
+    /// the holder's is at that name here (nothing there, or something else: another namespace's own), `unmade`
+    /// where the holder couldn't make it, else the errno it was refused with.
+    fn helper_try(said: &str) -> String {
+        use std::os::linux::net::SocketAddrExt as _;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::unix::net::{SocketAddr, UnixStream};
+        /// The path in `v` (`<path>:<a>:<b>`) when what's there is what the holder made (`id` of it is
+        /// `(a, b)`), else what was found instead.
+        fn placed(v: &str, id: fn(&std::fs::Metadata) -> (u64, u64)) -> Result<&str, String> {
+            let mut it = v.rsplitn(3, ':');
+            let (b, a, path) = (it.next(), it.next(), it.next().unwrap_or_default());
+            let want = (a.and_then(|a| a.parse().ok()), b.and_then(|b| b.parse().ok()));
+            match std::fs::metadata(path) {
+                Ok(m) if (Some(id(&m).0), Some(id(&m).1)) == want => Ok(path),
+                Ok(_) => Err("unseen".into()),
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Err("unseen".into()),
+                Err(e) => Err(tried::<()>(Err(e))),
+            }
+        }
+        let got: std::collections::HashMap<&str, &str> =
+            said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let tag = got.get("tag").copied().unwrap_or_default();
+        let judged = |text: &[u8], what: &str| {
+            let text = String::from_utf8_lossy(text);
+            match text.contains(&apart_marker(&format!("{tag}-{what}"))) {
+                true => "ok",
+                false if text.contains("apart-") => "unseen",
+                false => "unmarked",
+            }
+            .to_string()
+        };
+        let wait = Duration::from_secs(3);
+        let read = |s: io::Result<Box<dyn io::Read>>| match s {
+            Ok(mut s) => {
+                let mut b = Vec::new();
+                let _ = io::Read::read_to_end(&mut s, &mut b);
+                judged(&b, "sock")
+            }
+            // (nothing listening at that name here)
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ECONNREFUSED | libc::ENOENT)) => "unseen".into(),
+            Err(e) => tried::<()>(Err(e)),
+        };
+        let unix = |s: io::Result<UnixStream>| {
+            s.and_then(|s| s.set_read_timeout(Some(wait)).map(|()| Box::new(s) as Box<dyn io::Read>))
+        };
+        let each = |what: &str, f: &dyn Fn(&str) -> String| match got.get(what) {
+            Some(v) if !v.starts_with("no") => format!("{what}={}", f(v)),
+            _ => format!("{what}=unmade"),
+        };
+        [
+            each("tcp", &|port| {
+                let to = std::net::SocketAddr::from(([127, 0, 0, 1], port.parse().unwrap_or(9)));
+                read(
+                    std::net::TcpStream::connect_timeout(&to, wait).and_then(|s| {
+                        s.set_read_timeout(Some(wait)).map(|()| Box::new(s) as Box<dyn io::Read>)
+                    }),
+                )
+            }),
+            each("abstract", &|name| {
+                read(unix(
+                    SocketAddr::from_abstract_name(name.as_bytes())
+                        .and_then(|a| UnixStream::connect_addr(&a)),
+                ))
+            }),
+            each("path", &|path| read(unix(UnixStream::connect(path)))),
+            each("ipc", &|v| {
+                let (key, id) = v.split_once(':').unwrap();
+                let (key, id): (i32, i32) = (key.parse().unwrap(), id.parse().unwrap());
+                // SAFETY: plain calls; a segment attached read-only, 64 bytes of it read (a segment is a page at
+                // least), detached.
+                unsafe {
+                    let by_key = libc::shmget(key, 0, 0);
+                    let at = libc::shmat(
+                        if by_key >= 0 { by_key } else { id },
+                        std::ptr::null(),
+                        libc::SHM_RDONLY,
+                    );
+                    if at as isize == -1 {
+                        let e = io::Error::last_os_error();
+                        return match e.raw_os_error() {
+                            Some(libc::EINVAL | libc::EIDRM) => "unseen".into(),
+                            _ => tried::<()>(Err(e)),
+                        };
+                    }
+                    let r = judged(std::slice::from_raw_parts(at.cast::<u8>(), 64), "mem");
+                    libc::shmdt(at);
+                    r
+                }
+            }),
+            each("shm", &|v| match placed(v, |m| (m.dev(), m.ino())) {
+                Ok(p) => std::fs::read(p).map_or_else(|e| tried::<()>(Err(e)), |b| judged(&b, "mem")),
+                Err(found) => found,
+            }),
+            each("pty", &|v| match placed(v, |m| (m.dev(), m.rdev())) {
+                Ok(p) => tried(
+                    std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOCTTY).open(p),
+                ),
+                Err(found) => found,
+            }),
+        ]
+        .join(" ")
+    }
+
+    /// A session for step 7's tests: its project, its keeper — born in the namespaces this system gives the
+    /// project's policy — and its runs' rules as `linux::confine` makes them, served as this system serves.
+    struct Apart {
+        policy: super::super::Policy,
+        keeper: Arc<Keeper>,
+        confine: super::super::linux::Confine,
+        root: PathBuf,
+    }
+
+    impl Apart {
+        fn new(name: &str) -> Apart {
+            let (policy, root) = project_policy(name, Vec::new(), &[]);
+            let keeper = keeper_in(name, super::super::tier::for_policy(&policy));
+            let (abi, served) = (crate::landlock::abi().unwrap(), super::super::linux::served_here());
+            let confine = super::super::linux::confine(
+                &policy,
+                abi,
+                Err("not watched".into()),
+                false,
+                Some(&keeper),
+                served,
+            )
+            .unwrap();
+            Apart { policy, keeper, confine, root }
+        }
+
+        /// The test binary on `helper` doing `what` (with `env` set) as a run of this session's, in its project.
+        fn helper(&self, what: &str, env: &[(&str, &str)]) -> Started {
+            let cmd = helper_cmd(what, env, Some(&self.root));
+            let (c, name) = (&self.confine, crate::landlock::thread_name());
+            match c.net {
+                RunNet::Served | RunNet::Routed | RunNet::Copied => {
+                    // (what the supervisor refuses is said on a channel no one reads here)
+                    let told = std::sync::mpsc::channel().0;
+                    let p = Arc::new(self.policy.clone());
+                    self.keeper.start_served(&cmd, &name, c.rules_fd(), c.net, p, told)
+                }
+                RunNet::Own | RunNet::Plain => self.keeper.start(&cmd, &name, c.rules_fd(), c.net),
+            }
+            .unwrap()
+        }
+
+        fn end(self) {
+            self.keeper.end();
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    /// Step 7: two sessions side by side — from a run of one at what a run of the other holds (`held`): a
+    /// loopback TCP listener, an abstract unix one, a unix socket in its project, a SysV shared memory segment,
+    /// a file in `/dev/shm`, a pty. Each is the session's own where its keeper has the namespace — the network
+    /// (its `lo`, its abstract names), IPC and its own `/dev/shm` and `devpts` (A+, A) —; a unix socket by path
+    /// is the supervisor's to refuse outside the project, in every tier served. Without them (C/D) what goes
+    /// through is shared, pinned as shared and said (the user's decision 2026-10-10) — the loopback row is
+    /// step 8's (a session's own loopback), pinned as it is now. The trying run reaches its own of each first:
+    /// a try that reaches nothing would pass.
+    #[test]
+    fn two_sessions_cant_reach_each_others_sockets() {
+        use Reach::*;
+        let test = "two_sessions_cant_reach_each_others_sockets";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let (mine, theirs) = (Apart::new("socks-mine"), Apart::new("socks-theirs"));
+        let mut hold = theirs.helper("hold", &[]);
+        let mut out = io::BufReader::new(hold.spawned.stdout.take().unwrap());
+        let held = loop {
+            let mut line = String::new();
+            assert!(io::BufRead::read_line(&mut out, &mut line).unwrap() > 0, "the holder said nothing");
+            if let Some((_, s)) = line.split_once("helper: ") {
+                break s.trim().to_string();
+            }
+        };
+        let said = helper_said(mine.helper("sockets", &[("TARAE_TO", &held)]));
+        std::fs::write(theirs.root.join("done"), "").unwrap();
+        let mut rest = String::new();
+        io::Read::read_to_string(&mut out, &mut rest).unwrap();
+        io::Read::read_to_string(&mut hold.spawned.stderr.take().unwrap(), &mut rest).unwrap();
+        crate::spawn::wait(hold.spawned.pid).unwrap();
+        let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier);
+        // What the report says a run of this session's can't be kept from (`linux_said`'s notes)
+        let mut p = mine.policy.clone();
+        p.confine = Some(Ok(mine.confine.clone()));
+        let (_, notes) = p.linux_said().unwrap();
+        mine.end();
+        theirs.end();
+        let got: std::collections::HashMap<&str, &str> =
+            said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let line = format!("tier {tier} ({ns:?}, {net:?}): held {held}\n  tried: {said}\n  notes:{notes}\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        let verdict = |what: &str| match got[what] {
+            "ok" => Shared,
+            "unseen" => Unnamed,
+            "unmade" => Unmade,
+            n if n.bytes().all(|b| b.is_ascii_digit()) => Refused,
+            other => panic!("{what}: {other} — {line}"),
+        };
+        // Without a supervisor a run has no socket but netlink
+        let sockets = net != RunNet::Plain;
+        // The control: the trying run reaches its own — a loopback listener and an abstract name only in its
+        // session's network (without one a port the policy doesn't open is refused, its own too: measured, C)
+        for (what, want) in [
+            ("tcp", sockets && ns.net),
+            ("abstract", sockets && ns.net),
+            ("path", sockets),
+            ("ipc", true),
+            ("shm", true),
+            ("pty", true),
+        ] {
+            let own = got[&*format!("own-{what}")];
+            assert_eq!(own == "ok", want, "its own {what}: {line}");
+        }
+        // Step 8's: without a network of the session's own the loopback is this system's — a port the policy
+        // doesn't open is refused (this one's opens none), one it opens would be shared. Pinned as it is.
+        let loopback = Refused;
+        // (attempt, in the session's own namespace for it, without one)
+        let table = [
+            ("tcp", ns.net, Unnamed, loopback),
+            ("abstract", ns.net, Unnamed, Unmade),
+            ("path", false, Refused, Refused),
+            ("ipc", ns.user, Unnamed, Shared),
+            ("shm", ns.shm, Unnamed, Shared),
+            ("pty", ns.user, Unnamed, Shared),
+        ];
+        // Where the report says each that's shared
+        let said_of = |what: &str| {
+            notes.contains("other sessions' commands")
+                && match what {
+                    "ipc" => notes.contains("System V IPC"),
+                    "shm" => notes.contains("/dev/shm"),
+                    // (a run reaches every pty here, not only the other session's: the report says so)
+                    "pty" => notes.contains("terminals (/dev/pts)") && notes.contains("the user's own too"),
+                    _ => false,
+                }
+        };
+        let mut wrong = Vec::new();
+        for (what, own, in_own, without) in table {
+            let want = match (sockets, what) {
+                (false, "tcp" | "abstract" | "path") => Unmade,
+                _ if own => in_own,
+                _ => without,
+            };
+            if verdict(what) != want {
+                wrong.push(format!("{what}: {:?}, not {want:?}", verdict(what)));
+            }
+            if want == Shared && !said_of(what) {
+                wrong.push(format!("{what} is shared between sessions here, and the report doesn't say so"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
+        // …and nothing says it where it isn't so
+        assert_eq!(notes.contains("other sessions' commands"), !(ns.user && ns.shm), "{line}");
     }
 
     /// D10 under Landlock: the session's own `/dev/pts` and `/dev/shm` sit over this system's, where a rule

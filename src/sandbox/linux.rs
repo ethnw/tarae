@@ -101,9 +101,10 @@ pub struct Confine {
     /// The tier its runs go at (`tier::Tier`: the keeper's namespaces, served or not — `A+` … `D`), as `confine`
     /// decided it — what a run's chat row says it ran in (cardburden 4). Empty: no keeper's (a probe's rules).
     pub tier: &'static str,
-    /// Its keeper gave the session a PID namespace of its own (A+, B+): no other session's process is in sight —
-    /// for the report to say where one is (`notes`).
-    pub own_pids: bool,
+    /// The namespaces its keeper gave the session (`NONE`: no keeper's) — for the report to say what a run shares
+    /// with other sessions' (`notes`): their processes without a PID namespace of its own (A+, B+ have one), IPC
+    /// and terminals without the session's (C/D), `/dev/shm` without its own.
+    pub ns: super::tier::Ns,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
@@ -513,8 +514,7 @@ pub fn confine(
     }
     // (what the keeper's runs take for their filter — the same once-read answer `Keeper::start` gives them)
     let no_userns = super::tier::runs_refuse_userns();
-    let own_pids = ns.user && ns.pid;
-    confine_in(r, p, audit, make_first, serve, net).map(|c| Confine { no_userns, tier, own_pids, ..c })
+    confine_in(r, p, audit, make_first, serve, net).map(|c| Confine { no_userns, tier, ns, ..c })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
@@ -643,7 +643,7 @@ pub(super) fn confine_in(
         net,
         no_userns: false,
         tier: "",
-        own_pids: false,
+        ns: super::tier::Ns::NONE,
         made: Arc::new(made),
         closed,
         kept: Arc::new(kept),
@@ -695,21 +695,35 @@ pub fn made_said(made: &Made, root: &Path) -> String {
 }
 
 /// What a run of ABI `abi` can't be kept from, for the report: no signal scope below 6; without a PID namespace
-/// of its session's own (`own_pids`: A+, B+), the other sessions' processes in sight — Landlock keeps their
+/// of its session's own (`ns`: A+, B+ have one), the other sessions' processes in sight — Landlock keeps their
 /// environment and tracing in its domain, not their command lines nor `setpriority`
-/// (`keeper::tests::two_sessions_cant_reach_each_others_processes`).
-pub fn notes(abi: u32, own_pids: bool) -> String {
+/// (`keeper::tests::two_sessions_cant_reach_each_others_processes`); without the session's namespaces (C/D),
+/// this system's SysV IPC, `/dev/shm` and every pty — the user's own terminals too —, and `/dev/shm` alone
+/// where the session has none of its own (`keeper::tests::two_sessions_cant_reach_each_others_sockets`).
+pub fn notes(abi: u32, ns: super::tier::Ns) -> String {
     let mut s = match abi {
         n if n < 6 => format!(
             " This kernel's Landlock (ABI {n}) can't keep a command's signals to its own processes (6 does)."
         ),
         _ => String::new(),
     };
-    if !own_pids {
+    if !(ns.user && ns.pid) {
         s.push_str(
             " Here a command sees this system's processes — another session's commands and the user's others: \
              it can read their command lines and lower their priority, never their environment, nor trace them.",
         );
+    }
+    match (ns.user, ns.shm) {
+        (false, _) => s.push_str(
+            " Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other \
+             sessions' commands and the user's other programs: it can read and write the shared memory they \
+             keep there and open any of those terminals — the user's own too, not only other sessions'.",
+        ),
+        (true, false) => s.push_str(
+            " Here a command shares this system's /dev/shm with other sessions' commands and the user's other \
+             programs: it can read and write the files they keep there.",
+        ),
+        (true, true) => {}
     }
     s
 }
