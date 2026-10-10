@@ -35,7 +35,7 @@ each address it reaches. It leaves four things open:
 | D10 | The session's mount namespace changes only `/proc`, `/dev/pts` and `/dev/shm`. Files stay Landlock's: denied, never hidden |
 | D11 | A dead keeper is remade, the run under way is reported failed, and tarae stops remaking after two deaths in 10 minutes |
 | D12 | Where `/proc` can't be mounted there is no PID namespace (tier A), never the host's `/proc` |
-| D13 | The boundary is the session. A new conversation, a session behind and the main checkout's session each keep their keeper |
+| D13 | The boundary is the session. A new conversation, a session behind and the main checkout's session each keep their keeper — a new conversation unless the last one granted writes or ports: those are in the policy key (D14) |
 | D14 | Any policy-key change ends the keeper; its daemons start cold once |
 | D15 | The keeper is born by `clone3` from tarae, with raw system calls until its exec |
 | D16 | `/tmp` stays shared |

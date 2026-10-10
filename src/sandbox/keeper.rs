@@ -2993,6 +2993,207 @@ mod tests {
         third.end();
     }
 
+    /// A tarae session for the keeper's lifetime tests: an editor on a project of its own, the sandbox on, and
+    /// Claude's runs going tarae's whole way (`tools::guard_then_go`: the policy made on a worker, its session's
+    /// keeper found or made — `sandbox::confined`), in surroundings of the test's own (tarae's cache in `base`);
+    /// its chat's claude a stand-in.
+    struct Lived {
+        ed: crate::editor::Editor,
+        root: PathBuf,
+    }
+
+    impl Lived {
+        /// A session on `base/name` (`base`: out of tarae's repository — a run takes its snapshot with git — and
+        /// out of the temp folders, which every run writes).
+        fn new(base: &Path, name: &str) -> Lived {
+            let root = base.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+            (ed.config.llm.sandbox, ed.sandbox) = (true, super::super::Availability::Ready);
+            // (a stand-in claude: it reads what it's sent and says nothing)
+            ed.config.llm.command = "sh".into();
+            ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+            ed.session.root = root.clone();
+            crate::chat::open(&mut ed);
+            ed.session.chat.as_mut().unwrap().conversation = Some(format!("{name}-1"));
+            let cache = base.join("cache");
+            ed.sandbox_here = Some(Arc::new(move || {
+                let mut here = super::super::Here::now();
+                here.env.insert("XDG_CACHE_HOME".into(), cache.clone().into());
+                here
+            }));
+            Lived { ed, root }
+        }
+
+        /// `command` run as Claude's in this session — a call of its chat's turn under way —, to its end: its
+        /// answer.
+        fn run(&mut self, command: &str) -> String {
+            use crate::tools::{ANSWERED, Call, For, Job};
+            // (calls of every session's are answered into one list: an id of their own)
+            static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let id = serde_json::json!(n);
+            let c = self.ed.session.chat.as_mut().unwrap();
+            c.state = crate::chat::State::Thinking;
+            let call = Call::of(c.generation(), &format!("r{n}"), id.clone());
+            let job = Job::Command(command.into(), self.root.clone());
+            crate::tools::guard_then_go(&mut self.ed, For::Claude(call), job, Default::default());
+            let end = Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Some((_, answer)) =
+                    ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| *i == id).cloned())
+                {
+                    return answer.unwrap_or_else(|e| e);
+                }
+                if Instant::now() >= end {
+                    let toasts: Vec<_> = self.ed.toasts.iter().map(|t| t.text.clone()).collect();
+                    let (cards, task) = (self.ed.offers.len(), self.ed.session.task_run.is_some());
+                    panic!("{command}: no answer — toasts {toasts:?}, {cards} cards, a task run: {task}");
+                }
+                if let Some(ev) = self.ed.events.recv_timeout(Duration::from_millis(20)) {
+                    self.ed.handle_event(ev);
+                }
+            }
+        }
+
+        /// The session's keeper — the one taking its runs.
+        fn keeper(&self) -> Arc<Keeper> {
+            let current: Vec<_> =
+                of(Some(&self.root)).into_iter().filter(|k| !lock(&k.state).superseded).collect();
+            assert_eq!(current.len(), 1, "one keeper takes the session's runs");
+            current[0].clone()
+        }
+
+        /// A daemon left by a run of this session's: a run that starts one in the background and ends, then the
+        /// daemon under the session's keeper.
+        fn daemon(&mut self) -> u32 {
+            let said = self.run("setsid sleep 60 >/dev/null 2>&1 &");
+            let k = self.keeper();
+            let end = Instant::now() + Duration::from_secs(5);
+            loop {
+                match k.leftovers()[..] {
+                    [pid] => return pid,
+                    _ => assert!(Instant::now() < end, "a daemon under the keeper: {said}"),
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn end(self) {
+            super::super::end_leftovers(Some(&self.root));
+        }
+    }
+
+    /// Whether `pid` is alive (there, and no zombie).
+    fn alive(pid: u32) -> bool {
+        crate::procs::read(pid).is_some_and(|o| !o.zombie)
+    }
+
+    /// The folder `Lived` sessions of `test` live in, made empty.
+    fn lived_base(test: &str) -> PathBuf {
+        let base = PathBuf::from("/var/tmp").join(format!("tarae-{test}-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::canonicalize(&base).unwrap()
+    }
+
+    /// D13: the boundary is the session, not the conversation — a new conversation in the chat (`C-l`:
+    /// `chat::reset`) goes on with the session's keeper, and a daemon a run of the last conversation left is
+    /// alive after the new one's first run. Another session's runs between (another project, so another
+    /// policy key) leave it alone too.
+    #[test]
+    fn a_new_conversation_keeps_the_keeper() {
+        let test = "a_new_conversation_keeps_the_keeper";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let base = lived_base(test);
+        let (mut mine, mut theirs) = (Lived::new(&base, "mine"), Lived::new(&base, "theirs"));
+        let daemon = mine.daemon();
+        let k = mine.keeper();
+        let their_daemon = theirs.daemon();
+        assert_ne!(theirs.keeper().pid, k.pid, "each session its own keeper");
+        crate::chat::reset(&mut mine.ed);
+        assert!(mine.ed.session.chat.as_ref().unwrap().conversation.is_none(), "a new conversation");
+        let said = mine.run("true");
+        assert_eq!(mine.keeper().pid, k.pid, "the same keeper: {said}");
+        assert!(!k.is_gone());
+        assert!(alive(daemon), "the last conversation's daemon goes on");
+        assert_eq!(k.leftovers(), [daemon]);
+        assert!(alive(their_daemon), "the other session's too");
+        mine.end();
+        theirs.end();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// D14: a session's policy key changed (a setting — here `llm.sandbox-write` — between two runs), its next
+    /// run gets a new keeper, and the old one's daemons end with it: a daemon keeps the rights it started with,
+    /// narrower or wider. Another session's keeper and daemon go on.
+    #[test]
+    fn a_key_change_ends_the_keepers_daemons() {
+        let test = "a_key_change_ends_the_keepers_daemons";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let base = lived_base(test);
+        let (mut mine, mut theirs) = (Lived::new(&base, "mine"), Lived::new(&base, "theirs"));
+        let daemon = mine.daemon();
+        let old = mine.keeper();
+        let their_daemon = theirs.daemon();
+        let their_keeper = theirs.keeper();
+        let granted = base.join("granted");
+        std::fs::create_dir_all(&granted).unwrap();
+        mine.ed.config.llm.sandbox_write.push(granted.display().to_string());
+        let said = mine.run("true");
+        let new = mine.keeper();
+        assert_ne!(new.pid, old.pid, "a new keeper for the new key: {said}");
+        assert!(gone_within(&old, END_WITHIN), "the old keeper ends");
+        let end = Instant::now() + LEFT_TERM * 3;
+        while alive(daemon) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(daemon), "its daemon ended with it");
+        assert!(!their_keeper.is_gone() && alive(their_daemon), "the other session's go on");
+        assert_eq!(theirs.keeper().pid, their_keeper.pid);
+        mine.end();
+        theirs.end();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// D13 gives way to D14 (the user's decision 2026-10-10): a new conversation goes on with the keeper only
+    /// where the last one granted nothing. A write granted for the last conversation (`a` on its card:
+    /// `Chat.allowed`) is in the policy key; the new one (`C-l`) grants it no more, so its first run gets a new
+    /// keeper and the last conversation's daemons end — a daemon mustn't keep a right no longer granted.
+    #[test]
+    fn a_new_conversation_after_a_grant_ends_the_keepers_daemons() {
+        let test = "a_new_conversation_after_a_grant_ends_the_keepers_daemons";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let base = lived_base(test);
+        let mut mine = Lived::new(&base, "mine");
+        let granted = base.join("granted");
+        std::fs::create_dir_all(&granted).unwrap();
+        mine.ed.session.chat.as_mut().unwrap().allowed.write.push(granted);
+        let daemon = mine.daemon();
+        let old = mine.keeper();
+        crate::chat::reset(&mut mine.ed);
+        assert!(
+            mine.ed.session.chat.as_ref().unwrap().allowed.write.is_empty(),
+            "the grant was the last one's"
+        );
+        let said = mine.run("true");
+        assert_ne!(mine.keeper().pid, old.pid, "a new keeper: {said}");
+        assert!(gone_within(&old, END_WITHIN), "the old keeper ends");
+        let end = Instant::now() + LEFT_TERM * 3;
+        while alive(daemon) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(daemon), "the last conversation's daemon ended with it");
+        mine.end();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// Where `clone3` answers `ENOSYS` (Docker's default filter does, so libcs fall back), a keeper is born
     /// through `clone(2)` (`clone_pidfd`): `clone3` refused so in a process of its own (`clone3_refused_scene`, a
     /// seccomp filter of its own on the thread that makes the keeper), the keeper still says it's there.
