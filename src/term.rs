@@ -412,6 +412,15 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             (b.y + 3, b.list_rows)
         }),
         picker_preview_x: editor.picker.as_ref().and_then(|p| PickerBox::new(&lay, p).preview_x()),
+        picker_preview: editor.picker.as_ref().and_then(|p| {
+            let b = PickerBox::new(&lay, p);
+            let x = b.preview_x()?;
+            Some((x, b.y, lay.edit_w.saturating_sub(x), b.list_rows + 4))
+        }),
+        picker_list_cols: editor.picker.as_ref().map(|p| {
+            let b = PickerBox::new(&lay, p);
+            (b.x, b.x + b.list_w + 2)
+        }),
         popup: std::cell::Cell::new(None),
         offer_buttons: offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default(),
         offer_card: offer.as_ref().map(OfferCard::rect),
@@ -7712,14 +7721,12 @@ fn draw_follow_card(
     // review: said so, not "running" while nothing runs (what it waits on is that card's — not repeated)
     let asks = editor.offers.iter().any(|o| {
         use crate::offer::What;
-        matches!(
-            o.what,
-            What::Run(_)
-                | What::NoSandbox { .. }
-                | What::ProtectedMade { .. }
-                | What::Read { .. }
-                | What::Screen { .. }
-        )
+        match &o.what {
+            What::Run(_) | What::NoSandbox { .. } | What::ProtectedMade { .. } | What::Screen { .. } => true,
+            // (not one the user's pointing raised — `reads::point`)
+            What::Read { pending, .. } => pending.own.is_none(),
+            _ => false,
+        }
     });
     let waiting = |verb: &str| {
         c.busy()

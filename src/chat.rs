@@ -292,6 +292,16 @@ pub struct Chat {
     /// The folders a read's card offered for `a`/`A`, looked through for tokens on a worker (None: under way)
     /// — a folder is offered once its card can say what it holds (`reads::refold`).
     pub scanned: std::collections::HashMap<PathBuf, Option<crate::tokens::Found>>,
+    /// Files named like keys in the project, for the message's context (`reads::key_shut`): those the project
+    /// keeps open (`A`), as last read on a worker (`reads::kept_keys_load`; None: not read yet) · those the
+    /// user let go with the input's message, by the chip it was for (`y` on the card their pointing raised —
+    /// `reads::point`; gone with the chip, `reads::input_pass`) · those the chat said weren't sent, once each
+    /// a conversation (`reads::not_sent`).
+    pub kept_keys: Option<Vec<PathBuf>>,
+    /// What the user sent that waits for `kept_keys` to be read before it's decided (`reads::wait_for_kept`).
+    pub after_kept: Vec<crate::reads::Own>,
+    pub key_pass: Vec<(String, PathBuf)>,
+    pub keys_said: Vec<PathBuf>,
     /// This turn's sandboxed runs of Claude's — what they made is read unasked (#81, `reads::Ran`).
     pub ran: Vec<crate::reads::Ran>,
     /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
@@ -498,6 +508,10 @@ impl Chat {
             reads: Default::default(),
             read_once: Vec::new(),
             scanned: Default::default(),
+            kept_keys: None,
+            after_kept: Vec::new(),
+            key_pass: Vec::new(),
+            keys_said: Vec::new(),
             ran: Vec::new(),
             sees: false,
             run_again: Vec::new(),
@@ -703,6 +717,7 @@ pub fn open(ed: &mut Editor) {
             }
             ed.session.chat = Some(c);
             crate::edits::at_end_new_chat(ed);
+            crate::reads::kept_keys_load(ed);
         }
     }
     ensure_proc(ed);
@@ -942,6 +957,8 @@ pub fn reset(ed: &mut Editor) {
     ed.session.usage.new_conversation();
     // (review at the end stays as it's set — `llm.review-at-end`)
     crate::edits::at_end_new_chat(ed);
+    // (a `y` for the last one's message, and a card pointing raised, go with it)
+    crate::reads::conversation_new(ed);
     ensure_proc(ed);
     ed.set_status(said);
 }
@@ -1416,11 +1433,14 @@ fn turn_end_said(ed: &mut Editor, how: Result<(), String>) {
 // ── Send ───────────────────────────────────────────────────────────────────
 
 /// `C-s` in the chat · `:chat-screen` — the screen as the user sees it now (the last frame, as text) goes
-/// with their next message; the chat opens if it isn't, and the line over the input says so.
+/// with their next message, a pane showing a file named like a key Claude may not read blanked
+/// (`reads::key_panes`); the chat opens if it isn't, and the line over the input says so.
 pub fn attach_screen(ed: &mut Editor) -> Result<(), String> {
     let (frame, cols, rows) = ed.last_frame.as_ref().ok_or("nothing is on screen yet")?;
     let (cols, rows) = (*cols, *rows);
-    let text = crate::screen::text(frame, cols, rows).ok_or("this screen can't be read as text")?;
+    let hidden = crate::reads::key_panes(ed);
+    let text =
+        crate::screen::text_hiding(frame, cols, rows, &hidden).ok_or("this screen can't be read as text")?;
     if ed.session.chat.is_none() {
         open(ed);
     }
@@ -1440,18 +1460,24 @@ fn screen_copy_path() -> PathBuf {
 
 /// The turn ended: the message queued during it goes now (#23) — unless a restart waits for the turn (it
 /// stays queued, over the input, for after).
-fn send_queued(ed: &mut Editor) {
+pub(crate) fn send_queued(ed: &mut Editor) {
     if ed.restart.is_some() {
         return;
     }
+    // (it waits for the user's answer on a card their pointing raised — `reads::pointed_answer` sends it)
+    if crate::reads::pointing_asks(ed) {
+        return;
+    }
     let Some(q) = ed.session.chat.as_mut().and_then(|c| c.queued.take()) else { return };
-    if !submit(ed, &q, None, None)
+    if !submit_input(ed, &q)
         && let Some(c) = ed.session.chat.as_mut()
     {
         c.queued = Some(q);
     }
 }
 
+/// Enter in the chat: the input goes as the next turn — or waits its turn while Claude works, or for the
+/// user's answer on a card their pointing raised (`reads::point`), said, the input kept.
 pub fn send(ed: &mut Editor) {
     let Some(c) = &mut ed.session.chat else { return };
     let question = c.input.trim().to_string();
@@ -1467,7 +1493,10 @@ pub fn send(ed: &mut Editor) {
         c.cursor = 0;
         return;
     }
-    if !question.is_empty() && submit(ed, &question, None, None) {
+    if !question.is_empty() && crate::reads::pointing_asks(ed) {
+        return ed.set_status("not sent yet — answer the card about what you pointed at first (C-q)");
+    }
+    if !question.is_empty() && submit_input(ed, &question) {
         let c = ed.session.chat.as_mut().expect("just sent");
         c.input.clear();
         c.cursor = 0;
@@ -1475,22 +1504,49 @@ pub fn send(ed: &mut Editor) {
 }
 
 /// Sends `question` as the next turn — with the editor context, plus `about` (a note's lines and thread;
-/// `chip` then replaces the context summary). False if it couldn't go (busy, no process).
+/// `chip` then replaces the context summary). False if it couldn't go (busy, no process). Not the chat
+/// input's: what was pointed at stays for the input's own message (`submit_input`), and a `y` given for that
+/// one isn't this one's.
 pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Option<String>) -> bool {
+    submit_as(ed, question, about, chip, false)
+}
+
+/// The chat input's own message: with what the user pointed at (its chips), and the files named like keys a
+/// `y` let go with it (`reads::input_pass`).
+fn submit_input(ed: &mut Editor, question: &str) -> bool {
+    submit_as(ed, question, None, None, true)
+}
+
+fn submit_as(
+    ed: &mut Editor,
+    question: &str,
+    about: Option<String>,
+    chip: Option<String>,
+    input: bool,
+) -> bool {
     if ed.session.chat.as_ref().is_none_or(Chat::busy) {
         return false;
     }
     // Process first — a newly spawned one clears `sent`, so the context carries the whole file again
     ensure_proc(ed);
+    let pass = if input { crate::reads::input_pass(ed) } else { Vec::new() };
     // What's up on screen by id (the `ui:` line, when there's something), and what the user pointed at
     let ui = ed.ui_state_claude().context_line();
-    let (context, ctx_chip, sent) = context(ed, ui.as_ref().map(|u| u.0.as_str()));
-    let pointed: Vec<String> = ed.session.chat.as_ref().map(|c| c.pointed.clone()).unwrap_or_default();
+    let (context, ctx_chip, sent, withheld) = context(ed, ui.as_ref().map(|u| u.0.as_str()), &pass);
+    let pointed: Vec<String> =
+        ed.session.chat.as_ref().filter(|_| input).map(|c| c.pointed.clone()).unwrap_or_default();
     let context = match pointed.is_empty() {
         true => context,
         false => {
-            let blocks: Vec<String> =
-                pointed.iter().map(|id| crate::uistate::claude::pointed(ed, id)).collect();
+            // (one carrying a file named like a key the user said no to: its name only)
+            let block = |id: &String| match crate::reads::pointed_key(ed, id, &pass) {
+                Some(k) => {
+                    let name = k.strip_prefix(&ed.session.root).unwrap_or(&k).display().to_string();
+                    format!("<pointed id=\"{id}\">{id} — {name}, {}</pointed>", crate::reads::NOT_SENT)
+                }
+                None => crate::uistate::claude::pointed(ed, id),
+            };
+            let blocks: Vec<String> = pointed.iter().map(block).collect();
             format!("{context}\n{}", blocks.join("\n"))
         }
     };
@@ -1532,8 +1588,12 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     c.unfolded = false;
     // (a switch's cost is this message's now — the line over the input goes)
     c.switched = None;
-    // A new turn: what went to Claude is what this message carries (marks of the last one go)
-    c.pointed.clear();
+    // A new turn: what went to Claude is what this message carries (marks of the last one go) — the input's
+    // chips, and a `y` for them, once its own message went
+    if input {
+        c.pointed.clear();
+        c.key_pass.clear();
+    }
     c.cited.clear();
     c.given = ui.map(|u| u.1).unwrap_or_default();
     for id in &pointed {
@@ -1566,6 +1626,7 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     c.scroll = 0;
     c.state = State::Thinking;
     c.started = Instant::now();
+    crate::reads::not_sent(ed, &withheld);
     crate::uistate::watch::turn(ed, "started", 0, None);
     true
 }
@@ -1663,9 +1724,15 @@ pub fn stop(ed: &mut Editor) {
     }
 }
 
-/// Context to send + summary chip + the document versions whose full text went along. `ui`: the line naming
-/// what's up on screen by id (`UiState::context_line`).
-fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>) {
+/// Context to send + summary chip + the document versions whose full text went along + the files named like
+/// keys whose text it left out (`reads::key_shut`: their names go, "not sent"). `ui`: the line naming what's
+/// up on screen by id (`UiState::context_line`); `pass`: those this message may carry all the same (a `y` for
+/// the chat input's message — `reads::input_pass`).
+fn context(
+    ed: &Editor,
+    ui: Option<&str>,
+    pass: &[PathBuf],
+) -> (String, String, Vec<(DocId, u64)>, Vec<PathBuf>) {
     let doc = ed.doc();
     let text = &doc.text;
     let name = doc.display_name(&ed.session.root);
@@ -1673,10 +1740,15 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
     let sel = doc.selection().primary();
     let head = sel.cursor(text);
     let line = text.byte_to_line(head.min(text.len_bytes()));
+    let shut = |d: &crate::document::Document| {
+        d.path.as_deref().filter(|p| crate::reads::key_shut(ed, p, pass)).map(Path::to_path_buf)
+    };
+    let mut withheld: Vec<PathBuf> = shut(doc).into_iter().collect();
     let mut ctx = format!(
-        "<editor-context>\nfile: {name}{}{}\ncursor: line {}\n",
+        "<editor-context>\nfile: {name}{}{}{}\ncursor: line {}\n",
         if lang.is_empty() { String::new() } else { format!(" ({lang})") },
         if doc.is_modified() && doc.path.is_some() { " (unsaved)" } else { "" },
+        if withheld.is_empty() { String::new() } else { format!(" — {}", crate::reads::NOT_SENT) },
         line + 1
     );
     // What the user is looking at: this file's lines on screen, and any other pane beside it
@@ -1704,8 +1776,14 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
     let was_sent = |d: &crate::document::Document| {
         ed.session.chat.as_ref().and_then(|c| c.sent.get(&d.id)) == Some(&d.version())
     };
+    // A file named like a key, not open to Claude: its name only — no selection, text or diagnostics (a
+    // diagnostic's message can quote a line)
+    let its_text = withheld.is_empty();
+    if !its_text {
+        chip.push_str(" · not sent");
+    }
     // Selection (only when more than one character is selected)
-    if sel.to() > crate::graphemes::next_boundary(text, sel.from()) {
+    if its_text && sel.to() > crate::graphemes::next_boundary(text, sel.from()) {
         let (l0, l1) =
             (text.byte_to_line(sel.from()), text.byte_to_line(sel.to().saturating_sub(1).max(sel.from())));
         ctx.push_str(&format!(
@@ -1721,7 +1799,7 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
         });
     }
     // File: if this version hasn't been sent yet, the full text (if small) or around the cursor
-    if !was_sent(doc) {
+    if its_text && !was_sent(doc) {
         if text.len_bytes() <= WHOLE_FILE_MAX {
             ctx.push_str(&format!("<file-content>\n{text}</file-content>\n"));
             sent.push((doc.id, doc.version()));
@@ -1742,7 +1820,7 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
         }
     }
     let diags = &doc.lsp.diagnostics;
-    if !diags.is_empty() {
+    if its_text && !diags.is_empty() {
         ctx.push_str("<diagnostics>\n");
         for d in diags.iter().take(30) {
             let l = text.byte_to_line(d.from.min(text.len_bytes()));
@@ -1760,14 +1838,24 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
     let others: Vec<_> =
         ed.docs.iter().filter(|d| d.id != doc.id && d.path.is_some() && !d.loading).collect();
     if !others.is_empty() {
+        // (an unsaved one named like a key, not open to Claude: named, its text not sent)
+        let unsaved_key = |d: &crate::document::Document| d.is_modified().then(|| shut(d)).flatten();
         ctx.push_str("<open-files>\n");
         for d in others.iter().take(30) {
             ctx.push_str(&d.display_name(&ed.session.root));
-            ctx.push_str(if d.is_modified() { " (unsaved)\n" } else { "\n" });
+            ctx.push_str(match (d.is_modified(), unsaved_key(d).is_some()) {
+                (true, true) => " (unsaved — named like a key, not sent)\n",
+                (true, false) => " (unsaved)\n",
+                _ => "\n",
+            });
         }
         ctx.push_str("</open-files>\n");
         let mut budget = UNSAVED_MAX;
         for d in others.iter().filter(|d| d.is_modified() && !was_sent(d)) {
+            if let Some(k) = unsaved_key(d) {
+                withheld.push(k);
+                continue;
+            }
             let n = d.text.len_bytes();
             if n > budget.min(WHOLE_FILE_MAX) {
                 continue;
@@ -1782,7 +1870,7 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
         }
     }
     ctx.push_str("</editor-context>");
-    (ctx, chip, sent)
+    (ctx, chip, sent, withheld)
 }
 
 /// Per pane on screen (last frame, the focused one first): its document and the lines it shows. A document
@@ -2216,6 +2304,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         // An empty input: Backspace takes off what goes with it — the last element pointed at, the screen
         (Code::Backspace, ..) if c.input.is_empty() && !c.pointed.is_empty() => {
             c.pointed.pop();
+            crate::reads::unpointed(ed);
         }
         (Code::Backspace, ..) if c.input.is_empty() && c.screen.is_some() => c.screen = None,
         // (C-g too — zellij takes it for its lock mode)
@@ -2442,9 +2531,507 @@ mod tests {
         use crate::selection::{Range, Selection};
         let mut ed = editor("한글\n");
         ed.doc_mut().set_selection(Selection::single(Range::new(0, 3)));
-        assert!(!context(&ed, None).0.contains("<selection"));
+        assert!(!context(&ed, None, &[]).0.contains("<selection"));
         ed.doc_mut().set_selection(Selection::single(Range::new(0, 6)));
-        assert!(context(&ed, None).0.contains("<selection lines=\"1-1\">\n한글\n</selection>"));
+        assert!(context(&ed, None, &[]).0.contains("<selection lines=\"1-1\">\n한글\n</selection>"));
+    }
+
+    /// A project of this test's own temp folder: `.env` holding a fake token, its exception `.env.example`,
+    /// and a plain file (`.txt` — no language server starts) — real paths, as `Editor::open` keeps them.
+    fn key_project(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tarae-chat-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        let project = std::fs::canonicalize(dir.join("project")).unwrap();
+        let (env, example, plain) =
+            (project.join(".env"), project.join(".env.example"), project.join("notes.txt"));
+        std::fs::write(&env, "API_KEY=tarae-fake-token\n").unwrap();
+        std::fs::write(&example, "API_KEY=example-only\n").unwrap();
+        std::fs::write(&plain, "plain words\n").unwrap();
+        (dir, env, example, plain)
+    }
+
+    /// 7c′: the message's context names a file in the project named like a key (`runtime/secret-names.txt`)
+    /// but carries none of its text — not the file, its selection, its diagnostics (a message can quote a
+    /// line), nor its unsaved buffer behind another file — as Claude's Read asks for it (7c) and a run can't
+    /// read it (7a/7b). An exception (`!.env.example`) goes as any file does; so does one opened: for this
+    /// conversation (`Grant::Key`), kept for the project (the chat's copy), or let go with the next message
+    /// (`y` on the card pointing at it raised). The token is a fake.
+    #[test]
+    fn a_key_named_file_s_text_stays_out_of_the_context() {
+        use crate::selection::{Range, Selection};
+        let (dir, env, example, plain) = key_project("key-context");
+        let mut ed = editor("");
+        ed.session.root = env.parent().unwrap().to_path_buf();
+        let mut c = Chat::new();
+        c.kept_keys = Some(Vec::new());
+        ed.session.chat = Some(c);
+        ed.open(&env).unwrap();
+        let n = ed.doc().text.len_bytes();
+        ed.doc_mut().set_selection(Selection::single(Range::new(0, n)));
+        ed.doc_mut().lsp.diagnostics = vec![crate::lsp::Diagnostic {
+            from: 0,
+            to: 7,
+            severity: 1,
+            message: "unexpected tarae-fake-token".into(),
+            raw: serde_json::json!({}),
+            source: 0,
+        }];
+        let (ctx, chip, sent, withheld) = context(&ed, None, &[]);
+        assert!(!ctx.contains("tarae-fake-token"), "{ctx}");
+        assert!(ctx.contains("file: .env — named like a key — not sent\n"), "{ctx}");
+        assert!(!ctx.contains("<selection") && !ctx.contains("<diagnostics>"), "{ctx}");
+        assert!(chip.ends_with(" · not sent"), "{chip}");
+        assert!(sent.is_empty(), "no version of it counts as sent");
+        assert_eq!(withheld, std::slice::from_ref(&env));
+        // Unsaved, behind another file: named, its text not sent
+        use crate::transaction::{Change, Transaction};
+        ed.doc_mut().apply(&Transaction::new(vec![Change::insert(0, "OTHER=tarae-fake-token-2\n")]));
+        ed.open(&plain).unwrap();
+        let (ctx, _, _, withheld) = context(&ed, None, &[]);
+        assert!(!ctx.contains("tarae-fake-token") && ctx.contains("plain words"), "{ctx}");
+        assert!(ctx.contains(".env (unsaved — named like a key, not sent)\n"), "{ctx}");
+        assert_eq!(withheld, std::slice::from_ref(&env));
+        // An exception goes as any file
+        ed.open(&example).unwrap();
+        let (ctx, _, _, withheld) = context(&ed, None, &[]);
+        assert!(ctx.contains("example-only") && withheld == [env.clone()], "{ctx}");
+        // Opened — each way — its text goes, the unsaved buffer's too
+        ed.open(&env).unwrap();
+        let opened: [fn(&mut Chat, &Path); 3] = [
+            |c, k| c.allowed.keys.push(k.to_path_buf()),
+            |c, k| c.kept_keys = Some(vec![k.to_path_buf()]),
+            |c, k| {
+                c.pointed.push("pane#1".into());
+                c.key_pass.push(("pane#1".into(), k.to_path_buf()));
+            },
+        ];
+        for open in opened {
+            let mut c = Chat::new();
+            c.kept_keys = Some(Vec::new());
+            open(&mut c, &env);
+            ed.session.chat = Some(c);
+            let pass = crate::reads::input_pass(&ed);
+            let (ctx, chip, _, withheld) = context(&ed, None, &pass);
+            assert!(
+                ctx.contains("<file-content>\nOTHER=tarae-fake-token-2\nAPI_KEY=tarae-fake-token\n"),
+                "{ctx}"
+            );
+            assert!(
+                ctx.contains("<diagnostics>") && !chip.contains("not sent") && withheld.is_empty(),
+                "{ctx}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 7c′ through the chat: with `.env` in front, what reaches claude names it only, and the chat says once
+    /// a conversation that its text wasn't sent and how to send it. Pointing at its pane (`C-o`) is the
+    /// user's own act: the read card asks, the message waits for the answer — `y` sends its text with that
+    /// message only, `n` keeps it to its name; taking the chip off drops the card, or the `y` given for it;
+    /// a new conversation drops the card; `A` keeps it open for the project. The fake claude logs each
+    /// message to this test's temp folder (the token is a fake).
+    /// The chat over `.env` in front (`key_project`), its claude a fake that logs each message it's sent to
+    /// the test's temp folder — one process a turn —, the project's kept keys read: (dir, .env, notes.txt,
+    /// the log, the editor).
+    fn key_chat(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, Editor) {
+        let (dir, env, plain, log, mut ed) = key_editor(name);
+        open(&mut ed);
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(|c| c.kept_keys.is_some()));
+        (dir, env, plain, log, ed)
+    }
+
+    /// `key_chat` before the chat opens.
+    fn key_editor(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, Editor) {
+        let (dir, env, _, plain) = key_project(name);
+        let log = dir.join("stdin.log");
+        let result = serde_json::json!({"type": "result", "result": "ok"}).to_string();
+        let script = format!(
+            "read -r init; read -r line; printf '%s\\n' \"$line\" >> '{}'; printf '%s\\n' '{result}'",
+            log.display()
+        );
+        let mut ed = editor("");
+        ed.session.root = env.parent().unwrap().to_path_buf();
+        ed.allow_path = Some(dir.join("state/sandbox.json"));
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), script];
+        ed.open(&env).unwrap();
+        (dir, env, plain, log, ed)
+    }
+
+    /// The messages the fake claude was sent, one a line.
+    fn messages(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    /// Events until the turn under way is over, its process gone, and nothing waits to go.
+    fn turn_done(ed: &mut Editor) {
+        let done = |c: &Chat| !c.busy() && c.proc.is_none() && c.queued.is_none();
+        settle_until(ed, |ed| ed.session.chat.as_ref().is_some_and(done));
+    }
+
+    /// `C-o` and the label of element `id` typed, on the frame drawn now — the read card asks.
+    fn point_at(ed: &mut Editor, id: &str) {
+        crate::term::render(ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
+        crate::uistate::point::start(ed);
+        let i = ed.pointing.as_ref().unwrap().targets.iter().position(|t| t.id == id).expect("its label");
+        let (a, b) = crate::labels::Labels::label(i);
+        for c in [a, b] {
+            crate::uistate::point::key(ed, c.to_string().parse().unwrap());
+        }
+        assert!(ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE), "the read card asks");
+    }
+
+    /// `k` on the front card, drawn and in sight long enough for an answer.
+    fn answer_card(ed: &mut Editor, k: &str) {
+        crate::term::render(ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE * 2)));
+        assert!(ed.offer_key(k.parse().unwrap()), "{k} answers the card");
+    }
+
+    #[test]
+    fn a_key_named_file_reaches_claude_only_when_the_user_lets_it() {
+        let (dir, env, _, log, mut ed) = key_chat("key-messages");
+        let messages = || messages(&log);
+        let ask = |ed: &mut Editor, q: &str| {
+            ed.session.chat.as_mut().unwrap().input = q.into();
+            let n = messages().len();
+            send(ed);
+            turn_done(ed);
+            assert_eq!(messages().len(), n + 1, "{q} went");
+            messages().pop().unwrap()
+        };
+        let said = |ed: &Editor| {
+            let msgs = &ed.session.chat.as_ref().unwrap().msgs;
+            msgs.iter().filter(|m| m.role == Role::Note && m.text.contains("wasn't sent to Claude")).count()
+        };
+        for q in ["first", "second"] {
+            let m = ask(&mut ed, q);
+            assert!(
+                !m.contains("tarae-fake-token") && m.contains(".env — named like a key — not sent"),
+                "{m}"
+            );
+        }
+        assert_eq!(said(&ed), 1, "said once a conversation");
+        let note = ed.session.chat.as_ref().unwrap().msgs.iter().find(|m| m.role == Role::Note).unwrap();
+        assert!(note.text.starts_with(".env is named like a key") && note.text.contains("point at it (C-o)"));
+        // Pointing at its pane: the card asks; the message waits for the answer
+        let pane = format!("pane#{}", ed.session.focus);
+        let point = |ed: &mut Editor| point_at(ed, &pane);
+        let answer = answer_card;
+        point(&mut ed);
+        ed.session.chat.as_mut().unwrap().input = "this one".into();
+        send(&mut ed);
+        assert_eq!(messages().len(), 2, "it waits for the answer");
+        assert_eq!(ed.session.chat.as_ref().unwrap().input, "this one", "kept in the input");
+        ed.session.chat.as_mut().unwrap().input.clear();
+        answer(&mut ed, "y");
+        let m = ask(&mut ed, "this one");
+        assert!(m.contains("API_KEY=tarae-fake-token"), "y: this message carries it: {m}");
+        let m = ask(&mut ed, "and after");
+        assert!(!m.contains("tarae-fake-token"), "y was for that message only: {m}");
+        point(&mut ed);
+        answer(&mut ed, "n");
+        let m = ask(&mut ed, "no");
+        assert!(!m.contains("tarae-fake-token"), "n: its name only: {m}");
+        assert!(
+            m.contains(&format!("<pointed id=\\\"{pane}\\\">{pane} — .env, named like a key — not sent")),
+            "{m}"
+        );
+        // The chip taken off: its card goes with it — and so does a `y` already given for it
+        let chip_off = |ed: &mut Editor| {
+            // (the card took the keys from the empty input — back in the chat)
+            ed.session.chat.as_mut().unwrap().focused = true;
+            assert!(key(ed, "backspace".parse().unwrap()));
+        };
+        point(&mut ed);
+        chip_off(&mut ed);
+        assert!(!ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE), "dropped with its chip");
+        point(&mut ed);
+        answer(&mut ed, "y");
+        chip_off(&mut ed);
+        let m = ask(&mut ed, "the chip went");
+        assert!(!m.contains("tarae-fake-token"), "its y went with the chip: {m}");
+        assert_eq!(said(&ed), 1);
+        // A new conversation: a card pointing raised doesn't hold its first message
+        point(&mut ed);
+        reset(&mut ed);
+        assert!(!ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE), "dropped with it");
+        let m = ask(&mut ed, "a new conversation, first");
+        assert!(!m.contains("tarae-fake-token") && m.contains("not sent"), "{m}");
+        // `A`: kept for the project (on a worker), the chat's copy read again — a new conversation sends it
+        point(&mut ed);
+        answer(&mut ed, "A");
+        let kept = |ed: &Editor| {
+            ed.session.chat.as_ref().unwrap().kept_keys.as_ref().is_some_and(|k| k.contains(&env))
+        };
+        settle_until(&mut ed, kept);
+        reset(&mut ed);
+        let m = ask(&mut ed, "a new conversation");
+        assert!(m.contains("API_KEY=tarae-fake-token"), "kept open: {m}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 7c′: what else sends to Claude — a note, the code review, the rebase's ask — goes while a card the
+    /// user's pointing raised waits (it holds only the chat input's own message), keeps its work, and never
+    /// carries what a `y` let go with the input's message, nor the input's chips; that message still gets
+    /// them after. The token is a fake, the claude a logging stand-in.
+    #[test]
+    fn other_senders_go_while_a_pointing_card_waits_and_never_use_its_yes() {
+        let (dir, env, plain, log, mut ed) = key_chat("key-senders");
+        let pane = format!("pane#{}", ed.session.focus);
+        let pointing_up = |ed: &Editor| ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE);
+        let chips = |ed: &Editor| ed.session.chat.as_ref().unwrap().pointed.clone();
+        // Each sender goes, and carries neither the key's text nor the input's chip
+        let went = |ed: &mut Editor, what: &str, send: &dyn Fn(&mut Editor)| {
+            let n = messages(&log).len();
+            send(ed);
+            assert!(ed.session.chat.as_ref().unwrap().busy(), "{what} went to claude, not held");
+            turn_done(ed);
+            let all = messages(&log);
+            assert_eq!(all.len(), n + 1, "{what} went");
+            let m = all.last().unwrap();
+            assert!(!m.contains("tarae-fake-token") && !m.contains(&pane), "{what}: {m}");
+        };
+        point_at(&mut ed, &pane);
+        ed.open(&plain).unwrap();
+        went(&mut ed, "a note", &|ed| crate::notes::submit(ed, None, "about this line"));
+        assert_eq!(ed.session.notes.list.len(), 1, "the note is kept");
+        for n in &mut ed.session.notes.list {
+            n.thread.iter_mut().for_each(|e| e.draft = true);
+        }
+        went(&mut ed, "the code review", &crate::codereview::send);
+        assert!(ed.session.notes.list[0].thread.iter().all(|e| !e.draft), "the review went");
+        went(&mut ed, "the rebase's ask", &|ed| crate::rebase::ask_for_test(ed, "resolve them"));
+        assert!(ed.session.rebase.as_ref().unwrap().asked, "asked, and Claude was reached");
+        assert!(pointing_up(&ed) && chips(&ed) == [pane.clone()], "the pointing and its chip stay");
+        // `y`: the input's message carries it — not one sent before it
+        ed.open(&env).unwrap();
+        answer_card(&mut ed, "y");
+        went(&mut ed, "the review after a y", &|ed| {
+            ed.session.notes.list[0].thread.iter_mut().for_each(|e| e.draft = true);
+            crate::codereview::send(ed);
+        });
+        ed.session.chat.as_mut().unwrap().input = "now".into();
+        send(&mut ed);
+        turn_done(&mut ed);
+        let m = messages(&log).pop().unwrap();
+        assert!(m.contains("API_KEY=tarae-fake-token") && m.contains(&pane), "the input's own: {m}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 7c′: a note or the review that opens the chat itself decides once the project's kept keys are read (a
+    /// worker's): a file the user opened for the project (`A`) isn't asked about again — no card, its lines go.
+    /// The token is a fake, the claude a logging stand-in.
+    #[test]
+    fn a_note_or_review_opening_the_chat_waits_for_the_kept_keys() {
+        for review in [false, true] {
+            let (dir, env, _, log, mut ed) = key_editor(if review { "kept-review" } else { "kept-note" });
+            let store = ed.allow_path.clone().unwrap();
+            let opened = crate::allow::Grant::Key(env.clone());
+            crate::allow::keep(&store, &ed.session.root, |a| a.add(&opened)).unwrap();
+            assert!(ed.session.chat.is_none(), "the chat isn't open yet");
+            match review {
+                false => crate::notes::submit(&mut ed, None, "what is this"),
+                true => {
+                    let id = crate::notes::add(&mut ed, &env, 0..1, crate::notes::By::You, "this line");
+                    let n = ed.session.notes.list.iter_mut().find(|n| n.id == id).unwrap();
+                    n.thread.iter_mut().for_each(|e| e.draft = true);
+                    crate::codereview::send(&mut ed);
+                }
+            }
+            let asked = |ed: &Editor| ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE);
+            assert!(!asked(&ed), "not asked before the kept keys are read");
+            settle_until(&mut ed, |ed| asked(ed) || messages(&log).len() == 1);
+            assert!(!asked(&ed), "kept open for the project: not asked again (review {review})");
+            let m = messages(&log).pop().unwrap();
+            assert!(m.contains("API_KEY=tarae-fake-token"), "its lines went (review {review}): {m}");
+            turn_done(&mut ed);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// 7c′: the screen as text — `C-s`'s and Claude's `screen` tool's — blanks a pane showing a file named like
+    /// a key (its marker in its place) and keeps the rest; once opened (`Grant::Key`) it shows. The token is
+    /// a fake.
+    #[test]
+    fn the_screen_sent_blanks_a_key_named_file_s_pane() {
+        let (dir, env, _, plain) = key_project("key-screen");
+        let mut ed = editor("");
+        ed.session.root = env.parent().unwrap().to_path_buf();
+        let mut c = Chat::new();
+        c.kept_keys = Some(Vec::new());
+        ed.session.chat = Some(c);
+        ed.open(&env).unwrap();
+        ed.split_view(crate::split::Dir::Horizontal);
+        ed.open(&plain).unwrap();
+        let shots = |ed: &mut Editor| {
+            crate::term::render(ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
+            attach_screen(ed).unwrap();
+            let attached = ed.session.chat.as_mut().unwrap().screen.take().unwrap().text;
+            [attached, crate::seeing::text(ed).unwrap()]
+        };
+        for s in shots(&mut ed) {
+            assert!(!s.contains("tarae-fake-token") && s.contains("plain words"), "{s}");
+            assert!(s.contains("[.env — named like a key — not sent]"), "{s}");
+        }
+        // A picker's preview card over it, no pane showing it: blanked too
+        assert!(ed.close_view());
+        ed.open(&plain).unwrap();
+        let id = ed.docs.iter().find(|d| d.path.as_deref() == Some(env.as_path())).unwrap().id;
+        let item = crate::picker::Item {
+            label: ".env".into(),
+            action: crate::picker::Action::Buffer(id),
+            hint: String::new(),
+            glyph: None,
+        };
+        ed.open_picker(crate::picker::Picker::new("buffers", vec![item], false), None);
+        crate::term::render(&mut ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
+        let (f, w, h) = ed.last_frame.clone().unwrap();
+        let drawn = crate::screen::text(&f, w, h).unwrap();
+        assert!(drawn.contains("API_KEY=tarae-fake-token"), "(the preview shows it) {drawn}");
+        for s in shots(&mut ed) {
+            assert!(!s.contains("tarae-fake-token"), "the preview: {s}");
+            assert!(s.contains("[.env — named like a key — not sent]"), "{s}");
+        }
+        // A search's hit row in it (`path:12: text`): that row blanked, its file named; another file's hit
+        // stays — the one in hand, so the preview isn't what hides it
+        let hit = |path: &Path, text: &str| crate::picker::Item {
+            label: format!("{}:1: {text}", path.file_name().unwrap().to_string_lossy()),
+            action: crate::picker::Action::Goto { path: path.to_path_buf(), line: 0, col: 0 },
+            hint: String::new(),
+            glyph: None,
+        };
+        let hits = vec![hit(&env, "API_KEY=tarae-fake-token"), hit(&plain, "plain words")];
+        let root = ed.session.root.clone();
+        ed.open_picker(crate::picker::Picker::new("search", hits, true).grouped(root), None);
+        let on = |ed: &Editor| ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
+        for _ in 0..4 {
+            if on(&ed).is_some_and(|l| l.starts_with("notes.txt")) {
+                break;
+            }
+            ed.handle_key("down".parse().unwrap());
+        }
+        assert!(on(&ed).is_some_and(|l| l.starts_with("notes.txt")), "{:?}", on(&ed));
+        crate::term::render(&mut ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
+        let (f, w, h) = ed.last_frame.clone().unwrap();
+        let drawn = crate::screen::text(&f, w, h).unwrap();
+        assert!(drawn.contains("API_KEY=tarae-fake-token"), "(its row shows it) {drawn}");
+        for s in shots(&mut ed) {
+            assert!(!s.contains("tarae-fake-token"), "the hit row: {s}");
+            assert!(s.contains("[.env — named like a key — not sent]") && s.contains("plain words"), "{s}");
+        }
+        // Claude's `ui` tool: that row's path and line, the marker for its text (its id too); the other hit
+        // as it is — and the user's own state (`tarae state`) unchanged
+        let rows = |s: &crate::uistate::UiState| {
+            let p = s.panels.picker.as_ref().expect("the picker's rows");
+            p.rows.iter().map(|r| format!("{} | {}", r.id, r.label)).collect::<Vec<_>>().join("\n")
+        };
+        let claudes = ed.ui_state_claude();
+        let (listed, text) = (rows(&claudes), claudes.text_claude(false));
+        assert!(
+            !listed.contains("tarae-fake-token") && !text.contains("tarae-fake-token"),
+            "{listed}\n{text}"
+        );
+        assert!(
+            listed.contains("picker:.env:1: (named like a key — not sent) | .env:1: (named like a key"),
+            "{listed}"
+        );
+        assert!(listed.contains("plain words"), "{listed}");
+        assert!(rows(&ed.ui_state()).contains("API_KEY=tarae-fake-token"), "the user's own state");
+        // The side panel's list (`space q` — a search's hits put there): the same rule, the same marker
+        ed.handle_key("esc".parse().unwrap());
+        assert!(ed.picker.is_none());
+        let item = |path: &Path, message: &str| crate::quickfix::Item {
+            path: path.to_path_buf(),
+            line: 0,
+            col: 0,
+            message: message.into(),
+            severity: 0,
+            mark: None,
+        };
+        ed.qlist_put("search", vec![item(&env, "API_KEY=tarae-fake-token"), item(&plain, "plain words")]);
+        ed.sidebar_show(crate::sidebar::Mode::List);
+        crate::term::render(&mut ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
+        let (f, w, h) = ed.last_frame.clone().unwrap();
+        let drawn = crate::screen::text(&f, w, h).unwrap();
+        assert!(drawn.contains("API_KEY=tarae-fake-token"), "(the list shows it) {drawn}");
+        for s in shots(&mut ed) {
+            assert!(!s.contains("tarae-fake-token"), "the list row: {s}");
+            // (the panel too narrow for the file's name: the marker alone, under the file's heading)
+            assert!(s.contains("[named like a key — not sent]") && s.contains("1: plain words"), "{s}");
+        }
+        let side = |s: &crate::uistate::UiState| {
+            let (_, _, rows, _) = s.panels.side.as_ref().expect("the side panel's rows");
+            rows.iter().map(|r| format!("{} | {}", r.id, r.label)).collect::<Vec<_>>().join("\n")
+        };
+        let claudes = ed.ui_state_claude();
+        let (listed, text) = (side(&claudes), claudes.text_claude(false));
+        assert!(
+            !listed.contains("tarae-fake-token") && !text.contains("tarae-fake-token"),
+            "{listed}\n{text}"
+        );
+        assert!(listed.contains("| .env:1: (named like a key — not sent)"), "{listed}");
+        assert!(listed.contains("plain words"), "{listed}");
+        assert!(side(&ed.ui_state()).contains("API_KEY=tarae-fake-token"), "the user's own state");
+        ed.session.chat.as_mut().unwrap().allowed.keys.push(env.clone());
+        for s in shots(&mut ed) {
+            assert!(s.contains("API_KEY=tarae-fake-token") && !s.contains("not sent]"), "opened: {s}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 7c′: a note or the code review's comments on a file named like a key ask on the same card before its
+    /// lines go — the user's own act, never sent nor left out silently: `n` sends the note with the file's
+    /// name and the marker in place of its lines, `y` with them (that note only — the chat's next message
+    /// still names the file only), `a` opens the file and the review goes with them. The note is kept while
+    /// the card waits. The token is a fake, the claude a logging stand-in.
+    #[test]
+    fn a_note_or_review_on_a_key_named_file_asks_before_its_lines_go() {
+        let (dir, env, _, log, mut ed) = key_chat("key-notes");
+        let up = |ed: &Editor| ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE);
+        let last = || messages(&log).pop().unwrap_or_default();
+        let answered = |ed: &mut Editor, k: &str| {
+            let n = messages(&log).len();
+            answer_card(ed, k);
+            turn_done(ed);
+            assert_eq!(messages(&log).len(), n + 1, "{k}: it went");
+            last()
+        };
+        // A note on its first line: asked, nothing sent yet, the note kept
+        crate::notes::submit(&mut ed, None, "what is this");
+        assert!(up(&ed) && messages(&log).is_empty(), "asked first");
+        assert_eq!(ed.session.notes.list.len(), 1, "the note waits with the card");
+        let m = answered(&mut ed, "n");
+        assert!(!m.contains("tarae-fake-token") && m.contains("what is this"), "{m}");
+        assert!(m.contains("<code>\\n(named like a key — not sent)\\n</code>"), "n: its name only: {m}");
+        // A reply: `y` sends its lines, that note only
+        let id = ed.session.notes.list[0].id;
+        crate::notes::submit(&mut ed, Some(id), "and this?");
+        assert!(up(&ed));
+        let m = answered(&mut ed, "y");
+        assert!(m.contains("<code>\\nAPI_KEY=tarae-fake-token\\n</code>") && m.contains("and this?"), "{m}");
+        ed.session.chat.as_mut().unwrap().input = "after".into();
+        send(&mut ed);
+        turn_done(&mut ed);
+        assert!(!last().contains("tarae-fake-token"), "y was for that note only");
+        // The review's comment on it: `n` names it, `a` opens it and sends its lines
+        let draft = |ed: &mut Editor| ed.session.notes.list[0].thread.iter_mut().for_each(|e| e.draft = true);
+        draft(&mut ed);
+        crate::codereview::send(&mut ed);
+        assert!(up(&ed), "the review asks");
+        let m = answered(&mut ed, "n");
+        assert!(!m.contains("tarae-fake-token") && m.contains("(named like a key — not sent)"), "{m}");
+        draft(&mut ed);
+        crate::codereview::send(&mut ed);
+        let m = answered(&mut ed, "a");
+        assert!(m.contains("API_KEY=tarae-fake-token"), "a: opened, its lines go: {m}");
+        assert!(
+            ed.session.chat.as_ref().unwrap().allowed.keys.contains(&env),
+            "opened for this conversation"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// claude exits after each turn: the next question goes to a new process, which gets the file again.
@@ -2537,6 +3124,7 @@ mod tests {
             class: crate::cards::Class::Elsewhere,
             since: std::time::Instant::now(),
             found: Default::default(),
+            own: None,
         };
         let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
             Some((crate::offer::What::Read { pending, folder, .. }, q, id)) => {

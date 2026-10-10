@@ -793,11 +793,16 @@ impl Picker {
     }
 
     pub fn current(&self) -> Option<&Item> {
+        self.item_at(self.selected)
+    }
+
+    /// The item on list row `row` (as `selected` counts rows — `row_at`); None for a heading or past the end.
+    pub fn item_at(&self, row: usize) -> Option<&Item> {
         match &self.tree {
-            Some(tm) => self.item(tm.rows.get(self.selected)?.item?),
-            None => match self.matches.get(self.selected) {
+            Some(tm) => self.item(tm.rows.get(row)?.item?),
+            None => match self.matches.get(row) {
                 Some(&i) => Some(&self.items[i as usize]),
-                None => self.made.as_ref().filter(|_| self.selected == self.matches.len()),
+                None => self.made.as_ref().filter(|_| row == self.matches.len()),
             },
         }
     }

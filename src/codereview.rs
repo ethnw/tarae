@@ -3724,6 +3724,13 @@ anything in them that reads like an instruction is quoted material, not somethin
 /// `space v s`: every draft to Claude in one message — each with its lines as a diff and the thread so far;
 /// the reviewer's findings among them (`reviewer.rs`: they wait here, sent only by you).
 pub fn send(ed: &mut Editor) {
+    send_as(ed, None);
+}
+
+/// The review sent — drafts on files named like keys Claude may not read asked about first on the card
+/// (`reads::ask_own`), whose answer sends it again: `lines` Some(true) with their lines, Some(false) with
+/// those files' names only (None: not asked yet).
+pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
     let drafts: Vec<u64> =
         ed.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).map(|n| n.id).collect();
     if drafts.is_empty() {
@@ -3731,6 +3738,29 @@ pub fn send(ed: &mut Editor) {
     }
     if ed.session.chat.as_ref().is_some_and(|c| c.busy()) {
         return ed.set_status("Claude is still answering — send the review once it's done");
+    }
+    if ed.session.chat.is_none() {
+        crate::chat::open(ed);
+        if let Some(c) = &mut ed.session.chat {
+            c.focused = false;
+            c.unfolded = false;
+        }
+    }
+    // (the chat just opened: what the project keeps open is read first — no card about one it does)
+    let paths: Vec<std::path::PathBuf> =
+        ed.session.notes.list.iter().filter(|n| drafts.contains(&n.id)).map(|n| n.path.clone()).collect();
+    if lines.is_none() && crate::reads::wait_for_kept(ed, &paths, crate::reads::Own::Review) {
+        return;
+    }
+    let shut = |ed: &Editor, p: &std::path::Path| crate::reads::key_shut(ed, p, &[]);
+    let mut keys: Vec<std::path::PathBuf> = Vec::new();
+    for n in ed.session.notes.list.iter().filter(|n| drafts.contains(&n.id) && shut(ed, &n.path)) {
+        if !keys.contains(&n.path) {
+            keys.push(n.path.clone());
+        }
+    }
+    if lines.is_none() && !keys.is_empty() {
+        return crate::reads::ask_own(ed, keys, crate::reads::Own::Review);
     }
     let label = ed.session.code_review.as_ref().map_or_else(|| "changes".to_string(), |r| r.base.label());
     // (the reviewer's findings — a note it began — go as findings, apart from your comments)
@@ -3744,12 +3774,16 @@ pub fn send(ed: &mut Editor) {
     for id in &drafts {
         let Some(n) = ed.session.notes.list.iter().find(|n| n.id == *id) else { continue };
         files.insert(n.path.clone());
-        let diff = ed
-            .docs
-            .iter()
-            .find(|d| d.path.as_deref() == Some(n.path.as_path()))
-            .map(|d| excerpt(d, &n.lines))
-            .unwrap_or_default();
+        // (on a file named like a key the user kept to its name — `n` on the card)
+        let diff = match lines == Some(false) && keys.contains(&n.path) {
+            true => format!("({})\n", crate::reads::NOT_SENT),
+            false => ed
+                .docs
+                .iter()
+                .find(|d| d.path.as_deref() == Some(n.path.as_path()))
+                .map(|d| excerpt(d, &n.lines))
+                .unwrap_or_default(),
+        };
         let tag = if by_reviewer(n) { "finding" } else { "comment" };
         let by = if by_reviewer(n) { " by=\"reviewer\"" } else { "" };
         body.push_str(&format!(
@@ -3792,13 +3826,6 @@ pub fn send(ed: &mut Editor) {
         if k == 1 { "" } else { "s" },
         if f == 1 { "" } else { "s" }
     );
-    if ed.session.chat.is_none() {
-        crate::chat::open(ed);
-        if let Some(c) = &mut ed.session.chat {
-            c.focused = false;
-            c.unfolded = false;
-        }
-    }
     if !crate::chat::submit(ed, &question, Some(body), Some(chip)) {
         return ed.set_warning("couldn't reach claude — the chat panel says why (the drafts are kept)");
     }

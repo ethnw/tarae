@@ -657,10 +657,10 @@ pub fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allow
     let project = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let r = keep(&path, &crate::sandbox::profile_path(&project), change);
-        move |ed: &mut crate::editor::Editor| {
-            if let Err(e) = r {
-                ed.set_error(format!("couldn't keep it: {e}"));
-            }
+        move |ed: &mut crate::editor::Editor| match r {
+            Err(e) => ed.set_error(format!("couldn't keep it: {e}")),
+            // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
+            Ok(_) => crate::reads::kept_keys_load(ed),
         }
     });
 }

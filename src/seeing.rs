@@ -86,20 +86,24 @@ pub fn after_frame(ed: &mut Editor) {
     }
 }
 
-/// The last frame as the tool's answer — the terminal panel blanked when it's left out.
-fn text(ed: &Editor) -> Result<String, String> {
+/// The last frame as the tool's answer — the terminal panel blanked when it's left out, and every pane showing
+/// a file named like a key Claude may not read (`reads::key_panes`).
+pub(crate) fn text(ed: &Editor) -> Result<String, String> {
     let (frame, cols, rows) = ed.last_frame.as_ref().ok_or("nothing is on screen yet")?;
     let terminal = ed.screen.terminal_rows;
     let hide = terminal.filter(|_| !ed.config.llm.screen_terminal).map(|rows| crate::screen::Hidden {
         rows,
-        cols_end: ed.screen.chat_x.unwrap_or(*cols as usize),
+        cols: (0, ed.screen.chat_x.unwrap_or(*cols as usize)),
         note: LEFT_OUT.into(),
     });
-    let text = crate::screen::text_hiding(frame, *cols, *rows, hide.as_ref())
+    let left_out = hide.is_some();
+    let mut hidden = crate::reads::key_panes(ed);
+    hidden.extend(hide);
+    let text = crate::screen::text_hiding(frame, *cols, *rows, &hidden)
         .ok_or("this screen can't be read as text")?;
-    let part = match (terminal, &hide) {
-        (Some(_), None) => " — the terminal panel included",
-        (Some(_), Some(_)) => " — the terminal panel left out",
+    let part = match (terminal, left_out) {
+        (Some(_), false) => " — the terminal panel included",
+        (Some(_), true) => " — the terminal panel left out",
         (None, _) => "",
     };
     Ok(format!("The user's editor screen, {cols}×{rows}, as text (no colors){part}:\n\n{text}"))

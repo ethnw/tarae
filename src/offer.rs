@@ -331,7 +331,8 @@ impl Offer {
             What::NoSandbox { call, .. } | What::ProtectedMade { call, .. } | What::Screen { call } => {
                 Some(Asker::Tool(call.clone()))
             }
-            What::Read { pending, .. } => Some(Asker::Permission {
+            // (one the user's pointing raised holds no call — `reads::point`)
+            What::Read { pending, .. } if pending.own.is_none() => Some(Asker::Permission {
                 request_id: pending.request_id.clone(),
                 generation: pending.generation,
             }),

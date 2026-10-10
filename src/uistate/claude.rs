@@ -57,6 +57,23 @@ impl Editor {
         }
         if let Some(p) = s.panels.picker.as_mut() {
             p.query.clear();
+            // (a row carrying a line of a file named like a key Claude may not read: its path and line, the
+            // text not — `reads::picker_row_shut`; the rows are the visible lines, top to bottom)
+            for (line, r) in p.rows.iter_mut().enumerate() {
+                if let Some(shut) = crate::reads::picker_row_shut(self, line) {
+                    r.id = format!("picker:{shut}");
+                    r.label = shut;
+                }
+            }
+        }
+        // (the side panel's the same — its ids carry no text: `list:path:12`, `git:a.rs#2`)
+        if let Some((_, _, rows, _)) = s.panels.side.as_mut() {
+            let shut = crate::reads::side_rows_shut(self);
+            for r in rows.iter_mut() {
+                if let Some((_, label)) = shut.iter().find(|(id, _)| *id == r.id) {
+                    r.label = label.clone();
+                }
+            }
         }
         for l in s.sessions.iter_mut().filter(|l| l.id != own) {
             l.branch = None;

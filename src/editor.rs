@@ -280,8 +280,14 @@ pub struct Screen {
     /// How many of the front card's lines its drawing left out (`↓ 2 more lines`; 0: drawn whole) — None
     /// when no card is drawn, or it stepped aside to a bar while its text is read (the UI state's `cut`).
     pub offer_cut: Option<usize>,
-    /// Column where the picker's preview card starts (the wheel scrolls it there).
+    /// Column where the picker's preview card starts (the wheel scrolls it there) · the cells it takes (x, y,
+    /// width, height — to the code's right edge, its whole height: the screen sent blanks it over a file named
+    /// like a key, `reads::key_panes`).
     pub picker_preview_x: Option<usize>,
+    pub picker_preview: Option<(usize, usize, usize, usize)>,
+    /// The picker list's card's columns (first, end) — its rows are `picker_list`'s: the screen sent blanks a
+    /// row carrying a line of a file named like a key (`reads::key_panes`).
+    pub picker_list_cols: Option<(usize, usize)>,
     /// The floating docs card this frame (x, y, width, height) — drawing fills it in; the wheel scrolls it.
     pub popup: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// Clickable spots in the chat pane: (row, start col, end col, where it points) — drawing fills them in.
@@ -10294,10 +10300,12 @@ mod tests {
         );
         let behind = ed.session_open(&wt).unwrap();
         feed(&mut ed, "<space>lfix it<ret><esc>:session-switch 0<ret>");
+        // (the edit judged too — where it leads, on a worker: `edits::next` shows none before; Linux's workers
+        // came after the queue, and the review wasn't up yet at the switch)
         let waiting = |ed: &Editor| {
             let l = session_by(ed, behind);
             l.parked.iter().any(crate::offer::Offer::claudes)
-                && l.chat.as_ref().is_some_and(|c| !c.edits.queue.is_empty())
+                && l.chat.as_ref().is_some_and(|c| c.edits.queue.iter().any(|p| p.protected.is_some()))
         };
         settle_until(&mut ed, waiting);
         assert!(ed.offers.is_empty(), "no card over the front session");

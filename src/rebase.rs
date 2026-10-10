@@ -1356,6 +1356,26 @@ impl Editor {
     }
 }
 
+/// A rebase stopped at conflicts, its Claude asked `question` as `rebase_ask` asks — for tests elsewhere of
+/// what reaches Claude with it (`chat::tests`).
+#[cfg(test)]
+pub(crate) fn ask_for_test(ed: &mut Editor, question: &str) {
+    ed.session.rebase = Some(Rebase {
+        branch: "dev".into(),
+        base: "main".into(),
+        stage: Stage::Stopped,
+        step: None,
+        stop: Stop::default(),
+        asked: false,
+        waiting: None,
+        also: Vec::new(),
+        stashed: Vec::new(),
+        resolved_at: None,
+    });
+    let a = Ask { question: question.into(), about: "<conflicts/>".into(), chip: "rebase".into() };
+    ed.rebase_ask(a);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

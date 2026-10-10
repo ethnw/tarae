@@ -811,17 +811,15 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
         let k = ed.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
         return ed.note(format!("draft saved — {k} in this review · space v s sends them"));
     }
-    let n = find(ed, id).expect("just made");
-    let chip = format!(
-        "¶ #{id} · {} L{}",
-        n.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
-        n.lines.start + 1
-    );
-    let mut about = message(ed, n);
-    if let Some((_, _, why)) = &stop {
-        let at = about.len() - "</note>".len();
-        about.insert_str(at, &format!("(a stop of your walk-through — you said: {why})\n"));
-    }
+    let why = stop.map(|(_, _, why)| why.to_string());
+    send(ed, id, text, fresh, why, None);
+}
+
+/// Note `id`'s message goes to Claude — `text` the reply just added (`fresh`: the note with it), `why` what
+/// the user said at a walk-through's stop. On a file named like a key Claude may not read, the card asks
+/// first (`reads::ask_own`), and its answer sends it again: `lines` Some(true) with the lines, Some(false)
+/// with the file's name only (None: not asked yet).
+pub fn send(ed: &mut Editor, id: u64, text: &str, fresh: bool, why: Option<String>, lines: Option<bool>) {
     // The chat panel carries the conversation — opened in the background if closed; the keys stay here
     if ed.session.chat.is_none() {
         crate::chat::open(ed);
@@ -829,6 +827,27 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
             c.focused = false;
             c.unfolded = false;
         }
+    }
+    let Some(path) = find(ed, id).map(|n| n.path.clone()) else { return };
+    // (the chat just opened: what the project keeps open is read first — no card about one it does)
+    let own = || crate::reads::Own::Note { id, text: text.to_string(), fresh, why: why.clone() };
+    if lines.is_none() && crate::reads::wait_for_kept(ed, std::slice::from_ref(&path), own()) {
+        return;
+    }
+    let Some(n) = find(ed, id) else { return };
+    if lines.is_none() && crate::reads::key_shut(ed, &n.path, &[]) {
+        let (key, text) = (n.path.clone(), text.to_string());
+        return crate::reads::ask_own(ed, vec![key], crate::reads::Own::Note { id, text, fresh, why });
+    }
+    let chip = format!(
+        "¶ #{id} · {} L{}",
+        n.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+        n.lines.start + 1
+    );
+    let mut about = message(ed, n, lines != Some(false));
+    if let Some(why) = &why {
+        let at = about.len() - "</note>".len();
+        about.insert_str(at, &format!("(a stop of your walk-through — you said: {why})\n"));
     }
     if crate::chat::submit(ed, text, Some(about), Some(chip)) {
         ed.session.notes.turn = vec![id];
@@ -844,20 +863,23 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
     ed.set_warning("couldn't reach claude — the chat panel says why");
 }
 
-/// What goes to Claude with a reply: where the note is, the code there and the thread so far.
-fn message(ed: &Editor, n: &Note) -> String {
-    let code = ed
-        .docs
-        .iter()
-        .find(|d| d.path.as_deref() == Some(n.path.as_path()))
-        .map(|d| {
-            let last = mv::last_line(&d.text);
-            let (a, b) = (n.lines.start.min(last), n.lines.end.saturating_sub(1).min(last));
-            d.text
-                .slice(d.text.line_to_char(a)..d.text.line_to_char((b + 1).min(d.text.len_lines())))
-                .to_string()
-        })
-        .unwrap_or_default();
+/// What goes to Claude with a reply: where the note is, the code there (`code`; else what the context says of
+/// a file named like a key — `reads::NOT_SENT`) and the thread so far.
+fn message(ed: &Editor, n: &Note, code: bool) -> String {
+    let withheld = (!code).then(|| format!("({})\n", crate::reads::NOT_SENT));
+    let code = withheld.unwrap_or_else(|| {
+        ed.docs
+            .iter()
+            .find(|d| d.path.as_deref() == Some(n.path.as_path()))
+            .map(|d| {
+                let last = mv::last_line(&d.text);
+                let (a, b) = (n.lines.start.min(last), n.lines.end.saturating_sub(1).min(last));
+                d.text
+                    .slice(d.text.line_to_char(a)..d.text.line_to_char((b + 1).min(d.text.len_lines())))
+                    .to_string()
+            })
+            .unwrap_or_default()
+    });
     let mut s = format!(
         "<note id=\"{}\" path=\"{}\" lines=\"{}-{}\">\n<code>\n{}</code>\n",
         n.id,

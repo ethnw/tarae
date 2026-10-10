@@ -599,36 +599,49 @@ impl Grid {
 }
 
 /// A whole frame as the text it shows (`w`×`h` cells, a row a line, trailing blanks and rows dropped) — what
-/// goes to Claude for "the screen" (`chat::attach_screen`). None: a frame this doesn't read.
+/// goes to Claude for "the screen" is this less what's hidden (`text_hiding`). None: a frame this doesn't read.
+#[cfg(test)]
 pub fn text(frame: &[u8], w: u16, h: u16) -> Option<String> {
-    text_hiding(frame, w, h, None)
+    text_hiding(frame, w, h, &[])
 }
 
-/// A part of the screen left out of its text: rows `rows` (first, last), from the left edge up to column
-/// `cols_end`, blanked — `note` on its first row says so.
+/// A part of the screen left out of its text: rows `rows` (first, last), columns `cols` (first, end), blanked
+/// — `note` at its top left says so.
 pub struct Hidden {
     pub rows: (usize, usize),
-    pub cols_end: usize,
+    pub cols: (usize, usize),
     pub note: String,
 }
 
-/// `text`, with `hide` left out (the terminal panel, when `llm.screen-terminal` is off).
-pub fn text_hiding(frame: &[u8], w: u16, h: u16, hide: Option<&Hidden>) -> Option<String> {
+/// `text`, with `hide` left out (the terminal panel when `llm.screen-terminal` is off, a pane showing a file
+/// named like a key — `reads::key_panes`).
+pub fn text_hiding(frame: &[u8], w: u16, h: u16, hide: &[Hidden]) -> Option<String> {
     let mut g = Grid::new(w as usize, h as usize);
     g.apply(frame)?;
     let mut rows: Vec<String> = (0..g.h)
         .map(|y| {
-            let hid = hide.filter(|d| (d.rows.0..=d.rows.1).contains(&y));
             let mut row: Vec<u8> = Vec::new();
-            if let Some(d) = hid {
-                let note: String =
-                    if y == d.rows.0 { d.note.chars().take(d.cols_end).collect() } else { String::new() };
-                row.extend(format!("{note:<width$}", width = d.cols_end).bytes());
+            let mut x = 0;
+            while x < g.w {
+                let hid = hide.iter().find(|d| {
+                    (d.rows.0..=d.rows.1).contains(&y) && (d.cols.0..d.cols.1.min(g.w)).contains(&x)
+                });
+                if let Some(d) = hid {
+                    let width = d.cols.1.min(g.w) - x;
+                    let first = y == d.rows.0 && x == d.cols.0;
+                    let note: String =
+                        if first { d.note.chars().take(width).collect() } else { String::new() };
+                    row.extend(format!("{note:<width$}").bytes());
+                    x += width;
+                    continue;
+                }
+                // (cells by column: a wide one takes two, its second has no width)
+                let c = &g.row(y)[x];
+                if c.width > 0 {
+                    row.extend(c.text());
+                }
+                x += 1;
             }
-            // (cells by column: a wide one takes two, its second has no width)
-            let from = hid.map_or(0, |d| d.cols_end);
-            let cells = g.row(y).iter().enumerate().skip(from).filter(|(_, c)| c.width > 0);
-            row.extend(cells.flat_map(|(_, c)| c.text().to_vec()));
             String::from_utf8_lossy(&row).trim_end().to_string()
         })
         .collect();

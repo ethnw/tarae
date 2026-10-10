@@ -158,7 +158,8 @@ pub fn click(ed: &mut Editor, x: usize, y: usize) -> bool {
     true
 }
 
-/// `id` pointed at: a chip in the chat's input (the chat opened, with the keys) — the next message carries it.
+/// `id` pointed at: a chip in the chat's input (the chat opened, with the keys) — the next message carries it;
+/// one carrying a file named like a key Claude may not read asks first (`reads::point`).
 fn pick(ed: &mut Editor, id: String) {
     ed.pointing = None;
     if ed.session.chat.is_none() {
@@ -168,6 +169,7 @@ fn pick(ed: &mut Editor, id: String) {
     c.focused = true;
     c.unfolded = true;
     if !c.pointed.contains(&id) {
-        c.pointed.push(id);
+        c.pointed.push(id.clone());
     }
+    crate::reads::point(ed, &id);
 }
