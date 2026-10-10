@@ -244,6 +244,11 @@ git tab, search, a short Kubernetes one.
   - run output summarized from the packs' test-result parsing, the full log fetchable;
   - read and search tools returning ranges by default, with "more";
   - a stable prompt prefix: the volatile editor context last, and small.
+  - (user, 2026-10-10) **A direct Messages-API path for small, closed tasks — later, if ever.** The main
+    sessions stay on Claude Code (the plan's usage is only reachable through it; it keeps the agent loop,
+    compaction, resume, CLAUDE.md). Candidates where tarae owns the whole prompt and its cache: the second
+    reviewer, a one-shot question (`space i`), summaries — billed to the API key. Decide from the `tokens`
+    measurement what those cost today.
 - **The lineup** ([design/async.md](design/async.md) phases 2–4): one scheduler for heavy runs across sessions,
   exclusive runs (perf) on a quiet machine, the queue position shown, resources declared by language packs, and
   language-server work that holds a resource. Measured again after sandbox validation. As of 2026-10-08, build
