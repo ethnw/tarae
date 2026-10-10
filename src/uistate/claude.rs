@@ -82,10 +82,12 @@ impl Editor {
         s.toasts.retain(|t| !others.contains(&t.id));
         // (the inbox is every session's: only its own session's entries — the others are counts)
         s.inbox.retain(|e| e.session == own);
-        // (a plugin's card, and a repository's own git settings — text from outside, a credential helper's
-        // value maybe a secret: by title only, on the card and in the inbox; any other card's ask cut as the
-        // one-line forms cut it: the whole is for scripts — Claude's level doesn't grow with a long card)
-        let by_title = |kind: &str| kind.starts_with("plugin") || kind == "git-trust";
+        // (a plugin's card, a repository's own git settings and its Claude settings — text from outside, a
+        // credential helper's value maybe a secret: by title only, on the card and in the inbox; any other card's
+        // ask cut as the one-line forms cut it: the whole is for scripts — Claude's level doesn't grow with a
+        // long card)
+        let by_title =
+            |kind: &str| kind.starts_with("plugin") || kind == "git-trust" || kind == "claude-settings";
         for c in &mut s.cards {
             c.asks = match by_title(c.kind) {
                 true => c.title.clone(),

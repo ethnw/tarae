@@ -1794,13 +1794,13 @@ mod tests {
         };
         assert_eq!(md(&ed), None, "no server for a session behind");
         let c = session_at(&ed, &back).chat.as_ref().unwrap();
-        assert!(!c.proc_alive(), "no claude for a chat behind");
+        assert!(!c.running(), "no claude for a chat behind");
         let argv = || std::fs::read_to_string(dir.join("argv.log")).unwrap_or_default();
         // To the front: its server; a message: its claude, resuming its conversation
         let id = session_at(&ed, &back).id;
         ed.session_switch(id);
         assert!(md(&ed).is_some(), "its server, now it's in front");
-        assert!(!ed.session.chat.as_ref().unwrap().proc_alive(), "its claude waits for a message");
+        assert!(!ed.session.chat.as_ref().unwrap().running(), "its claude waits for a message");
         let c = ed.session.chat.as_mut().unwrap();
         (c.input, c.cursor) = ("go on".into(), 5);
         crate::chat::send(&mut ed);

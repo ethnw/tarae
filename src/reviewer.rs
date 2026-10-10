@@ -1171,7 +1171,7 @@ mod tests {
         assert!(!sent.contains("AUTHOR-ONLY-MARKER") && !sent.contains("author-c1"), "{sent}");
         assert!(sent.contains("+two") && sent.contains("+brand new"), "the diff went: {sent}");
         let c = ed.session.chat.as_ref().unwrap();
-        assert!(!c.proc_alive() && !c.busy(), "the chat's claude wasn't started or asked");
+        assert!(!c.running() && !c.busy(), "the chat's claude wasn't started or asked");
         assert_eq!(c.msgs.len(), 1, "the chat is as it was");
         assert_eq!(ed.session.reviewer.as_ref().unwrap().state, State::Done);
         std::fs::remove_dir_all(&dir).ok();

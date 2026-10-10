@@ -488,6 +488,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:config-show` |  | Show every setting with its value |
 | `:project-trust` |  | Look again at what this project's .tarae.toml runs, and trust it or not |
 | `:project-untrust` |  | Stop running what this project's .tarae.toml sets |
+| `:claude-settings` |  | Look again at what this project's Claude settings run in the chat, and trust them or not |
 | `:sandbox-allowed` |  | What Claude may do past the defaults — take one back |
 | `:sandbox-disallow` |  | Take back what :sandbox-allowed lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |

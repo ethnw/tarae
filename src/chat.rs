@@ -116,8 +116,12 @@ mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols
 mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs,\
 mcp__tarae__ui";
 
-/// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
-const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
+/// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`) — with what the
+/// project's own aren't trusted for held back (`claudetrust.rs`). `Skill` denied: a project skill's
+/// `allowed-tools` pre-approves tools with no trust asked (`--tools` already leaves the tool out; a deny no level
+/// can allow).
+pub(crate) const CHAT_SETTINGS: &str =
+    r#"{"permissions":{"ask":["Edit","Write"],"deny":["Skill"]},"disableAllHooks":true}"#;
 
 /// Example questions filled in with Tab in an empty chat.
 pub const SUGGESTIONS: [&str; 3] = [
@@ -327,6 +331,9 @@ pub struct Chat {
     /// The variables its runs' reports have said were left out of their environment, in the conversation named
     /// (`sandbox::runenv`): each said once a conversation.
     pub env_said: (Option<String>, Vec<String>),
+    /// The project's Claude settings, read before its claude starts and answered on a card when they run
+    /// commands or set its environment (`claudetrust.rs`).
+    pub settings: crate::claudetrust::Gate,
 }
 
 /// Where a command of Claude's ran (cardburden 4), from its run's own record — its guard (`Guard::where_ran`),
@@ -498,12 +505,27 @@ impl Chat {
             cited: Vec::new(),
             pointed: Vec::new(),
             env_said: (None, Vec::new()),
+            settings: Default::default(),
         }
     }
 
-    #[cfg(test)]
-    pub fn proc_alive(&self) -> bool {
+    /// Its claude is running.
+    pub(crate) fn running(&self) -> bool {
         self.proc.is_some()
+    }
+
+    /// A line of tarae's in the conversation — once, not again right under itself.
+    pub(crate) fn note(&mut self, text: &str) {
+        if self.msgs.last().is_none_or(|m| m.role != Role::Note || m.text != text) {
+            self.msgs.push(Msg::new(Role::Note, text, ""));
+        }
+    }
+
+    /// Its claude stops because the project's settings it runs with no longer hold (`claudetrust.rs`) — said;
+    /// the next start reads them as answered.
+    pub(crate) fn stop_for_settings(&mut self, why: &str) {
+        self.kill();
+        self.note(why);
     }
 
     /// The process of now — a later answer goes only to the one that asked.
@@ -882,6 +904,13 @@ pub fn reset(ed: &mut Editor) {
     ed.set_status(said);
 }
 
+/// The project's Claude settings are read and answered (`claudetrust.rs`): its claude starts, and a message
+/// that waited for it goes.
+pub(crate) fn gate_opened(ed: &mut Editor) {
+    ensure_proc(ed);
+    send_queued(ed);
+}
+
 fn ensure_proc(ed: &mut Editor) {
     let cfg = ed.config.llm.clone();
     let tx = ed.events.sender();
@@ -889,17 +918,32 @@ fn ensure_proc(ed: &mut Editor) {
     if c.proc.is_some() {
         return;
     }
+    // The project's Claude settings run commands as you under `-p` (no trust dialog there): read first, and
+    // held back unless trusted — claude starts once they're answered (`claudetrust.rs`)
+    let settings = match cfg.chat_settings {
+        true => match crate::claudetrust::ready(ed, CHAT_SETTINGS) {
+            Some(s) => Some(s),
+            None => return,
+        },
+        false => None,
+    };
+    let Some(c) = &mut ed.session.chat else { return };
     let mut args = llm::with_tools(&cfg.args, TOOLS, ALLOWED);
     // The conversation is kept by claude too, so it can be continued (`chats.rs`)
     args.retain(|a| a != "--no-session-persistence");
+    // Only tarae's own MCP server, whatever `llm.args` says: under `-p` a project's `.mcp.json` servers connect
+    // unasked
+    if !args.iter().any(|a| a == "--strict-mcp-config") {
+        args.push("--strict-mcp-config".into());
+    }
     if let Some(id) = &c.resume {
         args.extend(["--resume".to_string(), id.clone()]);
     }
-    if cfg.chat_settings {
+    if let Some((settings, sources)) = settings {
         // CLAUDE.md files and settings as `claude` loads them — but hooks don't run, and edits always come
         // here as a review (an `ask` rule and the default mode outrank any allow rule or accept-edits mode)
-        args = llm::with_flag(&args, "--setting-sources", "user,project,local");
-        args = llm::with_flag(&args, "--settings", CHAT_SETTINGS);
+        args = llm::with_flag(&args, "--setting-sources", &sources);
+        args = llm::with_flag(&args, "--settings", &settings);
         args = llm::with_flag(&args, "--permission-mode", "default");
     }
     let cfg = llm::LlmConfig { args, ..cfg };
@@ -1253,8 +1297,9 @@ pub fn send(ed: &mut Editor) {
     let Some(c) = &mut ed.session.chat else { return };
     let question = c.input.trim().to_string();
     // Claude is working: it waits its turn (#23) — said over the input, sent when this turn ends; a second
-    // one joins it
-    if c.busy() && !question.is_empty() {
+    // one joins it. So it does while claude waits on the project's settings (`claudetrust.rs`): sent once it
+    // starts
+    if (c.busy() || c.settings.waiting()) && !question.is_empty() {
         c.queued = Some(match c.queued.take() {
             Some(q) => format!("{q}\n\n{question}"),
             None => question,

@@ -238,6 +238,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "project-trust" => editor.project_trust_ask(),
         "project-untrust" => editor.project_untrust(),
+        "claude-settings" => editor.claude_settings_ask(),
         "sandbox-allowed" => {
             editor.sandbox_allowed();
             Ok(())

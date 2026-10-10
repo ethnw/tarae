@@ -140,6 +140,9 @@ pub enum What {
     /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
     /// part. `hash` = what the card showed.
     ProjectTrust { hash: crate::trust::Digest },
+    /// The project's Claude Code settings run commands or set Claude's environment (`claudetrust.rs`): `y`
+    /// trusts them, `n` holds those keys back in the chat. `hash` = what the card showed.
+    ClaudeSettings { hash: crate::trust::Digest },
     /// A repository's own git settings and hooks run commands (`gittrust.rs`): `y` lets them run, `n` keeps
     /// them off (held — `gitrepo`).
     GitTrust(Box<crate::gittrust::Ask>),
@@ -249,6 +252,8 @@ impl What {
             | What::PluginPermissions { .. }
             | What::PluginAsk { .. }
             | What::ProjectTrust { .. }
+            // (the chat reads the settings again when it opens)
+            | What::ClaudeSettings { .. }
             | What::GitTrust(_)
             | What::Recover(_)
             | What::Restart(_)
@@ -423,6 +428,7 @@ impl Offer {
                 | What::ProtectedMade { .. }
                 | What::ReviewAtEnd
                 | What::ProjectTrust { .. }
+                | What::ClaudeSettings { .. }
                 | What::GitTrust(_)
                 | What::Read { .. }
                 | What::Grant { .. }
@@ -628,6 +634,8 @@ impl Offer {
                     | What::HostRaw(_)
                     | What::Lookup(_)
                     | What::Containers(_)
+                    // (its session's chat waits on it — answered in another, it'd answer nothing)
+                    | What::ClaudeSettings { .. }
             )
     }
 
@@ -689,6 +697,7 @@ impl Offer {
             W::Run(_) => vec![('y', "Run"), ('n', "No")],
             W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
+            W::ClaudeSettings { .. } => vec![('y', "Trust"), ('n', "Hold back")],
             W::GitTrust(_) => vec![('y', "Let them run"), ('n', "Keep off")],
             W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
             W::ProtectedMade { .. } => vec![('y', "Run"), ('n', "No")],
@@ -792,6 +801,7 @@ impl Offer {
             W::Grant { .. } => "grant",
             W::Outside { .. } => "outside",
             W::ProjectTrust { .. } => "project-trust",
+            W::ClaudeSettings { .. } => "claude-settings",
             W::GitTrust(_) => "git-trust",
             W::Screen { .. } => "screen",
             W::Preflight { .. } => "preflight",
@@ -1143,6 +1153,7 @@ impl crate::editor::Editor {
                 crate::edits::at_end_set(self, true);
             }
             What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
+            What::ClaudeSettings { hash } => self.claude_settings_answer(id, hash, true),
             What::GitTrust(ask) => self.git_trust_answer(id, *ask, true),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep, folder)
@@ -1661,6 +1672,7 @@ impl crate::editor::Editor {
             }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
+            What::ClaudeSettings { hash } => self.claude_settings_answer(o.id, hash, false),
             What::GitTrust(ask) => self.git_trust_answer(o.id, *ask, false),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, o.id, *pending, None, keep, folder)

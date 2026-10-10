@@ -583,6 +583,12 @@ pub struct Editor {
     /// Claude reads the temp folders unasked (`allow::defaults`) — off in tests: their projects, and what
     /// they read "outside" them, are in the temp folder.
     pub read_temp: bool,
+    /// The chat's claude starts once the project's Claude settings are read and, if they need it, answered
+    /// (`claudetrust.rs`) — off in tests but their own: a worker's read before every chat test's claude.
+    pub claude_settings_gate: bool,
+    /// Your own Claude settings file, read for what a held-back key goes back to (`claudetrust::Baseline`) —
+    /// None in tests.
+    pub claude_user_settings: Option<std::path::PathBuf>,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
     pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
     /// What a run's policy reads of tarae's surroundings (`sandbox::Here`, on its worker) — `Here::now` unless a
@@ -778,6 +784,8 @@ impl Editor {
             tokens_said: if cfg!(test) { None } else { crate::tokens::said_path() },
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
+            claude_settings_gate: !cfg!(test),
+            claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
             run_clock: None,
             sandbox_here: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
@@ -7870,7 +7878,7 @@ mod tests {
         // (respawned: a process after the first — generations are unique across chats)
         let first = ed.session.chat.as_ref().unwrap().generation();
         settle_until(&mut ed, |ed| {
-            ed.session.chat.as_ref().unwrap().proc_alive()
+            ed.session.chat.as_ref().unwrap().running()
                 && ed.session.chat.as_ref().unwrap().generation() > first
         });
         feed(&mut ed, "hi<ret>");
@@ -8424,7 +8432,7 @@ mod tests {
         let c = ed.session.chat.as_ref().unwrap();
         assert!(c.msgs.iter().any(|m| m.text == "Hello back."));
         assert_eq!(c.conversation, None);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().proc_alive());
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().running());
         drop(ed);
         // #51: `:chat-new` at a fresh start — a new conversation, said, not the recent one continued once
         // the project's conversations are read
@@ -8436,7 +8444,7 @@ mod tests {
         let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
         assert!(said.contains("New conversation"), "{said}");
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().past.is_empty());
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().proc_alive());
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().running());
         let c = ed.session.chat.as_ref().unwrap();
         assert!(c.msgs.is_empty() && c.conversation.is_none(), "nothing continued: {:?}", c.msgs.len());
         assert!(!started().contains("--resume"), "claude started fresh: {}", started());

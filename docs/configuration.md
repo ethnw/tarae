@@ -35,6 +35,10 @@ the [keymap reference](reference/keymap.md).
   of those values, for the whole repository: every checkout of it (each session) shares every version you
   answered, so going back to one you trusted doesn't ask, and a version never seen does. `:project-trust`
   shows the card again, and `:project-untrust` takes trust back (for the version in hand)
+- **So are a project's Claude Code settings.** What a repository's `.claude/settings.json` (or a committed
+  `.claude/settings.local.json`) would run in the chat — its helper commands, its `env` block, the plugins it
+  turns on — waits for its own card the first time the chat starts, kept the same way. `:claude-settings` shows
+  it again ([Claude integration](claude-integration.md))
 
 One file holds everything — editor, keys, languages, language servers, and Claude. There's no separate
 `languages.toml`.
