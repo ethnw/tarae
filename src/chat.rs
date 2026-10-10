@@ -108,7 +108,8 @@ const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
 /// (`screen` asks the user itself — `seeing.rs`)
 /// (`references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project
-/// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`; `procs`
+/// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`; none of
+/// them reads or changes a file named like a key before Claude was let read it — `reads::Keys`; `procs`
 /// reads what `:procs` shows — `procs.rs`; `ui` the screen's structure at Claude's level, less than `screen`
 /// sends — `uistate/claude.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\

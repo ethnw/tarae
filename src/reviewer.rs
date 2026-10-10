@@ -463,6 +463,20 @@ fn read(ed: &mut Editor, generation: u64, request_id: &str, tool: &str, input: &
         move |ed: &mut Editor| {
             let answer = match ok {
                 true => json!({ "behavior": "allow", "updatedInput": input }),
+                // (it can't ask the user: a file named like a key stays shut — a search over it names them)
+                false if !look.keys.is_empty() => {
+                    let named: Vec<String> = look.keys.iter().map(|k| crate::nav::rel(&root, k)).collect();
+                    match look.keys.as_slice() {
+                        [k] if look.at.as_ref() == Some(k) => {
+                            deny(&format!("{} is named like a key — the reviewer doesn't read it", named[0]))
+                        }
+                        _ => deny(&format!(
+                            "this would search files named like keys ({}) — the reviewer doesn't read them; add a \
+                             path or glob that leaves them out",
+                            named.join(", ")
+                        )),
+                    }
+                }
                 false => {
                     let at = look.at.map_or(look.given, |p| p.display().to_string());
                     deny(&format!("{at} is outside the checkout — the reviewer reads only the checkout"))
@@ -1334,6 +1348,43 @@ mod tests {
         }
         assert!(ed.offers.is_empty() && ed.session.parked.is_empty(), "no card");
         assert_eq!(ed.session.reviewer.as_ref().unwrap().reads, 0, "(no tool rows from this fake)");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 7c: a file in the checkout named like a key that the user hasn't opened for the project is shut to it —
+    /// it can't put the card to the user. Reading one is refused; so is a search with no path or glob, which
+    /// would read it — the answer names it and says how to leave it out; a glob that does goes through. One
+    /// the user kept open for the project (`A` — `Grant::Key` in the store) it reads, as that project's Claude
+    /// may. No card.
+    #[test]
+    fn the_reviewer_reads_no_key_named_file_the_project_hasnt_opened() {
+        let (dir, repo) = place("keys");
+        std::fs::create_dir_all(repo.join("deploy")).unwrap();
+        let pem = repo.join("deploy/prod.pem");
+        std::fs::write(repo.join(".env"), "x\n").unwrap();
+        std::fs::write(&pem, "x\n").unwrap();
+        let store = dir.join("state/sandbox.json");
+        crate::allow::keep(&store, &repo, |a| a.add(&crate::allow::Grant::Key(pem.clone()))).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.allow_path = Some(store);
+        let steps = [
+            can_use("p1", "Read", json!({"file_path": repo.join(".env")})),
+            can_use("p2", "Grep", json!({"pattern": "two"})),
+            can_use("p3", "Grep", json!({"pattern": "two", "glob": "*.txt"})),
+            can_use("p4", "Read", json!({"file_path": pem})),
+            result("Done."),
+        ];
+        let (_, log) = fake(&mut ed, &dir, &steps);
+        reviewed(&mut ed, &repo);
+        let (read, search) = (answer(&log, "p1"), answer(&log, "p2"));
+        assert_eq!(read["behavior"], "deny");
+        assert_eq!(read["message"], ".env is named like a key — the reviewer doesn't read it", "{read}");
+        assert_eq!(search["behavior"], "deny");
+        let said = search["message"].as_str().unwrap();
+        assert!(said.contains("(.env)") && said.contains("add a path or glob"), "the one not opened: {said}");
+        assert_eq!(answer(&log, "p3")["behavior"], "allow", "a glob that leaves them out");
+        assert_eq!(answer(&log, "p4")["behavior"], "allow", "kept open for the project");
+        assert!(ed.offers.is_empty() && ed.session.parked.is_empty(), "no card");
         std::fs::remove_dir_all(&dir).ok();
     }
 

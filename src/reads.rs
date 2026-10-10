@@ -3,7 +3,9 @@
 //! they're left out (`chat::ALLOWED`) and answered here: inside the project (the real path, links
 //! followed) or in a place the user allowed (`allow.rs`) at once; anything else on a card that says
 //! exactly what's read — `y` once · `a` this chat · `A` always · `n` no. One card at a time; the rest wait
-//! in `Chat.reads`, and an answer for longer lets the ones it covers through.
+//! in `Chat.reads`, and an answer for longer lets the ones it covers through. A file in the project named
+//! like a key (`sandbox::key_named_in` — what a run can't read either, 7a/7b) asks too, Read's or one a
+//! Grep would search (`Look.keys`); `a`/`A` open it as the run's panel does (`Grant::Key`), for both.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -31,6 +33,10 @@ pub struct Look {
     pub given: String,
     /// `at` is a single file (Grep searches just it — not "everything in it").
     pub file: bool,
+    /// The files named like keys in the project it opens (`sandbox::key_named_in`, real paths): Read's file,
+    /// those a Grep would search (`grep_keys`) — Glob only lists names, so none. They ask unless opened
+    /// (`Grant::Key` — the run's panel's or this card's); `decide` leaves only those still closed.
+    pub keys: Vec<PathBuf>,
 }
 
 /// An ask waiting for its answer.
@@ -63,7 +69,112 @@ pub fn look(tool: &str, input: &Value, cwd: &Path) -> Look {
         _ => crate::paths::real(&rel(&given)),
     };
     let file = at.as_ref().is_some_and(|p| p.is_file());
-    Look { tool: tool.to_string(), at, pattern, filter, given, file }
+    let keys = match (tool, &at) {
+        ("Read", Some(at)) if crate::sandbox::key_named_in(cwd, at) => vec![at.clone()],
+        ("Grep", Some(at)) => grep_keys(cwd, at, &filter, &s("type")),
+        _ => Vec::new(),
+    };
+    Look { tool: tool.to_string(), at, pattern, filter, given, file, keys }
+}
+
+/// The files named like keys in the project at `root` a Grep of `at` (real) opens: `at` itself, filters or
+/// not, or those in the folder — in the project, when the folder holds it — that its file filters (`glob`,
+/// `type`) let through
+/// (`grep_opens`). What else Claude Code's Grep may leave out (ignored or hidden files, links) isn't guessed:
+/// every one counts. Not below a folder of tools' output, as `key_named_in`, nor in `.git` (git's own files —
+/// neither walked: `perf_grep_keys_in_this_repository`).
+fn grep_keys(root: &Path, at: &Path, glob: &str, kind: &str) -> Vec<PathBuf> {
+    // (a file named on ripgrep's command line is searched whatever `-g`/`-t` say: they filter what a walk
+    // finds, never what it starts from)
+    if at.is_file() {
+        return crate::sandbox::key_named_in(root, at).then(|| at.to_path_buf()).into_iter().collect();
+    }
+    let from = if at.starts_with(root) {
+        at
+    } else if root.starts_with(at) {
+        root
+    } else {
+        return Vec::new();
+    };
+    let outputs = crate::sandbox::outputs();
+    let walk = ignore::WalkBuilder::new(from)
+        .standard_filters(false)
+        .follow_links(false)
+        .filter_entry(move |e| {
+            let name = e.file_name();
+            e.depth() == 0
+                || !e.file_type().is_some_and(|t| t.is_dir())
+                || (name != ".git" && !outputs.iter().any(|o| name == o.as_str()))
+        })
+        .build();
+    let mut keys: Vec<PathBuf> = walk
+        .flatten()
+        // (a link to a file counts as the file it leads to)
+        .filter_map(|e| match e.path_is_symlink() {
+            true => crate::paths::real(e.path()).filter(|p| p.is_file()),
+            false => e.file_type().is_some_and(|t| t.is_file()).then(|| e.into_path()),
+        })
+        .filter(|p| crate::sandbox::key_named_in(root, p) && grep_opens(p, glob, kind, [from, root]))
+        .collect();
+    crate::sorting::sort(&mut keys);
+    keys.dedup();
+    keys
+}
+
+/// Whether Grep's file filters could let `file` through — where it can't be told, they do. Its `glob`, as
+/// ripgrep's `--glob`: how the tool splits it isn't known, so each reading counts — whole, its words, its
+/// parts between commas outside braces (`*.rs,*.pem`) — each part alone (several globs let through at most
+/// what one of them alone does: the last that matches decides, and none matching lets through only when all
+/// are `!`), from either of `roots` (where the search starts, the project), in either case. Its `type`:
+/// ripgrep's own types. A filter that doesn't build lets it through.
+fn grep_opens(file: &Path, glob: &str, kind: &str, roots: [&Path; 2]) -> bool {
+    let readings = glob_readings(glob);
+    let globbed = readings.is_empty()
+        || readings.iter().any(|g| {
+            roots.iter().any(|r| {
+                [false, true].into_iter().any(|insensitive| {
+                    let mut b = ignore::overrides::OverrideBuilder::new(r);
+                    let built =
+                        b.case_insensitive(insensitive).and_then(|b| b.add(g)).and_then(|b| b.build());
+                    built.map_or(true, |o| !o.matched(file, false).is_ignore())
+                })
+            })
+        });
+    let typed = kind.is_empty() || {
+        let mut t = ignore::types::TypesBuilder::new();
+        t.add_defaults();
+        t.select(kind);
+        t.build().map_or(true, |t| !t.matched(file, false).is_ignore())
+    };
+    globbed && typed
+}
+
+/// Every glob `glob` may stand for: itself, its words, and each of those cut at commas outside braces.
+fn glob_readings(glob: &str) -> Vec<&str> {
+    let commas = |s: &str| -> Vec<(usize, usize)> {
+        let (mut depth, mut from, mut out) = (0i32, 0, Vec::new());
+        for (i, c) in s.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                ',' if depth <= 0 => {
+                    out.push((from, i));
+                    from = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push((from, s.len()));
+        out
+    };
+    let mut all = vec![glob];
+    for word in std::iter::once(glob).chain(glob.split_whitespace()) {
+        all.push(word);
+        all.extend(commas(word).into_iter().map(|(a, b)| word[a..b].trim()));
+    }
+    all.retain(|g| !g.is_empty());
+    all.dedup();
+    all
 }
 
 /// The folder a Glob pattern walks from `base`: its folders up to the first one with a wildcard (never its
@@ -137,16 +248,74 @@ impl Made {
     }
 }
 
+/// The files named like keys in the project Claude may read — opened on a read card or the run's panel
+/// (`Grant::Key`): this conversation's, and the project's kept ones (read from the store the first time a
+/// key-named file comes up, on the worker asking). tarae's own tools (`nav.rs`, `refactor.rs` — allowed
+/// without asking, `chat::ALLOWED`) leave the others out, as Claude's Read asks for them.
+#[derive(Clone, Debug)]
+pub struct Keys {
+    root: PathBuf,
+    chat: Vec<PathBuf>,
+    store: Option<PathBuf>,
+    kept: std::sync::OnceLock<Vec<PathBuf>>,
+}
+
+impl Keys {
+    pub fn of(ed: &Editor) -> Keys {
+        Keys {
+            root: ed.session.root.clone(),
+            chat: ed.session.chat.as_ref().map(|c| c.allowed.keys.clone()).unwrap_or_default(),
+            store: ed.allow_path.clone(),
+            kept: Default::default(),
+        }
+    }
+
+    /// None opened, in the project at `root`, nothing kept.
+    #[cfg(test)]
+    pub fn none_opened(root: &Path) -> Keys {
+        Keys { root: root.to_path_buf(), chat: Vec::new(), store: None, kept: Default::default() }
+    }
+
+    /// These with `key` (real) opened for this conversation.
+    #[cfg(test)]
+    pub fn opening(mut self, key: PathBuf) -> Keys {
+        self.chat.push(key);
+        self
+    }
+
+    /// Whether `path` — where its links lead, as Read's `Look.keys` — is a file named like a key in the
+    /// project that isn't open to Claude. A worker's: it resolves the path, and may read the store.
+    pub fn shut(&self, path: &Path) -> bool {
+        let real = crate::paths::real(path).unwrap_or_else(|| path.to_path_buf());
+        if !crate::sandbox::key_named_in(&self.root, &real) {
+            return false;
+        }
+        let kept =
+            self.kept.get_or_init(|| crate::allow::Store::read(self.store.as_deref()).get(&self.root).keys);
+        !self.chat.contains(&real) && !kept.contains(&real)
+    }
+}
+
+/// What tarae's tools say of a file `Keys` keeps out (`shown`: its path as the answer names it).
+pub fn key_left_out(shown: &str) -> String {
+    format!("{shown} is named like a key — tarae's tools leave it out; Read asks the user for it")
+}
+
+/// The text a place in such a file shows instead of its line.
+pub const KEY_LINE: &str = "(named like a key — not read)";
+
 /// Whether the call may go without asking: inside the project, in a place allowed, tarae's own log
-/// (the file itself — `log::is_log_real`), or made by one of Claude's runs this turn (`Made`).
+/// (the file itself — `log::is_log_real`), or made by one of Claude's runs this turn (`Made`) — and every
+/// file named like a key it opens opened (`Grant::Key`, the same grant a run's reads go by).
 pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed, made: &Made) -> bool {
-    look.at.as_ref().is_some_and(|at| {
-        at.starts_with(root)
-            || chat.reads(at)
-            || kept.reads(at)
-            || crate::log::is_log_real(at)
-            || made.covers(at, SystemTime::now())
-    })
+    look.keys.iter().all(|k| chat.keys.contains(k) || kept.keys.contains(k))
+        && look.at.as_ref().is_some_and(|at| {
+            at.starts_with(root)
+                || chat.reads(at)
+                || kept.reads(at)
+                || crate::log::is_log_real(at)
+                || made.covers(at, SystemTime::now())
+        })
 }
 
 /// One of Claude's runs started (`tools::go`) — by the clock its files are stamped by (`file_clock`).
@@ -199,8 +368,12 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let (look, ok, defaults) = decide(&tool, &input, &root, store.as_deref(), temp, &chat, &made);
-        let class = crate::cards::class(look.at.as_deref(), &defaults, crate::allow::home().as_deref());
-        // (asked: its card says first what looks like a token there)
+        let class = match look.keys.is_empty() {
+            true => crate::cards::class(look.at.as_deref(), &defaults, crate::allow::home().as_deref()),
+            false => crate::cards::Class::Secret,
+        };
+        // (asked: its card says first what looks like a token there — a folder in the project too: its yes
+        // reads more than the keys it names)
         let found = match (ok, &look.at) {
             (false, Some(at)) => crate::tokens::found_in(at),
             _ => Default::default(),
@@ -220,7 +393,8 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
 }
 
 /// What `tool` reading `input` (from `root`, where claude runs) reads, and whether it may go without asking:
-/// inside `root`, a place this conversation (`chat`) or the user (`store`, kept for always) allowed, the places
+/// inside `root` (a file named like a key there only once opened — `Look.keys`), a place this conversation
+/// (`chat`) or the user (`store`, kept for always) allowed, the places
 /// read unasked (`allow::defaults` — the repository's other checkouts, and the temp folders when `temp`), or
 /// made by a run of this turn (`made`). The defaults come back too (the card sorts places by them). A worker's:
 /// it resolves paths and reads the kept answers. The chat asks the rest on a card; the reviewer refuses it
@@ -234,11 +408,13 @@ pub fn decide(
     chat: &Allowed,
     made: &Made,
 ) -> (Look, bool, crate::allow::Defaults) {
-    let look = look(tool, input, root);
+    let mut look = look(tool, input, root);
     let mut kept = crate::allow::Store::read(store).get(root);
     let defaults = crate::allow::defaults(root, temp);
     kept.read.extend(defaults.all());
     let ok = covered(&look, root, chat, &kept, made);
+    // (the card names those still closed)
+    look.keys.retain(|k| !chat.keys.contains(k) && !kept.keys.contains(k));
     (look, ok, defaults)
 }
 
@@ -247,8 +423,7 @@ pub fn decide(
 /// once the folder's been looked through for tokens (`scanned`), so the card says what it holds first.
 fn refold(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_ref() else { return };
-    let others: Vec<PathBuf> =
-        c.reads.iter().filter_map(|w| w.look.at.clone()).chain(c.read_once.iter().cloned()).collect();
+    let others = others(c);
     let home = crate::allow::home();
     let front = !ed.background();
     // (each card offering its file alone, and the folder it'd offer now)
@@ -259,7 +434,7 @@ fn refold(ed: &mut Editor) {
         .chain(ed.offers.iter().filter(|_| front))
         .filter_map(|o| {
             let crate::offer::What::Read { pending, keep: true, folder: None } = &o.what else { return None };
-            let at = pending.look.at.clone().filter(|_| pending.look.file)?;
+            let at = pending.look.at.clone().filter(|_| pending.look.file && pending.look.keys.is_empty())?;
             let f = crate::allow::grant_places(std::slice::from_ref(&at), &others, home.as_deref()).pop()?;
             (f != at).then_some((o.id, f))
         })
@@ -322,6 +497,16 @@ fn allow(input: &Value) -> Value {
 
 pub const TITLE: &str = "Claude wants to read — outside the project";
 
+/// A read in the project that opens files named like keys (`Look.keys`).
+pub const KEYS_TITLE: &str = "Claude wants to read — named like a key";
+
+/// The places other reads go (waiting, or let through once) — a card's folder for longer is offered beside
+/// them (#102). Not the files named like keys: those are opened one by one.
+fn others(c: &crate::chat::Chat) -> Vec<PathBuf> {
+    let waiting = c.reads.iter().filter(|w| w.look.keys.is_empty()).filter_map(|w| w.look.at.clone());
+    waiting.chain(c.read_once.iter().cloned()).collect()
+}
+
 /// The next waiting ask on its card, once none is up.
 pub fn next(ed: &mut Editor) {
     if ed.session_cards().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
@@ -330,12 +515,12 @@ pub fn next(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_mut() else { return };
     let Some(p) = c.reads.pop_front() else { return };
     let home = crate::allow::home();
-    let keep = p.look.at.as_deref().is_some_and(|at| crate::allow::keepable(at, home.as_deref()));
+    let keepable = |at: &Path| crate::allow::keepable(at, home.as_deref());
+    let keep = p.look.at.as_deref().is_some_and(keepable) && p.look.keys.iter().all(|k| keepable(k));
     // (beside another read waiting or let through once: its folder for longer — #102)
-    let others: Vec<PathBuf> =
-        c.reads.iter().filter_map(|w| w.look.at.clone()).chain(c.read_once.iter().cloned()).collect();
+    let others = others(c);
     let folder = match (&p.look.at, keep) {
-        (Some(at), true) if p.look.file => {
+        (Some(at), true) if p.look.file && p.look.keys.is_empty() => {
             crate::allow::grant_places(std::slice::from_ref(at), &others, home.as_deref())
                 .pop()
                 .filter(|f| f != at)
@@ -346,14 +531,19 @@ pub fn next(ed: &mut Editor) {
     let folder = folder.and_then(|f| scanned(ed, &f).map(|found| (f, found)));
     let (q, warning) = card_text(&p, keep, folder.as_ref().map(|(f, found)| (f.as_path(), found)));
     let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class));
+    let inside = p.look.at.as_ref().is_some_and(|at| at.starts_with(&ed.session.root));
+    let title = if inside && !p.look.keys.is_empty() { KEYS_TITLE } else { TITLE };
     let what = crate::offer::What::Read { pending: Box::new(p), keep, folder: folder.map(|(f, _)| f) };
-    let mut o = crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), what).asked(asked);
+    let mut o = crate::offer::Offer::new(title.into(), &q, "", String::new(), what).asked(asked);
     o.warning = warning;
     ed.push_offer(o);
 }
 
-/// The card's text: exactly what's read, and where it goes — and, when `a`/`A` allow its folder rather
-/// than the file (`folder`), that.
+/// The files named like keys a card lists by name; the rest are counted.
+const KEYS_SHOWN: usize = 5;
+
+/// The card's text: exactly what's read (the files named like keys it opens by name), and where it goes —
+/// and, when `a`/`A` allow its folder rather than the file (`folder`), that.
 pub fn question(look: &Look, keep: bool, folder: Option<&Path>) -> String {
     let at = match &look.at {
         Some(at) => at.display().to_string(),
@@ -371,7 +561,25 @@ pub fn question(look: &Look, keep: bool, folder: Option<&Path>) -> String {
         }
         _ => format!("lists {} in {at} and everything in it", look.pattern),
     };
+    match look.keys.as_slice() {
+        [] => {}
+        [k] if look.at.as_ref() == Some(k) => q.push_str("\n\nIt's named like a key."),
+        keys => {
+            q.push_str("\n\nIt opens files named like keys:");
+            for k in keys.iter().take(KEYS_SHOWN) {
+                let k = look.at.as_deref().and_then(|at| k.strip_prefix(at).ok()).unwrap_or(k);
+                q.push_str(&format!("\n    {}", k.display()));
+            }
+            if keys.len() > KEYS_SHOWN {
+                q.push_str(&format!("\n    and {} more", keys.len() - KEYS_SHOWN));
+            }
+        }
+    }
     q.push_str("\n\nWhat it reads goes to Claude.");
+    if keep && !look.keys.is_empty() {
+        let (them, only) = if look.keys.len() == 1 { ("it", "that file") } else { ("them", "those files") };
+        q.push_str(&format!("\n\na and A open {them} to its commands too — {only} only."));
+    }
     if !keep && look.at.is_some() {
         q.push_str(" Only once — a place like this is never kept.");
     }
@@ -397,28 +605,53 @@ pub fn answer(
     }
     let shown = p.look.at.as_ref().map_or_else(|| p.look.given.clone(), |a| a.display().to_string());
     let Some(scope) = scope else {
-        let no = format!("the user chose not to let you read {shown} — ask them if you need it");
+        let no = match p.look.keys.as_slice() {
+            [] => format!("the user chose not to let you read {shown} — ask them if you need it"),
+            [k] if p.look.at.as_ref() == Some(k) => {
+                format!(
+                    "the user chose not to let you read {shown}, named like a key — ask them if you need it"
+                )
+            }
+            keys => {
+                let named: Vec<String> = keys.iter().map(|k| k.display().to_string()).collect();
+                format!(
+                    "the user chose not to let you search {shown}: it would read files named like keys ({}) — \
+                     search with a path or glob that leaves them out, or ask them",
+                    named.join(", ")
+                )
+            }
+        };
         crate::chat::respond(ed, &p.request_id, json!({ "behavior": "deny", "message": no }));
         return next(ed);
     };
     crate::chat::respond(ed, &p.request_id, allow(&p.input));
     if scope == Scope::Once
+        && p.look.keys.is_empty()
         && let (Some(c), Some(at)) = (ed.session.chat.as_mut(), p.look.at.clone())
         && !c.read_once.contains(&at)
     {
         c.read_once.push(at);
     }
-    let at = folder.or_else(|| p.look.at.clone()).filter(|_| keep && scope != Scope::Once);
-    if let Some(at) = at {
-        crate::allow::grant_reads(ed, &[at], scope);
-        // The ones waiting that this lets through
-        if let Some(c) = ed.session.chat.as_mut() {
-            let (through, wait): (Vec<_>, Vec<_>) =
-                c.reads.drain(..).partition(|w| w.look.at.as_ref().is_some_and(|a| c.allowed.reads(a)));
-            c.reads.extend(wait);
-            for w in through {
-                crate::chat::respond(ed, &w.request_id, allow(&w.input));
-            }
+    let root = ed.session.root.clone();
+    let longer = keep && scope != Scope::Once;
+    // (in the project only its files named like keys are opened; outside, the place too)
+    let at = folder.or_else(|| p.look.at.clone()).filter(|at| longer && !at.starts_with(&root));
+    if let Some(at) = &at {
+        crate::allow::grant_reads(ed, std::slice::from_ref(at), scope);
+    }
+    if longer {
+        crate::allow::grant_keys(ed, &p.look.keys, scope);
+    }
+    // The ones waiting that this lets through
+    if let Some(c) = ed.session.chat.as_mut().filter(|_| longer) {
+        let opened = |w: &Pending| {
+            w.look.at.as_ref().is_some_and(|a| a.starts_with(&root) || c.allowed.reads(a))
+                && w.look.keys.iter().all(|k| c.allowed.keys.contains(k))
+        };
+        let (through, wait): (Vec<_>, Vec<_>) = c.reads.drain(..).partition(opened);
+        c.reads.extend(wait);
+        for w in through {
+            crate::chat::respond(ed, &w.request_id, allow(&w.input));
         }
     }
     next(ed);
@@ -548,6 +781,7 @@ mod tests {
             filter: String::new(),
             given: String::new(),
             file: true,
+            keys: Vec::new(),
         };
         let none = Allowed::default();
         let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };
@@ -717,5 +951,84 @@ mod tests {
             let out = crate::readonly::outside(&cmd, root, root, &none, &none, &[]).unwrap();
             assert_eq!(out, vec![std::fs::canonicalize(dir).unwrap()], "the folder still asks");
         }
+    }
+
+    /// 7c: a Grep's filters leave a key file out only where they surely do. Its glob is read every way the
+    /// tool might split it — whole, by words, by commas outside braces — from either root, in either case; its
+    /// type is ripgrep's; a glob or type that doesn't build counts the file in.
+    #[test]
+    fn a_greps_filters_leave_a_key_out_only_where_they_surely_do() {
+        let (root, from) = (Path::new("/p"), Path::new("/p/deploy"));
+        let pem = Path::new("/p/deploy/prod.pem");
+        let opens = |glob: &str, kind: &str| grep_opens(pem, glob, kind, [from, root]);
+        for glob in
+            ["", "*.pem", "*.rs,*.pem", "*.rs *.pem", "*.{rs,pem}", "*.PEM", "deploy/*.pem", "*.pem,", "["]
+        {
+            assert!(opens(glob, ""), "{glob:?} could let it through");
+        }
+        for glob in ["*.rs", "*.{rs,ts}", "!*.pem", "src/*.pem", "*.rs, *.ts"] {
+            assert!(!opens(glob, ""), "{glob:?} leaves it out");
+        }
+        assert!(!opens("", "rust"), "a type that isn't it");
+        assert!(opens("", "no-such-type"), "a type that doesn't build");
+        assert!(!opens("*.pem", "rust"), "both filters must let it through");
+    }
+
+    /// 7c: a link in the project counts as where it leads — Read of a link (named like nothing) to `.env`
+    /// asks for `.env`, and a Grep over the folder names `.env` once, though two names lead to it. A key file
+    /// in `.git` or below tools' output isn't one a Grep is asked about. A Grep of the file itself (or of the
+    /// link) counts it whatever its glob or type: ripgrep searches a file it's given by name.
+    #[test]
+    fn a_link_to_a_key_file_is_the_key_file() {
+        let dir = std::env::temp_dir().join(format!("tarae-key-link-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for d in [".git", "node_modules/pkg"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let root = std::fs::canonicalize(&dir).unwrap();
+        for f in [".env", ".git/server.key", "node_modules/pkg/test.key", "a.rs"] {
+            std::fs::write(root.join(f), "x\n").unwrap();
+        }
+        std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+        let env = root.join(".env");
+        let read = look("Read", &json!({"file_path": "notes.txt"}), &root);
+        assert_eq!(read.keys, std::slice::from_ref(&env), "where the link leads");
+        let grep = look("Grep", &json!({"pattern": "x"}), &root);
+        assert_eq!(grep.keys, std::slice::from_ref(&env), "once, and not in .git or node_modules");
+        let to_rs = look("Grep", &json!({"pattern": "x", "glob": "*.rs"}), &root);
+        assert!(to_rs.keys.is_empty(), "{:?}", to_rs.keys);
+        // A file named as the path is searched whatever its filters say (ripgrep filters what a walk finds)
+        for (path, filter) in [
+            (".env", json!({"glob": "*.rs"})),
+            (".env", json!({"type": "rust"})),
+            ("notes.txt", json!({"glob": "*.rs"})),
+        ] {
+            let mut input = json!({"pattern": "x", "path": path});
+            input.as_object_mut().unwrap().extend(filter.as_object().unwrap().clone());
+            let named = look("Grep", &input, &root);
+            assert_eq!(named.keys, std::slice::from_ref(&env), "{input}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What a Grep of this whole repository waits for before it's answered: the walk for files named like
+    /// keys (`grep_keys`; `.git` and tools' output not walked).
+    #[test]
+    fn perf_grep_keys_in_this_repository() {
+        if crate::test_results::unoptimized("reads::tests::perf_grep_keys_in_this_repository") {
+            return;
+        }
+        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut times: Vec<f64> = (0..5)
+            .map(|_| {
+                let t0 = std::time::Instant::now();
+                std::hint::black_box(grep_keys(&root, &root, "", ""));
+                t0.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        crate::sorting::by(&mut times, |a, b| a.total_cmp(b));
+        let ms = times[times.len() / 2];
+        let line = format!("PERF grep_keys_this_repository_ms {ms:.3} noise=5\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 }

@@ -123,10 +123,10 @@ pub fn references(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Strin
     let word = name_of(args["symbol"].as_str().unwrap_or_default())?;
     let line = args["line"].as_u64().map(|l| l.max(1) as usize - 1);
     let tests = args["tests"].as_bool().unwrap_or(true);
-    let root = project_root(ed);
+    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
     let path = root.join(path);
     ed.events.jobs().spawn(move || {
-        let file = file_in(&root, &path);
+        let file = file_in(&root, &path, &keys);
         move |ed: &mut Editor| match file {
             Ok(path) => ask(ed, call, path, line, Name { word, tests }),
             Err(e) => answer(ed, call, Err(e)),
@@ -155,12 +155,16 @@ fn name_of(symbol: &str) -> Result<String, String> {
     }
 }
 
-/// `path`, real, if it's a file in the project — on a worker.
-pub(crate) fn file_in(root: &Path, path: &Path) -> Result<PathBuf, String> {
+/// `path`, real, if it's a file in the project — and not one named like a key Claude hasn't been let read
+/// (`reads::Keys`) — on a worker.
+pub(crate) fn file_in(root: &Path, path: &Path, keys: &crate::reads::Keys) -> Result<PathBuf, String> {
     let shown = rel(root, path);
     let real = crate::paths::existing_inside(root, path, &shown, "these tools look inside it only")?;
     if !real.is_file() {
         return Err(format!("{shown} isn't a file"));
+    }
+    if keys.shut(&real) {
+        return Err(crate::reads::key_left_out(&shown));
     }
     Ok(real)
 }
@@ -338,14 +342,17 @@ fn finish(ed: &mut Editor, n: u64) {
         .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
         .filter(|(p, _)| all.iter().any(|f| f.0 == *p))
         .collect();
-    let root = project_root(ed);
+    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
     let (call, server, tests) = (a.call, a.server, name.tests);
     ed.events.jobs().spawn(move || {
         let places = crate::lsp_editor::read_places(all, &open);
         let mut t = crate::testcode::Tests::new(&root);
         let places: Vec<(Place, bool)> = places
             .into_iter()
-            .map(|p| {
+            .map(|mut p| {
+                if keys.shut(&p.path) {
+                    p.text = crate::reads::KEY_LINE.into();
+                }
                 let test = t.at(&p.path, p.line);
                 (p, test)
             })
@@ -395,7 +402,7 @@ fn refs_text(
 /// The name's whole-word text matches in the project (case as written), as the answer — `why` the
 /// server's references aren't (`later`: they will be, ask again).
 fn text_matches(ed: &mut Editor, call: Call, name: Name, why: String, later: bool) {
-    let root = project_root(ed);
+    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
     let Name { word, tests } = name;
     ed.events.jobs().spawn(move || {
         let r = crate::picker::word_matches(&root, &word).map(|items| {
@@ -403,6 +410,8 @@ fn text_matches(ed: &mut Editor, call: Call, name: Name, why: String, later: boo
             let mut places: Vec<(Place, bool)> = items
                 .into_iter()
                 .filter_map(|it| match it.action {
+                    // (a file named like a key isn't searched for Claude — `reads::Keys`)
+                    crate::picker::Action::Goto { path, .. } if keys.shut(&path) => None,
                     crate::picker::Action::Goto { path, line, col } => {
                         let text = it.label.split_once(&format!(":{}: ", line + 1)).map(|(_, t)| t);
                         let test = t.at(&path, line);
@@ -541,10 +550,10 @@ pub struct SymAsk {
 pub fn symbols(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let path = args["path"].as_str().map(str::trim).filter(|p| !p.is_empty()).ok_or("path is required")?;
     let line = args["line"].as_u64().map(|l| l.max(1) as usize - 1);
-    let root = project_root(ed);
+    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
     let path = root.join(path);
     ed.events.jobs().spawn(move || {
-        let file = file_in(&root, &path);
+        let file = file_in(&root, &path, &keys);
         move |ed: &mut Editor| match file {
             Ok(path) => ask_symbols(ed, call, path, line),
             Err(e) => answer(ed, call, Err(e)),
@@ -898,8 +907,9 @@ pub fn definition(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Strin
         return Ok(());
     }
     let spot = spot_of(&root, args)?;
+    let keys = crate::reads::Keys::of(ed);
     ed.events.jobs().spawn(move || {
-        let file = file_in(&root, &spot.path);
+        let file = file_in(&root, &spot.path, &keys);
         move |ed: &mut Editor| match file {
             Ok(path) => def_at(ed, call, Spot { path, ..spot }, goto),
             Err(e) => answer(ed, call, Err(e)),
@@ -1074,9 +1084,9 @@ fn finish_defs(ed: &mut Editor, n: u64) {
         .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
         .filter(|(p, _)| all.contains(&p))
         .collect();
-    let root = project_root(ed);
+    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
     ed.events.jobs().spawn(move || {
-        let text = defs_text(&root, &a, &servers, &open);
+        let text = defs_text(&root, &a, &servers, &open, &keys);
         move |ed: &mut Editor| answer(ed, a.call, Ok(text))
     });
 }
@@ -1084,7 +1094,13 @@ fn finish_defs(ed: &mut Editor, n: u64) {
 /// The answer: how many and from which server, then the places by file — each its signature (one outside
 /// the project named, not read); by name, those in the container asked for first, close names after
 /// when there's no exact one.
-fn defs_text(root: &Path, a: &DefAsk, servers: &str, open: &HashMap<PathBuf, ropey::Rope>) -> String {
+fn defs_text(
+    root: &Path,
+    a: &DefAsk,
+    servers: &str,
+    open: &HashMap<PathBuf, ropey::Rope>,
+    keys: &crate::reads::Keys,
+) -> String {
     let real = std::fs::canonicalize(root).ok();
     let inside = |p: &Path| p.starts_with(root) || real.as_ref().is_some_and(|r| p.starts_with(r));
     let read = |found: &[(PathBuf, usize, String)]| -> Vec<(Place, String)> {
@@ -1094,6 +1110,8 @@ fn defs_text(root: &Path, a: &DefAsk, servers: &str, open: &HashMap<PathBuf, rop
             .map(|(path, line, what)| {
                 let text = if !inside(path) {
                     "(outside the project — not read)".to_string()
+                } else if keys.shut(path) {
+                    crate::reads::KEY_LINE.to_string()
                 } else if let Some(rope) = open.get(path) {
                     signature(&|k| (k < rope.len_lines()).then(|| rope.line(k).to_string()), *line)
                 } else {
@@ -1214,9 +1232,9 @@ fn tree_defs(ed: &mut Editor, call: Call, word: String, goto: Goto, why: String,
     if word.is_empty() {
         return answer(ed, call, Ok(format!("{why} — and there's no name at that column to look for")));
     }
-    let root = project_root(ed);
+    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
     ed.events.jobs().spawn(move || {
-        let r = tree_found(&root, &word, goto).map(|(places, no_grammar)| {
+        let r = tree_found(&root, &word, goto, &keys).map(|(places, no_grammar)| {
             let then = if later { " — ask again in a moment for the server's" } else { "" };
             let what = if goto == Goto::Implementation { "implementation" } else { "definition" };
             let langs = match no_grammar.is_empty() {
@@ -1255,7 +1273,7 @@ fn tree_defs(ed: &mut Editor, call: Call, word: String, goto: Goto, why: String,
 /// (`function`, `struct`, `impl`) — and the languages of files with hits that have no grammar here. On a
 /// worker: a search, then each file with hits parsed (at most `TREE_FILES`).
 type TreeFound = (Vec<(Place, String)>, std::collections::BTreeSet<String>);
-fn tree_found(root: &Path, word: &str, goto: Goto) -> Result<TreeFound, String> {
+fn tree_found(root: &Path, word: &str, goto: Goto, keys: &crate::reads::Keys) -> Result<TreeFound, String> {
     let q = crate::grep::Query {
         pattern: word,
         literal: true,
@@ -1267,7 +1285,11 @@ fn tree_found(root: &Path, word: &str, goto: Goto) -> Result<TreeFound, String> 
     };
     let mut files: Vec<(PathBuf, Vec<usize>)> = Vec::new();
     crate::grep::search(root, None, &q, &|| false, &mut |f| {
-        files.push((root.join(&f.rel), f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
+        let path = root.join(&f.rel);
+        if keys.shut(&path) {
+            return true;
+        }
+        files.push((path, f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
         files.len() < TREE_FILES
     })?;
     crate::sorting::sort(&mut files);
@@ -1381,8 +1403,9 @@ pub struct HoverAsk {
 pub fn hover(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let root = project_root(ed);
     let spot = spot_of(&root, args)?;
+    let keys = crate::reads::Keys::of(ed);
     ed.events.jobs().spawn(move || {
-        let file = file_in(&root, &spot.path);
+        let file = file_in(&root, &spot.path, &keys);
         move |ed: &mut Editor| match file {
             Ok(path) => hover_at(ed, call, Spot { path, ..spot }),
             Err(e) => answer(ed, call, Err(e)),
@@ -1551,10 +1574,11 @@ pub fn diagnostics(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Stri
     if paths.is_empty() {
         return Err("no files to look at — you edited none this turn and none is open; give paths".into());
     }
+    let keys = crate::reads::Keys::of(ed);
     ed.events.jobs().spawn(move || {
         let (mut ok, mut unread) = (Vec::new(), Vec::new());
         for p in &paths {
-            match file_in(&root, p) {
+            match file_in(&root, p, &keys) {
                 Ok(p) if !ok.contains(&p) => ok.push(p),
                 Ok(_) => {}
                 Err(e) => unread.push(e),
@@ -1804,7 +1828,8 @@ pub fn search_schema() -> Value {
     (ripgrep's engine). Use it over Grep for finding code and text in the project. Hits come by file then line, each \
     with its line of code (and context lines around it if you ask), capped and said so — narrow with path \
     or glob, or page with offset. Smart case: an all-lowercase pattern matches any case. Skips what \
-    .gitignore skips; hidden files are searched. Inside the project only. For where a function, type or \
+    .gitignore skips; hidden files are searched — files named like keys (.env, *.pem) only once Read was let \
+    read them. Inside the project only. For where a function, type or \
     variable is used, references is better (the language server's, not text).",
         "inputSchema": {
             "type": "object",
@@ -1880,8 +1905,9 @@ pub fn search(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     // Unsaved buffers aren't what's on disk — said, when they're in what's searched
     let unsaved: Vec<PathBuf> =
         ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
+    let keys = crate::reads::Keys::of(ed);
     ed.events.jobs().spawn(move || {
-        let r = run_search(&root, path.as_deref(), &q, &unsaved);
+        let r = run_search(&root, path.as_deref(), &q, &unsaved, &keys);
         move |ed: &mut Editor| answer(ed, call, r)
     });
     Ok(())
@@ -1895,13 +1921,25 @@ struct Row {
     text: String,
 }
 
-/// The search on a worker → the answer's text.
-fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -> Result<String, String> {
+/// The search on a worker → the answer's text. A file named like a key Claude hasn't been let read
+/// (`reads::Keys`) isn't in it, hits or names — and isn't counted either: whether it had hits says what's in
+/// it (a pattern a character longer each time reads a key out). The tool's description says it once.
+fn run_search(
+    root: &Path,
+    path: Option<&str>,
+    q: &Query,
+    unsaved: &[PathBuf],
+    keys: &crate::reads::Keys,
+) -> Result<String, String> {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let scope = match path {
         Some(p) => crate::paths::existing_inside(&root, &root.join(p), p, "search looks inside it only")?,
         None => root.clone(),
     };
+    if scope.is_file() && keys.shut(&scope) {
+        return Err(crate::reads::key_left_out(&rel(&root, &scope)));
+    }
+    let shut = |f: &crate::grep::File| keys.shut(&root.join(&f.rel));
     let query = crate::grep::Query {
         pattern: &q.pattern,
         literal: q.literal,
@@ -1931,6 +1969,9 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
             let mut files: BTreeMap<String, Vec<Row>> = BTreeMap::new();
             let mut hits = 0;
             let warn = search(&mut |f| {
+                if shut(&f) {
+                    return true;
+                }
                 hits += f.hits;
                 let rows = f.rows.into_iter().map(|r| Row {
                     line: r.line,
@@ -1951,7 +1992,9 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
             let mut rows: Vec<String> = Vec::new();
             let counts = q.output == Output::Count;
             let warn = search(&mut |f| {
-                rows.push(if counts { format!("{}:{}", f.rel, f.hits) } else { f.rel });
+                if !shut(&f) {
+                    rows.push(if counts { format!("{}:{}", f.rel, f.hits) } else { f.rel });
+                }
                 true
             })?;
             if rows.is_empty() {
@@ -2272,12 +2315,13 @@ mod tests {
             DefAsk::new(Call::test(0), "Drop".into(), Goto::Implementation, None, vec![], vec!["ra".into()]);
         a.found = outside.iter().map(|p| (PathBuf::from(p), 9, String::new())).collect();
         let open = HashMap::new();
-        let text = defs_text(Path::new("/p"), &a, "ra", &open);
+        let text =
+            defs_text(Path::new("/p"), &a, "ra", &open, &crate::reads::Keys::none_opened(Path::new("/p")));
         assert!(text.starts_with("3 implementations (ra):\n/h/.cargo/"), "all outside: listed — {text}");
         assert!(text.contains("  10: (outside the project — not read)"), "{text}");
         a.found.push((PathBuf::from("/p/a.rs"), 2, String::new()));
         assert_eq!(
-            defs_text(Path::new("/p"), &a, "ra", &open),
+            defs_text(Path::new("/p"), &a, "ra", &open, &crate::reads::Keys::none_opened(Path::new("/p"))),
             "1 implementation (ra); 3 more outside the project (hashbrown 2, std 1), not listed:\na.rs\n  3:"
         );
     }
@@ -2495,6 +2539,50 @@ mod tests {
         assert_eq!(at(ns[1], Goto::Implementation), None);
     }
 
+    /// 7c: tarae's tools are Claude's without asking (`chat::ALLOWED`), so a file in the project named like a
+    /// key stays out of them until Claude was let read it (`reads::Keys`, the Read card's or the run's panel's
+    /// grant): the search has neither its lines nor its name, in any output, and doesn't count it — a search
+    /// that matches only in it says what one matching nothing does (else a pattern a character longer each
+    /// time would read it out); naming it is refused, as the tools that take a file (`file_in`) refuse it.
+    /// Opened, it's searched like any file.
+    #[test]
+    fn search_and_the_file_tools_leave_a_key_out_until_opened() {
+        let dir = std::env::temp_dir().join(format!("tarae-nav-keys-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let env = dir.join(".env");
+        std::fs::write(&env, "alpha=tarae-fake-token\n").unwrap();
+        std::fs::write(dir.join("a.rs"), "let alpha = 1;\n").unwrap();
+        let q = |pattern: &str, output: Output| Query {
+            pattern: pattern.into(),
+            literal: false,
+            case: Case::Smart,
+            globs: Vec::new(),
+            context: 0,
+            output,
+            offset: 0,
+            tests: true,
+        };
+        let (shut, open) = (crate::reads::Keys::none_opened(&dir), crate::reads::Keys::none_opened(&dir));
+        let open = open.opening(env.clone());
+        for output in [Output::Lines, Output::Files, Output::Count] {
+            let text = run_search(&dir, None, &q("alpha", output), &[], &shut).unwrap();
+            assert!(text.contains("a.rs") && !text.contains(".env") && !text.contains("fake"), "{text}");
+            let text = run_search(&dir, None, &q("alpha", output), &[], &open).unwrap();
+            assert!(text.contains(".env"), "opened: {text}");
+        }
+        let only_there = run_search(&dir, None, &q("fake-token", Output::Count), &[], &shut);
+        let nowhere = run_search(&dir, None, &q("nowhere", Output::Count), &[], &shut);
+        assert_eq!(only_there.unwrap().replace("fake-token", "nowhere"), nowhere.unwrap(), "not counted");
+        let named = run_search(&dir, Some(".env"), &q("alpha", Output::Lines), &[], &shut).unwrap_err();
+        assert!(named.contains(".env is named like a key") && named.contains("Read asks"), "{named}");
+        assert!(file_in(&dir, &env, &shut).unwrap_err().contains("named like a key"));
+        assert_eq!(file_in(&dir, &env, &open), Ok(env.clone()));
+        assert_eq!(file_in(&dir, &dir.join("a.rs"), &shut), Ok(dir.join("a.rs")), "the rest as before");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The search itself (in-process — rg or not): smart case, a glob, a folder, context, hidden files in
     /// and `.gitignore`d out; outside the project refused; an unsaved buffer said.
     #[test]
@@ -2521,36 +2609,68 @@ mod tests {
             offset: 0,
             tests: true,
         };
-        let text = run_search(&dir, None, &q("alpha"), &[]).unwrap();
+        let text = run_search(&dir, None, &q("alpha"), &[], &crate::reads::Keys::none_opened(&dir)).unwrap();
         assert!(text.starts_with("4 matching lines in 3 files:"), "{text}");
         assert!(text.contains(".github/ci.yml\n  1: alpha: ci"), "hidden files are searched: {text}");
         assert!(!text.contains("ignored"), ".gitignore'd: {text}");
         assert!(text.contains("src/a.rs\n  1: fn Alpha() {}\n  2: let alpha = 1;"), "{text}");
-        let text = run_search(&dir, None, &q("Alpha"), &[]).unwrap();
+        let text = run_search(&dir, None, &q("Alpha"), &[], &crate::reads::Keys::none_opened(&dir)).unwrap();
         assert!(
             text.starts_with("1 matching line in 1 file:"),
             "an uppercase letter: case as written — {text}"
         );
-        let text = run_search(&dir, Some("src"), &q("alpha"), &[]).unwrap();
+        let text =
+            run_search(&dir, Some("src"), &q("alpha"), &[], &crate::reads::Keys::none_opened(&dir)).unwrap();
         assert!(text.starts_with("2 matching lines in 1 file:\nsrc/a.rs"), "only in the folder: {text}");
-        let text = run_search(&dir, Some("src"), &Query { context: 1, ..q("let") }, &[]).unwrap();
+        let text = run_search(
+            &dir,
+            Some("src"),
+            &Query { context: 1, ..q("let") },
+            &[],
+            &crate::reads::Keys::none_opened(&dir),
+        )
+        .unwrap();
         assert_eq!(
             text,
             "1 matching line in 1 file:\nsrc/a.rs\n  1- fn Alpha() {}\n  2: let alpha = 1;\n  3- // x"
         );
-        let text = run_search(&dir, None, &Query { globs: vec!["*.md".into()], ..q("alpha") }, &[]).unwrap();
+        let text = run_search(
+            &dir,
+            None,
+            &Query { globs: vec!["*.md".into()], ..q("alpha") },
+            &[],
+            &crate::reads::Keys::none_opened(&dir),
+        )
+        .unwrap();
         assert!(text.starts_with("1 matching line in 1 file:\nnotes.md"), "{text}");
-        let text = run_search(&dir, None, &Query { output: Output::Count, ..q("alpha") }, &[]).unwrap();
+        let text = run_search(
+            &dir,
+            None,
+            &Query { output: Output::Count, ..q("alpha") },
+            &[],
+            &crate::reads::Keys::none_opened(&dir),
+        )
+        .unwrap();
         assert!(
             text.starts_with("4 matching lines in 3 files:\n.github/ci.yml:1\nnotes.md:1\nsrc/a.rs:2"),
             "{text}"
         );
-        let text = run_search(&dir, None, &Query { literal: true, ..q("a.rs(") }, &[]).unwrap();
+        let text = run_search(
+            &dir,
+            None,
+            &Query { literal: true, ..q("a.rs(") },
+            &[],
+            &crate::reads::Keys::none_opened(&dir),
+        )
+        .unwrap();
         assert_eq!(text, "no matches for `a.rs(`");
-        let e = run_search(&dir, Some(".."), &q("alpha"), &[]).unwrap_err();
+        let e = run_search(&dir, Some(".."), &q("alpha"), &[], &crate::reads::Keys::none_opened(&dir))
+            .unwrap_err();
         assert!(e.contains("outside the project"), "{e}");
         let unsaved = [std::fs::canonicalize(dir.join("src/a.rs")).unwrap()];
-        let text = run_search(&dir, Some("src"), &q("alpha"), &unsaved).unwrap();
+        let text =
+            run_search(&dir, Some("src"), &q("alpha"), &unsaved, &crate::reads::Keys::none_opened(&dir))
+                .unwrap();
         assert!(
             text.ends_with("(unsaved edits in src/a.rs aren't searched — what's here is from disk)"),
             "{text}"
@@ -2563,7 +2683,7 @@ mod tests {
             "fn beta() {}\n#[cfg(test)]\nmod tests {\n    fn beta2() {}\n}\n",
         )
         .unwrap();
-        let text = run_search(&dir, None, &q("beta"), &[]).unwrap();
+        let text = run_search(&dir, None, &q("beta"), &[], &crate::reads::Keys::none_opened(&dir)).unwrap();
         let rust =
             crate::syntax::spec("rust").is_some_and(|s| crate::syntax::Loader::global().load(s).is_ok());
         let want = if rust {
@@ -2574,7 +2694,14 @@ mod tests {
              4:     fn beta2() {}\nin test code:\ntests/t.rs\n  1: fn beta() {}"
         };
         assert_eq!(text, want);
-        let text = run_search(&dir, None, &Query { tests: false, ..q("beta") }, &[]).unwrap();
+        let text = run_search(
+            &dir,
+            None,
+            &Query { tests: false, ..q("beta") },
+            &[],
+            &crate::reads::Keys::none_opened(&dir),
+        )
+        .unwrap();
         assert!(text.starts_with("1 matching line in 1 file; "), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2644,7 +2771,7 @@ mod tests {
             tests: true,
         };
         let t0 = std::time::Instant::now();
-        let text = run_search(root, None, &q, &[]).unwrap();
+        let text = run_search(root, None, &q, &[], &crate::reads::Keys::none_opened(root)).unwrap();
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(text.contains("in test code, listed last"), "{}", text.lines().next().unwrap_or_default());
         let line = format!("PERF search_wide_with_test_code_ms {ms:.3} budget=3000 noise=100\n");

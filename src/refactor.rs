@@ -585,8 +585,9 @@ pub fn rename(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let new_name = new_name.to_string();
     let root = nav::project_root(ed);
     let spot = nav::spot_of(&root, args)?;
+    let keys = crate::reads::Keys::of(ed);
     ed.events.jobs().spawn(move || {
-        let file = nav::file_in(&root, &spot.path);
+        let file = nav::file_in(&root, &spot.path, &keys);
         move |ed: &mut Editor| match file {
             Ok(path) => rename_at(ed, call, Spot { path, ..spot }, new_name),
             Err(e) => answer(ed, call, Err(e)),
@@ -745,11 +746,11 @@ pub fn renamed(ed: &mut Editor, n: u64, result: Result<&Value, &Value>) {
         .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
         .filter(|(p, _)| per.iter().any(|(q, _)| q == p))
         .collect();
-    let root = nav::project_root(ed);
+    let (root, keys) = (nav::project_root(ed), crate::reads::Keys::of(ed));
     let what = format!("rename `{}` → `{}`", a.word, a.new_name);
     let call = a.call;
     ed.events.jobs().spawn(move || {
-        let files = file_changes(&root, per, &open, enc);
+        let files = file_changes(&root, per, &open, enc, &keys);
         move |ed: &mut Editor| match files {
             Ok(files) => land(ed, call, what, "place", files, String::new()),
             Err(e) => answer(ed, call, Err(e)),
@@ -827,12 +828,14 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
 }
 
 /// Each file's text before (the open buffer's, else disk) and after `per`'s edits — on a worker. Err: a file
-/// outside the project (the whole change is refused, said which), or one that can't be read.
+/// outside the project (the whole change is refused, said which), or one that can't be read — or one named
+/// like a key Claude hasn't been let read (`reads::Keys`; refused whole too: its change would show its text).
 fn file_changes(
     root: &Path,
     per: Vec<(PathBuf, Vec<Value>)>,
     open: &HashMap<PathBuf, Rope>,
     enc: Encoding,
+    keys: &crate::reads::Keys,
 ) -> Result<Vec<FileChange>, String> {
     let real_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let mut out: Vec<FileChange> = Vec::new();
@@ -842,6 +845,10 @@ fn file_changes(
             outside.push(path.display().to_string());
             continue;
         };
+        if keys.shut(&real) {
+            let left_out = crate::reads::key_left_out(&nav::rel(&real_root, &real));
+            return Err(format!("this change reaches a file named like a key — refused whole: {left_out}"));
+        }
         if let Some(f) = out.iter_mut().find(|f| f.path == real) {
             f.after = crate::editdiff::apply_edits(&f.after, &edits, enc);
             f.places += edits.len();
@@ -945,8 +952,9 @@ pub fn replace(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> 
         ed.docs.iter().filter_map(|d| Some((d.path.clone()?, d.text.clone()))).collect();
     let unsaved: Vec<PathBuf> =
         ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
+    let keys = crate::reads::Keys::of(ed);
     ed.events.jobs().spawn(move || {
-        let r = plan(&root, &q, &re, &open, &unsaved);
+        let r = plan(&root, &q, &re, &open, &unsaved, &keys);
         move |ed: &mut Editor| match r {
             Ok(Planned::Preview(text)) => answer(ed, call, Ok(text)),
             Ok(Planned::Apply(files, note)) => {
@@ -980,13 +988,15 @@ enum Planned {
 }
 
 /// On a worker: the files with matches (the project search), each one's text after — an open buffer's text
-/// is what's replaced in — and the preview, or the change set (refused past `max_files`).
+/// is what's replaced in — and the preview, or the change set (refused past `max_files`). Not a file named
+/// like a key Claude hasn't been let read (`reads::Keys`), nor counted — as the search (`nav::run_search`).
 fn plan(
     root: &Path,
     q: &Replace,
     re: &regex::Regex,
     open: &HashMap<PathBuf, Rope>,
     unsaved: &[PathBuf],
+    keys: &crate::reads::Keys,
 ) -> Result<Planned, String> {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let scope = match &q.path {
@@ -1007,7 +1017,9 @@ fn plan(
     // Per file, its matching lines (from 0)
     let mut found: Vec<(String, Vec<usize>)> = Vec::new();
     let warn = crate::grep::search(&root, Some(&scope), &query, &|| false, &mut |f| {
-        found.push((f.rel, f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
+        if !keys.shut(&root.join(&f.rel)) {
+            found.push((f.rel, f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
+        }
         true
     })?;
     crate::sorting::sort(&mut found);
@@ -1131,6 +1143,58 @@ fn preview(q: &Replace, files: &[FileChange], over: bool) -> String {
 mod tests {
     use super::*;
 
+    /// 7c: a file in the project named like a key isn't Claude's to change through these tools until it was let
+    /// read it (`reads::Keys`) — its change would show its text. A replace leaves it out, uncounted (its
+    /// preview of a match only there says what one matching nothing does), and changes it once opened; a
+    /// rename that reaches it is refused whole, naming it.
+    #[test]
+    fn a_key_named_file_is_out_of_replace_and_rename_until_opened() {
+        let dir = std::env::temp_dir().join(format!("tarae-refactor-keys-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let env = dir.join(".env");
+        std::fs::write(&env, "alpha=tarae-fake-token\n").unwrap();
+        std::fs::write(dir.join("a.rs"), "let alpha = 1;\n").unwrap();
+        let q = |pattern: &str, preview: bool| Replace {
+            pattern: pattern.into(),
+            replacement: "beta".into(),
+            literal: true,
+            case: crate::grep::Case::Sensitive,
+            globs: Vec::new(),
+            path: None,
+            preview,
+            max_files: MAX_FILES,
+        };
+        let shut = crate::reads::Keys::none_opened(&dir);
+        let open = shut.clone().opening(env.clone());
+        let none = HashMap::new();
+        let plan_of =
+            |q: Replace, keys: &crate::reads::Keys| plan(&dir, &q, &regex_of(&q).unwrap(), &none, &[], keys);
+        let changed = |p: Result<Planned, String>| match p {
+            Ok(Planned::Apply(files, _)) => files.iter().map(|f| f.rel.clone()).collect::<Vec<_>>(),
+            Ok(Planned::Preview(t)) | Err(t) => panic!("{t}"),
+        };
+        assert_eq!(changed(plan_of(q("alpha", false), &shut)), ["a.rs"]);
+        assert_eq!(changed(plan_of(q("alpha", false), &open)), [".env", "a.rs"], "opened");
+        let preview = |p: Result<Planned, String>| match p {
+            Ok(Planned::Preview(t)) => t,
+            _ => panic!("a preview"),
+        };
+        let only_there = preview(plan_of(q("fake-token", true), &shut));
+        assert_eq!(only_there.replace("fake-token", "nowhere"), preview(plan_of(q("nowhere", true), &shut)));
+        let edit = json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+            "newText": "beta"}]);
+        let per = vec![
+            (dir.join("a.rs"), edit.as_array().unwrap().clone()),
+            (env.clone(), edit.as_array().unwrap().clone()),
+        ];
+        let e = file_changes(&dir, per.clone(), &none, Encoding::Utf8, &shut).err().unwrap();
+        assert!(e.contains("refused whole") && e.contains(".env is named like a key"), "{e}");
+        assert_eq!(file_changes(&dir, per, &none, Encoding::Utf8, &open).map(|f| f.len()), Ok(2), "opened");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A literal replace puts its text in as written (`$1` too) and matches its pattern's characters only;
     /// a regex's `.` is any character and `$1` a group; case is as written unless asked; an open buffer's
     /// text is what's replaced in; a broken regex is said.
@@ -1158,6 +1222,7 @@ mod tests {
             &regex_of(&q).unwrap(),
             open,
             &[],
+            &crate::reads::Keys::none_opened(&dir),
         ) {
             Ok(Planned::Apply(files, _)) => {
                 files.iter().map(|f| f.after.to_string()).collect::<Vec<_>>().join("|")

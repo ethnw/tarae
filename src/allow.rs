@@ -685,6 +685,34 @@ pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Sc
     ed.set_success(format!("Claude may read {shown} in this project — :sandbox-allowed lists it"));
 }
 
+/// `a`/`A` on a read card naming files in the project named like keys (`reads.rs`): Claude may read `keys`
+/// (real paths), and its commands too — `Grant::Key`, the one the run's panel gives — for the rest of this
+/// conversation, or always in this project (kept on a worker) — said in a toast.
+pub fn grant_keys(ed: &mut crate::editor::Editor, keys: &[PathBuf], scope: Scope) {
+    if scope == Scope::Once || keys.is_empty() {
+        return;
+    }
+    let grants: Vec<Grant> = keys.iter().map(|k| Grant::Key(k.clone())).collect();
+    if let Some(c) = ed.session.chat.as_mut() {
+        grants.iter().for_each(|g| c.allowed.add(g));
+    }
+    let shown = keys.iter().map(|k| tilde(k)).collect::<Vec<_>>().join(", ");
+    let when = match scope {
+        Scope::Always => "in this project, until they take it back",
+        _ => "for the rest of this conversation",
+    };
+    // (Claude's read was answered; that its commands may read it too is news to it — as `grant` says)
+    let tell = format!("The user let you and your commands read {shown}, named like a key — {when}.");
+    ed.session.checkpoints.tell.push(tell);
+    if scope == Scope::ThisChat {
+        return ed.set_success(format!("Claude and its commands may read {shown} in this conversation"));
+    }
+    keep_later(ed, move |a| grants.iter().for_each(|g| a.add(g)));
+    ed.set_success(format!(
+        "Claude and its commands may read {shown} in this project — :sandbox-allowed lists it"
+    ));
+}
+
 /// `a`/`A` on a card about what the sandbox blocked: Claude's commands may do `g` for the rest of this
 /// conversation, or always in this project — and Claude hears it with the next message.
 pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {

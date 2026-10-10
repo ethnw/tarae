@@ -8156,6 +8156,122 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 7c: Claude's Read of a file in the project named like a key (`runtime/secret-names.txt`) asks on the
+    /// read card, as a run can't read it either (7a/7b); an exception (`!.env.example`) and a file the run's
+    /// panel opened (`Grant::Key`) are read unasked, and `a` opens it for the chat's reads and runs alike —
+    /// one grant. A Grep over a folder asks once, naming the keys it would search (not those opened, nor one
+    /// below tools' output) and what else there looks like a token; a glob that leaves them out, and a Glob
+    /// (names only), don't ask. `A` keeps the grant for the project, and its next Grep goes unasked. Claude is
+    /// told its commands may read what it opened. Nothing is read here: the fake claude only asks, and its
+    /// paths are this test's own temp folder.
+    #[test]
+    fn reading_a_key_named_file_in_the_project_asks() {
+        use crate::reads::KEYS_TITLE;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-key-reads-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for d in ["src/tls", "deploy", "node_modules/pkg"] {
+            std::fs::create_dir_all(dir.join("project").join(d)).unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let project = dir.join("project");
+        let (env, tls, pem) =
+            (project.join(".env"), project.join("src/tls/server.key"), project.join("deploy/prod.pem"));
+        for f in [".env.example", "src/main.rs", "node_modules/pkg/test.key"].map(|f| project.join(f)) {
+            std::fs::write(f, "x\n").unwrap();
+        }
+        for f in [&env, &tls, &pem] {
+            std::fs::write(f, "x\n").unwrap();
+        }
+        std::fs::write(project.join("deploy/hosts.yml"), "oauth_token: tarae-fake-token\n").unwrap();
+        let store = dir.join("state/sandbox.json");
+        let mut ed = editor("");
+        ed.session.root = project.clone();
+        ed.allow_path = Some(store.clone());
+        let asks = [
+            ("Read", json!({"file_path": ".env.example"})),
+            ("Read", json!({"file_path": tls})),
+            ("Read", json!({"file_path": ".env"})),
+            ("Read", json!({"file_path": env})),
+            ("Grep", json!({"pattern": "TOKEN"})),
+            ("Grep", json!({"pattern": "TOKEN", "glob": "*.rs"})),
+            ("Glob", json!({"pattern": "**/*.pem"})),
+            ("Read", json!({"file_path": "deploy/prod.pem"})),
+            ("Grep", json!({"pattern": "TOKEN"})),
+        ];
+        let log = fake_tool_asks(&mut ed, &dir, &asks);
+        let answered = |ed: &mut Editor, id: &str| {
+            let quoted = format!("\"request_id\":\"{id}\"");
+            settle_until(ed, |_| std::fs::read_to_string(&log).unwrap_or_default().contains(&quoted));
+            permission_answer_to(&log, id)
+        };
+        // The card up, drawn, and in sight long enough for an answer — what it says and the screen
+        let card = |ed: &mut Editor| {
+            settle_until(ed, |ed| ed.offers.iter().any(|o| o.title == KEYS_TITLE));
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            (ed.offers[0].question.clone(), parser.screen().contents())
+        };
+        feed(&mut ed, "<space>l");
+        // (opened for this chat on the run's panel — `blocked::grant_answer`'s `a`)
+        crate::allow::grant(&mut ed, &crate::allow::Grant::Key(tls.clone()), crate::allow::Scope::ThisChat);
+        feed(&mut ed, "read them<ret>");
+        assert_eq!(answered(&mut ed, "p1")["behavior"], "allow", "an exception: unasked");
+        assert_eq!(answered(&mut ed, "p2")["behavior"], "allow", "opened on the run's panel: unasked");
+        let (q, s) = card(&mut ed);
+        assert!(q.starts_with(&env.display().to_string()) && q.contains("It's named like a key."), "{q}");
+        assert!(q.contains("a and A open it to its commands too"), "{q}");
+        assert!(s.contains("y Once") && s.contains("a This chat") && s.contains("A Always"), "{s}");
+        feed(&mut ed, "a");
+        assert_eq!(answered(&mut ed, "p3")["behavior"], "allow");
+        let allowed = ed.session.chat.as_ref().unwrap().allowed.clone();
+        assert_eq!(allowed.keys, [tls.clone(), env.clone()], "the runs' grant, not a read of a place");
+        assert!(allowed.read.is_empty(), "{allowed:?}");
+        let told = |ed: &Editor, k: &Path| {
+            let said = format!("you and your commands read {}", crate::allow::tilde(k));
+            ed.session.checkpoints.tell.iter().any(|t| t.contains(&said))
+        };
+        assert!(told(&ed, &env), "{:?}", ed.session.checkpoints.tell);
+        assert_eq!(answered(&mut ed, "p4")["behavior"], "allow", "opened by `a`: unasked");
+        let (q, _) = card(&mut ed);
+        let named = format!("searches {} and everything in it\nfor TOKEN", project.display());
+        assert!(
+            q.starts_with(&named) && q.contains("It opens files named like keys:\n    deploy/prod.pem\n\n"),
+            "{q}"
+        );
+        assert!(!q.contains(".env") && !q.contains("server.key") && !q.contains("test.key"), "{q}");
+        assert!(q.contains("deploy/hosts.yml holds a token-like line"), "its yes reads more: {q}");
+        feed(&mut ed, "n");
+        let a = answered(&mut ed, "p5");
+        assert_eq!(a["behavior"], "deny");
+        assert!(a["message"].as_str().unwrap().contains(&pem.display().to_string()), "{a}");
+        assert_eq!(answered(&mut ed, "p6")["behavior"], "allow", "a glob that leaves the keys out");
+        assert_eq!(answered(&mut ed, "p7")["behavior"], "allow", "Glob lists names only");
+        let (q, _) = card(&mut ed);
+        assert!(q.starts_with(&pem.display().to_string()), "{q}");
+        feed(&mut ed, "A");
+        assert_eq!(answered(&mut ed, "p8")["behavior"], "allow");
+        // Kept for the project (on a worker), not this chat's alone — and the search it held back goes now
+        let kept =
+            |p: &Path| crate::allow::Store::read(Some(&store)).get(&project).keys.contains(&p.to_path_buf());
+        settle_until(&mut ed, |_| kept(&pem));
+        assert!(!kept(&env), "`a` was this chat's");
+        assert!(told(&ed, &pem));
+        // (a later conversation: the project's grant alone lets it through)
+        let none = (crate::allow::Allowed::default(), crate::reads::Made::default());
+        let later = |f: &Path| {
+            let input = json!({"file_path": f});
+            crate::reads::decide("Read", &input, &project, Some(&store), false, &none.0, &none.1).1
+        };
+        assert!(later(&pem) && !later(&env));
+        assert_eq!(answered(&mut ed, "p9")["behavior"], "allow", "every key it'd read opened");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #81: what one of Claude's runs made this turn (a shot under the temp folder) is read unasked; what
     /// was there before it still asks; the turn over, its runs count no more. Nothing is read here: the fake
     /// claude only asks.

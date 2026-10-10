@@ -111,6 +111,22 @@ fn task_panel(ed: &mut Editor) {
     ed.session.task_run = Some(crate::task::Run::for_test(task));
 }
 
+/// Whether `test` (its name in this module) skips itself, saying why: it starts a terminal (`terminal`, or a
+/// scene of `SCENES` that does), which needs a real pty — and inside macOS's sandbox a pty's other end doesn't
+/// open (EPERM — `sandbox::TERMINALS`), as `terminal::tests` skip for.
+fn no_pty_here(test: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::sandbox::skipped_inside_for(
+        &format!("uistate::tests::{test}"),
+        "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = test;
+        false
+    }
+}
+
 /// A terminal whose program sits there (`sleep`) — it hangs up when the editor goes.
 fn terminal(ed: &mut Editor) {
     ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
@@ -326,6 +342,9 @@ fn mismatches(scenes: &[Scene], model: impl Fn(&Editor) -> KeysTo) -> Vec<String
 /// The routing test: `keys_to` is `handle_key`'s chain — in every state, for every probe key.
 #[test]
 fn keys_to_is_where_handle_key_sends_every_key() {
+    if no_pty_here("keys_to_is_where_handle_key_sends_every_key") {
+        return;
+    }
     let off = mismatches(SCENES, Editor::keys_to);
     assert!(off.is_empty(), "{} of {}:\n{}", off.len(), SCENES.len() * PROBES.len(), off.join("\n"));
 }
@@ -335,6 +354,9 @@ fn keys_to_is_where_handle_key_sends_every_key() {
 /// either disagrees with `handle_key` for some probe.
 #[test]
 fn the_routing_test_sees_each_case_broken() {
+    if no_pty_here("the_routing_test_sees_each_case_broken") {
+        return;
+    }
     let main = |k: &KeysTo| k.chain.iter().position(|l| !l.shortcut).unwrap();
     let elsewhere = |ed: &Editor| {
         let mut k = ed.keys_to();
@@ -407,6 +429,9 @@ fn silent() -> Vec<String> {
 /// `C-` keys in the chat and the command line went nowhere; `:procs`' `s`/`r` with no row.
 #[test]
 fn no_key_is_refused_in_silence() {
+    if no_pty_here("no_key_is_refused_in_silence") {
+        return;
+    }
     let quiet = |k: &str, name: &str| match k {
         "<esc>" | "<C-w>" => true,
         "j" | "<C-d>" => [
@@ -442,6 +467,9 @@ fn no_key_is_refused_in_silence() {
 /// back (slip 3 was the one place they didn't).
 #[test]
 fn the_keys_always_go_somewhere_on_screen() {
+    if no_pty_here("the_keys_always_go_somewhere_on_screen") {
+        return;
+    }
     let mut hidden = Vec::new();
     for (name, setup) in SCENES {
         let mut ed = editor();
@@ -460,6 +488,9 @@ fn the_keys_always_go_somewhere_on_screen() {
 #[test]
 fn the_status_line_names_where_the_keys_go() {
     use crate::chrome::Keys;
+    if no_pty_here("the_status_line_names_where_the_keys_go") {
+        return;
+    }
     let mut ed = editor();
     ed.sidebar_show(crate::sidebar::Mode::Outline);
     ed.mode = Mode::Insert;
@@ -504,6 +535,9 @@ fn slip_1_a_y_meant_for_a_card_goes_to_the_chat_input() {
 /// the keys from tarae's keys on its panel — and so does the status line (`i type in it`).
 #[test]
 fn slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel() {
+    if no_pty_here("slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel") {
+        return;
+    }
     let mut ed = editor();
     terminal(&mut ed);
     frame(&mut ed);
