@@ -433,16 +433,35 @@ mod tests {
         let end = p.peer(a, libc::O_RDWR | libc::O_NONBLOCK).unwrap();
         let held = HashMap::from([(a, Held { master: false, slave: true })]);
         assert_eq!(p.settle(&held), 0);
-        let mut b = [0u8; 1];
-        // SAFETY: a buffer of ours, a descriptor we hold.
-        let r = unsafe { libc::read(end.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
-        let hung = r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EIO);
-        assert!(hung, "its other end hung up: {r} {}", io::Error::last_os_error());
+        hung_up(end.as_fd()).expect("its other end hung up");
         assert!(!p.known(a), "gone");
         let b = p.take_free().unwrap();
         assert_ne!(b, a);
         assert!(p.take_free().is_none(), "two of two");
         p.end();
+    }
+
+    /// Waits until `end`, a pty's other end, reads its end — hung up —, at most `HUNG_WAIT` (then why not). The
+    /// hang-up comes when tarae's master's last copy closes: a process another thread is spawning holds a copy of
+    /// every descriptor until it execs, so dropping the master may hang the pty up only a moment later.
+    fn hung_up(end: BorrowedFd) -> Result<(), String> {
+        const HUNG_WAIT: Duration = Duration::from_secs(10);
+        let mut fl = libc::pollfd { fd: end.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: a struct of ours, a descriptor we hold.
+        let ready = unsafe { libc::poll(&mut fl, 1, HUNG_WAIT.as_millis() as libc::c_int) };
+        match ready {
+            0 => return Err(format!("not hung up within {HUNG_WAIT:?}")),
+            ..0 => return Err(format!("poll: {}", io::Error::last_os_error())),
+            _ => {}
+        }
+        let mut b = [0u8; 1];
+        // SAFETY: a buffer of ours, a descriptor we hold.
+        let r = unsafe { libc::read(end.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
+        let e = io::Error::last_os_error();
+        match r == 0 || e.raw_os_error() == Some(libc::EIO) {
+            true => Ok(()),
+            false => Err(format!("read {r}: {e}")),
+        }
     }
 
     #[test]
