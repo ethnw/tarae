@@ -1,0 +1,21 @@
+// A stream as claude -p sends it to a subscription session near its weekly limit — written by hand for
+// `limits/tests.rs` (lines starting `//` are skipped). The shapes are the fields the user's live check L2
+// (2026-10-10, its own run outside the project) printed and shared, as target/sb/apibill-design.md §2 "Seen
+// live (L2)" records them; where a shape needs more than was shared, the value is made up. Ids are stand-ins.
+//
+// 1. `system/init` — shape from Claude Code's SDK types (sdk-ts-sdk.d.ts, SDKSystemMessage); `apiKeySource`
+//    "none" as L2 printed it. `model`, `claude_code_version`: made up.
+// 2. `rate_limit_event` — `rate_limit_info`'s fields as L2 printed them: `status` allowed_warning, `rateLimitType`
+//    seven_day, `utilization` 0.92 (a fraction), `surpassedThreshold` 0.75, `isUsingOverage` false. `resetsAt`:
+//    made up (L2's wasn't shared) — the same instant as line 3's `resets_at`, in seconds. `unifiedWindows`: L2
+//    printed the name only, undeclared in sdk-ts-sdk.d.ts; its contents here are made up.
+// 3. The `control_response` to `get_usage` (asked as `u` in L2) — fields as L2 printed them: `subscription_type`
+//    max, `rate_limits_available` true, `five_hour` {utilization 0}, `seven_day` {utilization 93 (a percent),
+//    resets_at 2026-10-13T01:00Z}, `seven_day_opus` and `seven_day_sonnet` null. `five_hour`'s `resets_at`: made up
+//    (null). `seven_day_breakdown`: L2 printed rows of it, undeclared; their contents here are made up.
+//    `behaviors` null as `skip_behaviors` makes it (sdk-ts-sdk.d.ts).
+// 4. The turn's `result` — shape from the SDK types (SDKResultSuccess); every value made up.
+{"type":"system","subtype":"init","session_id":"stand-in-session","apiKeySource":"none","model":"stand-in-model","claude_code_version":"stand-in"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1791853200,"rateLimitType":"seven_day","utilization":0.92,"surpassedThreshold":0.75,"isUsingOverage":false,"unifiedWindows":{"made_up":1}},"uuid":"stand-in-uuid-1","session_id":"stand-in-session"}
+{"type":"control_response","response":{"subtype":"success","request_id":"u","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":93,"resets_at":"2026-10-13T01:00:00+00:00"},"seven_day_opus":null,"seven_day_sonnet":null,"seven_day_breakdown":[{"made_up":1}]},"behaviors":null}}}
+{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"stand-in-session","total_cost_usd":0.001,"usage":{"input_tokens":3,"output_tokens":1}}

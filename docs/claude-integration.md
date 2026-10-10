@@ -1120,16 +1120,24 @@ over the same stream as the conversation, so no server or port is involved.
 
 ### What it costs
 
-The last row of the chat says how warm Claude's prompt cache is and what the conversation costs:
+The last row of the chat says how warm Claude's prompt cache is, where your plan's weekly limit stands, and what
+the conversation costs:
 
 ```
-● warm until 14:32  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k in 18 out 185
+● warm until 14:32  weekly 93 % · resets Tue 10:00  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k in 18 out 185
 ```
 
 The cost is what claude reports (`total_cost_usd`): the API price by Claude Code's own table. On a subscription
 that's not what you pay, so it's said as `≈ API` — in the chat's row, the session list — and once at the top of
 `:usage`, with the Claude Code version whose table it is.
 
+- **The weekly limit**: how much of your plan's weekly window is used and when it resets, as claude says it. It
+  shows once the session's own claude has said it runs on the plan. Either its `apiKeySource` is `none` (in its
+  answer to tarae's `initialize` as it starts, and again as each turn starts), or, before it says that, it sent a
+  `rate_limit_event` itself, which Claude Code sends to plan users only. So the row can have it before your first
+  message. In the warning colour when claude warns or from 80 %; `limit reached` when claude refuses. Not shown
+  while the session's claude runs on an API key (its limits aren't the plan's), before its claude has said which
+  credential it runs on, or when nothing has said where the window stands: never a guess.
 - **Cache**: warm until its TTL runs out, by the clock — 5 minutes or an hour from the last request that wrote
   or read it, as that request's cache write says; then `◦ cold`. Said as a time, it stays true while nothing
   redraws; the only frame while you're idle is the one when it turns cold. (`tarae state` says the seconds
@@ -1140,17 +1148,36 @@ that's not what you pay, so it's said as `≈ API` — in the chat's row, the se
 - **The last turn**: its cost, then its tokens read from the cache, written to it, sent as input and written out.
   Claude reports the cost as a whole; the four numbers are tokens, not dollars.
 
-When the chat is narrow the words fold first, then the split, then the context; the cache stays. The session list
-(`space W`) has a column with each session's cache and its total so far. `:usage` opens a buffer with a row per
-turn (time, model, input, cache write, cache read, output, hit rate, API price), the session's total, what every
-request in the conversation starts with (its first request: the system prompt, the tools, CLAUDE.md and the
-first message), and today's total across sessions. It updates as turns end.
+When the chat is narrow the words fold first, then the split, then the context; the cache stays. Near the weekly
+limit its reset outlasts the turn's cost and the context; otherwise it folds first. The session list (`space W`)
+has a column with each session's cache and its total so far. `:usage` opens a buffer with the plan's limits (each
+window claude has said: used, when it resets, as of when, and whether a `rate_limit_event` or `get_usage` said it),
+the credential the session's claude reported it runs on (`apiKeySource`; on an API key, Console is where billing
+is authoritative), a row per turn (time, model, input, cache write, cache read, output, hit rate, API price), the
+session's total, what every request in the conversation starts with (its first request: the system prompt, the
+tools, CLAUDE.md and the first message), and today's total across sessions. It updates as turns end and as
+limits come.
+
+**Where the limits come from.** Every claude says where one window stands as it starts, and when it changes (a
+`rate_limit_event`). For the rest, tarae asks the chat's claude `get_usage`, skipping its transcript scan, when no
+claude has said anything in the last 10 minutes: as the chat's claude starts, and when you open `:usage`. It's
+never asked twice while that claude hasn't answered. Claude
+Code marks `get_usage` experimental. An answer tarae can't read leaves the limits unknown, never guessed, and
+`:usage` and `tarae.log` say why. The limits are your account's, so any session's claude may say them and every
+session shows them. A window past its reset is unknown until something says it again. A reading that names no
+reset (a 5-hour window with nothing used) counts for 10 minutes, then is unknown too. A status claude gave for one
+period of a window (a warning, a refusal) never carries into the next.
+
+**Retries.** When a request fails and claude retries it (`system/api_retry`), the chat says so in one row that
+each retry updates: `API retry 2 of 10 — overloaded (529), next in 1s`.
 
 What claude doesn't send isn't guessed: another CLI's turn shows its counts as `not reported`, and a conversation
 continued from before tarae kept its cost says the first turn's cost wasn't reported (claude's total covers the
 whole conversation). The turns, the cost so far and the cache go with the conversation in `$state/chats/`, so a
-continued one picks up where it was. `tarae state` carries each session's usage, and `--watch usage` is told
-when a turn's result comes and when a cache goes cold.
+continued one picks up where it was. `tarae state` carries each session's usage and `key_source_seen` (the last
+`apiKeySource` its chat's claude reported), and the account's `limits` (each window by Claude Code's name:
+`percent`, `resets_at` and `seen_at` in unix ms, `status`, `from`). `--watch usage` is told when a turn's result
+comes, when a cache goes cold, and when the limits change (`limits`).
 
 ## Commit messages
 

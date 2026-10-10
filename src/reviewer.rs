@@ -326,8 +326,11 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             verdict_sync(ed);
         }
+        // (the account's limits, whichever claude says them)
+        StreamEv::Limits(report) => crate::limits::seen(ed, report),
         // (its words are its verdict, read whole at the end; the rest is the chat's business)
         StreamEv::Thinking
+        | StreamEv::Retry(_)
         | StreamEv::Thought(_)
         | StreamEv::Text(_)
         | StreamEv::ToolResult { .. }
@@ -335,7 +338,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         | StreamEv::Usage(_)
         | StreamEv::Conversation { .. }
         | StreamEv::Answered(_)
-        | StreamEv::Models(_)
+        | StreamEv::Initialized { .. }
         | StreamEv::Compaction(_)
         | StreamEv::Exit(_) => {}
     }
@@ -1348,7 +1351,7 @@ mod tests {
         let u = &ed.session.usage;
         let t = u.last_turn().expect("its turn");
         assert_eq!((t.conversation.as_str(), t.cost), ("reviewer", Some(0.12)));
-        let said = crate::usage::report("s", u, &[], crate::usage::now_ms());
+        let said = crate::usage::report("s", u, &ed.limits, &[], crate::usage::now_ms());
         assert!(said.contains("| reviewer · "), "said as the reviewer's in :usage: {said}");
         let conv = u.conv.as_ref().unwrap();
         assert_eq!((conv.id.as_str(), conv.cost_so_far), ("author-c1", Some(0.0)));

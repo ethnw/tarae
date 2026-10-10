@@ -596,6 +596,8 @@ pub struct Editor {
     pub claude_env: Option<crate::llm::Env>,
     /// What claude's environment leaves out has been said (`llm::env_told`): once since tarae started.
     pub claude_env_told: bool,
+    /// The plan's limits as any claude said them — the account's, not a session's (`limits.rs`).
+    pub limits: crate::limits::Limits,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
     pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
     /// What a run's policy reads of tarae's surroundings (`sandbox::Here`, on its worker) — `Here::now` unless a
@@ -795,6 +797,7 @@ impl Editor {
             claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
             claude_env: if cfg!(test) { Some(Default::default()) } else { None },
             claude_env_told: false,
+            limits: crate::limits::Limits::new(),
             run_clock: None,
             sandbox_here: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
@@ -4784,7 +4787,8 @@ mod tests {
         let text = ed.doc().text.to_string();
         for part in [
             "\n\nCosts are the API price, per Claude Code 2.1.288's own table — on a subscription, not what you \
-             pay.\n\n## Turns",
+             pay.\n\n## Plan limits",
+            "\n## Turns\n",
             "| time  | model     | input | cache write | cache read | output | hit | API price |",
             "| haiku 4.5 |    18 |        8.1k |       7.9k |    185 | 49% |    $0.018 |",
             "| total | 1 turn    |    18 |        8.1k |       7.9k |    185 | 49% |    $0.018 |",

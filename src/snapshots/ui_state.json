@@ -132,6 +132,7 @@
     "to": "edit-review",
     "under": null
   },
+  "limits": {},
   "mode": "normal",
   "panels": {
     "chat": null,

@@ -153,7 +153,14 @@ side git · 4 rows · in hand git:src/term.rs
   cards waiting, `rebasing n/m`, the reloaded `•`, and once its Claude compacted its
   conversation (`compaction.rs`), `compacted`: `count` since tarae started, the `last` one's `at_ms`, `trigger`
   (`auto` · `manual`), `pre_tokens`, `post_tokens`, and `unseen` (it came behind, not in front since). Claude's
+  level has only its own session's. `key_source_seen` (apibill): the last `apiKeySource` its chat's claude
+  reported (`none` · `apiKeyHelper` · `ANTHROPIC_API_KEY` · `/login managed key`) — absent before one; Claude's
   level has only its own session's.
+- **`limits`** (apibill, `limits.rs`) — the account's plan limits as any claude said them: each window known now
+  by Claude Code's name (`five_hour`, `seven_day`, `seven_day_<family>`, `seven_day:<model_scoped name>`) →
+  `percent` (whole), `resets_at` and `seen_at` (unix ms), `status` (`allowed` · `allowed_warning` · `rejected`,
+  or null: `get_usage` doesn't say), `from` (`rate_limit_event` · `get_usage`). A window past its reset is left
+  out. `{}` when nothing said.
 - **`cards`** — every card: up front, stacked behind it, or parked in a session behind.
   - `whose`: `claude` when `Offer::claudes`, else `tarae`.
   - `kind`: the `What` variant in kebab case.
@@ -334,6 +341,7 @@ A snapshot is one question. An event stream tells you about change without polli
 | `run` | id, `queued` · `started` · `waiting <what>` · `ended <how> <took>` | explicit, beside the `RunTrace` steps phase 0 already logs (and `Waiting::line`) |
 | `toast` | the toast | diff |
 | `procs` | processes `started`, `ended`; checks `found`, `over` — only when a look found something changed | explicit, at each `:procs` look (`procs_said`) |
+| `limits` (kind `usage`) | `limits` (above) — only when a reading changed what's known | explicit, at `limits::seen` |
 
 - **The diff:** after each batch of events, `uistate` compares a small summary (keys, card ids and revs,
   session `doing`, run states, toast ids) with the last one sent. That happens only while someone watches:

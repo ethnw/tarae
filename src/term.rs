@@ -9103,8 +9103,13 @@ fn draw_chat(
     let tabs_h = usize::from(!editor.sessions.is_empty());
     // ── What the conversation costs, under it all (once something was reported)
     let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
-    let usage_row =
-        usage_spans(&editor.session.usage, crate::usage::now_ms(), w, [accent, dim, faint, warn_fg]);
+    let usage_row = usage_spans(
+        &editor.session.usage,
+        &editor.limits,
+        crate::usage::now_ms(),
+        w,
+        [accent, dim, faint, warn_fg],
+    );
     let usage_h = usize::from(usage_row.is_some());
     // ── Message rows (filled from the bottom)
     // (tabs + title·divider + plan + divider·hint + usage)
@@ -9648,12 +9653,15 @@ fn draw_chat(
     }))
 }
 
-/// The chat's usage row: `● warm until 14:32  ctx 4% of 200k  turn ≈ API $0.0011  read 8.2k write 75 in 10
-/// out 30` — the widest form that fits in `w`, folding the split first, then the context, then the cost (the cache
-/// stays; said by the clock, so it's true however long nothing redraws). None: nothing reported in this
-/// conversation yet. Styles: accent, dim, faint, warning.
+/// The chat's usage row: `● warm until 14:32  weekly 93 % · resets Tue 10:00  ctx 4% of 200k  turn ≈ API $0.0011
+/// read 8.2k write 75 in 10 out 30` — the widest form that fits in `w`, folding the split first, then the context
+/// and the cost, then the weekly window's reset (the cache stays; both said by the clock, so true however long
+/// nothing redraws). The weekly window shows while claude runs on the plan (`limits::on_plan`), from claude's
+/// start — before any turn. None: nothing reported in this conversation yet, nor any limit. Styles: accent, dim,
+/// faint, warning.
 fn usage_spans(
     u: &crate::usage::Usage,
+    limits: &crate::limits::Limits,
     now_ms: u64,
     w: usize,
     [accent, dim, faint, warn]: [Style; 4],
@@ -9661,18 +9669,36 @@ fn usage_spans(
     use crate::markdown::Span;
     use crate::usage::{Cache, count, dollars, tokens, until};
     let sp = |text: String, style: Style| Span { text, style };
-    let conv = u.conv.as_ref()?;
-    let turn = u.turns.iter().rev().find(|t| t.conversation == conv.id);
-    if conv.last.is_none() && turn.is_none() {
+    let conv = u.conv.as_ref();
+    let turn = conv.and_then(|c| u.turns.iter().rev().find(|t| t.conversation == c.id));
+    let reported = conv.is_some_and(|c| c.last.is_some()) || turn.is_some();
+    let weekly = crate::limits::on_plan(u.key_source.as_deref(), u.plan_event)
+        .then(|| limits.get(crate::limits::WEEKLY, now_ms))
+        .flatten();
+    if !reported && weekly.is_none() {
         return None;
     }
     // Each part long and short (the cache has one form)
     let cache = |_long: bool| match u.cache(now_ms) {
+        _ if !reported => Vec::new(),
         Cache::Warm { left_ms, .. } => {
             vec![sp("● ".into(), accent), sp("warm until ".into(), faint), sp(until(now_ms + left_ms), dim)]
         }
         Cache::Cold { .. } => vec![sp("◦ ".into(), faint), sp("cold".into(), dim)],
         Cache::NotReported => vec![sp("cache not reported".into(), faint)],
+    };
+    // (the plan's weekly window: `weekly 93 % · resets Tue 10:00`, in the warning colour near its limit)
+    let limit = |long: bool| -> Vec<Span> {
+        let Some(r) = weekly else { return Vec::new() };
+        let shown = if crate::limits::pressing(r) { warn } else { dim };
+        let mut v = vec![
+            sp(format!("{} ", crate::limits::label(&r.window)), faint),
+            sp(crate::limits::used(r), shown),
+        ];
+        if let Some(at) = r.resets_at_ms.filter(|_| long) {
+            v.extend([sp(" · resets ".into(), faint), sp(crate::limits::resets(at), dim)]);
+        }
+        v
     };
     let context = |long: bool| -> Vec<Span> {
         match u.context() {
@@ -9686,7 +9712,8 @@ fn usage_spans(
                 v
             }
             Some((n, _)) => vec![sp("ctx ".into(), faint), sp(tokens(n), dim)],
-            None if long => vec![sp("ctx not reported".into(), faint)],
+            // (before a turn — the row there for the weekly window alone — nothing to say of it)
+            None if long && reported => vec![sp("ctx not reported".into(), faint)],
             None => Vec::new(),
         }
     };
@@ -9718,16 +9745,26 @@ fn usage_spans(
         }
         v
     };
-    // (the split's words go last — its letters are the hardest to read)
-    let tiers: [[Option<Vec<Span>>; 4]; 7] = [
-        [Some(cache(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
-        [Some(cache(false)), Some(context(true)), Some(cost(true)), Some(split(true))],
-        [Some(cache(false)), Some(context(false)), Some(cost(false)), Some(split(true))],
-        [Some(cache(false)), Some(context(false)), Some(cost(false)), Some(split(false))],
-        [Some(cache(false)), Some(context(false)), Some(cost(false)), None],
-        [Some(cache(false)), None, Some(cost(false)), None],
-        [Some(cache(false)), None, None, None],
+    // (the split's words go last — its letters are the hardest to read. Then, near the limit, the turn's cost and
+    // the context give way before the weekly window's reset — when it's back is what matters then; else the reset
+    // goes first)
+    let urgent = weekly.is_some_and(crate::limits::pressing);
+    let mut tiers: Vec<[Option<Vec<Span>>; 5]> = vec![
+        [Some(cache(true)), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
+        [Some(cache(false)), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
+        [Some(cache(false)), Some(limit(true)), Some(context(false)), Some(cost(false)), Some(split(true))],
+        [Some(cache(false)), Some(limit(true)), Some(context(false)), Some(cost(false)), Some(split(false))],
+        [Some(cache(false)), Some(limit(true)), Some(context(false)), Some(cost(false)), None],
     ];
+    if urgent {
+        tiers.push([Some(cache(false)), Some(limit(true)), Some(context(false)), None, None]);
+        tiers.push([Some(cache(false)), Some(limit(true)), None, None, None]);
+    } else {
+        tiers.push([Some(cache(false)), Some(limit(false)), Some(context(false)), Some(cost(false)), None]);
+        tiers.push([Some(cache(false)), Some(limit(false)), None, Some(cost(false)), None]);
+    }
+    tiers.push([Some(cache(false)), Some(limit(false)), None, None, None]);
+    tiers.push([Some(cache(false)), None, None, None, None]);
     let width = |v: &[Span]| v.iter().map(|s| s.text.width()).sum::<usize>();
     for tier in tiers {
         let groups: Vec<Vec<Span>> = tier.into_iter().flatten().filter(|g| width(g) > 0).collect();

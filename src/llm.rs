@@ -578,14 +578,16 @@ pub enum StreamEv {
     ToolResult { id: String, text: String, error: bool },
     /// claude asks the host something (`mcp_message` for tarae's own tools) — needs a `control_response`.
     Control { request_id: String, request: serde_json::Value },
-    /// The process's conversation (claude's `session_id`), the model it runs and Claude Code's version
-    /// (`system init`, None: not sent) — the chat resumes it later (`--resume`).
-    Conversation { id: String, model: String, version: Option<String> },
+    /// The process's conversation (claude's `session_id`), the model it runs, Claude Code's version and the
+    /// credential it reported it runs on (`apiKeySource` — `limits.rs`) (`system init`, None: not sent) — the
+    /// chat resumes it later (`--resume`).
+    Conversation { id: String, model: String, version: Option<String>, key_source: Option<String> },
     /// The model that wrote an answer (an assistant message's `message.model`, or a stream's
     /// `message_start`) — sent when it changes.
     Answered(String),
-    /// The models this claude offers (its answer to our `initialize`) — the chat's model picker.
-    Models(Vec<ModelInfo>),
+    /// Its answer to our `initialize`: the models it offers (the chat's model picker), and the credential it runs
+    /// on (`account.apiKeySource` — `limits.rs`; None: not said), known as it starts rather than with a turn.
+    Initialized { models: Vec<ModelInfo>, key_source: Option<String> },
     /// A request goes out (`system` `status: "requesting"`), when it was read (unix ms) — `usage.rs`.
     Requesting(u64),
     /// A request's usage, as a line reported it (`message_start`, `message_delta`, an assistant message).
@@ -594,6 +596,10 @@ pub enum StreamEv {
     Spent(crate::usage::Spent),
     /// claude compacting the conversation: begun, over, the compaction itself (`compaction.rs`).
     Compaction(crate::compaction::Ev),
+    /// Where the plan's limits stand — a `rate_limit_event`, or `get_usage`'s answer (`limits.rs`).
+    Limits(crate::limits::Report),
+    /// A request failed and claude retries it (`system/api_retry`).
+    Retry(crate::limits::Retry),
     /// End of a turn — final text or error (not logged in·stopped etc.).
     Done(Result<String, String>),
     /// The process exited (for the chat panel — last stderr line).
@@ -690,7 +696,11 @@ pub fn pump(
                             break;
                         }
                     }
-                    Some(e @ (StreamEv::Conversation { .. } | StreamEv::Models(_))) => {
+                    Some(
+                        e @ (StreamEv::Conversation { .. }
+                        | StreamEv::Initialized { .. }
+                        | StreamEv::Limits(_)),
+                    ) => {
                         if !send(e) {
                             break;
                         }
@@ -773,7 +783,8 @@ fn answered_by(ev: &serde_json::Value) -> Option<&str> {
     m.as_str().filter(|m| !m.is_empty() && !m.starts_with('<'))
 }
 
-/// What a line says about usage (`usage.rs` has what's where), read at `at_ms` — None: nothing.
+/// What a line says about usage (`usage.rs` has what's where), the plan's limits or a retry (`limits.rs`), read
+/// at `at_ms` — None: nothing.
 pub fn usage_line(ev: &serde_json::Value, at_ms: u64) -> Option<StreamEv> {
     use crate::usage::{Counts, Seen, Spent, Ttl};
     let seen = |id: Option<&serde_json::Value>, model: &serde_json::Value, u: &serde_json::Value| {
@@ -792,6 +803,8 @@ pub fn usage_line(ev: &serde_json::Value, at_ms: u64) -> Option<StreamEv> {
         "system" if ev["subtype"] == "status" && ev["status"] == "requesting" => {
             Some(StreamEv::Requesting(at_ms))
         }
+        "system" if ev["subtype"] == "api_retry" => crate::limits::of_retry(ev).map(StreamEv::Retry),
+        "rate_limit_event" => crate::limits::of_event(ev, at_ms).map(StreamEv::Limits),
         "stream_event" => {
             let e = &ev["event"];
             match e["type"].as_str()? {
@@ -858,7 +871,7 @@ pub fn with_tools(args: &[String], tools: &str, allowed: &str) -> Vec<String> {
     out
 }
 
-fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
+pub(crate) fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
     match ev["type"].as_str()? {
         "control_request" => Some(StreamEv::Control {
             request_id: ev["request_id"].as_str()?.to_string(),
@@ -884,9 +897,17 @@ fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
             id: ev["session_id"].as_str()?.to_string(),
             model: ev["model"].as_str().unwrap_or_default().to_string(),
             version: ev["claude_code_version"].as_str().filter(|v| !v.is_empty()).map(String::from),
+            key_source: ev["apiKeySource"].as_str().map(String::from),
         }),
         "control_response" if ev["response"]["request_id"] == "tarae-init" => {
-            Some(StreamEv::Models(ModelInfo::list(&ev["response"]["response"]["models"])))
+            let r = &ev["response"]["response"];
+            Some(StreamEv::Initialized {
+                models: ModelInfo::list(&r["models"]),
+                key_source: r["account"]["apiKeySource"].as_str().map(String::from),
+            })
+        }
+        "control_response" if ev["response"]["request_id"] == crate::limits::REQUEST_ID => {
+            Some(StreamEv::Limits(crate::limits::of_answer(&ev["response"], crate::usage::now_ms())))
         }
         "result" => {
             let text = ev["result"].as_str().unwrap_or_default().to_string();
@@ -1325,12 +1346,15 @@ fn start(
                 ed.session.usage.aside(s, "ask");
                 crate::usage::view_sync(ed);
             }),
+            // (the account's limits, whichever claude says them)
+            StreamEv::Limits(r) => Box::new(move |ed: &mut Editor| crate::limits::seen(ed, r)),
             // ask runs without tools, and its conversation isn't kept
             StreamEv::Requesting(_)
+            | StreamEv::Retry(_)
             | StreamEv::Usage(_)
             | StreamEv::Conversation { .. }
             | StreamEv::Answered(_)
-            | StreamEv::Models(_)
+            | StreamEv::Initialized { .. }
             | StreamEv::Tool { .. }
             | StreamEv::ToolResult { .. }
             | StreamEv::Control { .. }

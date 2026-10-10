@@ -63,6 +63,7 @@ impl Editor {
             l.root.clear();
             l.rebasing = None;
             l.compacted = None;
+            l.key_source = None;
         }
         // A reviewer — its own session's too — is how it goes and its counts, never its words: nothing of it
         // goes to the author until you send its findings (`space v s`), and its verdict never does

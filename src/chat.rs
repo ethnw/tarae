@@ -514,6 +514,11 @@ impl Chat {
         self.proc.is_some()
     }
 
+    /// A line to its claude — whether it went (not running: no).
+    pub(crate) fn to_claude(&self, line: String) -> bool {
+        self.proc.as_ref().is_some_and(|p| p.stdin.send(line).is_ok())
+    }
+
     /// A line of tarae's in the conversation — once, not again right under itself.
     pub(crate) fn note(&mut self, text: &str) {
         if self.msgs.last().is_none_or(|m| m.role != Role::Note || m.text != text) {
@@ -966,8 +971,9 @@ fn ensure_proc(ed: &mut Editor) {
     let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     // tarae's MCP server (the note tool) — registered before anything else is said
     let _ = stdin.send(llm::initialize_message(&["tarae"]));
-    // A fresh process has seen no file yet
+    // A fresh process has seen no file yet — and said no credential yet: the last one's may not be its
     c.sent.clear();
+    (ed.session.usage.key_source, ed.session.usage.plan_event) = (None, false);
     // (unique across chats too: a closed chat's process ending after a new chat's started isn't the new one's)
     static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     c.generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -982,6 +988,8 @@ fn ensure_proc(ed: &mut Editor) {
     {
         c.note(&said);
     }
+    // Where the plan's limits stand, unless a claude said it lately (`limits.rs`)
+    crate::limits::ask_chat(ed);
 }
 
 fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
@@ -1036,7 +1044,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::follow::on_tool(ed, &id, &name, &input, &look);
         }
         // Kept from the first question on — a tarae closed mid-turn still has it
-        StreamEv::Conversation { id, model, version } => {
+        StreamEv::Conversation { id, model, version, key_source } => {
             let new = c.conversation.as_deref() != Some(id.as_str());
             // (a process that didn't resume one began it: it has cost nothing before)
             match c.resume.is_none() {
@@ -1044,13 +1052,23 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 false => ed.session.usage.resumed(&id),
             }
             ed.session.usage.cli = version;
+            // (the credential it reported, each turn — `limits.rs`)
+            if key_source.is_some() {
+                ed.session.usage.key_source = key_source;
+            }
             c.conversation = Some(id);
             c.model = model;
             if new {
                 keep(ed);
             }
         }
-        StreamEv::Models(list) => c.models = list,
+        StreamEv::Initialized { models, key_source } => {
+            c.models = models;
+            // (the credential it runs on, as it starts — the first turn's `init` says it again)
+            if key_source.is_some() {
+                ed.session.usage.key_source = key_source;
+            }
+        }
         // What it costs (`usage.rs`) — a request going out changes nothing on screen yet
         StreamEv::Requesting(at) => {
             ed.session.usage.requesting(at);
@@ -1064,6 +1082,22 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::Answered(model) => c.model = model,
         StreamEv::Compaction(e) => crate::compaction::on_event(ed, e),
+        StreamEv::Limits(report) => {
+            // (its own claude's `rate_limit_event`: sent to plan users only — `limits::on_plan`)
+            if report.readings.iter().any(|r| r.from == crate::limits::Source::Event) {
+                ed.session.usage.plan_event = true;
+            }
+            crate::limits::seen(ed, report)
+        }
+        // (a retry said in place of the one before it — the turn's, not a row each)
+        StreamEv::Retry(r) => {
+            let said = r.said();
+            let retry = |m: &&mut Msg| m.role == Role::Note && m.text.starts_with(crate::limits::RETRY_SAID);
+            match c.msgs.last_mut().filter(retry) {
+                Some(m) => m.text = said,
+                None => c.msgs.push(Msg::new(Role::Note, said, "")),
+            }
+        }
         StreamEv::ToolResult { id, text, error } => {
             c.calls.retain(|k| k.id != id);
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it

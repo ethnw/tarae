@@ -588,6 +588,8 @@ pub struct UiState {
     pub gone: Vec<watch::Gone>,
     /// What `:procs` lists, as of its last look (#143 — every `procs::QUIET_EVERY`, each second while open).
     pub procs: ProcsState,
+    /// The plan's limits as claude said them, each window known now (`limits.rs`) — the account's.
+    pub limits: Vec<crate::limits::Reading>,
 }
 
 /// `:procs`' rows and the checks holding now, as of its last look.
@@ -744,6 +746,9 @@ pub struct SessionState {
     pub usage: Option<UsageState>,
     /// Its Claude's conversation compacted since tarae started (`compaction.rs`) — None: never.
     pub compacted: Option<crate::compaction::Compacted>,
+    /// The credential its chat's claude last reported (`apiKeySource`: `none`, `apiKeyHelper` … — `limits.rs`)
+    /// — None: none reported yet.
+    pub key_source: Option<String>,
 }
 
 /// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
@@ -1035,6 +1040,7 @@ impl Editor {
             front: is_front,
             usage: UsageState::of(&l.usage, now_ms),
             compacted: Some(l.compacted.clone()).filter(|c| c.count > 0),
+            key_source: l.usage.key_source.clone(),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1089,6 +1095,7 @@ impl Editor {
             runs: self.ui_runs(),
             gone: watch::recent(&self.ui_gone, GONE_SHOWN),
             procs: ProcsState::of(&self.procs),
+            limits: self.limits.known(now_ms).into_iter().cloned().collect(),
         }
     }
 
@@ -1239,6 +1246,9 @@ impl UiState {
                 if let Some(c) = &s.compacted {
                     v["compacted"] = c.json();
                 }
+                if let Some(k) = &s.key_source {
+                    v["key_source_seen"] = json!(k);
+                }
                 v
             })
             .collect();
@@ -1298,6 +1308,7 @@ impl UiState {
                 "id": g.id, "title": g.title, "how": g.how, "ago_ms": g.at.elapsed().as_millis() as u64,
             })).collect::<Vec<_>>(),
             "procs": self.procs.json(),
+            "limits": crate::limits::json(&self.limits.iter().collect::<Vec<_>>()),
         })
     }
 
@@ -1324,6 +1335,10 @@ impl UiState {
                 })
                 .collect();
             out.push(format!("sessions: {}", s.join("   ")));
+        }
+        if !self.limits.is_empty() {
+            let said: Vec<String> = self.limits.iter().map(crate::limits::said).collect();
+            out.push(format!("limits: {}", said.join("   ")));
         }
         for s in &self.sessions {
             if let Some(u) = &s.usage {

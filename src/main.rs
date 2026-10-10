@@ -63,6 +63,7 @@ mod labels;
 #[cfg(target_os = "linux")]
 mod landlock;
 mod languages;
+mod limits;
 mod llm;
 mod log;
 mod lsp;

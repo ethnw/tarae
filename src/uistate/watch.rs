@@ -173,6 +173,7 @@ fn kind_of(event: &str) -> &str {
         "turn" => "turns",
         "run" => "runs",
         "toast" => "toasts",
+        "limits" => "usage",
         other => other,
     }
 }
@@ -282,6 +283,17 @@ pub fn usage(ed: &mut Editor, what: &str) {
     ev["what"] = json!(what);
     ev["said"] = json!(said);
     ed.ui_said(ev);
+}
+
+/// Where the plan's limits stand changed (`limits.rs`) — for watchers of `usage`: the account's, so no session;
+/// said as the chat's row says the weekly window.
+pub fn limits(ed: &mut Editor) {
+    if !ed.ui_watch.watching() {
+        return;
+    }
+    let now = crate::usage::now_ms();
+    let said: Vec<String> = ed.limits.known(now).into_iter().map(crate::limits::said).collect();
+    ed.ui_said(json!({ "event": "limits", "limits": ed.limits.json(now), "said": said.join("   ") }));
 }
 
 /// After each frame (`uistate::after_frame`): the gone ring; then, while someone watches, what changed.

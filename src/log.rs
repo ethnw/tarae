@@ -148,6 +148,13 @@ pub fn clock(at: std::time::SystemTime) -> String {
     format!("{h:02}:{m:02}")
 }
 
+/// `Tue 10:00` — the local weekday and time of `at` (a plan window's reset: within a week).
+pub fn day_clock(at: std::time::SystemTime) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let tm = local_tm(at);
+    format!("{} {:02}:{:02}", DAYS[tm.tm_wday.rem_euclid(7) as usize], tm.tm_hour, tm.tm_min)
+}
+
 /// The local day `at` falls on (year, month, day).
 pub fn day(at: std::time::SystemTime) -> (i32, i32, i32) {
     let (y, mo, d, ..) = local(at);
@@ -155,15 +162,19 @@ pub fn day(at: std::time::SystemTime) -> (i32, i32, i32) {
 }
 
 fn local(at: std::time::SystemTime) -> (i32, i32, i32, i32, i32, i32) {
+    let tm = local_tm(at);
+    (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+fn local_tm(at: std::time::SystemTime) -> libc::tm {
     let secs = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let t = secs as libc::time_t;
     // SAFETY: localtime_r only writes the `tm` we own; a zeroed `tm` is a valid value to start from.
-    let tm = unsafe {
+    unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
         tm
-    };
-    (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
+    }
 }
 
 /// One line: `12:03:04  rust-analyzer  error  message` (multi-line text is indented under it).
@@ -184,6 +195,22 @@ pub fn line(source: &str, level: &str, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reset's day is said by its local weekday: seven days in a row are the seven names, each the one after
+    /// the day before's — whatever time zone the tests run in.
+    #[test]
+    fn a_day_clock_says_the_local_weekday() {
+        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        let start = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_791_853_200);
+        let names: Vec<String> = (0..8u64)
+            .map(|d| day_clock(start + std::time::Duration::from_secs(d * 86_400))[..3].to_string())
+            .collect();
+        let first = DAYS.iter().position(|d| *d == names[0]).expect("a weekday's name");
+        for (i, n) in names.iter().enumerate() {
+            assert_eq!(n, DAYS[(first + i) % 7], "{names:?}");
+        }
+        assert_eq!(day_clock(start).len(), "Tue 10:00".len());
+    }
 
     /// Captures under way at once each read their own lines — those since each began — and a test that panics
     /// mid-capture ends its capture as it unwinds: none is left under way keeping every later line, and with none

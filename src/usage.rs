@@ -345,6 +345,11 @@ pub struct Usage {
     pub watch: Option<u64>,
     /// The Claude Code version its chat's process runs (`system init`) — whose price table the costs are.
     pub cli: Option<String>,
+    /// The credential its chat's claude last reported it runs on (`system init`'s `apiKeySource` — `limits.rs`).
+    pub key_source: Option<String>,
+    /// Its chat's claude sent a `rate_limit_event` — which Claude Code sends to claude.ai plan users only
+    /// (`limits::on_plan`).
+    pub plan_event: bool,
     /// The turn under way compacted the conversation — its trigger, for its `Turn`.
     compacting: Option<String>,
 }
@@ -663,9 +668,74 @@ pub fn model_short(m: &str) -> String {
 
 // ── `:usage` ────────────────────────────────────────────────────────────────
 
-/// `:usage`'s text for session `name` (Markdown): the conversation now, a row per turn, the session's total,
-/// what each request starts with, and today's total across `all` sessions.
-pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> String {
+/// `:usage`'s plan limits (the account's) and the credential the session's claude reported it runs on.
+fn limits_section(u: &Usage, limits: &crate::limits::Limits, now_ms: u64) -> String {
+    use crate::limits::{Answer, label, resets, used};
+    let clock = |ms: u64| crate::log::clock(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+    let mut out = String::from("## Plan limits\n\n");
+    let known = limits.known(now_ms);
+    if known.is_empty() {
+        out += "Not known yet — a claude says where the weekly window stands when it starts.\n";
+    } else {
+        let rows: Vec<Vec<String>> = known
+            .iter()
+            .map(|r| {
+                let status = match r.status {
+                    Some(crate::limits::Status::Warning) => " (warning)",
+                    _ => "",
+                };
+                vec![
+                    label(&r.window),
+                    format!("{}{status}", used(r)),
+                    r.resets_at_ms.map_or_else(|| "not said".into(), resets),
+                    clock(r.seen_at_ms),
+                    r.from.name().to_string(),
+                ]
+            })
+            .collect();
+        out += &table(&["window", "used", "resets", "as of", "from"], &rows);
+    }
+    if let Some(plan) = &limits.plan {
+        out += &format!("\nPlan: {plan}.\n");
+    }
+    match limits.answer.as_ref().map(|a| &a.1) {
+        Some(Answer::NotAvailable) => {
+            out += "\nget_usage: no plan limits for that claude (an API key or a cloud provider).\n"
+        }
+        Some(Answer::Unknown(why)) => {
+            out += &format!(
+                "\nget_usage (experimental) answered in a shape tarae doesn't read ({why}) — unknown.\n"
+            )
+        }
+        _ => {}
+    }
+    out += "\n## Credential\n\n";
+    match u.key_source.as_deref() {
+        None => out += "Not reported yet — claude says it as a turn starts.\n",
+        Some(k) => {
+            out += &format!(
+                "This session's claude runs on {} (`apiKeySource` `{k}`).\n",
+                crate::limits::key_said(k)
+            );
+            if !crate::limits::on_plan(Some(k), u.plan_event) {
+                out += "Billed to the key's Console organization — Console, not tarae, is where billing is \
+                        authoritative; the costs here are Claude Code's estimates, and the plan limits above \
+                        aren't this session's.\n";
+            }
+        }
+    }
+    out
+}
+
+/// `:usage`'s text for session `name` (Markdown): the conversation now, the plan's limits and the credential, a
+/// row per turn, the session's total, what each request starts with, and today's total across `all` sessions.
+pub fn report(
+    name: &str,
+    u: &Usage,
+    limits: &crate::limits::Limits,
+    all: &[(&str, &Usage)],
+    now_ms: u64,
+) -> String {
     let clock = |ms: u64| crate::log::clock(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
     let pct = |n: u64, w: u64| n * 100 / w.max(1);
     let mut out = format!("# Claude usage — {name}\n\n");
@@ -682,7 +752,9 @@ pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> Str
         None => "context not reported".into(),
     };
     out += &format!("As of {} · {cache} · {context}\n\n", clock(now_ms));
-    out += &format!("{}\n\n## Turns\n\n", price_note(u.cli.as_deref()));
+    out += &format!("{}\n\n", price_note(u.cli.as_deref()));
+    out += &limits_section(u, limits, now_ms);
+    out += "\n## Turns\n\n";
     if u.turns.is_empty() {
         out += "No turn has ended yet.\n";
     } else {
@@ -780,13 +852,14 @@ fn report_now(ed: &Editor, sid: crate::event::SessionId) -> Option<String> {
     let sessions = ed.sessions_in_order();
     let all: Vec<(&str, &Usage)> = sessions.iter().map(|l| (l.label(), &l.usage)).collect();
     let l = sessions.iter().find(|l| l.id == sid)?;
-    Some(report(l.label(), &l.usage, &all, now_ms()))
+    Some(report(l.label(), &l.usage, &ed.limits, &all, now_ms()))
 }
 
 /// `:usage` — the front session's usage in a buffer of its own (Markdown, nothing to save); said again as
-/// its turns end while it's open.
+/// its turns end while it's open, and as the plan's limits come — asked of its chat's claude when nothing is fresh.
 pub fn open(ed: &mut Editor) {
     let sid = ed.session.id;
+    crate::limits::ask_chat(ed);
     let Some(text) = report_now(ed, sid) else { return };
     let at = ed.usage_view.and_then(|(id, _)| ed.docs.iter().position(|d| d.id == id));
     let id = match at {
