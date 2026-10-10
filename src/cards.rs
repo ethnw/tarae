@@ -306,7 +306,9 @@ pub fn decide(r: &Request) -> Decision {
         Request::Run { reads: c, .. } => reads(c),
         Request::Read(c) => reads(std::slice::from_ref(c)),
         Request::Screen => Decision::Screen,
-        Request::Grant(crate::allow::Grant::Read(_)) => Decision::Grant(Verb::Read),
+        Request::Grant(crate::allow::Grant::Read(_) | crate::allow::Grant::Key(_)) => {
+            Decision::Grant(Verb::Read)
+        }
         Request::Grant(crate::allow::Grant::Write(_)) => Decision::Grant(Verb::Write),
         Request::Grant(crate::allow::Grant::Port(_)) => Decision::Grant(Verb::Port),
         Request::Grant(crate::allow::Grant::Terminals) => Decision::Grant(Verb::Terminals),

@@ -2128,14 +2128,20 @@ pub struct Widened {
     pub hosts: Vec<(String, u16)>,
     /// macOS: the terminals open to it (`allow::Grant::Terminals`).
     pub terminals: bool,
+    /// macOS: the files named like keys in the project open to it (`allow::Grant::Key`).
+    pub keys: Vec<PathBuf>,
 }
 
 impl Widened {
     /// What no setting carries, onto the policy made from `llm`: how the result says what was allowed, the
-    /// sockets, the hosts its proxy rules let through, the terminals.
+    /// sockets, the hosts its proxy rules let through, the terminals, the files named like keys (where the
+    /// policy closes them: macOS).
     pub fn onto(self, p: &mut crate::sandbox::Policy) {
         (p.granted, p.sockets, p.egress.answered) = (self.granted, self.sockets, self.hosts);
         p.terminals = self.terminals;
+        if let Some(keys) = p.keys.as_mut() {
+            *keys = self.keys;
+        }
     }
 }
 
@@ -2159,6 +2165,7 @@ pub fn with_allowed(
                 .chain(a.sockets.iter().map(|s| Grant::Socket(s.clone())))
                 .chain(a.hosts.iter().map(|(h, p)| Grant::Host(h.clone(), *p)))
                 .chain(a.terminals.then_some(Grant::Terminals))
+                .chain(a.keys.iter().map(|k| Grant::Key(k.clone())))
         })
         .chain(once.cloned());
     for g in grants {
@@ -2169,7 +2176,8 @@ pub fn with_allowed(
             Grant::Socket(s) if !w.sockets.contains(s) => w.sockets.push(s.clone()),
             Grant::Host(h, p) if !w.hosts.contains(&(h.clone(), *p)) => w.hosts.push((h.clone(), *p)),
             Grant::Terminals => w.terminals = true,
-            Grant::Read(_) | Grant::Socket(_) | Grant::Host(..) => {}
+            Grant::Key(k) if !w.keys.contains(k) => w.keys.push(k.clone()),
+            Grant::Read(_) | Grant::Socket(_) | Grant::Host(..) | Grant::Key(_) => {}
         }
         let said = g.shown();
         if !w.granted.contains(&said) {

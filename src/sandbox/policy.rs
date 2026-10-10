@@ -71,6 +71,9 @@ pub struct Policy {
     pub sockets: Vec<PathBuf>,
     /// macOS: the terminals (`TERMINALS`) open to it, every one — the project's grant (`allow::Grant::Terminals`).
     pub terminals: bool,
+    /// macOS: files named like keys inside the project (`key_named_in` — `.env`, `*.pem`, as data) are closed to
+    /// it, but these the user opened, each that file (`allow::Grant::Key`; real paths). None on Linux (7b).
+    pub keys: Option<Vec<PathBuf>>,
     /// The folders the checkout's build tool named that stay closed, and why (`asked_dir_verdict`) — said with
     /// the result and on the panel — and who named them (`builds-said`: `cargo`).
     pub refused: Vec<(PathBuf, String)>,
@@ -179,6 +182,23 @@ impl Policy {
             "file-write* (require-all (subpath (param \"ROOT\")) (require-any{named}) \
              (require-not (require-any{in_output})))"
         )));
+        // …the files named like keys (`secretnames`, data — 7a): not read, below the root however deep, but a
+        // template or a public key (its `!` lines), what's below tools' output (a package's test keys), and each
+        // file the user opened (`keys`)
+        if let Some(keys) = &self.keys {
+            let names = |v: Vec<String>| -> String {
+                v.iter().map(|r| format!(" (regex #\"{below}({r})$\")")).collect()
+            };
+            let (named, except) = (names(key_regexes()), names(key_exception_regexes()));
+            p.push_str(&deny(&format!(
+                "file-read-data file-read-xattr (require-all (subpath (param \"ROOT\")) (require-any{named}) \
+                 (require-not (require-any{except} (regex #\"{below}({outputs})/\"))))"
+            )));
+            let open: String = (0..keys.len()).map(|i| format!(" (literal (param \"Y{i}\"))")).collect();
+            if !open.is_empty() {
+                p.push_str(&format!("(allow file-read-data file-read-xattr{open})\n"));
+            }
+        }
         // …the multiplexers' socket folders (they sit inside writable temp ones), cargo's caches
         let keep: String = (0..self.keep.len()).map(|i| format!(" (subpath (param \"K{i}\"))")).collect();
         let caches: String = (0..self.caches.len()).map(|i| format!(" (subpath (param \"C{i}\"))")).collect();
@@ -469,6 +489,10 @@ impl Policy {
         if is_terminal(real) {
             return self.terminals;
         }
+        if self.keys.as_ref().is_some_and(|k| !k.iter().any(|f| f == real)) && key_named_in(&self.root, real)
+        {
+            return false;
+        }
         match &r.home {
             Some(home) if real.starts_with(home) => {
                 real.starts_with(&self.root)
@@ -549,7 +573,9 @@ impl Policy {
                 let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
                     (true, true) => continue,
                     (true, false) => "file-write*",
-                    (false, _) => EITHER,
+                    // (a file named like a key in the project — `key_named_in`)
+                    (false, true) => "file-read-data",
+                    (false, false) => EITHER,
                 };
                 if seen.iter().chain(&out).any(|d| d.file() == Some(real.as_path())) {
                     continue;
@@ -654,6 +680,7 @@ impl Policy {
         v.extend(self.keep.iter().enumerate().map(|(i, p)| (format!("K{i}"), s(p))));
         v.extend(self.caches.iter().enumerate().map(|(i, p)| (format!("C{i}"), s(p))));
         v.extend(self.sockets.iter().enumerate().map(|(i, p)| (format!("S{i}"), s(p))));
+        v.extend(self.keys.iter().flatten().enumerate().map(|(i, p)| (format!("Y{i}"), s(p))));
         let r = &self.reads;
         v.extend(r.home.iter().map(|h| ("HOME".to_string(), s(h))));
         v.extend(
@@ -782,6 +809,7 @@ impl Policy {
             granted: Vec::new(),
             sockets: Vec::new(),
             terminals: false,
+            keys: (Os::HOST == Os::Mac).then(Vec::new),
             refused,
             refused_asked,
             named_by: env.builder.who.clone(),

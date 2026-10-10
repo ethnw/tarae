@@ -89,7 +89,17 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
                 why,
             });
         }
-        if file && !d.terminal() && (d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER) {
+        let read = d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER;
+        // A file named like a key in the project (macOS, 7a): that one file — no folder of it (the project is
+        // read anyway; what's closed is the name)
+        let key = file && read && crate::sandbox::key_named_in(&crate::sandbox::profile_path(root), &target);
+        if key {
+            found.push(Choice {
+                grant: Grant::Key(target.clone()),
+                hint: format!("{} reading {}", d.process, below(&crate::sandbox::profile_path(root))),
+                why: format!("{} was reading {}, named like a key", d.process, crate::allow::tilde(&target)),
+            });
+        } else if file && !d.terminal() && read {
             found.extend(crate::allow::read_choices(&target, home, &kept).into_iter().map(|place| {
                 let why = format!("{} was reading {} in it", d.process, below(&place));
                 Choice { hint: below(&place), grant: Grant::Read(place), why }
@@ -197,6 +207,7 @@ impl Editor {
                     Grant::Socket(s) => format!("allow the socket {} only", crate::allow::tilde(s)),
                     Grant::Host(h, p) => format!("allow reaching {h}:{p}"),
                     Grant::Terminals => "allow opening terminals — yours too".into(),
+                    Grant::Key(k) => format!("allow reading {} — that file only", crate::allow::tilde(k)),
                 },
                 action: Action::Grant(i.to_string()),
                 hint: c.hint.clone(),
@@ -411,6 +422,39 @@ mod tests {
         assert!(w.terminals && w.granted == [g.shown()], "{:?}", w.granted);
         crate::allow::keep(&store, Path::new("/p"), |a| a.remove(crate::allow::TERMINALS_LISTED)).unwrap();
         assert_eq!(crate::allow::Store::read(Some(&store)).get(Path::new("/p")), Default::default());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A file named like a key refused in the project (macOS, 7a) offers that one file, once — never a folder of
+    /// it (the project is read anyway); kept, it reaches the run (`with_allowed`) and `:sandbox-disallow` takes
+    /// it back. One outside the project isn't this (home's rules: its folders).
+    #[test]
+    fn a_key_named_file_refused_offers_that_file() {
+        let d = |target: &str| Denial {
+            process: "node".into(),
+            op: "file-read-data".into(),
+            target: target.into(),
+        };
+        let (home, root) = (Path::new("/Users/u"), Path::new("/Users/u/p"));
+        let env = root.join("app/.env");
+        let all = choices(&[d("/Users/u/p/app/.env"), d("/Users/u/p/app/.env")], home, root, &[]);
+        let got: Vec<(&Grant, &str, &str)> =
+            all.iter().map(|c| (&c.grant, c.hint.as_str(), c.why.as_str())).collect();
+        let g = Grant::Key(env.clone());
+        let why = format!("node was reading {}, named like a key", crate::allow::tilde(&env));
+        assert_eq!(got, [(&g, "node reading …/app/.env", why.as_str())]);
+        let outside = choices(&[d("/Users/u/q/.env")], home, root, &[]);
+        assert!(outside.iter().all(|c| matches!(c.grant, Grant::Read(_))), "{outside:?}");
+        assert!(g.keepable() && !g.as_outside() && g.risk().is_some_and(|r| r.contains("reaches Claude")));
+        let base = std::env::temp_dir().join(format!("tarae-blocked-key-{}", std::process::id()));
+        let store = base.join("sandbox.json");
+        crate::allow::keep(&store, root, |a| a.add(&g)).unwrap();
+        let kept = crate::allow::Store::read(Some(&store)).get(root);
+        assert_eq!(kept.keys, std::slice::from_ref(&env));
+        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
+        assert!(w.keys == [env.clone()] && w.granted == [g.shown()] && w.reads.is_empty(), "{:?}", w.granted);
+        crate::allow::keep(&store, root, |a| a.remove(&env.display().to_string())).unwrap();
+        assert_eq!(crate::allow::Store::read(Some(&store)).get(root), Default::default());
         std::fs::remove_dir_all(&base).ok();
     }
 

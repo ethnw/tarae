@@ -729,6 +729,14 @@ mod tests {
         assert_eq!(inside_env(given.clone(), true), given, "a value it's given stays");
         // (said, not inherited: a test run inside tarae's sandbox has it from there already)
         assert_eq!(inside_env(Vec::new(), true), [("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())]);
+        // (the terminal is a pty: inside macOS's sandbox its other end doesn't open — EPERM, measured)
+        #[cfg(target_os = "macos")]
+        if crate::sandbox::skipped_inside_for(
+            "terminal::tests::inside_a_sandbox_the_terminals_git_status_leaves_the_index_alone",
+            "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
+        ) {
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("tarae-term-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

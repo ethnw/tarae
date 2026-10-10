@@ -331,7 +331,7 @@ impl Guard {
         let Guard::In(p) = self else { return (String::new(), false) };
         let (mut names, mut git, mut caches, mut all) = (Vec::new(), false, Vec::new(), true);
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut homes, mut ports) = (Vec::new(), Vec::new());
+        let (mut homes, mut ports, mut keys) = (Vec::new(), Vec::new(), Vec::new());
         let refused_port = &crate::sandboxpack::get().refused_port;
         let (mut entries, mut signals, mut looks, mut attaches) = (false, false, false, false);
         for d in seen {
@@ -367,6 +367,9 @@ impl Guard {
                         false => names.push(rel.display().to_string()),
                     }
                 }
+                Ok(rel) if !p.reads_allow(path) && key_named_in(&p.root, path) => {
+                    keys.push(rel.display().to_string())
+                }
                 _ if p.caches.iter().any(|c| path.starts_with(c)) => {
                     let of = p.caches_said.iter().position(|s| s.dirs.iter().any(|c| path.starts_with(c)));
                     caches.extend(of.filter(|i| !caches.contains(i)));
@@ -389,6 +392,8 @@ impl Guard {
         names.dedup();
         crate::sorting::sort(&mut secret);
         secret.dedup();
+        crate::sorting::sort(&mut keys);
+        keys.dedup();
         services.dedup();
         crate::sorting::sort(&mut copied);
         copied.dedup();
@@ -409,6 +414,15 @@ impl Guard {
                  state, the clipboard, the keychain. Nothing opens them for a command; if one needs it, say so \
                  to the user and let them run it.\n",
                 what.join(", ")
+            ));
+        }
+        if !keys.is_empty() {
+            let it = if keys.len() == 1 { "it" } else { "them" };
+            s.push_str(&format!(
+                "{}: named like a key, so your commands can't read {it} — a key or a token may be in {it}. If a \
+                 command needs {it}, tell the user: the run's panel (space m s) lets your commands read that file. \
+                 Don't work around it.\n",
+                keys.join(", ")
             ));
         }
         if !names.is_empty() {
@@ -629,6 +643,14 @@ impl Guard {
                     }
                     None => String::new(),
                 };
+                // (macOS, 7a — names from the data, `secretnames`; Linux's are 7b's)
+                let keys = match p.keys.is_some() {
+                    true => {
+                        " In the project it can't read a file named like a key or a token (but templates and \
+                         public keys) — the user can open one from the run's panel."
+                    }
+                    false => "",
+                };
                 let (names_where, net, linux) = match linux {
                     Some((said, notes)) => ("where they are now", said.unwrap_or(net), notes),
                     // (a Seatbelt policy's — made for macOS, `supervised` Linux's: the golden's stand-in too)
@@ -638,7 +660,7 @@ impl Guard {
                 format!(
                     "In tarae's sandbox: it could {reads}write only in the project — not {names}, {names_where} \
                      (Edit changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}\
-                     {copies}{linux}"
+                     {keys}{copies}{linux}"
                 )
             }
             Guard::Without(why) => {
@@ -2383,9 +2405,33 @@ const NAMES_PER_REGEX: usize = 400;
 /// parts joined with `/`, split in runs of at most `NAMES_PER_REGEX` characters.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 fn name_regexes() -> Vec<String> {
+    in_runs(protected_names().map(|n| n.split('/').map(any_case).collect::<Vec<_>>().join("/")))
+}
+
+/// The names like keys' (`secretnames::patterns`, data) as Seatbelt regex alternatives in any case, `*` any
+/// characters but `/` — in runs as `name_regexes`.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub(crate) fn key_regexes() -> Vec<String> {
+    in_runs(crate::secretnames::patterns().map(glob_regex))
+}
+
+/// Their exceptions (`secretnames::exceptions`: `.env.example`, `*.pub`), alike.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub(crate) fn key_exception_regexes() -> Vec<String> {
+    in_runs(crate::secretnames::exceptions().map(glob_regex))
+}
+
+/// A file name with one `*` at most as a Seatbelt regex in any case: `[^/]*\.[pP][eE][mM]`.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn glob_regex(pat: &str) -> String {
+    pat.split('*').map(any_case).collect::<Vec<_>>().join("[^/]*")
+}
+
+/// Alternatives joined with `|` in runs of at most `NAMES_PER_REGEX` characters.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn in_runs(names: impl Iterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for n in protected_names() {
-        let n = n.split('/').map(any_case).collect::<Vec<_>>().join("/");
+    for n in names {
         match out.last_mut() {
             Some(last) if last.len() + 1 + n.len() <= NAMES_PER_REGEX => {
                 last.push('|');
@@ -2417,6 +2463,17 @@ pub fn protected_in(root: &Path, path: &Path) -> bool {
     let at = protected_at(&parts);
     let output = parts.iter().position(|p| outputs().iter().any(|o| *p == o.as_str()));
     !at.is_empty() && !output.is_some_and(|o| at.iter().any(|&i| i > o))
+}
+
+/// Whether `path` (real) is a file named like a key (`secretnames`, its exceptions taken out) in the project at
+/// `root`, not below a folder of tools' output (`outputs`: a package's test keys in `node_modules`) — what the
+/// macOS profile keeps a run from reading (7a), in Rust: the report names what it denied.
+pub fn key_named_in(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else { return false };
+    let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let Some((_, folders)) = parts.split_last() else { return false };
+    crate::secretnames::named_secret(rel)
+        && !folders.iter().any(|p| outputs().iter().any(|o| *p == o.as_str()))
 }
 
 /// Device files every program writes to (`/dev/null`, `/dev/ptmx` — a pty test hangs without it: measured), as
@@ -3004,6 +3061,7 @@ fn policy_computed(
     // (Linux: the supervisor hands the run's connections over — in the session's network where its keeper gets
     // one, taken there: the open network needs no proxy URL)
     p.supervised = here.os == Os::Linux;
+    p.keys = (here.os == Os::Mac).then(Vec::new);
     p.redirected = p.supervised && p.network && here.redirects;
     with_kept(&mut p, &env);
     (p, Found { real_home, above, own })
@@ -4018,11 +4076,18 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
 /// (macOS only, as the Seatbelt tests that ask — elsewhere it'd be dead code, an error under `-D warnings`)
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) fn skipped_inside(test: &str) -> bool {
+    skipped_inside_for(test, "Seatbelt can't start inside a sandbox")
+}
+
+/// `skipped_inside`, saying `why` the test can't run inside a sandbox — a pty's other end, closed to a run
+/// (`TERMINALS`, 3c).
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn skipped_inside_for(test: &str, why: &str) -> bool {
     if std::env::var_os(MARK).is_none() {
         return false;
     }
     let line = format!(
-        "{}{test} — Seatbelt can't start inside a sandbox; run `cargo test` outside one to check it\n",
+        "{}{test} — {why}; run `cargo test` outside one to check it\n",
         crate::test_results::SELF_SKIP
     );
     let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
@@ -5799,8 +5864,12 @@ mod tests {
         assert!(!p.writes_allow(Path::new("/dev/ttys012")));
         let none = Policy::for_project(&Env { reads: Reads::default(), ..env(Path::new("/Users/u/p")) });
         let text = none.profile();
-        let reads: Vec<&str> =
-            text.lines().filter(|l| l.contains("file-read") && !l.contains(TERMINALS)).collect();
+        // (but the project's own rule: files named like keys in it — `files_named_like_keys_are_closed_…`)
+        let keys = "(deny file-read-data file-read-xattr (require-all (subpath (param \"ROOT\"))";
+        let reads: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("file-read") && !l.contains(TERMINALS) && !l.starts_with(keys))
+            .collect();
         assert!(reads.is_empty() && !text.contains("HOME"), "{text}");
         assert!(none.reads_allow(Path::new("/Users/u/.ssh/id")), "not confined without a home");
     }
@@ -5843,6 +5912,56 @@ mod tests {
         assert!(!r.contains("If the command needs one of these"), "nothing left to open: {r}");
         let none = Guard::In(Box::new(Policy::for_project(&env(Path::new("/Users/u/p"))))).report(&[]);
         assert!(!none.contains("copies of") && !none.contains("T0"), "{none}");
+    }
+
+    /// Files named like keys in the project (7a, names from the data — `secretnames`): the profile denies their
+    /// reads below the root, after the allows, by name in any case and only by parameters — but its exceptions
+    /// (a `.env`'s template, a public key), what's below tools' output and the file the user opened; the rule
+    /// in Rust (`reads_allow`) agrees; the report names the file and how it opens; Linux's policy (`keys` None,
+    /// 7b) closes none of them yet and says nothing of it.
+    #[test]
+    fn files_named_like_keys_are_closed_but_the_exceptions() {
+        let root = Path::new("/Users/u/p");
+        let mac = Policy { keys: Some(Vec::new()), ..Policy::for_project(&env(root)) };
+        let text = mac.profile();
+        let deny = text.lines().find(|l| l.contains("(deny file-read-data file-read-xattr (require-all"));
+        let deny = deny.unwrap_or_else(|| panic!("{text}"));
+        assert!(deny.contains("\\.[eE][nN][vV]") && deny.contains("[^/]*\\.[pP][eE][mM]"), "{deny}");
+        assert!(deny.contains("(require-not (require-any") && deny.contains("node_modules|"), "{deny}");
+        assert!(deny.contains("[^/]*\\.[pP][uU][bB])$"), "the exceptions: {deny}");
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s}: {text}"));
+        assert!(at(deny) > at("(allow file-read-data file-read-xattr (subpath (param \"ROOT\"))"), "{text}");
+        assert!(!text.contains("/Users/u") && !text.contains("Y0"), "paths only as parameters: {text}");
+        let reads = |p: &Policy, f: &str| p.reads_allow(&root.join(f));
+        for f in [".env", ".env.local", "a/b/Server.PEM", "deep/id_ED25519"] {
+            assert!(!reads(&mac, f), "{f}");
+        }
+        for f in [".env.example", "a/.ENV.sample", "id_rsa.pub", "node_modules/x/test.pem", "src/env.rs"] {
+            assert!(reads(&mac, f), "{f}");
+        }
+        // The file the user opened, that one file: after the deny, by a parameter
+        let env_file = root.join(".env");
+        let granted = Policy { keys: Some(vec![env_file.clone()]), ..mac.clone() };
+        let text = granted.profile();
+        let open = "(allow file-read-data file-read-xattr (literal (param \"Y0\")))";
+        assert!(text.find(open).is_some_and(|o| o > text.find(deny).unwrap()), "{text}");
+        assert!(granted.params().contains(&("Y0".into(), env_file.display().to_string())));
+        assert!(reads(&granted, ".env") && !reads(&granted, ".env.local"));
+        // The report: the file and how it opens — not where it's open, and nothing on Linux
+        let refused =
+            [Denial { process: "cat".into(), op: "file-read-data".into(), target: "/Users/u/p/.env".into() }];
+        let said = |p: &Policy| Guard::In(Box::new(p.clone())).kept(&refused).0;
+        let line = ".env: named like a key, so your commands can't read it — a key or a token may be in it. If a \
+                    command needs it, tell the user: the run's panel (space m s) lets your commands read that file.";
+        assert!(said(&mac).contains(line), "{}", said(&mac));
+        assert!(!said(&granted).contains("named like a key"), "{}", said(&granted));
+        let linux = Policy::for_project(&env(root));
+        let linux = Policy { keys: None, ..linux };
+        assert!(reads(&linux, ".env") && !said(&linux).contains("named like a key"));
+        assert!(!linux.profile().contains("[pP][eE][mM]"));
+        let summary = |p: &Policy| Guard::In(Box::new(p.clone())).report(&[]);
+        assert!(summary(&mac).contains("In the project it can't read a file named like a key or a token"));
+        assert!(!summary(&linux).contains("named like a key"));
     }
 
     /// What a run never reads holds without any pack — `KEPT_FLOOR` beside `allow::SECRETS`, Claude's own,
@@ -7533,6 +7652,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             terminals: false,
+            keys: None,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -7640,6 +7760,103 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// A project for the real-Seatbelt tests of files named like keys (7a), in the test's own temp folder: each
+    /// file's whole text a fake token — what a run that reads it prints. (Its folder, its project.)
+    #[cfg(target_os = "macos")]
+    fn key_files(tag: &str) -> (PathBuf, PathBuf) {
+        let t =
+            profile_path(&std::env::temp_dir()).join(format!("tarae-sb-keys-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let root = t.join("project");
+        for f in [
+            ".env",
+            "deep/er/Server.PEM",
+            ".env.example",
+            "id_ed25519.pub",
+            "node_modules/pkg/test.pem",
+            "src/env.rs",
+        ] {
+            let at = root.join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, "tarae-fake-token").unwrap();
+        }
+        (t, root)
+    }
+
+    /// `script` run in `root` under `p`: whether it ended well, and its output and errors.
+    #[cfg(target_os = "macos")]
+    fn sh_under(p: &Policy, root: &Path, script: &str) -> (bool, String, String) {
+        let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
+        let out = c.current_dir(root).stdin(Stdio::null()).output().unwrap();
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        (out.status.success(), text(&out.stdout), text(&out.stderr))
+    }
+
+    /// For real, on macOS (7a): a run can't read a file in the project named like a key — at the top or deep, in
+    /// any case — nor through a link to it or a copy of it; it sees that it's there; the rule in Rust agrees.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_run_cant_read_a_key_named_file() {
+        if skipped_inside("sandbox::tests::a_run_cant_read_a_key_named_file") {
+            return;
+        }
+        let (t, root) = key_files("closed");
+        let p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+        for f in [".env", "deep/er/Server.PEM"] {
+            let (ok, out, err) = sh_under(&p, &root, &format!("cat {f}"));
+            assert!(
+                !ok && !out.contains("tarae-fake-token") && err.contains("Operation not permitted"),
+                "{f}: {err}"
+            );
+            assert!(!p.reads_allow(&root.join(f)), "{f}: the rule in Rust");
+        }
+        let (ok, out, err) = sh_under(&p, &root, "test -f .env && ln -s .env l && cat l; cp .env c; cat c");
+        assert!(!ok && !out.contains("tarae-fake-token") && root.join("l").exists(), "{out} {err}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (7a): what's named like a key but isn't one is read — the data's exceptions (a `.env`'s
+    /// template, a public key), a package's test key below tools' output, a name that only shares a part.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_exception_to_the_key_names_is_read() {
+        if skipped_inside("sandbox::tests::an_exception_to_the_key_names_is_read") {
+            return;
+        }
+        let (t, root) = key_files("except");
+        let p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+        for f in [".env.example", "id_ed25519.pub", "node_modules/pkg/test.pem", "src/env.rs"] {
+            let (ok, out, err) = sh_under(&p, &root, &format!("cat {f}"));
+            assert!(ok && out == "tarae-fake-token", "{f}: {err}");
+            assert!(p.reads_allow(&root.join(f)), "{f}: the rule in Rust");
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (7a): the user's grant from the run's panel (`allow::Grant::Key`, kept as `A` keeps it)
+    /// opens that one file — another named like a key stays closed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_granted_key_file_is_read() {
+        if skipped_inside("sandbox::tests::a_granted_key_file_is_read") {
+            return;
+        }
+        let (t, root) = key_files("granted");
+        let store = t.join("state/sandbox.json");
+        let g = crate::allow::Grant::Key(root.join(".env"));
+        crate::allow::keep(&store, &root, |a| a.add(&g)).unwrap();
+        let kept = crate::allow::Store::read(Some(&store)).get(&root);
+        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
+        let mut p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+        w.onto(&mut p);
+        assert_eq!(p.keys, Some(vec![root.join(".env")]));
+        let (ok, out, err) = sh_under(&p, &root, "cat .env");
+        assert!(ok && out == "tarae-fake-token", "{err}");
+        let (ok, _, err) = sh_under(&p, &root, "cat deep/er/Server.PEM");
+        assert!(!ok && err.contains("Operation not permitted"), "{err}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// For real, on macOS: a server outside the run listening on a unix socket — in `/private/tmp` or
     /// `$TMPDIR`, where tmux's and zellij's live — can't be reached from inside, the network closed or
     /// open (a tmux server there ran a command for a sandboxed one: reproduced). The run's own folder is
@@ -7685,6 +7902,7 @@ mod tests {
                 granted: Vec::new(),
                 sockets: Vec::new(),
                 terminals: false,
+                keys: None,
                 refused: Vec::new(),
                 named_by: String::new(),
                 refused_asked: Vec::new(),
@@ -7766,6 +7984,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             terminals: false,
+            keys: None,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -7834,6 +8053,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             terminals: false,
+            keys: None,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -8885,6 +9105,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             terminals: false,
+            keys: None,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),

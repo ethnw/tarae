@@ -29,6 +29,9 @@ pub struct Allowed {
     pub hosts: Vec<(String, u16)>,
     /// macOS: Claude's commands may open the terminals (`/dev/ttys*`) — every one (`Grant::Terminals`).
     pub terminals: bool,
+    /// macOS: files named like keys inside the project Claude's commands may read — each that file, by its real
+    /// path (`Grant::Key`, 7a).
+    pub keys: Vec<PathBuf>,
 }
 
 impl Allowed {
@@ -72,6 +75,11 @@ impl Allowed {
             }
             Grant::Host(h, p) => self.add_host(h, *p),
             Grant::Terminals => self.terminals = true,
+            Grant::Key(k) => {
+                if !self.keys.contains(k) {
+                    self.keys.push(k.clone());
+                }
+            }
         }
     }
 
@@ -83,6 +91,7 @@ impl Allowed {
         let at = Path::new(what);
         self.read.retain(|p| p != at);
         self.write.retain(|p| p != at);
+        self.keys.retain(|p| p != at);
         if let Some(n) = what.strip_prefix("port ").and_then(|n| n.parse::<u16>().ok()) {
             self.ports.retain(|p| *p != n);
         }
@@ -101,6 +110,7 @@ impl Allowed {
             && self.sockets.is_empty()
             && self.hosts.is_empty()
             && !self.terminals
+            && self.keys.is_empty()
     }
 }
 
@@ -138,6 +148,9 @@ pub enum Grant {
     /// macOS: open the terminals (`sandbox::TERMINALS`) — all of them, the user's own too: Seatbelt can't
     /// tell a pty a run made (expect, `script`, a pty test) from the user's shells.
     Terminals,
+    /// macOS: read that file in the project, named like a key (`sandbox::key_named_in`) — that one file, its
+    /// real path (7a).
+    Key(PathBuf),
 }
 
 impl Grant {
@@ -150,6 +163,7 @@ impl Grant {
             Grant::Socket(s) => format!("connect to the socket {} — that one file", tilde(s)),
             Grant::Host(h, p) => format!("reach {h}:{p} through tarae's proxy"),
             Grant::Terminals => "open terminals (/dev/ttys*) — every one, yours too".into(),
+            Grant::Key(k) => format!("read {}, named like a key — that one file", tilde(k)),
         }
     }
 
@@ -175,6 +189,10 @@ impl Grant {
             Grant::Terminals => Some(
                 "macOS's sandbox can't tell a terminal a command made from yours: its commands could read what \
                  you type in your shells, tarae's and other sessions', and type into them.",
+            ),
+            Grant::Key(_) => Some(
+                "Its commands read what's in it — a key or a token, by its name — and what they print reaches \
+                 Claude.",
             ),
             _ => self.warning(),
         }
@@ -247,8 +265,11 @@ impl Store {
             }
             let (read, write, sockets) = (paths("read"), paths("write"), Vec::new());
             let terminals = a["terminals"].as_bool().unwrap_or(false);
-            projects
-                .insert(PathBuf::from(project), Allowed { read, write, ports, sockets, hosts, terminals });
+            let keys = paths("keys");
+            projects.insert(
+                PathBuf::from(project),
+                Allowed { read, write, ports, sockets, hosts, terminals, keys },
+            );
         }
         Store { projects }
     }
@@ -266,6 +287,9 @@ impl Store {
             let mut body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports, "hosts": hosts });
             if a.terminals {
                 body["terminals"] = json!(true);
+            }
+            if !a.keys.is_empty() {
+                body["keys"] = json!(strings(&a.keys));
             }
             projects.insert(p.to_string_lossy().into_owned(), body);
         }
@@ -720,6 +744,9 @@ impl crate::editor::Editor {
                 }
                 if a.terminals && not_kept(kept.terminals) {
                     items.push(row(TERMINALS_LISTED.into(), format!("opens /dev/ttys* · {when}")));
+                }
+                for k in a.keys.iter().filter(|k| not_kept(kept.keys.contains(k))) {
+                    items.push(row(k.display().to_string(), format!("reads, named like a key · {when}")));
                 }
             }
             // (hosts: the project's, and this session's — not a conversation's; raw and lookups only the session's)
