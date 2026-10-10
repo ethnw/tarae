@@ -26,6 +26,9 @@
 //! commands don't run quietly without one: each asks, or the user agrees for the conversation, and the chat's
 //! title says so.
 
+// (step 7's two sessions side by side on Seatbelt — Linux's are the keeper's)
+#[cfg(all(test, target_os = "macos"))]
+mod apart;
 // (the profile and its hint: plain text, built everywhere — said on Linux)
 pub mod apparmor;
 #[cfg(target_os = "linux")]
@@ -330,7 +333,7 @@ impl Guard {
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
         let (mut homes, mut ports) = (Vec::new(), Vec::new());
         let refused_port = &crate::sandboxpack::get().refused_port;
-        let (mut entries, mut signals, mut looks) = (false, false, false);
+        let (mut entries, mut signals, mut looks, mut attaches) = (false, false, false, false);
         for d in seen {
             if d.op.starts_with("file-entry-") {
                 entries = true;
@@ -342,6 +345,7 @@ impl Guard {
                     "the keychain" => services.push("the keychain"),
                     _ if d.op == "signal" => signals = true,
                     _ if d.op == "process-info-pidinfo" => looks = true,
+                    _ if d.op == "mach-priv-task-port" => attaches = true,
                     // (a process the packs say needs this machine's ports refused one: Gradle's JVM)
                     w if w.starts_with("connecting to port")
                         && refused_port.iter().any(|(n, _)| *n == d.process) =>
@@ -442,12 +446,16 @@ impl Guard {
             );
         }
         // (Linux: Landlock's scope keeps signals in; macOS: Seatbelt's `same-sandbox` keeps signals and looks
-        // into processes' details in — `OWN_PROCESSES`, F2)
-        let to = match (signals, looks) {
-            (true, true) => Some("signal or look into"),
-            (true, false) => Some("signal"),
-            (false, true) => Some("look into"),
-            (false, false) => None,
+        // into processes' details and debuggers' attaching in — `OWN_PROCESSES`, F2)
+        let verbs: Vec<&str> =
+            [(signals, "signal"), (looks, "look into"), (attaches, "attach a debugger to")]
+                .into_iter()
+                .filter_map(|(done, verb)| done.then_some(verb))
+                .collect();
+        let to = match verbs.split_last() {
+            None => None,
+            Some((last, [])) => Some(last.to_string()),
+            Some((last, rest)) => Some(format!("{} or {last}", rest.join(", "))),
         };
         match to {
             Some(_) if cfg!(target_os = "linux") => s.push_str(
@@ -456,8 +464,8 @@ impl Guard {
             ),
             Some(to) => s.push_str(&format!(
                 "A command can't {to} a process outside its own — tarae's, another session's commands, the \
-                 user's others: macOS's sandbox lets it signal and read the details of (`lsof -p`) only the \
-                 processes it started. If one needs to, say so to the user.\n"
+                 user's others: macOS's sandbox lets it signal and read the details of (`lsof -p`) — and attach \
+                 a debugger to (`lldb -p`) — only the processes it started. If one needs to, say so to the user.\n"
             )),
             None => {}
         }
@@ -623,6 +631,8 @@ impl Guard {
                 };
                 let (names_where, net, linux) = match linux {
                     Some((said, notes)) => ("where they are now", said.unwrap_or(net), notes),
+                    // (a Seatbelt policy's — made for macOS, `supervised` Linux's: the golden's stand-in too)
+                    None if !p.supervised => ("anywhere in it", net, MAC_SHARED.to_string()),
                     None => ("anywhere in it", net, String::new()),
                 };
                 format!(
@@ -647,6 +657,15 @@ impl Guard {
         }
     }
 }
+
+/// What Seatbelt can't keep apart, for the report (step 7, the user's decision 2026-10-10: shared, and said):
+/// shared memory, POSIX and System V — no rule names who made a segment — and `setpriority`, which no operation
+/// guards (`process-info-setcontrol` doesn't: measured). The command line and starting environment are said once
+/// a conversation (`runenv::OTHERS_READ`). Pinned by `apart::two_sessions_cant_reach_each_others_{processes,
+/// sockets}`; Linux's are `linux::notes`.
+const MAC_SHARED: &str = " Here a command shares System V and POSIX shared memory with other sessions' commands \
+     and the user's other programs — it can read and write what they keep there — and can lower their priority \
+     (renice): macOS's sandbox has no rule for either.";
 
 /// Whether Claude's runs are refused new user namespaces here (`tier::runs_refuse_userns`) — outside the sandbox
 /// too (`spawn::Acts`).
@@ -1427,6 +1446,11 @@ impl Denial {
             },
             // (no process named: `lsof -p` looks into every one — they're one denial, `Blocked::add`)
             "process-info-pidinfo" => "looking into processes outside the run's own".into(),
+            // (a debugger's attach — `lldb -p`: Seatbelt names the process as for a signal, else as it does)
+            "mach-priv-task-port" => match seatbelt_process(&t) {
+                Some((name, pid)) => format!("attaching to {name} ({pid}) — outside the run's own processes"),
+                None => "attaching to a process outside the run's own processes".into(),
+            },
             _ if op.starts_with("file-write") => format!("changing {t}"),
             // (a path by what it is, not as shown: under home it's `~/…` — a VM's checkout in home)
             "network-outbound" if self.target.starts_with('/') => format!("connecting to socket {t}"),
@@ -2488,10 +2512,12 @@ fn seatbelt_process(target: &str) -> Option<(&str, &str)> {
 }
 
 /// What a run does only to its own processes (`same-sandbox`): signal them, read their details (`lsof`'s
-/// `proc_pidinfo`). Not `process-info*` whole: listing pids has no target, and `lsof` of its own child failed
-/// (spike M7.3).
+/// `proc_pidinfo`), take their task port — what a debugger attaches by (`lldb -p`: Apple's debugserver may, and
+/// with it run anything as tarae or another session's command; `apart::two_sessions_cant_reach_each_others_
+/// processes`). Not `process-info*` whole: listing pids has no target, and `lsof` of its own child failed
+/// (spike M7.3). Not `mach-task-read`: lldb attached through its deny (measured, 2026-10-10).
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-const OWN_PROCESSES: [&str; 2] = ["signal", "process-info-pidinfo"];
+const OWN_PROCESSES: [&str; 3] = ["signal", "process-info-pidinfo", "mach-priv-task-port"];
 
 /// A new run's id — one counter for both systems: the proxy's questions name it, and the main loop finds the run
 /// by it (`hosts.rs`).
@@ -6958,9 +6984,14 @@ mod tests {
         };
         let (signal, look) =
             (("signal", "others [sh(71140)] signum:19"), ("process-info-pidinfo", "others [ps(9)]"));
-        for (denials, to) in
-            [(&[signal][..], "signal"), (&[look], "look into"), (&[signal, look], "signal or look into")]
-        {
+        let attach = ("mach-priv-task-port", "others [tarae(4242)]");
+        for (denials, to) in [
+            (&[signal][..], "signal"),
+            (&[look], "look into"),
+            (&[signal, look], "signal or look into"),
+            (&[attach], "attach a debugger to"),
+            (&[signal, look, attach], "signal, look into or attach a debugger to"),
+        ] {
             let r = said(denials);
             assert!(r.contains(&format!("A command can't {to} a process outside its own")), "{r}");
             assert!(r.contains("macOS's sandbox lets it signal and read the details of"), "{r}");
@@ -7390,6 +7421,10 @@ mod tests {
         assert_eq!(
             plain("process-info-pidinfo", "others [log(71142)]"),
             "looking into processes outside the run's own"
+        );
+        assert_eq!(
+            plain("mach-priv-task-port", "others [tarae(4242)]"),
+            "attaching to tarae (4242) — outside the run's own processes"
         );
         // As Seatbelt says it, where there are no plainer words
         assert_eq!(plain("mach-lookup", "com.apple.other"), "mach-lookup com.apple.other");

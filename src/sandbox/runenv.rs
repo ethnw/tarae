@@ -204,7 +204,7 @@ fn grouped(names: &[String]) -> Vec<String> {
 /// `process-info*` rules, not a settings name, not every settings read denied), so a variable left out of its
 /// own is still within reach. Linux keeps environments in (Landlock: `landlock::tests::
 /// a_confined_run_reads_no_environment_outside_it`), so it isn't said there.
-const OTHERS_READ: &str = " On macOS left out isn't out of reach: a command can read the command line and starting \
+pub(super) const OTHERS_READ: &str = " On macOS left out isn't out of reach: a command can read the command line and starting \
      environment of the user's other processes (tarae's, their shell's, other sessions' commands) — no rule of \
      macOS's sandbox closes it. Don't read them for a value left out here; ask the user.";
 

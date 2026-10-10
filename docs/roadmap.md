@@ -277,6 +277,9 @@ git tab, search, a short Kubernetes one.
 - **Grammar distribution**: branch `grammar-wasm-proto` (15 commits; grammars as WebAssembly on tarae's own
   runtime, 1.6–2.0× native) against prebuilt native or bundled grammars. Undecided; to decide with binary
   releases (publishing).
+- **Release builds on macOS signed with the hardened runtime** (with binary releases): then no other program of the
+  user's can attach a debugger to tarae and run code as it. Claude's commands already can't (step 7: Seatbelt keeps the task port to a run's
+  own processes, 2026-10-10).
 - **A memory comparison with other editors** (Helix, Neovim with an AI plugin, Zed, VS Code). Method agreed
   2026-10-03: the same scenario; the editor alone and its whole process tree; measured numbers only; a one-off
   script.
