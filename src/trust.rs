@@ -52,6 +52,14 @@ pub const RISKY: [&str; 21] = [
     "review.risky",
 ];
 
+/// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
+/// trusted or not (said): they decide whose credentials Claude uses, and a project never does.
+pub const YOURS_ONLY: [&str; 1] = ["llm.environment-key"];
+
+pub fn yours_only(setting: &str) -> bool {
+    YOURS_ONLY.contains(&setting)
+}
+
 /// A value longer than this (as written) isn't put on the card whole — so it's never trusted.
 pub const SHOWN_MAX: usize = 600;
 

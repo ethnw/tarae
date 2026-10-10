@@ -555,7 +555,7 @@ mod tests {
                     args: vec!["-c".into(), LIST_FDS.into()],
                     ..Default::default()
                 };
-                out(crate::llm::spawn(&cfg, &[], Path::new("/")).unwrap().wait_with_output().unwrap())
+                out(crate::llm::spawn(&cfg, &[], Path::new("/"), None).unwrap().wait_with_output().unwrap())
             }),
             // the debugger, plugins — std's fork with `pre_exec`
             ("dap::setsid", &|| {

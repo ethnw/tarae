@@ -304,7 +304,7 @@ pub(crate) fn load_layers(
     if let Some(path) = &user
         && let Some(src) = read(path, &mut warnings)
     {
-        apply_source(&mut config, &src, &short(path), &mut warnings, None);
+        apply_source(&mut config, &src, &short(path), &mut warnings, None, true);
     }
     if let Some(path) = &project
         && let Some(src) = read(path, &mut warnings)
@@ -312,13 +312,20 @@ pub(crate) fn load_layers(
         let file = short(path);
         let (mut without, mut w_without) = (config.clone(), Vec::new());
         let mut gate = crate::trust::Gate::new(false);
-        apply_source(&mut without, &src, &file, &mut w_without, Some(&mut gate));
+        apply_source(&mut without, &src, &file, &mut w_without, Some(&mut gate), false);
         if gate.held.is_empty() {
             config = without;
             warnings.extend(w_without);
         } else {
             let (mut with, mut w_with) = (config.clone(), Vec::new());
-            apply_source(&mut with, &src, &file, &mut w_with, Some(&mut crate::trust::Gate::new(true)));
+            apply_source(
+                &mut with,
+                &src,
+                &file,
+                &mut w_with,
+                Some(&mut crate::trust::Gate::new(true)),
+                false,
+            );
             let real = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
             let hash = crate::trust::hash(&gate.held);
             let state = store.state(&real, hash);
@@ -343,7 +350,7 @@ pub(crate) fn load_layers(
                 let file = short(path);
                 let apply = |c: &mut Config, warnings: &mut Vec<String>| {
                     let project_steps = std::mem::take(&mut c.editor.preflight);
-                    apply_source(c, &src, &file, warnings, None);
+                    apply_source(c, &src, &file, warnings, None, false);
                     // (its steps were read in place of the project's: they go after them instead)
                     c.editor.preflight_local = std::mem::replace(&mut c.editor.preflight, project_steps);
                 };
@@ -374,17 +381,20 @@ pub(crate) fn load_layers(
 pub fn parse(src: &str) -> (Config, Vec<String>) {
     let mut config = Config::default();
     let mut warnings = Vec::new();
-    apply_source(&mut config, src, "config.toml", &mut warnings, None);
+    apply_source(&mut config, src, "config.toml", &mut warnings, None, true);
     (config, warnings)
 }
 
 /// One layer on top of `config`. `gate` = a project's file: each thing that runs commands goes through it.
+/// `your_config`: your config file — the one layer that sets `trust::YOURS_ONLY` (a project's two files are
+/// refused them, said).
 fn apply_source(
     config: &mut Config,
     src: &str,
     file: &str,
     warnings: &mut Vec<String>,
     mut gate: Option<&mut crate::trust::Gate>,
+    your_config: bool,
 ) {
     // (a layer with no gate is yours: your config, `.tarae.local.toml` — the project's goes through `trust.rs`)
     let yours = gate.is_none();
@@ -398,8 +408,19 @@ fn apply_source(
             return;
         }
     };
-    let mut risky = |path: &str, v: &Value| !crate::trust::is_risky(path) || pass(path.to_string(), v);
+    let mut refused = Vec::new();
+    let mut risky = |path: &str, v: &Value| {
+        if !your_config && crate::trust::yours_only(path) {
+            refused.push(path.to_string());
+            return false;
+        }
+        !crate::trust::is_risky(path) || pass(path.to_string(), v)
+    };
     settings::apply_table_gated(&mut config.editor, &table, src, file, warnings, &mut risky);
+    for path in refused {
+        let at = settings::locate(src, &path).map(|l| format!(":{l}")).unwrap_or_default();
+        warnings.push(format!("{file}{at}: {path} is set only in your own config — not a project's file"));
+    }
     // Server and language tables have free-form names, so they're read here, not via the settings table.
     if let Some(Value::Table(servers)) = table.get("lsp") {
         let strings = |v: &Value, k: &str| -> Option<Vec<String>> {
@@ -776,6 +797,44 @@ Y = "move_line_down"
 [keys.normal.space]
 Z = ["move_line_down", ":sh touch marker"]
 "#;
+
+    /// Whose credentials Claude uses is yours to say (`trust::YOURS_ONLY`): a project's `.tarae.toml` — trusted
+    /// or not — and its `.tarae.local.toml` are refused `llm.environment-key`, and say so at its line; your own
+    /// config sets it.
+    #[test]
+    fn a_setting_only_yours_sets_is_refused_from_both_project_files() {
+        use crate::trust::Store;
+        let dir = std::env::temp_dir().join(format!("tarae-config-yours-only-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
+        assert!(ok.status.success());
+        let (user, project, local) =
+            (dir.join("user.toml"), dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
+        // (a risky setting beside it, so the project has a trust card to answer)
+        fs::write(&project, "[llm]\nrun-allow = [\"make\"]\nenvironment-key = \"keep\"\n").unwrap();
+        fs::write(&local, "[llm]\nenvironment-key = \"keep\"\n").unwrap();
+        fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
+        let load = |user: Option<PathBuf>, store: &Store| {
+            load_layers(user, Some(project.clone()), Some((dir.clone(), local.clone())), store)
+        };
+        let (c, w) = load(None, &Store::default());
+        assert!(!c.editor.llm.keep_env_key, "neither project file keeps the key");
+        for file in [".tarae.toml:3", ".tarae.local.toml:2"] {
+            let said =
+                format!("{file}: llm.environment-key is set only in your own config — not a project's file");
+            assert!(w.iter().any(|w| w.ends_with(&said)), "{file}: {w:?}");
+        }
+        let mut trusted = Store::default();
+        trusted.answer(&project, c.project.as_ref().unwrap().hash, true);
+        let (t, _) = load(None, &trusted);
+        assert!(t.editor.llm.run_allow == ["make"] && !t.editor.llm.keep_env_key, "trusted: still refused");
+        fs::write(&user, "[llm]\nenvironment-key = \"keep\"\n").unwrap();
+        let (mine, w) = load(Some(user.clone()), &Store::default());
+        assert!(mine.editor.llm.keep_env_key, "yours sets it: {w:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
 
     /// `.tarae.local.toml` is read as yours only while git says it's untracked and ignored: its settings over
     /// the project's, its preflight steps after the project's — on both ways the project's trust can go.

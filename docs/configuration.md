@@ -39,6 +39,9 @@ the [keymap reference](reference/keymap.md).
   `.claude/settings.local.json`) would run in the chat — its helper commands, its `env` block, the plugins it
   turns on — waits for its own card the first time the chat starts, kept the same way. `:claude-settings` shows
   it again ([Claude integration](claude-integration.md))
+- **Some settings are only yours.** Whose credentials Claude uses is never a project's to say:
+  `llm.environment-key` is read from your own config only — a project's `.tarae.toml` (trusted or not) and its
+  `.tarae.local.toml` are refused it, with a warning at its line
 
 One file holds everything — editor, keys, languages, language servers, and Claude. There's no separate
 `languages.toml`.

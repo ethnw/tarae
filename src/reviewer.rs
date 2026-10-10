@@ -246,7 +246,7 @@ fn spawn(ed: &mut Editor, g: Gathered) {
     let cfg = ed.config.llm.clone();
     let cfg = llm::LlmConfig { args: args(&cfg.args), ..cfg };
     let extra = ["--append-system-prompt", SYSTEM, "--permission-prompt-tool", "stdio"];
-    let mut child = match llm::spawn(&cfg, &extra, &g.root) {
+    let mut child = match llm::spawn(&cfg, &extra, &g.root, ed.claude_env.as_ref()) {
         Ok(child) => child,
         Err(e) => {
             return ed.set_error(format!("the reviewer: {}", llm::spawn_failed(&cfg.command, &e, false)));
@@ -1174,6 +1174,30 @@ mod tests {
         assert!(!c.running() && !c.busy(), "the chat's claude wasn't started or asked");
         assert_eq!(c.msgs.len(), 1, "the chat is as it was");
         assert_eq!(ed.session.reviewer.as_ref().unwrap().state, State::Done);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The reviewer's claude is started as the chat's: tarae's environment less a parent Claude Code session's
+    /// variables and an exported key (`llm::claude_env`), your settings kept.
+    #[test]
+    fn the_reviewers_claude_leaves_out_a_parent_sessions_variables() {
+        let (dir, repo) = place("env");
+        let mut ed = Editor::new(crate::config::Config::default());
+        fake(&mut ed, &dir, &[result("No findings.")]);
+        let names = dir.join("env.names");
+        ed.config.llm.args[1] = format!(
+            "awk 'BEGIN {{ for (k in ENVIRON) print k }}' > '{}'; {}",
+            names.display(),
+            ed.config.llm.args[1]
+        );
+        ed.claude_env = Some(crate::llm::tests::nested_env());
+        reviewed(&mut ed, &repo);
+        let got = std::fs::read_to_string(&names).unwrap();
+        let got: Vec<&str> = got.lines().collect();
+        for gone in crate::llm::ClaudeEnv::of(ed.claude_env.as_ref(), false).removed {
+            assert!(!got.contains(&gone.as_str()), "{gone} reached the reviewer's claude");
+        }
+        assert!(got.contains(&"CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "yours stays: {got:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

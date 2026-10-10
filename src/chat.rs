@@ -952,7 +952,7 @@ fn ensure_proc(ed: &mut Editor) {
     if !c.no_thought_flag {
         extra.extend(["--thinking-display", "summarized"]);
     }
-    let mut child = match llm::spawn(&cfg, &extra, &ed.session.root) {
+    let mut child = match llm::spawn(&cfg, &extra, &ed.session.root, ed.claude_env.as_ref()) {
         Ok(child) => child,
         Err(e) => {
             // (once: opening the chat tries, and so does sending)
@@ -976,9 +976,20 @@ fn ensure_proc(ed: &mut Editor) {
     llm::pump(child, false, tx, move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
     });
+    // What claude's environment leaves out, once since tarae started (names only)
+    if let Some(said) = llm::env_told(ed)
+        && let Some(c) = &mut ed.session.chat
+    {
+        c.note(&said);
+    }
 }
 
 fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
+    // (a failure for want of a login, with a key tarae left out: said with it, and what passes it)
+    let login_hint = match &ev {
+        StreamEv::Done(Err(e)) | StreamEv::Exit(e) => llm::login_hint(ed, e),
+        _ => None,
+    };
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation == generation) else { return };
     match ev {
         StreamEv::Thinking => {
@@ -1162,6 +1173,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 Err(e) => {
                     let e = if std::mem::take(&mut c.stopping) { "stopped".to_string() } else { e };
                     c.msgs.push(Msg::new(Role::Note, e, ""));
+                    if let Some(hint) = &login_hint {
+                        c.note(hint);
+                    }
                 }
             }
             crate::follow::on_done(ed);
@@ -1223,6 +1237,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                     format!("claude exited: {err}")
                 };
                 c.msgs.push(Msg::new(Role::Note, e, ""));
+            }
+            if let Some(hint) = &login_hint {
+                c.note(hint);
             }
             // (a turn cut off: what its requests reported, no cost)
             ed.session.usage.cut_off(crate::usage::now_ms());

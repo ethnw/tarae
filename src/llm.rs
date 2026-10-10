@@ -95,6 +95,9 @@ pub struct LlmConfig {
     pub review_at_end: bool,
     /// Chat: load CLAUDE.md files and Claude Code settings like `claude` does (hooks off, edits always ask).
     pub chat_settings: bool,
+    /// An `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in tarae's environment goes on to claude (`llm.environment-key
+    /// = "keep"`) — but inside a Claude Code session, where it's the host's (`claude_env`).
+    pub keep_env_key: bool,
     /// Chat: commands Claude's `run` starts without asking, past the built-in checks (`tools::run_allow`) —
     /// each a prefix of whole words (`"npm test"`).
     pub run_allow: Vec<String>,
@@ -152,6 +155,7 @@ impl Default for LlmConfig {
             follow_resume: 20,
             review_at_end: false,
             chat_settings: true,
+            keep_env_key: false,
             run_allow: Vec::new(),
             review_ask: Vec::new(),
             sandbox: true,
@@ -182,7 +186,7 @@ pub struct Warm {
 impl Warm {
     /// Spawns one in `dir` if there's no live spare there (one elsewhere goes). spawn itself returns at once
     /// (slow init happens in the child).
-    pub fn ensure(&mut self, cfg: &LlmConfig, dir: &Path) -> Result<(), String> {
+    pub fn ensure(&mut self, cfg: &LlmConfig, dir: &Path, given: Option<&Env>) -> Result<(), String> {
         if let Some((c, at)) = &mut self.child
             && matches!(c.try_wait(), Ok(None))
         {
@@ -196,7 +200,7 @@ impl Warm {
                 let _ = old.wait();
             });
         }
-        let child = spawn(cfg, &[], dir).map_err(|e| spawn_failed(&cfg.command, &e, false))?;
+        let child = spawn(cfg, &[], dir, given).map_err(|e| spawn_failed(&cfg.command, &e, false))?;
         self.child = Some((child, dir.to_path_buf()));
         Ok(())
     }
@@ -206,8 +210,8 @@ impl Warm {
         self.child.as_ref().map(|(c, _)| c.id())
     }
 
-    fn take(&mut self, cfg: &LlmConfig, dir: &Path) -> Result<Child, String> {
-        self.ensure(cfg, dir)?;
+    fn take(&mut self, cfg: &LlmConfig, dir: &Path, given: Option<&Env>) -> Result<Child, String> {
+        self.ensure(cfg, dir, given)?;
         Ok(self.child.take().expect("ensured").0)
     }
 }
@@ -251,8 +255,11 @@ pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
         .into()
 }
 
-/// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there).
-pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path) -> std::io::Result<Child> {
+/// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there),
+/// with tarae's environment less what `claude_env` leaves out. `given`: `Editor::claude_env` — a test's stand-in
+/// for tarae's environment, laid over the process's as if inherited (None: the process's own); what's left out is
+/// judged on both, all the child would inherit.
+pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path, given: Option<&Env>) -> std::io::Result<Child> {
     // (tests never start the real claude — a stand-in in `sh` answers for it; card model P2 found a test
     // whose claude read ~/.claude.json and the keychain)
     #[cfg(test)]
@@ -262,6 +269,13 @@ pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path) -> std::io::Result<Chi
     );
     let mut cmd = Command::new(&cfg.command);
     cmd.current_dir(dir).args(&cfg.args).args(extra);
+    if let Some(given) = given {
+        cmd.envs(given);
+    }
+    // (removed by name, never `env_clear`: the rest of tarae's environment is claude's as it always was)
+    for name in ClaudeEnv::of(given, cfg.keep_env_key).removed {
+        cmd.env_remove(name);
+    }
     if let Some(m) = &cfg.model {
         cmd.args(["--model", m]);
     }
@@ -269,6 +283,220 @@ pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path) -> std::io::Result<Chi
         cmd.args(["--effort", &cfg.effort]);
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+}
+
+// ── Claude's environment ────────────────────────────────────────────────
+//
+// tarae's environment can hold another Claude Code session's variables (apibill L0: tarae started from a shell a
+// desktop-app session started — `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, its session id, entrypoint, effort, pid,
+// its host's account hints), and an exported API key. Passed on, a top-level chat is taken for a nested one —
+// "transcript persistence, prompt history, and `claude agents` registration" off (Claude Code's env-vars
+// reference, `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE`) — and a key in the environment bills in your login's place.
+// A named list, not a `CLAUDE*` prefix: most such names are settings you may export on purpose
+// (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `MCP_TIMEOUT`, `ANTHROPIC_BASE_URL`) — those stay.
+
+/// Credentials Claude Code takes from its environment over your login (its authentication docs: under `-p` the
+/// key "is always used when present"): not passed — unless you keep them (`llm.environment-key = "keep"`: a
+/// login by key alone, a gateway's `ANTHROPIC_BASE_URL` with its token), and never inside a Claude Code session,
+/// where they're the host's. `CLAUDE_CODE_OAUTH_TOKEN` is the host's there too (`THE_HOSTS`), else a subscription
+/// login you chose (`claude setup-token`) — passed.
+const CREDENTIALS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+
+/// What Claude Code (or its Agent SDK) sets in the processes it starts — inherited, always a parent session's,
+/// never passed. Claude Code's env-vars reference says so of each, but where noted.
+const SET_FOR_CHILDREN: [&str; 12] = [
+    // (the SDK drops it from what it inherits as well)
+    "CLAUDECODE",
+    // ("reliably distinguishes a nested session")
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_REMOTE",
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_JOB_DIR",
+    // (hooks' and file suggestions' — the settings reference; apibill L5 saw claude set it for its children)
+    "CLAUDE_PROJECT_DIR",
+    // (the SDK's transport sets both: how its host started claude — L5 again for the entrypoint)
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_AGENT_SDK_VERSION",
+    // (the changelog: "for subprocesses so `gh` can attribute traffic to Claude Code")
+    "AI_AGENT",
+];
+
+/// …and whole families of them: Remote Control's, and the session inbox's ("Set by Claude Code, not by you").
+const SET_FOR_CHILDREN_FAMILIES: [&str; 2] = ["CLAUDE_CODE_BRIDGE_", "CLAUDE_CODE_MESSAGING_"];
+
+/// A Claude Code host's own, seen in tarae's environment (L0) or named by the SDK as what its host passes — no doc
+/// lists them as yours to set. Left out only when tarae itself runs inside Claude Code (`ClaudeEnv::nested`).
+const THE_HOSTS: [&str; 10] = [
+    // (the SDK: what a host passes the claude it starts — its login among them)
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+    // (L0's, undocumented)
+    "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+    "CLAUDE_CODE_DESKTOP_APP_VERSION",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_WORKER_EPOCH",
+    // (the SDK passes its span's W3C context, and a `-p` claude parents its own spans under it — the
+    // monitoring docs)
+    "TRACEPARENT",
+    "TRACESTATE",
+];
+
+/// What tells that tarae itself runs inside a Claude Code session: a parent session's own marks, set only by
+/// Claude Code (or its host) in what it starts — `CLAUDE_CODE_CHILD_SESSION` ("only set by Claude Code itself …
+/// and not by IDE extensions") and `CLAUDE_PID` in its tools' and hooks' processes, `CLAUDE_CODE_SESSION_ID` in
+/// those and its stdio MCP servers', `CLAUDE_CODE_HOST_SESSION_ID` what an SDK host passes the claude it starts
+/// (L0 found it in tarae's). Not `CLAUDECODE`: an IDE's terminal sets it too, and a shell there is no session's —
+/// your own `CLAUDE_CODE_OAUTH_TOKEN` stays.
+const NESTED_BY: [&str; 4] =
+    ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID"];
+
+/// The OAuth scopes go with their refresh token ("Required when `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` is set"): with
+/// it, they're yours; without it, inside Claude Code, the host's.
+const SCOPES: (&str, &str) = ("CLAUDE_CODE_OAUTH_SCOPES", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
+
+/// What claude gets of tarae's environment: the names left out, and why — names only, never a value.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClaudeEnv {
+    /// Left out (`env_remove`), sorted.
+    pub removed: Vec<String>,
+    /// tarae itself runs inside a Claude Code session (`NESTED_BY`).
+    pub nested: bool,
+    /// Nested: the `CLAUDE*`/`ANTHROPIC_*` names passed as they are — your settings, or the host's under a name
+    /// tarae doesn't know yet; said, so the lists can grow. Sorted.
+    pub passed: Vec<String>,
+}
+
+/// The rules over `names` (tarae's environment's — names, not values: none is needed, so none is read).
+/// `keep_keys`: `llm.environment-key = "keep"`.
+pub fn claude_env<'a>(names: impl IntoIterator<Item = &'a str>, keep_keys: bool) -> ClaudeEnv {
+    let mut names: Vec<&str> = names.into_iter().collect();
+    crate::sorting::sort(&mut names);
+    names.dedup();
+    let has = |n: &str| names.contains(&n);
+    let nested = NESTED_BY.iter().any(|n| has(n));
+    let mut out = ClaudeEnv { nested, ..Default::default() };
+    for &name in &names {
+        let removed = CREDENTIALS.contains(&name) && (nested || !keep_keys)
+            || SET_FOR_CHILDREN.contains(&name)
+            || SET_FOR_CHILDREN_FAMILIES.iter().any(|f| name.starts_with(f))
+            || nested && THE_HOSTS.contains(&name)
+            || nested && name == SCOPES.0 && !has(SCOPES.1);
+        if removed {
+            out.removed.push(name.to_string());
+        } else if nested && (name.starts_with("CLAUDE") || name.starts_with("ANTHROPIC_")) {
+            out.passed.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// A stand-in for tarae's environment, by name (`Editor::claude_env`).
+pub type Env = std::collections::HashMap<String, String>;
+
+/// The process's environment's names (a name that isn't UTF-8 is none of the rules').
+fn process_names() -> Vec<String> {
+    std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect()
+}
+
+impl ClaudeEnv {
+    /// The rules over every name claude would inherit — the process's, and `given`'s laid over them (`spawn`). A
+    /// test's stand-ins alone wouldn't do: tests run where the process holds a Claude Code session's variables
+    /// too (tarae's own checks, run from inside one).
+    pub fn of(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
+        let mut names = process_names();
+        names.extend(given.into_iter().flat_map(|g| g.keys().cloned()));
+        claude_env(names.iter().map(String::as_str), keep_keys)
+    }
+
+    /// The rules over tarae's environment as it reads it to say what's left out: `given`'s alone (a test's —
+    /// what's said never depends on where the tests run), else the process's.
+    fn as_read(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
+        let names = given.map_or_else(process_names, |g| g.keys().cloned().collect());
+        claude_env(names.iter().map(String::as_str), keep_keys)
+    }
+
+    /// The keys left out (`CREDENTIALS`).
+    fn keys(&self) -> Vec<&str> {
+        self.removed.iter().map(String::as_str).filter(|n| CREDENTIALS.contains(n)).collect()
+    }
+
+    /// Why a key left out stays out, and what passes it: the setting — or, inside a Claude Code session, nothing.
+    fn keys_why(&self, keys: &[&str]) -> String {
+        let (it, its) = if keys.len() == 1 { ("it", "it's") } else { ("them", "they're") };
+        match self.nested {
+            true => {
+                format!("inside a Claude Code session {its} the host's, whatever llm.environment-key says")
+            }
+            false => format!("llm.environment-key = \"keep\" in your config passes {it}"),
+        }
+    }
+
+    /// What the chat says of it, names only — None: nothing left out.
+    pub fn said(&self) -> Option<String> {
+        let keys = self.keys();
+        let rest: Vec<&str> = self.removed.iter().map(String::as_str).filter(|n| !keys.contains(n)).collect();
+        let mut said = Vec::new();
+        if !rest.is_empty() {
+            let whose = match self.nested {
+                true => "tarae runs inside Claude Code — that session's variables aren't passed to Claude",
+                false => "Variables Claude Code sets for the processes it starts aren't passed to Claude",
+            };
+            said.push(format!("{whose}: {}.", rest.join(", ")));
+        }
+        if !keys.is_empty() {
+            let verb = if keys.len() == 1 { "isn't" } else { "aren't" };
+            let to = if rest.is_empty() { "to Claude" } else { "either" };
+            said.push(format!(
+                "{} {verb} passed {to}: Claude uses your Claude Code login ({}).",
+                keys.join(" and "),
+                self.keys_why(&keys)
+            ));
+        }
+        if said.is_empty() {
+            return None;
+        }
+        if !self.passed.is_empty() {
+            said.push(format!("Passed as they are: {}.", self.passed.join(", ")));
+        }
+        Some(said.join(" "))
+    }
+}
+
+/// What claude's environment leaves out, said once since tarae started: one log line, and the chat's note — None:
+/// nothing left out, or said already.
+pub fn env_told(ed: &mut Editor) -> Option<String> {
+    if ed.claude_env_told {
+        return None;
+    }
+    ed.claude_env_told = true;
+    let said = ClaudeEnv::as_read(ed.claude_env.as_ref(), ed.config.llm.keep_env_key).said()?;
+    crate::log::line("claude", "info", &said);
+    Some(said)
+}
+
+/// What a claude that failed with `error` for want of a login is told, when tarae left a key out — None: not a
+/// login failure, or no key was left out. Claude Code's words under `-p` (its errors reference): "Not logged in ·
+/// Please run /login", "Failed to authenticate…", "Please run /login · API Error: 401…".
+pub fn login_hint(ed: &Editor, error: &str) -> Option<String> {
+    let login = ["Not logged in", "Please run /login", "Failed to authenticate"];
+    if !login.iter().any(|l| error.contains(l)) {
+        return None;
+    }
+    let env = ClaudeEnv::as_read(ed.claude_env.as_ref(), ed.config.llm.keep_env_key);
+    let keys = env.keys();
+    (!keys.is_empty()).then(|| {
+        format!(
+            "Claude has no login of its own, and tarae didn't pass on {} from its environment ({}). Or log in: \
+             run `claude` in a terminal, then /login.",
+            keys.join(" and "),
+            env.keys_why(&keys)
+        )
+    })
 }
 
 /// One user message line (stream-json input).
@@ -942,7 +1170,7 @@ impl Review {
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
     let cfg = ed.config.llm.clone();
-    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.session.root) {
+    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.session.root, ed.claude_env.as_ref()) {
         ed.set_error(e);
     }
 }
@@ -1052,7 +1280,7 @@ fn start(
     hunks: Vec<Hunk>,
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
-    let mut child = ed.llm_warm.take(&cfg, &ed.session.root)?;
+    let mut child = ed.llm_warm.take(&cfg, &ed.session.root, ed.claude_env.as_ref())?;
     // Write the message and close stdin — the process exits on its own after this one turn (written off the
     // main loop: a commit draft's prompt can be 80 KB, and a spare still starting reads nothing yet).
     // Before anything is installed: a process without stdin leaves no review waiting forever.
@@ -1479,7 +1707,7 @@ fn apply_accepted(ed: &mut Editor, rev: &Review) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Tests never start the real claude (card model P2 caught one reading ~/.claude.json and the keychain):
@@ -1489,7 +1717,7 @@ mod tests {
     fn a_test_never_starts_the_real_claude() {
         // (a path that isn't there: without the guard, nothing starts and nothing panics)
         let cfg = LlmConfig { command: "/nonexistent/claude".into(), ..LlmConfig::default() };
-        let _ = spawn(&cfg, &[], &std::env::temp_dir());
+        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None);
     }
 
     /// No claude: Claude Code isn't installed — how to get it and log in, as its docs say (#163); any other
@@ -1510,6 +1738,389 @@ mod tests {
         assert_eq!(spawn_failed("/x/my-agent", &gone, true), "/x/my-agent isn't there (llm.command)");
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(spawn_failed("claude", &denied, true).starts_with("claude: "), "not a missing one");
+    }
+
+    // ── Claude's environment ──
+
+    /// The `ANTHROPIC_*` / `CLAUDE*` / `AI_AGENT` / `MCP_*` names apibill's L0 found in tarae's environment —
+    /// tarae started from a shell a desktop-app Claude Code session started.
+    const L0: [&str; 20] = [
+        "AI_AGENT",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDECODE",
+        "CLAUDE_AGENT_SDK_VERSION",
+        "CLAUDE_CODE_BRIDGE_MCP_CARRIER",
+        "CLAUDE_CODE_BRIDGE_OWNER_ACCOUNT_UUID",
+        "CLAUDE_CODE_BRIDGE_OWNER_ORG_UUID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_DESKTOP_APP_VERSION",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_HOST_SESSION_ID",
+        "CLAUDE_CODE_OAUTH_SCOPES",
+        "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_WORKER_EPOCH",
+        "CLAUDE_EFFORT",
+        "CLAUDE_PID",
+        "MCP_CONNECTION_NONBLOCKING",
+        "MCP_SERVER_CONNECTION_BATCH_SIZE",
+    ];
+
+    /// Inside a Claude Code session, everything of that session's goes — what it sets for its children, its
+    /// host's own, an exported key — and what you may have set yourself stays: documented settings
+    /// (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `MCP_*`, `ANTHROPIC_BASE_URL`), and the rest of the environment. What stays
+    /// under a Claude name is listed, so a host's next undocumented variable is seen.
+    #[test]
+    fn inside_claude_code_its_sessions_variables_go_and_your_settings_stay() {
+        let yours = ["PATH", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "ANTHROPIC_API_KEY"];
+        let env = dropped(L0.iter().chain(&yours).copied());
+        assert!(env.nested);
+        let kept = ["ANTHROPIC_BASE_URL", "MCP_CONNECTION_NONBLOCKING", "MCP_SERVER_CONNECTION_BATCH_SIZE"];
+        let mut gone: Vec<&str> = L0.iter().copied().filter(|n| !kept.contains(n)).collect();
+        gone.push("ANTHROPIC_API_KEY");
+        crate::sorting::sort(&mut gone);
+        assert_eq!(env.removed, gone);
+        assert_eq!(env.passed, ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"]);
+    }
+
+    /// The rules as tarae has them by default (`llm.environment-key = "drop"`).
+    fn dropped<'a>(names: impl IntoIterator<Item = &'a str>) -> ClaudeEnv {
+        claude_env(names, false)
+    }
+
+    /// Outside Claude Code, a host's names may be your own setup (a self-hosted environment's session token, your
+    /// tracing, OAuth scopes) — tarae can't tell, so they stay. Only a key, which bills in your login's place,
+    /// and what Claude Code sets for its children (a stray one is always a parent's) go.
+    #[test]
+    fn outside_claude_code_only_keys_and_what_it_sets_for_children_go() {
+        let names = [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_PROJECT_DIR",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+            "CLAUDE_CODE_OAUTH_SCOPES",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "TRACEPARENT",
+        ];
+        let env = dropped(names);
+        assert!(!env.nested);
+        assert_eq!(
+            env.removed,
+            [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_MESSAGING_SOCKET",
+                "CLAUDE_PROJECT_DIR"
+            ]
+        );
+        assert!(env.passed.is_empty(), "nothing to say outside: {:?}", env.passed);
+    }
+
+    /// The OAuth scopes are "required when `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` is set": beside it they're yours, even
+    /// inside Claude Code; alone there, the host's.
+    #[test]
+    fn the_oauth_scopes_stay_with_their_refresh_token() {
+        let with = dropped([
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_OAUTH_SCOPES",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+        ]);
+        assert_eq!(with.removed, ["CLAUDE_CODE_CHILD_SESSION"]);
+        let alone = dropped(["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_OAUTH_SCOPES"]);
+        assert_eq!(alone.removed, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_OAUTH_SCOPES"]);
+    }
+
+    /// An IDE's terminal sets `CLAUDECODE` too ("IDE extensions also set this in their integrated terminals"), and
+    /// a shell there is no Claude Code session's: tarae started from it isn't nested — your login and your tracing
+    /// stay; `CLAUDECODE` itself still goes.
+    #[test]
+    fn an_ides_terminal_isnt_a_claude_code_session() {
+        let ide = dropped(["CLAUDECODE", "CLAUDE_CODE_OAUTH_TOKEN", "TRACEPARENT"]);
+        assert!(!ide.nested);
+        assert_eq!(ide.removed, ["CLAUDECODE"], "only what Claude Code sets for its children");
+    }
+
+    /// Each of a parent session's own marks alone says tarae runs inside one — a stdio MCP server's process gets
+    /// no `CLAUDE_CODE_CHILD_SESSION` but the session's id, an SDK host's claude its host's session id — and the
+    /// host's login goes with it.
+    #[test]
+    fn each_mark_of_a_parent_session_alone_makes_it_nested() {
+        for mark in NESTED_BY {
+            let env = dropped([mark, "CLAUDE_CODE_OAUTH_TOKEN"]);
+            assert!(env.nested, "{mark}");
+            assert!(env.removed.iter().any(|n| n == "CLAUDE_CODE_OAUTH_TOKEN"), "{mark}: {:?}", env.removed);
+        }
+    }
+
+    /// The keys are dropped unless your config keeps them (a login by key alone, a gateway's token) — and inside a
+    /// Claude Code session even then: there they're the host's. What's said names the setting where it helps.
+    #[test]
+    fn keys_go_to_claude_only_when_you_keep_them_outside_claude_code() {
+        let keys = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+        assert!(claude_env(keys, true).removed.is_empty(), "kept: a gateway's URL and token both go on");
+        assert_eq!(dropped(keys).removed, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
+        let inside = claude_env(["CLAUDE_CODE_SESSION_ID", "ANTHROPIC_API_KEY"], true);
+        assert_eq!(
+            inside.removed,
+            ["ANTHROPIC_API_KEY", "CLAUDE_CODE_SESSION_ID"],
+            "the host's, kept or not"
+        );
+        assert!(dropped(["ANTHROPIC_API_KEY"]).said().unwrap().contains("llm.environment-key = \"keep\""));
+        assert!(inside.said().unwrap().contains("the host's, whatever llm.environment-key says"));
+    }
+
+    /// `CLAUDE_CODE_OAUTH_TOKEN` is a login: outside Claude Code it's yours (`claude setup-token`) and Claude uses
+    /// it; inside, it's the host session's (an SDK host passes the claude it starts its token), and Claude would
+    /// answer on that host's login instead of yours.
+    #[test]
+    fn the_oauth_token_is_yours_outside_claude_code_and_the_hosts_inside() {
+        assert!(dropped(["CLAUDE_CODE_OAUTH_TOKEN", "PATH"]).removed.is_empty(), "yours: passed");
+        let inside = dropped(["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_OAUTH_TOKEN"]);
+        assert_eq!(inside.removed, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_OAUTH_TOKEN"]);
+    }
+
+    /// What's left out is said by name — and, inside Claude Code, what's passed under a Claude name that no list
+    /// holds (`CLAUDE_CODE_NEW_THING`), so it can be added. A key alone is said in words of its own; nothing left
+    /// out says nothing.
+    #[test]
+    fn what_claude_doesnt_get_is_said_by_name() {
+        let said = dropped([
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_PID",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_NEW_THING",
+        ])
+        .said()
+        .unwrap();
+        assert!(said.starts_with("tarae runs inside Claude Code"), "{said}");
+        assert!(said.contains(": CLAUDE_CODE_CHILD_SESSION, CLAUDE_PID."), "{said}");
+        assert!(said.contains("ANTHROPIC_API_KEY isn't passed either"), "{said}");
+        assert!(said.ends_with("Passed as they are: CLAUDE_CODE_NEW_THING."), "{said}");
+        let key = dropped(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "PATH"]).said().unwrap();
+        assert!(
+            key.starts_with("ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN aren't passed to Claude:"),
+            "{key}"
+        );
+        assert_eq!(dropped(["PATH", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"]).said(), None);
+    }
+
+    /// tarae's environment as a test gives it: L0's names, an exported key and a setting of yours — each with a
+    /// stand-in value (`zq7`: in nothing of tarae's own).
+    pub(crate) fn nested_env() -> Env {
+        let mut env: Env = L0.iter().map(|n| (n.to_string(), format!("{n}-zq7"))).collect();
+        env.insert("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into());
+        env.insert("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), "1234".into());
+        env
+    }
+
+    /// A stand-in claude that writes its environment's names (no value) to `env.names` in the folder it's started
+    /// in, then reads what it's sent.
+    pub(crate) fn recording(cfg: &mut LlmConfig) {
+        cfg.command = "sh".into();
+        cfg.args = vec![
+            "-c".into(),
+            "awk 'BEGIN { for (k in ENVIRON) print k }' > env.tmp && mv env.tmp env.names; cat > /dev/null"
+                .into(),
+        ];
+    }
+
+    /// The names the stand-in wrote in `dir`, once it has (5 s at most), the file taken away for the next.
+    fn names_in(ed: &mut Editor, dir: &Path) -> Vec<String> {
+        let file = dir.join("env.names");
+        let end = Instant::now() + Duration::from_secs(5);
+        while !file.exists() {
+            assert!(Instant::now() < end, "the stand-in claude wrote no env.names");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let names = std::fs::read_to_string(&file).unwrap().lines().map(String::from).collect();
+        std::fs::remove_file(&file).unwrap();
+        names
+    }
+
+    /// What claude would inherit from the process itself is left out too, not only what a test gives: tarae's
+    /// own checks run from inside a Claude Code session, its variables in the test binary's environment, and a
+    /// stand-in claude got them all while every test passed. The variables are set only in a process of its own
+    /// (`process_env_in_its_own_process`) — this one's is never changed.
+    /// The same from a process outside any Claude Code session (its marks taken out of the child's environment,
+    /// wherever the tests run) with `llm.environment-key = "keep"`: the key goes on — `spawn` reads the setting —
+    /// and `CLAUDECODE` (an IDE terminal's, say) still doesn't.
+    #[test]
+    fn what_the_process_itself_holds_never_reaches_claude() {
+        let run = |how: &str, env: &[(&str, &str)]| {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "llm::tests::process_env_in_its_own_process", "--ignored", "--nocapture"])
+                .env("TARAE_CLAUDE_ENV_CHILD", how)
+                .envs(env.iter().copied());
+            if how == "keep" {
+                for mark in NESTED_BY {
+                    child.env_remove(mark);
+                }
+            }
+            let out = child.output().unwrap();
+            let said =
+                String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{how}: {said}");
+            assert!(said.contains("1 passed"), "{how}: the child ran it: {said}");
+        };
+        run("drop", &PROCESS_ENV);
+        run("keep", &[("CLAUDECODE", "1"), ("ANTHROPIC_API_KEY", "tarae-fake-key-1")]);
+    }
+
+    /// A Claude Code session's variables, a key and a setting of yours — the process's own in the child.
+    const PROCESS_ENV: [(&str, &str); 5] = [
+        ("CLAUDECODE", "1"),
+        ("CLAUDE_CODE_SESSION_ID", "x"),
+        ("CLAUDE_CODE_HOST_SESSION_ID", "host-zq7"),
+        ("ANTHROPIC_API_KEY", "tarae-fake-key-1"),
+        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "1234"),
+    ];
+
+    /// `what_the_process_itself_holds_never_reaches_claude`'s child: a stand-in claude started as every test
+    /// starts one (`given` empty), from a process holding `PROCESS_ENV` (`drop`) or a key outside any session
+    /// with the key kept (`keep`).
+    #[test]
+    #[ignore]
+    fn process_env_in_its_own_process() {
+        let Some(how) = std::env::var_os("TARAE_CLAUDE_ENV_CHILD") else { return };
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-llm-process-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = LlmConfig { keep_env_key: how == "keep", ..LlmConfig::default() };
+        recording(&mut cfg);
+        let mut child = spawn(&cfg, &[], &dir, Some(&Env::new())).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        let names = std::fs::read_to_string(dir.join("env.names")).unwrap();
+        let names: Vec<&str> = names.lines().collect();
+        if how == "keep" {
+            assert!(names.contains(&"ANTHROPIC_API_KEY"), "kept: {names:?}");
+            assert!(!names.contains(&"CLAUDECODE"), "CLAUDECODE, the process's, reached claude");
+        } else {
+            for (gone, _) in &PROCESS_ENV[..4] {
+                assert!(!names.contains(gone), "{gone}, the process's, reached claude");
+            }
+            assert!(names.contains(&"CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "yours stays: {names:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// claude failing for want of a login, with a key tarae left out, is told why and what passes it — in the
+    /// chat, after claude's own words — and nothing of the key's value. A key you keep, or another failure, adds
+    /// nothing.
+    #[test]
+    fn a_login_failure_with_a_key_left_out_names_the_setting() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-llm-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
+        ed.claude_env = Some(Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into())]));
+        // (a stand-in claude with no login: each message answered as Claude Code does under `-p`)
+        let failed = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do case \"$line\" in *'\"type\":\"user\"'*) printf '%s\\n' '{failed}';; esac; done"
+            ),
+        ];
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().input = "hello".into();
+        crate::chat::send(&mut ed);
+        let hint = |ed: &Editor| {
+            ed.session
+                .chat
+                .as_ref()
+                .unwrap()
+                .msgs
+                .iter()
+                .find(|m| m.text.contains("no login"))
+                .map(|m| m.text.clone())
+        };
+        let end = Instant::now() + Duration::from_secs(5);
+        while hint(&ed).is_none() {
+            assert!(
+                Instant::now() < end,
+                "no hint: {:?}",
+                ed.session.chat.as_ref().unwrap().msgs.iter().map(|m| &m.text).collect::<Vec<_>>()
+            );
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let hint = hint(&ed).unwrap();
+        assert!(
+            hint.contains("ANTHROPIC_API_KEY") && hint.contains("llm.environment-key = \"keep\""),
+            "{hint}"
+        );
+        assert!(!hint.contains("zq7"), "names only: {hint}");
+        assert_eq!(login_hint(&ed, "Overloaded"), None, "not a login failure");
+        ed.config.llm.keep_env_key = true;
+        assert_eq!(
+            login_hint(&ed, "Not logged in · Please run /login"),
+            None,
+            "the key went on: nothing to add"
+        );
+        drop(ed);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The chat's claude and the ask's spare (which the ask takes, or starts the same way) get tarae's environment
+    /// less what `claude_env` says — the same names left out, the rest as it was (the reviewer's: its own test).
+    /// The chat says so once since tarae started, by name: a new conversation's claude doesn't say it again.
+    #[test]
+    fn the_chats_and_the_asks_claude_leave_out_a_parent_sessions_variables() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-llm-claude-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
+        recording(&mut ed.config.llm);
+        ed.claude_env = Some(nested_env());
+        let log = crate::log::capture();
+        let gone = ClaudeEnv::of(ed.claude_env.as_ref(), false).removed;
+        let check = |names: Vec<String>, who: &str| {
+            for name in &gone {
+                assert!(!names.contains(name), "{who}: {name} reached claude");
+            }
+            for kept in ["CLAUDE_CODE_MAX_OUTPUT_TOKENS", "ANTHROPIC_BASE_URL", "MCP_CONNECTION_NONBLOCKING"]
+            {
+                assert!(names.iter().any(|n| n == kept), "{who}: {kept} left out — {names:?}");
+            }
+        };
+        assert!(gone.iter().any(|n| n == "ANTHROPIC_API_KEY") && gone.iter().any(|n| n == "CLAUDECODE"));
+        crate::chat::open(&mut ed);
+        check(names_in(&mut ed, &root), "the chat");
+        let notes = |ed: &Editor| -> Vec<String> {
+            let c = ed.session.chat.as_ref().unwrap();
+            c.msgs
+                .iter()
+                .filter(|m| m.text.contains("CLAUDE_CODE_CHILD_SESSION"))
+                .map(|m| m.text.clone())
+                .collect()
+        };
+        assert_eq!(notes(&ed).len(), 1, "said in the chat");
+        assert!(!notes(&ed)[0].contains("zq7"), "names only: {}", notes(&ed)[0]);
+        let logged =
+            log.lines().into_iter().filter(|l| l.starts_with("claude  info  tarae runs inside")).count();
+        assert_eq!(logged, 1, "one log line");
+        crate::chat::reset(&mut ed);
+        names_in(&mut ed, &root);
+        assert!(notes(&ed).is_empty(), "a new conversation: not again");
+        prewarm(&mut ed);
+        check(names_in(&mut ed, &root), "the ask's spare");
+        drop(ed);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A commit message's body wrapped at 72: the subject and short lines as they are, a long line between

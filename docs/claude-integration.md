@@ -249,6 +249,34 @@ edited helper mid-conversation). `:claude-settings` shows the card again. The ch
 own MCP server (`--strict-mcp-config`), whatever `llm.args` says, so a project's `.mcp.json` servers don't
 connect.
 
+**Claude gets your environment, less another Claude Code session's.** Every claude tarae starts — the chat, the
+reviewer, `space i` and its spare — inherits tarae's environment with a few names left out:
+
+- `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`, by default: without a terminal Claude Code uses a key in its
+  environment over your login, and bills it — so Claude in tarae runs on your Claude Code login (`/login`, or
+  `claude setup-token`'s `CLAUDE_CODE_OAUTH_TOKEN`). If you sign in only with a key — an API key alone, or a
+  gateway's `ANTHROPIC_BASE_URL` with its `ANTHROPIC_AUTH_TOKEN` — set `llm.environment-key = "keep"` in your own
+  config (`~/.config/tarae/config.toml`; a project's `.tarae.toml` or `.tarae.local.toml` is refused it, and
+  says so). When Claude fails for want of a login and a key was left out, the chat says which and names the
+  setting.
+- What Claude Code sets in the processes it starts, always: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, its session
+  id, entrypoint, effort, pid, `CLAUDE_PROJECT_DIR`, `CLAUDE_AGENT_SDK_VERSION`, `AI_AGENT`, the
+  `CLAUDE_CODE_BRIDGE_*` and `CLAUDE_CODE_MESSAGING_*` families. Inherited, they're another session's, and Claude
+  Code would take the chat for a session nested in that one — one it keeps no transcript or prompt history for, by
+  its docs.
+- When tarae itself was started inside a Claude Code session — its environment has one of that session's own
+  marks, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_HOST_SESSION_ID`; an
+  IDE's terminal, which sets only `CLAUDECODE`, isn't one: that host's own too — its login
+  (`CLAUDE_CODE_OAUTH_TOKEN`) and keys (whatever `llm.environment-key` says), its session id and token, its app's
+  version and paths, its trace context (`TRACEPARENT`), and `CLAUDE_CODE_OAUTH_SCOPES` unless its
+  `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` is set. Outside one these stay: a `CLAUDE_CODE_OAUTH_TOKEN` you exported
+  (`claude setup-token`) is your login.
+
+Every other name stays, Claude Code's settings you may export on purpose among them
+(`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `MCP_TIMEOUT`, `ANTHROPIC_BASE_URL`). When something was left out, the chat says
+so once since tarae started, by name, and names the `CLAUDE*`/`ANTHROPIC_*` variables still passed when tarae runs
+inside Claude Code; `tarae.log` has the same line.
+
 Claude isn't limited to that file: it **explores the project itself** (Read, Grep, Glob — in the project without
 asking, [outside it only once you say so](#reading-outside-the-project); its [edits](#edits) always come to you
 first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`, `◦ grep  fn add  in src` — each named as the tool it is),

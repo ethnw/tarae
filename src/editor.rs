@@ -589,9 +589,13 @@ pub struct Editor {
     /// Your own Claude settings file, read for what a held-back key goes back to (`claudetrust::Baseline`) —
     /// None in tests.
     pub claude_user_settings: Option<std::path::PathBuf>,
-    /// The environment claude gets, as `claudetrust` reads it for a held-back name — None: tarae's own (the
-    /// process's); tests give their own (empty unless a test says), so none depends on where it runs.
-    pub claude_env: Option<std::collections::HashMap<String, String>>,
+    /// tarae's environment as claude inherits it — None: the process's own; tests give their own (empty unless a
+    /// test says), so none depends on where it runs. `claudetrust` reads only it for a held-back name;
+    /// `llm::spawn` lays it over the process's (a stand-in claude still finds `sh`'s programs) and leaves out what
+    /// `llm::claude_env` says of both; what the chat says of it (`llm::env_told`) reads only this.
+    pub claude_env: Option<crate::llm::Env>,
+    /// What claude's environment leaves out has been said (`llm::env_told`): once since tarae started.
+    pub claude_env_told: bool,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
     pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
     /// What a run's policy reads of tarae's surroundings (`sandbox::Here`, on its worker) — `Here::now` unless a
@@ -790,6 +794,7 @@ impl Editor {
             claude_settings_gate: !cfg!(test),
             claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
             claude_env: if cfg!(test) { Some(Default::default()) } else { None },
+            claude_env_told: false,
             run_clock: None,
             sandbox_here: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
