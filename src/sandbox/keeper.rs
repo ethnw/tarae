@@ -882,7 +882,9 @@ impl Keeper {
     /// process named `comm` before it confines itself (`landlock::thread_name` — what Landlock's audit names
     /// beside its pid: the caller tells its watch first, `sandbox::spawn`). Its sockets go as `net` says — the
     /// answer `rules` were made for (`linux::confine`'s `Confine.net`): `Own`, its internet sockets are its own
-    /// (`seccomp::Mode::OwnNetwork`); `Plain`, it has none; `Served` and `Routed` are `start_served`'s.
+    /// (`seccomp::Mode::OwnNetwork`); `Plain`, it has none; `Served` and `Routed` are `start_served`'s. `rules` are
+    /// made by hand (the tier probe's, tests'): a `Confine`'s go only through `start_confined` or `start_served`,
+    /// which take the files it hides by mounts with them (outside tests a `Confine` gives its rules to nothing else).
     pub fn start(
         &self,
         cmd: &std::process::Command,
@@ -893,8 +895,25 @@ impl Keeper {
         if matches!(net, RunNet::Served | RunNet::Routed | RunNet::Copied) {
             return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
         }
-        let no_userns = super::tier::runs_refuse_userns();
-        self.start_with(cmd, comm, rules, net, no_userns, false).map(|(s, _)| s)
+        let asks = Asks { no_userns: super::tier::runs_refuse_userns(), ..Asks::default() };
+        self.start_with(cmd, comm, rules, net, asks).map(|(s, _)| s)
+    }
+
+    /// `start` with the rules `c` made — and the files named like keys it hides by mounts (`linux::Covers`, 7d): a
+    /// run of tarae's starts here or through `start_served`, never with `c`'s rules alone (they leave those
+    /// files' folders whole, for the mounts to hide them).
+    pub fn start_confined(
+        &self,
+        cmd: &std::process::Command,
+        comm: &str,
+        c: &super::linux::Confine,
+    ) -> io::Result<Started> {
+        if matches!(c.net, RunNet::Served | RunNet::Routed | RunNet::Copied) {
+            return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
+        }
+        let (rules, covers) = c.rules_and_covers();
+        let asks = Asks { no_userns: super::tier::runs_refuse_userns(), ptys: false, covers: Some(covers) };
+        self.start_with(cmd, comm, rules, c.net, asks).map(|(s, _)| s)
     }
 
     /// Tests: `start`, new user namespaces refused (`no_userns`) as asked rather than as this system decides.
@@ -907,22 +926,29 @@ impl Keeper {
         net: RunNet,
         no_userns: bool,
     ) -> io::Result<Started> {
-        self.start_with(cmd, comm, rules, net, no_userns, false).map(|(s, _)| s)
+        self.start_with(cmd, comm, rules, net, Asks { no_userns, ..Asks::default() }).map(|(s, _)| s)
     }
 
     /// `start`, served or not; with a handoff socket when served or held (a keeper in a PID namespace — its
-    /// run waits for tarae to know its pid): tarae's end of it comes back. `no_userns`: its filter refuses new
-    /// user namespaces (`tier::runs_refuse_userns`); `ptys`: its way to a pty's other end goes to its supervisor
-    /// (served, a pool granted in `rules` — 3b).
+    /// run waits for tarae to know its pid): tarae's end of it comes back. What's asked of its child besides its
+    /// rules: `asks`.
     fn start_with(
         &self,
         cmd: &std::process::Command,
         comm: &str,
         rules: BorrowedFd,
         net: RunNet,
-        no_userns: bool,
-        ptys: bool,
+        asks: Asks<'_>,
     ) -> io::Result<(Started, Option<Arc<OwnedFd>>)> {
+        let Asks { no_userns, ptys, covers } = asks;
+        // (only a keeper in a user namespace can give its run a mount namespace of its own)
+        let covers = covers.filter(|c| !c.keys.is_empty());
+        // (the break-once: the mounts skipped, the rules left whole — 7d's key tests fail where keys are mounted over)
+        #[cfg(test)]
+        let covers = covers.filter(|_| std::env::var_os("TARAE_TEST_NO_COVERS").is_none());
+        if covers.is_some() && !self.ns.user {
+            return Err(io::Error::other("files hidden by mounts, but its keeper has no user namespace"));
+        }
         use std::os::unix::ffi::OsStrExt;
         // (its own sockets only inside the network namespace that holds them to `lo`)
         if matches!(net, RunNet::Own | RunNet::Routed) && !self.ns.netns() {
@@ -957,6 +983,16 @@ impl Keeper {
             held: self.ns.pid,
             no_userns,
             ptys,
+            shut: covers.and_then(|c| c.shut.as_ref()).map(|s| channel::Covered {
+                dev: s.dev,
+                ino: s.ino,
+                path: bytes(s.path.as_os_str()),
+            }),
+            covers: covers
+                .iter()
+                .flat_map(|c| &c.keys)
+                .map(|k| channel::Covered { dev: k.dev, ino: k.ino, path: bytes(k.path.as_os_str()) })
+                .collect(),
         };
         let stdin = open_null(libc::O_RDONLY)?;
         let (out_r, out_w) = io::pipe()?;
@@ -973,6 +1009,16 @@ impl Keeper {
         let spawned = crate::spawn::Spawned { pid, stdout: Some(out_r), stderr: Some(err_r) };
         Ok((Started { spawned, cgroup: (cgroup != 0).then_some(cgroup) }, ours))
     }
+}
+
+/// What a run's child is asked besides its rules (`Keeper::start_with`): its filter refuses new user namespaces
+/// (`no_userns`, `tier::runs_refuse_userns`); its way to a pty's other end goes to its supervisor (`ptys`: served, a
+/// pool granted in its rules — 3b); it hides these files named like keys by mounts first (`covers`, 7d).
+#[derive(Clone, Copy, Default)]
+struct Asks<'a> {
+    no_userns: bool,
+    ptys: bool,
+    covers: Option<&'a super::linux::Covers>,
 }
 
 /// A `SOCK_STREAM` pair, close-on-exec: tarae's end (shared by who writes on it) and the child's.
@@ -1012,7 +1058,9 @@ impl Keeper {
         let marks = lock(&self.network).as_ref().map(|n| n.marks.clone());
         let to = super::supervisor::serve(policy, net, refused, marks, self.pid, c.ptys.clone())?;
         let no_userns = super::tier::runs_refuse_userns();
-        let (started, ours) = self.start_with(cmd, comm, c.rules_fd(), net, no_userns, c.ptys.is_some())?;
+        let (rules, covers) = c.rules_and_covers();
+        let asks = Asks { no_userns, ptys: c.ptys.is_some(), covers: Some(covers) };
+        let (started, ours) = self.start_with(cmd, comm, rules, net, asks)?;
         let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
         crate::event::thread("tarae-handoff", move || {
             let Ok(listener) = recv_listener(&ours) else { return };
@@ -2247,7 +2295,8 @@ fn own_usage() -> (u64, u64) {
     (kb("Rss:"), kb("Pss:"))
 }
 
-/// A run's child, after the keeper's `clone3` or fork: its channel closed, dumpable again (finding 1: tarae reads a
+/// A run's child, after the keeper's `clone3` or fork: its channel closed, the files named like keys hidden in a
+/// mount namespace of its own where it's asked to (`cover`, 7d), dumpable again (finding 1: tarae reads a
 /// served run's memory through `/proc/<tid>/mem`, which a non-dumpable process refuses without a namespace of
 /// tarae's), a session of its own, its stdio, its folder, its name (what Landlock's audit names), every signal
 /// unblocked, its Landlock rules, its seccomp filter — served, put on by a helper thread and its listener sent to
@@ -2296,7 +2345,10 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
     // SAFETY: plain calls on this process and descriptors it holds.
     unsafe {
         libc::close(chan);
-        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+        #[cfg(test)]
+        if exec.leak {
+            libc::open(exec.cwd.as_ptr(), libc::O_PATH | libc::O_DIRECTORY);
+        }
         libc::setsid();
         for (from, to) in [(stdin, 0), (stdout, 1), (stderr, 2)] {
             if libc::dup2(from.as_raw_fd(), to) < 0 {
@@ -2306,6 +2358,14 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
         if libc::chdir(exec.cwd.as_ptr()) != 0 {
             fail(Step::Chdir, errno());
         }
+        // (7d: before dumpable — a new user namespace's capabilities make it undumpable again; after its stdio, which
+        // says why it failed)
+        if let Some(c) = &exec.covers
+            && let Err(e) = cover(c)
+        {
+            fail(Step::Covers, e);
+        }
+        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
         libc::prctl(libc::PR_SET_NAME, exec.comm.as_ptr());
         let mut none: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut none);
@@ -2346,6 +2406,12 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
         }
     }
     drop(listener);
+    // (nothing but its stdio goes past the exec — every descriptor of the keeper's and tarae's comes close-on-exec,
+    // and this holds it whatever comes later: one opened before its own mount namespace would reach past the mounts)
+    // SAFETY: a plain call on this process's own descriptors.
+    if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) } != 0 {
+        fail(Step::Exec, errno());
+    }
     // SAFETY: the program, argv and envp are NUL-terminated arrays of strings `exec` holds.
     unsafe { libc::execve(exec.program.as_ptr(), exec.argv_p.as_ptr(), exec.envp_p.as_ptr()) };
     fail(Step::Exec, errno())
@@ -2366,6 +2432,165 @@ struct Exec {
     filter: crate::seccomp::Filter,
     /// The stack of the thread that puts a served filter on and makes its listener (`hand_over`).
     stack: Box<[u8]>,
+    /// What it hides by mounts first (7d) — None: nothing.
+    covers: Option<Covering>,
+    /// Tests: its child opens its folder without close-on-exec first thing, before its own mount namespace (its
+    /// environment holds `TARAE_TEST_LEAK_FD=1`) — what `close_range` must keep from the program.
+    #[cfg(test)]
+    leak: bool,
+}
+
+/// What a run's child needs to hide the files named like keys (7d, `linux::Covers`; `cover`): the shut file, each
+/// file and what it was (device, inode), its own user namespace's id maps (the keeper's ids, the user's — D5) and
+/// the last capability to drop.
+struct Covering {
+    shut: (CString, u64, u64),
+    keys: Vec<(CString, u64, u64)>,
+    uid_map: CString,
+    gid_map: CString,
+    last_cap: libc::c_ulong,
+}
+
+impl Covering {
+    fn of(run: &channel::Run) -> Option<Covering> {
+        let shut = run.shut.as_ref().filter(|_| !run.covers.is_empty())?;
+        let c = |s: &[u8]| CString::new(s).unwrap_or_default();
+        // SAFETY: plain calls.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(63);
+        Some(Covering {
+            shut: (c(&shut.path), shut.dev, shut.ino),
+            keys: run.covers.iter().map(|k| (c(&k.path), k.dev, k.ino)).collect(),
+            uid_map: c(format!("{uid} {uid} 1\n").as_bytes()),
+            gid_map: c(format!("{gid} {gid} 1\n").as_bytes()),
+            last_cap,
+        })
+    }
+}
+
+/// `mount_setattr`'s: no set-user-ID, devices nor programs run from it (Linux 5.12).
+const MOUNT_ATTR_NOSUID: u64 = 0x02;
+const MOUNT_ATTR_NODEV: u64 = 0x04;
+const MOUNT_ATTR_NOEXEC: u64 = 0x08;
+/// `open_tree`'s: a copy of the mount, detached (Linux 5.2); `move_mount`'s: from and onto descriptors themselves.
+const OPEN_TREE_CLONE: libc::c_uint = 1;
+const OPEN_TREE_CLOEXEC: libc::c_uint = libc::O_CLOEXEC as libc::c_uint;
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x04;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
+
+/// 7d: a run's child hides `c`'s files named like keys — in a user and mount namespace of its own (`unshare`: it
+/// holds every capability there, the keeper none), its ids mapped to themselves; each key opened through no link
+/// (`openat2`) and checked to be the file tarae found (device, inode; a regular file) — moved or swapped since, it
+/// fails (`ESTALE`); a copy of the shut file's mount (opened through no link, the file tarae checked — else
+/// `ESTALE` too), read-only, no set-user-ID, devices nor programs, moved onto
+/// what it opened (so onto that file wherever it went since); then every capability dropped for good. The
+/// mounts in it, made in this namespace, aren't locked; what takes them back from a run is that it has no
+/// capability, and Landlock refuses a confined process every mount and unmount; in a namespace a run makes, they
+/// come locked. Err: an errno. Raw calls only, nothing allocated (`child`).
+///
+/// # Safety
+/// A run's child's: raw calls on what `c` holds.
+unsafe fn cover(c: &Covering) -> Result<(), i32> {
+    // SAFETY: raw calls on this process, `c`'s strings and buffers on the stack; each descriptor closed.
+    unsafe {
+        if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+            return Err(errno());
+        }
+        // (its new capabilities made it undumpable, which gives its `/proc/self` to root: its maps couldn't be
+        // written — EACCES, measured)
+        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+        let maps: [(&std::ffi::CStr, &[u8]); 3] = [
+            (c"/proc/self/setgroups", b"deny"),
+            (c"/proc/self/uid_map", c.uid_map.as_bytes()),
+            (c"/proc/self/gid_map", c.gid_map.as_bytes()),
+        ];
+        for (file, text) in maps {
+            let fd = libc::open(file.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if fd < 0 {
+                return Err(errno());
+            }
+            let n = libc::write(fd, text.as_ptr().cast(), text.len());
+            let e = errno();
+            libc::close(fd);
+            if n != text.len() as isize {
+                return Err(e);
+            }
+        }
+        for (path, dev, ino) in &c.keys {
+            let mut how: libc::open_how = std::mem::zeroed();
+            how.flags = (libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64;
+            how.resolve = libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+            let size = std::mem::size_of::<libc::open_how>();
+            let key = libc::syscall(libc::SYS_openat2, libc::AT_FDCWD, path.as_ptr(), &raw const how, size);
+            if key < 0 {
+                return Err(errno());
+            }
+            let key = key as libc::c_int;
+            let mut st: libc::stat = std::mem::zeroed();
+            let same = libc::fstat(key, &mut st) == 0
+                && st.st_mode & libc::S_IFMT == libc::S_IFREG
+                && (st.st_dev as u64, st.st_ino as u64) == (*dev, *ino);
+            if !same {
+                libc::close(key);
+                return Err(libc::ESTALE);
+            }
+            // (the shut file through no link, and only the one tarae checked — swapped since, it fails as a key does)
+            let flags = OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | libc::AT_SYMLINK_NOFOLLOW as libc::c_uint;
+            let (shut_at, shut_dev, shut_ino) = &c.shut;
+            let tree = libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, shut_at.as_ptr(), flags);
+            if tree < 0 {
+                let e = errno();
+                libc::close(key);
+                return Err(e);
+            }
+            let tree = tree as libc::c_int;
+            let mut st: libc::stat = std::mem::zeroed();
+            let same = libc::fstat(tree, &mut st) == 0
+                && st.st_mode & libc::S_IFMT == libc::S_IFREG
+                && (st.st_dev as u64, st.st_ino as u64) == (*shut_dev, *shut_ino);
+            if !same {
+                libc::close(tree);
+                libc::close(key);
+                return Err(libc::ESTALE);
+            }
+            let shut = MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC;
+            let attr = MountAttr { attr_set: shut, attr_clr: 0, propagation: 0, userns_fd: 0 };
+            let empty = c"".as_ptr();
+            let size = std::mem::size_of::<MountAttr>();
+            let set = libc::syscall(
+                libc::SYS_mount_setattr,
+                tree,
+                empty,
+                libc::AT_EMPTY_PATH,
+                &raw const attr,
+                size,
+            ) == 0;
+            if !set {
+                let e = errno();
+                libc::close(tree);
+                libc::close(key);
+                return Err(e);
+            }
+            let done = libc::syscall(
+                libc::SYS_move_mount,
+                tree,
+                empty,
+                key,
+                empty,
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ) == 0;
+            let e = errno();
+            libc::close(tree);
+            libc::close(key);
+            if !done {
+                return Err(e);
+            }
+        }
+        capabilities_dropped(c.last_cap)
+    }
 }
 
 impl Exec {
@@ -2396,6 +2621,9 @@ impl Exec {
             envp_p,
             filter,
             stack: vec![0u8; HELPER_STACK].into_boxed_slice(),
+            covers: Covering::of(run),
+            #[cfg(test)]
+            leak: run.envp.iter().any(|e| e.as_slice() == b"TARAE_TEST_LEAK_FD=1"),
         })
     }
 }
@@ -3357,7 +3585,7 @@ mod tests {
             let policy = Arc::new(p);
             let (tx, _rx) = std::sync::mpsc::channel();
             let keeper_plain = median_ms(50, || {
-                let s = k.start(&cmd, &crate::landlock::thread_name(), plain.rules_fd(), plain.net).unwrap();
+                let s = k.start_confined(&cmd, &crate::landlock::thread_name(), &plain).unwrap();
                 crate::spawn::wait(s.spawned.pid).unwrap();
             });
             let keeper_served = served.then(|| {
@@ -5878,7 +6106,7 @@ mod tests {
                     let p = Arc::new(self.policy.clone());
                     self.keeper.start_served(&cmd, &name, c, p, told)
                 }
-                RunNet::Own | RunNet::Plain => self.keeper.start(&cmd, &name, c.rules_fd(), c.net),
+                RunNet::Own | RunNet::Plain => self.keeper.start_confined(&cmd, &name, c),
             };
             (started.unwrap(), refused)
         }
@@ -6242,7 +6470,7 @@ mod tests {
         );
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "printf made > made"]).current_dir(&root);
-        let s = k.start(&cmd, &crate::landlock::thread_name(), c.rules_fd(), c.net).unwrap();
+        let s = k.start_confined(&cmd, &crate::landlock::thread_name(), &c).unwrap();
         let status = crate::spawn::wait(s.spawned.pid).unwrap();
         assert!(status.success() && std::fs::read_to_string(root.join("made")).is_ok_and(|m| m == "made"));
         k.end();
@@ -7863,7 +8091,7 @@ mod tests {
             project_served("over-6d-own", vec![], Some(&k), &[], Err("not served".into()));
         let go = own_root.join("go");
         let cmd = helper_cmd("socket", &[("TARAE_GO", go.to_str().unwrap())], Some(&own_root));
-        let s = k.start(&cmd, &crate::landlock::thread_name(), own.rules_fd(), own.net).unwrap();
+        let s = k.start_confined(&cmd, &crate::landlock::thread_name(), &own).unwrap();
         let held = s.spawned.pid;
         let mut out = io::BufReader::new(s.spawned.stdout.unwrap()).lines().map_while(Result::ok);
         let n: i32 =
@@ -9033,7 +9261,7 @@ mod tests {
         let env = [("TARAE_TO", "203.0.113.7:443"), ("TARAE_GO", go.to_str().unwrap())];
         let start = || {
             let cmd = helper_cmd("within_when", &env, Some(&root));
-            k.start(&cmd, &crate::landlock::thread_name(), c.rules_fd(), c.net).unwrap()
+            k.start_confined(&cmd, &crate::landlock::thread_name(), &c).unwrap()
         };
         let (a, b) = (start(), start());
         let id = a.cgroup.expect("run A in a cgroup of its own");

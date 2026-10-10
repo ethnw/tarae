@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments] | test --installed … | test --as-user …]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -63,10 +63,20 @@ enum What {
     Installed {
         args: Vec<String>,
     },
+    /// `test --as-user`: tarae's own tests (`--bin tarae`) built as root, then run as a user of the container's own
+    /// (`AS_USER`, made there) through `setpriv` with these arguments (the test binary's), the `--env` variables
+    /// kept — what runs as tarae does on a desktop, where root's ways differ (7d: root can't map itself into a run's
+    /// own user namespace, so its keys are closed by their folders' rules).
+    AsUser {
+        args: Vec<String>,
+    },
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments]]";
+/// The user `test --as-user` runs the tests as, made in the container.
+const AS_USER: &str = "tarae-test";
+
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments] | test --as-user [the test binary's arguments]]";
 
 /// `--cgroup` (6g): the container in the machine's cgroup namespace (`--cgroupns host`), the hierarchy writable, and
 /// a folder under the container's own cgroup made first, as root — as systemd's `Delegate=yes` makes one — for the
@@ -344,6 +354,7 @@ fn what(args: &[String]) -> Result<What> {
         Some((c, [])) if c == "clippy" => What::Clippy,
         Some((t, rest)) if t == "test" => match rest {
             [i, rest @ ..] if i == "--installed" => What::Installed { args: rest.to_vec() },
+            [u, rest @ ..] if u == "--as-user" => What::AsUser { args: rest.to_vec() },
             [r, n, rest @ ..] if r == "--repeat" => What::Test {
                 args: rest.to_vec(),
                 repeat: n
@@ -1289,7 +1300,7 @@ fn script(tree: Tree, what: &What) -> String {
         }
     });
     s.push_str("echo \"toolchain: $(rustc --version)\"\n");
-    if !matches!(what, What::Test { .. } | What::Installed { .. }) {
+    if !matches!(what, What::Test { .. } | What::Installed { .. } | What::AsUser { .. }) {
         // (every package: netlink/ is Linux code, linted only here)
         s.push_str("cargo clippy --locked --workspace --all-targets -- -D warnings\n");
         s.push_str(
@@ -1307,6 +1318,25 @@ fn script(tree: Tree, what: &What) -> String {
             ));
             let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
             s.push_str(&format!("CARGO_MANIFEST_DIR=/work/tarae /usr/bin/tarae {}\n", args.join(" ")));
+        }
+        What::AsUser { args } => {
+            // (the binary copied where the user reads it; the clone — a throwaway, where tests write under `target/` —
+            // given to the user; its uid and gid set by setpriv, every capability gone with root's uid — the
+            // environment as `--env` gave it, but its home)
+            s.push_str(&format!(
+                "exe=$(cargo test --locked --bin tarae --no-run 2>&1 | tee /dev/stderr | sed -n '{EXE_SED}')\n\
+                 test -n \"$exe\" || {{ echo 'cargo named no test binary'; exit 1; }}\n\
+                 id -u {AS_USER} >/dev/null 2>&1 || useradd --create-home {AS_USER}\n\
+                 chown -R {AS_USER}: /work/tarae\n\
+                 install -o root -g root -m 0755 \"$exe\" /usr/local/bin/tarae-tests\n\
+                 echo \"the tests run as {AS_USER} ($(id {AS_USER}))\"\n",
+            ));
+            let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
+            s.push_str(&format!(
+                "HOME=/home/{AS_USER} USER={AS_USER} CARGO_MANIFEST_DIR=/work/tarae \
+                 setpriv --reuid={AS_USER} --regid={AS_USER} --init-groups /usr/local/bin/tarae-tests {}\n",
+                args.join(" ")
+            ));
         }
         What::Both => s.push_str("cargo test --locked --workspace\n"),
         What::Test { args, repeat } => {
@@ -1602,6 +1632,30 @@ mod tests {
         std::io::Write::write_all(&mut sed.stdin.take().unwrap(), said.as_bytes()).unwrap();
         let out = sed.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "/target/debug/deps/tarae-0123abcd\n");
+    }
+
+    /// `test --as-user` (7d): tarae's own tests built as root, then run as a user made in the container — through
+    /// `setpriv`, which leaves the environment (`--env`'s) as it is but its home — with the test binary's arguments
+    /// as words. Never as root, never through `cargo test`.
+    #[test]
+    fn as_user_runs_the_tests_as_a_user_of_the_containers() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let w = what(&args(&["test", "--as-user", "sandbox::", "--exact", "it's"])).unwrap();
+        assert_eq!(w, What::AsUser { args: args(&["sandbox::", "--exact", "it's"]) });
+        let s = script(Tree::Mounted(None), &w);
+        assert!(s.contains("cargo test --locked --bin tarae --no-run"), "built, not run: {s}");
+        assert!(s.contains(&format!("useradd --create-home {AS_USER}\n")), "{s}");
+        assert!(s.contains(&format!("chown -R {AS_USER}: /work/tarae\n")), "the clone the user's: {s}");
+        let run = format!(
+            "setpriv --reuid={AS_USER} --regid={AS_USER} --init-groups /usr/local/bin/tarae-tests \
+             'sandbox::' '--exact' 'it'\\''s'\n"
+        );
+        assert!(s.contains(&run) && s.contains(&format!("HOME=/home/{AS_USER} ")), "run as the user: {s}");
+        assert!(
+            !s.contains("--reset-env") && !s.contains("--keep-groups"),
+            "--env's kept, root's groups not: {s}"
+        );
+        assert!(!s.contains("cargo clippy") && !s.contains("cargo test --locked\n"), "{s}");
     }
 
     /// `--platform linux/<arch>` first: `docker run` on it, with a target and toolchains of its own (an x86_64

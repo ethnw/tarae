@@ -38,10 +38,13 @@ pub enum Step {
     Exec,
     /// Its own cgroup's folder (6g: `mkdirat` in the keeper's scope) — a run starts without one then, never fails.
     Cgroup,
+    /// Hiding the files named like keys (7d): its own user and mount namespace, the mounts, its capabilities dropped
+    /// — or a key moved or swapped since tarae found it.
+    Covers,
 }
 
 impl Step {
-    const ALL: [Step; 8] = [
+    const ALL: [Step; 9] = [
         Step::Request,
         Step::Fork,
         Step::Chdir,
@@ -50,6 +53,7 @@ impl Step {
         Step::Handoff,
         Step::Exec,
         Step::Cgroup,
+        Step::Covers,
     ];
 
     /// As a byte (the record's, and a run's failure pipe's).
@@ -72,6 +76,7 @@ impl Step {
             Step::Handoff => "handing its calls to tarae",
             Step::Exec => "running the program",
             Step::Cgroup => "its own cgroup",
+            Step::Covers => "hiding the files named like keys (one moved since? run it again)",
         }
     }
 }
@@ -98,6 +103,38 @@ pub struct Run {
     pub no_userns: bool,
     /// Its way to a pty's other end is tarae's (`tier::Ns::serves_ptys`, 3b): its filter hands those calls over.
     pub ptys: bool,
+    /// The empty file nobody may open its child mounts over each of `covers` (7d, `linux::Covers`), and the file tarae
+    /// checked there — None with none.
+    pub shut: Option<Covered>,
+    /// The files named like keys its child hides, in a mount namespace of its own, before its rules.
+    pub covers: Vec<Covered>,
+}
+
+/// A file a run's child mounts `Run.shut` over: where (a real path), and the file the walk found there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Covered {
+    pub dev: u64,
+    pub ino: u64,
+    pub path: Vec<u8>,
+}
+
+impl Covered {
+    /// As a list item: its device and inode, then its path.
+    fn item(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(16 + self.path.len());
+        b.extend(self.dev.to_le_bytes());
+        b.extend(self.ino.to_le_bytes());
+        b.extend(&self.path);
+        b
+    }
+
+    fn of_item(b: &[u8]) -> Result<Covered, Refused> {
+        let (Some(dev), Some(ino), Some(path)) = (b.get(..8), b.get(8..16), b.get(16..)) else {
+            return Err(Refused("a covered file without its device and inode"));
+        };
+        let n = |s: &[u8]| u64::from_le_bytes(s.try_into().unwrap_or_default());
+        Ok(Covered { dev: n(dev), ino: n(ino), path: path.to_vec() })
+    }
 }
 
 impl Run {
@@ -229,6 +266,8 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             bytes(&mut b, &r.comm);
             let net = NETS.iter().position(|n| *n == r.net).unwrap_or(0) as u8;
             b.extend([net, r.held as u8, r.no_userns as u8, r.ptys as u8]);
+            list(&mut b, &r.shut.iter().map(Covered::item).collect::<Vec<_>>())?;
+            list(&mut b, &r.covers.iter().map(Covered::item).collect::<Vec<_>>())?;
             valid_run(r)?;
         }
         Msg::Signal { id, sig } => {
@@ -331,6 +370,16 @@ fn valid_run(r: &Run) -> Result<(), Refused> {
     if r.envp.iter().any(|e| !e.contains(&b'=')) {
         return Err(Refused("an environment entry without '='"));
     }
+    // (the child takes them as they are: absolute, each a C string; the shut file with covers, and only then)
+    let absolute = |s: &[u8]| s.first() == Some(&b'/') && !nul(s);
+    let shut = match (&r.shut, r.covers.is_empty()) {
+        (None, true) => true,
+        (Some(s), false) => absolute(&s.path),
+        _ => false,
+    };
+    if !shut || r.covers.iter().any(|c| !absolute(&c.path)) {
+        return Err(Refused("a covered file or the shut file not an absolute path"));
+    }
     Ok(())
 }
 
@@ -424,6 +473,12 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                 held: r.flag()?,
                 no_userns: r.flag()?,
                 ptys: r.flag()?,
+                shut: match r.list()?.as_slice() {
+                    [] => None,
+                    [one] => Some(Covered::of_item(one)?),
+                    _ => return Err(Refused("more than one shut file")),
+                },
+                covers: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
             };
             valid_run(&run)?;
             Msg::Run(run)
@@ -589,6 +644,12 @@ mod tests {
                 // (one way and the other, by the net mode: both values on the wire)
                 no_userns: net == RunNet::Routed,
                 ptys: net == RunNet::Served,
+                // (covered files on one only — both shapes on the wire)
+                shut: held.then(|| Covered { dev: 9, ino: 1 << 33, path: b"/tmp/i/shut".to_vec() }),
+                covers: match held {
+                    true => vec![Covered { dev: 1 << 40, ino: 7, path: b"/tmp/project/.env".to_vec() }],
+                    false => Vec::new(),
+                },
             })
         };
         vec![

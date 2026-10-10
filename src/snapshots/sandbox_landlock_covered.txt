@@ -1,0 +1,10 @@
+ABI 6, its own mount namespace — the project's rules:
+    0x000d $ROOT
+    0x0010 $ROOT
+    0xc007 $ROOT/.env
+    0xc007 $ROOT/.env.example
+    0xc007 $ROOT/go.mod
+    0xffff $ROOT/src
+hidden by mounts:
+    $ROOT/.env
+    $ROOT/src/tls/server.pem

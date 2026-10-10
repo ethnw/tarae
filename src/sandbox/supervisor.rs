@@ -3902,9 +3902,9 @@ mod tests {
                 let c = p.confine.take()?.ok()?;
                 let r = linux::ruleset_for(c.net, abi).ok()?;
                 let (serve, ptys) = (c.serve.clone(), c.ptys.clone());
+                let own = linux::Own { ptys: ptys.as_deref(), ..Default::default() };
                 let mut bare =
-                    linux::confine_in(r, &p, Err("not watched".into()), true, serve, c.net, ptys.as_deref())
-                        .ok()?;
+                    linux::confine_in(r, &p, Err("not watched".into()), true, serve, c.net, own).ok()?;
                 bare.keeper = c.keeper;
                 bare.ptys = ptys;
                 p.confine = Some(Ok(bare));

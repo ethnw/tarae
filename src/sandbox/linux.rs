@@ -19,7 +19,8 @@
 //! whatever `TMPDIR` says); a single file not there yet (cargo's SQLite journal); a file made or replaced in a
 //! folder holding one named like a key, read only from the next run — and refused if opened to read and write
 //! as it's made (`sed -i`'s temporary file) (the folder's own rule can't read files without
-//! opening the key — `grant_around`, 7b). The network: what a run
+//! opening the key — `grant_around`, 7b; where the session's keeper is in a user namespace, those files are hidden
+//! by mounts in the run's own mount namespace instead, and their folders stay whole — `Covers`, 7d). The network: what a run
 //! reaches by address tarae decides, as macOS's profile does (`supervisor.rs`) — where it can't here,
 //! seccomp refuses every socket but netlink, this machine's ports and the project's unix sockets too. Under
 //! that, Landlock refuses a run's own TCP bind and connect (ABI 4), its connect to a unix socket by path
@@ -117,6 +118,14 @@ pub struct Confine {
     /// The folders a run makes files in but can't read them back until its next run — each holds a file named
     /// like a key, or one below it (`grant_around`, 7b).
     pub unread: Vec<PathBuf>,
+    /// The files named like keys its run's child hides by mounts (7d) — none where they're closed as 7b closes them.
+    pub covers: Covers,
+    /// Where its runs could have their own mount namespace but the keys are closed as 7b closes them: why.
+    pub split_why: Option<String>,
+    /// The other mounts of a key's filesystem that reach it (`other_ways`) — its paths through them closed as its own.
+    pub elsewhere: Vec<PathBuf>,
+    /// The keys with a name outside the project (`There.unseen`), relative to it — said.
+    pub unseen: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
     pub kept: Arc<Kept>,
     /// The session's keeper, which forks the run (`sandbox::confined` finds or makes it) — None until then.
@@ -125,8 +134,18 @@ pub struct Confine {
 }
 
 impl Confine {
-    /// The Landlock ruleset's descriptor — what a keeper's run confines itself with (`sandbox::keeper`).
+    /// The Landlock ruleset's descriptor with the files its run's child hides by mounts — what a keeper's run
+    /// confines itself with (`Keeper::start_confined`, `start_served`): the rules alone would leave those files'
+    /// folders whole with nothing over the files.
+    pub(super) fn rules_and_covers(&self) -> (std::os::fd::BorrowedFd<'_>, &Covers) {
+        (self.rules.fd(), &self.covers)
+    }
+
+    /// Tests: the ruleset's descriptor alone, for `Keeper::start` — refused where its keys are hidden by mounts
+    /// (started so, they'd be read: `start_confined`).
+    #[cfg(test)]
     pub fn rules_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        assert!(self.covers.keys.is_empty(), "these rules come with keys hidden by mounts: start_confined");
         self.rules.fd()
     }
 
@@ -169,6 +188,10 @@ impl PartialEq for Confine {
             && self.no_userns == other.no_userns
             && self.closed == other.closed
             && self.unread == other.unread
+            && self.covers == other.covers
+            && self.split_why == other.split_why
+            && self.elsewhere == other.elsewhere
+            && self.unseen == other.unseen
             && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.kept, &other.kept)
             && Arc::ptr_eq(&self.rules, &other.rules)
@@ -527,6 +550,97 @@ pub fn unread_said(unread: &[PathBuf], root: &Path) -> String {
     )
 }
 
+/// What the report says of the files named like keys hidden by mounts (`Covers`, 7d) — and, where the session has a
+/// user namespace but tarae runs as root, why they're closed by their folders' rules instead; else nothing.
+pub fn covers_said(c: &Confine) -> String {
+    const SAID: usize = 3;
+    let mut unseen: String = c
+        .unseen
+        .iter()
+        .take(SAID)
+        .map(|k| format!(" {} has another name tarae can't see; it may be readable there.", k.display()))
+        .collect();
+    if c.unseen.len() > SAID {
+        unseen += &format!(" So do {} more files named like keys.", c.unseen.len() - SAID);
+    }
+    let elsewhere = match c.elsewhere.as_slice() {
+        [] => String::new(),
+        places => format!(
+            " {} reach{} the project's files named like keys through another mount of their filesystem: they're \
+             closed there too.",
+            places.iter().map(|p| crate::allow::tilde(p)).collect::<Vec<_>>().join(", "),
+            if places.len() == 1 { "es" } else { "" }
+        ),
+    };
+    let how = match (c.covers.keys.is_empty(), &c.split_why) {
+        (true, Some(why)) => format!(
+            " Files named like keys are closed by their folders' rules here, not hidden by mounts of the run's own: \
+             {why}."
+        ),
+        (true, None) => String::new(),
+        (false, _) => " Here a file named like a key is hidden by a mount of the run's own: it reads as an empty file \
+                        it may not open (Permission denied) and can't be written, renamed, removed or replaced (Device \
+                        or resource busy) nor linked (Invalid cross-device link); what's beside it is read and \
+                        written as usual. One named like a key that's made while it runs is hidden from its next \
+                        command."
+            .to_string(),
+    };
+    format!("{how}{elsewhere}{unseen}")
+}
+
+/// The other mounts in mount table `table` (a `mountinfo`) that reach `key`: those of its filesystem (the same
+/// device) whose root holds the key's place in that filesystem — beside the mount it's seen through (the deepest
+/// holding it, the last such listed; one whose way to it is that same path, mounted over, isn't another). Each: its
+/// mount point, and the key's path through it.
+pub fn other_ways(table: &str, key: &Path) -> Vec<(PathBuf, PathBuf)> {
+    // (`\ooo` escapes a space, a tab, a newline and a backslash)
+    let path = |s: &str| {
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            let octal =
+                b.get(i + 1..i + 4).filter(|o| b[i] == b'\\' && o.iter().all(|c| (b'0'..=b'7').contains(c)));
+            match octal {
+                Some(o) => {
+                    out.push(o.iter().fold(0u8, |n, c| n.wrapping_mul(8).wrapping_add(c - b'0')));
+                    i += 4;
+                }
+                None => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+        }
+        PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(out))
+    };
+    let mounts: Vec<(&str, PathBuf, PathBuf)> = table
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split(' ').skip(2);
+            Some((f.next()?, path(f.next()?), path(f.next()?)))
+        })
+        .collect();
+    let Some((seen, (dev, root, at))) = mounts
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, at))| key.starts_with(at))
+        .max_by_key(|(i, (_, _, at))| (at.components().count(), *i))
+    else {
+        return Vec::new();
+    };
+    let Ok(below) = key.strip_prefix(at) else { return Vec::new() };
+    let inside = root.join(below);
+    mounts
+        .iter()
+        .enumerate()
+        .filter(|(i, (d, _, _))| *i != seen && d == dev)
+        .filter_map(|(_, (_, r, a))| Some((a.clone(), a.join(inside.strip_prefix(r).ok()?))))
+        // (one whose way to it is the key's own path is that same place, mounted over: not another way)
+        .filter(|(_, through)| through != key)
+        .collect()
+}
+
 /// What a run's rules are made around in the project at `root` (`There`), found in one walk.
 pub fn there(root: &Path, extra: &[PathBuf], open: &[PathBuf]) -> There {
     // (`within`: below a protected name — only keys looked for there, no protected name again)
@@ -553,9 +667,54 @@ pub fn there(root: &Path, extra: &[PathBuf], open: &[PathBuf]) -> There {
             }
         }
     }
+    // (a key's other names in the project — hard links made earlier, named like anything — are closed as it is:
+    // looked for only when a key has more than one name, each file's inode asked then, and everywhere — tools'
+    // output and `.git/objects` too: each name found, with its file)
+    fn links(dir: &Path, of: &[(u64, u64)], out: &mut Vec<((u64, u64), PathBuf)>) {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => links(&e.path(), of, out),
+                Ok(t) if t.is_file() => {
+                    if let Some(id) =
+                        e.metadata().ok().map(|m| (m.dev(), m.ino())).filter(|id| of.contains(id))
+                    {
+                        out.push((id, e.path()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     let protected = extra.iter().filter(|p| p.symlink_metadata().is_ok()).cloned().collect();
-    let mut out = There { protected, keys: Vec::new() };
+    let mut out = There { protected, keys: Vec::new(), unseen: Vec::new() };
     walk(root, root, open, false, &mut out);
+    // (each key with more than one name: its file, how many names it has, the key)
+    let linked: Vec<((u64, u64), u64, PathBuf)> = {
+        use std::os::unix::fs::MetadataExt;
+        let m = out.keys.iter().filter_map(|k| Some((k.symlink_metadata().ok()?, k)));
+        m.filter(|(m, _)| m.nlink() > 1).map(|(m, k)| ((m.dev(), m.ino()), m.nlink(), k.clone())).collect()
+    };
+    if !linked.is_empty() {
+        let ids: Vec<(u64, u64)> = linked.iter().map(|(id, _, _)| *id).collect();
+        let mut found = Vec::new();
+        links(root, &ids, &mut found);
+        for (_, path) in &found {
+            if !out.keys.contains(path) && !open.contains(path) {
+                out.keys.push(path.clone());
+            }
+        }
+        // (a name the walk didn't find is outside the project: said, as it may be read there)
+        let mut said: Vec<(u64, u64)> = Vec::new();
+        for (id, names, key) in &linked {
+            let here = found.iter().filter(|(i, _)| i == id).count() as u64;
+            if here < *names && !said.contains(id) {
+                said.push(*id);
+                out.unseen.push(key.clone());
+            }
+        }
+    }
     out
 }
 
@@ -569,8 +728,83 @@ pub struct There {
     /// but those the user opened (`allow::Grant::Key`, 7b), inside protected names too (`.cargo/credentials`, a
     /// `.pem` under `.github/`). Files only: a folder named like one isn't. Not looked at: tools' output, and
     /// `.git/objects` — git's own names, thousands of them, read every run (a file named like a key put there
-    /// stays readable on Linux, unlike macOS).
+    /// stays readable on Linux, unlike macOS). A key's hard links in the project are keys too, whatever their names,
+    /// wherever they are (tools' output and `.git/objects` looked in for those).
     pub keys: Vec<PathBuf>,
+    /// The keys with a name outside the project (more names than the project holds): tarae can't see it, and it may
+    /// be read there.
+    pub unseen: Vec<PathBuf>,
+}
+
+/// The most files named like keys a run's child hides by mounts (7d, `Covers`): past it, they're closed as 7b closes
+/// them, its folders split. (Measured in `many_keys_are_hidden_at_once` on Debian 12, 6.1, in A+, a test build, the
+/// fastest of five: a project of 1,024 keys run hiding them took 108 ms, the same closing none 39 ms — about 70 µs a
+/// key: its checks against the mount table, its own and the mounts.)
+pub const COVERS_MAX: usize = 1024;
+
+/// The files named like keys hidden from a run by mounts (7d), where its keeper gave the session a user namespace
+/// (A+ … B) and tarae doesn't run as root (`confine`): its child makes a user and mount namespace of its own, mounts `shut` — an empty file nobody may open
+/// (mode 0), tarae's — read-only over each, drops every capability, then confines itself (`keeper::child`). So its
+/// folders stay one Landlock rule each, and a file made or replaced beside a key is read at once. A key read is
+/// refused (EACCES, as Landlock's); written, refused too (its mount is read-only); renamed, removed or replaced
+/// by a rename, refused (EBUSY: a mount point); linked, refused (EXDEV: another mount). A link to it reads the
+/// cover. Each key is the one the walk found (`dev`, `ino`): the child opens it through no link and checks, and
+/// mounts on what it opened — moved or swapped since, the run doesn't start. The mounts go with the run's mount
+/// namespace: when the run and what it left running have ended.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Covers {
+    /// The shut file, and which file it was when checked (the child mounts only that one).
+    pub shut: Option<Cover>,
+    pub keys: Vec<Cover>,
+}
+
+/// A key hidden by a mount: where it is, a real path, and which file it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cover {
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl Covers {
+    /// `keys` (`There.keys`, real paths), each as it is now (one gone isn't hidden), and the shut file in `run`'s
+    /// instance folder — tarae's, which no run is granted — made the first time (mode 0, empty, through no link).
+    /// Err: past `COVERS_MAX`, or the shut file can't be made or isn't one.
+    fn of(keys: &[PathBuf], run: &Path) -> io::Result<Covers> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        if keys.len() > COVERS_MAX {
+            return Err(io::Error::other(format!("{} files named like keys, past {COVERS_MAX}", keys.len())));
+        }
+        let dir = run.parent().ok_or_else(|| io::Error::other("a run's folder in no instance"))?;
+        let shut = dir.join("shut");
+        let made = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o000)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&shut);
+        match made {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let m = shut.symlink_metadata()?;
+        // SAFETY: a plain call.
+        let uid = unsafe { libc::geteuid() };
+        if !m.file_type().is_file() || m.len() != 0 || m.mode() & 0o7777 != 0 || m.uid() != uid {
+            return Err(io::Error::other(format!("{} isn't tarae's shut file", shut.display())));
+        }
+        // (the child opens each through no link at all: its folder's real path)
+        let keys = keys
+            .iter()
+            .filter_map(|k| {
+                let m = k.symlink_metadata().ok().filter(|m| m.file_type().is_file())?;
+                let path = std::fs::canonicalize(k.parent()?).ok()?.join(k.file_name()?);
+                Some(Cover { path, dev: m.dev(), ino: m.ino() })
+            })
+            .collect();
+        Ok(Covers { shut: Some(Cover { path: shut, dev: m.dev(), ino: m.ino() }), keys })
+    }
 }
 
 /// The protected names (`There.protected`) that are there in the project at `root` — tests'.
@@ -626,13 +860,23 @@ pub fn confine(
     let no_userns = super::tier::runs_refuse_userns();
     let ptys = keeper.is_some() && ns.serves_ptys(net);
     let ptys = ptys.then(|| Arc::new(super::ptys::Ptys::open(super::ptys::POOL)));
-    confine_in(r, p, audit, make_first, serve, net, ptys.as_deref()).map(|c| Confine {
-        no_userns,
-        tier,
-        ns,
-        ptys,
-        ..c
-    })
+    // (7d's mounts need the run's own user namespace, which root can't map itself into: since Linux 5.12 a map of the
+    // parent's uid 0 needs CAP_SETFCAP there when the namespace was made, and the run has none — measured on Debian
+    // 12, EPERM at `uid_map`. tarae run as root — a container — closes keys as 7b does)
+    // SAFETY: a plain call.
+    let root = unsafe { libc::geteuid() } == 0;
+    let mounts = ns.user.then(|| match root {
+        true => Err(
+            "tarae runs as root, and the kernel lets a namespace map root only with a capability nothing of \
+                     tarae's keeps"
+                .to_string(),
+        ),
+        false => Ok(()),
+    });
+    // (the mount table its runs see: the keeper's — a run's own namespace is a copy of it — read where it's made)
+    let at = keeper.map_or("/proc/self/mountinfo".to_string(), |k| format!("/proc/{}/mountinfo", k.pid));
+    let own = Own { ptys: ptys.as_deref(), mounts, table: std::fs::read_to_string(at).ok() };
+    confine_in(r, p, audit, make_first, serve, net, own).map(|c| Confine { no_userns, tier, ns, ptys, ..c })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
@@ -671,9 +915,22 @@ pub(super) fn session_devices(
     Ok(())
 }
 
-/// `confine`, the rules added to `r` (the golden's are only written down: `Ruleset::written`), made for `net`.
-/// `ptys`: the run gets only these of this system's `/dev/pts` (3b: none of it read nor written but them, and
-/// `ptmx` — `sandbox::ptys`); without, all of it.
+/// What a session's keeper gives its runs beyond their rules (`confine_in`).
+#[derive(Clone, Default)]
+pub(super) struct Own<'a> {
+    /// The only ones of this system's `/dev/pts` the run gets (3b: none of it read nor written but them, and
+    /// `ptmx` — `sandbox::ptys`); None: all of it.
+    pub ptys: Option<&'a super::ptys::Ptys>,
+    /// Whether its child can make a mount namespace of its own to hide the project's files named like keys in
+    /// (`Covers`, 7d) rather than split its folders around them: None, no user namespace (C, D); Err, the session has
+    /// one but its runs can't have their own (why — tarae runs as root).
+    pub mounts: Option<Result<(), String>>,
+    /// The mount table its runs see (`/proc/<keeper>/mountinfo`) — None: not read.
+    pub table: Option<String>,
+}
+
+/// `confine`, the rules added to `r` (the golden's are only written down: `Ruleset::written`), made for `net`, with
+/// what the keeper gives its runs (`own`).
 pub(super) fn confine_in(
     mut r: Ruleset,
     p: &Policy,
@@ -681,8 +938,9 @@ pub(super) fn confine_in(
     make_first: bool,
     serve: Result<(), String>,
     net: RunNet,
-    ptys: Option<&super::ptys::Ptys>,
+    own: Own<'_>,
 ) -> io::Result<Confine> {
+    let ptys = own.ptys;
     let abi = r.abi();
     let hidden: Vec<PathBuf> = p.reads.copies.hidden.iter().map(|(f, _)| f.clone()).collect();
     // (every pty is a file the reads would reach — reading one takes what's typed in another terminal)
@@ -690,10 +948,56 @@ pub(super) fn confine_in(
     let pts_hole: Vec<PathBuf> = ptys.map(|_| pts.to_path_buf()).into_iter().collect();
     // The project's protected names, and its files named like keys (7b): no place granted around those reads
     // them — each folder on the way down opened entry by entry (`grant_around`); every other folder stays one rule
-    let There { protected: found, mut keys } =
+    let There { protected: found, mut keys, mut unseen } =
         there(&p.root, &p.protect, p.keys.as_deref().unwrap_or_default());
     if p.keys.is_none() {
         keys.clear();
+        unseen.clear();
+    }
+    // Landlock's rules hold inodes, not paths: another mount of a key's filesystem that reaches it (a second bind of
+    // the workspace, a host's root at /run/host, a btrfs top level, `/` itself for a project seen through a bind) would
+    // read it through whatever grant holds that way. Its path through each such mount is closed as a key's is, and
+    // its folders can't be whole then (the project's folder rule would open it through any way), so no mounts for
+    // that run
+    let ways: Vec<(PathBuf, PathBuf)> = match &own.table {
+        Some(table) => keys.iter().flat_map(|k| other_ways(table, k)).collect(),
+        None => Vec::new(),
+    };
+    // (the break-once: other mounts not looked at — a key reached through a second one reads there)
+    #[cfg(test)]
+    let ways = match std::env::var_os("TARAE_TEST_NO_ELSEWHERE") {
+        Some(_) => Vec::new(),
+        None => ways,
+    };
+    let mut elsewhere: Vec<PathBuf> = ways.iter().map(|(at, _)| at.clone()).collect();
+    crate::sorting::sort(&mut elsewhere);
+    elsewhere.dedup();
+    // (7d: hidden by mounts in the run's own mount namespace where it can have one — its folders whole then; else
+    // split as 7b, and where mounts could have been, why not)
+    let decided: Option<Result<Covers, String>> = match (&own.mounts, keys.is_empty()) {
+        (None, _) | (_, true) => None,
+        (Some(Err(why)), false) => Some(Err(why.clone())),
+        (Some(Ok(())), false) => Some(match (&own.table, elsewhere.first(), &p.run) {
+            (None, _, _) => Err("the mount table its commands see couldn't be read".to_string()),
+            (_, Some(other), _) => Err(format!(
+                "{} reaches them through another mount of their filesystem (closed there too)",
+                other.display()
+            )),
+            (_, None, None) => Err("it has no folder of its own".to_string()),
+            (_, None, Some(run)) => Covers::of(&keys, run.path()).map_err(|e| e.to_string()),
+        }),
+    };
+    let (covers, split_why) = match decided {
+        Some(Ok(c)) => (Some(c), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
+    };
+    match covers.is_some() {
+        true => keys.clear(),
+        // (each key's paths through other mounts closed as it is: every folder on the way to it there gets its rule
+        // without reading files — never a hole, which would take what's below it from the run, the project and `/`
+        // too where one of those is the other way)
+        false => keys.extend(ways.into_iter().map(|(_, through)| through)),
     }
     let mut unread: Vec<PathBuf> = Vec::new();
     let mut grant = |r: &mut Ruleset, path: &Path, access: u64, holes: &[PathBuf]| {
@@ -790,6 +1094,10 @@ pub(super) fn confine_in(
         made: Arc::new(made),
         closed,
         unread,
+        covers: covers.unwrap_or_default(),
+        split_why,
+        elsewhere,
+        unseen: unseen.iter().map(|k| k.strip_prefix(&p.root).unwrap_or(k).to_path_buf()).collect(),
         kept: Arc::new(kept),
         keeper: None,
         rules: Arc::new(r),
@@ -1331,7 +1639,8 @@ mod tests {
             std::fs::write(dir.join(f), "tarae-fake-token").unwrap();
         }
         std::os::unix::fs::symlink(dir.join("src/main.rs"), dir.join("link.pem")).unwrap();
-        let There { protected: mut holes, keys: mut found } = there(&dir, &[], &[dir.join("open/id_rsa")]);
+        let There { protected: mut holes, keys: mut found, .. } =
+            there(&dir, &[], &[dir.join("open/id_rsa")]);
         holes.sort();
         found.sort();
         let at = |fs: &[&str]| fs.iter().map(|f| dir.join(f)).collect::<Vec<_>>();
@@ -1366,6 +1675,138 @@ mod tests {
             assert!(rule(&r, f).is_some_and(|a| a & landlock::READ_FILE != 0), "{f}: read whole");
         }
         assert!(unread.is_empty(), "{unread:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The other mounts that reach a key (`other_ways`), from a mount table as the kernel writes it: a second bind of
+    /// the workspace, toolbox's host root at `/run/host`, a btrfs top level beside its subvolumes (each a way); and
+    /// what isn't — Fedora's `/` and `/home` subvolumes, a bind of another folder of the same filesystem, another
+    /// filesystem, a mount stacked at the project's own place. Paths with escaped spaces read as the kernel means.
+    #[test]
+    fn a_key_is_reached_through_the_mounts_of_its_filesystem_that_hold_it() {
+        let ways = |table: &str, key: &str| other_ways(table, Path::new(key));
+        let p = |at: &str, through: &str| (PathBuf::from(at), PathBuf::from(through));
+        let docker = "1 0 0:50 / / rw - overlay overlay rw\n2 1 8:1 /var/lib/hosts /etc/hosts rw - ext4 /dev/sda1 rw\n";
+        assert!(ways(docker, "/work/p/.env").is_empty(), "one mount of its filesystem");
+        let bound = format!("{docker}3 1 0:50 /work/p /mnt/p\\040two rw - overlay overlay rw\n");
+        let second = p("/mnt/p two", "/mnt/p two/.env");
+        assert_eq!(ways(&bound, "/work/p/.env"), [second], "a second bind of the workspace");
+        assert_eq!(ways(&bound, "/mnt/p two/.env"), [p("/", "/work/p/.env")], "and the other way round");
+        let toolbox = "1 0 0:60 / / rw - overlay overlay rw\n2 1 8:1 / /run/host rw - ext4 /dev/sda1 rw\n\
+                       3 1 8:1 /home /home rw - ext4 /dev/sda1 rw\n";
+        let host = p("/run/host", "/run/host/home/u/p/.env");
+        assert_eq!(ways(toolbox, "/home/u/p/.env"), [host], "toolbox's host root");
+        let fedora =
+            "1 0 0:30 /root / rw - btrfs /dev/vda3 rw\n2 1 0:30 /home /home rw - btrfs /dev/vda3 rw\n";
+        assert!(ways(fedora, "/home/u/p/.env").is_empty(), "subvolumes that don't hold it");
+        let top = format!("{fedora}3 1 0:30 / /mnt/top rw - btrfs /dev/vda3 rw\n");
+        let level = p("/mnt/top", "/mnt/top/home/u/p/.env");
+        assert_eq!(ways(&top, "/home/u/p/.env"), [level], "the top level holds every subvolume");
+        let other = format!(
+            "{docker}3 1 0:50 /srv /srv2 rw - overlay overlay rw\n4 1 0:70 / /mnt/x rw - tmpfs t rw\n"
+        );
+        assert!(ways(&other, "/work/p/.env").is_empty(), "another folder, another filesystem");
+        let stacked = format!("{docker}3 1 0:50 /work/p /work/p rw - overlay overlay rw\n");
+        assert!(ways(&stacked, "/work/p/.env").is_empty(), "bound over its own place: not another way");
+    }
+
+    /// A project seen through a bind of a folder of `/`'s filesystem: `/` is another way to its keys (`other_ways`).
+    /// The run's rules still grant the project and the system (no way is a hole that would take them away), its keys
+    /// are closed by their folders' rules, not mounts — said why — and on the way to each key through `/` no folder
+    /// reads files, the key no rule of its own.
+    #[test]
+    fn a_key_reached_through_root_closes_its_way_there_and_grants_the_rest() {
+        let dir = std::env::temp_dir().join(format!("tarae-through-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // (the bind stood for by two folders alike: what's mounted is only read from the table)
+        let (real, bound) = (dir.join("real"), dir.join("bound"));
+        for at in [&real, &bound] {
+            for f in [".env", "src/main.rs"] {
+                std::fs::create_dir_all(at.join(f).parent().unwrap()).unwrap();
+                std::fs::write(at.join(f), "tarae-fake-token").unwrap();
+            }
+        }
+        let p = Policy {
+            run: crate::sandbox::RunDir::new().ok(),
+            ..Policy::for_project(&Env { root: bound.clone(), ..Default::default() })
+        };
+        let table = format!(
+            "1 0 0:50 / / rw - overlay overlay rw\n2 1 0:50 {} {} rw - overlay overlay rw\n",
+            real.display(),
+            bound.display()
+        );
+        let own = Own { mounts: Some(Ok(())), table: Some(table), ..Default::default() };
+        let r = Ruleset::written(3).unwrap();
+        let c = confine_in(r, &p, Err("not watched".into()), false, Ok(()), RunNet::Served, own).unwrap();
+        // (a path's rules add up, as Landlock's do)
+        let rule = |at: &Path| {
+            let all = c.granted().iter().filter(|(p, _)| p == at).map(|(_, a)| *a);
+            all.reduce(|a, b| a | b)
+        };
+        assert!(c.covers.keys.is_empty(), "no mounts: {:?}", c.covers);
+        assert_eq!(c.elsewhere, [PathBuf::from("/")]);
+        assert!(c.split_why.as_deref().is_some_and(|w| w.starts_with("/ reaches them")), "{:?}", c.split_why);
+        // The project and the system still granted
+        assert!(rule(&bound.join("src")).is_some_and(|a| a & landlock::WRITE_FILE != 0), "the project");
+        let usr = Path::new("/usr");
+        assert!(c.granted().iter().any(|(p, a)| p.starts_with(usr) && a & landlock::READ_FILE != 0), "/usr");
+        // The way through `/`: no folder on it reads files, the key no rule
+        assert_eq!(rule(&real.join(".env")), None);
+        for at in [Path::new("/"), &dir, &real] {
+            assert!(
+                rule(at).is_none_or(|a| a & landlock::READ_FILE == 0),
+                "{}: {:?}",
+                at.display(),
+                rule(at)
+            );
+        }
+        assert!(rule(&real.join("src")).is_some_and(|a| a & landlock::READ_FILE != 0), "beside it, read");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What every key is mounted over (7d, `Covers::of`) is tarae's own empty file nobody may open, in the run's
+    /// instance folder, made the first time: one already there is taken only as that — not a link (to a file with a
+    /// secret in it, say), not one with something in it, not one that opens, not someone else's. Each refused keeps
+    /// the keys to their folders' rules.
+    #[test]
+    fn the_shut_file_is_taraes_empty_unopenable_one() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("tarae-shut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (run, key) = (dir.join("instance/1"), dir.join("p/.env"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        std::fs::write(&key, "tarae-fake-token").unwrap();
+        let shut = dir.join("instance/shut");
+        let c = Covers::of(std::slice::from_ref(&key), &run).unwrap();
+        let m = shut.symlink_metadata().unwrap();
+        assert!(m.is_file() && m.len() == 0 && m.mode() & 0o7777 == 0, "made: {m:?}");
+        assert_eq!(
+            (c.shut.map(|s| (s.path, s.dev, s.ino)), c.keys.len()),
+            (Some((shut.clone(), m.dev(), m.ino())), 1)
+        );
+        let again = |what: &str| {
+            let refused = Covers::of(std::slice::from_ref(&key), &run);
+            assert!(refused.is_err(), "{what}: taken");
+            std::fs::remove_file(&shut).unwrap();
+        };
+        std::fs::remove_file(&shut).unwrap();
+        std::os::unix::fs::symlink(&key, &shut).unwrap();
+        again("a link");
+        std::fs::write(&shut, "x").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        again("not empty");
+        std::fs::write(&shut, "").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o644)).unwrap();
+        again("one that opens");
+        // (someone else's: only root can make one — the root run checks it, `--as-user`'s doesn't)
+        // SAFETY: a plain call.
+        if unsafe { libc::geteuid() } == 0 {
+            std::fs::write(&shut, "").unwrap();
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+            std::os::unix::fs::chown(&shut, Some(65534), Some(65534)).unwrap();
+            again("someone else's");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2273,7 +2714,8 @@ mod tests {
         let p = Policy::for_project(&Env { root: root.clone(), ..Default::default() });
         let rules = |ptys: Option<&crate::sandbox::ptys::Ptys>| {
             let r = Ruleset::written(4).unwrap();
-            confine_in(r, &p, Err("not watched".into()), false, Ok(()), RunNet::Served, ptys).unwrap()
+            let own = Own { ptys, ..Default::default() };
+            confine_in(r, &p, Err("not watched".into()), false, Ok(()), RunNet::Served, own).unwrap()
         };
         let pool = crate::sandbox::ptys::Ptys::open(2);
         // (as ABI 4 handles them: `IOCTL_DEV` is 5's)

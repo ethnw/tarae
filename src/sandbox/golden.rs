@@ -458,16 +458,10 @@ fn landlocks_rules_are_pinned() {
     let mut out = String::new();
     for abi in [3, 4, 6, 9, 10] {
         let r = landlock::Ruleset::written(abi).unwrap();
-        let c = linux::confine_in(
-            r,
-            &p,
-            Err("not watched".into()),
-            false,
-            Ok(()),
-            super::tier::RunNet::Served,
-            None,
-        )
-        .unwrap();
+        let served = super::tier::RunNet::Served;
+        let c =
+            linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), served, Default::default())
+                .unwrap();
         let (fs, net, scopes) = (landlock::handled(abi), landlock::handled_net(abi), landlock::scopes(abi));
         out += &format!("ABI {abi}: handles files {fs:#07x} · network {net:#x} · scopes {scopes:#x}\n");
         let mut rules: Vec<String> = c
@@ -481,6 +475,29 @@ fn landlocks_rules_are_pinned() {
         out.extend(rules);
     }
     pinned("sandbox_landlock.txt", &out);
+    // 7d: where the run's child has a mount namespace of its own, the closed keys are hidden by mounts (`Covers`)
+    // and every folder of the project is one rule — the project's rules and the files mounted over, one ABI
+    let r = landlock::Ruleset::written(6).unwrap();
+    // (its mount table: the project on the one mount of its filesystem)
+    let table = Some("22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n".to_string());
+    let own = linux::Own { ptys: None, mounts: Some(Ok(())), table };
+    let served = super::tier::RunNet::Served;
+    let c = linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), served, own).unwrap();
+    let mut out = String::from("ABI 6, its own mount namespace — the project's rules:\n");
+    let mut rules: Vec<String> = c
+        .granted()
+        .iter()
+        .filter(|(path, _)| path.starts_with(&f.root))
+        .map(|(path, access)| format!("    {:#06x} {}\n", access, f.named(&shown(path), run)))
+        .collect();
+    rules.sort();
+    out.extend(rules);
+    out += "hidden by mounts:\n";
+    let mut hidden: Vec<String> =
+        c.covers.keys.iter().map(|k| format!("    {}\n", f.named(&shown(&k.path), run))).collect();
+    hidden.sort();
+    out.extend(hidden);
+    pinned("sandbox_landlock_covered.txt", &out);
 }
 
 /// The rules of a run with its own ptys (3b, `sandbox::ptys`), pinned by shape: what this machine's `/dev` holds
@@ -508,8 +525,8 @@ fn landlocks_rules_with_ptys_are_pinned() {
     for abi in [4, 6] {
         let r = landlock::Ruleset::written(abi).unwrap();
         let served = super::tier::RunNet::Served;
-        let c =
-            linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), served, Some(&pool)).unwrap();
+        let own = linux::Own { ptys: Some(&pool), ..Default::default() };
+        let c = linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), served, own).unwrap();
         let read = (landlock::EXECUTE | landlock::READ_FILE | landlock::READ_DIR) & landlock::handled(abi);
         out += &format!("ABI {abi}:\n");
         let mut rules: Vec<String> = c

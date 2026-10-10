@@ -3806,7 +3806,7 @@ fn output_in(
         let mut c = Command::new(program);
         from_run_env(&mut c, policy);
         c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
-        let s = k.start(&c, &crate::landlock::thread_name(), rules.rules_fd(), rules.net).ok()?.spawned;
+        let s = k.start_confined(&c, &crate::landlock::thread_name(), &rules).ok()?.spawned;
         // (what it says on stderr read meanwhile, unkept: a full pipe would stop it)
         if let Some(mut err) = s.stderr {
             crate::event::thread("tarae-probe", move || io::copy(&mut err, &mut io::sink()));
@@ -3952,7 +3952,7 @@ pub fn spawn_as(
                 let serve = std::sync::Arc::new(p.clone());
                 k.start_served(cmd, &comm, c, serve.clone(), told(serve))?
             }
-            net => k.start(cmd, &comm, c.rules_fd(), net)?,
+            _ => k.start_confined(cmd, &comm, c)?,
         };
         let spawned = started.spawned;
         #[cfg(test)]
@@ -7825,34 +7825,52 @@ mod tests {
     /// `script` run in `root` under `p` — on Linux its rules made now, as each run's are (`confined`): whether it
     /// ended well, and its output and errors.
     fn sh_under(p: &Policy, root: &Path, script: &str) -> (bool, String, String) {
-        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         #[cfg(target_os = "macos")]
         {
+            let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
             let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
             let out = c.current_dir(root).stdin(Stdio::null()).output().unwrap();
             (out.status.success(), text(&out.stdout), text(&out.stderr))
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let p = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
-            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
-            c.current_dir(root).stdin(Stdio::null());
-            let s = spawn(Some(&p), &c).unwrap_or_else(|e| panic!("{e}: {:?}", p.confine));
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            let (mut o, mut e) = (s.stdout.expect("its stdout"), s.stderr.expect("its stderr"));
-            std::thread::scope(|sc| {
-                sc.spawn(|| std::io::Read::read_to_end(&mut e, &mut err));
-                let _ = std::io::Read::read_to_end(&mut o, &mut out);
-            });
-            let ok = crate::spawn::wait(s.pid).is_ok_and(|st| st.success());
-            (ok, text(&out), text(&err))
+            sh_confined(&confined(Policy { run: RunDir::new().ok(), ..p.clone() }), root, script)
         }
+    }
+
+    /// Linux: `script` run in `root` under `p` whose rules were made already (`confined`) — as `sh_under`.
+    #[cfg(not(target_os = "macos"))]
+    fn sh_confined(p: &Policy, root: &Path, script: &str) -> (bool, String, String) {
+        sh_confined_env(p, root, script, &[])
+    }
+
+    /// `sh_confined`, with `env` in its environment too.
+    #[cfg(not(target_os = "macos"))]
+    fn sh_confined_env(
+        p: &Policy,
+        root: &Path,
+        script: &str,
+        env: &[(&str, &str)],
+    ) -> (bool, String, String) {
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
+        c.current_dir(root).stdin(Stdio::null()).envs(env.iter().copied());
+        let s = spawn(Some(p), &c).unwrap_or_else(|e| panic!("{e}: {:?}", p.confine));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let (mut o, mut e) = (s.stdout.expect("its stdout"), s.stderr.expect("its stderr"));
+        std::thread::scope(|sc| {
+            sc.spawn(|| std::io::Read::read_to_end(&mut e, &mut err));
+            let _ = std::io::Read::read_to_end(&mut o, &mut out);
+        });
+        let ok = crate::spawn::wait(s.pid).is_ok_and(|st| st.success());
+        (ok, text(&out), text(&err))
     }
 
     /// For real (7a, 7b): a run can't read a file in the project named like a key — at the top or deep, in any
     /// case — nor through a link to it or a copy of it; it sees that it's there; the rule in Rust agrees. On
     /// Linux (Landlock's rules hold the file, not its name) not after a rename or a hard link either, in its
-    /// folder or to one that reads.
+    /// folder or to one that reads — where it's hidden by a mount (7d), the mount holds it: it can't be renamed
+    /// nor linked, and a folder moved takes it along.
     #[test]
     fn a_run_cant_read_a_key_named_file() {
         if !keys_tested_here("a_run_cant_read_a_key_named_file") {
@@ -7952,11 +7970,15 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_file_made_or_replaced_beside_a_key_is_read_from_the_next_run() {
-        if !keys_tested_here("a_file_made_or_replaced_beside_a_key_is_read_from_the_next_run") {
+        let test = "a_file_made_or_replaced_beside_a_key_is_read_from_the_next_run";
+        if !keys_tested_here(test) {
             return;
         }
         let (t, root) = key_files("later");
         let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, false) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
         let script = "printf made > new.txt && printf made > src/new.txt && cat src/new.txt && cat new.txt";
         let (ok, out, err) = sh_under(&p, &root, script);
         assert!(!ok && out == "made" && err.contains(KEY_DENIED), "{out} {err}");
@@ -7981,6 +8003,459 @@ mod tests {
                     makes it is refused (sed -i's temporary file, mkstemp's): on Linux a folder holding a file \
                     named like a key can't let what's new in it be read";
         assert!(notes.contains(said), "{notes}");
+        // (root in a user namespace: why not mounts, said — 7d)
+        let namespaced = matches!(&c.confine, Some(Ok(c)) if c.ns.user);
+        // SAFETY: a plain call.
+        let root = unsafe { libc::geteuid() } == 0;
+        let why = "not hidden by mounts of the run's own: tarae runs as root";
+        assert_eq!(notes.contains(why), namespaced && root, "{notes}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Linux: whether a run under `p` here has the files named like keys hidden by mounts (7d: its keeper in a user
+    /// namespace) — where that's not what `test` needs (`mounts`), it says it skips itself and why, and true.
+    #[cfg(not(target_os = "macos"))]
+    fn skipped_for_mounts(p: &Policy, test: &str, mounts: bool) -> bool {
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let (here, tier) = match &c.confine {
+            Some(Ok(c)) => (!c.covers.keys.is_empty(), c.tier),
+            _ => (false, "none"),
+        };
+        if here != mounts {
+            // SAFETY: a plain call.
+            let namespaced = ["A+", "A", "B+", "B"].contains(&tier);
+            let why = match unsafe { libc::geteuid() } {
+                0 if namespaced => {
+                    "tarae runs as root, which can't map itself into a run's own user namespace".into()
+                }
+                _ => tier::get().short.clone().unwrap_or_default(),
+            };
+            // (a machine said to give namespaces fails instead where it doesn't: keys not hidden there isn't a skip)
+            if let Ok(want) = std::env::var("TARAE_EXPECT_TIER")
+                && ["A+", "A", "B+", "B"].contains(&want.trim())
+                && want.trim() != tier
+            {
+                panic!("{test}: tier {want} expected here, the runs are {tier} — {why}");
+            }
+            let how = match here {
+                true => "hidden by mounts in the run's own mount namespace (7d)",
+                false => "closed by their folders' rules (7b)",
+            };
+            let skip = crate::test_results::SELF_SKIP;
+            let line = format!("{skip}sandbox::tests::{test} — keys here are {how}, tier {tier} {why}\n");
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        }
+        here != mounts
+    }
+
+    /// Whether `err` says one of `said`.
+    #[cfg(not(target_os = "macos"))]
+    fn says_one(err: &str, said: &[&str]) -> bool {
+        said.iter().any(|s| err.contains(s))
+    }
+
+    /// For real, on Linux where a run's keeper is in a user namespace (7d): its folders whole, a file is made,
+    /// replaced by a rename and edited in place (`sed -i`'s temporary file) beside a key and read at once, which 7b's
+    /// rules can't give (`a_file_made_or_replaced_beside_a_key_is_read_from_the_next_run`). The key, hidden by a
+    /// mount, isn't read, written, made readable, renamed, removed, replaced or linked — each refused as the report
+    /// says — and stays as it was on disk.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn beside_a_hidden_key_files_are_made_and_read_at_once() {
+        let test = "beside_a_hidden_key_files_are_made_and_read_at_once";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("mounted");
+        let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, true) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        let script =
+            "printf made > new.txt && cat new.txt && printf made > deep/er/new.txt && cat deep/er/new.txt";
+        let (ok, out, err) = sh_under(&p, &root, script);
+        assert!(ok && out == "mademade", "made beside a key: {out} {err}");
+        let script = "cat .env.example && printf replaced > t && mv t .env.example && cat .env.example";
+        let (ok, out, err) = sh_under(&p, &root, script);
+        assert!(ok && out == "tarae-fake-tokenreplaced", "a save by rename: {out} {err}");
+        let (ok, out, err) =
+            sh_under(&p, &root, "sed -i s/fake/replaced/ id_ed25519.pub && cat id_ed25519.pub");
+        assert!(ok && out == "tarae-replaced-token", "sed -i: {out} {err}");
+        let (refused, busy) = (["Permission denied", "Read-only file system"], ["Device or resource busy"]);
+        for (script, said) in [
+            ("cat .env", &refused[..1]),
+            ("cat deep/er/Server.PEM", &refused[..1]),
+            ("printf x > .env", &refused[..]),
+            ("printf x >> .env", &refused[..]),
+            ("chmod 644 .env && cat .env", &refused[1..]),
+            ("mv .env moved", &busy[..]),
+            ("rm -f .env", &busy[..]),
+            ("printf x > t2 && mv t2 .env", &busy[..]),
+            ("ln .env src/h", &["Invalid cross-device link"][..]),
+        ] {
+            let (ok, out, err) = sh_under(&p, &root, script);
+            assert!(
+                !ok && !out.contains("tarae-fake-token") && says_one(&err, said),
+                "{script}: {out} {err}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), "tarae-fake-token", "as it was");
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let (_, notes) = c.linux_said().unwrap_or_else(|| panic!("{:?}", c.confine));
+        assert!(notes.contains("hidden by a mount of the run's own"), "{notes}");
+        assert!(!notes.contains("can't be read until its next command"), "no folder split: {notes}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, where keys are hidden by mounts (7d): the run can't take a mount back — not by unmounting it
+    /// (lazily too), remounting it writable, mounting over it, nor from a user and mount namespace it makes itself
+    /// (where it holds every capability): it has none in its own, Landlock refuses a confined process every mount
+    /// call, and in a namespace it makes the mounts come locked. After each try the key is still refused.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_run_cant_take_a_keys_mount_back() {
+        let test = "a_run_cant_take_a_keys_mount_back";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("unmount");
+        let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, true) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        for undo in [
+            "umount .env",
+            "umount -l .env",
+            "mount -o remount,bind,rw .env",
+            "mount --bind src/env.rs .env",
+            "unshare -Urm sh -c 'umount -l .env && cat .env'",
+            "unshare -Urm sh -c 'mount -o remount,bind,rw .env && chmod 644 .env && cat .env'",
+        ] {
+            let script = format!("{undo} && echo UNDONE; cat .env");
+            let (ok, out, err) = sh_under(&p, &root, &script);
+            assert!(
+                !ok && !out.contains("UNDONE") && !out.contains("tarae-fake-token"),
+                "{undo}: {out} {err}"
+            );
+            assert!(err.contains(KEY_DENIED), "{undo}: still refused after — {err}");
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on Linux (7b, 7d): a hard link to a key made before the run — under any name, in a folder holding
+    /// no key, in tools' output — is closed as the key is: the walk finds a key's other names by its inode,
+    /// everywhere in the project. One outside the project it can't see: the report says so, for that key alone.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_hard_link_to_a_key_made_earlier_is_closed_too() {
+        if !keys_tested_here("a_hard_link_to_a_key_made_earlier_is_closed_too") {
+            return;
+        }
+        let (t, root) = key_files("linked");
+        std::fs::hard_link(root.join(".env"), root.join("src/notes.txt")).unwrap();
+        // (in tools' output too, where names aren't looked at)
+        std::fs::hard_link(root.join(".env"), root.join("node_modules/pkg/notes.txt")).unwrap();
+        let p = key_policy(&root);
+        for f in ["src/notes.txt", "node_modules/pkg/notes.txt"] {
+            let (ok, out, err) = sh_under(&p, &root, &format!("cat {f}"));
+            assert!(!ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED), "{f}: {out} {err}");
+        }
+        let (ok, out, err) = sh_under(&p, &root, "cat src/env.rs");
+        assert!(ok && out == "tarae-fake-token", "beside it: {err}");
+        // A name outside the project: tarae can't see it, and says so
+        let said = "deep/er/Server.PEM has another name tarae can't see; it may be readable there.";
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let (_, notes) = c.linux_said().unwrap_or_else(|| panic!("{:?}", c.confine));
+        assert!(!notes.contains("another name tarae can't see"), "{notes}");
+        std::fs::hard_link(root.join("deep/er/Server.PEM"), t.join("outside.txt")).unwrap();
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let (_, notes) = c.linux_said().unwrap_or_else(|| panic!("{:?}", c.confine));
+        assert!(notes.contains(said) && !notes.contains(".env has another name"), "{notes}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, where keys are hidden by mounts (7d): `COVERS_MAX` of them are, each — what that costs a run, said
+    /// against the same project closing no key (`keys: None`: each key's checks and its mount); one more and they're
+    /// closed by their folders' rules (7b), the report saying so.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn many_keys_are_hidden_at_once() {
+        let test = "many_keys_are_hidden_at_once";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("many");
+        let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, true) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        // (the fastest of five, rules made and run: the same project closing no key, then hiding every one)
+        let timed = |p: &Policy, script: &str| {
+            let runs = (0..5).map(|_| {
+                let at = std::time::Instant::now();
+                let ran = sh_under(p, &root, script);
+                (at.elapsed(), ran)
+            });
+            runs.min_by_key(|(took, _)| *took).unwrap()
+        };
+        std::fs::create_dir_all(root.join("k")).unwrap();
+        // (the project's own two, deep and at the top, are hidden too)
+        for i in 0..linux::COVERS_MAX - 2 {
+            std::fs::write(root.join(format!("k/{i}.pem")), "tarae-fake-token").unwrap();
+        }
+        let script = "cat src/env.rs >/dev/null; cat k/0.pem";
+        let (none, _) = timed(&Policy { keys: None, ..p.clone() }, script);
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let Some(Ok(c)) = &c.confine else { panic!("{:?}", c.confine) };
+        assert_eq!(c.covers.keys.len(), linux::COVERS_MAX);
+        let (many, (ok, out, err)) = timed(&p, script);
+        assert!(!ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED), "{out} {err}");
+        let (_, (ok, out, err)) = timed(&p, &format!("cat k/{}.pem", linux::COVERS_MAX - 3));
+        assert!(
+            !ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED),
+            "the last: {out} {err}"
+        );
+        let per = many.saturating_sub(none) / linux::COVERS_MAX as u32;
+        // (written past libtest's capture: the number is what this test is for)
+        let said = format!(
+            "{test}: the same run closing no key {none:?}, hiding {} {many:?} — {per:?} a key\n",
+            linux::COVERS_MAX
+        );
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), said.as_bytes());
+        // One past: the folders' rules
+        std::fs::write(root.join("k/past.pem"), "tarae-fake-token").unwrap();
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let Some(Ok(c)) = &c.confine else { panic!("{:?}", c.confine) };
+        assert!(c.covers.keys.is_empty() && c.unread.contains(&root.join("k")), "{:?}", c.unread);
+        let (ok, out, err) = sh_under(&p, &root, "cat k/past.pem");
+        assert!(!ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED), "past: {out} {err}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, where keys are hidden by mounts (7d): a key replaced by a rename, or moved away, between the walk
+    /// that found it and its run's start doesn't start the run — the child mounts only over the file the walk found
+    /// (device, inode), and the run says why; nothing of the new file or the moved one is read.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_key_swapped_after_the_walk_stops_its_run() {
+        let test = "a_key_swapped_after_the_walk_stops_its_run";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("swapped");
+        let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, true) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        let said = "hiding the files named like keys";
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        std::fs::write(root.join("t"), "tarae-fake-token, new").unwrap();
+        std::fs::rename(root.join("t"), root.join(".env")).unwrap();
+        let (ok, out, err) = sh_confined(&c, &root, "cat .env");
+        let stale = format!("errno {}", libc::ESTALE);
+        assert!(!ok && out.is_empty() && err.contains(said) && err.contains(&stale), "replaced: {out} {err}");
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        std::fs::rename(root.join(".env"), root.join("src/moved")).unwrap();
+        let (ok, out, err) = sh_confined(&c, &root, "cat src/moved");
+        assert!(!ok && out.is_empty() && err.contains(said), "moved away: {out} {err}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, where keys are hidden by mounts (7d): the shut file swapped for a link after tarae checked it (here
+    /// to the key itself, which mounted over its own place would read) doesn't start the run — the child opens it
+    /// through no link and mounts only the file that was checked. (Its run folder is the test's own: the shut file
+    /// is its instance's, which other tests' runs share.)
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_shut_file_swapped_after_its_check_stops_the_run() {
+        let test = "a_shut_file_swapped_after_its_check_stops_the_run";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("shut");
+        let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, true) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        let c = confined(Policy { run: RunDir::new_in(&t.join("runs")).ok(), ..p.clone() });
+        let Some(Ok(conf)) = &c.confine else { panic!("{:?}", c.confine) };
+        let shut = conf.covers.shut.clone().expect("a shut file").path;
+        assert!(shut.starts_with(&t), "the test's own: {}", shut.display());
+        std::fs::remove_file(&shut).unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), &shut).unwrap();
+        let (ok, out, err) = sh_confined(&c, &root, "cat .env");
+        let said = "hiding the files named like keys";
+        assert!(!ok && !out.contains("tarae-fake-token") && err.contains(said), "{out} {err}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on Linux (7b, 7d): a key reached through another mount of its filesystem — here a second bind of
+    /// the project, made in a user and mount namespace of the test binary's own before its exec, as a desktop's
+    /// would be there already — isn't read there: its path through that mount is closed as its own is (a file beside
+    /// no key reads there as in the project — Landlock's rules are its folders' inodes'), and the keys are closed by
+    /// their folders' rules, not mounts (the project's folder rule would open them through it), said in the report.
+    /// The run happens in that namespace (`a_key_reached_through_another_mount_inside`).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_key_reached_through_another_mount_is_closed_there() {
+        use std::os::unix::process::CommandExt;
+        let test = "a_key_reached_through_another_mount_is_closed_there";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("elsewhere");
+        let p = key_policy(&root);
+        if skipped_for_mounts(&p, test, true) {
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        let second = t.join("second");
+        std::fs::create_dir_all(&second).unwrap();
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        let (from, to) = (c(&root), c(&second));
+        // SAFETY: plain calls.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let maps = [
+            (c"/proc/self/setgroups", b"deny".to_vec()),
+            (c"/proc/self/uid_map", format!("{uid} {uid} 1\n").into_bytes()),
+            (c"/proc/self/gid_map", format!("{gid} {gid} 1\n").into_bytes()),
+        ];
+        let inside = "sandbox::tests::a_key_reached_through_another_mount_inside";
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", inside, "--ignored", "--test-threads=1", "--nocapture"])
+            .env("TARAE_TEST_ROOT", &root)
+            .env("TARAE_TEST_SECOND", &second);
+        // SAFETY: raw calls on the child's own namespaces and strings made before the fork.
+        unsafe {
+            cmd.pre_exec(move || {
+                let fail = || Err(std::io::Error::last_os_error());
+                if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+                    return fail();
+                }
+                libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+                for (file, text) in &maps {
+                    let fd = libc::open(file.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                    if fd < 0 || libc::write(fd, text.as_ptr().cast(), text.len()) != text.len() as isize {
+                        return fail();
+                    }
+                    libc::close(fd);
+                }
+                let null = std::ptr::null();
+                if libc::mount(from.as_ptr(), to.as_ptr(), null, libc::MS_BIND, null.cast()) != 0 {
+                    return fail();
+                }
+                Ok(())
+            })
+        };
+        let out = cmd.output().unwrap();
+        let said =
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// The other half of `a_key_reached_through_another_mount_is_closed_there`: in its namespace, the project bound
+    /// at `TARAE_TEST_SECOND` too.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    #[ignore = "run by a_key_reached_through_another_mount_is_closed_there, in a mount namespace of its own"]
+    fn a_key_reached_through_another_mount_inside() {
+        let (Some(root), Some(second)) =
+            (std::env::var_os("TARAE_TEST_ROOT"), std::env::var_os("TARAE_TEST_SECOND"))
+        else {
+            return;
+        };
+        let (root, second) = (PathBuf::from(root), PathBuf::from(second));
+        let p = key_policy(&root);
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let Some(Ok(conf)) = &c.confine else { panic!("{:?}", c.confine) };
+        // (the reads first: what a run gets is what this test is for)
+        let s = second.display();
+        for script in ["cat .env".to_string(), format!("cat {s}/.env"), format!("cat {s}/deep/er/Server.PEM")]
+        {
+            let (ok, out, err) = sh_confined(&c, &root, &script);
+            assert!(
+                !ok && !out.contains("tarae-fake-token") && err.contains(KEY_DENIED),
+                "{script}: {out} {err}"
+            );
+        }
+        assert_eq!(conf.elsewhere, std::slice::from_ref(&second), "the second bind closed");
+        assert!(conf.covers.keys.is_empty(), "no mounts: {:?}", conf.covers);
+        let why = conf.split_why.clone().unwrap_or_default();
+        assert!(why.contains(&second.display().to_string()), "{why}");
+        // (a file beside no key reads both ways: Landlock's rule is its folder's inode's, whichever path)
+        for script in ["cat src/env.rs".to_string(), format!("cat {s}/src/env.rs")] {
+            let (ok, out, err) = sh_confined(&c, &root, &script);
+            assert!(ok && out == "tarae-fake-token", "{script}: {err}");
+        }
+        let (_, notes) = c.linux_said().unwrap_or_else(|| panic!("{:?}", c.confine));
+        assert!(
+            notes.contains("through another mount of their filesystem: they're closed there too"),
+            "{notes}"
+        );
+    }
+
+    /// For real, on Linux with a PID namespace of the session's (A+, B+): a run sees only its session's processes —
+    /// not its keeper by tarae's number for it, nor tarae — and no process's `/proc/<pid>/root` (its keeper's mount
+    /// namespace holds no mount over a key; another run's has its own) takes it to a key: Landlock keeps a run's
+    /// reach into other processes to its own domain, and the keeper isn't dumpable.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_run_reaches_no_key_through_another_process_root() {
+        let test = "a_run_reaches_no_key_through_another_process_root";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("roots");
+        let p = key_policy(&root);
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let Some(Ok(conf)) = &c.confine else { panic!("{:?}", c.confine) };
+        let keeper = conf.keeper.as_ref().map(|k| k.pid);
+        let script = format!(
+            "for d in /proc/[0-9]*; do echo \"pid ${{d#/proc/}}\"; cat \"$d/root{}/.env\" 2>/dev/null; done; true",
+            root.display()
+        );
+        let (_, out, err) = sh_confined(&c, &root, &script);
+        assert!(!out.contains("tarae-fake-token"), "{out} {err}");
+        let pids: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("pid ")).collect();
+        if conf.ns.pid {
+            let (keeper, tarae) = (keeper.unwrap().to_string(), std::process::id().to_string());
+            assert!(pids.contains(&"1"), "its keeper, as 1: {pids:?}");
+            assert!(
+                !pids.contains(&keeper.as_str()) && !pids.contains(&tarae.as_str()),
+                "{keeper} {tarae}: {pids:?}"
+            );
+        } else {
+            let line = format!(
+                "{}sandbox::tests::{test} — no PID namespace here: only its /proc/<pid>/root reads checked\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on Linux: a run holds no descriptor but its stdio — not one its child had open without close-on-exec
+    /// (the test build's hook opens the project's folder so, before the child's own mount namespace: through it a
+    /// run would reach past the mounts over keys) — `keeper::child`'s `close_range`.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_run_holds_no_descriptor_but_its_stdio() {
+        if !keys_tested_here("a_run_holds_no_descriptor_but_its_stdio") {
+            return;
+        }
+        let (t, root) = key_files("fds");
+        let p = confined(Policy { run: RunDir::new().ok(), ..key_policy(&root) });
+        // (the program the run execs lists its own: past its stdio only the folder it lists them from)
+        let leak = [("TARAE_TEST_LEAK_FD", "1")];
+        let (ok, out, err) = sh_confined_env(&p, &root, "exec ls -l /proc/self/fd/", &leak);
+        let fds: Vec<(&str, &str)> = out
+            .lines()
+            .filter_map(|l| l.split_once(" -> "))
+            .filter_map(|(l, to)| Some((l.rsplit(' ').next()?, to)))
+            .collect();
+        let others: Vec<&(&str, &str)> =
+            fds.iter().filter(|(n, to)| !["0", "1", "2"].contains(n) && !to.ends_with("/fd")).collect();
+        assert!(ok && fds.len() >= 3 && others.is_empty(), "{fds:?} {err}");
         std::fs::remove_dir_all(&t).ok();
     }
 

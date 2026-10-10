@@ -1058,6 +1058,19 @@ thread of tarae's that confined itself first, and everything it starts stays con
   without allowing writes to every file beside them (Landlock's rights go by folder), so tools that write
   a temporary file beside their manifest and rename it in fail there: **pnpm install** in a project with a
   `package.json`, `make`'s first build beside its `Makefile`.
+- **Files named like keys** (`.env`, `*.pem`, `id_*` …, and a key's other names in the project — hard links made
+  earlier, tools' output too) are closed one of two ways, said in Claude's result. Where the session's commands have
+  a user namespace (tiers A+ … B) and tarae doesn't run as root, each command hides them by mounts of its own: a key
+  reads as an empty file it may not open, and can't be written, renamed, removed, replaced or linked; everything
+  beside it works as usual — `sed -i`, a save by rename. Up to 1,024 keys (a run costs about 0.07 ms more a key,
+  measured on Debian 12). Otherwise — tiers C and D, past 1,024 keys, or **tarae run as root** (a dev container: the
+  kernel lets a namespace map root only with a capability nothing of tarae's keeps) — their folders are closed
+  around them: a file made or replaced beside a key is read only from Claude's next command, and `sed -i` there
+  fails. The same when another mount of the key's filesystem reaches it — a second bind of the workspace, toolbox's
+  `/run/host`, a btrfs top level, `/` for a project seen through a bind — and the key's way through that mount is
+  closed as its own (the kernel's rules follow files, not paths, so a mount over one path alone wouldn't keep it).
+  A key with a name outside the project (a hard link tarae can't see) is named in Claude's result: it may be
+  readable there. Either way a key made during a command is closed from the next one.
 - **So what a first build makes there is made first.** Before a command runs, tarae makes, empty, what the
   language packs say a build makes beside their protected names when it isn't there yet: `target/` beside
   `Cargo.toml` (and `Cargo.lock` in the outermost crate), `node_modules/` and `package-lock.json` beside
