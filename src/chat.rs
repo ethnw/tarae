@@ -337,6 +337,9 @@ pub struct Chat {
     /// Who pays for its claude — what the last one was started on (`billing.rs`), what its `apiKeySource` is
     /// checked against (the session's may have changed since: a restart's list coming back). None: none started.
     pub billing: Option<crate::billing::Billing>,
+    /// What its conversation ran on before a switch of billing, model or effort since the last message went
+    /// (`switchcost.rs`) — the line over the input says what the next one costs; sending clears it.
+    pub switched: Option<crate::switchcost::Setup>,
 }
 
 /// Where a command of Claude's ran (cardburden 4), from its run's own record — its guard (`Guard::where_ran`),
@@ -510,6 +513,7 @@ impl Chat {
             env_said: (None, Vec::new()),
             settings: Default::default(),
             billing: None,
+            switched: None,
         }
     }
 
@@ -640,6 +644,10 @@ pub fn restart_process(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_mut() else { return };
     if c.state != State::Idle {
         return ed.set_status("claude is answering — s stops it, or wait for the end of its turn");
+    }
+    // (the same conversation, as said — a claude started without `--resume` would begin another)
+    if let Some(id) = c.conversation.clone() {
+        c.resume = Some(id);
     }
     c.kill();
     ensure_proc(ed);
@@ -921,6 +929,9 @@ pub fn reset(ed: &mut Editor) {
     c.follow.new_turn();
     c.conversation = None;
     c.resume = None;
+    c.switched = None;
+    // (a billing waiting for the last conversation's turn to end goes with it)
+    ed.session.billing_next = None;
     ed.session.usage.new_conversation();
     // (review at the end stays as it's set — `llm.review-at-end`)
     crate::edits::at_end_new_chat(ed);
@@ -1128,7 +1139,17 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             if report.readings.iter().any(|r| r.from == crate::limits::Source::Event) {
                 ed.session.usage.plan_event = true;
             }
-            crate::limits::seen(ed, report)
+            // (refused: wait, or the limit card — `billing.rs`)
+            let refused: Vec<(String, Option<u64>)> = report
+                .readings
+                .iter()
+                .filter(|r| r.status == Some(crate::limits::Status::Rejected))
+                .map(|r| (r.window.clone(), r.resets_at_ms))
+                .collect();
+            crate::limits::seen(ed, report);
+            for (window, resets_at_ms) in refused {
+                ed.limit_hit(&window, resets_at_ms);
+            }
         }
         // (a retry said in place of the one before it — the turn's, not a row each)
         StreamEv::Retry(r) => {
@@ -1228,6 +1249,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             };
             crate::uistate::watch::turn(ed, "ended", calls, Some(took));
             let ok = r.is_ok();
+            // (refused by the plan, in Claude Code's own words — `limits::of_words`)
+            let refused = r.as_ref().err().and_then(|e| crate::limits::of_words(e));
             // A session behind: its tab says `done` until it's looked at (#86), and a toast says it once
             // (`with_session`). In front with the chat out of sight past the turn: said here
             if ed.background() {
@@ -1281,6 +1304,13 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 // (its interrupt may have come after the turn's end: the next turn isn't "stopped")
                 c.stopping = false;
             }
+            // The plan refused it: wait, or the limit card (`billing.rs`) — its reset as the limits know it
+            if let Some(window) = refused {
+                let resets = ed.limits.get(window, crate::usage::now_ms()).and_then(|r| r.resets_at_ms);
+                ed.limit_hit(window, resets);
+            }
+            // (a billing that waited for the turn's end — the limit card's `y` mid-turn)
+            crate::billing::turn_over(ed);
             send_queued(ed);
         }
         StreamEv::Exit(err) => {
@@ -1333,6 +1363,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::tools::turn_over(ed);
             crate::reads::turn_over(ed);
             crate::restart::turn_over(ed);
+            // (a billing that waited for the turn's end — the turn ended here)
+            crate::billing::turn_over(ed);
         }
     }
 }
@@ -1470,6 +1502,8 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     c.hop = 0;
     c.follow.new_turn();
     c.unfolded = false;
+    // (a switch's cost is this message's now — the line over the input goes)
+    c.switched = None;
     // A new turn: what went to Claude is what this message carries (marks of the last one go)
     c.pointed.clear();
     c.cited.clear();

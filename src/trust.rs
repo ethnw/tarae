@@ -60,6 +60,16 @@ pub fn yours_only(setting: &str) -> bool {
     YOURS_ONLY.contains(&setting)
 }
 
+/// `:` commands only your own keys run (or you, typed): they switch who pays for Claude. A project's key binding
+/// to one is left out (`config.rs`).
+pub const YOURS_ONLY_COMMANDS: [&str; 1] = ["session-billing"];
+
+/// Whether the `:` line `line` (no `:`) runs one of `YOURS_ONLY_COMMANDS`.
+pub fn yours_only_command(line: &str) -> bool {
+    let cmd = line.split_whitespace().next().unwrap_or_default();
+    YOURS_ONLY_COMMANDS.contains(&cmd)
+}
+
 /// A value longer than this (as written) isn't put on the card whole — so it's never trusted.
 pub const SHOWN_MAX: usize = 600;
 

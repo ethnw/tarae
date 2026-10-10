@@ -143,6 +143,8 @@ pub(crate) const CLAUDE_KEYS: &[(&str, Reach)] = &[
     ("time-limits", Reach::BuiltIn),
     // (Claude's prompt)
     ("said", Reach::BuiltIn),
+    // (what a switch is said to cost you — a runtime folder's prices would be its words, not the price list's)
+    ("price", Reach::BuiltIn),
 ];
 
 /// A tool's home.
@@ -343,6 +345,9 @@ pub struct Packs {
     /// Claude's under one isn't asked whether it's stuck before then (`stuck::limit`).
     pub time_limits: Vec<TimeLimit>,
     pub said: Vec<Said>,
+    /// What writing a model's prompt cache costs (`switchcost.rs`) — what a switch of billing, model or effort is
+    /// said to cost.
+    pub price: Vec<crate::switchcost::Price>,
     /// What was wrong: a built-in pack's entry left out (a mistake in tarae's pack — a test fails), a runtime
     /// folder's key that's the built-in packs' only.
     pub problems: Vec<String>,
@@ -710,6 +715,7 @@ fn read_key_of(
             let whose = if builtin { format!("{pack} pack") } else { format!("your {pack} pack") };
             out.warn.extend(crate::cardwarn::read(v, &whose, &mut wrong));
         }
+        ("claude", "price") => out.price.extend(crate::switchcost::read(v)?),
         ("claude", "time-limits") => {
             let Some(entries) = v.as_array() else { return Err("`time-limits` isn't a list".into()) };
             for e in entries {

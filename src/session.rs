@@ -180,6 +180,10 @@ pub struct Session {
     /// Who pays for its Claude — the chat's, the ask's, the reviewer's unless `llm.reviewer-billing` says
     /// (`billing.rs`): `llm.billing` when it's made, kept with it (`worktree::Kept`), `:session-billing` switches it.
     pub billing: crate::billing::Billing,
+    /// The billing its chat goes on once Claude's turn is over (the limit card's `y` mid-turn — `billing.rs`).
+    pub billing_next: Option<crate::billing::Billing>,
+    /// The plan's weekly window its limit card was up for (its reset, unix ms): not asked again for it.
+    pub limit_asked: Option<u64>,
     /// Its Claude's conversation compacted since tarae started — how often, the last one, and whether one
     /// came behind and it hasn't been in front since (`compaction.rs`).
     pub compacted: crate::compaction::Compacted,
@@ -299,6 +303,8 @@ impl Session {
             reloaded: 0,
             usage: Default::default(),
             billing: Default::default(),
+            billing_next: None,
+            limit_asked: None,
             compacted: Default::default(),
             hosts: Vec::new(),
             proxy_id,
@@ -840,7 +846,7 @@ impl Editor {
         let doc = self.alloc_id();
         self.docs.push(Document::from_str(doc, ""));
         let mut session = Session::new(id, root.clone(), view);
-        session.billing = self.config.llm.billing;
+        session.billing = self.new_session_billing();
         session.views.push(View::new(view, doc));
         (session.current_doc, session.scratch, session.docs) = (doc, Some(doc), vec![doc]);
         self.sessions.push(session);
@@ -1729,6 +1735,7 @@ mod tests {
             compacted: false,
             reviewer: String::new(),
             claude: None,
+            billing: Default::default(),
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

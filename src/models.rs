@@ -158,6 +158,8 @@ pub fn set(ed: &mut Editor, value: &str) -> Result<(), String> {
     let known = offered(ed);
     let m = known.iter().find(|m| m.value == value || m.name.eq_ignore_ascii_case(value));
     let value = m.map_or(value.to_string(), |m| m.value.clone());
+    // (what the conversation ran on — the line over the input says what the next message costs)
+    ed.switching();
     save(ed, "llm.model", if value == "default" { "" } else { &value })?;
     crate::chat::request(ed, json!({ "subtype": "set_model", "model": value }));
     // (what answers is known again from the next answer — until then the title says what was asked for)
@@ -170,13 +172,15 @@ pub fn set(ed: &mut Editor, value: &str) -> Result<(), String> {
         save(ed, "llm.effort", "")?;
     }
     let name = label(ed).or_else(|| m.map(|m| m.name.clone())).unwrap_or(value);
-    ed.set_success(format!("Claude: {name}"));
+    let cost = ed.switched_said();
+    ed.set_success(format!("Claude: {name}{cost}"));
     Ok(())
 }
 
 /// `:effort <level>` — saved, and applied to the conversation.
 pub fn set_effort(ed: &mut Editor, level: &str) -> Result<(), String> {
     let level = if level == "default" { "" } else { level };
+    ed.switching();
     save(ed, "llm.effort", level)?;
     // (null = the model's own — measured: thinking back at the untouched default's)
     let effort = if level.is_empty() { serde_json::Value::Null } else { json!(level) };
@@ -185,6 +189,7 @@ pub fn set_effort(ed: &mut Editor, level: &str) -> Result<(), String> {
         json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } }),
     );
     let what = if level.is_empty() { "the model's default".to_string() } else { level.to_string() };
-    ed.set_success(format!("Effort: {what}"));
+    let cost = ed.switched_said();
+    ed.set_success(format!("Effort: {what}{cost}"));
     Ok(())
 }

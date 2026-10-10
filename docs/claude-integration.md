@@ -1199,7 +1199,35 @@ the turn, or stop it with `C-c`. New sessions take `llm.billing` (`"subscription
 keeps its own across `:restart` and the next start. The reviewer follows its session unless
 `llm.reviewer-billing` says `"subscription"` or `"api"`. These settings, like `llm.environment-key`, are read
 from your own config only: a project's `.tarae.toml` or `.tarae.local.toml` is refused them, and says so. A
-project never decides to spend your credits.
+project never decides to spend your credits: a key either file binds to `:session-billing` is left out too, said
+at its key (your own config's bindings work).
+
+**From the session list.** `$` in `space W` switches the session in hand the other way. When it has a
+conversation going, a card asks first and says what the switch costs, by its prompt cache:
+
+- warm: `rewrites ≈ $1.20 of cached context (150k tokens)` onto the key (at the hour-long cache write's price),
+  or `≈ 150k tokens … toward your plan's limits` back to the plan, and when the cache goes cold — switch after
+  that and it costs nothing extra;
+- cold: `no extra cost`, since staying would write it again too.
+
+Without a conversation it switches at once. The list's rows say `api` for a session on the key.
+
+**What a switch costs, said after it.** After any switch of billing, model (`:model`, `C-t`) or effort
+(`:effort`), the toast and a line over the chat's input say what the next message costs:
+`next message rewrites ≈ $0.75 (model changed) · switching back costs nothing`. Nothing has gone out since, so
+going back is free; the line goes when the next message does, or when you're back where you were. Narrow, it
+folds what changed first. Dollars come from a price table in the tools pack (`[[claude.price]]`, from
+Anthropic's pricing page); a model it doesn't list is said in tokens, and so is the plan always. An effort change
+says what the model's row says: Fable 5.1 keeps its cache; others rewrite it, or "may rewrite" where it isn't
+known whether Claude Code keeps it.
+
+**Near the plan's limits.** Making a session while the plan's weekly window (or the chosen model's weekly window)
+is at 80 % or more, its card asks who pays: the plan, or from 95 % your key first — `$` on the card switches. The
+5-hour window never offers the key; the card only says it's near and to wait. When the weekly window refuses a
+running session's Claude, a card asks: `y` this session on your key, `a` new sessions and the reviewer too until
+the window resets (kept across starts, and it lapses by itself), `n` wait. It says what the first message on the
+key costs. `y` while Claude still answers switches at the end of the turn. A refused 5-hour window is a toast.
+Esc never answers either card.
 
 **How the key reaches Claude.** tarae never reads it. An API session's claude gets a key helper in its
 `--settings`: `/usr/bin/security find-generic-password -a <you> -s tarae.anthropic-api-key -w`. Claude Code runs
@@ -1222,7 +1250,11 @@ the same way. The chat's last row starts with `api` in an API session, and `tara
 
 **Where it can be read.** Commands Claude runs in the sandbox can't reach the Keychain. Any process of yours
 outside the sandbox can: `security` hands the item to whoever runs it, with no prompt. That includes a command of
-Claude's you allow to run outside the sandbox.
+Claude's you allow to run outside the sandbox. tarae says this once, the first time a session goes on the key (on
+the card that does it, or as a warning and in the chat). A run card warns when Claude asks to run
+`security find-generic-password … -w` (or `-g`), `security dump-keychain`/`export`, or `secret-tool lookup`/`search`
+outside the sandbox — and asks each time, whatever `a` said before. It judges the command's words and the scripts
+it runs; a program that reads the Keychain from its own code isn't seen.
 
 **macOS only for now.** On Linux, `:session-billing api` is refused, and a session on `llm.billing = "api"` has no
 Claude: the chat says why.

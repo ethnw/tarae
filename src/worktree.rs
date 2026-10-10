@@ -226,6 +226,15 @@ pub struct Making {
     /// the front session's, whichever isn't `base` (#85: three sessions from main meant going to main
     /// before each).
     pub others: Vec<(String, String)>,
+    /// Who pays for its Claude (`billing.rs`) — `llm.billing`, your key while `a` on the limit card holds, or as
+    /// the card's `$` sets it.
+    pub billing: crate::billing::Billing,
+    /// The plan's weekly window near its limit, said (`weekly 84 % · resets Mon 00:00`): the card asks who pays,
+    /// `$` switches (D2 — your key first from 95 %). None: not asked.
+    pub billing_ask: Option<String>,
+    /// A line about billing that asks nothing: the 5-hour window near its limit (wait — never the key), or your
+    /// key until a reset (`a` on the limit card).
+    pub billing_note: Option<String>,
 }
 
 /// The instruction files a session's checkout gets from this one when git doesn't carry them (#17: CLAUDE.md
@@ -296,7 +305,8 @@ impl Making {
         }
     }
 
-    pub fn card(&self) -> crate::offer::Offer {
+    /// Its card — `weakness`: it says `billing::WEAKNESS` when it bills the key (not said yet).
+    pub fn card(&self, weakness: bool) -> crate::offer::Offer {
         // (the folder and where it is apart: a path wraps only at its space, never mid-name)
         let (folder, under) = match (self.path.file_name(), self.path.parent()) {
             (Some(f), Some(p)) => (f.to_string_lossy().into_owned(), crate::allow::tilde(p)),
@@ -354,17 +364,35 @@ impl Making {
         if !self.copies.is_empty() {
             q += &format!("\n\nCopied into it (not in git here):\n  {}", self.copies.join("  "));
         }
+        // Who pays: asked near the plan's weekly limit (D2), said when something else decided it
+        let api = self.billing == crate::billing::Billing::Api;
+        if let Some(window) = &self.billing_ask {
+            let (on, other) = if api { ("your API key", "your plan") } else { ("your plan", "your API key") };
+            q += &format!("\n\nThe plan's {window}. Its Claude runs on {on} — $ puts it on {other}.");
+        }
+        if let Some(note) = &self.billing_note {
+            q += &format!("\n\n{note}");
+        }
+        let warn = (api && weakness).then(|| {
+            let at = q.split('\n').count() + 1;
+            q += &format!("\n\n{}", crate::billing::WEAKNESS);
+            at..at + 1
+        });
         if let Some((b, s)) = self.others.first() {
             let said = if b == s { s[..7].to_string() } else { format!("{b} ({})", &s[..7]) };
             q += &format!("\n\nb — from {said} instead");
         }
-        crate::offer::Offer::new(
+        let o = crate::offer::Offer::new(
             format!("New session: {}", self.branch),
             &q,
             "Making its checkout…",
             "Couldn't make the session".into(),
             crate::offer::What::SessionNew(Box::new(self.clone())),
-        )
+        );
+        match warn {
+            Some(lines) => o.warning(lines),
+            None => o,
+        }
     }
 }
 
@@ -436,7 +464,22 @@ pub fn making(
         _ => None,
     };
     let copies = instructions(&top);
-    Ok(Making { top, branch, base, base_sha, path, files, big, builds: said, build_own, copies, others })
+    Ok(Making {
+        top,
+        branch,
+        base,
+        base_sha,
+        path,
+        files,
+        big,
+        builds: said,
+        build_own,
+        copies,
+        others,
+        billing: Default::default(),
+        billing_ask: None,
+        billing_note: None,
+    })
 }
 
 /// The repository's main branch, a local one: the remote's default (`origin/HEAD`), else `main` or
@@ -893,6 +936,8 @@ pub struct Shown {
     /// Its Claude's cache (`warm until 14:32` · `cold` · `cache not reported`) and what its turns cost so far
     /// (`usage.rs`) — None: nothing reported.
     pub claude: Option<(String, String)>,
+    /// Who pays for its Claude (`billing.rs`): `api` said, the plan nothing.
+    pub billing: crate::billing::Billing,
 }
 
 impl Shown {
@@ -929,13 +974,13 @@ impl Shown {
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
 /// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
 /// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), its
-/// Claude compacted behind (`≈ compacted`), what it's doing, its reviewer (`¶ reviewing`), its Claude's
-/// cache and cost so far, CPU and memory — each column as wide as its widest and empty ones left out, so the
+/// Claude compacted behind (`≈ compacted`), what it's doing, its reviewer (`¶ reviewing`), `api` when your key
+/// pays for its Claude, its Claude's cache and cost so far, CPU and memory — each column as wide as its widest and empty ones left out, so the
 /// hints (right-aligned) line up row under row.
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 10]> = sessions
+    let cols: Vec<[String; 11]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -967,12 +1012,26 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
             let compacted = if l.compacted { "≈ compacted".to_string() } else { String::new() };
             let (cache, cost) = l.claude.clone().unwrap_or_default();
             let reviewer = l.reviewer.clone();
-            [branch, moved.join(" "), changed, reloaded, compacted, doing, reviewer, cache, cost, usage]
+            // (who pays: `api` — the plan, the calm default, says nothing — D5)
+            let billing = if l.billing == crate::billing::Billing::Api { "api" } else { "" }.to_string();
+            [
+                branch,
+                moved.join(" "),
+                changed,
+                reloaded,
+                compacted,
+                doing,
+                reviewer,
+                billing,
+                cache,
+                cost,
+                usage,
+            ]
         })
         .collect();
-    let widths: Vec<usize> = (0..10).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..11).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, false, false, false, true, true];
+    let right = [false, true, true, true, false, false, false, false, false, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1262,9 +1321,22 @@ impl Editor {
         let builds = self.session_store.builds.clone();
         let work = move || making(&root, &name, base.as_deref(), &setting, builds.as_ref());
         self.step(self.events.shared_jobs(), "session", said, work, |ed, found| match found {
-            Ok(m) => ed.push_offer(m.card()),
+            Ok(mut m) => {
+                // (who pays: by the plan's limits as they stand when the card comes, and whether your key can
+                // be used — D2)
+                ed.api_check(ed.events.shared_jobs(), move |ed, _| {
+                    (m.billing, m.billing_ask, m.billing_note) = ed.new_session_ask();
+                    let card = ed.session_card(&m);
+                    ed.push_offer(card);
+                });
+            }
             Err(e) => ed.set_error(format!("new session: {e}")),
         });
+    }
+
+    /// The create card for `m` (its billing's weakness said while it's not been).
+    pub(crate) fn session_card(&self, m: &Making) -> crate::offer::Offer {
+        m.card(self.weakness_due())
     }
 
     /// `y` on the create card: the worktree made (a worker), then its session in front, its chat open.
@@ -1278,6 +1350,11 @@ impl Editor {
                     if let Some(l) = ed.session_by_id(session) {
                         (l.name, l.branch, l.base) =
                             (m.branch.clone(), Some(m.branch.clone()), Some(m.base.clone()));
+                        // (who pays, as its card said)
+                        l.billing = m.billing;
+                    }
+                    if m.billing == crate::billing::Billing::Api {
+                        ed.weakness_shown();
                     }
                     ed.session_switch(session);
                     crate::chat::open(ed);
@@ -1553,6 +1630,7 @@ impl Editor {
                 compacted: l.compacted.unseen,
                 reviewer: Shown::reviewer_of(l),
                 claude: Shown::claude_of(&l.usage, now_ms),
+                billing: l.billing,
             })
             .collect();
         items(&shown)
@@ -1572,7 +1650,7 @@ impl Editor {
     }
 
     /// A letter in the list: `j`/`k` move, a digit brings that row's session to the front, `n` makes a new
-    /// one, `d` ends the one in hand, `b` brings it into its base.
+    /// one, `d` ends the one in hand, `b` brings it into its base, `$` switches who pays for its Claude.
     pub(crate) fn session_list_key(&mut self, c: char) {
         use crate::picker::Action;
         let Some(p) = self.picker.as_mut() else { return };
@@ -1600,6 +1678,14 @@ impl Editor {
                 let which = id.to_string();
                 let done = if c == 'd' { self.session_end(&which) } else { self.session_bring(&which) };
                 if let Err(e) = done {
+                    self.set_error(e);
+                }
+            }
+            // Who pays for its Claude, the other way — asked first on a conversation going (`billing.rs`)
+            '$' => {
+                let Some(id) = here else { return };
+                self.picker = None;
+                if let Err(e) = self.billing_toggle(id) {
                     self.set_error(e);
                 }
             }
@@ -3997,6 +4083,7 @@ mod tests {
             compacted: false,
             reviewer: String::new(),
             claude: None,
+            billing: Default::default(),
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[
@@ -4106,17 +4193,24 @@ mod tests {
             build_own,
             copies: Vec::new(),
             others: Vec::new(),
+            billing: Default::default(),
+            billing_ask: None,
+            billing_note: None,
         };
-        let q =
-            making(Some((3 << 30, true))).card().question.split_whitespace().collect::<Vec<_>>().join(" ");
+        let q = making(Some((3 << 30, true)))
+            .card(false)
+            .question
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(q.contains("Cargo builds it in a build-dir of its own in"), "{q}");
         assert!(
             q.contains("its first build starts cold — this checkout's is 3.0 GB") && !q.contains("shared"),
             "{q}"
         );
-        let q = making(Some((0, true))).card().question.split_whitespace().collect::<Vec<_>>().join(" ");
+        let q = making(Some((0, true))).card(false).question.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(q.contains("its first build starts cold.") && !q.contains("0 B"), "none built here yet: {q}");
-        let q = making(None).card().question.split_whitespace().collect::<Vec<_>>().join(" ");
+        let q = making(None).card(false).question.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(q.contains("build-dir is shared") && !q.contains("cold"), "{q}");
         std::fs::remove_dir_all(&dir).ok();
     }

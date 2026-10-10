@@ -42,7 +42,7 @@ the [keymap reference](reference/keymap.md).
 - **Some settings are only yours.** Whose credentials Claude uses, and who pays for it, are never a project's to
   say: `llm.environment-key`, `llm.billing` and `llm.reviewer-billing` are read from your own config only — a
   project's `.tarae.toml` (trusted or not) and its `.tarae.local.toml` are refused them, with a warning at each
-  line
+  line; so is a key either file binds to `:session-billing`
 
 One file holds everything — editor, keys, languages, language servers, and Claude. There's no separate
 `languages.toml`.

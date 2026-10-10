@@ -370,10 +370,13 @@ fn every_built_in_warning_fires_on_its_example_not_its_safe_form() {
     }
     // (an option's value is never an option: `ps -o user` reads no environment)
     assert!(!j.ids(w, "ps -o user -p 12").contains(&"process-env".to_string()));
-    // (only what reaches beyond, and what's published, is asked over `a`)
+    // (only what reaches beyond, what's published, and a secret store read outside the sandbox are asked over `a`)
     let mut asks: Vec<&str> = w.iter().filter(|w| w.asks).map(|w| w.id.as_str()).collect();
     asks.sort();
-    assert_eq!(asks, ["cargo-publish", "npm-publish", "outward"]);
+    assert_eq!(
+        asks,
+        ["cargo-publish", "keychain-dump", "keychain-read", "npm-publish", "outward", "secret-service-read"]
+    );
     // The facts' words: what a read goes to, a script changed, a protected file edited
     for (id, facts) in [
         ("reads-outside", Judge { reads: vec!["/etc/hosts".into()], ..Judge::default() }),
@@ -389,6 +392,40 @@ fn every_built_in_warning_fires_on_its_example_not_its_safe_form() {
         privileges[0].said
     );
     assert_eq!(privileges[0].whose, "tools pack");
+}
+
+/// The secret stores tarae's API key is kept in (apibill D3): outside the sandbox, a read of a password from the
+/// keychain (`-w`, `-g`), a dump of it, a Secret Service lookup warns — and asks each time, whatever `a` said.
+/// Inside the sandbox it can't reach them: no warning. The keychain's attributes alone (no `-w`) aren't the
+/// password; an option's value is never an option (`-s -w` names a service called `-w`).
+#[test]
+fn a_secret_store_read_outside_the_sandbox_warns_and_asks_each_time() {
+    let w = &crate::sandboxpack::get().warn;
+    let (outside, inside) = (Judge { outside: true, ..Judge::default() }, Judge::default());
+    let read = "security find-generic-password -a me -s tarae.anthropic-api-key -w";
+    for (id, cmd) in [
+        ("keychain-read", read),
+        ("keychain-read", "security find-internet-password -g -s example.com"),
+        ("keychain-dump", "security dump-keychain"),
+        ("secret-service-read", "secret-tool lookup service tarae-anthropic-api-key"),
+        ("secret-service-read", "secret-tool search --all service x"),
+    ] {
+        assert!(outside.ids(w, cmd).contains(&id.to_string()), "{id} outside on `{cmd}`");
+        assert!(!inside.ids(w, cmd).contains(&id.to_string()), "{id}: not in the sandbox, `{cmd}`");
+        assert!(w.iter().find(|x| x.id == id).unwrap().asks, "{id} asks over `a`");
+    }
+    for cmd in [
+        "security find-generic-password -a me -s tarae.anthropic-api-key",
+        "security find-generic-password -s -w",
+    ] {
+        assert!(!outside.ids(w, cmd).contains(&"keychain-read".to_string()), "not a password read: `{cmd}`");
+    }
+    // (in a script it runs, as in its line; and its words say what's at stake)
+    let script =
+        Judge { outside: true, scripts: vec![("k.sh".into(), format!("{read}\n"))], ..Judge::default() };
+    let said = script.judged(w, "sh k.sh");
+    let k = said.iter().find(|x| x.id == "keychain-read").expect("in the script");
+    assert!(k.said.contains("tarae's API key is there") && k.whose == "tools pack", "{k:?}");
 }
 
 /// An editor in a temp folder of its own (`name`) with Claude mid-turn (a stand-in claude that reads and says

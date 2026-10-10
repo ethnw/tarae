@@ -518,7 +518,31 @@ fn apply_source(
         // A key bound to a `:` command (`:sh …`) runs it when pressed
         let mut keys = keys.clone();
         drop_typed(&mut keys, "keys", &mut pass);
+        // …and who pays for Claude is switched only by your own keys or a command you type: a project's file
+        // (trusted or not, `.tarae.local.toml` too — as `trust::YOURS_ONLY`) never binds one, said
+        if !your_config {
+            let mut theirs = Vec::new();
+            drop_typed(&mut keys, "keys", &mut |at, v| {
+                let bills = typed_lines(v).any(|l| crate::trust::yours_only_command(&l));
+                if bills {
+                    theirs.push(at);
+                }
+                !bills
+            });
+            for at in theirs {
+                warnings.push(format!("{file}: {at} switches billing — only your own keys do; left out"));
+            }
+        }
         config.keymaps.merge_user(&keys, warnings);
+    }
+}
+
+/// The `:` lines a key binding's value runs (`":a"`, or those in a list), without their `:`.
+fn typed_lines(v: &Value) -> Box<dyn Iterator<Item = String> + '_> {
+    match v {
+        Value::String(s) => Box::new(s.trim_start().strip_prefix(':').map(str::to_string).into_iter()),
+        Value::Array(a) => Box::new(a.iter().flat_map(typed_lines)),
+        _ => Box::new(std::iter::empty()),
     }
 }
 
@@ -847,6 +871,70 @@ Z = ["move_line_down", ":sh touch marker"]
             l.keep_env_key && l.billing == Billing::Api && l.reviewer_billing == Some(Billing::Api),
             "{w:?}"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Who pays for Claude is switched only by your own keys or a command you type: a key a project's file binds
+    /// to `:session-billing` — `.tarae.toml` trusted or not, `.tarae.local.toml` — is left out, said at its key
+    /// (a trusted project's other `:` bindings run as before); your config's binding stays.
+    #[test]
+    fn a_projects_key_binding_never_switches_billing() {
+        use crate::keymap::{Lookup, MappableCommand};
+        use crate::trust::Store;
+        let dir = std::env::temp_dir().join(format!("tarae-config-bill-keys-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
+        assert!(ok.status.success());
+        let (user, project, local) =
+            (dir.join("user.toml"), dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
+        let keys = "[keys.normal]\nX = \":session-billing api\"\nY = \":sh true\"\n\
+                    [keys.normal.space]\nZ = [\"move_line_down\", \":session-billing subscription\"]\n";
+        fs::write(&project, keys).unwrap();
+        fs::write(&local, "[keys.normal]\nW = \":session-billing api\"\n").unwrap();
+        fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
+        let load = |user: Option<PathBuf>, store: &Store| {
+            load_layers(user, Some(project.clone()), Some((dir.clone(), local.clone())), store)
+        };
+        let typed = |c: &Config, seq: &str| -> Vec<String> {
+            let keys: Vec<crate::key::Key> = seq
+                .split(' ')
+                .map(|k| match k {
+                    "space" => crate::key::Key::plain(crate::key::Code::Char(' ')),
+                    k => crate::key::Key::plain(crate::key::Code::Char(k.chars().next().unwrap())),
+                })
+                .collect();
+            match c.keymaps.lookup(crate::editor::Mode::Normal, &keys) {
+                Lookup::Matched(cmds) => cmds
+                    .iter()
+                    .filter_map(|c| match c {
+                        MappableCommand::Typed(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        let (c, _) = load(None, &Store::default());
+        let mut trusted = Store::default();
+        trusted.answer(&project, c.project.as_ref().unwrap().hash, true);
+        let (t, w) = load(None, &trusted);
+        assert_eq!(typed(&t, "Y"), ["sh true"], "a trusted project's other `:` binding runs");
+        for seq in ["X", "space Z", "W"] {
+            assert!(typed(&t, seq).is_empty(), "{seq}: no billing switch from a project's file");
+        }
+        for (file, at) in [
+            (".tarae.toml", "keys.normal.X"),
+            (".tarae.toml", "keys.normal.space.Z"),
+            (".tarae.local.toml", "keys.normal.W"),
+        ] {
+            let said = format!("{file}: {at} switches billing — only your own keys do; left out");
+            assert!(w.iter().any(|w| w.ends_with(&said)), "{said}: {w:?}");
+        }
+        fs::write(&user, "[keys.normal]\nV = \":session-billing api\"\n").unwrap();
+        let (mine, _) = load(Some(user.clone()), &trusted);
+        assert_eq!(typed(&mine, "V"), ["session-billing api"], "your own key does");
         fs::remove_dir_all(&dir).ok();
     }
 

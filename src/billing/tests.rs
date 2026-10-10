@@ -16,7 +16,9 @@ use crate::editor::Editor;
 /// `got.key`, and says `apiKeyHelper` as its credential then (else `none`) — or what `init.source` (its answer to
 /// `initialize`) and `turn.source` (each turn's `init`) say. Every line it's sent goes to `stdin`; a message is
 /// answered with a turn's `init` and its result — unless `turn.hold` is there (nothing), or `turn.wait` (the
-/// `init`, then the result only once interrupted, as Claude Code ends a turn it's told to stop).
+/// `init`, then the result only once interrupted, as Claude Code ends a turn it's told to stop). `turn.limit`: a
+/// line it says before the result (a `rate_limit_event`); `turn.refused`: the result is an error with its words;
+/// `turn.exit`: told to stop, it exits instead — the turn without a result.
 const STAND_IN: &str = r#"s=''; r=-
 while [ $# -gt 0 ]; do case "$1" in --settings) s="$2";; --resume) r="$2";; esac; shift; done
 printf '%s %s\n' "$r" "$s" >> starts
@@ -32,10 +34,15 @@ while read -r line; do
   printf '%s\n' "$line" >> stdin
   case "$line" in
     *tarae-init*) printf '{"type":"control_response","response":{"subtype":"success","request_id":"tarae-init","response":{"models":[],"account":{"apiKeySource":"%s"}}}}\n' "$isrc";;
-    *tarae-stop*) printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"%s"}\n' "$id";;
+    *tarae-stop*) [ -f turn.exit ] && exit 3; printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"%s"}\n' "$id";;
     *'"type":"user"'*) [ -f turn.hold ] || {
       printf '{"type":"system","subtype":"init","session_id":"%s","apiKeySource":"%s","model":"m"}\n' "$id" "$tsrc"
-      [ -f turn.wait ] || printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}\n' "$id"
+      [ -f turn.limit ] && cat turn.limit
+      if [ -f turn.refused ]; then
+        printf '{"type":"result","subtype":"success","is_error":true,"result":"%s","session_id":"%s"}\n' "$(cat turn.refused)" "$id"
+      elif [ ! -f turn.wait ]; then
+        printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}\n' "$id"
+      fi
     };;
   esac
 done"#;
@@ -68,13 +75,14 @@ impl Place {
         Place { state: dir.join("state"), root, dir, helper, key }
     }
 
-    /// An editor in the project, its claude the stand-in, its key helper the stand-in's, keeping its chats and
-    /// sessions in `state/`.
+    /// An editor in the project, its claude the stand-in, its key helper the stand-in's (and found, `query`),
+    /// keeping its chats and sessions in `state/`.
     fn editor(&self) -> Editor {
         let mut ed = Editor::with_root(crate::config::Config::default(), self.root.clone());
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), STAND_IN.into(), "stand-in".into()];
         ed.api_key_helper = Some(self.helper.clone());
+        ed.api_key_query = query(true);
         ed.chats_dir = Some(self.state.join("chats"));
         ed.session_store.dir = Some(self.state.join("sessions"));
         ed.session_store.restored = true;
@@ -100,6 +108,12 @@ impl Drop for Place {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.dir).ok();
     }
+}
+
+/// A stand-in for the Keychain query (`api_check`): one that finds the key, or one that doesn't — `security`'s
+/// exit status for no such item.
+fn query(found: bool) -> Option<Vec<String>> {
+    Some(["sh", "-c", if found { "exit 0" } else { "exit 44" }].map(String::from).to_vec())
 }
 
 fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
@@ -149,6 +163,8 @@ fn files_in(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 fn an_api_sessions_key_goes_through_its_helper_and_never_through_tarae() {
     let place = Place::new("api");
     let mut ed = place.editor();
+    // (what tarae keeps of billing in the state folder too — the weakness said, then kept)
+    ed.billing_kept.path = Some(place.state.join("billing.json"));
     let log = crate::log::capture();
     // (a key of tarae's environment, passed on by "keep" — but not to an API session's claude)
     ed.config.llm.keep_env_key = true;
@@ -180,7 +196,7 @@ fn an_api_sessions_key_goes_through_its_helper_and_never_through_tarae() {
     until(&mut ed, "the chat and the sessions kept", |_| {
         let files = files_in(&place.state);
         let has = |part: &str| files.iter().any(|(p, _)| p.to_string_lossy().contains(part));
-        has("/chats/") && has("/sessions/")
+        has("/chats/") && has("/sessions/") && has("billing.json")
     });
     let sessions = files_in(&place.state.join("sessions"));
     assert!(String::from_utf8_lossy(&sessions[0].1).contains(r#""billing":"api""#), "kept as an API session");
@@ -391,4 +407,476 @@ fn each_billing_has_the_one_credential_it_accepts() {
     assert!(check(Billing::Subscription, true, "ANTHROPIC_API_KEY"), "your key, kept on purpose");
     assert!(!check(Billing::Subscription, true, "apiKeyHelper"));
     assert_eq!(checked(Billing::Api, false, Role::Chat, None), None);
+}
+
+// ── Switching, and the plan's limit (step 5's rest) ─────────────────────────
+
+/// The session's conversation cached as a stream would say it: its last request carried `tokens` on `model`, an
+/// hour-long write `ago_ms` ago — warm for an hour from then.
+fn cache(ed: &mut Editor, model: &str, tokens: u64, ago_ms: u64) {
+    let now = crate::usage::now_ms();
+    let u = &mut ed.session.usage;
+    u.requesting(now - ago_ms);
+    let counts =
+        crate::usage::Counts { input: Some(10), write: Some(tokens - 10), read: Some(0), output: Some(5) };
+    let id = Some(format!("msg-{ago_ms}-{tokens}-{now}"));
+    let ttl = Some(crate::usage::Ttl::Hour1);
+    u.seen(crate::usage::Seen { id, model: model.into(), counts, ttl, at_ms: now - ago_ms });
+}
+
+/// The front card drawn, and in sight long enough for a key to answer it.
+fn settled(ed: &mut Editor) {
+    crate::term::render(ed, &mut Vec::new(), 140, 44).unwrap();
+    let o = (ed.offers[0].id, ed.offers[0].rev);
+    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+}
+
+fn key(ed: &mut Editor, code: crate::key::Code) {
+    ed.handle_key(crate::key::Key::plain(code));
+}
+
+fn toasts(ed: &Editor) -> String {
+    ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>().join("\n")
+}
+
+/// An editor whose chat had a turn on the plan (conversation `conv-1`), its cache warm: 150k tokens of Opus 5.5
+/// written a minute ago — and what tarae keeps of billing in the test's state folder.
+fn talking(place: &Place) -> Editor {
+    let mut ed = place.editor();
+    ed.billing_kept.path = Some(place.state.join("billing.json"));
+    crate::chat::open(&mut ed);
+    send(&mut ed, "hello");
+    until(&mut ed, "the first turn", |ed| idle(ed) && ed.session.usage.key_source.is_some());
+    cache(&mut ed, "claude-opus-5-5", 150_000, 60_000);
+    ed
+}
+
+/// `$` in the session list on a session with a conversation going asks first — what its next message costs by its
+/// cache (warm: the context at the key's hour-long write, and when it goes cold), and the key's weakness the
+/// first time — `n` keeps it, `y` switches and resumes the conversation; the list's row says `api` then. Back to
+/// the plan the card says tokens. A session with nothing said yet switches at once, and the weakness, said once
+/// ever (kept), is a warning there.
+#[test]
+fn dollar_in_the_list_asks_first_on_a_conversation_saying_what_it_costs() {
+    let place = Place::new("dollar");
+    let mut ed = talking(&place);
+    ed.session_list();
+    ed.session_list_key('$');
+    until(&mut ed, "the card, once the key is found", |ed| !ed.offers.is_empty());
+    let o = ed.offers.first().expect("asked first").clone();
+    assert!(matches!(o.what, crate::offer::What::BillingSwitch { to: Billing::Api, .. }), "{:?}", o.what);
+    let q = &o.question;
+    assert!(q.contains("The next message rewrites ≈ $1.20 of cached context (150k tokens)"), "{q}");
+    assert!(q.contains("The cache is warm until") && q.contains("costs nothing extra"), "{q}");
+    let lines: Vec<&str> = q.split('\n').collect();
+    let warned = o.warning.clone().expect("the weakness in the warning colour");
+    assert_eq!(lines[warned].concat(), WEAKNESS);
+    assert_eq!(o.answers(false), [('y', "Switch"), ('n', "Keep it")]);
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Esc);
+    assert_eq!(ed.offers.len(), 1, "Esc never answers it");
+    key(&mut ed, crate::key::Code::Char('n'));
+    assert!(ed.offers.is_empty());
+    assert_eq!(ed.session.billing, Billing::Subscription, "n keeps it");
+    assert_eq!(place.starts().len(), 1, "nothing started again");
+    ed.session_list();
+    ed.session_list_key('$');
+    until(&mut ed, "the card again", |ed| !ed.offers.is_empty());
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Char('y'));
+    assert_eq!(ed.session.billing, Billing::Api);
+    until(&mut ed, "the conversation resumed on the key", |_| place.starts().len() == 2);
+    assert_eq!(place.starts()[1].0.as_deref(), Some("conv-1"));
+    assert!(!toasts(&ed).contains(WEAKNESS), "the card said it — not again as a toast");
+    ed.session_list();
+    let row = ed.picker.as_ref().unwrap().items()[0].hint.clone();
+    assert!(row.split("  ").any(|c| c.trim() == "api"), "the list's row says who pays: {row}");
+    // Back to the plan: tokens, toward its limits
+    ed.session_list_key('$');
+    let back = &ed.offers[0];
+    let q = &back.question;
+    assert!(q.contains("rewrites ≈ 150k tokens of cached context, toward your plan's limits"), "{q}");
+    assert!(back.warning.is_none(), "the weakness is about the key");
+    ed.offer_dismiss();
+    // A session with nothing said yet: at once — the weakness said once, as a warning, and kept
+    let fresh = Place::new("dollar-fresh");
+    let mut ed = fresh.editor();
+    let kept = fresh.state.join("billing.json");
+    ed.billing_kept.path = Some(kept.clone());
+    ed.session_list();
+    ed.session_list_key('$');
+    until(&mut ed, "on the key", |ed| ed.session.billing == Billing::Api);
+    assert!(ed.offers.is_empty(), "nothing to cost: no card");
+    assert!(toasts(&ed).contains(WEAKNESS), "{}", toasts(&ed));
+    until(&mut ed, "the weakness kept as said", |_| Kept::read(Some(kept.clone())).weakness_told);
+    let mut again = fresh.editor();
+    again.billing_kept = Kept::read(Some(kept.clone()));
+    again.session_billing("api").unwrap();
+    assert!(!toasts(&again).contains(WEAKNESS), "said once ever");
+}
+
+/// After a switch of billing, model or effort: the toast says what the next message costs, and so does the line
+/// over the chat's input — `next message rewrites ≈ $1.20 (billing changed) · switching back costs nothing` —
+/// until the next message goes; switching back takes it away. An effort change says what the model's row says:
+/// Opus 5.5 may rewrite (unchecked), Fable 5.1 keeps the cache. A cold cache costs nothing extra.
+#[test]
+fn a_switch_says_what_the_next_message_costs_until_it_goes() {
+    let place = Place::new("line");
+    let mut ed = talking(&place);
+    let info = |value: &str, resolved: &str| crate::llm::ModelInfo {
+        value: value.into(),
+        name: value.into(),
+        about: String::new(),
+        resolved: resolved.into(),
+        efforts: vec!["low".into(), "high".into()],
+    };
+    let models = vec![
+        info("opus", "claude-opus-5-5"),
+        info("sonnet", "claude-sonnet-5-5"),
+        info("fable", "claude-fable-5-1"),
+    ];
+    ed.session.chat.as_mut().unwrap().models = models.clone();
+    ed.config.llm.model = Some("opus".into());
+    ed.session_billing("api").unwrap();
+    let said = "bills api — Claude runs on your API key from now — next message rewrites ≈ $1.20";
+    assert!(toasts(&ed).contains(said), "{}", toasts(&ed));
+    let line = ed.switch_line();
+    assert_eq!(
+        line.as_deref(),
+        Some("next message rewrites ≈ $1.20 (billing changed) · switching back costs nothing")
+    );
+    until(&mut ed, "the chat on the key", |_| place.starts().len() == 2);
+    ed.session.chat.as_mut().unwrap().models = models;
+    // The model too: Sonnet 5.5's prices ($4/MTok) now — what changed said, still since the last message
+    crate::models::set(&mut ed, "sonnet").unwrap();
+    assert!(toasts(&ed).contains("next message rewrites ≈ $0.60"), "{}", toasts(&ed));
+    let line = ed.switch_line();
+    let want = "next message rewrites ≈ $0.60 (billing and model changed) · switching back costs nothing";
+    assert_eq!(line.as_deref(), Some(want));
+    // Back as it was: nothing to say
+    crate::models::set(&mut ed, "opus").unwrap();
+    ed.session_billing("subscription").unwrap();
+    assert_eq!(ed.switch_line(), None, "back where it was");
+    // Effort, as the model's row says: Opus 5.5's is unchecked
+    crate::models::set_effort(&mut ed, "low").unwrap();
+    let line = ed.switch_line();
+    let want = "next message may rewrite ≈ 150k tokens (effort changed) · switching back costs nothing";
+    assert_eq!(line.as_deref(), Some(want));
+    // The next message goes: the line with it
+    send(&mut ed, "go");
+    assert_eq!(ed.switch_line(), None, "sent: the cost is that message's");
+    until(&mut ed, "the turn", idle);
+    // Fable 5.1 keeps its cache over an effort change
+    crate::models::set(&mut ed, "fable").unwrap();
+    send(&mut ed, "on fable");
+    until(&mut ed, "the turn", idle);
+    cache(&mut ed, "claude-fable-5-1", 150_000, 1_000);
+    crate::models::set_effort(&mut ed, "high").unwrap();
+    assert_eq!(ed.switch_line().as_deref(), Some("next message keeps the cache (effort changed)"));
+    send(&mut ed, "again");
+    until(&mut ed, "the turn", idle);
+    // A cold cache: nothing extra
+    cache(&mut ed, "claude-fable-5-1", 150_000, 2 * crate::usage::Ttl::Hour1.ms());
+    ed.session_billing("api").unwrap();
+    let line = ed.switch_line().unwrap();
+    assert!(
+        line.starts_with("next message costs nothing extra — cold since ")
+            && line.ends_with("(billing changed)"),
+        "{line}"
+    );
+}
+
+/// The plan's weekly window refuses the chat's claude (its `rate_limit_event`, `status: rejected`): the limit
+/// card, once for that window's period — what the first message on the key costs, `y` this session · `a` new
+/// sessions and the reviewer too until the reset · `n` waits; Esc never answers. `a` is kept, and lapses at the
+/// reset. The 5-hour window: a toast, once — never the key. A turn ending on Claude Code's own limit words is a
+/// refusal too.
+#[test]
+fn a_weekly_refusal_asks_once_and_a_reaches_new_sessions_until_the_reset() {
+    let place = Place::new("limit");
+    let mut ed = talking(&place);
+    let resets = crate::usage::now_ms() / 1000 + 3 * 86_400;
+    let event = |window: &str| {
+        json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": window,
+               "resetsAt": resets, "utilization": 1.0, "isUsingOverage": false}})
+        .to_string()
+            + "\n"
+    };
+    std::fs::write(place.root.join("turn.limit"), event("five_hour")).unwrap();
+    send(&mut ed, "one");
+    until(&mut ed, "the turn", idle);
+    assert!(toasts(&ed).contains("5-hour limit · resets"), "{}", toasts(&ed));
+    assert!(ed.offers.is_empty(), "the 5-hour window never offers the key");
+    ed.toasts.clear();
+    send(&mut ed, "two");
+    until(&mut ed, "the turn", idle);
+    assert!(!toasts(&ed).contains("5-hour limit"), "said once a period");
+    // The weekly window: the card
+    std::fs::write(place.root.join("turn.limit"), event("seven_day")).unwrap();
+    send(&mut ed, "three");
+    until(&mut ed, "the turn and its card", |ed| idle(ed) && !ed.offers.is_empty());
+    let o = ed.offers.first().expect("the limit card").clone();
+    assert!(o.title.starts_with("Weekly limit reached · resets "), "{}", o.title);
+    assert!(o.question.contains("The first message rewrites ≈ $1.20 of cached context"), "{}", o.question);
+    assert_eq!(o.answers(false), [('y', "This session"), ('a', "New sessions too"), ('n', "Wait")]);
+    assert!(o.goes_with_session(), "its session's");
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Esc);
+    assert_eq!(ed.offers.len(), 1, "Esc never answers it");
+    key(&mut ed, crate::key::Code::Char('a'));
+    assert!(ed.offers.is_empty(), "answered");
+    until(&mut ed, "this session on the key", |ed| ed.session.billing == Billing::Api);
+    until(&mut ed, "resumed on the key", |_| {
+        place
+            .starts()
+            .last()
+            .is_some_and(|s| s.0.as_deref() == Some("conv-1") && s.1["apiKeyHelper"] == json!(place.helper))
+    });
+    let other = place.dir.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let id = ed.session_add(other);
+    assert_eq!(ed.sessions.iter().find(|l| l.id == id).unwrap().billing, Billing::Api, "a new session");
+    ed.config.llm.reviewer_billing = Some(Billing::Subscription);
+    assert_eq!(ed.reviewer_billing(), Billing::Api, "the reviewer too");
+    let kept = place.state.join("billing.json");
+    until(&mut ed, "kept", |_| Kept::read(Some(kept.clone())).api_until_ms == Some(resets * 1000));
+    // Past the reset it lapses by itself
+    ed.billing_kept.api_until_ms = Some(crate::usage::now_ms() - 1);
+    assert_eq!(ed.new_session_billing(), Billing::Subscription);
+    assert_eq!(ed.reviewer_billing(), Billing::Subscription, "llm.reviewer-billing again");
+    // The same refusal again, back on the plan: not asked again for that period
+    ed.session_billing("subscription").unwrap();
+    send(&mut ed, "four");
+    until(&mut ed, "the turn", idle);
+    assert!(ed.offers.is_empty(), "asked once a period");
+    // Claude Code's own words end a turn: refused too — a new period's card
+    ed.session.limit_asked = None;
+    std::fs::remove_file(place.root.join("turn.limit")).unwrap();
+    std::fs::write(place.root.join("turn.refused"), "You've hit your weekly limit · resets Mon 12:00am")
+        .unwrap();
+    send(&mut ed, "five");
+    until(&mut ed, "the turn and its card", |ed| idle(ed) && !ed.offers.is_empty());
+    let o = ed.offers.first().expect("the words' card");
+    assert!(matches!(&o.what, crate::offer::What::Limit(a) if a.window == "seven_day"), "{:?}", o.what);
+}
+
+/// The limit card's `y` while Claude still answers: the key pays once the turn is over — the chat goes on it
+/// then, the conversation resumed. A reset not known: no `a` (until when?).
+#[test]
+fn the_limit_cards_yes_mid_turn_waits_for_the_turns_end() {
+    let place = Place::new("limit-mid");
+    let mut ed = talking(&place);
+    std::fs::write(place.root.join("turn.wait"), "").unwrap();
+    send(&mut ed, "long");
+    yes_mid_turn(&mut ed);
+    crate::chat::stop(&mut ed);
+    until(&mut ed, "the turn's end", |ed| idle(ed) && ed.session.billing == Billing::Api);
+    until(&mut ed, "resumed on the key", |_| {
+        place.starts().last().is_some_and(|s| s.0.as_deref() == Some("conv-1"))
+    });
+}
+
+/// The limit card for a weekly refusal (no reset known), up once the key is found, and its `y` while Claude still
+/// answers: on the key once the turn is over, said so.
+fn yes_mid_turn(ed: &mut Editor) {
+    ed.limit_hit("seven_day", None);
+    until(ed, "the limit card", |ed| !ed.offers.is_empty());
+    assert!(!ed.offers[0].limit_all(), "no reset known: no `a`");
+    ed.offer_accept();
+    until(ed, "the answer", |ed| toasts(ed).contains("Your API key pays once this turn is over"));
+    assert_eq!(ed.session.billing, Billing::Subscription, "not mid-turn");
+}
+
+/// The limit card's `y` mid-turn, then claude exits before the turn's result: the turn is over all the same, and
+/// the key pays from the next message. A new conversation started instead drops the switch that waited — the
+/// next message goes on the plan, as before.
+#[test]
+fn a_switch_waiting_for_the_turn_goes_on_when_claude_exits_and_not_into_a_new_conversation() {
+    let place = Place::new("limit-exit");
+    let mut ed = talking(&place);
+    std::fs::write(place.root.join("turn.wait"), "").unwrap();
+    send(&mut ed, "cut off");
+    yes_mid_turn(&mut ed);
+    // (told to stop, the stand-in exits — no result ends the turn)
+    std::fs::write(place.root.join("turn.exit"), "").unwrap();
+    crate::chat::stop(&mut ed);
+    until(&mut ed, "the exit ends the turn on the key", |ed| idle(ed) && ed.session.billing == Billing::Api);
+    assert_eq!(ed.session.billing_next, None);
+    // A new conversation instead: the switch waiting for the old one's turn goes with it
+    let place = Place::new("limit-reset");
+    let mut ed = talking(&place);
+    std::fs::write(place.root.join("turn.wait"), "").unwrap();
+    send(&mut ed, "long");
+    yes_mid_turn(&mut ed);
+    crate::chat::reset(&mut ed);
+    assert_eq!(ed.session.billing_next, None, "dropped with the conversation");
+    std::fs::remove_file(place.root.join("turn.wait")).unwrap();
+    send(&mut ed, "fresh");
+    until(&mut ed, "the new conversation's turn", |ed| idle(ed) && place.read("stdin").contains("fresh"));
+    assert_eq!(ed.session.billing, Billing::Subscription, "still the plan");
+    assert_eq!(place.starts().last().unwrap().1["apiKeyHelper"], Value::Null, "{:?}", place.starts());
+}
+
+/// A new session's card asks who pays near the plan's weekly limit (80 %): the plan first, your key first from
+/// 95 % — `$` switches. Below, it asks nothing; the 5-hour window only says to wait; an Opus session counts the
+/// weekly Opus window too; nothing known asks nothing; `a` on the limit card makes it the key's, said.
+#[test]
+fn a_new_session_asks_who_pays_near_the_weekly_limit() {
+    let place = Place::new("ask-new");
+    let mut ed = place.editor();
+    // (as `api_check` leaves it where the key is found — `:session-new` looks before its card)
+    ed.api_ready = Some(Ok(()));
+    let now = crate::usage::now_ms();
+    let week = now + 3 * 86_400_000;
+    let read = |window: &str, percent: u32, resets: u64| crate::limits::Reading {
+        window: window.into(),
+        percent: Some(percent),
+        resets_at_ms: Some(resets),
+        status: None,
+        seen_at_ms: now,
+        from: crate::limits::Source::Usage,
+    };
+    let set = |ed: &mut Editor, rs: Vec<crate::limits::Reading>| {
+        ed.limits = crate::limits::Limits::default();
+        ed.limits.seen(crate::limits::Report { readings: rs, ..Default::default() });
+    };
+    assert_eq!(ed.new_session_ask(), (Billing::Subscription, None, None), "nothing known: nothing asked");
+    set(&mut ed, vec![read("seven_day", 79, week)]);
+    assert_eq!(ed.new_session_ask().1, None, "under 80 %");
+    set(&mut ed, vec![read("seven_day", 84, week)]);
+    let (b, ask, _) = ed.new_session_ask();
+    assert_eq!(b, Billing::Subscription);
+    assert!(ask.as_deref().is_some_and(|a| a.starts_with("weekly 84 % · resets")), "{ask:?}");
+    set(&mut ed, vec![read("seven_day", 96, week)]);
+    assert_eq!(ed.new_session_ask().0, Billing::Api, "your key first from 95 %");
+    // `llm.billing = "api"`: the key from the start — near the limit too, nothing asked
+    ed.config.llm.billing = Billing::Api;
+    for p in [84, 96] {
+        set(&mut ed, vec![read("seven_day", p, week)]);
+        assert_eq!(ed.new_session_ask(), (Billing::Api, None, None), "llm.billing = api at {p} %");
+    }
+    ed.config.llm.billing = Billing::Subscription;
+    // The 5-hour window: said, never asked
+    set(&mut ed, vec![read("seven_day", 50, week), read("five_hour", 91, now + 3_600_000)]);
+    let (b, ask, note) = ed.new_session_ask();
+    assert_eq!((b, ask), (Billing::Subscription, None));
+    assert!(note.as_deref().is_some_and(|n| n.contains("5-hour 91 %") && n.contains("wait")), "{note:?}");
+    // An Opus session: the weekly Opus window counts
+    set(&mut ed, vec![read("seven_day", 50, week), read("seven_day_opus", 90, week)]);
+    ed.config.llm.model = Some("opus".into());
+    assert!(ed.new_session_ask().1.is_some_and(|a| a.starts_with("weekly opus 90 %")));
+    // The card: `$` switches, the weakness said while the key would pay
+    set(&mut ed, vec![read("seven_day", 96, week)]);
+    let mut m = making(&place);
+    (m.billing, m.billing_ask, m.billing_note) = ed.new_session_ask();
+    let card = ed.session_card(&m);
+    let q = &card.question;
+    assert!(
+        q.contains("The plan's weekly 96 %")
+            && q.contains("Its Claude runs on your API key — $ puts it on your plan"),
+        "{q}"
+    );
+    assert!(card.warning.is_some(), "the weakness");
+    assert!(card.answers(false).contains(&('$', "Bill plan")));
+    ed.push_offer(card);
+    ed.offer_session_billing();
+    let o = &ed.offers[0];
+    assert!(
+        o.question.contains("Its Claude runs on your plan — $ puts it on your API key"),
+        "{}",
+        o.question
+    );
+    assert!(o.warning.is_none() && o.answers(false).contains(&('$', "Bill API")));
+    // `a` on the limit card: the key's, said — no question
+    ed.billing_kept.api_until_ms = Some(week);
+    let (b, ask, note) = ed.new_session_ask();
+    assert_eq!((b, ask), (Billing::Api, None));
+    assert!(note.unwrap().contains("until"));
+}
+
+/// Where the key can't be used (a stand-in Keychain query that doesn't find it), nothing offers or keeps it: a
+/// weekly refusal says to wait and how to add the key — no card; a new session near the limit isn't asked, and
+/// `a` kept from before reaches neither it (its line says why) nor the reviewer; `$` in the list says why and
+/// stays on the plan. A key gone between the limit card and its `a`: nothing switched, nothing kept.
+#[test]
+fn where_the_key_cant_be_used_nothing_offers_or_keeps_it() {
+    let place = Place::new("no-key");
+    let mut ed = place.editor();
+    ed.api_key_query = query(false);
+    let kept = place.state.join("billing.json");
+    ed.billing_kept.path = Some(kept.clone());
+    let add =
+        "add it in a terminal: security add-generic-password -a \"$USER\" -s tarae.anthropic-api-key -w";
+    let now = crate::usage::now_ms();
+    let week = now + 3 * 86_400_000;
+    ed.limit_hit("seven_day", Some(week));
+    until(&mut ed, "the refusal said", |ed| toasts(ed).contains(add));
+    assert!(toasts(&ed).contains("weekly limit · resets"), "{}", toasts(&ed));
+    assert!(ed.offers.is_empty(), "no limit card");
+    // A new session near the limit: not asked — and `a` kept from before doesn't reach it, said
+    let reading = crate::limits::Reading {
+        window: "seven_day".into(),
+        percent: Some(96),
+        resets_at_ms: Some(week),
+        status: None,
+        seen_at_ms: now,
+        from: crate::limits::Source::Usage,
+    };
+    ed.limits.seen(crate::limits::Report { readings: vec![reading], ..Default::default() });
+    assert_eq!(ed.new_session_ask(), (Billing::Subscription, None, None), "96 % and no key: not asked");
+    ed.billing_kept.api_until_ms = Some(week);
+    let (b, ask, note) = ed.new_session_ask();
+    assert_eq!((b, ask), (Billing::Subscription, None));
+    assert!(note.as_deref().is_some_and(|n| n.contains(add)), "{note:?}");
+    assert_eq!(ed.new_session_billing(), Billing::Subscription, "a new session");
+    assert_eq!(ed.reviewer_billing(), Billing::Subscription, "the reviewer");
+    ed.billing_kept.api_until_ms = None;
+    // `$` in the list
+    ed.toasts.clear();
+    ed.session_list();
+    ed.session_list_key('$');
+    until(&mut ed, "`$` refused", |ed| toasts(ed).contains(add));
+    assert_eq!(ed.session.billing, Billing::Subscription);
+    // The key there for the card, gone by its `a`
+    ed.api_key_query = query(true);
+    ed.limit_hit("seven_day", Some(week + 1000));
+    until(&mut ed, "the limit card", |ed| !ed.offers.is_empty());
+    ed.api_key_query = query(false);
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Char('a'));
+    until(&mut ed, "the answer refused", |ed| toasts(ed).contains("Still on your plan"));
+    assert_eq!(ed.session.billing, Billing::Subscription);
+    assert_eq!(ed.billing_kept.api_until_ms, None, "nothing kept");
+    assert!(!kept.exists(), "nothing written");
+}
+
+/// What a create card is made from, by hand (no git asked): a branch `feat` from main.
+fn making(place: &Place) -> crate::worktree::Making {
+    crate::worktree::Making {
+        top: place.root.clone(),
+        branch: "feat".into(),
+        base: "main".into(),
+        base_sha: "0123456789abcdef".into(),
+        path: place.dir.join("feat"),
+        files: (1 << 20, true),
+        big: Vec::new(),
+        builds: None,
+        build_own: None,
+        copies: Vec::new(),
+        others: Vec::new(),
+        billing: Billing::Subscription,
+        billing_ask: None,
+        billing_note: None,
+    }
+}
+
+/// `r` in `:procs` starts the chat's claude again on the same conversation, as it says — with `--resume`, not a
+/// new conversation on claude's side.
+#[test]
+fn restarting_claude_from_procs_resumes_its_conversation() {
+    let place = Place::new("procs-r");
+    let mut ed = talking(&place);
+    crate::chat::restart_process(&mut ed);
+    until(&mut ed, "claude again", |_| place.starts().len() == 2);
+    assert_eq!(place.starts()[1].0.as_deref(), Some("conv-1"), "{:?}", place.starts());
 }

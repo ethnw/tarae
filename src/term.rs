@@ -9500,6 +9500,7 @@ fn draw_chat(
     chat_row_start(out, x0, y, edge(y), card)?;
     let mut used = 0;
     // A message waiting for this turn's end (#23): its start, faint, over the input
+    let switched = editor.switch_parts();
     if let Some(q) = &c.queued
         && w > 14
     {
@@ -9511,6 +9512,25 @@ fn draw_chat(
         queue!(out, Print(&shown))?;
         queue!(out, Print(" "))?;
         used = 8 + shown.width();
+    } else if let Some((what, changed, back)) = switched.filter(|_| w > 16) {
+        // A switch of billing, model or effort since the last message: what the next one costs, until it goes
+        // (`switchcost.rs`) — the cost in the warning colour, the rest faint. Narrow: what changed folds first (it
+        // was just done), then that going back costs nothing says it shorter, then goes; then the cost is cut
+        let (back, short) = match back.is_empty() {
+            true => (String::new(), String::new()),
+            false => (format!(" · {back}"), " · switch back: free".to_string()),
+        };
+        let tail = [format!(" {changed}{back}"), back, short, String::new()]
+            .into_iter()
+            .find(|t| what.width() + t.width() + 2 <= w)
+            .unwrap_or_default();
+        let head = fit_ellipsis(&what, w - 2 - tail.width());
+        apply(out, warn_fg)?;
+        queue!(out, Print(&head))?;
+        apply(out, faint)?;
+        queue!(out, Print(&tail))?;
+        queue!(out, Print(" "))?;
+        used = head.width() + tail.width() + 1;
     } else if c.screen.is_some() || !c.pointed.is_empty() {
         // What goes with the message: the elements pointed at (`C-o`), the screen (`C-s`) — or how many
         let mut what: Vec<String> = c.pointed.clone();
@@ -10960,12 +10980,17 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
     } else if let Some(p) = editor.picker.as_ref().filter(|p| p.keys) {
         // The sessions: the checkout tarae started in can't be ended or brought in
         match p.current().map(|i| &i.action) {
-            Some(Action::Session(0)) | None => hints(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
+            None => hints(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
+            // (`$`: who pays for its Claude — every session, the one tarae started in too)
+            Some(Action::Session(0)) => {
+                hints(&[("enter", "switch"), ("n", "new"), ("$", "billing"), ("esc", "close")])
+            }
             Some(_) => hints(&[
                 ("enter", "switch"),
                 ("n", "new"),
                 ("d", "end"),
                 ("b", "bring into its base"),
+                ("$", "billing"),
                 ("esc", "close"),
             ]),
         }

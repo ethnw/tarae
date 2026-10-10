@@ -26,6 +26,26 @@ fn report_of(i: usize, at_ms: u64) -> Report {
     }
 }
 
+/// Claude Code's limit words name the plan's window that ran out (the errors reference's four), not a spend limit
+/// (the account's, no window); and the event says whether the plan's usage credits pay (`isUsingOverage`).
+#[test]
+fn the_limit_words_name_the_window_and_the_event_says_who_pays_past_it() {
+    assert_eq!(of_words("You've hit your session limit · resets 3:45pm"), Some("five_hour"));
+    assert_eq!(of_words("API Error: You've hit your weekly limit · resets Mon 12:00am"), Some("seven_day"));
+    assert_eq!(of_words("You've hit your Opus limit · resets 3:45pm"), Some("seven_day_opus"));
+    assert_eq!(of_words("You've hit your Sonnet limit · resets 3:45pm"), Some("seven_day_sonnet"));
+    assert_eq!(of_words("You've hit your monthly spend limit · raise it at https://claude.ai"), None);
+    assert_eq!(of_words("stopped"), None);
+    let ev = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
+        "rateLimitType": "seven_day", "isUsingOverage": true}});
+    let mut l = Limits::default();
+    l.seen(of_event(&ev, BEFORE).unwrap());
+    assert_eq!(l.overage, Some(true));
+    // (an answer that doesn't say leaves what the event said)
+    l.seen(Report::default());
+    assert_eq!(l.overage, Some(true));
+}
+
 /// The `rate_limit_event` a claude sends as it starts says where the weekly window stands: its fraction as a
 /// whole percent, its reset (seconds) in ms, and claude's warning.
 #[test]

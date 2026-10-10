@@ -110,6 +110,8 @@ pub struct Report {
     pub answer: Option<Answer>,
     /// The plan `get_usage` named (`subscription_type`: `max`, `pro` …).
     pub plan: Option<String>,
+    /// Whether the plan's usage credits pay now (the event's `isUsingOverage`) — None: not said.
+    pub overage: Option<bool>,
 }
 
 /// Every window known, the account's.
@@ -126,6 +128,10 @@ pub struct Limits {
     /// tarae asks `get_usage` itself — off in tests but their own (a stand-in claude's input stays as each test
     /// writes it).
     pub ask: bool,
+    /// Whether the plan's usage credits pay now, as the latest event said (`isUsingOverage`).
+    pub overage: Option<bool>,
+    /// The refusals said already (window, its reset or 0) — a 5-hour one's toast once a period (`billing.rs`).
+    pub said_rejected: Vec<(String, u64)>,
 }
 
 impl Limits {
@@ -162,6 +168,9 @@ impl Limits {
         }
         if r.plan.is_some() {
             self.plan = r.plan;
+        }
+        if r.overage.is_some() {
+            self.overage = r.overage;
         }
         changed
     }
@@ -277,7 +286,7 @@ pub fn of_event(ev: &Value, at_ms: u64) -> Option<Report> {
         seen_at_ms: at_ms,
         from: Source::Event,
     };
-    Some(Report { readings: vec![reading], ..Report::default() })
+    Some(Report { readings: vec![reading], overage: i["isUsingOverage"].as_bool(), ..Report::default() })
 }
 
 /// `get_usage`'s answer (the `control_response`'s `response`: `subtype`, `response`), read at `at_ms`.
@@ -315,7 +324,7 @@ pub fn of_answer(response: &Value, at_ms: u64) -> Report {
             readings.extend(reading(format!("seven_day:{name}"), m));
         }
     }
-    Report { readings, answer: Some(Answer::Read), plan }
+    Report { readings, answer: Some(Answer::Read), plan, overage: None }
 }
 
 /// A percent rounded to a whole one — None: not a number one can be (negative, not finite).
@@ -383,6 +392,22 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// The plan's window Claude Code's limit words name — "You've hit your session limit · resets 3:45pm", "… weekly
+/// limit …", "… Opus limit", "… Sonnet limit" (the errors reference) — None: not those words (a spend limit is the
+/// account's, no window).
+pub fn of_words(text: &str) -> Option<&'static str> {
+    let rest = &text[text.find("You've hit your ")? + "You've hit your ".len()..];
+    [
+        ("session limit", "five_hour"),
+        ("weekly limit", WEEKLY),
+        ("Opus limit", "seven_day_opus"),
+        ("Sonnet limit", "seven_day_sonnet"),
+    ]
+    .into_iter()
+    .find(|(said, _)| rest.starts_with(said))
+    .map(|(_, window)| window)
 }
 
 // ── Retries ─────────────────────────────────────────────────────────────────

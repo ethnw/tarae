@@ -221,6 +221,12 @@ pub enum What {
     /// Containers made on an engine while a stopped run of Claude's went, under names not its own
     /// (`containers.rs`): `y` stops them, by name · `n` leaves them running.
     Containers(Box<crate::containers::Ask>),
+    /// `$` in the session list on a session with a conversation going (`billing.rs`): `y` switches its billing to
+    /// `to`, the card having said what the next message costs · `n` keeps it.
+    BillingSwitch { session: crate::event::SessionId, to: crate::billing::Billing },
+    /// The plan's weekly window refused a session's Claude (`billing.rs`): `y` that session on your key · `a` new
+    /// sessions and the reviewer too, until the reset (when it's known) · `n` waits. Its session's.
+    Limit(Box<crate::billing::LimitAsk>),
 }
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
@@ -285,7 +291,10 @@ impl What {
             // (its run ends with the restart)
             | What::Host(_)
             | What::HostRaw(_)
-            | What::Lookup(_) => Lost,
+            | What::Lookup(_)
+            // (about a conversation's cache as it was — `$` asks again, a refusal comes again)
+            | What::BillingSwitch { .. }
+            | What::Limit(_) => Lost,
         }
     }
 }
@@ -455,7 +464,21 @@ impl Offer {
                 | What::Containers(_)
                 // (one `y` closes every draft it lists — cardburden 6: answered once read, its list as it is)
                 | What::NotesStale { .. }
+                // (its yes spends your credits)
+                | What::BillingSwitch { .. }
+                | What::Limit(_)
         )
+    }
+
+    /// Whether `a` answers it: the limit card whose window's reset is known (new sessions too, until then).
+    pub fn limit_all(&self) -> bool {
+        matches!(&self.what, What::Limit(a) if a.resets_at_ms.is_some())
+    }
+
+    /// Whether `$` steps it: a new session's card asking who pays for its Claude (the plan's weekly window is
+    /// near its limit — `worktree::Making::billing_ask`).
+    pub fn bills(&self) -> bool {
+        matches!(&self.what, What::SessionNew(m) if m.billing_ask.is_some())
     }
 
     /// The host it asks about, if it's that card — or a raw connection's, or a lookup's (6e+).
@@ -636,6 +659,8 @@ impl Offer {
                     | What::Containers(_)
                     // (its session's chat waits on it — answered in another, it'd answer nothing)
                     | What::ClaudeSettings { .. }
+                    // (its session's conversation was refused)
+                    | What::Limit(_)
             )
     }
 
@@ -719,10 +744,20 @@ impl Offer {
             W::Preflight { .. } => vec![('y', "Run them"), ('n', "Not now")],
             W::BranchDelete { .. } => vec![('y', "Delete"), ('n', "Keep it")],
             W::ForcePush(_) => vec![('y', "Push"), ('n', "No")],
-            W::SessionNew(_) if self.base_steps() => {
-                vec![('y', "Make it"), ('b', "Other base"), ('n', "Not now")]
+            W::SessionNew(m) => {
+                let mut v = vec![('y', "Make it")];
+                if self.bills() {
+                    v.push((
+                        '$',
+                        if m.billing == crate::billing::Billing::Api { "Bill plan" } else { "Bill API" },
+                    ));
+                }
+                if self.base_steps() {
+                    v.push(('b', "Other base"));
+                }
+                v.push(('n', "Not now"));
+                v
             }
-            W::SessionNew(_) => vec![('y', "Make it"), ('n', "Not now")],
             // (work in no commit: no `y` — committing leads, removing takes a capital)
             W::SessionEnd(_) if self.commits_first() => {
                 vec![('c', "Commit, then end"), ('R', "Remove"), ('D', "Remove both"), ('n', "Cancel")]
@@ -781,6 +816,11 @@ impl Offer {
             // (F7: no `A` — a lasting allow is the user's own line in llm.sandbox-hosts)
             W::HostRaw(_) | W::Lookup(_) => vec![('y', "This run"), ('s', "This session"), ('n', "No")],
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
+            W::BillingSwitch { .. } => vec![('y', "Switch"), ('n', "Keep it")],
+            W::Limit(_) if self.limit_all() => {
+                vec![('y', "This session"), ('a', "New sessions too"), ('n', "Wait")]
+            }
+            W::Limit(_) => vec![('y', "This session"), ('n', "Wait")],
         }
     }
 
@@ -829,6 +869,8 @@ impl Offer {
             W::HostRaw(_) => "host-raw",
             W::Lookup(_) => "lookup",
             W::Containers(_) => "containers",
+            W::BillingSwitch { .. } => "billing-switch",
+            W::Limit(_) => "limit",
         }
     }
 }
@@ -1024,6 +1066,8 @@ impl crate::editor::Editor {
             Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
                 self.offer_never()
             }
+            Code::Char('a') if o.limit_all() => self.offer_limit_all(),
+            Code::Char('$') if o.bills() => self.offer_session_billing(),
             Code::Char('a') if o.lasts() => self.offer_for_chat(),
             Code::Char('A') if o.keeps() => self.offer_always(),
             Code::Char('D') if o.both() => self.offer_remove(true),
@@ -1046,7 +1090,9 @@ impl crate::editor::Editor {
             }
             // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
             // and the `y` after it was typed)
-            Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
+            Code::Char('a' | 'A') if o.lasts() || o.limit_all() => {
+                self.set_status("this card asks y, a or n")
+            }
             Code::Char('a' | 'A') if o.weighty() => self.set_status("this card asks only y or n"),
             _ => return false,
         }
@@ -1204,7 +1250,36 @@ impl crate::editor::Editor {
                 crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run)
             }
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
+            What::BillingSwitch { session, to } => self.switch_answer(id, session, to),
+            What::Limit(a) => self.limit_answer(id, *a, false),
         }
+    }
+
+    /// `a` on the limit card: its session on your key, and new sessions and the reviewer too, until the reset.
+    fn offer_limit_all(&mut self) {
+        if !self.offers.first().is_some_and(Offer::limit_all) {
+            return;
+        }
+        let mut o = self.offers.remove(0);
+        self.offer_answered(&o, 'a');
+        o.state = OfferState::Installing(Instant::now());
+        let (id, what) = (o.id, o.what.clone());
+        self.offers.push(o);
+        if let What::Limit(a) = what {
+            self.limit_answer(id, *a, true);
+        }
+    }
+
+    /// `$` on a new session's card that asks who pays: the other way — the card says so, and settles again.
+    pub fn offer_session_billing(&mut self) {
+        let Some(What::SessionNew(m)) = self.offers.first().map(|o| o.what.clone()) else { return };
+        let mut m = *m;
+        m.billing = match m.billing {
+            crate::billing::Billing::Subscription => crate::billing::Billing::Api,
+            crate::billing::Billing::Api => crate::billing::Billing::Subscription,
+        };
+        let card = self.session_card(&m);
+        self.push_offer(card);
     }
 
     /// `s` on a host's card (or a host's grant): that host for every run of this session.
@@ -1337,7 +1412,8 @@ impl crate::editor::Editor {
         }
         let (b, s) = m.others.remove(0);
         m.others.push((std::mem::replace(&mut m.base, b), std::mem::replace(&mut m.base_sha, s)));
-        self.push_offer(m.card());
+        let card = self.session_card(&m);
+        self.push_offer(card);
     }
 
     /// `c` on a session's end card with work in no commit: committed on its branch first, then asked again.
@@ -1715,6 +1791,18 @@ impl crate::editor::Editor {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused)
             }
             What::Containers(a) => crate::containers::answer(self, o.id, *a, false),
+            What::BillingSwitch { session, to } => {
+                let name = std::iter::once(&self.session)
+                    .chain(&self.sessions)
+                    .find(|l| l.id == session)
+                    .map_or_else(String::new, |l| l.name.clone());
+                let stays = match to {
+                    crate::billing::Billing::Api => "on your plan",
+                    crate::billing::Billing::Subscription => "on your API key",
+                };
+                self.set_status(format!("{name} stays {stays}"));
+            }
+            What::Limit(a) => self.limit_wait(&a),
         }
     }
 

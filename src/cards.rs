@@ -134,6 +134,9 @@ pub enum Why {
     /// tarae's own question, not about what Claude does (a preflight, a stuck run, notes gone stale, a review's
     /// end …) — logged all the same (cardburden 5), so every card's answer and time are measured.
     Own,
+    /// A conversation would bill your API key, or leave it (`billing.rs`: `$` in the session list, the plan's
+    /// limit hit) — spending credits, no capability.
+    Spend,
 }
 
 impl Why {
@@ -161,6 +164,7 @@ impl Why {
             Why::Lookup => "lookup".into(),
             Why::Asks(ids) => format!("asks:{ids}"),
             Why::Own => "own".into(),
+            Why::Spend => "spend".into(),
         }
     }
 
@@ -199,7 +203,8 @@ impl Why {
             | Why::Host
             | Why::HostRaw
             | Why::Lookup
-            | Why::Own => return None,
+            | Why::Own
+            | Why::Spend => return None,
         })
     }
 }

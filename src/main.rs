@@ -128,6 +128,7 @@ mod spawn;
 mod split;
 mod structure;
 mod stuck;
+mod switchcost;
 mod syntax;
 mod task;
 mod term;

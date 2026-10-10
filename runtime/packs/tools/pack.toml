@@ -87,3 +87,123 @@ say = "It can't gain privileges: there's no terminal for a password, and on Linu
 id = "edit-protected"
 fact = "edit-protected"
 say = "It changes a file that runs later outside the sandbox (a build file, a hook, settings) — read all of it."
+
+# Secret stores (apibill D3): outside the sandbox they hand an item over unasked — `security` is the trusted app of
+# the Keychain item tarae's API sessions read their key from, and the Secret Service checks no program at all.
+# Sandboxed runs can't reach either (the keychain's services are denied, the session bus is a socket outside). Words
+# only: a program calling them from its own code isn't seen — the card's other lines and your reading carry that.
+[[claude.warn]]
+id = "keychain-read"
+run = ["security find-generic-password", "security find-internet-password"]
+options = ["-w", "-g"]
+# (their next word is their value: `-s -w` names a service called `-w`)
+option-values = ["-a", "-c", "-C", "-d", "-D", "-G", "-j", "-l", "-p", "-P", "-r", "-s", "-t"]
+fact = "outside-sandbox"
+asks = true
+say = "It reads a password from your keychain outside the sandbox — tarae's API key is there, and what it prints goes to Claude."
+[[claude.warn]]
+id = "keychain-dump"
+run = ["security dump-keychain", "security export"]
+fact = "outside-sandbox"
+asks = true
+say = "It dumps your keychain outside the sandbox — tarae's API key is there, and what it prints goes to Claude."
+[[claude.warn]]
+id = "secret-service-read"
+run = ["secret-tool lookup", "secret-tool search"]
+fact = "outside-sandbox"
+asks = true
+say = "It reads your Secret Service outside the sandbox — tarae's API key would be there, and what it prints goes to Claude."
+
+# What writing a model's prompt cache costs, per million tokens (`switchcost.rs`): the 5-minute and the hour-long
+# write — said as "≈ $X" when a switch of billing, model or effort throws a warm cache away. From
+# platform.claude.com/docs/en/about-claude/pricing, read 2026-10-09 (`target/sb/apibill-src/pf-pricing.md`). A model
+# not listed is said in tokens only. `model` is claude's id without a date; `up-to`: the row holds for prompts of
+# at most that many tokens. `effort`: what an effort change does to its cache — `keeps` (Claude Code 2.1.260 says
+# so for Fable 5.1), `rewrites`, or `unknown` (the API keeps it with per-message effort; whether Claude Code uses
+# that for the model isn't checked — live check L7): said "may rewrite".
+[[claude.price]]
+model = "claude-fable-5-1"
+write-5m = 12.5
+write-1h = 20
+effort = "keeps"
+[[claude.price]]
+model = "claude-mythos-5-1"
+write-5m = 12.5
+write-1h = 20
+effort = "unknown"
+[[claude.price]]
+model = "claude-fable-5"
+write-5m = 12.5
+write-1h = 20
+effort = "rewrites"
+[[claude.price]]
+model = "claude-mythos-5"
+write-5m = 12.5
+write-1h = 20
+effort = "rewrites"
+[[claude.price]]
+model = "claude-opus-5-5"
+write-5m = 5
+write-1h = 8
+effort = "unknown"
+[[claude.price]]
+model = "claude-opus-5"
+write-5m = 6.25
+write-1h = 10
+effort = "unknown"
+[[claude.price]]
+model = "claude-opus-4-8"
+write-5m = 6.25
+write-1h = 10
+effort = "rewrites"
+[[claude.price]]
+model = "claude-opus-4-7"
+write-5m = 6.25
+write-1h = 10
+effort = "rewrites"
+[[claude.price]]
+model = "claude-opus-4-6"
+write-5m = 6.25
+write-1h = 10
+effort = "rewrites"
+[[claude.price]]
+model = "claude-opus-4-5"
+write-5m = 6.25
+write-1h = 10
+effort = "rewrites"
+[[claude.price]]
+model = "claude-sonnet-5-5"
+write-5m = 2.5
+write-1h = 4
+effort = "unknown"
+[[claude.price]]
+model = "claude-sonnet-5"
+write-5m = 2.5
+write-1h = 4
+effort = "rewrites"
+[[claude.price]]
+model = "claude-sonnet-4-6"
+write-5m = 3.75
+write-1h = 6
+effort = "rewrites"
+[[claude.price]]
+model = "claude-sonnet-4-5"
+write-5m = 3.75
+write-1h = 6
+effort = "rewrites"
+[[claude.price]]
+model = "claude-haiku-5-5"
+up-to = 100000
+write-5m = 0.125
+write-1h = 0.2
+effort = "unknown"
+[[claude.price]]
+model = "claude-haiku-5-5"
+write-5m = 0.625
+write-1h = 1
+effort = "unknown"
+[[claude.price]]
+model = "claude-haiku-4-5"
+write-5m = 1.25
+write-1h = 2
+effort = "rewrites"
