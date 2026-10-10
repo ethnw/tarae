@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
+use crate::billing::Credential;
 use crate::document::DocId;
 use crate::editor::Editor;
 use crate::event::{Apply, Event};
@@ -98,6 +99,10 @@ pub struct LlmConfig {
     /// An `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in tarae's environment goes on to claude (`llm.environment-key
     /// = "keep"`) — but inside a Claude Code session, where it's the host's (`claude_env`).
     pub keep_env_key: bool,
+    /// Who pays for a new session's Claude (`llm.billing` — `billing.rs`); a session keeps its own.
+    pub billing: crate::billing::Billing,
+    /// Who pays for the reviewer's (`llm.reviewer-billing`): None — as its session.
+    pub reviewer_billing: Option<crate::billing::Billing>,
     /// Chat: commands Claude's `run` starts without asking, past the built-in checks (`tools::run_allow`) —
     /// each a prefix of whole words (`"npm test"`).
     pub run_allow: Vec<String>,
@@ -156,6 +161,8 @@ impl Default for LlmConfig {
             review_at_end: false,
             chat_settings: true,
             keep_env_key: false,
+            billing: Default::default(),
+            reviewer_billing: None,
             run_allow: Vec::new(),
             review_ask: Vec::new(),
             sandbox: true,
@@ -177,55 +184,77 @@ impl Default for LlmConfig {
 
 // ── Spare process ───────────────────────────────────────────────────────
 
-/// A pre-spawned process for the next request (at most one), and the folder it runs in.
+/// A pre-spawned process for the next request (at most one), the folder it runs in and the credential it was
+/// started with.
 #[derive(Default)]
 pub struct Warm {
-    child: Option<(Child, PathBuf)>,
+    child: Option<(Child, PathBuf, Credential)>,
 }
 
 impl Warm {
-    /// Spawns one in `dir` if there's no live spare there (one elsewhere goes). spawn itself returns at once
-    /// (slow init happens in the child).
-    pub fn ensure(&mut self, cfg: &LlmConfig, dir: &Path, given: Option<&Env>) -> Result<(), String> {
-        if let Some((c, at)) = &mut self.child
+    /// Spawns one in `dir` on `cred` if there's no live spare there on it (one elsewhere, or on another billing,
+    /// goes). spawn itself returns at once (slow init happens in the child).
+    pub fn ensure(
+        &mut self,
+        cfg: &LlmConfig,
+        dir: &Path,
+        given: Option<&Env>,
+        cred: &Credential,
+    ) -> Result<(), String> {
+        if let Some((c, at, on)) = &mut self.child
             && matches!(c.try_wait(), Ok(None))
+            && at == dir
+            && on == cred
         {
-            if at == dir {
-                return Ok(());
-            }
-            // Spared for another folder: it goes (reaped off the main thread)
-            let (mut old, _) = self.child.take().expect("just seen");
-            crate::event::thread("tarae-reap", move || {
-                let _ = old.kill();
-                let _ = old.wait();
-            });
+            return Ok(());
         }
-        let child = spawn(cfg, &[], dir, given).map_err(|e| spawn_failed(&cfg.command, &e, false))?;
-        self.child = Some((child, dir.to_path_buf()));
+        // Spared for another folder or billing, or gone: it goes
+        self.drop_spare();
+        let child = spawn(cfg, &[], dir, given, cred).map_err(|e| e.said(&cfg.command, false))?;
+        self.child = Some((child, dir.to_path_buf(), cred.clone()));
         Ok(())
     }
 
     /// The spare's process (`:procs`).
     pub fn pid(&self) -> Option<u32> {
-        self.child.as_ref().map(|(c, _)| c.id())
+        self.child.as_ref().map(|(c, ..)| c.id())
     }
 
-    fn take(&mut self, cfg: &LlmConfig, dir: &Path, given: Option<&Env>) -> Result<Child, String> {
-        self.ensure(cfg, dir, given)?;
-        Ok(self.child.take().expect("ensured").0)
-    }
-}
-
-impl Drop for Warm {
-    fn drop(&mut self) {
-        // (reaped off the main thread — else a zombie until tarae exits)
-        if let Some((mut c, _)) = self.child.take() {
+    /// The spare goes (reaped off the main thread — else a zombie until tarae exits).
+    pub fn drop_spare(&mut self) {
+        if let Some((mut c, ..)) = self.child.take() {
             crate::event::thread("tarae-reap", move || {
                 let _ = c.kill();
                 let _ = c.wait();
             });
         }
     }
+
+    fn take(
+        &mut self,
+        cfg: &LlmConfig,
+        dir: &Path,
+        given: Option<&Env>,
+        cred: &Credential,
+    ) -> Result<Child, String> {
+        self.ensure(cfg, dir, given, cred)?;
+        Ok(self.child.take().expect("ensured").0)
+    }
+}
+
+impl Drop for Warm {
+    fn drop(&mut self) {
+        self.drop_spare();
+    }
+}
+
+/// The session in front's billing changed (`:session-billing`): a spare there goes, and comes back on it.
+pub fn spare_billing_changed(ed: &mut Editor) {
+    if ed.llm_warm.child.is_none() {
+        return;
+    }
+    ed.llm_warm.drop_spare();
+    prewarm(ed);
 }
 
 /// What a failed start of `command` (`llm.command`) says. No `claude` at all: that Claude Code isn't installed,
@@ -256,10 +285,17 @@ pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
 }
 
 /// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there),
-/// with tarae's environment less what `claude_env` leaves out. `given`: `Editor::claude_env` — a test's stand-in
-/// for tarae's environment, laid over the process's as if inherited (None: the process's own); what's left out is
-/// judged on both, all the child would inherit.
-pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path, given: Option<&Env>) -> std::io::Result<Child> {
+/// with tarae's environment less what `claude_env` leaves out, on `cred` (`billing.rs`: an API session's key helper
+/// laid into its `--settings`). `given`: `Editor::claude_env` — a test's stand-in for tarae's environment, laid
+/// over the process's as if inherited (None: the process's own); what's left out is judged on both, all the child
+/// would inherit.
+pub fn spawn(
+    cfg: &LlmConfig,
+    extra: &[&str],
+    dir: &Path,
+    given: Option<&Env>,
+    cred: &Credential,
+) -> Result<Child, SpawnError> {
     // (tests never start the real claude — a stand-in in `sh` answers for it; card model P2 found a test
     // whose claude read ~/.claude.json and the keychain)
     #[cfg(test)]
@@ -267,13 +303,16 @@ pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path, given: Option<&Env>) -
         Path::new(&cfg.command).file_name().is_none_or(|n| n != "claude"),
         "a test started the real claude — give llm.command a stand-in (`sh -c 'cat > /dev/null'`)"
     );
+    let args = crate::billing::args(&cfg.args, cred).map_err(SpawnError::Billing)?;
     let mut cmd = Command::new(&cfg.command);
-    cmd.current_dir(dir).args(&cfg.args).args(extra);
+    cmd.current_dir(dir).args(&args).args(extra);
     if let Some(given) = given {
         cmd.envs(given);
     }
-    // (removed by name, never `env_clear`: the rest of tarae's environment is claude's as it always was)
-    for name in ClaudeEnv::of(given, cfg.keep_env_key).removed {
+    // (removed by name, never `env_clear`: the rest of tarae's environment is claude's as it always was. An API
+    // session never keeps a key from it: one there outranks its helper — Claude Code's credential order)
+    let keep_keys = cfg.keep_env_key && *cred == Credential::Subscription;
+    for name in ClaudeEnv::of(given, keep_keys).removed {
         cmd.env_remove(name);
     }
     if let Some(m) = &cfg.model {
@@ -282,7 +321,26 @@ pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path, given: Option<&Env>) -
     if !cfg.effort.is_empty() {
         cmd.args(["--effort", &cfg.effort]);
     }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(SpawnError::Start)
+}
+
+/// Why a claude didn't start.
+#[derive(Debug)]
+pub enum SpawnError {
+    /// Its program didn't start (`spawn_failed` says it).
+    Start(std::io::Error),
+    /// Its billing can't be laid into its arguments (`billing::args`).
+    Billing(String),
+}
+
+impl SpawnError {
+    /// What the chat (`whole`: every line) or a toast says of it.
+    pub fn said(&self, command: &str, whole: bool) -> String {
+        match self {
+            SpawnError::Start(e) => spawn_failed(command, e, whole),
+            SpawnError::Billing(why) => why.clone(),
+        }
+    }
 }
 
 // ── Claude's environment ────────────────────────────────────────────────
@@ -1191,7 +1249,10 @@ impl Review {
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
     let cfg = ed.config.llm.clone();
-    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.session.root, ed.claude_env.as_ref()) {
+    let warmed = ed
+        .credential(ed.session.billing, crate::billing::Role::Ask)
+        .and_then(|cred| ed.llm_warm.ensure(&cfg, &ed.session.root, ed.claude_env.as_ref(), &cred));
+    if let Err(e) = warmed {
         ed.set_error(e);
     }
 }
@@ -1301,7 +1362,9 @@ fn start(
     hunks: Vec<Hunk>,
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
-    let mut child = ed.llm_warm.take(&cfg, &ed.session.root, ed.claude_env.as_ref())?;
+    let cred = ed.credential(ed.session.billing, crate::billing::Role::Ask)?;
+    let mut child = ed.llm_warm.take(&cfg, &ed.session.root, ed.claude_env.as_ref(), &cred)?;
+    let (billing, keep) = (cred.billing(), cfg.keep_env_key);
     // Write the message and close stdin — the process exits on its own after this one turn (written off the
     // main loop: a commit draft's prompt can be 80 KB, and a spare still starting reads nothing yet).
     // Before anything is installed: a process without stdin leaves no review waiting forever.
@@ -1348,11 +1411,19 @@ fn start(
             }),
             // (the account's limits, whichever claude says them)
             StreamEv::Limits(r) => Box::new(move |ed: &mut Editor| crate::limits::seen(ed, r)),
+            // (the credential it says it runs on — another than its billing's stops it: `billing.rs`)
+            StreamEv::Conversation { key_source, .. } => {
+                let role = crate::billing::Role::Ask;
+                let said = crate::billing::checked(billing, keep, role, key_source.as_deref())?;
+                Box::new(move |ed: &mut Editor| {
+                    crate::log::line("claude", "warn", &said);
+                    stop_waiting(ed, Some(generation), &said);
+                })
+            }
             // ask runs without tools, and its conversation isn't kept
             StreamEv::Requesting(_)
             | StreamEv::Retry(_)
             | StreamEv::Usage(_)
-            | StreamEv::Conversation { .. }
             | StreamEv::Answered(_)
             | StreamEv::Initialized { .. }
             | StreamEv::Tool { .. }
@@ -1741,7 +1812,7 @@ pub(crate) mod tests {
     fn a_test_never_starts_the_real_claude() {
         // (a path that isn't there: without the guard, nothing starts and nothing panics)
         let cfg = LlmConfig { command: "/nonexistent/claude".into(), ..LlmConfig::default() };
-        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None);
+        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None, &Credential::Subscription);
     }
 
     /// No claude: Claude Code isn't installed — how to get it and log in, as its docs say (#163); any other
@@ -2019,7 +2090,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = LlmConfig { keep_env_key: how == "keep", ..LlmConfig::default() };
         recording(&mut cfg);
-        let mut child = spawn(&cfg, &[], &dir, Some(&Env::new())).unwrap();
+        let mut child = spawn(&cfg, &[], &dir, Some(&Env::new()), &Credential::Subscription).unwrap();
         drop(child.stdin.take());
         child.wait().unwrap();
         let names = std::fs::read_to_string(dir.join("env.names")).unwrap();

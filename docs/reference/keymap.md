@@ -554,5 +554,6 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:session-new` |  | New session: a branch in its own checkout |
 | `:session-end` |  | End a session (its checkout goes) |
 | `:session-bring` |  | Move a session's base up to it (rebase first if it moved) |
+| `:session-billing` |  | Who pays for this session's Claude: api (your API key) or subscription — the conversation goes on |
 | `:rebase-continue` |  | Stage the resolved files and go on with the rebase |
 | `:rebase-abort` |  | Abort the rebase: back to where it was |

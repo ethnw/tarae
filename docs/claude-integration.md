@@ -1179,6 +1179,54 @@ continued one picks up where it was. `tarae state` carries each session's usage 
 `percent`, `resets_at` and `seen_at` in unix ms, `status`, `from`). `--watch usage` is told when a turn's result
 comes, when a cache goes cold, and when the limits change (`limits`).
 
+### Paying with your API key
+
+Each session's Claude runs on your plan (the Claude Code login) or on an Anthropic API key. You choose per
+session; the chat, `space i` and the reviewer of that session follow it.
+
+**Add the key once**, to your login Keychain (macOS). `security` asks for it, so it's in no command line or shell
+history:
+
+```sh
+security add-generic-password -a "$USER" -s tarae.anthropic-api-key -w
+```
+
+**Switch a session** with `:session-billing api` (and back with `:session-billing subscription`; with no word it
+says which the session is on). If its Claude is running, it stops and starts again on the new billing, continuing
+the same conversation. The first turn after a switch writes the whole conversation to the prompt cache again: the
+plan's cache and your API organization's aren't shared. While Claude answers, the switch is refused; switch after
+the turn, or stop it with `C-c`. New sessions take `llm.billing` (`"subscription"` by default), and each session
+keeps its own across `:restart` and the next start. The reviewer follows its session unless
+`llm.reviewer-billing` says `"subscription"` or `"api"`. These settings, like `llm.environment-key`, are read
+from your own config only: a project's `.tarae.toml` or `.tarae.local.toml` is refused them, and says so. A
+project never decides to spend your credits.
+
+**How the key reaches Claude.** tarae never reads it. An API session's claude gets a key helper in its
+`--settings`: `/usr/bin/security find-generic-password -a <you> -s tarae.anthropic-api-key -w`. Claude Code runs
+it and uses what it prints as the key (its settings reference, `apiKeyHelper`). The key isn't in tarae's state,
+log, cards or `tarae state`, and isn't in Claude's environment. `--settings` outranks your own Claude settings and
+the project's, so this helper is the one that runs. It's merged into the chat's own settings (edits still come to
+you, hooks stay off). An API session never passes on `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` from tarae's
+environment, whatever `llm.environment-key` says: one there would outrank the helper. The chat's prompt cache
+lives an hour on the key (`promptCacheTtl: "1h"`): the API's default is five minutes, and turns in an editor are
+often further apart, so each such turn would write the whole context again. A `FORCE_PROMPT_CACHING_5M` or
+`CLAUDE_CODE_PROMPT_CACHE_TTL` you export still wins.
+
+**Checked, not believed.** Claude says which credential it runs on (`apiKeySource`), as it starts and as each
+turn starts. An API session's must be `apiKeyHelper`, a plan session's `none` (or `ANTHROPIC_API_KEY` when you
+keep your environment's key on purpose). Anything else stops it, and the chat says what Claude reported and where
+it likely came from (a project's Claude settings, a key helper of your own, a Console login). Mid-turn, the turn
+is interrupted; one request may already have gone out on that credential. The reviewer and `space i` are stopped
+the same way. The chat's last row starts with `api` in an API session, and `tarae state` says each session's
+`billing` (`"subscription"` or `"api"`; the line form says `api` beside such a session).
+
+**Where it can be read.** Commands Claude runs in the sandbox can't reach the Keychain. Any process of yours
+outside the sandbox can: `security` hands the item to whoever runs it, with no prompt. That includes a command of
+Claude's you allow to run outside the sandbox.
+
+**macOS only for now.** On Linux, `:session-billing api` is refused, and a session on `llm.billing = "api"` has no
+Claude: the chat says why.
+
 ## Commit messages
 
 ![A commit message Claude drafted, as an in-buffer review in COMMIT_EDITMSG: the subject "Fix add() subtracting instead of adding" and a body on why, above the # lines](screenshots/commit-draft.png)

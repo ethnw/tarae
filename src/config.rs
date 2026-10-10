@@ -798,11 +798,12 @@ Y = "move_line_down"
 Z = ["move_line_down", ":sh touch marker"]
 "#;
 
-    /// Whose credentials Claude uses is yours to say (`trust::YOURS_ONLY`): a project's `.tarae.toml` — trusted
-    /// or not — and its `.tarae.local.toml` are refused `llm.environment-key`, and say so at its line; your own
-    /// config sets it.
+    /// Whose credentials Claude uses, and who pays for it, are yours to say (`trust::YOURS_ONLY`): a project's
+    /// `.tarae.toml` — trusted or not — and its `.tarae.local.toml` are refused `llm.environment-key`,
+    /// `llm.billing` and `llm.reviewer-billing`, and say so at each line; your own config sets them.
     #[test]
     fn a_setting_only_yours_sets_is_refused_from_both_project_files() {
+        use crate::billing::Billing;
         use crate::trust::Store;
         let dir = std::env::temp_dir().join(format!("tarae-config-yours-only-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -812,27 +813,40 @@ Z = ["move_line_down", ":sh touch marker"]
         assert!(ok.status.success());
         let (user, project, local) =
             (dir.join("user.toml"), dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
-        // (a risky setting beside it, so the project has a trust card to answer)
-        fs::write(&project, "[llm]\nrun-allow = [\"make\"]\nenvironment-key = \"keep\"\n").unwrap();
-        fs::write(&local, "[llm]\nenvironment-key = \"keep\"\n").unwrap();
+        let yours_only = "environment-key = \"keep\"\nbilling = \"api\"\nreviewer-billing = \"api\"\n";
+        // (a risky setting beside them, so the project has a trust card to answer)
+        fs::write(&project, format!("[llm]\nrun-allow = [\"make\"]\n{yours_only}")).unwrap();
+        fs::write(&local, format!("[llm]\n{yours_only}")).unwrap();
         fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
         let load = |user: Option<PathBuf>, store: &Store| {
             load_layers(user, Some(project.clone()), Some((dir.clone(), local.clone())), store)
         };
+        let none_set = |c: &Config| {
+            let l = &c.editor.llm;
+            !l.keep_env_key && l.billing == Billing::Subscription && l.reviewer_billing.is_none()
+        };
         let (c, w) = load(None, &Store::default());
-        assert!(!c.editor.llm.keep_env_key, "neither project file keeps the key");
-        for file in [".tarae.toml:3", ".tarae.local.toml:2"] {
-            let said =
-                format!("{file}: llm.environment-key is set only in your own config — not a project's file");
-            assert!(w.iter().any(|w| w.ends_with(&said)), "{file}: {w:?}");
+        assert!(none_set(&c), "neither project file sets them");
+        for (file, first) in [(".tarae.toml", 3), (".tarae.local.toml", 2)] {
+            for (i, key) in ["environment-key", "billing", "reviewer-billing"].into_iter().enumerate() {
+                let said = format!(
+                    "{file}:{}: llm.{key} is set only in your own config — not a project's file",
+                    first + i
+                );
+                assert!(w.iter().any(|w| w.ends_with(&said)), "{said}: {w:?}");
+            }
         }
         let mut trusted = Store::default();
         trusted.answer(&project, c.project.as_ref().unwrap().hash, true);
         let (t, _) = load(None, &trusted);
-        assert!(t.editor.llm.run_allow == ["make"] && !t.editor.llm.keep_env_key, "trusted: still refused");
-        fs::write(&user, "[llm]\nenvironment-key = \"keep\"\n").unwrap();
+        assert!(t.editor.llm.run_allow == ["make"] && none_set(&t), "trusted: still refused");
+        fs::write(&user, format!("[llm]\n{yours_only}")).unwrap();
         let (mine, w) = load(Some(user.clone()), &Store::default());
-        assert!(mine.editor.llm.keep_env_key, "yours sets it: {w:?}");
+        let l = &mine.editor.llm;
+        assert!(
+            l.keep_env_key && l.billing == Billing::Api && l.reviewer_billing == Some(Billing::Api),
+            "{w:?}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

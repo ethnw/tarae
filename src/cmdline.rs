@@ -162,6 +162,11 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),
     c(&["session-end"], Arg::None, "End a session (its checkout goes)"),
     c(&["session-bring"], Arg::None, "Move a session's base up to it (rebase first if it moved)"),
+    c(
+        &["session-billing"],
+        Arg::None,
+        "Who pays for this session's Claude: api (your API key) or subscription — the conversation goes on",
+    ),
     c(&["rebase-continue"], Arg::None, "Stage the resolved files and go on with the rebase"),
     c(&["rebase-abort"], Arg::None, "Abort the rebase: back to where it was"),
 ];

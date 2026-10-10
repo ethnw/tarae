@@ -6,6 +6,7 @@
 
 mod allow;
 mod attach;
+mod billing;
 mod blocked;
 mod builds;
 mod cards;

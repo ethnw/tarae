@@ -596,6 +596,8 @@ pub struct Editor {
     pub claude_env: Option<crate::llm::Env>,
     /// What claude's environment leaves out has been said (`llm::env_told`): once since tarae started.
     pub claude_env_told: bool,
+    /// An API session's key helper, a test's stand-in (`billing::Editor::credential`) — None: the Keychain's.
+    pub api_key_helper: Option<String>,
     /// The plan's limits as any claude said them — the account's, not a session's (`limits.rs`).
     pub limits: crate::limits::Limits,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
@@ -797,6 +799,7 @@ impl Editor {
             claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
             claude_env: if cfg!(test) { Some(Default::default()) } else { None },
             claude_env_told: false,
+            api_key_helper: None,
             limits: crate::limits::Limits::new(),
             run_clock: None,
             sandbox_here: None,
@@ -861,6 +864,7 @@ impl Editor {
         };
         ed.new_scratch();
         ed.session.views.push(View::new(1, ed.docs[0].id));
+        ed.session.billing = ed.config.llm.billing;
         ed.project_trust_set(config.project);
         ed
     }

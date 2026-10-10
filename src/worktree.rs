@@ -45,22 +45,31 @@ pub struct SessionStore {
     pub builds: Option<crate::builds::Builds>,
 }
 
-/// A session as it's kept: its checkout, name, branch and base (`Session`'s).
+/// A session as it's kept: its checkout, name, branch, base and who pays for its Claude (`Session`'s).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kept {
     pub root: PathBuf,
     pub name: String,
     pub branch: Option<String>,
     pub base: Option<String>,
+    /// None: kept by a build before billing (it takes `llm.billing`, as a new one).
+    pub billing: Option<crate::billing::Billing>,
 }
 
 impl Kept {
     pub fn of(l: &crate::session::Session) -> Kept {
-        Kept { root: l.root.clone(), name: l.name.clone(), branch: l.branch.clone(), base: l.base.clone() }
+        Kept {
+            root: l.root.clone(),
+            name: l.name.clone(),
+            branch: l.branch.clone(),
+            base: l.base.clone(),
+            billing: Some(l.billing),
+        }
     }
 
     fn json(&self) -> Value {
-        json!({ "root": self.root, "name": self.name, "branch": self.branch, "base": self.base })
+        json!({ "root": self.root, "name": self.name, "branch": self.branch, "base": self.base,
+            "billing": self.billing.map(crate::billing::Billing::name) })
     }
 
     fn from_json(v: &Value) -> Option<Kept> {
@@ -69,6 +78,7 @@ impl Kept {
             name: v["name"].as_str()?.to_string(),
             branch: v["branch"].as_str().map(str::to_string),
             base: v["base"].as_str().map(str::to_string),
+            billing: v["billing"].as_str().and_then(crate::billing::Billing::parse),
         })
     }
 }
@@ -1178,6 +1188,11 @@ impl Editor {
             };
             if let Some(l) = self.session_by_id(id) {
                 (l.name, l.branch, l.base) = (k.name, k.branch, k.base);
+                // (its claude, if one already runs — session 0's chat opened before the list came back — keeps the
+                // billing it started on until its next start)
+                if let Some(b) = k.billing {
+                    l.billing = b;
+                }
             }
         }
         self.session_store.restored = true;

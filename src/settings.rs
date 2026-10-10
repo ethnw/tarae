@@ -435,6 +435,20 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.keep_env_key = s(v) == "keep",
     },
     Setting {
+        path: "llm.billing",
+        kind: Kind::Enum(&["subscription", "api"]),
+        doc: "Who pays for a new session's Claude — \"subscription\": your Claude Code login; \"api\": your Anthropic API key, from the macOS Keychain (item tarae.anthropic-api-key — tarae never reads it). A session keeps its own; :session-billing switches it. Only your own config sets it",
+        get: |c| Value::from(c.llm.billing.name()),
+        set: |c, v| c.llm.billing = crate::billing::Billing::parse(s(v)).unwrap_or_default(),
+    },
+    Setting {
+        path: "llm.reviewer-billing",
+        kind: Kind::Enum(&["same", "subscription", "api"]),
+        doc: "Who pays for the reviewer's Claude (space v c) — \"same\": as its session. Only your own config sets it",
+        get: |c| Value::from(c.llm.reviewer_billing.map_or("same", crate::billing::Billing::name)),
+        set: |c, v| c.llm.reviewer_billing = crate::billing::Billing::parse(s(v)),
+    },
+    Setting {
         path: "llm.screen-terminal",
         kind: Kind::Bool,
         doc: "Chat: when Claude looks at your screen (you say yes on a card), the terminal panel's contents go too — off: its rows go blank",

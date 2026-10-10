@@ -167,6 +167,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "session-end" => editor.session_end(rest),
         "session-bring" => editor.session_bring(rest),
+        "session-billing" => editor.session_billing(rest),
         // A session's rebase stopped at a conflict (rebase.rs)
         "rebase-continue" => editor.rebase_by_hand(rest, true),
         "rebase-abort" => editor.rebase_by_hand(rest, false),

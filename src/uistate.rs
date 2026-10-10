@@ -749,6 +749,8 @@ pub struct SessionState {
     /// The credential its chat's claude last reported (`apiKeySource`: `none`, `apiKeyHelper` … — `limits.rs`)
     /// — None: none reported yet.
     pub key_source: Option<String>,
+    /// Who pays for its Claude: `subscription` · `api` (`billing.rs`).
+    pub billing: &'static str,
 }
 
 /// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
@@ -1041,6 +1043,7 @@ impl Editor {
             usage: UsageState::of(&l.usage, now_ms),
             compacted: Some(l.compacted.clone()).filter(|c| c.count > 0),
             key_source: l.usage.key_source.clone(),
+            billing: l.billing.name(),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1223,8 +1226,8 @@ impl UiState {
             .sessions
             .iter()
             .map(|s| {
-                let mut v =
-                    json!({ "id": s.id, "name": s.name, "doing": s.doing, "cards": s.cards, "root": s.root });
+                let mut v = json!({ "id": s.id, "name": s.name, "doing": s.doing, "cards": s.cards, "root": s.root,
+                    "billing": s.billing });
                 if let Some(b) = &s.branch {
                     v["branch"] = json!(b);
                 }
@@ -1331,7 +1334,9 @@ impl UiState {
                         n => format!(" · {n} cards"),
                     };
                     let reviewer = s.reviewer.map(|r| format!(" · {r}")).unwrap_or_default();
-                    format!("{} {}{front} · {}{reviewer}{cards}", s.id, s.name, s.doing)
+                    // (the plan is the calm default; a key session says so)
+                    let api = if s.billing == "api" { " · api" } else { "" };
+                    format!("{} {}{front}{api} · {}{reviewer}{cards}", s.id, s.name, s.doing)
                 })
                 .collect();
             out.push(format!("sessions: {}", s.join("   ")));

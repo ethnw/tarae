@@ -334,6 +334,9 @@ pub struct Chat {
     /// The project's Claude settings, read before its claude starts and answered on a card when they run
     /// commands or set its environment (`claudetrust.rs`).
     pub settings: crate::claudetrust::Gate,
+    /// Who pays for its claude — what the last one was started on (`billing.rs`), what its `apiKeySource` is
+    /// checked against (the session's may have changed since: a restart's list coming back). None: none started.
+    pub billing: Option<crate::billing::Billing>,
 }
 
 /// Where a command of Claude's ran (cardburden 4), from its run's own record — its guard (`Guard::where_ran`),
@@ -506,6 +509,7 @@ impl Chat {
             pointed: Vec::new(),
             env_said: (None, Vec::new()),
             settings: Default::default(),
+            billing: None,
         }
     }
 
@@ -640,6 +644,21 @@ pub fn restart_process(ed: &mut Editor) {
     c.kill();
     ensure_proc(ed);
     ed.set_success("claude restarted · the conversation goes on");
+}
+
+/// The session's billing changed (`:session-billing`, between turns): the next claude continues the same
+/// conversation (`--resume`) on it — one running stops and starts again at once.
+pub(crate) fn billing_changed(ed: &mut Editor) {
+    let billing = ed.session.billing;
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    if let Some(id) = c.conversation.clone() {
+        c.resume = Some(id);
+    }
+    c.note(&format!("Billing: {} from here — the conversation goes on", billing.name()));
+    if c.running() {
+        c.kill();
+        ensure_proc(ed);
+    }
 }
 
 impl Drop for Chat {
@@ -957,17 +976,21 @@ fn ensure_proc(ed: &mut Editor) {
     if !c.no_thought_flag {
         extra.extend(["--thinking-display", "summarized"]);
     }
-    let mut child = match llm::spawn(&cfg, &extra, &ed.session.root, ed.claude_env.as_ref()) {
-        Ok(child) => child,
-        Err(e) => {
+    // Who pays (`billing.rs`): an API session's key helper goes into the `--settings` above, merged
+    let started = ed.credential(ed.session.billing, crate::billing::Role::Chat).and_then(|cred| {
+        let child = llm::spawn(&cfg, &extra, &ed.session.root, ed.claude_env.as_ref(), &cred);
+        child.map(|child| (child, cred.billing())).map_err(|e| e.said(&cfg.command, true))
+    });
+    let Some(c) = &mut ed.session.chat else { return };
+    let (mut child, billing) = match started {
+        Ok(started) => started,
+        Err(said) => {
             // (once: opening the chat tries, and so does sending)
-            let said = llm::spawn_failed(&cfg.command, &e, true);
-            if c.msgs.last().is_none_or(|m| m.role != Role::Note || m.text != said) {
-                c.msgs.push(Msg::new(Role::Note, said, ""));
-            }
+            c.note(&said);
             return;
         }
     };
+    c.billing = Some(billing);
     let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     // tarae's MCP server (the note tool) — registered before anything else is said
     let _ = stdin.send(llm::initialize_message(&["tarae"]));
@@ -997,6 +1020,11 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
     let login_hint = match &ev {
         StreamEv::Done(Err(e)) | StreamEv::Exit(e) => llm::login_hint(ed, e),
         _ => None,
+    };
+    // (the credential claude says it runs on, against who pays for it — `billing.rs`)
+    let keep_key = ed.config.llm.keep_env_key;
+    let wrong = |c: &Chat, said: Option<&str>| {
+        c.billing.and_then(|b| crate::billing::checked(b, keep_key, crate::billing::Role::Chat, said))
     };
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation == generation) else { return };
     match ev {
@@ -1052,6 +1080,13 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 false => ed.session.usage.resumed(&id),
             }
             ed.session.usage.cli = version;
+            // Not the credential its billing gives: this turn stops, and the claude at its end — said
+            if let Some(said) = wrong(c, key_source.as_deref()) {
+                crate::log::line("claude", "warn", &said);
+                c.note(&said);
+                c.stopping = true;
+                c.to_claude(llm::interrupt_message());
+            }
             // (the credential it reported, each turn — `limits.rs`)
             if key_source.is_some() {
                 ed.session.usage.key_source = key_source;
@@ -1064,6 +1099,12 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::Initialized { models, key_source } => {
             c.models = models;
+            // Not the credential its billing gives, as it starts: it stops — said
+            if let Some(said) = wrong(c, key_source.as_deref()) {
+                crate::log::line("claude", "warn", &said);
+                c.note(&said);
+                c.kill();
+            }
             // (the credential it runs on, as it starts — the first turn's `init` says it again)
             if key_source.is_some() {
                 ed.session.usage.key_source = key_source;
@@ -1231,6 +1272,15 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::rebase::turn_over(ed);
             // (whatever the turn changed on disk, the git tab shows it — #29)
             ed.git_tab_follow();
+            // A claude that said another credential than its billing's goes with its turn: the next message
+            // starts one that's checked again
+            if let Some(c) = ed.session.chat.as_mut()
+                && wrong(c, ed.session.usage.key_source.as_deref()).is_some()
+            {
+                c.kill();
+                // (its interrupt may have come after the turn's end: the next turn isn't "stopped")
+                c.stopping = false;
+            }
             send_queued(ed);
         }
         StreamEv::Exit(err) => {

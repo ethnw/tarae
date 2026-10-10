@@ -90,6 +90,8 @@ pub struct Reviewer {
     /// It ended while its session was behind, and that session hasn't been in front since — its inbox item,
     /// its tab's `•`; said when you come to it (`Editor::session_switch`).
     pub unseen: bool,
+    /// Who pays for its claude — what its `apiKeySource` is checked against (`billing.rs`).
+    pub billing: crate::billing::Billing,
 }
 
 impl Reviewer {
@@ -112,6 +114,7 @@ impl Reviewer {
             verdict: verdict.into(),
             cost: None,
             unseen: false,
+            billing: Default::default(),
         }
     }
 
@@ -246,11 +249,14 @@ fn spawn(ed: &mut Editor, g: Gathered) {
     let cfg = ed.config.llm.clone();
     let cfg = llm::LlmConfig { args: args(&cfg.args), ..cfg };
     let extra = ["--append-system-prompt", SYSTEM, "--permission-prompt-tool", "stdio"];
-    let mut child = match llm::spawn(&cfg, &extra, &g.root, ed.claude_env.as_ref()) {
-        Ok(child) => child,
-        Err(e) => {
-            return ed.set_error(format!("the reviewer: {}", llm::spawn_failed(&cfg.command, &e, false)));
-        }
+    // Who pays: `llm.reviewer-billing`, else its session's (`billing.rs`)
+    let started = ed.credential(ed.reviewer_billing(), crate::billing::Role::Reviewer).and_then(|cred| {
+        let child = llm::spawn(&cfg, &extra, &g.root, ed.claude_env.as_ref(), &cred);
+        child.map(|child| (child, cred.billing())).map_err(|e| e.said(&cfg.command, false))
+    });
+    let (mut child, billing) = match started {
+        Ok(started) => started,
+        Err(e) => return ed.set_error(format!("the reviewer: {e}")),
     };
     let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     let content = ask(&g.label, g.n, &g.diff, &nonce(&g.diff));
@@ -277,6 +283,7 @@ fn spawn(ed: &mut Editor, g: Gathered) {
         verdict: String::new(),
         cost: None,
         unseen: false,
+        billing,
     });
     llm::pump(child, true, ed.events.sender(), move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
@@ -307,10 +314,22 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 crate::usage::view_sync(ed);
             }
         }
+        // Not the credential its billing gives: it stops, and its end says why (`billing.rs`)
+        StreamEv::Conversation { key_source, .. } | StreamEv::Initialized { key_source, .. } => {
+            let keep = ed.config.llm.keep_env_key;
+            let role = crate::billing::Role::Reviewer;
+            if let Some(said) = crate::billing::checked(r.billing, keep, role, key_source.as_deref()) {
+                crate::log::line("claude", "warn", &said);
+                r.state = State::Failed(said);
+                r.kill();
+            }
+        }
         StreamEv::Done(result) => {
             r.proc = None;
             r.took = Some(r.started.elapsed());
             match result {
+                // (stopped for its credential: that's why, whatever the process said as it went)
+                _ if matches!(r.state, State::Failed(_)) => {}
                 Ok(text) => {
                     r.verdict = cut(text.trim(), VERDICT_MAX);
                     r.state = State::Done;
@@ -336,9 +355,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         | StreamEv::ToolResult { .. }
         | StreamEv::Requesting(_)
         | StreamEv::Usage(_)
-        | StreamEv::Conversation { .. }
         | StreamEv::Answered(_)
-        | StreamEv::Initialized { .. }
         | StreamEv::Compaction(_)
         | StreamEv::Exit(_) => {}
     }
@@ -1201,6 +1218,44 @@ mod tests {
             assert!(!got.contains(&gone.as_str()), "{gone} reached the reviewer's claude");
         }
         assert!(got.contains(&"CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "yours stays: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The reviewer's claude pays as its session does — an API session's key helper in its `--settings`, without
+    /// the chat's hour-long cache (one turn) — unless `llm.reviewer-billing` says otherwise; one that says another
+    /// credential than its billing's is stopped, and its end says why (not how the stopped process ended).
+    #[test]
+    fn the_reviewer_pays_as_its_session_unless_you_say() {
+        use crate::billing::Billing;
+        let init = |src: &str| {
+            json!({"type": "system", "subtype": "init", "session_id": "reviewer-s1", "apiKeySource": src,
+                "model": "m"})
+        };
+        let (dir, repo) = place("billing");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let (args, _) = fake(&mut ed, &dir, &[init("apiKeyHelper"), result("No findings.")]);
+        ed.api_key_helper = Some("stand-in-helper".into());
+        ed.session.billing = Billing::Api;
+        reviewed(&mut ed, &repo);
+        let got = std::fs::read_to_string(&args).unwrap();
+        assert!(got.contains(r#"--settings {"apiKeyHelper":"stand-in-helper"}"#), "{got}");
+        assert_eq!(ed.session.reviewer.as_ref().unwrap().state, State::Done);
+        // Yours says the plan: no helper — and its claude saying one is stopped
+        let mut ed = Editor::new(crate::config::Config::default());
+        let (args, _) = fake(&mut ed, &dir, &[init("apiKeyHelper"), result("No findings.")]);
+        ed.api_key_helper = Some("stand-in-helper".into());
+        ed.session.billing = Billing::Api;
+        ed.config.llm.reviewer_billing = Some(Billing::Subscription);
+        reviewed(&mut ed, &repo);
+        // (and the stopped process's end has come: it doesn't say otherwise)
+        settle_until(&mut ed, |ed| ed.session.reviewer.as_ref().is_some_and(|r| r.took.is_some()));
+        let got = std::fs::read_to_string(&args).unwrap();
+        assert!(!got.contains("apiKeyHelper"), "{got}");
+        let State::Failed(why) = &ed.session.reviewer.as_ref().unwrap().state else { panic!("not stopped") };
+        assert!(
+            why.contains("reported its credential as apiKeyHelper") && why.contains("bills subscription"),
+            "{why}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

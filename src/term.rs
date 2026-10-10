@@ -9106,6 +9106,7 @@ fn draw_chat(
     let usage_row = usage_spans(
         &editor.session.usage,
         &editor.limits,
+        editor.session.billing,
         crate::usage::now_ms(),
         w,
         [accent, dim, faint, warn_fg],
@@ -9657,11 +9658,13 @@ fn draw_chat(
 /// read 8.2k write 75 in 10 out 30` — the widest form that fits in `w`, folding the split first, then the context
 /// and the cost, then the weekly window's reset (the cache stays; both said by the clock, so true however long
 /// nothing redraws). The weekly window shows while claude runs on the plan (`limits::on_plan`), from claude's
-/// start — before any turn. None: nothing reported in this conversation yet, nor any limit. Styles: accent, dim,
-/// faint, warning.
+/// start — before any turn. An API session's row starts with `api` (dim: a state, not something asking — D5),
+/// always there, never folded. None: nothing reported in this conversation yet, nor any limit, on the plan.
+/// Styles: accent, dim, faint, warning.
 fn usage_spans(
     u: &crate::usage::Usage,
     limits: &crate::limits::Limits,
+    billing: crate::billing::Billing,
     now_ms: u64,
     w: usize,
     [accent, dim, faint, warn]: [Style; 4],
@@ -9675,9 +9678,11 @@ fn usage_spans(
     let weekly = crate::limits::on_plan(u.key_source.as_deref(), u.plan_event)
         .then(|| limits.get(crate::limits::WEEKLY, now_ms))
         .flatten();
-    if !reported && weekly.is_none() {
+    let api = billing == crate::billing::Billing::Api;
+    if !reported && weekly.is_none() && !api {
         return None;
     }
+    let billed = || if api { vec![sp("api".into(), dim)] } else { Vec::new() };
     // Each part long and short (the cache has one form)
     let cache = |_long: bool| match u.cache(now_ms) {
         _ if !reported => Vec::new(),
@@ -9767,7 +9772,8 @@ fn usage_spans(
     tiers.push([Some(cache(false)), None, None, None, None]);
     let width = |v: &[Span]| v.iter().map(|s| s.text.width()).sum::<usize>();
     for tier in tiers {
-        let groups: Vec<Vec<Span>> = tier.into_iter().flatten().filter(|g| width(g) > 0).collect();
+        let groups: Vec<Vec<Span>> =
+            std::iter::once(billed()).chain(tier.into_iter().flatten()).filter(|g| width(g) > 0).collect();
         let total = groups.iter().map(|g| width(g)).sum::<usize>() + 2 * groups.len().saturating_sub(1);
         if total <= w {
             let mut row = Vec::new();
@@ -11144,6 +11150,21 @@ mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {
+    /// An API session's chat says so on its last row — `api`, before anything is reported, and still there when
+    /// the row has room for nothing else; a subscription's row is as it was (none before anything is reported).
+    #[test]
+    fn an_api_sessions_row_says_so_and_a_plans_says_nothing_new() {
+        use crate::billing::Billing;
+        let (u, limits) = (crate::usage::Usage::default(), crate::limits::Limits::default());
+        let text = |b, w| {
+            let spans = usage_spans(&u, &limits, b, 0, w, [Style::default(); 4]);
+            spans.map(|v| v.into_iter().map(|s| s.text).collect::<String>())
+        };
+        assert_eq!(text(Billing::Api, 80).as_deref(), Some("api"));
+        assert_eq!(text(Billing::Api, 3).as_deref(), Some("api"), "never folded");
+        assert_eq!(text(Billing::Subscription, 80), None, "the plan: nothing new");
+    }
+
     /// The chat's tool row keeps its suffix when it fits whole — a command's `ok` too, the command cut for it.
     #[test]
     fn a_short_suffix_stays_on_a_long_row() {

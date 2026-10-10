@@ -177,6 +177,9 @@ pub struct Session {
     pub reloaded: usize,
     /// What its Claude's turns cost and how warm its cache is (`usage.rs`).
     pub usage: crate::usage::Usage,
+    /// Who pays for its Claude — the chat's, the ask's, the reviewer's unless `llm.reviewer-billing` says
+    /// (`billing.rs`): `llm.billing` when it's made, kept with it (`worktree::Kept`), `:session-billing` switches it.
+    pub billing: crate::billing::Billing,
     /// Its Claude's conversation compacted since tarae started — how often, the last one, and whether one
     /// came behind and it hasn't been in front since (`compaction.rs`).
     pub compacted: crate::compaction::Compacted,
@@ -295,6 +298,7 @@ impl Session {
             looked_orders: Default::default(),
             reloaded: 0,
             usage: Default::default(),
+            billing: Default::default(),
             compacted: Default::default(),
             hosts: Vec::new(),
             proxy_id,
@@ -836,6 +840,7 @@ impl Editor {
         let doc = self.alloc_id();
         self.docs.push(Document::from_str(doc, ""));
         let mut session = Session::new(id, root.clone(), view);
+        session.billing = self.config.llm.billing;
         session.views.push(View::new(view, doc));
         (session.current_doc, session.scratch, session.docs) = (doc, Some(doc), vec![doc]);
         self.sessions.push(session);

@@ -196,6 +196,7 @@
   ],
   "sessions": [
     {
+      "billing": "subscription",
       "cards": 1,
       "doing": "waiting",
       "id": "s0",
@@ -203,6 +204,7 @@
       "root": "tarae-uistate-main"
     },
     {
+      "billing": "subscription",
       "cards": 1,
       "doing": "waiting",
       "id": "s1",
