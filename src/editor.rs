@@ -7710,14 +7710,15 @@ mod tests {
         ed.session.task_run = Some(run);
         assert!(!screen(&mut ed).contains("sandbox blocked"), "nothing blocked: no line");
         let d = |op: &str, target: &str| crate::sandbox::Denial {
-            process: "script".into(),
+            process: "cargo".into(),
             op: op.into(),
             target: target.into(),
         };
-        watch.record(d("file-write-data", "/dev/ttys004"));
+        // (a write outside: its words are short — a terminal's are long and cut, `denials_in_plain_words`)
+        watch.record(d("file-write-data", "/opt/tarae-test/x"));
         watch.record(d("network-outbound", "192.0.2.1:9"));
         let s = screen(&mut ed);
-        assert!(s.contains("▲ sandbox blocked writing /dev/ttys004  +1"), "{s}");
+        assert!(s.contains("▲ sandbox blocked writing /opt/tarae-test/x  +1"), "{s}");
         assert!(!s.contains("may be waiting"), "it printed just now");
         ed.session.task_run.as_mut().unwrap().last_output -= crate::sandbox::QUIET;
         assert!(screen(&mut ed).contains("— it may be waiting on what was blocked"));
@@ -7728,7 +7729,7 @@ mod tests {
         ed.session.test_run = Some(t);
         let s = screen(&mut ed);
         assert!(
-            s.contains("▲ sandbox blocked writing /dev/ttys004  +1") && !s.contains("may be waiting"),
+            s.contains("▲ sandbox blocked writing /opt/tarae-test/x  +1") && !s.contains("may be waiting"),
             "{s}"
         );
     }
