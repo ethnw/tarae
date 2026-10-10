@@ -498,6 +498,8 @@ struct Places {
     root: PathBuf,
     store: Option<PathBuf>,
     user: Option<PathBuf>,
+    /// `Editor::claude_env`: None — tarae's own.
+    env: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Places {
@@ -506,14 +508,19 @@ impl Places {
             root: ed.session.root.clone(),
             store: ed.trust_path.clone(),
             user: ed.claude_user_settings.clone(),
+            env: ed.claude_env.clone(),
         }
     }
 
     /// `look` as tarae reads: git says whether the local file is yours, and claude gets tarae's environment
-    /// (`llm::spawn` passes it on).
+    /// (`llm::spawn` passes it on) — or the one `Editor::claude_env` gives.
     fn look(&self) -> Seen {
         let yours = |p: &Path| crate::config::personal(&self.root, p).is_ok();
-        look(&self.root, self.store.as_deref(), self.user.as_deref(), yours, |n| std::env::var(n).ok())
+        let env = |n: &str| match &self.env {
+            Some(given) => given.get(n).cloned(),
+            None => std::env::var(n).ok(),
+        };
+        look(&self.root, self.store.as_deref(), self.user.as_deref(), yours, env)
     }
 }
 

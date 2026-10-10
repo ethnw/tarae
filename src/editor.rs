@@ -589,6 +589,9 @@ pub struct Editor {
     /// Your own Claude settings file, read for what a held-back key goes back to (`claudetrust::Baseline`) —
     /// None in tests.
     pub claude_user_settings: Option<std::path::PathBuf>,
+    /// The environment claude gets, as `claudetrust` reads it for a held-back name — None: tarae's own (the
+    /// process's); tests give their own (empty unless a test says), so none depends on where it runs.
+    pub claude_env: Option<std::collections::HashMap<String, String>>,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
     pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
     /// What a run's policy reads of tarae's surroundings (`sandbox::Here`, on its worker) — `Here::now` unless a
@@ -786,6 +789,7 @@ impl Editor {
             read_temp: !cfg!(test),
             claude_settings_gate: !cfg!(test),
             claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
+            claude_env: if cfg!(test) { Some(Default::default()) } else { None },
             run_clock: None,
             sandbox_here: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },

@@ -478,6 +478,9 @@ fn the_chats_claude_starts_only_as_the_card_answers() {
     // (`theirs-zq7`: in nothing of tarae's own — its system prompt says "stand-in")
     let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
     ed.claude_settings_gate = true;
+    // (tarae's environment as the test gives it — with the variable, as a real one may have)
+    let base_url = ("ANTHROPIC_BASE_URL".to_string(), "https://api.anthropic.com".to_string());
+    ed.claude_env = Some(std::collections::HashMap::from([base_url]));
     stand_in(&mut ed);
     crate::chat::open(&mut ed);
     assert!(!running(&ed), "nothing starts before the settings are read");
@@ -500,9 +503,8 @@ fn the_chats_claude_starts_only_as_the_card_answers() {
     });
     let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
     assert_eq!(settings["apiKeyHelper"], "");
-    // (back to what claude has without the file: tarae's own value if it has one, else empty)
-    let without = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default();
-    assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], without.as_str());
+    // (not on `RESTORED`: empty, whatever tarae's environment holds — the test gives one that has it)
+    assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "");
     assert_eq!(settings["disableAllHooks"], true);
     let argv = std::fs::read_to_string(root.join("argv")).unwrap();
     let theirs: Vec<&str> = argv.lines().filter(|l| l.contains("theirs-zq7")).collect();
