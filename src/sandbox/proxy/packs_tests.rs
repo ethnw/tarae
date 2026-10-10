@@ -328,6 +328,11 @@ fn gradle_resolves_through_the_proxy() {
     };
     #[allow(unused_mut)]
     let mut p = crate::sandbox::policy(&root, &llm, &[]).unwrap();
+    // (macOS, 7a: the project's trust store is named like a key, `*.p12` — closed to a run until the user opens
+    // that file from the run's panel, `allow::Grant::Key`, as a project with one would)
+    if let Some(keys) = p.keys.as_mut() {
+        keys.push(root.join("trust.p12"));
+    }
     #[cfg(target_os = "linux")]
     {
         // (this machine's own address stands for the outside: a policy that knows none)
