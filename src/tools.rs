@@ -2126,13 +2126,16 @@ pub struct Widened {
     /// The hosts the user let its network reach through tarae's proxy — the project's, and this run's alone
     /// (`Egress::answered`).
     pub hosts: Vec<(String, u16)>,
+    /// macOS: the terminals open to it (`allow::Grant::Terminals`).
+    pub terminals: bool,
 }
 
 impl Widened {
     /// What no setting carries, onto the policy made from `llm`: how the result says what was allowed, the
-    /// sockets, the hosts its proxy rules let through.
+    /// sockets, the hosts its proxy rules let through, the terminals.
     pub fn onto(self, p: &mut crate::sandbox::Policy) {
         (p.granted, p.sockets, p.egress.answered) = (self.granted, self.sockets, self.hosts);
+        p.terminals = self.terminals;
     }
 }
 
@@ -2155,6 +2158,7 @@ pub fn with_allowed(
                 .chain(a.ports.iter().map(|n| Grant::Port(*n)))
                 .chain(a.sockets.iter().map(|s| Grant::Socket(s.clone())))
                 .chain(a.hosts.iter().map(|(h, p)| Grant::Host(h.clone(), *p)))
+                .chain(a.terminals.then_some(Grant::Terminals))
         })
         .chain(once.cloned());
     for g in grants {
@@ -2164,6 +2168,7 @@ pub fn with_allowed(
             Grant::Port(n) => w.llm.sandbox_ports.push(*n),
             Grant::Socket(s) if !w.sockets.contains(s) => w.sockets.push(s.clone()),
             Grant::Host(h, p) if !w.hosts.contains(&(h.clone(), *p)) => w.hosts.push((h.clone(), *p)),
+            Grant::Terminals => w.terminals = true,
             Grant::Read(_) | Grant::Socket(_) | Grant::Host(..) => {}
         }
         let said = g.shown();

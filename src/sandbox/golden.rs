@@ -313,6 +313,8 @@ fn the_report_is_pinned() {
         file("file-write-data", f.root.join("Cargo.toml")),
         file("file-write-create", f.root.join(".git/index.lock")),
         file("file-write-create", PathBuf::from("/opt/tarae-golden/x")),
+        // (3c: a pty the run made — `script`'s other end — or one of the user's)
+        file("file-write-data", PathBuf::from("/dev/ttys012")),
     ];
     let watch = Watch::quiet("golden.");
     for d in denials {

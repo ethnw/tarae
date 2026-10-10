@@ -67,6 +67,15 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
         };
         let file = d.target.starts_with('/');
         let mut found: Vec<Choice> = Vec::new();
+        // A terminal (macOS, 3c): the terminals — no folder of `/dev` nor the file itself
+        if d.terminal() {
+            let why = format!("{} was opening {}", d.process, d.target);
+            found.push(Choice {
+                grant: Grant::Terminals,
+                hint: format!("{} opening a terminal", d.process),
+                why,
+            });
+        }
         // A host the proxy held and the user's answer would lift (`host:port: why`) — never what its other checks
         // refused (an address, the server name)
         if d.op == crate::sandbox::proxy::HOST_OP
@@ -80,13 +89,13 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
                 why,
             });
         }
-        if file && (d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER) {
+        if file && !d.terminal() && (d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER) {
             found.extend(crate::allow::read_choices(&target, home, &kept).into_iter().map(|place| {
                 let why = format!("{} was reading {} in it", d.process, below(&place));
                 Choice { hint: below(&place), grant: Grant::Read(place), why }
             }));
         }
-        if file && (d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER) {
+        if file && !d.terminal() && (d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER) {
             found.extend(crate::allow::write_choices(&target, home, root, &later).into_iter().map(|dir| {
                 let why = format!("{} was writing {} in it", d.process, below(&dir));
                 Choice { hint: below(&dir), grant: Grant::Write(dir), why }
@@ -187,6 +196,7 @@ impl Editor {
                     Grant::Port(n) => format!("allow port {n} on this machine"),
                     Grant::Socket(s) => format!("allow the socket {} only", crate::allow::tilde(s)),
                     Grant::Host(h, p) => format!("allow reaching {h}:{p}"),
+                    Grant::Terminals => "allow opening terminals — yours too".into(),
                 },
                 action: Action::Grant(i.to_string()),
                 hint: c.hint.clone(),
@@ -273,7 +283,7 @@ fn grant_card(
     if let Some(from) = &run.from {
         question.push_str(&format!("\n\nWhat it refused was read {from}."));
     }
-    let warn: Vec<String> = grant.warning().map(String::from).into_iter().chain(tokens).collect();
+    let warn: Vec<String> = grant.risk().map(String::from).into_iter().chain(tokens).collect();
     let warning = (!warn.is_empty()).then(|| {
         question.push_str("\n\n");
         let at = question.split('\n').count() - 1;
@@ -363,6 +373,44 @@ mod tests {
             ],
             "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once"
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A terminal refused (macOS, 3c — reading or writing `/dev/ttysN`) offers the terminals, once, whichever
+    /// and however many: never `/dev` nor the file itself for writing. Its card says what yes risks — though
+    /// not as much as outside, so a chat's `a` and the project's `A` take it — and the project keeps it
+    /// (`sandbox.json`'s `terminals`) until `:sandbox-disallow terminals` takes it back.
+    #[test]
+    fn a_terminal_refused_offers_the_terminals_once() {
+        let d = |op: &str, target: &str| Denial {
+            process: "script".into(),
+            op: op.into(),
+            target: target.into(),
+        };
+        let denials = [
+            d("file-write-data", "/dev/ttys012"),
+            d("file-read-data", "/dev/ttys012"),
+            d("file-read-data", "/dev/ttys003"),
+            d("file-write-create", "/dev/ttysq"),
+            // (not an open: no grant offered, nor `/dev` to write in)
+            d("file-write-unlink", "/dev/ttys005"),
+            d("file-write-mode", "/dev/ttys005"),
+        ];
+        let all = choices(&denials, Path::new("/Users/u"), Path::new("/Users/u/p"), &[]);
+        let got: Vec<(&Grant, &str)> = all.iter().map(|c| (&c.grant, c.why.as_str())).collect();
+        assert_eq!(got, [(&Grant::Terminals, "script was opening /dev/ttys012")]);
+        let g = Grant::Terminals;
+        assert!(g.keepable() && !g.as_outside());
+        assert!(g.risk().is_some_and(|r| r.contains("read what you type")), "{:?}", g.risk());
+        let base = std::env::temp_dir().join(format!("tarae-blocked-tty-{}", std::process::id()));
+        let store = base.join("sandbox.json");
+        crate::allow::keep(&store, Path::new("/p"), |a| a.add(&g)).unwrap();
+        let kept = crate::allow::Store::read(Some(&store)).get(Path::new("/p"));
+        assert!(kept.terminals && !kept.is_empty());
+        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
+        assert!(w.terminals && w.granted == [g.shown()], "{:?}", w.granted);
+        crate::allow::keep(&store, Path::new("/p"), |a| a.remove(crate::allow::TERMINALS_LISTED)).unwrap();
+        assert_eq!(crate::allow::Store::read(Some(&store)).get(Path::new("/p")), Default::default());
         std::fs::remove_dir_all(&base).ok();
     }
 

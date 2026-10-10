@@ -27,6 +27,8 @@ pub struct Allowed {
     /// Hosts Claude's commands reach through tarae's proxy without asking, each at its port — kept for the
     /// project only (the card's `A`, `hosts.rs`).
     pub hosts: Vec<(String, u16)>,
+    /// macOS: Claude's commands may open the terminals (`/dev/ttys*`) — every one (`Grant::Terminals`).
+    pub terminals: bool,
 }
 
 impl Allowed {
@@ -69,11 +71,15 @@ impl Allowed {
                 }
             }
             Grant::Host(h, p) => self.add_host(h, *p),
+            Grant::Terminals => self.terminals = true,
         }
     }
 
-    /// Takes back a place, a port or a socket (as `:sandbox-allowed` lists it).
+    /// Takes back a place, a port, a socket or the terminals (as `:sandbox-allowed` lists it).
     pub fn remove(&mut self, what: &str) {
+        if what == TERMINALS_LISTED {
+            self.terminals = false;
+        }
         let at = Path::new(what);
         self.read.retain(|p| p != at);
         self.write.retain(|p| p != at);
@@ -94,8 +100,12 @@ impl Allowed {
             && self.ports.is_empty()
             && self.sockets.is_empty()
             && self.hosts.is_empty()
+            && !self.terminals
     }
 }
+
+/// How `:sandbox-allowed` lists `Grant::Terminals`, and `:sandbox-disallow` takes it back.
+pub const TERMINALS_LISTED: &str = "terminals";
 
 /// `host:port` as a kept answer or `:sandbox-disallow` writes it: one name (as the proxy reads names) at its
 /// port — None for anything else (a pattern, an address, no port).
@@ -125,6 +135,9 @@ pub enum Grant {
     Socket(PathBuf),
     /// A host at its port, through tarae's proxy (`hosts.rs`) — kept for the project, or this session's.
     Host(String, u16),
+    /// macOS: open the terminals (`sandbox::TERMINALS`) — all of them, the user's own too: Seatbelt can't
+    /// tell a pty a run made (expect, `script`, a pty test) from the user's shells.
+    Terminals,
 }
 
 impl Grant {
@@ -136,6 +149,7 @@ impl Grant {
             Grant::Port(n) => format!("connect to port {n} on this machine"),
             Grant::Socket(s) => format!("connect to the socket {} — that one file", tilde(s)),
             Grant::Host(h, p) => format!("reach {h}:{p} through tarae's proxy"),
+            Grant::Terminals => "open terminals (/dev/ttys*) — every one, yours too".into(),
         }
     }
 
@@ -153,6 +167,17 @@ impl Grant {
     /// allowed for a chat, only for one run or one command (#193, `tools::RunAgain`).
     pub fn as_outside(&self) -> bool {
         self.warning().is_some()
+    }
+
+    /// What yes risks beyond what the grant says, on its card (`warning` in `warning`, the terminals').
+    pub fn risk(&self) -> Option<&'static str> {
+        match self {
+            Grant::Terminals => Some(
+                "macOS's sandbox can't tell a terminal a command made from yours: its commands could read what \
+                 you type in your shells, tarae's and other sessions', and type into them.",
+            ),
+            _ => self.warning(),
+        }
     }
 
     /// For a socket that's Docker's (`docker.sock`, colima's, Docker Desktop's): what connecting to it
@@ -221,7 +246,9 @@ impl Store {
                 }
             }
             let (read, write, sockets) = (paths("read"), paths("write"), Vec::new());
-            projects.insert(PathBuf::from(project), Allowed { read, write, ports, sockets, hosts });
+            let terminals = a["terminals"].as_bool().unwrap_or(false);
+            projects
+                .insert(PathBuf::from(project), Allowed { read, write, ports, sockets, hosts, terminals });
         }
         Store { projects }
     }
@@ -236,7 +263,10 @@ impl Store {
         let mut projects = serde_json::Map::new();
         for (p, a) in self.projects.iter().filter(|(_, a)| !a.is_empty()) {
             let hosts: Vec<String> = a.hosts.iter().map(|(h, p)| format!("{h}:{p}")).collect();
-            let body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports, "hosts": hosts });
+            let mut body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports, "hosts": hosts });
+            if a.terminals {
+                body["terminals"] = json!(true);
+            }
             projects.insert(p.to_string_lossy().into_owned(), body);
         }
         serde_json::to_string_pretty(&json!({ "projects": projects })).unwrap_or_default()
@@ -688,6 +718,9 @@ impl crate::editor::Editor {
                 for s in &a.sockets {
                     items.push(row(format!("socket {}", s.display()), format!("connects · {when}")));
                 }
+                if a.terminals && not_kept(kept.terminals) {
+                    items.push(row(TERMINALS_LISTED.into(), format!("opens /dev/ttys* · {when}")));
+                }
             }
             // (hosts: the project's, and this session's — not a conversation's; raw and lookups only the session's)
             for (h, p) in &kept.hosts {
@@ -721,11 +754,12 @@ impl crate::editor::Editor {
         if !what.starts_with('/')
             && !what.starts_with("port ")
             && !what.starts_with("socket /")
+            && what != TERMINALS_LISTED
             && host.is_none()
         {
             return Err(
-                "usage: :sandbox-disallow <path | port N | socket path | host name:port | raw name:port | \
-                        lookup name> — as :sandbox-allowed lists it"
+                "usage: :sandbox-disallow <path | port N | socket path | terminals | host name:port | raw \
+                        name:port | lookup name> — as :sandbox-allowed lists it"
                     .into(),
             );
         }

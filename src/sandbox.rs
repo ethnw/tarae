@@ -1369,11 +1369,27 @@ impl Denial {
         format!("{} {}", self.op, self.target_shown()).trim_end().to_string()
     }
 
+    /// Whether it's a terminal's open refused (macOS, `TERMINALS`) — reading or writing `/dev/ttysN`. Not its
+    /// removal, move or mode (closed too, said as such, and no grant offered for them: no tool needs that).
+    pub fn terminal(&self) -> bool {
+        let open =
+            matches!(self.op.as_str(), "file-read-data" | "file-write-data" | "file-write-create" | EITHER);
+        open && is_terminal(Path::new(&self.target))
+    }
+
     /// In plain words: `writing ~/x`, `connecting to port 9`, `opening apps` — Seatbelt's own (`shown`) for
     /// what has none. Its network denials name no address, only the port (`remote:*:9` — measured).
     pub fn plain(&self) -> String {
         let t = self.target_shown();
         let op = self.op.as_str();
+        // (a pty the run made, or the user's: Seatbelt can't tell them apart — the grant opens them all)
+        if self.terminal() {
+            return format!(
+                "opening the terminal {t} — every terminal is closed to a run, the ones it makes too (expect, \
+                 script, a pty test): macOS's sandbox can't tell them from the user's; the run's panel (space m \
+                 s) lets this project's commands open terminals"
+            );
+        }
         match op {
             "file-read-data" | "file-read-xattr" => format!("reading {t}"),
             "file-read-metadata" => format!("looking at {t}"),
@@ -2379,37 +2395,44 @@ pub fn protected_in(root: &Path, path: &Path) -> bool {
     !at.is_empty() && !output.is_some_and(|o| at.iter().any(|&i| i > o))
 }
 
-/// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured), as
-/// the profile's filters (`devices_rule`): (filter, its argument).
+/// Device files every program writes to (`/dev/null`, `/dev/ptmx` — a pty test hangs without it: measured), as
+/// the profile's filters (`devices_rule`): (filter, its argument). Not the terminals (`TERMINALS`).
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-const DEVICES: [(&str, &str); 7] = [
+const DEVICES: [(&str, &str); 6] = [
     ("literal", "/dev/null"),
     ("literal", "/dev/zero"),
     ("literal", "/dev/tty"),
     ("literal", "/dev/ptmx"),
     ("literal", "/dev/dtracehelper"),
-    ("regex", "^/dev/ttys[0-9]+$"),
     ("subpath", "/dev/fd"),
 ];
+
+/// macOS's terminals — the user's shells', tarae's own, other sessions' runs' — closed to a run, read and write
+/// (3c): Seatbelt matches paths and a pty a run makes is one of these names too (reused, lowest free first),
+/// so it can't be told from theirs. `/dev/ptmx` stays: the pty is made, its other end's open refused
+/// (`Denial::terminal`). The project's grant opens them all (`allow::Grant::Terminals`). (Runs start without a
+/// controlling terminal and with pipes, never a pty of tarae's — `spawn.rs` — so `/dev/tty` reaches nothing.)
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub const TERMINALS: &str = "^/dev/ttys[0-9]+$";
+
+/// Whether `path` is one `TERMINALS` matches — the rule in Rust.
+pub fn is_terminal(path: &Path) -> bool {
+    let n = path.to_str().and_then(|p| p.strip_prefix("/dev/ttys")).unwrap_or_default();
+    !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+}
 
 /// The profile's rule for `DEVICES`.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 fn devices_rule() -> String {
-    let filters: String = DEVICES
-        .iter()
-        .map(|(f, a)| match *f {
-            "regex" => format!(" (regex #\"{a}\")"),
-            f => format!(" ({f} \"{a}\")"),
-        })
-        .collect();
+    let filters: String = DEVICES.iter().map(|(f, a)| format!(" ({f} \"{a}\")")).collect();
     format!("(allow file-write*{filters})\n")
 }
 
 /// The device places a run writes (`Policy::write_places`): the files and folders the platform's rules name
-/// (Seatbelt's `DEVICES` but its patterns — terminals' files in `/dev`; Landlock's `linux::DEVICES`).
+/// (Seatbelt's `DEVICES`; Landlock's `linux::DEVICES`).
 #[cfg(not(target_os = "linux"))]
 static DEVICE_PLACES: std::sync::LazyLock<Vec<&'static str>> =
-    std::sync::LazyLock::new(|| DEVICES.iter().filter(|(f, _)| *f != "regex").map(|(_, a)| *a).collect());
+    std::sync::LazyLock::new(|| DEVICES.iter().map(|(_, a)| *a).collect());
 #[cfg(target_os = "linux")]
 static DEVICE_PLACES: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| linux::DEVICES.iter().map(|(d, _)| *d).collect());
@@ -4056,8 +4079,7 @@ mod tests {
         assert_eq!(
             devices_rule(),
             "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
-             (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\") (subpath \
-             \"/dev/fd\"))\n"
+             (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (subpath \"/dev/fd\"))\n"
         );
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&cache).ok();
@@ -5739,12 +5761,21 @@ mod tests {
             ("/Users/u/other/x", false),
             ("/Users/u/.ssh/id_ed25519", false),
             ("/Users/u/.local/state/tarae/chats/x.json", false),
+            ("/dev/ttys012", false),
         ] {
             assert_eq!(p.reads_allow(Path::new(path)), read, "{path}");
         }
+        // (the terminals: the project's grant opens them, to the report's rules too)
+        let granted = Policy { terminals: true, ..p.clone() };
+        assert!(
+            granted.reads_allow(Path::new("/dev/ttys012")) && granted.writes_allow(Path::new("/dev/ttys012"))
+        );
+        assert!(!p.writes_allow(Path::new("/dev/ttys012")));
         let none = Policy::for_project(&Env { reads: Reads::default(), ..env(Path::new("/Users/u/p")) });
         let text = none.profile();
-        assert!(!text.contains("file-read") && !text.contains("HOME"), "{text}");
+        let reads: Vec<&str> =
+            text.lines().filter(|l| l.contains("file-read") && !l.contains(TERMINALS)).collect();
+        assert!(reads.is_empty() && !text.contains("HOME"), "{text}");
         assert!(none.reads_allow(Path::new("/Users/u/.ssh/id")), "not confined without a home");
     }
 
@@ -7315,7 +7346,18 @@ mod tests {
         // (a socket in home is still a socket — once said as Seatbelt's `network-outbound ~/…`)
         assert_eq!(plain("network-outbound", &format!("{home}/s.sock")), "connecting to socket ~/s.sock");
         assert_eq!(plain("network-bind", &format!("{home}/s.sock")), "making socket ~/s.sock");
-        assert_eq!(plain("file-write-data", "/dev/ttys004"), "writing /dev/ttys004");
+        // A terminal (3c): why it's closed, the ones a run makes too, and what opens them — read or written
+        let tty = plain("file-write-data", "/dev/ttys004");
+        assert!(tty.starts_with("opening the terminal /dev/ttys004 — every terminal is closed"), "{tty}");
+        assert!(tty.ends_with("the run's panel (space m s) lets this project's commands open terminals"));
+        assert_eq!(plain("file-read-data", "/dev/ttys004"), tty);
+        assert_eq!(plain("file-write-data", "/dev/ttys"), "writing /dev/ttys", "no number, no terminal");
+        assert_eq!(plain("file-write-data", "/dev/ttysx1"), "writing /dev/ttysx1");
+        assert_eq!(plain("file-write-create", "/dev/ttys004"), tty, "`>` opens with O_CREAT");
+        assert_eq!(plain("file-read-metadata", "/dev/ttys004"), "looking at /dev/ttys004", "only an open");
+        assert_eq!(plain("file-write-unlink", "/dev/ttys004"), "deleting /dev/ttys004", "only an open");
+        assert_eq!(plain("file-write-mode", "/dev/ttys004"), "changing /dev/ttys004", "only an open");
+        assert_eq!(plain("file-write-rename", "/dev/ttys004"), "moving /dev/ttys004", "only an open");
         assert_eq!(plain("file-write-unlink", "/a"), "deleting /a");
         assert_eq!(plain("file-write-rename", "/a"), "moving /a");
         assert_eq!(plain("file-write-mode", "/a"), "changing /a");
@@ -7412,8 +7454,8 @@ mod tests {
 
     /// For real, on macOS — with harmless markers in a temp folder: writes land in the project and nowhere
     /// else, `.git` and `.tarae.toml` stay as they are, a symlink out doesn't help, localhost answers and
-    /// the rest of the network doesn't, and a pseudo-terminal opens. Inside a sandbox already (Claude's
-    /// own `cargo test`) none can start: the probe says so, and that's what's checked.
+    /// the rest of the network doesn't (terminals: `a_run_cant_open_another_terminal`). Inside a sandbox
+    /// already (Claude's own `cargo test`) none can start: the probe says so, and that's what's checked.
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_keeps_writes_in_the_project() {
@@ -7455,6 +7497,7 @@ mod tests {
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
+            terminals: false,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -7486,8 +7529,79 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(!sh("/usr/bin/nc -z -w 5 192.0.2.1 9").status.success());
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "refused, not timed out");
-        // A pseudo-terminal opens (without /dev/ptmx a pty test hangs instead of failing: measured)
-        assert!(sh("/usr/bin/script -q /dev/null /usr/bin/true").status.success());
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (3c): a terminal of the user's — a pty this test opens, as their shell's — can't be
+    /// read nor written by a run, and one the run makes itself can't either (`script`: `/dev/ptmx` opens, its
+    /// other end is refused — failing, not hanging); the project's grant (`allow::Grant::Terminals`, kept as
+    /// `A` keeps it) opens both, and what the run writes reaches the terminal. Harmless: the pty is the test's
+    /// own, and only a marker goes through it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_run_cant_open_another_terminal() {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        if skipped_inside("sandbox::tests::a_run_cant_open_another_terminal") {
+            return;
+        }
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-tty-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let root = t.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let (master, _slave) = crate::pty::open(24, 80).unwrap();
+        let mut name = [0u8; 128];
+        // SAFETY: TIOCPTYGNAME fills a 128-byte buffer with a NUL-terminated path.
+        let named = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCPTYGNAME as _, name.as_mut_ptr()) };
+        assert_eq!(named, 0);
+        let tty = std::ffi::CStr::from_bytes_until_nul(&name).unwrap().to_str().unwrap().to_string();
+        assert!(tty.starts_with("/dev/ttys"), "{tty}");
+        let store = t.join("state/sandbox.json");
+        crate::allow::keep(&store, &root, |a| a.add(&crate::allow::Grant::Terminals)).unwrap();
+        let kept = crate::allow::Store::read(Some(&store)).get(&root);
+        let none = crate::allow::Allowed::default();
+        for (scope, open) in [(&none, false), (&kept, true)] {
+            let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[scope], None);
+            let mut p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
+            w.onto(&mut p);
+            assert_eq!(p.terminals, open);
+            // (each within 10 s, else killed and failed: a pty refused must fail, not hang — its output is a
+            // line, so the pipes never fill while it's waited for)
+            let sh = |script: &str| {
+                let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+                c.current_dir(&root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                let mut child = c.spawn().unwrap();
+                let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while child.try_wait().unwrap().is_none() {
+                    if std::time::Instant::now() > end {
+                        child.kill().ok();
+                        child.wait().ok();
+                        panic!("{script}, granted {open}: still going after 10 s");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                child.wait_with_output().unwrap()
+            };
+            let said = |r: &std::process::Output| String::from_utf8_lossy(&r.stderr).into_owned();
+            let write = sh(&format!("printf tarae-marker > {tty}"));
+            let read = sh(&format!(": < {tty}"));
+            let made = sh("/usr/bin/script -q /dev/null /usr/bin/true");
+            for (r, what) in [(&write, "writing"), (&read, "reading"), (&made, "a pty of its own")] {
+                assert_eq!(r.status.success(), open, "{what}, granted {open}: {}", said(r));
+            }
+            if !open {
+                for (r, what) in [(&write, "writing"), (&read, "reading")] {
+                    assert!(said(r).contains("Operation not permitted"), "{what}: {}", said(r));
+                }
+                continue;
+            }
+            // (what the run wrote, from the test's end: the marker, as the terminal's line discipline passes it)
+            // SAFETY: the master is this test's own, live; nonblocking so a missing marker fails, not hangs.
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+            let mut got = [0u8; 64];
+            let n = std::fs::File::from(master.try_clone().unwrap()).read(&mut got).unwrap_or(0);
+            assert_eq!(&got[..n], b"tarae-marker");
+        }
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -7535,6 +7649,7 @@ mod tests {
                 watch: None,
                 granted: Vec::new(),
                 sockets: Vec::new(),
+                terminals: false,
                 refused: Vec::new(),
                 named_by: String::new(),
                 refused_asked: Vec::new(),
@@ -7615,6 +7730,7 @@ mod tests {
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
+            terminals: false,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -7682,6 +7798,7 @@ mod tests {
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
+            terminals: false,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -8732,6 +8849,7 @@ mod tests {
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
+            terminals: false,
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),

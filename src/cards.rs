@@ -225,6 +225,7 @@ pub enum Verb {
     Read,
     Write,
     Port,
+    Terminals,
 }
 
 /// What a card asks for, in the capability model's terms.
@@ -277,6 +278,7 @@ impl Decision {
             Decision::Grant(Verb::Read) => "grant:read",
             Decision::Grant(Verb::Write) => "grant:write",
             Decision::Grant(Verb::Port) => "grant:port",
+            Decision::Grant(Verb::Terminals) => "grant:terminals",
             Decision::Socket => "socket",
             Decision::Outside => "outside",
             Decision::NoSandbox => "no-sandbox",
@@ -307,6 +309,7 @@ pub fn decide(r: &Request) -> Decision {
         Request::Grant(crate::allow::Grant::Read(_)) => Decision::Grant(Verb::Read),
         Request::Grant(crate::allow::Grant::Write(_)) => Decision::Grant(Verb::Write),
         Request::Grant(crate::allow::Grant::Port(_)) => Decision::Grant(Verb::Port),
+        Request::Grant(crate::allow::Grant::Terminals) => Decision::Grant(Verb::Terminals),
         Request::Grant(crate::allow::Grant::Socket(_)) => Decision::Socket,
         Request::Grant(crate::allow::Grant::Host(..)) => Decision::Host,
         Request::Host(_) => Decision::Host,

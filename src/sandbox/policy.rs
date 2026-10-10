@@ -69,6 +69,8 @@ pub struct Policy {
     pub granted: Vec<String>,
     /// Unix sockets outside the project it may connect to, each that one file (`allow::Grant::Socket`).
     pub sockets: Vec<PathBuf>,
+    /// macOS: the terminals (`TERMINALS`) open to it, every one — the project's grant (`allow::Grant::Terminals`).
+    pub terminals: bool,
     /// The folders the checkout's build tool named that stay closed, and why (`asked_dir_verdict`) — said with
     /// the result and on the panel — and who named them (`builds-said`: `cargo`).
     pub refused: Vec<(PathBuf, String)>,
@@ -205,6 +207,12 @@ impl Policy {
             ));
         }
         p.push_str(&devices_rule());
+        // The terminals: closed, read and write, but where the project's grant opens them (`TERMINALS`). After
+        // every file allow, so none opens them
+        match self.terminals {
+            true => p.push_str(&format!("(allow file-write* (regex #\"{TERMINALS}\"))\n")),
+            false => p.push_str(&deny(&format!("file-read-data file-write* (regex #\"{TERMINALS}\")"))),
+        }
         // The network open goes beyond this machine only through tarae's proxy, at the run's own port (step 5d:
         // another run's isn't reached — M3d); the port is a number tarae made, never text from outside
         let proxied = self.proxy.as_ref().filter(|_| self.network).map(|r| r.port);
@@ -458,6 +466,9 @@ impl Policy {
         if r.kept_holds(&self.root, real) || r.copies.instead_of(real).is_some() {
             return false;
         }
+        if is_terminal(real) {
+            return self.terminals;
+        }
         match &r.home {
             Some(home) if real.starts_with(home) => {
                 real.starts_with(&self.root)
@@ -489,7 +500,7 @@ impl Policy {
 
     /// Whether the profile lets a run write `real` — its rules, in Rust (the devices aside).
     pub fn writes_allow(&self, real: &Path) -> bool {
-        if self.files.iter().any(|f| f == real) {
+        if self.files.iter().any(|f| f == real) || is_terminal(real) && self.terminals {
             return true;
         }
         if real.starts_with(&self.root) {
@@ -770,6 +781,7 @@ impl Policy {
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
+            terminals: false,
             refused,
             refused_asked,
             named_by: env.builder.who.clone(),
