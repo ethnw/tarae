@@ -712,6 +712,25 @@ impl Progress {
     }
 }
 
+impl Client {
+    /// Whose its log lines are: the session whose checkout holds its folders — one that serves several
+    /// sessions' checkouts is each of theirs, so tarae's own.
+    pub fn log(&self) -> crate::log::Session {
+        log_of(&self.roots)
+    }
+}
+
+/// Whose a server's log lines are, serving `roots`: the one session whose checkout holds them all, else
+/// tarae's own.
+pub(crate) fn log_of(roots: &[PathBuf]) -> crate::log::Session {
+    let Some(first) = roots.first() else { return crate::log::Session::none() };
+    let s = crate::log::Session::of(first);
+    match roots.iter().all(|r| crate::log::Session::of(r) == s) {
+        true => s,
+        false => crate::log::Session::none(),
+    }
+}
+
 pub struct Client {
     pub id: ClientId,
     pub name: String,
@@ -849,6 +868,9 @@ impl Client {
         let name = spec.name.clone();
         let tool = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
         let events = events_err;
+        // (whose, by the folders it starts with: a checkout joining a shared one later isn't seen here)
+        let log = log_of(roots);
+        let said_start = log.clone();
         crate::event::thread("tarae-lsp-err", move || {
             let mut lines = BufReader::new(&mut stderr);
             let mut line = String::new();
@@ -858,7 +880,7 @@ impl Client {
                 line.clear();
                 match lines.read_line(&mut line) {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => crate::log::line(&name, "stderr", &line),
+                    Ok(_) => log.line(&name, "stderr", &line),
                 }
                 let Some(tool) = tool.clone() else { continue };
                 // (read at the first line: most servers never print one)
@@ -870,7 +892,7 @@ impl Client {
                 }
             }
         });
-        crate::log::line(
+        said_start.line(
             &spec.name,
             "start",
             &format!("{} {} (in {})", spec.command, spec.args.join(" "), root.display()),

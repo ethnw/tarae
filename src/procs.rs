@@ -1833,10 +1833,11 @@ impl Editor {
     /// Checks recorded; what the new ones say to do, done.
     fn procs_found(&mut self, found: Vec<Finding>, at: SystemTime) {
         for f in self.procs.record(&found, at) {
-            if let Act::StopServer(cid) = f.act
-                && let Some(name) = self.lsp_stopped(cid)
-            {
-                crate::log::line(&name, "stop", &format!("{name} stopped by tarae's check: {}", f.what));
+            if let Act::StopServer(cid) = f.act {
+                let log = self.server_log(cid);
+                if let Some(name) = self.lsp_stopped(cid) {
+                    log.line(&name, "stop", &format!("{name} stopped by tarae's check: {}", f.what));
+                }
             }
         }
     }
@@ -1911,8 +1912,9 @@ impl Editor {
                 self.procs_wake(Wake::Now);
             }
             Kind::Lsp(cid) => {
+                let log = self.server_log(cid);
                 if let Some(name) = self.lsp_stopped(cid) {
-                    crate::log::line(&name, "stop", &format!("{name} stopped from :procs"));
+                    log.line(&name, "stop", &format!("{name} stopped from :procs"));
                     gone(self, &name, Some(SERVER_AGAIN));
                 }
             }
@@ -1989,8 +1991,9 @@ impl Editor {
             Kind::Lsp(cid) => {
                 let docs: Vec<_> =
                     self.docs.iter().filter(|d| d.lsp.clients().any(|c| c == cid)).map(|d| d.id).collect();
+                let log = self.server_log(cid);
                 let Some(name) = self.lsp_stopped(cid) else { return };
-                crate::log::line(&name, "stop", &format!("{name} restarted from :procs"));
+                log.line(&name, "stop", &format!("{name} restarted from :procs"));
                 if docs.is_empty() {
                     self.set_status(format!("{name} stopped — no file uses it, so it starts with the next"));
                 } else {

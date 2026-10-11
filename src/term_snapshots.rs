@@ -2754,6 +2754,9 @@ fn test_panel_says_when_no_test_ran() {
 /// The terminal panel under the code with a program's colored output, the keys in it.
 #[test]
 fn snapshot_terminal_panel() {
+    if crate::sandbox::no_pty_here("term::snapshot_tests::snapshot_terminal_panel") {
+        return;
+    }
     let mut s = Shot::new(100, 24);
     s.file("src/demo.rs", DEMO_RS);
     let script = "printf '\\033[1;32m$\\033[0m cargo test\\r\\nrunning 3 tests\\r\\ntest words ... \\033[32mok\\033[0m\\r\\n\
@@ -3450,6 +3453,9 @@ fn the_picker_floats_with_equal_margins() {
 #[test]
 fn the_bottom_slot_shows_its_panels_as_tabs() {
     use crate::sizes::Slot;
+    if crate::sandbox::no_pty_here("term::snapshot_tests::the_bottom_slot_shows_its_panels_as_tabs") {
+        return;
+    }
     let (w, h) = (120u16, 30u16);
     let mut s = Shot::new(w, h);
     s.file("src/demo.rs", DEMO_RS);

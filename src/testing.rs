@@ -751,7 +751,7 @@ impl Editor {
             let done = move |ed: &mut Editor| {
                 // (a host its proxy holds for it has no one left to ask for — its card goes)
                 crate::hosts::run_ended(ed, run_id);
-                let session = ed.session.label().to_string();
+                let session = ed.session.log();
                 let Some(r) = ed.session.test_run.as_mut().filter(|r| r.generation == generation) else {
                     return;
                 };

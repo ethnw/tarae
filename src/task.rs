@@ -641,7 +641,7 @@ impl Editor {
                     outside,
                 };
                 let warned = crate::tools::warned(self, on);
-                crate::cards::ran_warned(&self.session.name, &task.cmd, &warned);
+                crate::cards::ran_warned(&self.session.log(), &task.cmd, &warned);
                 warned
             });
             crate::chat::Ran::of(g, ride.card, ride.reason.as_deref(), warned)
@@ -881,7 +881,7 @@ impl Editor {
             let done = move |ed: &mut Editor| {
                 // (a host its proxy holds for it has no one left to ask for — its card goes)
                 crate::hosts::run_ended(ed, run_id);
-                let session = ed.session.label().to_string();
+                let session = ed.session.log();
                 let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
                     return;
                 };

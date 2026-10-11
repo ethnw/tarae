@@ -102,13 +102,15 @@ pub fn run(cmd: &[String], cwd: &Path, ended: &Path, limit: Duration) -> Ran {
 }
 
 impl Editor {
-    /// `session.ended`, if set, for `root` — a session's checkout just removed.
-    pub fn session_ended(&mut self, root: &Path) {
+    /// `session.ended`, if set, for `root` — session `name`'s checkout just removed (the session itself gone:
+    /// its name comes along for its last log line).
+    pub fn session_ended(&mut self, root: &Path, name: &str) {
         let cmd = self.config.session_ended.clone();
         if cmd.is_empty() {
             return;
         }
         let (cwd, ended): (PathBuf, PathBuf) = (self.start_root(), root.to_path_buf());
+        let log = crate::log::Session::named(name);
         self.events.shared_jobs().spawn(move || {
             let ran = run(&cmd, &cwd, &ended, LIMIT);
             let shown = cmd.join(" ");
@@ -118,7 +120,7 @@ impl Editor {
             };
             let printed: Vec<&str> = ran.out.iter().chain(&ran.err).map(String::as_str).collect();
             let text = format!("{shown} for {}: {how}\n{}", ended.display(), printed.join("\n"));
-            crate::log::line("session.ended", level, &text);
+            log.line("session.ended", level, &text);
             move |ed: &mut Editor| match ran.result {
                 // (nothing on screen changed — the log has it)
                 Ok(_) => ed.unchanged = true,

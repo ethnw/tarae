@@ -115,16 +115,7 @@ fn task_panel(ed: &mut Editor) {
 /// scene of `SCENES` that does), which needs a real pty — and inside macOS's sandbox a pty's other end doesn't
 /// open (EPERM — `sandbox::TERMINALS`), as `terminal::tests` skip for.
 fn no_pty_here(test: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    return crate::sandbox::skipped_inside_for(
-        &format!("uistate::tests::{test}"),
-        "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
-    );
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = test;
-        false
-    }
+    crate::sandbox::no_pty_here(&format!("uistate::tests::{test}"))
 }
 
 /// A terminal whose program sits there (`sleep`) — it hangs up when the editor goes.

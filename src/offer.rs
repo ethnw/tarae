@@ -402,7 +402,7 @@ impl Offer {
     }
 
     /// Its `card` line: answered (`y` `a` `A` `n`) or dropped — in `session`.
-    fn said(&self, session: &str, answer: &str) {
+    fn said(&self, session: &crate::log::Session, answer: &str) {
         crate::cards::said(session, self, answer);
     }
 
@@ -911,11 +911,11 @@ impl crate::editor::Editor {
     /// `drop_cards`, the gone ring told `why`.
     pub fn drop_cards_for(&mut self, gone: impl Fn(&What) -> bool, why: &str) {
         let front = !self.background();
-        let label = self.session.label();
+        let session = self.session.log();
         let mut dropped = Vec::new();
         for o in self.session.parked.iter().chain(self.offers.iter().filter(|_| front)) {
             if gone(&o.what) {
-                o.said(label, "dropped");
+                o.said(&session, "dropped");
                 dropped.push(o.id);
             }
         }
@@ -1167,7 +1167,7 @@ impl crate::editor::Editor {
             return self.offer_refused(why);
         }
         let mut o = self.offers.remove(0);
-        o.said(self.session.label(), &key.to_string());
+        o.said(&self.session.log(), &key.to_string());
         self.card_how(o.id, format!("answered {key}"));
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
@@ -1291,7 +1291,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(self.session.label(), "s");
+        o.said(&self.session.log(), "s");
         self.card_how(o.id, "answered s");
         self.card_answered(o.id);
         match o.what {
@@ -1311,7 +1311,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(self.session.label(), "D");
+        o.said(&self.session.log(), "D");
         self.card_how(o.id, "answered D");
         self.card_answered(o.id);
         if let What::Recover(f) = o.what {
@@ -1364,7 +1364,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(self.session.label(), &c.to_string());
+        o.said(&self.session.log(), &c.to_string());
         self.card_how(o.id, format!("answered {c}"));
         self.card_answered(o.id);
         if let What::RebaseHeld(h) = o.what {
@@ -1395,7 +1395,7 @@ impl crate::editor::Editor {
             return;
         }
         let mut o = self.offers.remove(0);
-        o.said(self.session.label(), if both { "D" } else { "R" });
+        o.said(&self.session.log(), if both { "D" } else { "R" });
         self.card_how(o.id, if both { "answered D" } else { "answered R" });
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
@@ -1676,7 +1676,7 @@ impl crate::editor::Editor {
 
     fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
         let key = if scope == crate::allow::Scope::Always { "A" } else { "a" };
-        o.said(self.session.label(), key);
+        o.said(&self.session.log(), key);
         self.card_how(o.id, format!("answered {key}"));
         self.card_answered(o.id);
         match o.what {
@@ -1712,7 +1712,7 @@ impl crate::editor::Editor {
     /// Card `o`, taken off by key `key` (one of its own letters, past `y` `n`): its `card` line, how it went
     /// for the gone ring, and its call told it's answered.
     fn offer_answered(&mut self, o: &Offer, key: char) {
-        o.said(self.session.label(), &key.to_string());
+        o.said(&self.session.log(), &key.to_string());
         self.card_how(o.id, format!("answered {key}"));
         self.card_answered(o.id);
     }
@@ -1722,7 +1722,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(self.session.label(), "n");
+        o.said(&self.session.log(), "n");
         self.card_how(o.id, "answered n");
         self.card_answered(o.id);
         match o.what {

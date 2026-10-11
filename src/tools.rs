@@ -212,7 +212,7 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
 /// output beside it.
 fn sized(ed: &mut Editor, tool: &str, r: &Result<String, String>, output: Option<usize>) {
     let (Ok(text) | Err(text)) = r;
-    let session = ed.session.label().to_string();
+    let session = ed.session.log();
     ed.session.usage.tool_result(&session, tool, text.len(), output);
 }
 
@@ -2990,7 +2990,7 @@ fn run_changes_now(
                 Ok(_) => String::new(),
                 Err(e) => {
                     let line = format!("snapshot: what `{cmd}` changed can't be told — {e}");
-                    crate::log::line("tarae", "info", &line);
+                    ed.session.log().line("tarae", "info", &line);
                     String::new()
                 }
             };
@@ -4122,14 +4122,17 @@ mod tests {
         // (1..=1000, a newline each: what the command printed, all of it)
         let whole: usize = (1..=1000).map(|n: usize| n.to_string().len() + 1).sum();
 
-        let lines: Vec<String> =
-            log.lines().into_iter().filter(|l| l.contains(&format!("session={name} "))).collect();
+        let lines: Vec<String> = log
+            .lines()
+            .into_iter()
+            .filter_map(|l| l.strip_prefix(&format!("@{name}  ")).map(String::from))
+            .filter(|l| l.starts_with("tokens  info  "))
+            .collect();
         let num = |l: &str, key: &str| -> usize {
             let at = l.find(key).unwrap_or_else(|| panic!("{key} in {l}")) + key.len();
             l[at..].split(' ').next().unwrap().parse().unwrap()
         };
         assert_eq!(lines.len(), 4, "a message and three tool results: {lines:#?}");
-        assert!(lines.iter().all(|l| l.starts_with("tokens  info  ")), "{lines:#?}");
         // The message: its editor context a part of it — sizes, never its words
         let message = &lines[0];
         assert!(message.contains(" message ") && !message.contains("tokens go"), "{message}");

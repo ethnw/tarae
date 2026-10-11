@@ -334,7 +334,7 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
     // isn't asked before `llm.stuck-after-outside`; marked so, the next looks wait that long)
     let (_, outside) = afters(&ed.config.llm);
     if !peers.is_empty() && s.quiet < outside {
-        crate::log::line(
+        ed.session.log().line(
             "stuck",
             "held",
             &format!("pid {}: {} — connected to {}", s.pid, said(&s), peers.join(", ")),
@@ -371,7 +371,8 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
         }
     };
     let o = card(s, &label, &lines, &peers);
-    crate::log::line("stuck", "ask", &format!("{label}: {}", o.question.lines().next().unwrap_or_default()));
+    let asks = format!("{label}: {}", o.question.lines().next().unwrap_or_default());
+    ed.session.log().line("stuck", "ask", &asks);
     ed.push_offer(o);
 }
 
@@ -461,7 +462,7 @@ pub fn stop(ed: &mut Editor, s: &Stuck) {
     }
     .unwrap_or((None, None));
     let Some(pid) = pid else { return ed.set_status("that run ended already") };
-    crate::log::line("stuck", "stop", &format!("pid {pid}: {}", said(s)));
+    ed.session.log().line("stuck", "stop", &format!("pid {pid}: {}", said(s)));
     let started = crate::procs::read(pid).map(|o| o.started);
     crate::dap::term_group(pid);
     // (what it started in a container engine — a quiet `docker run`'s work goes on there — with it, by name:

@@ -98,12 +98,17 @@ through (the review note at `readonly.rs:630`). A mistake in any of them is a wa
 One line per card, when it's answered or dropped (built in P0 — `src/cards.rs`):
 
 ```
-20:01:13  tarae  card  size · card#12 · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s
-20:01:40  tarae  card  ra-policy · card#13 · read · why=read · class=home · shadow=grant:read · y · 1.4s · up 1.9s
-20:02:02  tarae  card  frictions5 · card#14 · run · why=socket · shadow=socket · y · 6.2s · up 6.3s
-20:02:30  tarae  card  size · card#15 · run · why=reads-outside · class=temp,elsewhere · shadow=grant:read · n · not drawn · up 0.4s
-20:03:10  tarae  card  size · card#16 · run · why=not-a-check:awk · shadow=none · same=#12 · y · 1.1s · up 1.3s
+20:01:13  @size            tarae            card     card#12 · run · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s
+20:01:40  @ra-policy       tarae            card     card#13 · read · why=read · class=home · shadow=grant:read · y · 1.4s · up 1.9s
+20:02:02  @frictions5      tarae            card     card#14 · run · why=socket · shadow=socket · y · 6.2s · up 6.3s
+20:02:30  @size            tarae            card     card#15 · run · why=reads-outside · class=temp,elsewhere · shadow=grant:read · n · not drawn · up 0.4s
+20:03:10  @size            tarae            card     card#16 · run · why=not-a-check:awk · shadow=none · same=#12 · y · 1.1s · up 1.3s
 ```
+
+- `@size`: the session, in the log's own column (`log::Session`, linux7 piece 9) — as the session list names it
+  (the checkout tarae started in by its branch), cut to the column with a `…` past 15 characters
+  (`@fix-login-ever…`). `grep @size tarae.log` is one session's lines; `warned` and `denied` lines carry it the
+  same way.
 
 - `card#<id>`: the card (cardburden 3), so a later card's `same=#12` — a run card the same as one answered
   before, `same=#12:changed` when what it runs changed since — names a line here.

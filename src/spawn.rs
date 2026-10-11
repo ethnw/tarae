@@ -497,6 +497,11 @@ mod tests {
     /// in, and the handed pipe would slip into other tests' children here.
     #[test]
     fn every_way_of_starting_a_program_hands_it_only_its_own_descriptors() {
+        // (its child holds a terminal panel's pty and one of its own)
+        let test = "spawn::tests::every_way_of_starting_a_program_hands_it_only_its_own_descriptors";
+        if crate::sandbox::no_pty_here(test) {
+            return;
+        }
         let out = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "spawn::tests::descriptors_in_its_own_process", "--ignored", "--nocapture"])
             .env("TARAE_DESCRIPTORS", "1")

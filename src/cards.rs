@@ -349,11 +349,11 @@ impl Asked {
     }
 }
 
-/// The `card` line: `<session> · card#<id> · <kind> · why=… · class=… · shadow=… · same=#41 · warn=… ·
-/// <answer> · <drawn → answered> · up <asked → answered>` (the kind as `tarae state` names it, `Offer::kind`;
-/// `class` only for reads; `same` only for a run card the same as one answered before — that card's id,
-/// `same=#41:changed` when something changed since; `warn` the warnings it said, by id).
-pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
+/// The `card` line: `card#<id> · <kind> · why=… · class=… · shadow=… · same=#41 · warn=… · <answer> ·
+/// <drawn → answered> · up <asked → answered>` (the kind as `tarae state` names it, `Offer::kind`; `class` only
+/// for reads; `same` only for a run card the same as one answered before — that card's id, `same=#41:changed`
+/// when something changed since; `warn` the warnings it said, by id). Its session is the log's column.
+pub fn line(o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
     let classes: Vec<Class> = match &asked.request {
         Request::Run { reads, .. } => reads.clone(),
         Request::Read(c) => vec![*c],
@@ -377,7 +377,7 @@ pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant)
     let took = |at: Instant| crate::term::duration(now.saturating_duration_since(at).as_secs_f32());
     let drawn = o.drawn.get().map_or_else(|| "not drawn".to_string(), took);
     format!(
-        "{session} · card#{} · {} · why={}{class} · shadow={}{same} · {answer} · {drawn} · up {}",
+        "card#{} · {} · why={}{class} · shadow={}{same} · {answer} · {drawn} · up {}",
         o.id,
         o.kind(),
         asked.why.word(),
@@ -389,25 +389,25 @@ pub fn line(session: &str, o: &Offer, asked: &Asked, answer: &str, now: Instant)
 /// Card `o` was answered (`y` `a` `A` `n`, or a letter of its own) or dropped unanswered: its line — what it
 /// asked, or `why=own · shadow=own` for tarae's own questions (cardburden 5: a preflight's, a stuck run's, a
 /// review's end were never measured).
-pub fn said(session: &str, o: &Offer, answer: &str) {
+pub fn said(session: &crate::log::Session, o: &Offer, answer: &str) {
     let own = Asked::new(Why::Own, Request::Own);
     let asked = o.asked.as_ref().unwrap_or(&own);
-    logged("card", &line(session, o, asked, answer, Instant::now()));
+    logged(session, "card", &line(o, asked, answer, Instant::now()));
 }
 
 /// A command of Claude's that ran with no card (a check, an `a` before) and warns of something (`cardwarn.rs`):
-/// a `warned` line — `<session> · <command> · warn=<ids>` — as its chat row says it (D2: a warning doesn't ask).
-pub fn ran_warned(session: &str, cmd: &str, warned: &[crate::cardwarn::Warned]) {
+/// a `warned` line — `<command> · warn=<ids>` — as its chat row says it (D2: a warning doesn't ask).
+pub fn ran_warned(session: &crate::log::Session, cmd: &str, warned: &[crate::cardwarn::Warned]) {
     if warned.is_empty() {
         return;
     }
     let ids: Vec<&str> = warned.iter().map(|w| w.id.as_str()).collect();
-    logged("warned", &format!("{session} · {} · warn={}", cmd.trim().replace('\n', " "), ids.join(",")));
+    logged(session, "warned", &format!("{} · warn={}", cmd.trim().replace('\n', " "), ids.join(",")));
 }
 
-/// The `denied` line for a run the sandbox denied something: `<session> · <what ran> · N things, M times:
-/// <each, as Claude reads it>` — None when it denied nothing (or couldn't be watched).
-pub fn denied_line(session: &str, what: &str, b: &crate::sandbox::Blocked) -> Option<String> {
+/// The `denied` line for a run the sandbox denied something: `<what ran> · N things, M times: <each, as
+/// Claude reads it>` — None when it denied nothing (or couldn't be watched).
+pub fn denied_line(what: &str, b: &crate::sandbox::Blocked) -> Option<String> {
     if b.total == 0 {
         return None;
     }
@@ -417,7 +417,7 @@ pub fn denied_line(session: &str, what: &str, b: &crate::sandbox::Blocked) -> Op
     }
     let what = what.trim().replace('\n', " ");
     Some(format!(
-        "{session} · {what} · {} thing{}, {} time{}: {}",
+        "{what} · {} thing{}, {} time{}: {}",
         b.distinct,
         if b.distinct == 1 { "" } else { "s" },
         b.total,
@@ -427,21 +427,22 @@ pub fn denied_line(session: &str, what: &str, b: &crate::sandbox::Blocked) -> Op
 }
 
 /// A run ended under the sandbox's watch: what it denied, to the log.
-pub fn denied(session: &str, what: &str, w: &crate::sandbox::Watch) {
-    if let Some(l) = denied_line(session, what, &w.blocked()) {
-        logged("denied", &l);
+pub fn denied(session: &crate::log::Session, what: &str, w: &crate::sandbox::Watch) {
+    if let Some(l) = denied_line(what, &w.blocked()) {
+        logged(session, "denied", &l);
     }
 }
 
-fn logged(level: &str, line: &str) {
-    crate::log::line("tarae", level, line);
+fn logged(session: &crate::log::Session, level: &str, line: &str) {
+    session.line("tarae", level, line);
     #[cfg(test)]
-    LOGGED.with(|l| l.borrow_mut().push(format!("{level} {line}")));
+    LOGGED.with(|l| l.borrow_mut().push(format!("{level} {} · {line}", session.name().unwrap_or_default())));
 }
 
 #[cfg(test)]
 thread_local! {
-    /// (tests: the lines logged on this thread, each after its level — `card …`, `denied …`)
+    /// (tests: the lines logged on this thread, each after its level and its session's name — `card s · …`,
+    /// `denied s · …`)
     pub static LOGGED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -520,8 +521,8 @@ mod tests {
         o.since = t0;
         let at = |s: u64| t0 + std::time::Duration::from_millis(s);
         assert_eq!(
-            line("size", &o, &asked, "n", at(4200)),
-            "size · card#12 · screen · why=reads-outside · class=temp,home · shadow=grant:read · n · not drawn · \
+            line(&o, &asked, "n", at(4200)),
+            "card#12 · screen · why=reads-outside · class=temp,home · shadow=grant:read · n · not drawn · \
              up 4.2s"
         );
         o.drawn.set(Some(at(3300)));
@@ -530,15 +531,15 @@ mod tests {
             Request::Run { past: Past::No, sandboxed: true, reads: vec![] },
         );
         assert_eq!(
-            line("size", &o, &a, "a", at(4200)),
-            "size · card#12 · screen · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s"
+            line(&o, &a, "a", at(4200)),
+            "card#12 · screen · why=not-a-check:awk · shadow=none · a · 900ms · up 4.2s"
         );
-        let same = |unchanged| line("size", &o, &a.clone().same_as(9, unchanged), "y", at(4200));
+        let same = |unchanged| line(&o, &a.clone().same_as(9, unchanged), "y", at(4200));
         assert!(same(true).contains(" · shadow=none · same=#9 · y · "), "{}", same(true));
         assert!(same(false).contains(" · shadow=none · same=#9:changed · y · "), "{}", same(false));
         // (cardburden 4: the warnings it said, by id)
         let warned = a.clone().warned(vec!["docker-own-config".into(), "outward".into()]);
-        let l = line("size", &o, &warned, "y", at(4200));
+        let l = line(&o, &warned, "y", at(4200));
         assert!(l.contains(" · shadow=none · warn=docker-own-config,outward · y · "), "{l}");
     }
 
@@ -573,7 +574,7 @@ mod tests {
     #[test]
     fn a_runs_denials_are_one_line() {
         let mut b = crate::sandbox::Blocked::default();
-        assert_eq!(denied_line("s", "x", &b), None, "nothing denied, no line");
+        assert_eq!(denied_line("x", &b), None, "nothing denied, no line");
         let d = |op: &str, t: &str| crate::sandbox::Denial {
             process: "touch".into(),
             op: op.into(),
@@ -582,13 +583,13 @@ mod tests {
         b.add(d("file-write-create", "/opt/a"));
         b.add(d("file-write-create", "/opt/a"));
         assert_eq!(
-            denied_line("size", "touch /opt/a\n", &b).unwrap(),
-            "size · touch /opt/a · 1 thing, 2 times: writing /opt/a (file-write-create, touch)"
+            denied_line("touch /opt/a\n", &b).unwrap(),
+            "touch /opt/a · 1 thing, 2 times: writing /opt/a (file-write-create, touch)"
         );
         for i in 0..crate::sandbox::DENIALS_KEPT + 1 {
             b.add(d("file-write-create", &format!("/opt/{i}")));
         }
-        let l = denied_line("size", "x", &b).unwrap();
-        assert!(l.starts_with("size · x · 12 things, 13 times: ") && l.ends_with("; … and 2 more"), "{l}");
+        let l = denied_line("x", &b).unwrap();
+        assert!(l.starts_with("x · 12 things, 13 times: ") && l.ends_with("; … and 2 more"), "{l}");
     }
 }

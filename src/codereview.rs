@@ -2519,7 +2519,7 @@ pub fn hunk_seen(ed: &mut Editor) {
                 true => format!("{} lines left to look at", g.left(looked).len()),
                 false => format!("{} lines", g.lines),
             };
-            crate::log::line(
+            ed.session.log().line(
                 "review",
                 "unread",
                 &format!(
@@ -2577,7 +2577,7 @@ pub fn hunk_seen(ed: &mut Editor) {
             || ed.toasts.iter().any(|t| t.step == Some("review-binary"));
         if !pending && (ed.doc().id, ed.doc().selection().clone()) == before {
             let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-            crate::log::line("review", "stuck", &format!("space v h went on to where it was: {said}"));
+            ed.session.log().line("review", "stuck", &format!("space v h went on to where it was: {said}"));
             ed.set_warning(
                 "space v h can't take the high-risk change here — it isn't under the cursor as graded \
                  (the log says where): mark the file viewed with space v m and tell us",

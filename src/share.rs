@@ -468,7 +468,8 @@ impl Editor {
         let name = self.client(a).map(|c| c.name.clone()).unwrap_or_default();
         let list = self.lsp.share.joining.entry(a).or_default();
         if !list.contains(&root) {
-            crate::log::line(&name, "share", &format!("{} joins the shared {name}", root.display()));
+            let joins = format!("{} joins the shared {name}", root.display());
+            crate::log::Session::of(&root).line(&name, "share", &joins);
             list.push(root);
         }
         self.share_wake();

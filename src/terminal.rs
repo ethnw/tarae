@@ -622,16 +622,7 @@ mod tests {
     /// sandbox a pty's other end doesn't open (EPERM, measured — `sandbox::TERMINALS`) — the test would fail, or
     /// wait forever on output that never comes.
     fn no_pty_here(test: &str) -> bool {
-        #[cfg(target_os = "macos")]
-        return crate::sandbox::skipped_inside_for(
-            &format!("terminal::tests::{test}"),
-            "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
-        );
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = test;
-            false
-        }
+        crate::sandbox::no_pty_here(&format!("terminal::tests::{test}"))
     }
 
     #[test]

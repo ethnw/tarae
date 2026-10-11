@@ -877,7 +877,7 @@ impl Editor {
     /// conversation resumed · `n` stays. One such card a session at a time.
     pub fn money_out(&mut self, m: Money) {
         let said = m.said();
-        crate::log::line("claude", "warn", &said);
+        self.session.log().line("claude", "warn", &said);
         let refused = self.plan_refused().map(crate::limits::said);
         if let Some(c) = self.session.chat.as_mut() {
             c.note(&match &refused {

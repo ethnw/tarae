@@ -1061,6 +1061,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
     let wrong = |c: &Chat, said: Option<&str>| {
         c.billing.and_then(|b| crate::billing::checked(b, keep_key, crate::billing::Role::Chat, said))
     };
+    let log = ed.session.log();
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation == generation) else { return };
     match ev {
         StreamEv::Thinking => {
@@ -1117,7 +1118,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             ed.session.usage.cli = version;
             // Not the credential its billing gives: this turn stops, and the claude at its end — said
             if let Some(said) = wrong(c, key_source.as_deref()) {
-                crate::log::line("claude", "warn", &said);
+                log.line("claude", "warn", &said);
                 c.note(&said);
                 c.stopping = true;
                 c.to_claude(llm::interrupt_message());
@@ -1136,7 +1137,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             c.models = models;
             // Not the credential its billing gives, as it starts: it stops — said
             if let Some(said) = wrong(c, key_source.as_deref()) {
-                crate::log::line("claude", "warn", &said);
+                log.line("claude", "warn", &said);
                 c.note(&said);
                 c.kill();
             }
@@ -1550,7 +1551,7 @@ fn submit_as(
             format!("{context}\n{}", blocks.join("\n"))
         }
     };
-    let session = ed.session.label().to_string();
+    let session = ed.session.log();
     let Some(c) = &mut ed.session.chat else { return false };
     let Some(p) = &mut c.proc else { return false };
     // What happened to its edits since (a turn undone): Claude's memory still has them

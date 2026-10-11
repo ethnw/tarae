@@ -3012,20 +3012,17 @@ pub(crate) fn run_policy_in(
     let (mut p, found) = policy_computed(root, llm, reads, here);
     // (a run without its own folder would have the temp folders, which every run writes, as its `TMPDIR` and
     // tools' homes, and no tag its denials are watched by: it doesn't start)
+    let log = crate::log::Session::of(root);
     let run = run_folder(&p, here).map_err(|why| {
-        crate::log::line("sandbox", "warning", &why);
+        log.line("sandbox", "warning", &why);
         format!("The sandbox gives each command a folder of its own, and {why}, then run it again.")
     })?;
     for_its_run(&mut p, Some(run), reads, here, &found);
     if let Some((own, tool)) = found.own {
         match own_build_made(&own, &tool) {
-            Ok(true) => {
-                crate::log::line("sandbox", "info", &format!("made {} for its first build", own.display()))
-            }
+            Ok(true) => log.line("sandbox", "info", &format!("made {} for its first build", own.display())),
             Ok(false) => {}
-            Err(e) => {
-                crate::log::line("sandbox", "warning", &format!("the checkout's own build folder: {e}"))
-            }
+            Err(e) => log.line("sandbox", "warning", &format!("the checkout's own build folder: {e}")),
         }
     }
     Ok(p)
@@ -3134,7 +3131,11 @@ fn for_its_run(
                 true
             }
             Err(e) => {
-                crate::log::line("sandbox", "warning", &format!("kept home {}: {e}", k.home.display()));
+                crate::log::Session::of(&p.root).line(
+                    "sandbox",
+                    "warning",
+                    &format!("kept home {}: {e}", k.home.display()),
+                );
                 dropped.push(k.home.clone());
                 false
             }
@@ -4102,6 +4103,22 @@ pub(crate) fn skipped_inside_for(test: &str, why: &str) -> bool {
     );
     let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     true
+}
+
+/// Whether test `test` (its full path), which opens a pty — a terminal panel, `pty::open` — skips itself here:
+/// inside macOS's sandbox a run can't open a pty's other end (`TERMINALS`). Elsewhere it runs.
+#[cfg(test)]
+pub(crate) fn no_pty_here(test: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    return skipped_inside_for(
+        test,
+        "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = test;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -7197,7 +7214,7 @@ mod tests {
         let r = g.report(&[]);
         assert!(r.starts_with("The sandbox blocked nothing. In tarae's sandbox"), "{r}");
         assert_eq!(panel_line(Some(&g), true, std::time::Instant::now()), None, "nothing on the panel");
-        assert_eq!(crate::cards::denied_line("s", "go vet", &w.blocked()), None);
+        assert_eq!(crate::cards::denied_line("go vet", &w.blocked()), None);
         // (a read there isn't quieted: only Go's own writes)
         assert!(!quiet(&denial("file-read-data", &format!("{home}/Library/Application Support/go/env"))));
         // A shell's setup in home, closed on purpose: said calmly, not as blocked — no "tell the user"

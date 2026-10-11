@@ -612,7 +612,13 @@ impl Usage {
 
     /// A result of tarae's tool `tool` went to session `session`'s conversation: `sent` bytes — of `output`, a
     /// run's whole output. One `tokens` log line, and counted for `:usage`.
-    pub fn tool_result(&mut self, session: &str, tool: &str, sent: usize, output: Option<usize>) {
+    pub fn tool_result(
+        &mut self,
+        session: &crate::log::Session,
+        tool: &str,
+        sent: usize,
+        output: Option<usize>,
+    ) {
         let extra = output.map(|o| format!(" output={o}")).unwrap_or_default();
         size_line(session, &format!("tool={tool}"), sent, &extra);
         if let Some(c) = &mut self.conv {
@@ -630,18 +636,14 @@ const BYTES_PER_TOKEN: usize = 4;
 
 /// The `tokens` log line for `bytes` of `what` (`tool=search`, `message`) sent to session `session`'s
 /// conversation, `extra` after. Sizes only, never content.
-fn size_line(session: &str, what: &str, bytes: usize, extra: &str) {
+fn size_line(session: &crate::log::Session, what: &str, bytes: usize, extra: &str) {
     let est = bytes / BYTES_PER_TOKEN;
-    crate::log::line(
-        "tokens",
-        "info",
-        &format!("session={session} {what} bytes={bytes} est_tokens={est}{extra}"),
-    );
+    session.line("tokens", "info", &format!("{what} bytes={bytes} est_tokens={est}{extra}"));
 }
 
 /// A user message went to session `session`'s conversation: `bytes` in all, `context` of them the editor
 /// context (with what rides along: notes, a screen, what was pointed at).
-pub fn message_sent(session: &str, bytes: usize, context: usize) {
+pub fn message_sent(session: &crate::log::Session, bytes: usize, context: usize) {
     size_line(session, "message", bytes, &format!(" context={context}"));
 }
 

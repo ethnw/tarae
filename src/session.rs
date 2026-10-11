@@ -26,6 +26,9 @@ pub struct Session {
     pub root: PathBuf,
     /// What it's called (toasts from it start with it): a session's name, else its checkout's folder name.
     pub name: String,
+    /// Its checkout, known to the log while it lives: a line about a path in it names it (`log::Session::of`)
+    /// by its label — told again when that changes (`git::watch`: the branch known, or switched).
+    pub in_log: crate::log::Checkout,
     /// A session's branch, as it was made (`worktree.rs`) · what it was made from — a branch, or a commit
     /// when that checkout was detached; what `:session-end` and `:session-bring` compare with (None:
     /// the branch of the checkout tarae started in).
@@ -236,6 +239,7 @@ impl Session {
         let proxy_id = std::cell::RefCell::new((root.clone(), crate::sandbox::proxy::session_of(&root)));
         Self {
             id,
+            in_log: crate::log::Checkout::new(&root, &name),
             root,
             name,
             branch: None,
@@ -320,6 +324,12 @@ impl Session {
             *c = (self.root.clone(), crate::sandbox::proxy::session_of(&self.root));
         }
         c.1
+    }
+
+    /// Whose its log lines are: what the list calls it (`label`) in the log's session column
+    /// (`log::Session::line`).
+    pub fn log(&self) -> crate::log::Session {
+        crate::log::Session::named(self.label())
     }
 
     /// What the tabs, the chip and the list call it: a session by its name (its branch), the checkout tarae
@@ -709,7 +719,7 @@ impl Editor {
         for (id, a) in lost {
             self.card_how(a.card, "lost — its call was told nothing ran");
             let tell = move |ed: &mut Editor| {
-                crate::log::line(
+                ed.session.log().line(
                     "cards",
                     "lost",
                     &format!("a card was lost with its call waiting: {}", a.what),

@@ -293,6 +293,7 @@ fn spawn(ed: &mut Editor, g: Gathered) {
 
 fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
     let behind = ed.background();
+    let log = ed.session.log();
     let Some(r) = ed.session.reviewer.as_mut().filter(|r| r.generation == generation) else { return };
     match ev {
         StreamEv::Control { request_id, request } => {
@@ -319,7 +320,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             let keep = ed.config.llm.keep_env_key;
             let role = crate::billing::Role::Reviewer;
             if let Some(said) = crate::billing::checked(r.billing, keep, role, key_source.as_deref()) {
-                crate::log::line("claude", "warn", &said);
+                log.line("claude", "warn", &said);
                 r.state = State::Failed(said);
                 r.kill();
             }

@@ -401,7 +401,7 @@ impl Keeper {
             if unsafe { libc::write(go.as_raw_fd(), [1u8].as_ptr().cast(), 1) } != 1 {
                 return Err(BirthError { step: BirthStep::Go, errno: errno() }.into());
             }
-            said_ready(ours.as_fd(), told, &mut lo_missing, &mut cgroupfs)
+            said_ready(ours.as_fd(), told, &mut lo_missing, &mut cgroupfs, &crate::log::Session::of(root))
         })();
         let (ready, devices) = match ready {
             Ok(devices) => (Ok(()), devices),
@@ -462,7 +462,7 @@ impl Keeper {
                 Ok(made) => *lock(&k.network) = Some(made),
                 // (never a retry: a half-made network is never a session's — `redirect.rs`)
                 Err(e) => {
-                    crate::log::line(
+                    k.log().line(
                         "sandbox",
                         "warn",
                         &format!(
@@ -481,12 +481,17 @@ impl Keeper {
             Some(Ok(r)) => format!("; runs in cgroups of their own in {} (level {})", r.scope, r.level),
             Some(Err(why)) => format!("; runs in its cgroup — no scope of its own: {why}"),
         };
-        crate::log::line(
+        k.log().line(
             "sandbox",
             "info",
             &format!("a keeper for {}: pid {}, {}{runs}", root.display(), k.pid, k.said()),
         );
         Ok(k)
+    }
+
+    /// Whose its log lines are: the session of its checkout (`log::Session::of`).
+    pub fn log(&self) -> crate::log::Session {
+        crate::log::Session::of(&self.root)
     }
 
     /// Its tier and namespaces in words (`:procs`, the log): `A+ (user net ipc pid mnt)`, and a mirror its `lo`
@@ -514,7 +519,7 @@ impl Keeper {
         loop {
             match channel::recv(self.chan.as_fd(), &mut buf) {
                 Ok(Some((Ok(msg), fds))) => self.heard(msg, fds),
-                Ok(Some((Err(e), _))) => crate::log::line("sandbox", "warn", &format!("its keeper: {e}")),
+                Ok(Some((Err(e), _))) => self.log().line("sandbox", "warn", &format!("its keeper: {e}")),
                 Ok(None) | Err(_) => return self.gone("its channel closed".into()),
             }
         }
@@ -526,7 +531,7 @@ impl Keeper {
             Msg::Started { id, pid, cgroup, missed } => {
                 // (D5: a run that couldn't have its own cgroup started in its keeper's — said, not refused)
                 if let Some((step, errno)) = missed {
-                    crate::log::line(
+                    self.log().line(
                         "sandbox",
                         "info",
                         &format!(
@@ -588,7 +593,7 @@ impl Keeper {
                 let why = format!("{}: {}", step.said(), io::Error::from_raw_os_error(errno));
                 match s.runs.get_mut(&id) {
                     Some(slot) if slot.started.is_none() => slot.started = Some(Err(why)),
-                    _ => crate::log::line(
+                    _ => self.log().line(
                         "sandbox",
                         "info",
                         &format!("a run (keeper {}) failed at {why}", self.pid),
@@ -611,19 +616,19 @@ impl Keeper {
                 }
             }
             Msg::Reaped { n } => {
-                crate::log::line("sandbox", "info", &format!("keeper {} reaped {n} left by runs", self.pid));
+                self.log().line("sandbox", "info", &format!("keeper {} reaped {n} left by runs", self.pid));
             }
             #[cfg(test)]
             Msg::Usage { rss_kb, pss_kb } => s.usage = Some((rss_kb, pss_kb)),
             // (handed before any run, or not taken: a socket of the session's network comes from its keeper
             // before a run could be in it — P5)
             Msg::Planted { kinds, errno } if s.next == 0 => s.planted = Some((kinds, errno, fds)),
-            Msg::Planted { .. } => crate::log::line(
+            Msg::Planted { .. } => self.log().line(
                 "sandbox",
                 "warn",
                 &format!("keeper {} handed sockets after a run — refused", self.pid),
             ),
-            other => crate::log::line("sandbox", "warn", &format!("its keeper said {other:?}")),
+            other => self.log().line("sandbox", "warn", &format!("its keeper said {other:?}")),
         }
         drop(s);
         self.changed.notify_all();
@@ -740,7 +745,7 @@ impl Keeper {
             kill_run(*pid, pidfd);
         }
         if !asked {
-            crate::log::line(
+            self.log().line(
                 "sandbox",
                 "warn",
                 &format!("{said} (pid {}, {})", self.pid, self.root.display()),
@@ -1615,6 +1620,7 @@ fn said_ready(
     told: OwnedFd,
     missing: &mut Families,
     cgroupfs: &mut Option<i32>,
+    log: &crate::log::Session,
 ) -> io::Result<Vec<(&'static str, OwnedFd)>> {
     let deadline = Instant::now() + READY_WITHIN;
     let mut told = Some(told);
@@ -1650,7 +1656,7 @@ fn said_ready(
                     false => (&mut missing.v6, SESSION_V6.to_string(), "IPv6"),
                 };
                 *family = true;
-                crate::log::line(
+                log.line(
                     "sandbox",
                     "warn",
                     &format!(
@@ -1675,7 +1681,7 @@ fn said_ready(
                     for (place, fd) in places.iter().zip(fds) {
                         match DEVICE_HANDLES.iter().find(|d| d.as_bytes() == place.as_slice()) {
                             Some(d) if !kept.iter().any(|(k, _)| k == d) => kept.push((*d, fd)),
-                            _ => crate::log::line(
+                            _ => log.line(
                                 "sandbox",
                                 "warn",
                                 &format!("a keeper handed {} — left out", String::from_utf8_lossy(place)),

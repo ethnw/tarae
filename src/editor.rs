@@ -6550,6 +6550,9 @@ mod tests {
     #[test]
     fn claude_sees_the_screen_once_the_user_says_yes() {
         use serde_json::json;
+        if crate::sandbox::no_pty_here("editor::tests::claude_sees_the_screen_once_the_user_says_yes") {
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("tarae-screen-tool-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -10204,6 +10207,9 @@ mod tests {
     /// meanwhile doesn't make its output "an older run's".
     #[test]
     fn a_background_sessions_terminal_keeps_its_output() {
+        if crate::sandbox::no_pty_here("editor::tests::a_background_sessions_terminal_keeps_its_output") {
+            return;
+        }
         let repo = git_repo("session-term", &[("a.txt", "one\n")]);
         let wt = worktree(&repo, "term");
         let mut ed = editor("");
@@ -12120,9 +12126,11 @@ mod tests {
                 wrong.push(format!("{what} ran in {got:?}"));
             }
         };
-        // What runs
-        ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), pwd("terminal")], Vec::new());
-        ran_in(&mut ed, "terminal", &root);
+        // What runs (the terminal panel's part skipped inside macOS's sandbox — the rest still checked)
+        if !crate::sandbox::no_pty_here("editor::tests::a_root_of_its_own_is_where_everything_runs") {
+            ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), pwd("terminal")], Vec::new());
+            ran_in(&mut ed, "terminal", &root);
+        }
         ed.task_start(crate::task::Task { name: "where".into(), cmd: pwd("task"), cwd: "sub".into() });
         ran_in(&mut ed, "task", &root.join("sub"));
         ed.config.llm.command = "sh".into();

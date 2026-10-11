@@ -462,6 +462,11 @@ impl Editor {
         self.lsp.clients.iter().find(|c| c.id == cid)
     }
 
+    /// Whose server `cid`'s log lines are (`Client::log`; gone: tarae's own).
+    pub(crate) fn server_log(&self, cid: ClientId) -> crate::log::Session {
+        self.client(cid).map_or_else(crate::log::Session::none, Client::log)
+    }
+
     /// Position encoding of server `cid` (UTF-16 until it says otherwise).
     pub(crate) fn encoding_of(&self, cid: ClientId) -> Encoding {
         self.client(cid).map_or(Encoding::Utf16, |c| c.encoding)
@@ -625,7 +630,7 @@ impl Editor {
             }
             Err(e) => {
                 self.lsp.failed.insert(server.name.clone(), e.clone());
-                crate::log::line(&server.name, "error", &format!("couldn't start: {e}"));
+                crate::log::Session::of(root).line(&server.name, "error", &format!("couldn't start: {e}"));
                 self.set_error(format!("{} couldn't start: {e} · :log-open", server.name));
                 None
             }
@@ -747,7 +752,7 @@ impl Editor {
                     .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
                     .collect();
                 let msg = format!("save of {} sent again — a change came right after it", names.join(", "));
-                crate::log::line(&c.name, "save", &msg);
+                c.log().line(&c.name, "save", &msg);
                 self.lsp.recent_saves.entry(cid).or_default().extend(paths.into_iter().map(|p| (p, now)));
             }
         }
@@ -844,7 +849,7 @@ impl Editor {
                     for l in self.docs.iter_mut().flat_map(|d| &mut d.lsp.links).filter(|l| l.client == cid) {
                         l.u16 = u16;
                     }
-                    crate::log::line(&name, "ready", &format!("after {ms} ms"));
+                    self.server_log(cid).line(&name, "ready", &format!("after {ms} ms"));
                     self.lsp.failed.remove(&name);
                     self.set_success(format!("{name} ready"));
                     self.lsp_flush();
@@ -906,7 +911,7 @@ impl Editor {
                     &Kind::CodeAction { list } if error.is_some() => {
                         let name = self.client(cid).map(|c| c.name.clone()).unwrap_or_default();
                         let why = error.and_then(|e| e["message"].as_str()).unwrap_or("failed");
-                        crate::log::line(&name, "error", &format!("code actions: {why}"));
+                        self.server_log(cid).line(&name, "error", &format!("code actions: {why}"));
                         self.on_code_actions(cid, list, &Value::Null);
                     }
                     // The server couldn't format — save as is
@@ -1081,7 +1086,7 @@ impl Editor {
                             && let Some(began) = p.began
                         {
                             let took = crate::term::duration(began.elapsed().as_secs_f32());
-                            crate::log::line(&c.name, "progress", &format!("{} took {took}", p.title));
+                            c.log().line(&c.name, "progress", &format!("{} took {took}", p.title));
                         }
                         self.lsp.work_ended.insert(cid, std::time::Instant::now());
                         self.ask_again(cid);
@@ -1117,7 +1122,7 @@ impl Editor {
                 let health = field(&q.health).unwrap_or("ok").to_string();
                 if health != c.health && !(c.health.is_empty() && health == "ok") {
                     let msg = field(&q.message).unwrap_or_default().lines().next().unwrap_or_default();
-                    crate::log::line(&c.name, "health", format!("{health} {msg}").trim_end());
+                    c.log().line(&c.name, "health", format!("{health} {msg}").trim_end());
                 }
                 (c.quiescent, c.health) = (Some(quiescent), health);
                 c.settled_once |= quiescent;
@@ -1133,7 +1138,7 @@ impl Editor {
                 let text = s.text(params);
                 // (it says what it's at with each change — the log keeps them in order, timed)
                 if let Some(text) = &text {
-                    crate::log::line(&c.name, "status", text);
+                    c.log().line(&c.name, "status", text);
                 }
                 match text {
                     Some(title) => c.progress.insert(key, lsp::Progress { title, ..Default::default() }),
@@ -1145,7 +1150,7 @@ impl Editor {
                 let level = ["", "error", "warning", "info", "log"]
                     [params["type"].as_u64().unwrap_or(4).clamp(1, 4) as usize];
                 let name = self.client(cid).map(|c| c.name.clone()).unwrap_or_default();
-                crate::log::line(&name, level, params["message"].as_str().unwrap_or_default());
+                self.server_log(cid).line(&name, level, params["message"].as_str().unwrap_or_default());
             }
             "window/showMessage" => {
                 let m = params["message"].as_str().unwrap_or_default().to_string();
@@ -2165,6 +2170,7 @@ impl Editor {
             .filter(|d| d.lsp.clients().any(|c| c == cid))
             .map(|d| (d.id, d.path.as_deref().and_then(|p| self.session_of(p))))
             .collect();
+        let log = self.server_log(cid);
         let Some(name) = self.lsp_stopped(cid) else { return };
         // (its files get it back when their session is in front again, or its Claude asks)
         for (d, owner) in served {
@@ -2176,7 +2182,7 @@ impl Editor {
         }
         let idle = crate::term::duration(wait.as_secs_f32());
         let msg = format!("{name} for {} stopped — its session idle behind for {idle}", root.display());
-        crate::log::line(&name, "stop", &msg);
+        log.line(&name, "stop", &msg);
         // (nothing of it is on screen)
         self.unchanged = true;
     }
@@ -2237,14 +2243,11 @@ impl Editor {
         let Some(root) = self.client(cid).map(|c| c.root.display().to_string()) else { return };
         let served: Vec<DocId> =
             self.docs.iter().filter(|d| d.lsp.clients().any(|c| c == cid)).map(|d| d.id).collect();
+        let log = self.server_log(cid);
         let Some(name) = self.lsp_stopped(cid) else { return };
         self.lsp.waits_sight.extend(served);
         let idle = crate::term::duration(wait.as_secs_f32());
-        crate::log::line(
-            &name,
-            "stop",
-            &format!("{name} for {root} stopped — no file of it in sight for {idle}"),
-        );
+        log.line(&name, "stop", &format!("{name} for {root} stopped — no file of it in sight for {idle}"));
         // (nothing of it is on screen)
         self.unchanged = true;
     }
@@ -2268,8 +2271,9 @@ impl Editor {
             .map(|c| (c.id, c.root.display().to_string()))
             .collect();
         for (cid, at) in gone {
+            let log = self.server_log(cid);
             if let Some(name) = self.lsp_stopped(cid) {
-                crate::log::line(&name, "stop", &format!("{name} for {at} stopped — its session ended"));
+                log.line(&name, "stop", &format!("{name} for {at} stopped — its session ended"));
             }
         }
     }
@@ -2283,13 +2287,10 @@ impl Editor {
             return;
         }
         let Some(root) = self.client(cid).map(|c| c.root.display().to_string()) else { return };
+        let log = self.server_log(cid);
         if let Some(name) = self.lsp_stopped(cid) {
             let idle = crate::term::duration(wait.as_secs_f32());
-            crate::log::line(
-                &name,
-                "stop",
-                &format!("{name} for {root} stopped — no file of it open for {idle}"),
-            );
+            log.line(&name, "stop", &format!("{name} for {root} stopped — no file of it open for {idle}"));
         }
     }
 
@@ -3259,10 +3260,11 @@ impl Editor {
         let tool = self
             .client(cid)
             .and_then(|c| Path::new(&c.spec.command).file_name().map(|n| n.to_string_lossy().into_owned()));
+        let log = self.server_log(cid);
         if let Some(name) = self.lsp_stopped(cid) {
             // (reaped as it's dropped; the next file of its project starts it again — unless it keeps
             // exiting: then `:procs` holds it)
-            crate::log::line(&name, "exit", &format!("{name} for {} exited", root.display()));
+            log.line(&name, "exit", &format!("{name} for {} exited", root.display()));
             self.lsp.failed.insert(name.clone(), "exited".into());
             // An install card for it says why already (a rustup proxy without its component — #166)
             let offered = |t: &str| t == name || tool.as_deref() == Some(t);

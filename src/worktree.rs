@@ -1467,7 +1467,7 @@ impl Editor {
                             ed.set_warning(format!("{}'s build dir isn't all removed — {why}", e.name));
                         }
                         // (only once its checkout is gone — what it runs may judge by that)
-                        ed.session_ended(&e.root);
+                        ed.session_ended(&e.root, &e.name);
                     }
                     Err(why) => {
                         if let Some(k) = kept.filter(|k| k.root.is_dir()) {
@@ -2200,12 +2200,14 @@ mod tests {
 
     /// `session.ended` runs once a session's checkout is removed — in the checkout tarae started in, the one
     /// removed named in TARAE_ENDED_CHECKOUT and gone by then (a stand-in writing a mark in the test's own
-    /// folder). A removal that failed runs nothing; a command that fails says so in a warning.
+    /// folder). A removal that failed runs nothing; a command that fails says so in a warning — and its log
+    /// line names the session it ran for, gone by then.
     #[test]
     fn session_ended_runs_once_a_sessions_checkout_is_gone() {
         let (repo, dir) = place("ended");
         let marks = dir.join("ended-marks");
         let mut ed = editor(&repo, &dir);
+        let log = crate::log::capture();
         let script = format!(
             "{{ pwd; echo \"$TARAE_ENDED_CHECKOUT\"; [ -e \"$TARAE_ENDED_CHECKOUT\" ] && echo there || echo gone; }} \
              >> '{}'",
@@ -2235,6 +2237,8 @@ mod tests {
         settle_until(&mut ed, |ed| says(ed, "session.ended") || says(ed, "end bad:"));
         assert!(!bad.exists(), "{}", said(&ed));
         assert!(says(&ed, "session.ended `sh -c echo nope >&2; exit 3` — exit 3: nope"), "{}", said(&ed));
+        let last = log.lines().into_iter().find(|l| l.contains(&format!("for {}:", bad.display())));
+        assert!(last.as_ref().is_some_and(|l| l.starts_with("@bad  session.ended  warn  ")), "{last:?}");
         assert!(!read().contains(kept.to_str().unwrap()), "not after a failed removal: {}", read());
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();

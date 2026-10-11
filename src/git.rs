@@ -89,6 +89,8 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
                 let apply = move |ed: &mut Editor| {
                     if ed.session.root == dir {
                         ed.session.git_branch = branch;
+                        // (the log names it as the list does: the checkout tarae started in by its branch)
+                        ed.session.in_log.named(ed.session.label());
                         if moved {
                             ed.git_reload_bases_in(&dir);
                         }
