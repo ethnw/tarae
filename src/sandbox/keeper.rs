@@ -3783,11 +3783,10 @@ mod tests {
     /// binary) are neither's. A measurement, no budget (the user, 2026-10-10).
     #[test]
     fn perf_keepers_memory_per_session() {
-        let test = "perf_keepers_memory_per_session";
         if crate::test_results::unoptimized("sandbox::keeper::tests::perf_keepers_memory_per_session") {
             return;
         }
-        let Some(tiers) = served_tiers(test, false) else { return };
+        let Some(tiers) = served_tiers("perf_keepers_memory_per_session", false) else { return };
         let Some(ip) = outside() else { return };
         // (the outside: each connection's first line answered, then kept open — the run's relay stays, idle)
         let l = std::net::TcpListener::bind((ip, 0)).unwrap();
