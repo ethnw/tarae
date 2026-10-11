@@ -3681,6 +3681,230 @@ mod tests {
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
     }
 
+    /// What `perf_keepers_memory_per_session` reads at one moment: each keeper's own (Rss, Pss) as it says it
+    /// (`usage`), this process's (`own_usage`), its threads by name and its descriptors by kind.
+    struct Seen {
+        keepers: Vec<(u64, u64)>,
+        mine: (u64, u64),
+        threads: std::collections::BTreeMap<String, i64>,
+        fds: std::collections::BTreeMap<String, i64>,
+    }
+
+    impl Seen {
+        fn now(keepers: &[Arc<Keeper>]) -> Seen {
+            let mut threads = std::collections::BTreeMap::new();
+            for t in std::fs::read_dir("/proc/self/task").into_iter().flatten().flatten() {
+                if let Ok(name) = std::fs::read_to_string(t.path().join("comm")) {
+                    *threads.entry(name.trim().to_string()).or_default() += 1;
+                }
+            }
+            // (a socket, a pipe, an anonymous inode by its name — `[pidfd]`, `[eventfd]`… —, a pty's end — the
+            // pool's, 3b —, else a path)
+            let mut fds = std::collections::BTreeMap::new();
+            for fd in std::fs::read_dir("/proc/self/fd").into_iter().flatten().flatten() {
+                let Ok(to) = std::fs::read_link(fd.path()) else { continue };
+                let to = to.to_string_lossy();
+                let kind = match to.split_once(':') {
+                    Some(("anon_inode", name)) => name.to_string(),
+                    Some((kind @ ("socket" | "pipe"), _)) => kind.to_string(),
+                    _ if to.starts_with("/dev/pts/") || to == "/dev/ptmx" => "pty".to_string(),
+                    _ => "path".to_string(),
+                };
+                *fds.entry(kind).or_default() += 1;
+            }
+            let keepers = keepers.iter().map(|k| k.usage().expect("a keeper says what it uses")).collect();
+            Seen { keepers, mine: own_usage(), threads, fds }
+        }
+
+        /// The keepers' Pss: in all, and each one's lowest and highest — MB.
+        fn keepers_pss(&self) -> String {
+            let each = self.keepers.iter().map(|u| u.1);
+            let (lo, hi) = (each.clone().min().unwrap_or(0), each.clone().max().unwrap_or(0));
+            let mb = |kb: u64| kb as f64 / 1024.0;
+            format!("{:.1} ({:.1}–{:.1})", mb(each.sum()), mb(lo), mb(hi))
+        }
+
+        /// This process's Pss / Rss grown since `then`, per session — KB.
+        fn mine_since(&self, then: &Seen, n: usize) -> String {
+            let per = |now: u64, was: u64| (now as i64 - was as i64) / n as i64;
+            format!("{:+} / {:+}", per(self.mine.1, then.mine.1), per(self.mine.0, then.mine.0))
+        }
+
+        /// The threads more (or fewer) than `then`, by name.
+        fn threads_since(&self, then: &Seen) -> String {
+            Self::more(&self.threads, &then.threads)
+        }
+
+        /// The descriptors more (or fewer) than `then`, by kind.
+        fn fds_since(&self, then: &Seen) -> String {
+            Self::more(&self.fds, &then.fds)
+        }
+
+        /// What `now` counts more (or fewer) of than `then`, by name.
+        fn more(
+            now: &std::collections::BTreeMap<String, i64>,
+            then: &std::collections::BTreeMap<String, i64>,
+        ) -> String {
+            let mut names: Vec<&String> = now.keys().chain(then.keys()).collect();
+            names.sort();
+            names.dedup();
+            let more: Vec<String> = names
+                .into_iter()
+                .filter_map(|name| {
+                    let d = now.get(name).unwrap_or(&0) - then.get(name).unwrap_or(&0);
+                    (d != 0).then(|| format!("{name} {d:+}"))
+                })
+                .collect();
+            if more.is_empty() { "none".into() } else { more.join(", ") }
+        }
+
+        /// The descriptors open, in all.
+        fn fds_open(&self) -> i64 {
+            self.fds.values().sum()
+        }
+    }
+
+    /// This process's limit on open descriptors: (soft, hard).
+    fn fd_limit() -> (u64, u64) {
+        let mut l = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: reads this process's limit into a struct of ours.
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut l) };
+        (l.rlim_cur, l.rlim_max)
+    }
+
+    /// Step 8 (`docs/design/sandbox-keeper.md` §Measured): memory with 1, 8, 16 and 32 sessions, in each tier
+    /// served here (`served_tiers`). Each session is a keeper of its own, left idle; then each keeps one idle run,
+    /// served, holding a connection through the proxy to a stand-in outside (`proxyhold`) — what a session whose
+    /// daemon went out once holds: its supervisor, the proxy's thread for the connection and its relay. A table
+    /// row per tier and count: the keepers' own Pss (in all, each one's lowest–highest), idle and with their run;
+    /// this process's (tarae's stand-in) Pss / Rss grown per session, for the keepers and then for the runs; its
+    /// threads more, by name, and its descriptors more, by kind. Where a run can't be made (descriptors run out),
+    /// the row says after how many, and the tier's larger counts aren't tried. The runs' own processes (the test
+    /// binary) are neither's. A measurement, no budget (the user, 2026-10-10).
+    #[test]
+    fn perf_keepers_memory_per_session() {
+        let test = "perf_keepers_memory_per_session";
+        if crate::test_results::unoptimized("sandbox::keeper::tests::perf_keepers_memory_per_session") {
+            return;
+        }
+        let Some(tiers) = served_tiers(test, false) else { return };
+        let Some(ip) = outside() else { return };
+        // (the outside: each connection's first line answered, then kept open — the run's relay stays, idle)
+        let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+        let at = l.local_addr().unwrap();
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let keep = kept.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let mut line = String::new();
+                let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
+                let _ = io::Write::write_all(&mut &s, b"out hello\n");
+                lock(&keep).push(s);
+            }
+        });
+        let host = "kept-open.test";
+        super::super::proxy::TEST_NAMES.lock().unwrap().push((host.into(), at));
+        let env = [
+            ("TARAE_TO", super::super::route::PROXY.to_string()),
+            ("TARAE_HOST", format!("{host}:{}", at.port())),
+        ];
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        // (long enough for what starts a run — the handoff, a connect's own supervisor thread — to have ended)
+        const IDLE: Duration = Duration::from_secs(1);
+        let (soft, hard) = fd_limit();
+        let mut rows = vec![
+            format!("descriptors: at most {soft} open (hard limit {hard})"),
+            "| tier | sessions | keepers' Pss, MB: idle | … with a run each | tarae's Pss / Rss, KB per session: \
+             keepers | … runs | tarae's threads more | tarae's descriptors more (open in all) |"
+                .to_string(),
+            "|---|---|---|---|---|---|---|---|".to_string(),
+        ];
+        let abi = crate::landlock::abi().unwrap();
+        'tiers: for (tier, ns, network) in tiers {
+            for n in [1, 8, 16, 32] {
+                let before = Seen::now(&[]);
+                let ks: Vec<Arc<Keeper>> =
+                    (0..n).map(|i| keeper_for(&format!("mem-{tier}-{n}-{i}"), ns, network)).collect();
+                std::thread::sleep(IDLE);
+                let idle = Seen::now(&ks);
+                let mut runs = Vec::new();
+                let mut stopped = None;
+                for (i, k) in ks.iter().enumerate() {
+                    let (p, root) = project_policy(&format!("mem-{tier}-{n}-{i}"), Vec::new(), &[]);
+                    let c = match super::super::linux::confine(
+                        &p,
+                        abi,
+                        Err("not watched".into()),
+                        false,
+                        Some(k),
+                        Ok(()),
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            stopped = Some(format!("session {}'s rules: {e}", i + 1));
+                            std::fs::remove_dir_all(&root).ok();
+                            break;
+                        }
+                    };
+                    let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
+                    let p = Arc::new(super::super::Policy {
+                        network: true,
+                        own_addresses: Some(Vec::new()),
+                        egress,
+                        ..p
+                    });
+                    let (mut lines, pid, refused) = served_helper(k, (&p, &c, &root), "proxyhold", &env);
+                    let said = said_next(&mut lines);
+                    assert!(said.ends_with("reply=out hello"), "{tier} {n}: {said} {:?}", refused.try_recv());
+                    runs.push((lines, pid, refused, c, root));
+                }
+                std::thread::sleep(IDLE);
+                let held = Seen::now(&ks);
+                rows.push(match &stopped {
+                    None => format!(
+                        "| {tier} | {n} | {} | {} | {} | {} | keepers: {} · runs: {} | keepers: {} · runs: {} ({}) |",
+                        idle.keepers_pss(),
+                        held.keepers_pss(),
+                        idle.mine_since(&before, n),
+                        held.mine_since(&idle, n),
+                        idle.threads_since(&before),
+                        held.threads_since(&idle),
+                        idle.fds_since(&before),
+                        held.fds_since(&idle),
+                        held.fds_open(),
+                    ),
+                    Some(why) => format!(
+                        "| {tier} | {n} | {} | stopped after {} runs — {why} | {} | | | keepers: {} · runs: {} ({}) |",
+                        idle.keepers_pss(),
+                        runs.len(),
+                        idle.mine_since(&before, n),
+                        idle.fds_since(&before),
+                        held.fds_since(&idle),
+                        held.fds_open(),
+                    ),
+                });
+                for (.., root) in &runs {
+                    std::fs::write(root.join("done"), "").unwrap();
+                }
+                for (lines, pid, _, _, root) in runs {
+                    lines.for_each(drop);
+                    crate::spawn::wait(pid).unwrap();
+                    std::fs::remove_dir_all(&root).ok();
+                }
+                for k in ks {
+                    k.end();
+                }
+                lock(&kept).clear();
+                if stopped.is_some() {
+                    continue 'tiers;
+                }
+            }
+        }
+        let line = format!("keepers' memory per session (step 8)\n{}\n", rows.join("\n"));
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+    }
+
     /// The keeper is non-dumpable: its `/proc/<pid>/environ`, and where its descriptors point, are refused to
     /// a process of its own user — a dumpable one's aren't (Landlock alone would hide the difference from a
     /// run). As an ordinary user (`dumpable_scene`): as root, capabilities decide first.
@@ -3911,6 +4135,16 @@ mod tests {
             "origin" => helper_origin(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swap" => helper_swap(&std::env::var("TARAE_TO").unwrap_or_default()),
             "proxied" => helper_proxied(&std::env::var("TARAE_TO").unwrap_or_default()),
+            // (step 8: `proxied`, its connection then kept open, idle, until `done` is in its folder — 120 s at most)
+            "proxyhold" => {
+                let (said, _kept) = proxied(&std::env::var("TARAE_TO").unwrap_or_default());
+                println!("helper: {said}");
+                let by = Instant::now() + Duration::from_secs(120);
+                while !Path::new("done").exists() && Instant::now() < by {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                return;
+            }
             "bound" => helper_bound(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swaplisten" => helper_swap_listen(&std::env::var("TARAE_TO").unwrap_or_default()),
             "racelo" => helper_race_lo(&std::env::var("TARAE_TO").unwrap_or_default()),
@@ -5085,6 +5319,11 @@ mod tests {
     /// `http://$TARAE_HOST/` sent through it, its answer's first line read (`connect=<errno> family= stream=
     /// nodelay= nonblock= peer=<its address's ip> reply=<line>`).
     fn helper_proxied(to: &str) -> String {
+        proxied(to).0
+    }
+
+    /// `helper_proxied`'s words, and its connection — still open.
+    fn proxied(to: &str) -> (String, std::net::TcpStream) {
         use std::io::{BufRead, Write};
         let sa = sockaddr(to);
         let host = std::env::var("TARAE_HOST").unwrap_or_default();
@@ -5125,7 +5364,7 @@ mod tests {
         let _ = (&s).write_all(format!("GET http://{host}/ HTTP/1.1\r\n\r\n").as_bytes());
         let mut reply = String::new();
         let _ = std::io::BufReader::new(&s).read_line(&mut reply);
-        format!("connect={said} {facts} reply={}", reply.trim_end())
+        (format!("connect={said} {facts} reply={}", reply.trim_end()), s)
     }
 
     /// `bound`: a TCP socket bound to `0.0.0.0:$TARAE_PORT` first (0: the kernel's pick), then connected to

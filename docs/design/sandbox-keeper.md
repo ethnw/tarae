@@ -804,7 +804,49 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   cargo's caches covers only the folders there when the policy is made (Landlock can't grant a path that isn't
   there). It predates step 4 (open items).
 
+### Many sessions, idle (linux7 piece 8, 2026-10-11)
+
+- **How**: `cargo xtask linux [--env TARAE_EXPECT_TIER=A+ --userns] test --profile perf --bin tarae -- --exact
+  sandbox::keeper::tests::perf_keepers_memory_per_session --nocapture`, optimized, run as root in the container.
+  `test --as-user` builds at opt-level 0, where every `perf_` test skips itself.
+- **What a session is here**: a keeper of its own, left idle. Then each keeper also keeps one idle served run: the
+  test binary, holding a plain HTTP connection through the proxy to a listener of the test's that answers and
+  keeps it open. That stands in for a daemon that went out once: its supervisor, the proxy's thread and its relay.
+- **What's read**: the keepers' Pss is each keeper's own `smaps_rollup`, as it says it (`usage`). tarae's Pss and Rss
+  are the test process's, grown per session, first for the keepers, then for the runs. Threads are counted by
+  name, descriptors by kind. The runs' own processes count for neither. The first run's row also holds the
+  proxy's one-time start (+4–5 MB Pss), so the per-session numbers are from 8 sessions up.
+- colima twice (the same to ±0.1 MB); Debian 12 once, C beside A+ (netns) in one process.
+
+| | colima `tarae-test`: 6.8, aarch64, ABI 4 — C | Debian 12: 6.1, x86_64, ABI 2 — C · A+ |
+|---|---|---|
+| **Keepers' Pss in all**, idle, 1 / 8 / 16 / 32 | 4.8 / 24.1 / 44.0 / 83.1 MB | 5.0 / 25.3 / 45.5 / 85.1 · the same |
+| … each keeping a run | 4.8 / 23.7 / 43.9 / *stopped at 19 runs* | 5.0 / 24.8 / 45.2 / 85.7 · 4.9 / 24.7 / 45.3 / 85.8 MB |
+| … one keeper's, at 32 | 2.6–2.7 MB | 2.6–2.7 · 2.6–2.7 MB |
+| **tarae's Pss / Rss per session** for the keepers, 8 / 16 / 32 | +0.5 / +1.0 · +0.2 / +0.5 · +0.5 / +0.6 MB | +0.7 / +1.3 · +0.6 / +0.9 · +1.1 / +1.3 MB · −0.3 / +0.2 · +0.3 / +0.7 · +0.3 / +0.5 MB |
+| … for the runs, 8 / 16 / 32 | −48 / +80 · +4 / +65 KB · — | −115 / +71 · +84 / +174 · −2 / +42 KB · −414 / −233 · −67 / +23 · −10 / +34 KB |
+| **tarae's threads per session** | keeper 2 (`tarae-keeper`, `tarae-kwait`) · run 3 (`tarae-serve`, `tarae-ptys`, `tarae-proxy-conn`) | the same · run 2 (no `tarae-ptys`) |
+| **tarae's descriptors per session** | keeper 5 · run 44 (32 ptys, 5 pipes, 4 sockets, ruleset, pidfd, seccomp notify) | the same · run 12 (no ptys) |
+| … open at 32 sessions with their runs | — (1002 at 19: the limit is 1024) | 1574 · 550 |
+
+- **The keepers dominate the memory**: 2.6–2.7 MB of Pss each at 32, 83–86 MB in all. tarae's side is at most
+  about 1.3 MB of Rss per session, for a keeper's two threads. A held run's threads add at most 0.2 MB. Those
+  numbers are noisy (the allocator's arenas): they move by hundreds of KB between counts, both ways.
+- **Nothing grows worse than linearly.** A keeper's own Pss falls as there are more of them (4.8 → 2.6 MB: their
+  pages are shared). tarae's per session doesn't rise with the count. Keeping a run changes no keeper's Pss.
+  The threads grow by a fixed 2 per keeper and 3 (C) or 2 (A+) per held run.
+- **Descriptors are the limit, not memory.** In C a session with a held served run costs tarae 49 descriptors.
+  32 of them are the run's pty pool (3b: `ptys::POOL` = 16, a master and an `O_PATH` other end each). In A+ it's
+  17, with no pool. colima's soft `RLIMIT_NOFILE` is 1024, systemd's default too. There the 20th session's run
+  couldn't be made: `EMFILE` making its rules, both times. Debian's container allowed 1048576 and reached 32.
+  tarae never raises its soft limit, and its servers, files and terminal take from the same 1024 (open items).
+
 ## Open items
+
+- **Descriptors with many sessions (piece 8).** A served run in tier C holds 49 of tarae's descriptors, 32 of
+  them its pty pool. Under a soft limit of 1024 (systemd's default) about 20 sessions each with a run reach it:
+  the next run can't be made. Raising the soft limit to the hard one at start, or a pool opened as it's needed,
+  would lift it. Not built.
 
 - **macOS: this machine's own addresses beyond loopback.** Seatbelt names a port by `localhost` only, so with
   `llm.sandbox-network` on a command reaches the risky ports (Docker's 2375, Jupyter's 8888…) on this machine's
