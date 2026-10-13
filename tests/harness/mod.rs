@@ -61,6 +61,8 @@ pub struct Sandbox {
     vars: Vec<(OsString, OsString)>,
     /// The soft descriptor limit tarae starts with (`with_soft_nofile`) — else the test's own.
     soft_nofile: Option<u64>,
+    /// The tarae it runs (`with_bin`) — else `TARAE_BIN`, else this build's.
+    bin: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -75,7 +77,8 @@ impl Sandbox {
         fs::create_dir_all(&dir).unwrap();
         // Real path (macOS: /var → /private/var) — tarae canonicalizes the paths it opens.
         let root = fs::canonicalize(&dir).unwrap();
-        let sb = Sandbox { root, live: false, tools: Vec::new(), vars: Vec::new(), soft_nofile: None };
+        let sb =
+            Sandbox { root, live: false, tools: Vec::new(), vars: Vec::new(), soft_nofile: None, bin: None };
         for d in
             ["home/.config/tarae", "home/.local/state", "home/.local/share", "home/.cache", "claude", "work"]
         {
@@ -127,8 +130,47 @@ impl Sandbox {
         self
     }
 
+    /// Another build of tarae runs here — one of two measured against each other in one test (`TARAE_BIN`
+    /// can name only one).
+    pub fn with_bin(mut self, bin: &Path) -> Self {
+        self.bin = Some(bin.to_path_buf());
+        self
+    }
+
+    /// The tarae this sandbox runs.
+    fn bin(&self) -> OsString {
+        let given = self.bin.clone().map(OsString::from);
+        given.or_else(|| std::env::var_os("TARAE_BIN")).unwrap_or_else(|| BIN.into())
+    }
+
     pub fn git_config(&self) -> PathBuf {
         self.root.join("gitconfig")
+    }
+
+    /// A file beside the project, not in it — what tarae and Claude mustn't find there (a measurement's
+    /// own records).
+    pub fn outside(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
+
+    /// The project's files = `paths` of this repository as of `commit` (`git archive`) — a tree that stays
+    /// the same however the repository grows. False when this clone hasn't that commit.
+    pub fn copy_commit(&self, commit: &str, paths: &[&str]) -> bool {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        fs::create_dir_all(self.work()).unwrap();
+        let mut archive = Command::new("git")
+            .args(["-C", here.to_str().unwrap(), "archive", "--format=tar", commit, "--"])
+            .args(paths)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let untarred = Command::new("tar")
+            .args(["-x", "-C", self.work().to_str().unwrap()])
+            .stdin(archive.stdout.take().unwrap())
+            .status()
+            .is_ok_and(|s| s.success());
+        archive.wait().is_ok_and(|s| s.success()) && untarred
     }
 
     /// Runs git in the work dir with the sandbox's git config; panics if it fails.
@@ -322,6 +364,8 @@ pub struct Term {
     timeout: Duration,
     /// The environment it runs in — `tarae state` runs in it too (the same state folder).
     env: Vec<(OsString, OsString)>,
+    /// The build it is — `tarae state` is asked of the same one.
+    bin: OsString,
 }
 
 pub fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
@@ -358,8 +402,8 @@ impl Term {
         let (master, slave) = pty::open(rows, cols).expect("pty");
         let master = File::from(master);
         let stdio = || Stdio::from(slave.try_clone().expect("dup slave"));
-        // (`TARAE_BIN`: another build of tarae — a kept copy, to measure it against this one)
-        let mut cmd = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()));
+        // (`TARAE_BIN` or `with_bin`: another build of tarae — a kept copy, to measure it against this one)
+        let mut cmd = Command::new(sb.bin());
         cmd.args(args)
             .current_dir(cwd)
             .env_clear()
@@ -445,7 +489,8 @@ impl Term {
             }
         });
 
-        let mut term = Term { child, master, _slave: slave, out, timeout: sb.timeout(), env: sb.env() };
+        let mut term =
+            Term { child, master, _slave: slave, out, timeout: sb.timeout(), env: sb.env(), bin: sb.bin() };
         // First frame drawn = raw mode is on — safe to type from here.
         term.wait_for("the first frame (status line with the mode)", |s| s.status().contains("NORMAL"));
         term
@@ -631,7 +676,7 @@ impl Term {
 
     /// `tarae state --pid <its pid> args…` in its environment: what it prints (panics if it fails).
     pub fn state(&self, args: &[&str]) -> String {
-        let out = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()))
+        let out = Command::new(&self.bin)
             .arg("state")
             .args(["--pid", &self.pid().to_string()])
             .args(args)
@@ -653,7 +698,7 @@ impl Term {
     /// A watcher of its UI state — `tarae state --watch [kinds] --json` running beside it, its event lines
     /// gathered as they come (`Watching::events`); stopped when dropped.
     pub fn watch(&self, kinds: &str) -> Watching {
-        let mut cmd = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()));
+        let mut cmd = Command::new(&self.bin);
         cmd.arg("state").args(["--pid", &self.pid().to_string(), "--json", "--watch"]);
         if !kinds.is_empty() {
             cmd.arg(kinds);

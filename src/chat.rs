@@ -6,8 +6,9 @@
 //!   only the first time that version is sent (not resent every time), and only around the cursor if large.
 //! - Answers are drawn as they stream; stop (`C-c`) is an interrupt control request — process, memory stay.
 //! - A code block in the answer: `C-r` applies it to the selection (via the review diff), `C-y` copies it.
-//! - Claude explores the project itself with read-only tools (Read·Grep·Glob — it can't write). Each call
-//!   is one dim row (`◦ read  src/lib.rs  L10–49`); it and every `path:line` in an answer is a link —
+//! - Claude explores the project itself with read-only tools (Read, tarae's search and read — it can't
+//!   write). Each call is one dim row (`◦ read  src/lib.rs  L10–49`); it and every `path:line` in an answer
+//!   is a link —
 //!   click it, or `C-]` (`C-g`) walks them newest first. Open files are listed in the context; unsaved ones carry
 //!   their text (disk is stale for them).
 //! - It reads your CLAUDE.md files and Claude Code settings like `claude` (`llm.chat-settings`) — with hooks off
@@ -35,7 +36,7 @@ grep for `fn X`, `struct X` or `class X`; for a trait's implementations, definit
 for a value's type or a function's signature and docs, hover; for where something is used or what a change \
 would touch, references. For finding code or text, search (the editor's project search — each hit says the \
 function it's in); for lines of files, read (several files and ranges, or a function by name, in one call); \
-for a file's outline or which function a line is in, symbols — Grep, Glob and shell pipelines are for what \
+for a file's outline or which function a line is in, symbols — shell pipelines are for what \
 those can't do. Prefer the most direct tool, and ask for enough in one call to skip another turn: a turn \
 costs more than a few extra lines. Edit needs its own Read of the part it changes. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
@@ -106,9 +107,11 @@ pub(crate) fn system() -> String {
 /// The tools the chat process gets. Reading and tarae's own (`note`, `run_tests`, `run` — `tools.rs`) are
 /// allowed up front: the tests are the project's own, run the way the user runs them, in view, and any code
 /// Claude wrote for them was reviewed; `run` asks the user itself for anything but the checks. Edit and Write
-/// come to tarae as permission requests and show as a review first (`edits.rs`).
-const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
-/// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
+/// come to tarae as permission requests and show as a review first (`edits.rs`). No Grep or Glob: tarae's
+/// `search` and `read` do what they did — 54 exploration turns on three builds called Grep never and Glob 3
+/// times, and leaving them out takes 1,570 tokens off every request (tests/live.rs `chat_tools_ab`, 2026-10-13).
+const TOOLS: &str = "Read,Edit,Write";
+/// Not Read: allowed by name it reads anywhere unasked (measured — `reads.rs` answers it).
 /// (`screen` asks the user itself — `seeing.rs`)
 /// (`references`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project only — `nav.rs`;
 /// `search` and `read` outside it only as Read would, on its card — `reads::Gate`; `rename` and `replace` land
@@ -3388,8 +3391,8 @@ mod tests {
     }
 
     /// The system prompt sends "where is X defined" to the language server by name (never a grep for `fn X`
-    /// / `struct X`), a type to hover, uses to references — then tarae's search and read; Grep, Glob and shell
-    /// pipelines for what those can't do.
+    /// / `struct X`), a type to hover, uses to references — then tarae's search and read; shell pipelines for
+    /// what those can't do. Grep and Glob aren't the chat's tools, and the prompt doesn't name them.
     #[test]
     fn the_prompt_prefers_the_language_server() {
         let s = system();
@@ -3400,9 +3403,9 @@ mod tests {
         assert!(s.contains("never a grep for `fn X`, `struct X` or `class X`"));
         assert!(at("definition by name") < at(", hover;") && at(", hover;") < at("references."));
         assert!(at("references.") < at("for lines of files, read"));
-        assert!(
-            at("for lines of files, read") < at("Grep, Glob and shell pipelines are for what those can't do")
-        );
+        assert!(at("for lines of files, read") < at("shell pipelines are for what those can't do"));
+        assert!(!s.contains("Grep") && !s.contains("Glob"), "a tool the chat hasn't");
+        assert!(!TOOLS.split(',').any(|t| t == "Grep" || t == "Glob"));
     }
 
     /// A walk-through's stops as Claude writes them: parsed from its words, shown as link lines, a tag

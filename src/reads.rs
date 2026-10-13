@@ -1,4 +1,5 @@
-//! Claude's Read, Grep and Glob in the chat. Measured 2026-10-02 (`target/sb/r1.sh`): named in
+//! Claude's Read in the chat, and the reviewer's Read, Grep and Glob (the chat has had no Grep or Glob
+//! since 2026-10-13 — `chat::TOOLS`). Measured 2026-10-02 (`target/sb/r1.sh`): named in
 //! `--allowedTools` they read anywhere without asking; left out, every call is a `can_use_tool` ask. So
 //! they're left out (`chat::ALLOWED`) and answered here: inside the project (the real path, links
 //! followed) or in a place the user allowed (`allow.rs`) at once; anything else on a card that says

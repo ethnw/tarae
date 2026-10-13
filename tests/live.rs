@@ -916,16 +916,25 @@ fn chat_pins_a_note() {
     t.wait_for("the note in the notes picker", |s| s.contains("lib.rs"));
 }
 
-/// The chat's claude with its stream-json copied to `stream.jsonl` in the project as it goes (a `tee` in
-/// between) — what each of its requests cost is in that stream (`usage`).
+/// The chat's claude with its stream-json copied to `stream.jsonl` as it goes (a `tee` in between) — what
+/// each of its requests cost is in that stream (`usage`).
 fn teed_chat(name: &str) -> (Sandbox, std::path::PathBuf) {
     let sb = Sandbox::live(name);
-    let out = sb.file("stream.jsonl");
-    let script =
-        sb.write("claude-tee.sh", &format!("#!/bin/sh\nclaude \"$@\" | tee -a '{}'\n", out.display()));
-    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n[llm]\ncommand = \"{}\"\n", script.display()));
+    let out = teed(&sb, "");
     (sb, out)
+}
+
+/// `teed_chat`'s config on `sb`, with more `[llm]` lines: the stream and the script beside the project, not
+/// in it — a search of the project would find the turn's own answer there. Beside it is still under the temp
+/// folder, which Claude reads unasked, so only a call that goes looking outside the project reaches them — the
+/// A/B counts those (`Measured.outside`).
+fn teed(sb: &Sandbox, llm: &str) -> std::path::PathBuf {
+    let out = sb.outside("stream.jsonl");
+    let script = sb.outside("claude-tee.sh");
+    std::fs::write(&script, format!("#!/bin/sh\nclaude \"$@\" | tee -a '{}'\n", out.display())).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n[llm]\ncommand = \"{}\"\n{llm}", script.display()));
+    out
 }
 
 /// Each request's prompt as claude's `usage` counts it — input + cache written + cache read, the whole
@@ -1013,6 +1022,502 @@ fn chat_ui_call_tokens() {
         .unwrap_or_default();
     eprintln!("TOKENS requests' prompts: {p:?}; the ui answer: {} bytes\n{answer}", answer.len());
     assert!(p.len() >= 2, "a request after the call: {p:?}");
+}
+
+// ── What tarae's reading tools save: two builds on the same questions ──────────────────────────────────
+
+/// The tree the A/B's questions are about: this repository as of the base build's commit (perf's `CORPUS`
+/// predates `spawn.rs` and awk's rule). Pinned, so every run of either build reads the same files.
+const TOOLS_CORPUS: &str = "6d7149a1";
+const TOOLS_CORPUS_PATHS: [&str; 8] =
+    ["src", "runtime", "docs", "tests", "xtask/src", "Cargo.toml", "README.md", "CONTRIBUTING.md"];
+
+/// A run stops past these (`C-c`), counted as capped — a turn that wanders mustn't eat the budget.
+const AB_MAX_REQUESTS: usize = 30;
+const AB_MAX_TIME: Duration = Duration::from_secs(8 * 60);
+
+/// A question of the A/B and what a right answer names: each entry is met when the answer has any of its
+/// words (case aside). Found in `TOOLS_CORPUS` with the language server's references, not by guessing.
+struct Question {
+    name: &'static str,
+    ask: &'static str,
+    key: &'static [&'static [&'static str]],
+}
+
+const QUESTIONS: [Question; 3] = [
+    Question {
+        name: "setsid",
+        ask: "Who calls spawn::setsid in src/, and which descriptor limit does what it starts get? Answer from \
+              the code; change nothing.",
+        // (its callers: setsid_as, ended.rs, the proxy's macOS measurement; Limit::Original — setsid_git and
+        // setsid_fed keep the raised one)
+        key: &[&["setsid_as"], &["ended.rs"], &["macos_measure"], &["Original", "started with"]],
+    },
+    Question {
+        name: "card-front",
+        ask: "How does a new card get to the front of the cards that are up, and how does it get the keys \
+              while the chat has them? Answer from the code; change nothing.",
+        key: &[&["push_offer"], &["offer_place"], &["rank"], &["chat_lent", "card_key", "C-q"]],
+    },
+    Question {
+        name: "awk-tests",
+        ask: "Which tests cover readonly's rule for awk — what makes an awk command count as only reading? \
+              Answer from the code; change nothing.",
+        key: &[
+            &["a_glob_value_tr_and_a_printing_awk_read_only_what_they_name"],
+            &["a_run_cards_a_is_this_exact_command_with_any_reading_filters"],
+            &["awk_reads"],
+        ],
+    },
+];
+
+/// What one run of a question cost and how it went — all read from claude's stream, the same yardstick for
+/// both builds (the base build has no `calls.rs`).
+#[derive(Clone, Debug, Default)]
+struct Measured {
+    requests: usize,
+    calls: usize,
+    /// Each request's prompt (input + cache written + cache read): mean and largest.
+    prompt_mean: f64,
+    prompt_max: u64,
+    /// The turn's tokens as claude's result counts them, output included.
+    tokens: u64,
+    cost: f64,
+    /// The turn's time outside the model: claude's `duration_ms` − `duration_api_ms`.
+    tool_ms: u64,
+    wall_ms: u64,
+    /// `run` calls whose every part starts with a program that only reads text (grep, sed, head …).
+    read_only: usize,
+    /// Calls naming a place outside the project — where the A/B's own records sit (`teed`): a run that has
+    /// some read what no build should be measured on.
+    outside: usize,
+    /// The same call again, or a Read of lines an earlier Read of the file covered (nothing is written).
+    wasted: usize,
+    errors: usize,
+    cards: usize,
+    capped: bool,
+    /// Share of the question's key the answer names.
+    right: f64,
+    tools: std::collections::BTreeMap<String, usize>,
+    answer: String,
+}
+
+/// Programs a read-only text pipeline is made of — what `search` and `read` are meant to replace.
+const TEXT_READERS: [&str; 15] = [
+    "grep", "rg", "sed", "awk", "head", "tail", "cat", "wc", "find", "ls", "cut", "sort", "uniq", "tr", "nl",
+];
+
+/// Whether a `run` command only reads text: every part (between `|`, `;`, `&`) starts with one of
+/// `TEXT_READERS` (or is a `cd`), and nothing is written — a `>` is a redirect to a file, but a descriptor's
+/// copy (`2>&1`, `>&2`) writes none. Quoted text isn't the shell's (`awk 'NR>=7'`, `grep 'a|b'`).
+fn reads_text_only(command: &str) -> bool {
+    // The line with quoted text blanked to `x`s: its `|`, `>` and `&` are the program's
+    let mut line = String::new();
+    let mut quote = None;
+    for c in command.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => line.push('x'),
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None => line.push(c),
+        }
+    }
+    let copy = |w: &str| {
+        let fd = w.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix(">&");
+        fd.is_some_and(|n| n == "-" || (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+    };
+    let words: Vec<&str> = line.split_whitespace().filter(|w| !copy(w)).collect();
+    if words.iter().any(|w| w.contains('>')) {
+        return false;
+    }
+    let line = words.join(" ");
+    let parts = line.split(['|', ';', '&']).map(str::trim).filter(|p| !p.is_empty());
+    let mut any = false;
+    for p in parts {
+        let first = p.split_whitespace().next().unwrap_or_default();
+        if first == "cd" {
+            continue;
+        }
+        if !TEXT_READERS.contains(&first) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// A Read's lines: (first, last) — its default is 2000 lines from the top.
+fn read_lines(input: &serde_json::Value) -> (u64, u64) {
+    let from = input["offset"].as_u64().unwrap_or(1).max(1);
+    (from, from + input["limit"].as_u64().unwrap_or(2000) - 1)
+}
+
+/// Whether a call's places (`file_path`, `path`, `files`, `cwd` — never a pattern, which may well start with
+/// `/`) lead outside the project at `work`: an absolute path elsewhere, or one climbing out with `..`.
+fn reaches_out(input: &serde_json::Value, work: &str) -> bool {
+    let out = |s: &str| {
+        let inside = s == work || s.strip_prefix(work).is_some_and(|r| r.starts_with('/'));
+        (s.starts_with('/') && !inside) || s == ".." || s.starts_with("../") || s.contains("/../")
+    };
+    ["file_path", "path", "files", "cwd"].iter().any(|k| match &input[*k] {
+        serde_json::Value::String(s) => out(s),
+        serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_str()).any(out),
+        _ => false,
+    })
+}
+
+/// What a turn cost, from claude's stream; `work` is the project's real path.
+fn measure(stream: &str, work: &str) -> Measured {
+    let mut m = Measured::default();
+    let mut ids: Vec<String> = Vec::new();
+    let mut prompts: Vec<u64> = Vec::new();
+    let mut uses: Vec<String> = Vec::new();
+    let mut calls: Vec<(String, serde_json::Value)> = Vec::new();
+    for line in stream.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match v["type"].as_str() {
+            Some("assistant") => {
+                let msg = &v["message"];
+                let id = msg["id"].as_str().unwrap_or_default().to_string();
+                if !ids.contains(&id) {
+                    let u = &msg["usage"];
+                    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                    prompts.push(
+                        n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"),
+                    );
+                    ids.push(id);
+                }
+                for c in msg["content"].as_array().into_iter().flatten() {
+                    let use_id = c["id"].as_str().unwrap_or_default().to_string();
+                    if c["type"] == "tool_use" && !uses.contains(&use_id) {
+                        uses.push(use_id);
+                        calls.push((c["name"].as_str().unwrap_or_default().to_string(), c["input"].clone()));
+                    }
+                }
+            }
+            Some("user") => {
+                for c in v["message"]["content"].as_array().into_iter().flatten() {
+                    if c["type"] == "tool_result" && c["is_error"] == true {
+                        m.errors += 1;
+                    }
+                }
+            }
+            Some("result") => {
+                let u = &v["usage"];
+                let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                m.tokens = [
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                    "output_tokens",
+                ]
+                .iter()
+                .map(|k| n(k))
+                .sum();
+                m.cost = v["total_cost_usd"].as_f64().unwrap_or(0.0);
+                let ms = |k: &str| v[k].as_u64().unwrap_or(0);
+                m.tool_ms = ms("duration_ms").saturating_sub(ms("duration_api_ms"));
+                m.answer = v["result"].as_str().unwrap_or_default().to_string();
+            }
+            _ => {}
+        }
+    }
+    m.requests = prompts.len();
+    m.calls = calls.len();
+    m.prompt_max = prompts.iter().copied().max().unwrap_or(0);
+    m.prompt_mean = prompts.iter().sum::<u64>() as f64 / prompts.len().max(1) as f64;
+    for (i, (name, input)) in calls.iter().enumerate() {
+        let tool = name.strip_prefix("mcp__tarae__").unwrap_or(name).to_string();
+        *m.tools.entry(tool.clone()).or_default() += 1;
+        if tool == "run" && reads_text_only(input["command"].as_str().unwrap_or_default()) {
+            m.read_only += 1;
+        }
+        if reaches_out(input, work) {
+            m.outside += 1;
+        }
+        let before = &calls[..i];
+        let again = before.iter().any(|(n, x)| n == name && x == input);
+        let covered = name == "Read"
+            && before.iter().any(|(n, x)| {
+                let ((a, b), (c, d)) = (read_lines(x), read_lines(input));
+                n == "Read" && x["file_path"] == input["file_path"] && a <= c && d <= b
+            });
+        if again || covered {
+            m.wasted += 1;
+        }
+    }
+    m
+}
+
+/// The A/B's yardstick on a stream written by hand: a request counted once however many events carry it,
+/// the same call again and a Read inside an earlier one wasted, a text pipeline told from a run that does
+/// more, the result's numbers taken whole. Runs offline, in every `cargo test`.
+#[test]
+fn the_ab_reads_a_turn_from_claudes_stream() {
+    let use_ = |msg: &str, id: &str, name: &str, input: &str| {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{msg}","usage":{{"input_tokens":10,"cache_read_input_tokens":1000}},"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}]}}}}"#
+        )
+    };
+    let stream = [
+        use_("m1", "t1", "Read", r#"{"file_path":"/p/a.rs","offset":10,"limit":50}"#),
+        use_("m1", "t2", "mcp__tarae__run", r#"{"command":"grep -n x src/a.rs | head -5"}"#),
+        use_("m2", "t3", "Read", r#"{"file_path":"/p/a.rs","offset":20,"limit":10}"#),
+        use_("m2", "t4", "mcp__tarae__run", r#"{"command":"cargo test -q | grep FAILED"}"#),
+        use_("m3", "t5", "mcp__tarae__run", r#"{"command":"grep -n x src/a.rs | head -5"}"#),
+        use_("m3", "t6", "mcp__tarae__search", r#"{"pattern":"/// x","path":"src"}"#),
+        use_("m3", "t7", "mcp__tarae__read", r#"{"files":["src/a.rs:1-9","../stream.jsonl"]}"#),
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":true}]}}"#.into(),
+        r#"{"type":"result","usage":{"input_tokens":30,"cache_read_input_tokens":3000,"output_tokens":70},"total_cost_usd":0.5,"duration_ms":9000,"duration_api_ms":6000,"result":"It's setsid_as."}"#.into(),
+    ]
+    .join("\n");
+    let m = measure(&stream, "/p");
+    assert_eq!((m.requests, m.calls, m.prompt_max, m.prompt_mean as u64), (3, 7, 1010, 1010));
+    assert_eq!((m.tokens, m.cost, m.tool_ms, m.errors), (3100, 0.5, 3000, 1));
+    assert_eq!(m.read_only, 2, "both greps, not cargo's run");
+    assert_eq!(m.wasted, 2, "the Read inside the first and the grep again");
+    assert_eq!(m.outside, 1, "the read climbing out — not the pattern starting with /, nor /p/a.rs");
+    assert_eq!((m.tools["Read"], m.tools["run"], m.tools["search"]), (2, 3, 1));
+    assert_eq!(m.answer, "It's setsid_as.");
+}
+
+/// What counts as a text pipeline: quoted text is the program's (`awk 'NR>=7'`, `grep 'a|b'`), a
+/// descriptor's copy writes nothing (`2>&1`), a redirect to a file does — so does a part that isn't a reader.
+#[test]
+fn a_text_pipeline_reads_and_writes_nothing() {
+    for read in [
+        "grep -n x a.rs 2>&1 | head -5",
+        "awk 'NR>=702 && NR<=800' a.rs | grep -n x",
+        "grep -E 'a|b>c' a.rs",
+        "cd src && sed -n 1,9p a.rs >&2",
+        "sort < a.txt | uniq -c",
+    ] {
+        assert!(reads_text_only(read), "{read}");
+    }
+    for not in
+        ["cat a.txt > b.txt", "sed -n 1,5p a.rs >> out", "grep x a.rs | xargs rm", "cargo test", "cd src"]
+    {
+        assert!(!reads_text_only(not), "{not}");
+    }
+}
+
+/// Requests so far in a stream — the cap's count.
+fn requests_so_far(stream: &Path) -> usize {
+    prompts(&std::fs::read_to_string(stream).unwrap_or_default()).len()
+}
+
+/// One question asked of the chat and answered, caps kept; a card that comes up is answered `n` (the questions
+/// need none) and counted.
+fn ab_turn(t: &mut Term, ask: &str, stream: &Path) -> (usize, bool) {
+    if !t.screen().contains("enter send") {
+        t.send(" l");
+        t.wait_for("the chat, focused", |s| s.contains("enter send"));
+    }
+    t.send(&format!("{ask}\r"));
+    let _ = t.poll_for(Duration::from_secs(15), |s| s.contains("C-c stop"));
+    let start = Instant::now();
+    // (keys sent to cards: an answer, or `C-q` to bring the keys to one)
+    let (mut cards, mut tries) = (0, 0);
+    let ended =
+        |stream: &Path| std::fs::read_to_string(stream).unwrap_or_default().contains("\"type\":\"result\"");
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if ended(stream) && chat_idle(&t.screen()) {
+            return (cards, false);
+        }
+        // The caps first: a card that never takes the keys or never goes mustn't keep the run going
+        if requests_so_far(stream) > AB_MAX_REQUESTS || start.elapsed() > AB_MAX_TIME || tries > 10 {
+            t.send("\x03");
+            let _ = t.poll_for(Duration::from_secs(60), chat_idle);
+            return (cards, true);
+        }
+        let st = t.state_json(0);
+        let asking = st["cards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c["state"] == "asking" && c["settled"] == true);
+        if asking {
+            tries += 1;
+            // (the card has the keys — lent by the chat — or `C-q` hands them to it first)
+            if st["keys"]["region"].as_str().is_some_and(|r| r.contains("card")) {
+                t.send("n");
+                cards += 1;
+            } else {
+                t.send("\x11");
+            }
+        }
+    }
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    match v.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => v[n / 2],
+        n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+    }
+}
+
+/// Does tarae's own reading (`search`, `read`) pay for its tools' schemas? Two builds — `TARAE_AB_BASE` (before
+/// them) and `TARAE_AB_NEW` — answer the same questions about `TOOLS_CORPUS`, one turn each, no edits, the
+/// language server off (its tools are the same in both); what each run cost is read from claude's stream. Runs
+/// alternate between the builds (A B, then B A) so the time of day and the prompt cache fall on both alike.
+/// `TARAE_AB_RUNS` (3), `TARAE_AB_QUESTIONS` (names, comma-separated; all), `TARAE_AB_BUDGET` ($ claude
+/// reports, 25: no run starts past it), `TARAE_AB_MODEL` ("opus"), `TARAE_AB_EFFORT` (the model's default),
+/// `TARAE_AB_LABELS` (what the two are called in the rows: "base,new").
+/// Each run's row goes to `target/live/tools-ab.tsv`, its stream and summary to `target/live/tools-ab/`. To
+/// see them as they come: `cargo live chat_tools_ab --nocapture` (no second `--`: the alias has one).
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_tools_ab() {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (Some(base), Some(new)) = (var("TARAE_AB_BASE"), var("TARAE_AB_NEW")) else {
+        skip("TARAE_AB_BASE and TARAE_AB_NEW name the two builds");
+        return;
+    };
+    if !have("claude") {
+        return;
+    }
+    let runs: usize = var("TARAE_AB_RUNS").and_then(|r| r.parse().ok()).unwrap_or(3);
+    let budget: f64 = var("TARAE_AB_BUDGET").and_then(|b| b.parse().ok()).unwrap_or(25.0);
+    let model = var("TARAE_AB_MODEL").unwrap_or_else(|| "opus".into());
+    let effort = var("TARAE_AB_EFFORT").unwrap_or_default();
+    let only = var("TARAE_AB_QUESTIONS");
+    let questions: Vec<&Question> = QUESTIONS
+        .iter()
+        .filter(|q| only.as_deref().is_none_or(|o| o.split(',').any(|n| n == q.name)))
+        .collect();
+    let labels = var("TARAE_AB_LABELS").unwrap_or_else(|| "base,new".into());
+    let (first, second) = labels.split_once(',').unwrap_or(("base", "new"));
+    let builds = [(first, Path::new(&base)), (second, Path::new(&new))];
+    let tsv = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/live/tools-ab.tsv");
+    std::fs::create_dir_all(tsv.parent().unwrap()).unwrap();
+    let mut rows: Vec<(&str, &str, Measured)> = Vec::new();
+    let mut spent = 0.0;
+    'runs: for run in 0..runs {
+        for q in &questions {
+            let order = if run % 2 == 0 { [0, 1] } else { [1, 0] };
+            for b in order {
+                if spent > budget {
+                    eprintln!("TOOLS_AB budget: ${spent:.2} spent, past ${budget} — no more runs");
+                    break 'runs;
+                }
+                let (build, bin) = builds[b];
+                let sb = Sandbox::live(&format!("tools-ab-{}-{build}", q.name)).with_bin(bin);
+                assert!(
+                    sb.copy_commit(TOOLS_CORPUS, &TOOLS_CORPUS_PATHS),
+                    "commit {TOOLS_CORPUS} in this clone"
+                );
+                let stream = teed(&sb, &format!("model = \"{model}\"\neffort = \"{effort}\"\n"));
+                let mut t = sb.spawn(&["README.md"]);
+                let started = Instant::now();
+                let (cards, capped) = ab_turn(&mut t, q.ask, &stream);
+                let work = sb.work();
+                let mut m =
+                    measure(&std::fs::read_to_string(&stream).unwrap_or_default(), work.to_str().unwrap());
+                m.wall_ms = started.elapsed().as_millis() as u64;
+                (m.cards, m.capped) = (cards, capped);
+                let lower = m.answer.to_lowercase();
+                let met = q.key.iter().filter(|alts| alts.iter().any(|a| lower.contains(&a.to_lowercase())));
+                m.right = met.count() as f64 / q.key.len() as f64;
+                spent += m.cost;
+                // (the new build counts its own calls — `calls.rs`; said beside the stream's, a check of it)
+                let st = t.state_json(0);
+                let own = &st["sessions"][0]["usage"]["last_turn"]["calls"];
+                let said = format!(
+                    "TOOLS_AB {} {build} run {}: {} requests, {} calls {:?}, prompt mean {:.0} max {}, {} tokens, \
+                     ${:.3}, tools {} ms of {} ms, read-only runs {}, wasted {}, errors {}, cards {}, capped {}, \
+                     outside the project {}, right {:.2}{}\n  answer: {}",
+                    q.name,
+                    run + 1,
+                    m.requests,
+                    m.calls,
+                    m.tools,
+                    m.prompt_mean,
+                    m.prompt_max,
+                    m.tokens,
+                    m.cost,
+                    m.tool_ms,
+                    m.wall_ms,
+                    m.read_only,
+                    m.wasted,
+                    m.errors,
+                    m.cards,
+                    m.capped,
+                    m.outside,
+                    m.right,
+                    if own.is_null() { String::new() } else { format!("\n  calls.rs: {own}") },
+                    m.answer.replace('\n', " ⏎ "),
+                );
+                eprintln!("{said}");
+                // (what libtest keeps from a passing test's stderr is nothing: the answers, the calls.rs check
+                // and each run's whole stream are kept beside the table)
+                let kept = tsv.with_file_name("tools-ab");
+                std::fs::create_dir_all(&kept).unwrap();
+                let name = format!("{}-{build}-{}-{}", q.name, run + 1, std::process::id());
+                let _ = std::fs::copy(&stream, kept.join(format!("{name}.jsonl")));
+                std::fs::write(kept.join(format!("{name}.txt")), &said).unwrap();
+                let row = format!(
+                    "{}\t{}\t{build}\t{}\t{}\t{}\t{:.0}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:?}\t{}\n",
+                    TOOLS_CORPUS,
+                    q.name,
+                    run + 1,
+                    m.requests,
+                    m.calls,
+                    m.prompt_mean,
+                    m.prompt_max,
+                    m.tokens,
+                    m.cost,
+                    m.tool_ms,
+                    m.wall_ms,
+                    m.read_only,
+                    m.wasted,
+                    m.errors,
+                    m.cards,
+                    m.capped,
+                    m.right,
+                    m.tools,
+                    m.outside,
+                );
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&tsv).unwrap();
+                f.write_all(row.as_bytes()).unwrap();
+                rows.push((q.name, build, m));
+            }
+        }
+    }
+    eprintln!(
+        "TOOLS_AB median (min–max) — question build n: requests · calls/request · prompt mean · tokens · $ · \
+         tool ms · read-only runs · wasted · right"
+    );
+    for q in &questions {
+        for (build, _) in builds {
+            let of: Vec<&Measured> =
+                rows.iter().filter(|r| r.0 == q.name && r.1 == build).map(|r| &r.2).collect();
+            let at = |f: &dyn Fn(&Measured) -> f64, p: usize| {
+                let v: Vec<f64> = of.iter().map(|m| f(m)).collect();
+                let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+                format!("{:.p$} ({lo:.p$}–{hi:.p$})", median(v))
+            };
+            eprintln!(
+                "TOOLS_AB {} {build} {}: {} · {} · {} · {} · {} · {} · {} · {} · {}",
+                q.name,
+                of.len(),
+                at(&|m| m.requests as f64, 0),
+                at(&|m| m.calls as f64 / m.requests.max(1) as f64, 2),
+                at(&|m| m.prompt_mean, 0),
+                at(&|m| m.tokens as f64, 0),
+                at(&|m| m.cost, 3),
+                at(&|m| m.tool_ms as f64, 0),
+                at(&|m| m.read_only as f64, 0),
+                at(&|m| m.wasted as f64, 0),
+                at(&|m| m.right, 2),
+            );
+        }
+    }
+    eprintln!("TOOLS_AB spent ${spent:.2}");
+    assert!(!rows.is_empty(), "no run");
 }
 
 /// A turn's edit, undone with `space u` (on disk too); after a restart the conversation goes on, and Claude

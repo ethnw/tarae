@@ -277,9 +277,10 @@ Every other name stays, Claude Code's settings you may export on purpose among t
 so once since tarae started, by name, and names the `CLAUDE*`/`ANTHROPIC_*` variables still passed when tarae runs
 inside Claude Code; `tarae.log` has the same line.
 
-Claude isn't limited to that file: it **explores the project itself** (Read, Grep, Glob — in the project without
-asking, [outside it only once you say so](#reading-outside-the-project); its [edits](#edits) always come to you
-first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`, `◦ grep  fn add  in src` — each named as the tool it is),
+Claude isn't limited to that file: it **explores the project itself** (Read, and tarae's own search, read and
+language-server tools — in the project without asking, [outside it only once you say so](#reading-outside-the-project);
+its [edits](#edits) always come to you first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`,
+`◦ search  fn add  in src` — each named as the tool it is),
 the one in progress marked `●`. The other open files are listed in the context, and unsaved ones send their text,
 since Claude would otherwise read the stale copy on disk. Answers cite code as `path:line`. Those references are
 underlined, and a click opens them. `C-]` (or `C-g` — zellij takes that one) walks every place the conversation points at, newest first, centering
@@ -1104,7 +1105,7 @@ thread of tarae's that confined itself first, and everything it starts stays con
 
 ### Reading outside the project
 
-Claude reads the project freely: its Read, Grep and Glob go through without asking wherever the path really
+Claude reads the project freely: its Read (and tarae's `search` and `read`) go through without asking wherever the path really
 leads into the project (links followed). So do the repository's other checkouts (the main one and each
 session's — as git's own files say, both ways: an entry under `.git/worktrees` whose folder doesn't name it
 back is no checkout), the temp folders (`/tmp`, your `$TMPDIR`), the toolchains' sources, the crates cargo

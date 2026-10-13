@@ -777,22 +777,7 @@ fn copy_repo(sb: &Sandbox) {
     if let Some(from) = std::env::var_os("TARAE_PERF_REPO") {
         return copy_tree(std::path::Path::new(&from), sb);
     }
-    fs::create_dir_all(sb.work()).unwrap();
-    let mut archive = std::process::Command::new("git")
-        .args(["-C", here.to_str().unwrap(), "archive", "--format=tar", CORPUS, "--"])
-        .args(CORPUS_PATHS)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let untarred = std::process::Command::new("tar")
-        .args(["-x", "-C", sb.work().to_str().unwrap()])
-        .stdin(archive.stdout.take().unwrap())
-        .status()
-        .is_ok_and(|s| s.success());
-    let archived = archive.wait().is_ok_and(|s| s.success());
-    let ok = archived && untarred && sb.file("src/editor.rs").exists();
-    if !ok {
+    if !(sb.copy_commit(CORPUS, &CORPUS_PATHS) && sb.file("src/editor.rs").exists()) {
         // (a clone without that commit: today's files — a number not to compare with the history)
         eprintln!("perf: no commit {CORPUS} here — copying the working tree's files");
         copy_tree(here, sb);

@@ -83,7 +83,7 @@ pub fn references_schema() -> Value {
         "name": "references",
         "description": "Find where a function, type, method, field or variable is used — the language \
     server's references, each with its line of code, by file, the declaration first. Semantic, not text: \
-    no same-named strangers, no misses through imports or aliases. Reach for it over Grep and search whenever \
+    no same-named strangers, no misses through imports or aliases. Reach for it over search whenever \
     the question is who calls or uses something, or what a change to it would touch. Give the file and line \
     where the name is written (its declaration or any use) and the name. While the language server is still \
     loading, the answer is the name's whole-word text matches instead, and says so — ask again later for the \
@@ -1841,7 +1841,7 @@ pub fn search_schema() -> Value {
     json!({
         "name": "search",
         "description": "Search files for a regex — the editor's own search (ripgrep's engine, in the editor: \
-    no process, and no card inside the project). Use it rather than Grep, or grep/rg in run. Hits come by file \
+    no process, and no card inside the project). Use it rather than grep/rg in run. Hits come by file \
     then line, each with its line and the function or type it's in (and context lines if you ask) — often \
     enough without reading the file; the answer says the total and the offset of the next page. Smart case: \
     an all-lowercase pattern matches any case. Skips what .gitignore skips; hidden files are searched — files \
