@@ -51,6 +51,7 @@ mod git;
 mod gitmenu;
 mod gitpanel;
 mod gitrepo;
+mod gittool;
 mod gittrust;
 mod grammar;
 mod graphemes;

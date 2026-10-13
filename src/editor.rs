@@ -6919,6 +6919,42 @@ mod tests {
         assert!(s.contains("y accept   n reject") && !s.contains("accept all"), "{s}");
     }
 
+    /// #216: one `y` answers the one change there is to answer. A change that changes nothing comes decided
+    /// already (left as it is) — the review starts past it: a `y` on the no-op left "1 undecided" and asked for a
+    /// second press. On a change decided already (gone back to it), `y` answers that change again — a change
+    /// of mind — never another one not looked at.
+    #[test]
+    fn one_y_answers_the_one_open_change() {
+        let mut ed = editor("one\ntwo\n");
+        let id = ed.doc().id;
+        // (the first change changes nothing — decided at once)
+        let changes =
+            vec![(0, 4, "one\n".to_string(), "one\n".to_string()), (4, 8, "two\n".into(), "TWO\n".into())];
+        crate::llm::review_with(&mut ed, id, "upper", changes, None);
+        assert_eq!(ed.session.review.as_ref().unwrap().current, 1, "on the open change");
+        feed(&mut ed, "y");
+        assert!(ed.session.review.is_none(), "one y settles it");
+        assert_eq!(ed.doc().text.to_string(), "one\nTWO\n");
+
+        // Gone back to a change decided already: `y` changes that answer, the open one still waits
+        let changes =
+            vec![(0, 4, "one\n".to_string(), "ONE\n".to_string()), (4, 8, "TWO\n".into(), "two\n".into())];
+        crate::llm::review_with(&mut ed, id, "swap", changes, None);
+        let rev = ed.session.review.as_mut().unwrap();
+        rev.hunks[0].decision = crate::llm::Decision::Reject;
+        rev.current = 0;
+        feed(&mut ed, "y");
+        let rev = ed.session.review.as_ref().expect("the other change is still open");
+        assert_eq!(rev.hunks[0].decision, crate::llm::Decision::Accept, "the change of mind");
+        assert_eq!(
+            (rev.current, rev.hunks[1].decision),
+            (1, crate::llm::Decision::Undecided),
+            "not answered"
+        );
+        feed(&mut ed, "n");
+        assert_eq!(ed.doc().text.to_string(), "ONE\nTWO\n");
+    }
+
     /// #61, #70: while an edit review waits, the editor's keys still work over it — C-d/C-u and the wheel
     /// scroll it (a long insertion was cut off), `space` opens what it opens, the picker has the keys — and
     /// Esc goes back to the chat with the change unanswered (it declined it): typed keys are the chat's
@@ -11677,8 +11713,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `C` (and `c`) in the git tab with nothing staged: no buffer, and said why and what to press — `s` on
-    /// Changes stages them all.
+    /// `C` (and `c`) in the git tab with nothing staged: no buffer, and said why and what to press — `S`
+    /// stages them all.
     #[test]
     fn committing_with_nothing_staged_says_what_to_press() {
         let repo = git_repo("commit-unstaged", &[("a.txt", "one\n")]);
@@ -11695,11 +11731,42 @@ mod tests {
             let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
             assert!(
                 said.contains("nothing staged to commit")
-                    && said.contains(&format!("s on Changes stages them all, then {key}")),
+                    && said.contains(&format!("S stages them all, then {key}")),
                 "{key}: {said}"
             );
             assert!(ed.session.committing.is_none(), "{key}: no message buffer");
         }
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// #217: `S` stages every change and `U` unstages everything, from whatever row is selected — a file deep
+    /// in the list, not the Changes heading; with nothing to take, each says so.
+    #[test]
+    fn s_and_u_in_capitals_take_everything_from_any_row() {
+        let repo = git_repo("stage-all", &[("a.txt", "one\n")]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        for f in ["b.txt", "c/d.txt", "c/e.txt"] {
+            std::fs::create_dir_all(repo.join(f).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(f), "new\n").unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| s.unstaged.len() == 4));
+        let sb = ed.session.sidebar.as_mut().unwrap();
+        sb.focus = true;
+        // (the last row: a file, not the heading)
+        sb.selected = sb.lines().len() - 1;
+        assert!(!sb.lines()[sb.selected].label.contains("Changes"));
+        let counts = |ed: &Editor| ed.session.git_status.as_ref().map(|s| (s.staged.len(), s.unstaged.len()));
+        feed(&mut ed, "S");
+        settle_until(&mut ed, |ed| counts(ed) == Some((4, 0)));
+        ed.session.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "S");
+        assert_eq!(ed.status.as_ref().map(|s| s.0.as_str()), Some("nothing to stage"));
+        ed.session.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "U");
+        settle_until(&mut ed, |ed| counts(ed) == Some((0, 4)));
         std::fs::remove_dir_all(&repo).ok();
     }
 

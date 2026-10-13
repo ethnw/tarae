@@ -38,6 +38,38 @@ struct Job {
     then: Then,
     /// A new file of Claude's: its missing folders are made first, inside this project (`Document::make_folders`).
     folders: Option<PathBuf>,
+    /// A save Claude caused (its change accepted, its own write that never came): written beneath this folder
+    /// through no link (`write_beneath`), its missing folders made the same way.
+    beneath: Option<PathBuf>,
+}
+
+/// `text` to `path` as Claude's changes are written (`refactor::write_file`, `beneath.rs`): through descriptors
+/// walked from `root`'s real path one name at a time, no link followed, its missing folders made on the way —
+/// a file there replaced whole (made beside it, renamed over it; a link there refused), else made. Never a path
+/// walked again after the check: a folder swapped for a link meanwhile isn't gone through. `between` runs once
+/// the folder is open, before a byte is written (tests: what a run could swap then).
+pub(crate) fn write_beneath(
+    root: &Path,
+    path: &Path,
+    text: &Rope,
+    between: &dyn Fn(),
+) -> Result<Option<Stamp>, String> {
+    use crate::beneath::Dir;
+    let said = |e: &dyn std::fmt::Display| format!("writing {}: {e}", path.display());
+    let base = Dir::root(root).map_err(|e| said(&e))?;
+    let rel = path.strip_prefix(&base.at).map_err(|_| said(&format!("not in {}", base.at.display())))?;
+    let name = rel.file_name().ok_or_else(|| said(&"no file named"))?;
+    let dir = base.folder(rel.parent().unwrap_or(Path::new("")), true).map_err(|e| said(&e))?;
+    let there = match dir.stamp(name) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(said(&e)),
+    };
+    between();
+    let mut bytes = Vec::with_capacity(text.len_bytes());
+    text.write_to(&mut bytes).map_err(|e| said(&e))?;
+    let written = if there { dir.replace(name, &bytes) } else { dir.create(name, &bytes) };
+    written.map(Some).map_err(|e| said(&e))
 }
 
 /// The folders `path` needs, for a new file of Claude's (`Document::make_folders`): made when they're inside
@@ -123,14 +155,21 @@ impl Saver {
                         std::thread::sleep(slow);
                         job.text.write_to(w)
                     };
-                    let result =
-                        job.folders.as_deref().map_or(Ok(()), |root| make_folders(root, &job.path)).and_then(
-                            |()| {
+                    let result = match job.beneath.as_deref() {
+                        Some(root) => write_beneath(root, &job.path, &job.text, &|| {
+                            #[cfg(test)]
+                            std::thread::sleep(slow);
+                        }),
+                        None => job
+                            .folders
+                            .as_deref()
+                            .map_or(Ok(()), |root| make_folders(root, &job.path))
+                            .and_then(|()| {
                                 crate::disk::write_atomic(&job.path, write)
                                     .map(|()| crate::disk::stamp(&job.path))
                                     .map_err(|e| format!("writing {}: {e}", job.path.display()))
-                            },
-                        );
+                            }),
+                    };
                     let (lock, cv) = &*shared;
                     let idle = {
                         let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -190,11 +229,29 @@ impl Editor {
     /// Save document `id` in the background. Err: it can't be saved (nothing was asked) — the same
     /// errors a save always gave, at once.
     pub fn save_in_background(&mut self, id: DocId, force: bool, then: Then) -> Result<(), String> {
+        self.save_job(id, force, then, None)
+    }
+
+    /// `save_in_background` for a save Claude caused — its change accepted in the review, its own write that
+    /// never came: written beneath `root` (the project) through no link
+    /// (`write_beneath`; `space u` writes with it in place — `checkpoint::file`). Your own saves (`:w`,
+    /// auto-save) write by path as always — a link to a file elsewhere is yours to follow.
+    pub fn save_beneath(&mut self, id: DocId, root: PathBuf, then: Then) -> Result<(), String> {
+        self.save_job(id, false, then, Some(root))
+    }
+
+    fn save_job(
+        &mut self,
+        id: DocId,
+        force: bool,
+        then: Then,
+        beneath: Option<PathBuf>,
+    ) -> Result<(), String> {
         let doc = self.docs.iter_mut().find(|d| d.id == id).ok_or("the buffer was closed")?;
         let path = doc.check_save(force).map_err(|e| format!("{e:#}"))?;
         doc.saving += 1;
         let folders = doc.make_folders.clone();
-        let job = Job { id, path, text: doc.text.clone(), version: doc.version(), then, folders };
+        let job = Job { id, path, text: doc.text.clone(), version: doc.version(), then, folders, beneath };
         self.saver.push(job);
         Ok(())
     }
@@ -381,6 +438,104 @@ mod tests {
         feed(&mut ed, "u");
         assert!(!ed.doc().is_modified());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// A save Claude caused goes through the project's folders by descriptor (`write_beneath`): `sub/` swapped
+    /// for a link to outside after its folder was opened — what a sandboxed run could do while the save waits —
+    /// and the outside file is untouched, the write lands in the folder that was opened; a link already there
+    /// is refused. Through `save_beneath` the same: the outside file stays as it was. Your own `:w` follows.
+    #[test]
+    fn a_save_claude_caused_never_goes_through_a_link_swapped_in() {
+        let base = std::env::temp_dir().join(format!("tarae-saver-beneath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, outside) = (base.join("p"), base.join("outside"));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let (dir, outside) = (std::fs::canonicalize(&dir).unwrap(), std::fs::canonicalize(&outside).unwrap());
+        std::fs::write(dir.join("sub/a.txt"), "one\n").unwrap();
+        std::fs::write(outside.join("a.txt"), "theirs\n").unwrap();
+        let swap = || {
+            std::fs::rename(dir.join("sub"), dir.join("sub.aside")).unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        };
+        let text = Rope::from_str("two\n");
+        write_beneath(&dir, &dir.join("sub/a.txt"), &text, &swap).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outside.join("a.txt")).unwrap(),
+            "theirs\n",
+            "never through the link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sub.aside/a.txt")).unwrap(),
+            "two\n",
+            "in the folder opened"
+        );
+        // The link there before the write: refused
+        let e = write_beneath(&dir, &dir.join("sub/a.txt"), &text, &|| {}).unwrap_err();
+        assert!(e.contains("a link"), "{e}");
+        // As the review's save: the same
+        let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.clone();
+        ed.open(&dir.join("sub.aside/a.txt")).unwrap();
+        std::fs::remove_file(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        ed.doc_mut().path = Some(dir.join("sub/a.txt"));
+        ed.doc_mut().disk = crate::disk::stamp(&outside.join("a.txt"));
+        feed(&mut ed, "cTHREE<esc>");
+        let id = ed.doc().id;
+        ed.save_beneath(id, dir.clone(), Then::Auto(" · Claude's change")).unwrap();
+        assert!(ed.flush_saves());
+        assert_eq!(std::fs::read_to_string(outside.join("a.txt")).unwrap(), "theirs\n");
+        assert!(toasts(&ed, ToastKind::Error).iter().any(|t| t.contains("a link")), "said");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The save tarae makes when Claude's write of an accepted edit never came (`agent_write_missed`): in the
+    /// project it goes through the folders by descriptor — `sub/` swapped for a link to outside meanwhile and
+    /// the outside file is untouched, said; a file outside the project (accepted on its review) is saved by
+    /// its path as before.
+    #[test]
+    fn the_save_for_a_missed_write_never_goes_through_a_link() {
+        let base = std::env::temp_dir().join(format!("tarae-saver-missed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, outside, apart) = (base.join("p"), base.join("outside"), base.join("apart"));
+        for d in [dir.join("sub"), outside.clone(), apart.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let (dir, outside, apart) = (real(&dir), real(&outside), real(&apart));
+        std::fs::write(dir.join("sub/a.txt"), "one\n").unwrap();
+        std::fs::write(outside.join("a.txt"), "theirs\n").unwrap();
+        std::fs::write(apart.join("b.txt"), "one\n").unwrap();
+        let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.clone();
+        // Claude's accepted edit, its write never come — and the folder swapped for a link meanwhile
+        let missed = |ed: &mut Editor, path: &Path| {
+            ed.open(path).unwrap();
+            feed(ed, "cTWO<esc>");
+            ed.doc_mut().agent_will_write();
+            (ed.doc().id, ed.doc().version())
+        };
+        let (id, version) = missed(&mut ed, &dir.join("sub/a.txt"));
+        std::fs::rename(dir.join("sub"), dir.join("sub.aside")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        // (its fingerprint the outside file's: a conflict would stop it before the write — what's tried is the write)
+        ed.doc_mut().disk = crate::disk::stamp(&outside.join("a.txt"));
+        ed.agent_write_missed(id, version);
+        assert!(ed.flush_saves());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("a.txt")).unwrap(),
+            "theirs\n",
+            "never through the link"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("sub.aside/a.txt")).unwrap(), "one\n");
+        assert!(toasts(&ed, ToastKind::Error).iter().any(|t| t.contains("a link")), "said");
+        // Outside the project: by its path, as before
+        let (id, version) = missed(&mut ed, &apart.join("b.txt"));
+        ed.agent_write_missed(id, version);
+        assert!(ed.flush_saves());
+        assert_eq!(std::fs::read_to_string(apart.join("b.txt")).unwrap(), "TWOne\n");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Saves in a row land in the order asked — the file ends with the last — and none of them is taken for

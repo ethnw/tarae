@@ -11,6 +11,13 @@ pub fn inside(root: &Path, path: &Path) -> Option<PathBuf> {
     real(path).filter(|real| real.starts_with(&root))
 }
 
+/// Whether `path`, as written (a document's real path when opened), is in `root` — as written or by its real
+/// path — with no link followed now: a folder swapped for a link since doesn't take it out (a write there goes
+/// through `beneath.rs`, which refuses the link).
+pub fn written_inside(root: &Path, path: &Path) -> bool {
+    path.starts_with(root) || std::fs::canonicalize(root).is_ok_and(|r| path.starts_with(r))
+}
+
 /// Where `path` really leads: its deepest existing folder resolved (links followed, `..` gone through), the
 /// names below it as they are — None if one of those is `.`/`..` (it would climb unseen).
 pub fn real(path: &Path) -> Option<PathBuf> {

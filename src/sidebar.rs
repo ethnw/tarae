@@ -1032,6 +1032,15 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
             let row = ed.session.sidebar.as_ref().map_or(0, |s| s.selected);
             ed.sidebar_activate(row);
         }
+        // Everything at once, from any row (#217: with 31 files the Changes heading was 40 keys away)
+        ('S' | 'U', ..) => {
+            let stage = c == 'S';
+            let st = ed.session.git_status.as_ref();
+            match st.is_some_and(|s| if stage { !s.unstaged.is_empty() } else { !s.staged.is_empty() }) {
+                true => ed.git_stage("", stage),
+                false => ed.set_status(if stage { "nothing to stage" } else { "nothing staged" }),
+            }
+        }
         ('c', ..) => ed.git_commit_start(false),
         ('A', ..) => ed.git_commit_start(true),
         ('C', ..) => ed.git_commit_open(false, true),

@@ -126,8 +126,12 @@ configs carry over as they are.
   tarae's log at its last line). tarae looks every 30 s while the list is closed (well under a thousandth of a
   core) and checks what it sees: busy for minutes, memory far above what that program usually takes, a server
   left running with no file of it open (stopped), one that keeps exiting (not started again until `r`), a child
-  it doesn't know. Each check is listed with when and what tarae did, and while one holds, the status line says
-  so with a `▲` — nothing otherwise
+  it doesn't know, a disk running out of room (below 10 GB free, or a tenth of a small one: `▲ disk 8.0 GB free`;
+  below 2 GB a card that waits for a key, once each time it gets there). Each check is listed with when and what
+  tarae did, and while one holds, the status line says so with a `▲` — nothing otherwise. A run of Claude's that
+  fails for space says the disk is full first. The session list (`space W`) shows each session's own build folder
+  outside its checkout (`build 12.0 GB`) — one its end would remove — and `x` twice on a session behind with
+  nothing running drops it (its next build starts cold)
 - **Toasts** — status messages fade in as cards at the top right, the left bar colored by kind (info, saved, warning,
   error). The more serious, the longer they stay ([screenshot](screenshots/ux-toasts-sync.png))
 - **Rendered doc comments** — `///`, `//!`, and `/** */` blocks show as rewrapped prose: markers stripped, paragraphs
@@ -239,7 +243,7 @@ configs carry over as they are.
   from its upstream (`main ↑1`); it catches up as soon as Claude edits a file or a command it ran ends. Enter (or `l`) on a changed file opens it to its **hunks and merge conflicts**, one
   row each (where it starts, `+a −r`); moving onto one shows it in the editor. On a hunk `s` stages it and `d` puts
   the index's lines back (an undoable edit); on a conflict `o` / `t` / `a` keep ours / theirs / both. On files,
-  folders, or a whole section: `s` / `u` stage / unstage, `d` discards (press it twice — an open file's old text is
+  folders, or a whole section: `s` / `u` stage / unstage — `S` / `U` stage / unstage everything from any row —, `d` discards (press it twice — an open file's old text is
   one `u` away; an untracked file is deleted), `e` opens it in the editor, `D` shows it against HEAD. `c` commits —
   the message is written in a buffer (`:w` commits it, `:q` cancels), `A` amends; `p` pulls (fast-forward only),
   `P` pushes (setting the upstream the first time), `f` fetches — none ever waits on a password prompt. `B`

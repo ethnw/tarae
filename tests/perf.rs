@@ -763,6 +763,100 @@ fn perf_e2e_memory_with_a_working_set_open() {
     report("e2e_footprint_working_set_mb", mb(later.footprint), 60.0, 5.0);
 }
 
+/// What a restored idle session costs (#218: after a `:restart` with 26 sessions the status line said "▲ tarae
+/// 620 MB", 313 MB moments later). A copy of this repository; `n` sessions made (`:session-new`, its card
+/// answered), four files opened in each, then `:restart` — tarae's footprint before it, a second after it
+/// came back, and settled (frames stopped, then 20 s more). The same with no session but the first is the
+/// baseline: what's past it, per session, is what one costs. `TARAE_HEAP`: what's live in the heap at the end.
+/// `TARAE_RESTORED_N` sets `n` (26, as it happened).
+#[test]
+fn perf_e2e_memory_restored_sessions() {
+    if unoptimized("perf_e2e_memory_restored_sessions") {
+        return;
+    }
+    let n: usize = std::env::var("TARAE_RESTORED_N").ok().and_then(|v| v.parse().ok()).unwrap_or(26);
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    let (base_first, base_settled) = restored_sessions(0).1;
+    let (live, (first, settled)) = restored_sessions(n);
+    let each = (settled - base_settled) / n.max(1) as f64;
+    eprintln!(
+        "restored sessions: {n} — live before :restart {:.1} MB; after it: first {first:.1} MB, settled \
+         {settled:.1} MB; with none: first {base_first:.1} MB, settled {base_settled:.1} MB — {each:.1} MB a \
+         session",
+        mb(live)
+    );
+    report("e2e_restored_session_each_mb", each, 40.0, 1.0);
+    report("e2e_restored_sessions_first_mb", first, 1000.0, 20.0);
+}
+
+/// `restored_sessions`' scene with `n` sessions besides the first: the footprint before `:restart` (bytes), and
+/// after it (MB) a second after it came back and settled.
+fn restored_sessions(n: usize) -> (u64, (f64, f64)) {
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    let sb = Sandbox::new(&format!("perf-restored-{n}"));
+    copy_repo(&sb);
+    fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
+    sb.write(".tarae.toml", &format!("[editor]\nrestart-build = \"true\"\nrestart-binary = \"{BIN}\"\n"));
+    sb.git(&["init", "-q", "-b", "main"]);
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-q", "-m", "base"]);
+    let files = ["src/picker.rs", "src/lsp.rs", "src/readonly.rs", "README.md"];
+    // (a card settled in front: of `kind`, or — `kind` empty — any but the project's trust card)
+    let front_card = |t: &mut Term, what: &str, kind: &str| {
+        t.wait_state(what, |s| {
+            s["cards"].as_array().into_iter().flatten().any(|c| {
+                let of = if kind.is_empty() { c["kind"] != "project-trust" } else { c["kind"] == kind };
+                c["up"] == "front" && c["settled"] == true && of
+            })
+        })
+    };
+    let sessions = |s: &serde_json::Value| s["sessions"].as_array().map_or(0, Vec::len);
+    let settled = |t: &mut Term| {
+        let mut last = t.frames();
+        loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            if t.frames() == last {
+                break;
+            }
+            last = t.frames();
+        }
+    };
+    let mut t = Term::spawn(&sb, &files, 160, 50);
+    // (the project's trust card — its `.tarae.toml` names the binary `:restart` runs: set aside, as
+    // `yes_to_restart` in e2e does; the restart takes the binary all the same)
+    front_card(&mut t, "the trust card", "project-trust");
+    t.send("n");
+    for i in 1..=n {
+        t.command(&format!("session-new s{i}"));
+        front_card(&mut t, "the new session's card", "");
+        t.send("y");
+        t.wait_state("the session made, in front", |s| sessions(s) == i + 1 && s["front"] == format!("s{i}"));
+        // (a new session opens with its chat focused: the keys back to the code first)
+        t.send("\x1b");
+        t.wait_state("the keys back in the code", |s| s["keys"]["to"] != "chat");
+        for f in files {
+            t.command(&format!("o {f}"));
+        }
+        t.wait_text("README");
+    }
+    settled(&mut t);
+    let live = t.usage().footprint;
+    t.command("restart");
+    front_card(&mut t, "the restart card", "restart");
+    t.send("y");
+    t.wait_raw("the new tarae", |r| r.windows(8).filter(|w| *w == b"\x1b[?1049h").count() >= 2);
+    t.wait_text("Restarted");
+    std::thread::sleep(Duration::from_secs(1));
+    let first = t.usage().footprint;
+    settled(&mut t);
+    std::thread::sleep(Duration::from_secs(20));
+    let after = t.usage().footprint;
+    if std::env::var_os("TARAE_HEAP").is_some() {
+        eprintln!("{n} sessions restored, settled:\n{}", heap(t.pid()));
+    }
+    (live, (mb(first), mb(after)))
+}
+
 /// The repository's files as of this commit — what the scenes that copy "this repository" open and search.
 /// Pinned: the files keep growing, and a scene's number moved with them (the working set's footprint went
 /// 31.7 → 50.3 MB from Oct 2 to 4 with tarae's own part +0.5 MB — `editor.rs` grew 477 → 643 KB). Moving it

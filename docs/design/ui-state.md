@@ -202,7 +202,8 @@ side git · 4 rows · in hand git:src/term.rs
   - `code`: panes (id, path, lines on screen, focused, cursor line), the follow or replay stop.
   - `side`: tab, focused, rows.
   - `review`: base, files, viewed n/m, the file in hand, the change in hand i/n.
-  - `edit_review`: file, change i/n, undecided count, the first line of the reason (always Claude's — its `by`
+  - `edit_review`: `id` (which review: the next edit to the same file is a new one, #216), file, change i/n,
+    undecided count, the first line of the reason (always Claude's — its `by`
     went with `space c` in `v` 2), `warnings` — what the change warns of, by id (`edit-protected`, cardburden
     4b).
   - `picker`: title, query (full level), rows, total, loading or searching.

@@ -1,7 +1,7 @@
 //! Git in the editor — the side panel's git tab (`space g`, lazygit beside the code): what's staged and what
 //! isn't, each as a tree with status letters and `+a −r`, the branch and how far it is from its upstream.
 //! A changed file opens to its hunks and conflicts (rows under it — sidebar.rs `detail_rows`); the keys
-//! (`sidebar::git_key`): `s`/`u` stage/unstage (a file, folder, section — or a hunk), `d` discards (a file
+//! (`sidebar::git_key`): `s`/`u` stage/unstage (a file, folder, section — or a hunk), `S`/`U` everything, `d` discards (a file
 //! twice; a hunk: its index lines back), `o`/`t`/`a` on a conflict, `c` commit (a message buffer — `:w`
 //! commits, `:q` cancels), `A` amend, `p`/`P` pull/push, `f` fetch, `B` branches, `L` log, `z`/`Z` stash,
 //! `b` blame, `e`/`D` the file in the editor / against HEAD, `?` all of them. From the code the next key
@@ -638,6 +638,7 @@ impl Editor {
         let md = "**git tab**\n\n\
             `enter` a changed file: its hunks and conflicts · a hunk: there in the code\n\
             `s` `u` stage · unstage (a file, folder, section — or the hunk)\n\
+            `S` `U` stage · unstage everything, from any row\n\
             `d` discard (twice for a file; a hunk: its index lines back)\n\
             `o` `t` `a` a conflict: keep ours · theirs · both\n\
             `e` open in the editor · `D` diff against HEAD\n\
@@ -898,8 +899,7 @@ impl Editor {
                     let then = if draft { "C" } else { "c" };
                     ed.set_warning(match changed {
                         true => format!(
-                            "nothing staged to commit — s on a file stages it, s on Changes stages them all, \
-                             then {then}"
+                            "nothing staged to commit — s on a file stages it, S stages them all, then {then}"
                         ),
                         false => "nothing staged to commit — no changes either".to_string(),
                     })

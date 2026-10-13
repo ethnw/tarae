@@ -457,10 +457,17 @@ fn file(
     let empty = Rope::new();
     let now = ed.doc().text.to_string();
     let (target, kept) = rebase(&from.unwrap_or(&empty).to_string(), &to.unwrap_or(&empty).to_string(), &now);
+    // In the project, written through no link from its root (`beneath.rs`): a run of Claude's may have swapped
+    // a folder for a link to outside since the turn. A file outside it (accepted on its review) by its path.
+    let root = Some(ed.session.root.clone()).filter(|r| crate::paths::written_inside(r, path));
     // A file the turn made, with nothing else in it now: it goes
     if to.is_none() && kept == 0 && target.is_empty() {
         let id = ed.doc().id;
-        std::fs::remove_file(path).map_err(|e| format!("{shown}: {e}"))?;
+        match &root {
+            Some(r) => remove_beneath(r, path),
+            None => std::fs::remove_file(path),
+        }
+        .map_err(|e| format!("{shown}: {e}"))?;
         ed.close_doc(id);
         return Ok((true, 0));
     }
@@ -481,16 +488,37 @@ fn file(
     // The disk matches again (unsaved edits of the user's stay unsaved)
     if clean {
         let id = ed.doc().id;
-        // (a file a run deleted, with its folder: the folder first)
-        if let Some(dir) = path.parent().filter(|d| !d.exists()) {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{shown}: {e}"))?;
-        }
         ed.flush_saves(); // (written here — a background save of it finishes first)
-        ed.doc_mut().save().map_err(|e| format!("{shown}: {e:#}"))?;
+        match root {
+            // (a folder a run deleted made again on the way)
+            Some(r) => {
+                let doc = ed.doc_mut();
+                let at = doc.check_save(false).map_err(|e| format!("{shown}: {e:#}"))?;
+                let stamp = crate::saver::write_beneath(&r, &at, &doc.text, &|| {})?;
+                let version = doc.version();
+                doc.saved_at(version, stamp);
+            }
+            None => {
+                // (a file a run deleted, with its folder: the folder first)
+                if let Some(dir) = path.parent().filter(|d| !d.exists()) {
+                    std::fs::create_dir_all(dir).map_err(|e| format!("{shown}: {e}"))?;
+                }
+                ed.doc_mut().save().map_err(|e| format!("{shown}: {e:#}"))?;
+            }
+        }
         ed.lsp_did_save(id);
         ed.undo_persist(id);
     }
     Ok((true, kept))
+}
+
+/// `path` removed from its folder, opened from `root`'s real path through no link (`beneath.rs`) — a link
+/// in the way is refused, never gone through.
+fn remove_beneath(root: &Path, path: &Path) -> std::io::Result<()> {
+    let base = crate::beneath::Dir::root(root)?;
+    let rel = path.strip_prefix(&base.at).map_err(|_| std::io::Error::other("not in the project"))?;
+    let name = rel.file_name().ok_or_else(|| std::io::Error::other("no file named"))?;
+    base.folder(rel.parent().unwrap_or(Path::new("")), false)?.remove(name)
 }
 
 // ── Kept on disk ────────────────────────────────────────────────────────────
@@ -761,6 +789,127 @@ mod tests {
         assert_eq!(rebase("new\n", "", "new\n"), (String::new(), 0));
         // (the user's line right after them touches them: all stays)
         assert_eq!(rebase("x\ny\nz\n", "", "x\ny\nz\nmine\n"), ("x\ny\nz\nmine\n".to_string(), 1));
+    }
+
+    /// #218: what restoring sessions' turns costs — each session's kept turns (`KEEP` of them, every file
+    /// a turn touched with its whole text before and after) read as a restore reads them (`load`: the file,
+    /// a `serde_json::Value` of it, ropes), 26 sessions four at a time as the workers take them. The process's
+    /// footprint before, at its peak while loading, with the turns held, and once they're dropped. Stand-in
+    /// turns: `TARAE_TURN_FILES` files of `TARAE_TURN_KB` KB each (3 × 150 KB).
+    #[test]
+    fn perf_restored_turns_memory() {
+        if crate::test_results::unoptimized("checkpoint::tests::perf_restored_turns_memory") {
+            return;
+        }
+        use super::*;
+        let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (files, kb, sessions) = (env("TARAE_TURN_FILES", 3), env("TARAE_TURN_KB", 150), 26);
+        let dir = std::env::temp_dir().join(format!("tarae-perf-turns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = |seed: usize| -> Rope {
+            let line =
+                format!("    let x{seed} = compute(a, b, c); // a line of a source file, as long as most\n");
+            Rope::from_str(&line.repeat(kb * 1024 / line.len()))
+        };
+        let roots: Vec<PathBuf> = (0..sessions).map(|i| PathBuf::from(format!("/checkouts/s{i}"))).collect();
+        for root in &roots {
+            let list = (0..KEEP)
+                .map(|t| {
+                    let touched = (0..files)
+                        .map(|f| Touched {
+                            path: root.join(format!("src/f{f}.rs")),
+                            before: Some(text(t * 10 + f)),
+                            after: text(t * 10 + f + 1),
+                            ..Default::default()
+                        })
+                        .collect();
+                    Checkpoint::new(format!("turn {t}"), touched)
+                })
+                .collect();
+            save(&dir, root, Stored { list, seq: 1, ..Default::default() });
+        }
+        let on_disk: u64 =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+        let me = std::process::id();
+        let footprint = || {
+            let os = crate::procs::tree(me).into_iter().find(|o| o.pid == me).unwrap();
+            os.footprint.unwrap_or(os.rss)
+        };
+        let mb = |b: u64| b as f64 / (1 << 20) as f64;
+        let before = footprint();
+        let (stop, peak) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicU64::new(0));
+        let held: Vec<Stored> = std::thread::scope(|s| {
+            crate::event::scoped(s, "tarae-peak", || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    peak.fetch_max(footprint(), std::sync::atomic::Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+            let mut held = Vec::new();
+            for four in roots.chunks(4) {
+                let loads: Vec<_> =
+                    four.iter().map(|r| crate::event::scoped(s, "tarae-load", || load(&dir, r))).collect();
+                held.extend(loads.into_iter().map(|l| l.join().unwrap()));
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            held
+        });
+        let holding = footprint();
+        let turns: usize = held.iter().map(|s| s.list.len()).sum();
+        drop(held);
+        let after = footprint();
+        let peak = peak.into_inner().max(holding);
+        eprintln!(
+            "restored turns: {sessions} sessions × {KEEP} turns × {files} files × {kb} KB ({turns} turns, {:.0} MB \
+             on disk) — footprint before {:.0} MB, peak {:.0} MB, holding {:.0} MB, dropped {:.0} MB",
+            mb(on_disk),
+            mb(before),
+            mb(peak),
+            mb(holding),
+            mb(after)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(turns, sessions * KEEP);
+    }
+
+    /// frictions19: `space u` putting a file back in the project writes through its folders by descriptor —
+    /// `sub/` swapped for a link to outside since the turn (what a sandboxed run can do) and the file there
+    /// is untouched, the step says why; a file the turn made is removed the same way, never the one the
+    /// link leads to. (By its real path the file was "outside" now, and written by path through the link.)
+    #[test]
+    fn putting_a_file_back_never_goes_through_a_link_swapped_in() {
+        use super::*;
+        let base = std::env::temp_dir().join(format!("tarae-undo-beneath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, outside) = (base.join("p"), base.join("outside"));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let (dir, outside) = (std::fs::canonicalize(&dir).unwrap(), std::fs::canonicalize(&outside).unwrap());
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        for f in ["a.txt", "new.txt"] {
+            std::fs::write(dir.join("sub").join(f), "after\n").unwrap();
+            std::fs::write(outside.join(f), "after\n").unwrap();
+            ed.open(&dir.join("sub").join(f)).unwrap();
+        }
+        std::fs::rename(dir.join("sub"), dir.join("sub.aside")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        let (before, after) = (Rope::from_str("before\n"), Rope::from_str("after\n"));
+        // (undoing: from the turn's text back to what was before it — none, for the file it made)
+        // (opened again it's where the link leads now: refused as not the project's, or as the link it is)
+        let e = file(&mut ed, &dir.join("sub/a.txt"), Some(&after), Some(&before)).unwrap_err();
+        assert!(e.contains("a link") || e.contains("not in"), "{e}");
+        let e = file(&mut ed, &dir.join("sub/new.txt"), Some(&after), None).unwrap_err();
+        assert!(e.contains("a link"), "{e}");
+        for f in ["a.txt", "new.txt"] {
+            assert_eq!(
+                std::fs::read_to_string(outside.join(f)).unwrap(),
+                "after\n",
+                "{f}: never through the link"
+            );
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Wave 3, gap 2: a session behind (back at a start, or opened again) kept its turns nowhere it read —

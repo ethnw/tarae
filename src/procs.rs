@@ -492,14 +492,89 @@ pub struct Sample {
     pub took: Duration,
     /// What `$state/procs.json` held (the thread's first sample only).
     usual: Option<Usual>,
+    /// The file systems tarae writes to, as this look found them (`volumes`).
+    pub free: Vec<Volume>,
 }
 
 impl Sample {
     /// A look of these processes, as the sampling thread sends one (tests).
     #[cfg(test)]
     pub fn of(procs: Vec<(Os, Option<f32>)>) -> Sample {
-        Sample { procs, took: Duration::ZERO, usual: None }
+        Sample { procs, took: Duration::ZERO, usual: None, free: Vec::new() }
     }
+}
+
+// ── Free space (#219) ────────────────────────────────────────────────────────────────────
+
+/// A file system tarae writes to: where it was looked at from, what's free of it and its whole size (bytes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Volume {
+    pub at: PathBuf,
+    pub free: u64,
+    pub total: u64,
+}
+
+/// Free below this (or a tenth of a small disk) marks the status line.
+const DISK_LOW: u64 = 10 << 30;
+/// Free below this (or a fiftieth of a small disk) is said on a card that waits for a key — builds and runs
+/// start failing soon (#219: 117 MB left, a session stopped mid-turn and nothing said why).
+const DISK_FLOOR: u64 = 2 << 30;
+
+/// Where tarae and what it runs write: the home folder (the tools' build folders — `~/.cargo/build`), tarae's
+/// data (sessions' checkouts) and cache (run folders), the temp folder.
+fn disk_places() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    home.into_iter()
+        .chain(crate::runtime::data_dir())
+        .chain(crate::runtime::cache_dir())
+        .chain([std::env::temp_dir()])
+        .collect()
+}
+
+/// The file systems `places` are on, one each (by device) — a place not there yet counts by its nearest
+/// folder that is.
+pub fn volumes(places: &[PathBuf]) -> Vec<Volume> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for p in places {
+        let Some(at) = p.ancestors().find(|a| a.exists()) else { continue };
+        let (Ok(m), Some(st)) = (std::fs::metadata(at), crate::fswatch::statfs(at)) else { continue };
+        if seen.contains(&m.dev()) {
+            continue;
+        }
+        seen.push(m.dev());
+        #[allow(clippy::unnecessary_cast)] // (the field types differ between systems)
+        let block = st.f_bsize as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let (free, total) = (st.f_bavail as u64 * block, st.f_blocks as u64 * block);
+        out.push(Volume { at: at.to_path_buf(), free, total });
+    }
+    out
+}
+
+/// What free space says: below `DISK_LOW` the status line's mark, below `DISK_FLOOR` a card too (`procs_found`).
+pub fn disk_check(vols: &[Volume]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for v in vols.iter().filter(|v| v.total > 0) {
+        let (low, floor) = (DISK_LOW.min(v.total / 10), DISK_FLOOR.min(v.total / 50));
+        let shown = crate::sandbox::home_shown(&v.at.display().to_string());
+        let what = format!("{} free of {} on {shown}", mem(v.free), mem(v.total));
+        let did = "nothing — space W shows each session's build folder; x drops an idle one's";
+        for (key, under) in [("disk-low", low), ("disk-full", floor)] {
+            if v.free < under {
+                out.push(Finding {
+                    key: format!("{key}:{}", v.at.display()),
+                    pid: 0,
+                    what: what.clone(),
+                    short: format!("disk {} free", mem(v.free)),
+                    did: did.into(),
+                    act: Act::Nothing,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Each process's CPU time at the look before — for its share since.
@@ -529,7 +604,7 @@ impl Sampler {
             .collect();
         self.prev = procs.iter().map(|(o, _)| ((o.pid, o.started), o.cpu)).collect();
         self.at = Some(t0);
-        Sample { procs, took: t0.elapsed(), usual: None }
+        Sample { procs, took: t0.elapsed(), usual: None, free: Vec::new() }
     }
 }
 
@@ -570,9 +645,16 @@ pub fn start(events: crate::event::Tx, usual_path: Option<PathBuf>) -> Sender<Wa
         let (mut s, mut reaper) = (Sampler::default(), crate::reaper::Reaper::default());
         let (quiet, mut open) = (quiet_every(), false);
         let mut usual = Some(usual_path.as_deref().map(load_usual).unwrap_or_default());
+        let places = disk_places();
+        // (screenshots and drivers: every volume this free, in bytes — the mark and the card without a full disk)
+        let free_as = std::env::var("TARAE_DISK_FREE").ok().and_then(|v| v.parse::<u64>().ok());
         loop {
             let mut sample = look(&mut s, &mut reaper, Instant::now());
             sample.usual = usual.take();
+            sample.free = volumes(&places);
+            if let Some(free) = free_as {
+                sample.free.iter_mut().for_each(|v| v.free = free.min(v.total));
+            }
             let job = move |ed: &mut Editor| ed.procs_sampled(sample);
             if events.send(Event::Job(Box::new(job))).is_err() {
                 return;
@@ -1216,6 +1298,8 @@ pub struct Procs {
     pub held: Vec<Held>,
     /// The mark the status line last had (a look that changes it is drawn).
     marked: Option<String>,
+    /// The file systems tarae writes to, at the last look (`volumes`).
+    pub free: Vec<Volume>,
 }
 
 /// `412 KB` · `48 MB` · `1.4 GB`.
@@ -1758,7 +1842,9 @@ impl Editor {
         let groups = self.procs_groups();
         let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, &groups, secs);
         with_queued(&mut rows, &self.procs_queued(), &groups);
-        let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
+        let (mut found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
+        found.extend(disk_check(&s.free));
+        self.procs.free = s.free.clone();
         // (a run of Claude's printing nothing at next to no CPU — `stuck.rs`)
         crate::stuck::look(self, &rows, Instant::now());
         let flagged: HashSet<u32> = found.iter().map(|f| f.pid).filter(|&p| p > 0).collect();
@@ -1833,6 +1919,14 @@ impl Editor {
     /// Checks recorded; what the new ones say to do, done.
     fn procs_found(&mut self, found: Vec<Finding>, at: SystemTime) {
         for f in self.procs.record(&found, at) {
+            // (once each time it gets there: a card that waits for a key, not only the status line's mark)
+            if f.key.starts_with("disk-full:") {
+                // (what matters first: under a newer toast it's one row, cut; whole in a narrow card's 3 rows)
+                self.set_error(format!(
+                    "Disk almost full: {}. space W lists build folders; x drops an idle one",
+                    f.what
+                ));
+            }
             if let Act::StopServer(cid) = f.act {
                 let log = self.server_log(cid);
                 if let Some(name) = self.lsp_stopped(cid) {
@@ -2159,6 +2253,7 @@ mod tests {
             procs: procs.into_iter().map(|o| (o, Some(1.0))).collect(),
             took: Duration::ZERO,
             usual: None,
+            free: Vec::new(),
         }
     }
 
@@ -2592,6 +2687,7 @@ mod tests {
             ],
             took: Duration::ZERO,
             usual: None,
+            free: Vec::new(),
         };
         let k = |pid, kind, title: &str, session| Known {
             pid,
@@ -3036,6 +3132,50 @@ mod tests {
         for k in keys.split_whitespace() {
             ed.handle_key(k.parse().unwrap());
         }
+    }
+
+    /// #219: free space as the checks take it — below 10 GB (a tenth of a small disk) the status line's mark,
+    /// below 2 GB a card that waits for a key, once each time it gets there; room again and both end.
+    #[test]
+    fn a_disk_running_full_is_marked_then_said_on_a_card_once() {
+        const GB: u64 = 1 << 30;
+        let v = |free| Volume { at: PathBuf::from("/Volumes/x"), free, total: 500 * GB };
+        assert!(disk_check(&[v(50 * GB)]).is_empty());
+        let low = disk_check(&[v(8 * GB)]);
+        assert_eq!(low.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["disk-low:/Volumes/x"]);
+        assert_eq!(low[0].short, "disk 8.0 GB free");
+        assert_eq!(disk_check(&[v(GB)]).len(), 2, "low and at the floor");
+        let small = Volume { at: PathBuf::from("/s"), free: 5 * GB, total: 32 * GB };
+        assert!(disk_check(&[small]).is_empty(), "a small disk: a tenth of it");
+        // Through the looks: the mark, the card once per crossing
+        let mut ed = Editor::new(crate::config::Config::default());
+        let look = |ed: &mut Editor, free| {
+            let mut s = Sample::of(Vec::new());
+            s.free = vec![v(free)];
+            ed.procs_sampled(s);
+        };
+        let cards = |ed: &Editor| {
+            ed.messages
+                .iter()
+                .filter(|m| m.1 == crate::editor::ToastKind::Error && m.2.contains("almost full"))
+                .count()
+        };
+        look(&mut ed, 8 * GB);
+        assert_eq!(ed.procs.mark().map(|c| c.short.as_str()), Some("disk 8.0 GB free"));
+        assert_eq!(cards(&ed), 0);
+        look(&mut ed, GB);
+        look(&mut ed, GB);
+        assert_eq!(cards(&ed), 1, "once while it stays there");
+        assert_eq!(ed.procs.mark().map(|c| c.short.as_str()), Some("disk 1.0 GB free"));
+        look(&mut ed, 50 * GB);
+        assert!(ed.procs.mark().is_none());
+        look(&mut ed, GB);
+        assert_eq!(cards(&ed), 2, "again when it gets there again");
+        // The real look: the temp folder's file system, a place not there yet by its folder
+        let tmp = std::env::temp_dir();
+        let vols = volumes(&[tmp.clone(), tmp.join("not-there-yet/x")]);
+        assert_eq!(vols.len(), 1, "one file system, once");
+        assert!(vols[0].total > 0 && vols[0].free <= vols[0].total, "{vols:?}");
     }
 
     /// `:procs` lists tarae and its language server — what it's for, its numbers — in the bottom slot;

@@ -1,5 +1,6 @@
 //! Writes in the project through no link (toolcalls, 2026-10-13): what tarae writes for Claude's change sets
-//! (`refactor::write_file` — edit, rename, replace) goes through descriptors walked from the project root's
+//! (`refactor::write_file` — edit, rename, replace) and the saves Claude caused (frictions19: a change accepted
+//! in the review, `space u` — `saver::write_beneath`, `checkpoint::remove_beneath`) goes through descriptors walked from the project root's
 //! real path one name at a time, each folder opened with `O_DIRECTORY | O_NOFOLLOW` from the one before, the
 //! file itself `O_NOFOLLOW` — and every write after the check uses those descriptors, never a path walked again.
 //! A sandboxed run writes the project and tarae's writes aren't sandboxed: a folder swapped for a link to

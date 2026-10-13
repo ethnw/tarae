@@ -1490,8 +1490,12 @@ pub fn review_with(
         }
         return ed.set_status("claude: no changes");
     }
-    ed.session.review =
-        Some(Review { ready: true, on_done, ..Review::new(ed.llm_generation, doc_id, instruction, hunks) });
+    let mut rev =
+        Review { ready: true, on_done, ..Review::new(ed.llm_generation, doc_id, instruction, hunks) };
+    // (on the first change still to answer — a no-op change before it is decided already, and `y` there
+    // answered nothing: #216)
+    rev.current = rev.hunks.iter().position(|h| h.decision == Decision::Undecided).unwrap_or(0);
+    ed.session.review = Some(rev);
 }
 
 /// A commit message with its body wrapped at `width` (git's convention, 72): the subject line stays as it

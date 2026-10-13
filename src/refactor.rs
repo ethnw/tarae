@@ -673,7 +673,9 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
             if dirty {
                 Outcome::InBuffer
             } else {
-                match ed.save_in_background(doc_id, false, crate::saver::Then::Auto(" · Claude's change")) {
+                // (beneath the project through no link, as a change set's writes)
+                let root = nav::project_root(ed);
+                match ed.save_beneath(doc_id, root, crate::saver::Then::Auto(" · Claude's change")) {
                     Err(e) => Outcome::Failed(format!("not saved: {e}")),
                     Ok(()) if now == f.after => Outcome::Accepted,
                     Ok(()) => Outcome::Partly,

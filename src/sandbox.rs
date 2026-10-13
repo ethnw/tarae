@@ -3128,6 +3128,12 @@ fn run_folder(p: &Policy, here: &Here) -> Result<std::sync::Arc<RunDir>, String>
         return Err(format!("{why}. Set XDG_CACHE_HOME for tarae to a folder no run writes"));
     }
     RunDir::new_in(base).map_err(|e| {
+        // (#219: a full disk said as one — the run's folder is often the first thing that can't be made)
+        if matches!(e.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT)) {
+            return format!(
+                "the disk is full — its own folder couldn't be made in {at} ({e}). Tell the user"
+            );
+        }
         let why = format!("its own folder couldn't be made in {at} ({e})");
         format!("{why}. Check that {at} can be written — its permissions, the disk's free space")
     })

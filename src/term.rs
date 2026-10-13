@@ -11110,6 +11110,20 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             Some(Action::Session(0)) => {
                 hints(&[("enter", "switch"), ("n", "new"), ("$", "billing"), ("esc", "close")])
             }
+            // (`x`: only on a session whose own build folder was measured — what it would drop, #219)
+            Some(Action::Session(id))
+                if *id != editor.session.id && editor.session_store.build_dirs.contains_key(id) =>
+            {
+                hints(&[
+                    ("enter", "switch"),
+                    ("n", "new"),
+                    ("d", "end"),
+                    ("b", "bring into its base"),
+                    ("x", "drop its build"),
+                    ("$", "billing"),
+                    ("esc", "close"),
+                ])
+            }
             Some(_) => hints(&[
                 ("enter", "switch"),
                 ("n", "new"),

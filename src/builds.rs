@@ -14,6 +14,7 @@
 //! the tool tags one) and `macos-xattrs = [{ name, hex }]` (the attributes it sets on one on macOS) — `Marks`:
 //! tarae makes a checkout's own before a run, marked as the tool would (`sandbox::own_build_made`).
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -376,7 +377,7 @@ pub enum BuildDir {
 
 /// A build folder to remove: the tool's home (real path), the removal root's names below it (`under`) and the
 /// folders below that (`depth` of them).
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Doomed {
     home: PathBuf,
     under: PathBuf,
@@ -590,22 +591,50 @@ impl Builds {
     /// are never removed; the checkouts other than `root` that are the tool's projects are asked where they
     /// build. `Ok` = what to remove once the checkout is gone (`remove_build` checks it again).
     pub fn decide(&self, root: &Path, git_dir: &Path, checkouts: &[PathBuf]) -> Result<Doomed, BuildDir> {
-        let tool = match self.tool_for(root) {
-            None => return Err(BuildDir::Nothing),
-            Some(Err(why)) => return Err(BuildDir::Left(why)),
-            Some(Ok(t)) if !t.removes() => return Err(BuildDir::Nothing),
-            Some(Ok(t)) => t,
+        let mut all = self.decide_all(&[root.to_path_buf()], git_dir, checkouts);
+        all.pop().unwrap_or(Err(BuildDir::Nothing))
+    }
+
+    /// `decide` for each of `roots` (checkouts of one repository, among `checkouts`), each checkout's tool asked
+    /// once — the session list's sizes (#219: one `decide` a session asks every other checkout again: 26
+    /// sessions, 650 asks).
+    pub fn decide_all(
+        &self,
+        roots: &[PathBuf],
+        git_dir: &Path,
+        checkouts: &[PathBuf],
+    ) -> Vec<Result<Doomed, BuildDir>> {
+        let asked = std::cell::RefCell::new(HashMap::<(String, PathBuf), Option<(PathBuf, PathBuf)>>::new());
+        let ask = |tool: &Tool, p: &Path| {
+            let key = (tool.name.clone(), p.to_path_buf());
+            if let Some(a) = asked.borrow().get(&key) {
+                return a.clone();
+            }
+            let a = self.ask(tool, p);
+            asked.borrow_mut().insert(key, a.clone());
+            a
         };
         let mut floor = vec![git_dir.to_path_buf()];
         floor.extend(checkouts.iter().cloned());
-        let others = || {
-            checkouts
-                .iter()
-                .filter(|p| p.as_path() != root && tool.when.iter().any(|f| p.join(f).is_file()))
-                .map(|p| (p.clone(), self.ask(tool, p)))
-                .collect()
-        };
-        self.fate(tool, root, self.ask(tool, root), &floor, others)
+        roots
+            .iter()
+            .map(|root| {
+                let tool = match self.tool_for(root) {
+                    None => return Err(BuildDir::Nothing),
+                    Some(Err(why)) => return Err(BuildDir::Left(why)),
+                    Some(Ok(t)) if !t.removes() => return Err(BuildDir::Nothing),
+                    Some(Ok(t)) => t,
+                };
+                let others = || {
+                    checkouts
+                        .iter()
+                        .filter(|p| p.as_path() != root && tool.when.iter().any(|f| p.join(f).is_file()))
+                        .map(|p| (p.clone(), ask(tool, p)))
+                        .collect()
+                };
+                self.fate(tool, root, ask(tool, root), &floor, others)
+            })
+            .collect()
     }
 
     /// Whether the checkout at `root`'s own build folder goes once the checkout is gone — only when every rule

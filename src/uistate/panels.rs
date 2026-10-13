@@ -68,6 +68,9 @@ pub struct Review {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditReview {
+    /// Which review it is (its `llm_generation`): the next edit to the same file is a new one — one `y` ended
+    /// the last, though it reads the same (#216).
+    pub id: u64,
     pub file: String,
     pub change: (usize, usize),
     pub undecided: usize,
@@ -233,6 +236,7 @@ impl Editor {
             let file =
                 self.docs.iter().find(|d| d.id == r.doc_id).map(|d| d.display_name(&self.session.root));
             p.edit_review = Some(EditReview {
+                id: r.generation,
                 file: file.unwrap_or_default(),
                 change: (r.current + 1, r.hunks.len()),
                 undecided: r.hunks.iter().filter(|h| h.decision == crate::llm::Decision::Undecided).count(),
@@ -417,7 +421,7 @@ impl Panels {
                     "high": t.high, "answered": t.answered })),
             })),
             "edit_review": self.edit_review.as_ref().map(|r| json!({
-                "file": r.file, "change": [r.change.0, r.change.1], "undecided": r.undecided,
+                "id": r.id, "file": r.file, "change": [r.change.0, r.change.1], "undecided": r.undecided,
                 "reason": r.reason, "warnings": r.warnings,
             })),
             "picker": self.picker.as_ref().map(|p| json!({
@@ -463,8 +467,8 @@ impl Panels {
         }
         if let Some(r) = &self.edit_review {
             out.push(format!(
-                "edit review · {} · change {}/{} · {} undecided",
-                r.file, r.change.0, r.change.1, r.undecided
+                "edit review #{} · {} · change {}/{} · {} undecided",
+                r.id, r.file, r.change.0, r.change.1, r.undecided
             ));
         }
         if let Some(p) = &self.picker {

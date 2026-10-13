@@ -124,6 +124,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 crate::refactor::replace_schema(),
                 crate::procs::tool_schema(),
                 crate::uistate::claude::tool_schema(),
+                crate::gittool::schema(),
             ];
             if arm.tarae() {
                 tools.push(crate::edittool::schema());
@@ -155,6 +156,10 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     crate::procs::tool_call(ed, call(), args);
                     return None;
                 }
+                Some("git") => match crate::gittool::call(ed, call(), args) {
+                    Ok(()) => return None,
+                    Err(e) => Err(e),
+                },
                 Some(
                     name @ ("references" | "search" | "read" | "symbols" | "definition" | "hover"
                     | "diagnostics" | "rename" | "replace" | "edit"),
@@ -222,6 +227,7 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
         "edit" => ("Edit files", Some("destructiveHint")),
         "procs" => ("The editor's processes", Some("readOnlyHint")),
         "ui" => ("What's on screen, by id", Some("readOnlyHint")),
+        "git" => ("Read the repository", Some("readOnlyHint")),
         _ => return schema,
     };
     let mut a = json!({ "title": title });
@@ -622,7 +628,7 @@ pub(crate) fn run_schema() -> Value {
     its output — build, lint, format, test suites, git. Not for reading or searching files: read and search do \
     that in the editor, with no process and no card. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
-    that. Checks ({checks}, git status/diff/log/show) \
+    that. For git's reads the git tool is better (no card, no process). Checks ({checks}, git status/diff/log/show) \
     start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq. So do \
     read-only ones (ls find tree stat file du diff wc pwd echo nm otool strings size, git \
     blame/rev-parse/ls-files/branch/show, git diff --no-index; git -C <dir> too) whose paths stay in the \
@@ -3210,6 +3216,13 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         .map(|s| format!("{s}\n"))
         .unwrap_or_default();
     let mut out = format!("{verdict}{took}\n{waited}{silent}$ {}\n", r.task.cmd);
+    // (#219: a run that failed for space says so first — the rest of its errors follow from it)
+    if !matches!(r.state, State::Passed) && r.output.iter().any(|(_, l)| disk_full_said(l)) {
+        out.push_str(
+            "The disk is full (\"No space left on device\" in its output) — nothing builds until there's room. Tell \
+             the user: space W shows each session's build folder; x there drops an idle one's.\n",
+        );
+    }
     let (errors, warnings) = r.found;
     // Where its places are said as they are (#38): a check's or a build's went to the user's list; any
     // other run's (a grep's `path:line:` hits) are only in its output — not the user's, not errors
@@ -3287,6 +3300,12 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         }
     }
     out
+}
+
+/// Whether an output line says the disk (or the user's quota) is full — as the C library says ENOSPC and
+/// EDQUOT, and as Rust's `io::Error` and Python say them.
+fn disk_full_said(l: &str) -> bool {
+    ["No space left on device", "Disk quota exceeded", "ENOSPC", "StorageFull"].iter().any(|s| l.contains(s))
 }
 
 /// A run's report in a word or two — the chat row's suffix (`ok` · `exit 101` · `not run`).
@@ -3567,7 +3586,8 @@ mod tests {
         for t in list["result"]["tools"].as_array().unwrap() {
             assert!(t["annotations"]["title"].is_string(), "{t}");
         }
-        for name in ["references", "search", "symbols", "definition", "hover", "diagnostics", "screen", "ui"]
+        for name in
+            ["references", "search", "symbols", "definition", "hover", "diagnostics", "screen", "ui", "git"]
         {
             assert_eq!(annotations(&list, name)["readOnlyHint"], true, "{name}");
         }
@@ -5649,6 +5669,24 @@ mod tests {
         );
         r.output.retain(|(err, _)| !err);
         assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("skipped"));
+    }
+
+    /// #219: a run that failed for space says so first, in words Claude passes on — not one that passed with
+    /// the words in its output (a test of the message itself).
+    #[test]
+    fn a_run_that_failed_for_space_says_the_disk_is_full() {
+        use crate::task::{Run, State, Task};
+        let mut r = Run::for_test(Task { name: "b".into(), cmd: "cargo build".into(), cwd: "/p".into() });
+        r.output =
+            vec![(true, "error: failed to write `target/x`: No space left on device (os error 28)".into())];
+        r.state = State::Failed(Some(101));
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(text.contains("\nThe disk is full"), "{text}");
+        r.state = State::Passed;
+        assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("The disk is full"));
+        r.state = State::Failed(Some(1));
+        r.output = vec![(true, "error: something else".into())];
+        assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("The disk is full"));
     }
 
     /// #38: a run that isn't a check or a build (a grep) leaves the user's list alone (#28) — and its report

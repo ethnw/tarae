@@ -1867,6 +1867,7 @@ mod tests {
             reviewer: String::new(),
             claude: None,
             billing: Default::default(),
+            build: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

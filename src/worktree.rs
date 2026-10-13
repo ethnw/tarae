@@ -43,6 +43,60 @@ pub struct SessionStore {
     /// Where a checkout's tool builds (the built-in packs' `[builds]`): said on the create card, asked at a
     /// session's end — None in tests (they set a stand-in: never a real tool nor its home).
     pub builds: Option<crate::builds::Builds>,
+    /// Each session's own build folder outside its checkout — one `builds::Builds::decide` lets go — and what it
+    /// takes (#219: 26 sessions' folders filled the disk): the list's `build` column, what `x` there drops.
+    /// Measured when the list opens, kept `BUILDS_KEPT` (when it was asked).
+    pub build_dirs: std::collections::HashMap<SessionId, (crate::builds::Doomed, (u64, bool))>,
+    pub build_dirs_at: Option<Instant>,
+    /// `x` pressed on a session's row — the second within `DROP_AGAIN` drops its build folder.
+    pub drop_asked: Option<(SessionId, Instant)>,
+}
+
+/// How long the sessions' build folders as measured are shown before they're measured again.
+const BUILDS_KEPT: Duration = Duration::from_secs(600);
+/// The second `x` within this drops the build folder.
+const DROP_AGAIN: Duration = Duration::from_secs(3);
+
+/// Each of `roots`' own build folder (`Builds::decide_all`, a repository's checkouts asked once) and what it
+/// takes — counted four at a time, each for `MEASURE_FOR` at most. On a worker: it runs the tools and reads disk.
+pub fn build_dirs(
+    b: &crate::builds::Builds,
+    roots: &[(SessionId, PathBuf)],
+) -> Vec<(SessionId, crate::builds::Doomed, (u64, bool))> {
+    let mut by_repo: Vec<(PathBuf, Vec<(SessionId, PathBuf)>)> = Vec::new();
+    for (id, root) in roots {
+        let Ok(common) = common_dir(root) else { continue };
+        match by_repo.iter_mut().find(|(c, _)| *c == common) {
+            Some((_, v)) => v.push((*id, root.clone())),
+            None => by_repo.push((common, vec![(*id, root.clone())])),
+        }
+    }
+    let mut doomed = Vec::new();
+    for (common, sessions) in by_repo {
+        let cks = checkouts(&common);
+        let rs: Vec<PathBuf> = sessions.iter().map(|(_, r)| r.clone()).collect();
+        for ((id, _), d) in sessions.iter().zip(b.decide_all(&rs, &common, &cks)) {
+            if let Ok(d) = d {
+                doomed.push((*id, d));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for chunk in doomed.chunks(4) {
+        let sized: Vec<(u64, bool)> = std::thread::scope(|s| {
+            let walks: Vec<_> = chunk
+                .iter()
+                .map(|(_, d)| {
+                    crate::event::scoped(s, "tarae-buildsize", move || {
+                        disk_size(&d.path(), Instant::now() + MEASURE_FOR)
+                    })
+                })
+                .collect();
+            walks.into_iter().map(|w| w.join().unwrap_or((0, false))).collect()
+        });
+        out.extend(chunk.iter().cloned().zip(sized).map(|((id, d), size)| (id, d, size)));
+    }
+    out
 }
 
 /// A session as it's kept: its checkout, name, branch, base and who pays for its Claude (`Session`'s).
@@ -938,6 +992,8 @@ pub struct Shown {
     pub claude: Option<(String, String)>,
     /// Who pays for its Claude (`billing.rs`): `api` said, the plan nothing.
     pub billing: crate::billing::Billing,
+    /// What its own build folder outside its checkout takes (`build_dirs`) — None: none, or not measured yet.
+    pub build: Option<(u64, bool)>,
 }
 
 impl Shown {
@@ -980,7 +1036,7 @@ impl Shown {
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 11]> = sessions
+    let cols: Vec<[String; 12]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -1014,6 +1070,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
             let reviewer = l.reviewer.clone();
             // (who pays: `api` — the plan, the calm default, says nothing — D5)
             let billing = if l.billing == crate::billing::Billing::Api { "api" } else { "" }.to_string();
+            let build = l.build.map(|s| format!("build {}", size_text(s))).unwrap_or_default();
             [
                 branch,
                 moved.join(" "),
@@ -1025,13 +1082,14 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 billing,
                 cache,
                 cost,
+                build,
                 usage,
             ]
         })
         .collect();
-    let widths: Vec<usize> = (0..11).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..12).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, false, false, false, false, true, true];
+    let right = [false, true, true, true, false, false, false, false, false, true, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1597,6 +1655,7 @@ impl Editor {
         let start = self.start_root();
         let asks: Vec<(SessionId, PathBuf, Option<String>)> =
             self.sessions_in_order().iter().map(|l| (l.id, l.root.clone(), l.base.clone())).collect();
+        self.build_dirs_measure(&asks);
         self.events.shared_jobs().spawn(move || {
             let found: Vec<(SessionId, Option<Facts>)> =
                 asks.into_iter().map(|(id, root, base)| (id, facts(&root, base, &start))).collect();
@@ -1606,6 +1665,81 @@ impl Editor {
                         Some(f) => ed.session_store.facts.insert(id, f),
                         None => ed.session_store.facts.remove(&id),
                     };
+                }
+            }
+        });
+    }
+
+    /// The sessions' own build folders measured again on a worker — unless they were within `BUILDS_KEPT`.
+    fn build_dirs_measure(&mut self, asks: &[(SessionId, PathBuf, Option<String>)]) {
+        let Some(b) = self.session_store.builds.clone() else { return };
+        let store = &mut self.session_store;
+        if store.build_dirs_at.is_some_and(|t| t.elapsed() < BUILDS_KEPT) {
+            return;
+        }
+        store.build_dirs_at = Some(Instant::now());
+        let roots: Vec<(SessionId, PathBuf)> = asks.iter().map(|(id, r, _)| (*id, r.clone())).collect();
+        self.events.shared_jobs().spawn(move || {
+            let found = build_dirs(&b, &roots);
+            move |ed: &mut Editor| {
+                ed.session_store.build_dirs =
+                    found.into_iter().map(|(id, d, size)| (id, (d, size))).collect();
+            }
+        });
+    }
+
+    /// `x` in the list: the session's own build folder dropped — the second `x` within `DROP_AGAIN` (the first
+    /// says what goes). Only a session behind with nothing running (in front, its language server builds
+    /// there), and only what `Builds::decide` lets go — asked again on a worker right before.
+    fn session_build_drop(&mut self, id: SessionId) {
+        let Some(l) = self.sessions.iter().find(|l| l.id == id) else {
+            return self.set_status("x drops a build folder of a session behind — this one is in front");
+        };
+        let (name, root) = (l.label().to_string(), l.root.clone());
+        let idle = matches!(self.doing(l), crate::session::Doing::Idle | crate::session::Doing::Done);
+        if !idle || !l.spawned.is_empty() {
+            return self.set_status(format!("{name} has something running — its build folder stays"));
+        }
+        let Some((d, size)) = self.session_store.build_dirs.get(&id).cloned() else {
+            let why = match self.session_store.build_dirs_at {
+                Some(t) if t.elapsed() < MEASURE_FOR * 4 => "still being measured",
+                _ => "no build folder of its own outside its checkout",
+            };
+            return self.set_status(format!("{name}: {why}"));
+        };
+        let at = crate::allow::tilde(&d.path());
+        let again = self.session_store.drop_asked.is_some_and(|(i, t)| i == id && t.elapsed() < DROP_AGAIN);
+        if !again {
+            self.session_store.drop_asked = Some((id, Instant::now()));
+            return self.set_status(format!(
+                "x again drops {name}'s build folder {at} ({}) — its next build starts cold",
+                size_text(size)
+            ));
+        }
+        self.session_store.drop_asked = None;
+        let Some(b) = self.session_store.builds.clone() else { return };
+        self.events.shared_jobs().spawn(move || {
+            // (asked again: another checkout may build there since it was measured)
+            let done = common_dir(&root).map(|common| match b.decide(&root, &common, &checkouts(&common)) {
+                Ok(now) if now == d => crate::builds::remove_build(&now),
+                Ok(_) => {
+                    crate::builds::BuildDir::Left("it builds somewhere else now — nothing removed".into())
+                }
+                Err(why) => why,
+            });
+            move |ed: &mut Editor| {
+                ed.session_store.build_dirs.remove(&id);
+                ed.procs_wake(crate::procs::Wake::Now);
+                match done {
+                    Ok(crate::builds::BuildDir::Freed(size)) => {
+                        ed.set_success(format!("Dropped {name}'s build folder — {} freed", size_text(size)))
+                    }
+                    Ok(crate::builds::BuildDir::Left(why)) => ed.set_warning(format!("{name}: {why}")),
+                    Ok(crate::builds::BuildDir::Failed(why)) => {
+                        ed.set_error(format!("{name}'s build folder: removing it failed partway — {why}"))
+                    }
+                    Ok(crate::builds::BuildDir::Nothing) => ed.set_status(format!("{name}: nothing to drop")),
+                    Err(e) => ed.set_error(format!("{name}: {e}")),
                 }
             }
         });
@@ -1631,6 +1765,7 @@ impl Editor {
                 reviewer: Shown::reviewer_of(l),
                 claude: Shown::claude_of(&l.usage, now_ms),
                 billing: l.billing,
+                build: self.session_store.build_dirs.get(&l.id).map(|(_, size)| *size),
             })
             .collect();
         items(&shown)
@@ -1650,7 +1785,8 @@ impl Editor {
     }
 
     /// A letter in the list: `j`/`k` move, a digit brings that row's session to the front, `n` makes a new
-    /// one, `d` ends the one in hand, `b` brings it into its base, `$` switches who pays for its Claude.
+    /// one, `d` ends the one in hand, `b` brings it into its base, `x` drops its build folder, `$` switches who
+    /// pays for its Claude.
     pub(crate) fn session_list_key(&mut self, c: char) {
         use crate::picker::Action;
         let Some(p) = self.picker.as_mut() else { return };
@@ -1682,6 +1818,11 @@ impl Editor {
                 }
             }
             // Who pays for its Claude, the other way — asked first on a conversation going (`billing.rs`)
+            // Its own build folder dropped (#219) — the second `x` does it
+            'x' => {
+                let Some(id) = here else { return };
+                self.session_build_drop(id);
+            }
             '$' => {
                 let Some(id) = here else { return };
                 self.picker = None;
@@ -2475,6 +2616,53 @@ mod tests {
         });
         assert!(warned, "a warning says it: {}", said(&ed));
         assert!(!wt.exists() && (ed.session.id, ed.sessions.len()) == (0, 0), "it ended all the same");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #219: the list says what each session's own build folder takes, and `x` twice drops an idle one's —
+    /// the first only says what goes; the session stays, so does every other build folder. Not the one in
+    /// front (its server builds there), nor one shared with another checkout (`Builds::decide`).
+    #[test]
+    fn x_in_the_list_drops_an_idle_sessions_own_build_folder() {
+        let (repo, dir) = place("dropbuild");
+        let cargo = fake_cargo(&repo, &dir);
+        let builds = dir.join("cargo-home/build");
+        let main_build = builds.join("aa/main");
+        builds_in(&repo, &main_build, 1);
+        let mut ed = editor(&repo, &dir);
+        ed.session_store.builds = Some(cargo);
+        let (own, shared) = (builds.join("bb/own"), builds.join("aa/main"));
+        let wt = new_session(&mut ed, "own");
+        builds_in(&wt, &own, 2);
+        let wt2 = new_session(&mut ed, "shared");
+        builds_in(&wt2, &shared, 1);
+        ed.session_switch(0);
+        let id = |ed: &Editor, name: &str| ed.sessions.iter().find(|l| l.name == name).unwrap().id;
+        let (own_id, shared_id) = (id(&ed, "own"), id(&ed, "shared"));
+        ed.session_list();
+        settle_until(&mut ed, |ed| ed.session_store.build_dirs.contains_key(&own_id));
+        assert!(!ed.session_store.build_dirs.contains_key(&shared_id), "shared with the main checkout");
+        let row = |ed: &Editor, id| {
+            let p = ed.picker.as_ref().unwrap();
+            p.items().iter().find(|i| i.action == crate::picker::Action::Session(id)).unwrap().hint.clone()
+        };
+        ed.session_list_sync();
+        assert!(row(&ed, own_id).contains("build 2 MB"), "{}", row(&ed, own_id));
+        // The first `x` says what goes; the second drops it
+        ed.picker.as_mut().unwrap().select_where(|a| *a == crate::picker::Action::Session(own_id));
+        ed.session_list_key('x');
+        assert!(says(&ed, "x again drops own's build folder"), "{}", said(&ed));
+        assert!(own.join("debug/marker").is_file(), "not yet");
+        ed.session_list_key('x');
+        settle_until(&mut ed, |ed| says(ed, "Dropped own's build folder"));
+        assert!(!own.exists() && wt.is_dir(), "its build folder gone, the session stays");
+        assert!(main_build.join("debug/marker").is_file(), "every other one stays");
+        // In front: not dropped
+        ed.session_switch(own_id);
+        builds_in(&wt, &own, 1);
+        ed.session_build_drop(own_id);
+        ed.session_build_drop(own_id);
+        assert!(says(&ed, "this one is in front") && own.join("debug/marker").is_file());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4089,6 +4277,7 @@ mod tests {
             reviewer: String::new(),
             claude: None,
             billing: Default::default(),
+            build: None,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[
@@ -4129,6 +4318,15 @@ mod tests {
                 &" ".repeat(35),
             ]
         );
+        // Its own build folder (#219): a column, right-aligned before the processes', `over` when counting
+        // stopped first
+        let rows = items(&[
+            Shown { build: Some((12 << 30, true)), ..shown(1, "fix", None, None, Doing::Idle, None) },
+            Shown { build: Some((900 << 20, false)), ..shown(2, "parser", None, None, Doing::Idle, None) },
+            shown(3, "docs", None, None, Doing::Idle, None),
+        ]);
+        let hints: Vec<&str> = rows.iter().map(|i| i.hint.as_str()).collect();
+        assert_eq!(hints, ["    build 12.0 GB", "build over 900 MB", &" ".repeat(17)]);
     }
 
     /// The column from a session's usage: its cache, warm until when (by the clock — true however long

@@ -150,11 +150,11 @@ fn tools(arm: crate::edittool::Arm) -> &'static str {
 /// as Claude's edits do, in the review — `refactor.rs`, and `edit` too — `edittool.rs`; none of them reads or
 /// changes a file named like a key before Claude was let read it — `reads::Keys`; `procs` reads what `:procs`
 /// shows — `procs.rs`; `ui` the screen's structure at Claude's level, less than `screen` sends —
-/// `uistate/claude.rs`)
+/// `uistate/claude.rs`; `git` only git's reads, on the guarded path — `gittool.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
 mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__read,mcp__tarae__symbols,mcp__tarae__definition,\
 mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs,\
-mcp__tarae__ui,mcp__tarae__edit";
+mcp__tarae__ui,mcp__tarae__edit,mcp__tarae__git";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`) — with what the
 /// project's own aren't trusted for held back (`claudetrust.rs`). `Skill` denied: a project skill's
@@ -2060,6 +2060,13 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
             range: String::new(),
             link: None,
         },
+        "mcp__tarae__git" => {
+            let words: Vec<&str> = input["args"]
+                .as_array()
+                .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
+                .unwrap_or_default();
+            Look { verb: "git", what: words.join(" "), pattern: true, range: String::new(), link: None }
+        }
         "mcp__tarae__procs" => {
             let what =
                 if input["all"].as_bool() == Some(true) { "every session's" } else { "this session's" };

@@ -448,9 +448,15 @@ impl Editor {
             return;
         }
         d.agent_writes = None;
-        if let Err(e) =
-            self.save_in_background(id, false, crate::saver::Then::Auto(" — Claude's write didn't come"))
-        {
+        // (Claude's change, so saved as one: beneath the project through no link — one outside it, accepted on
+        // its review, by path)
+        let inside = d.path.as_deref().is_some_and(|p| crate::paths::written_inside(&self.session.root, p));
+        let then = crate::saver::Then::Auto(" — Claude's write didn't come");
+        let saved = match inside {
+            true => self.save_beneath(id, self.session.root.clone(), then),
+            false => self.save_in_background(id, false, then),
+        };
+        if let Err(e) = saved {
             self.set_error(format!("not saved — {e}"));
         }
     }
