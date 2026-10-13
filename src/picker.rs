@@ -1168,6 +1168,10 @@ pub fn word_matches(root: &Path, word: &str) -> Result<Vec<Item>, String> {
         globs: &[],
         context: 0,
         mode: crate::grep::Mode::Lines,
+        types: &[],
+        multiline: false,
+        exclude: "",
+        judged: false,
     };
     Ok(by_place(hits(root, &q, &|| false, &mut |_| {})?))
 }
@@ -1190,6 +1194,10 @@ pub fn search(
         globs: &[],
         context: 0,
         mode: crate::grep::Mode::Lines,
+        types: &[],
+        multiline: false,
+        exclude: "",
+        judged: false,
     };
     let items = hits(root, &q, stop, &mut |found| partial(by_place(found.to_vec())))?;
     Ok(by_place(items))
@@ -1210,7 +1218,7 @@ fn hits(
     let mut items = Vec::new();
     let started = std::time::Instant::now();
     let mut next = PARTIAL_FIRST;
-    crate::grep::search(root, None, q, stop, &mut |file| {
+    crate::grep::search(root, &[], q, stop, &mut |file| {
         for r in file.rows.into_iter().filter(|r| r.hit) {
             let text = r.text.trim();
             let text = text.char_indices().nth(LABEL_MAX).map_or(text, |(i, _)| &text[..i]);

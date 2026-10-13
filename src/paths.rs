@@ -46,9 +46,73 @@ pub fn existing_inside(root: &Path, path: &Path, shown: &str, why: &str) -> Resu
     Ok(real)
 }
 
+/// A file opened to read, and where it really is — as the descriptor says, not the path again.
+pub struct Opened {
+    pub file: std::fs::File,
+    /// The opened file's own path (`F_GETPATH` / `/proc/self/fd`): links, `..` and any change since gone.
+    pub real: PathBuf,
+    pub meta: std::fs::Metadata,
+}
+
+/// `path` opened to read first, then judged by what was opened: a path judged and then read again can be
+/// changed in between — a folder on it swapped for a link by a run that writes the project — and the read
+/// follows it where the judge never looked. So tarae's own reads for Claude (`read`, `search`) open, take the
+/// descriptor's real path, judge that, and read from that descriptor. Non-blocking (a FIFO doesn't wait for a
+/// writer) and no controlling terminal; a folder opens too (`meta` says so).
+pub fn open_read(path: &Path) -> std::io::Result<Opened> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)?;
+    let meta = file.metadata()?;
+    let real = fd_path(&file)?;
+    Ok(Opened { file, real, meta })
+}
+
+/// Where an open descriptor's file is.
+#[cfg(target_os = "macos")]
+fn fd_path(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes (with its NUL) into the buffer given.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..end])))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fd_path(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What was opened, by its descriptor: a link's target, the folder's real path (macOS `/tmp` is
+    /// `/private/tmp`), and a FIFO opened without waiting for a writer.
+    #[test]
+    fn what_was_opened_says_where_it_is() {
+        let dir = std::env::temp_dir().join(format!("tarae-paths-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("in")).unwrap();
+        std::fs::write(dir.join("in/a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink(dir.join("in"), dir.join("link")).unwrap();
+        let real = std::fs::canonicalize(dir.join("in/a.txt")).unwrap();
+        let o = open_read(&dir.join("link/a.txt")).unwrap();
+        assert_eq!((o.real, o.meta.is_file()), (real, true), "where the link led");
+        assert!(open_read(&dir.join("in")).unwrap().meta.is_dir());
+        let fifo = std::ffi::CString::new(dir.join("fifo").to_str().unwrap()).unwrap();
+        // SAFETY: a path made above, a mode.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(!open_read(&dir.join("fifo")).unwrap().meta.is_file(), "opened, not waited on");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Inside means where the path really leads — links followed and `..` gone through — whether it's there
     /// yet (`inside`) or must be (`existing_inside`, which says why not).

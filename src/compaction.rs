@@ -163,6 +163,8 @@ impl Compacted {
 pub fn on_compacted(ed: &mut Editor, k: Compaction) {
     if let Some(c) = ed.session.chat.as_mut() {
         c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, k.note(), ""));
+        // (the sandbox's rules a run told may be gone from what it kept: the next run says them)
+        c.rules_said = (None, None);
     }
     ed.session.usage.compacted(&k);
     let how = k.how();

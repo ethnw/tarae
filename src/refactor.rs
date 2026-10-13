@@ -1013,10 +1013,14 @@ fn plan(
         globs: &q.globs,
         context: 0,
         mode: crate::grep::Mode::Lines,
+        types: &[],
+        multiline: false,
+        exclude: "",
+        judged: false,
     };
     // Per file, its matching lines (from 0)
     let mut found: Vec<(String, Vec<usize>)> = Vec::new();
-    let warn = crate::grep::search(&root, Some(&scope), &query, &|| false, &mut |f| {
+    let warn = crate::grep::search(&root, std::slice::from_ref(&scope), &query, &|| false, &mut |f| {
         if !keys.shut(&root.join(&f.rel)) {
             found.push((f.rel, f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
         }

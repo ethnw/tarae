@@ -28,13 +28,16 @@ use crate::llm::{self, StreamEv};
 use crate::markdown::Span;
 
 pub(crate) const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
-(your current directory). Explore it with Read, Glob and tarae's own code tools — look at the code you need \
+(your current directory). Explore it with tarae's own code tools — look at the code you need \
 across files instead of guessing. The language server's answers beat any text search and reading around — \
 reach for them first: \"where is X defined\" is definition by name (symbol X, no file or line needed) — never a \
 grep for `fn X`, `struct X` or `class X`; for a trait's implementations, definition with kind implementation; \
 for a value's type or a function's signature and docs, hover; for where something is used or what a change \
-would touch, references. For finding code or text, search (the editor's project search); for a file's outline \
-or which function a line is in, symbols — Grep is for what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
+would touch, references. For finding code or text, search (the editor's project search — each hit says the \
+function it's in); for lines of files, read (several files and ranges, or a function by name, in one call); \
+for a file's outline or which function a line is in, symbols — Grep, Glob and shell pipelines are for what \
+those can't do. Prefer the most direct tool, and ask for enough in one call to skip another turn: a turn \
+costs more than a few extra lines. Edit needs its own Read of the part it changes. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
 another way. After you change code, check your work: diagnostics with wait says in seconds whether it \
 compiles as the language servers see it (before any build), then the run_tests tool runs the tests that cover \
@@ -107,13 +110,13 @@ pub(crate) fn system() -> String {
 const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
 /// (`screen` asks the user itself — `seeing.rs`)
-/// (`references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project
-/// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`; none of
-/// them reads or changes a file named like a key before Claude was let read it — `reads::Keys`; `procs`
-/// reads what `:procs` shows — `procs.rs`; `ui` the screen's structure at Claude's level, less than `screen`
-/// sends — `uistate/claude.rs`)
+/// (`references`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project only — `nav.rs`;
+/// `search` and `read` outside it only as Read would, on its card — `reads::Gate`; `rename` and `replace` land
+/// as Claude's edits do, in the review — `refactor.rs`; none of them reads or changes a file named like a key
+/// before Claude was let read it — `reads::Keys`; `procs` reads what `:procs` shows — `procs.rs`; `ui` the
+/// screen's structure at Claude's level, less than `screen` sends — `uistate/claude.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
-mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols,mcp__tarae__definition,\
+mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__read,mcp__tarae__symbols,mcp__tarae__definition,\
 mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs,\
 mcp__tarae__ui";
 
@@ -342,6 +345,9 @@ pub struct Chat {
     /// The variables its runs' reports have said were left out of their environment, in the conversation named
     /// (`sandbox::runenv`): each said once a conversation.
     pub env_said: (Option<String>, Vec<String>),
+    /// The conversation its runs' reports told the sandbox's rules in, and their digest (`tools::rules_known`):
+    /// once a conversation — forgotten at a compaction (`compaction.rs`).
+    pub rules_said: (Option<String>, Option<u64>),
     /// The project's Claude settings, read before its claude starts and answered on a card when they run
     /// commands or set its environment (`claudetrust.rs`).
     pub settings: crate::claudetrust::Gate,
@@ -529,6 +535,7 @@ impl Chat {
             cited: Vec::new(),
             pointed: Vec::new(),
             env_said: (None, Vec::new()),
+            rules_said: (None, None),
             settings: Default::default(),
             billing: None,
             switched: None,
@@ -1087,6 +1094,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             c.state = State::Thinking;
             c.calls.push(Called { id: id.clone(), name: name.clone(), input: input.clone() });
+            let now = crate::usage::now_ms();
+            ed.session.usage.tally.called(&id, &name, &input, &ed.session.root, ed.session.wrote, now);
             let mut look = look(&ed.session.root, &name, &input);
             // A reply points at its note
             if let Some(n) =
@@ -1194,6 +1203,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::ToolResult { id, text, error } => {
             c.calls.retain(|k| k.id != id);
+            ed.session.usage.tally.answered(&id, error, crate::usage::now_ms());
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
             // said "the tree is clean" over files Claude had changed, until reopened)
             let wrote = c
@@ -1690,6 +1700,8 @@ pub fn request(ed: &mut Editor, request: serde_json::Value) {
 
 /// Our answer to one of claude's control requests (the chat process of now).
 pub fn respond(ed: &mut Editor, request_id: &str, response: serde_json::Value) {
+    // (a permission's answer: a no makes the call's failed result a declined one — `calls.rs`)
+    ed.session.usage.tally.answer(request_id, response["behavior"] == "deny");
     if let Some(p) = ed.session.chat.as_mut().and_then(|c| c.proc.as_mut()) {
         let _ = p.stdin.send(llm::control_response(request_id, response));
     }
@@ -1705,6 +1717,7 @@ fn control(
 ) -> Option<serde_json::Value> {
     use serde_json::json;
     if req["subtype"] == "can_use_tool" {
+        ed.session.usage.tally.asked(request_id, req["tool_name"].as_str().unwrap_or_default());
         return crate::edits::request(ed, request_id, req);
     }
     if req["subtype"] != "mcp_message" || req["server_name"] != "tarae" {
@@ -2012,6 +2025,29 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
         "mcp__tarae__search" => {
             let place = if input["glob"].is_string() { s("glob") } else { s("path") };
             Look { verb: "search", what: s("pattern"), pattern: true, range: within(place), link: None }
+        }
+        // (its first file, where its first range starts; the rest counted)
+        "mcp__tarae__read" => {
+            let files: Vec<&str> = input["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            // (read as the tool reads it — `readtool::item`)
+            let it = crate::readtool::item(files.first().copied().unwrap_or_default());
+            let path = resolve(&it.path);
+            let line = match &it.want {
+                crate::readtool::Want::Lines(r) => r.first().map_or(0, |r| r.0 - 1),
+                _ => 0,
+            };
+            let more = match files.len() {
+                0 | 1 => String::new(),
+                n => format!("+{} more", n - 1),
+            };
+            let asked = it.given.strip_prefix(it.path.as_str()).unwrap_or_default();
+            let what = format!("{}{asked}", shown(&path));
+            Look { verb: "read", what, pattern: false, range: more, link: Some(Link { path, line }) }
         }
         "mcp__tarae__symbols" => {
             let path = resolve(&s("path"));
@@ -3126,6 +3162,7 @@ mod tests {
             since: std::time::Instant::now(),
             found: Default::default(),
             own: None,
+            then: None,
         };
         let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
             Some((crate::offer::What::Read { pending, folder, .. }, q, id)) => {
@@ -3255,6 +3292,59 @@ mod tests {
         assert_eq!(c.msgs[0].look.as_ref().unwrap().range, "exit 101");
     }
 
+    /// A turn's calls counted from the stream as the chat reads it: each `tool_use` and its result, a range
+    /// read twice, a run that only reads, the time a card of Claude's waits for the user — kept with the
+    /// turn when its result comes, and said in `:usage`.
+    #[test]
+    fn a_turns_tool_calls_are_counted_from_the_stream() {
+        let mut ed = editor("");
+        let mut c = Chat::new();
+        c.state = State::Thinking;
+        let generation = c.generation;
+        ed.session.chat = Some(c);
+        let root = ed.session.root.clone();
+        let read = serde_json::json!({ "file_path": root.join("src/a.rs"), "offset": 1, "limit": 40 });
+        let calls = [
+            ("t1", "Read", read.clone()),
+            ("t2", "Read", read),
+            ("t3", "mcp__tarae__run", serde_json::json!({ "command": "grep -n x src/a.rs | head" })),
+        ];
+        for (id, name, input) in calls {
+            on_event(&mut ed, generation, StreamEv::Tool { id: id.into(), name: name.into(), input });
+            on_event(
+                &mut ed,
+                generation,
+                StreamEv::ToolResult { id: id.into(), text: String::new(), error: false },
+            );
+        }
+        // A card of Claude's up while the turn is under way: the user is waited for, until it goes
+        ed.push_offer(crate::offer::Offer::new(
+            "Claude changes 3 files".into(),
+            "q",
+            "",
+            String::new(),
+            crate::offer::What::ChangeSet { generation },
+        ));
+        ed.sessions_sync();
+        assert!(ed.session.usage.tally.is_waiting());
+        ed.offers.clear();
+        ed.sessions_sync();
+        assert!(!ed.session.usage.tally.is_waiting());
+        let spent =
+            crate::usage::Spent { ms: Some(9_000), at_ms: crate::usage::now_ms(), ..Default::default() };
+        on_event(&mut ed, generation, StreamEv::Spent(spent));
+        let turn = ed.session.usage.last_turn().unwrap();
+        let calls = turn.calls.as_ref().expect("counted");
+        assert_eq!((calls.sums.calls, calls.sums.reread, calls.sums.read_only), (3, 1, 1));
+        assert_eq!(calls.programs.get("grep"), Some(&1));
+        let report = crate::usage::report("s", &ed.session.usage, &ed.limits, &[], crate::usage::now_ms());
+        assert!(report.contains("## Tool calls"), "{report}");
+        assert!(report.contains("By tool: Read 2 · run 1"), "{report}");
+        assert!(
+            report.contains("Read-only runs by program (each a process tarae's reads could spare): grep 1")
+        );
+    }
+
     #[test]
     fn tool_calls_become_rows() {
         let cwd = Path::new("/proj");
@@ -3283,7 +3373,8 @@ mod tests {
     }
 
     /// The system prompt sends "where is X defined" to the language server by name (never a grep for `fn X`
-    /// / `struct X`), a type to hover, uses to references — Grep for what those can't do.
+    /// / `struct X`), a type to hover, uses to references — then tarae's search and read; Grep, Glob and shell
+    /// pipelines for what those can't do.
     #[test]
     fn the_prompt_prefers_the_language_server() {
         let s = system();
@@ -3293,7 +3384,10 @@ mod tests {
         );
         assert!(s.contains("never a grep for `fn X`, `struct X` or `class X`"));
         assert!(at("definition by name") < at(", hover;") && at(", hover;") < at("references."));
-        assert!(at("references.") < at("Grep is for what those can't do"));
+        assert!(at("references.") < at("for lines of files, read"));
+        assert!(
+            at("for lines of files, read") < at("Grep, Glob and shell pipelines are for what those can't do")
+        );
     }
 
     /// A walk-through's stops as Claude writes them: parsed from its words, shown as link lines, a tag
@@ -3311,5 +3405,30 @@ mod tests {
             "First:\n▸ src/filetree.rs:78-149 · builds the tree\nThen ▸ src/a.rs:3 · x and "
         );
         assert_eq!(displayed("no tags"), "no tags");
+    }
+
+    /// tarae's `read` as a row: its first item as the tool reads it (`readtool::item`) — the editor goes to its
+    /// first range's start (a file's top for an end or a symbol) — and how many more it asks for.
+    #[test]
+    fn a_read_row_names_its_first_item() {
+        let cwd = Path::new("/proj");
+        let read =
+            |files: serde_json::Value| look(cwd, "mcp__tarae__read", &serde_json::json!({ "files": files }));
+        let r = read(serde_json::json!(["src/lib.rs:10-40,90", "b.rs"]));
+        assert_eq!((r.verb, r.what.as_str(), r.range.as_str()), ("read", "src/lib.rs:10-40,90", "+1 more"));
+        assert_eq!(r.link, Some(Link { path: cwd.join("src/lib.rs"), line: 9 }));
+        for (spec, what) in
+            [("src/lib.rs:-30", "src/lib.rs:-30"), ("src/lib.rs:Editor::open", "src/lib.rs:Editor::open")]
+        {
+            let r = read(serde_json::json!([spec]));
+            assert_eq!((r.what.as_str(), r.range.as_str()), (what, ""));
+            assert_eq!(r.link, Some(Link { path: cwd.join("src/lib.rs"), line: 0 }), "{spec}");
+        }
+        let r = read(serde_json::json!(["notes:2026/x.md"]));
+        assert_eq!(
+            r.link.map(|l| l.path),
+            Some(cwd.join("notes:2026/x.md")),
+            "a `:` in the path is the path's"
+        );
     }
 }

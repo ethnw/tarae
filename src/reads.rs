@@ -55,6 +55,148 @@ pub struct Pending {
     /// Not Claude's call: what the user's own act would send with a file named like a key (`Own`) — no call
     /// waits on it.
     pub own: Option<Own>,
+    /// A call of tarae's own tools (`search`, `read`) waits on it, not a permission ask: run again once
+    /// allowed, else answered no.
+    pub then: Option<Then>,
+}
+
+/// A call of tarae's in-process tools that reads where Read would ask (`Gate::judge`): it waits on the same
+/// card, and runs again with what the card let through (`granted`) — the tools run in tarae, outside every
+/// sandbox, so the read rules are theirs to keep.
+#[derive(Clone, Debug)]
+pub struct Then {
+    pub call: crate::tools::Call,
+    /// `search` · `read`.
+    pub tool: &'static str,
+    pub args: Value,
+    /// Real paths the user let this call read (`y` once — `a`/`A` are kept grants the gate sees anyway).
+    pub granted: Vec<PathBuf>,
+}
+
+/// What tarae's own tools that read go by — Read's rules (`decide`): gathered on the main thread, judged on a
+/// worker.
+pub struct Gate {
+    root: PathBuf,
+    chat: Allowed,
+    made: Made,
+    store: Option<PathBuf>,
+    temp: bool,
+    granted: Vec<PathBuf>,
+}
+
+/// What a gate asks the user about: the read, where it is as the cards sort places, what looks like a token
+/// there.
+pub struct Ask {
+    look: Look,
+    class: crate::cards::Class,
+    found: crate::tokens::Found,
+}
+
+impl Ask {
+    /// What it would read, as the card names it. (Tests.)
+    #[cfg(test)]
+    pub fn at_said(&self) -> String {
+        self.look.at.as_ref().map_or_else(|| self.look.given.clone(), |a| a.display().to_string())
+    }
+}
+
+impl Gate {
+    /// (Tests: the project `root` alone — nothing allowed, nothing kept, no temp folders.)
+    #[cfg(test)]
+    pub fn for_test(root: &Path) -> Gate {
+        let root = crate::paths::real(root).unwrap_or_else(|| root.to_path_buf());
+        Gate {
+            root,
+            chat: Allowed::default(),
+            made: Made::default(),
+            store: None,
+            temp: false,
+            granted: Vec::new(),
+        }
+    }
+
+    /// (Tests: as after the card let `at` through.)
+    #[cfg(test)]
+    pub fn granting(mut self, at: PathBuf) -> Gate {
+        self.granted.push(at);
+        self
+    }
+
+    /// For session `ed.session`'s chat, with what the user already let this call read.
+    pub fn of(ed: &Editor, granted: Vec<PathBuf>) -> Gate {
+        let c = ed.session.chat.as_ref();
+        Gate {
+            root: ed.session.root.clone(),
+            chat: c.map(|c| c.allowed.clone()).unwrap_or_default(),
+            made: c.map(|c| Made::of(&c.ran)).unwrap_or_default(),
+            store: ed.allow_path.clone(),
+            temp: ed.read_temp,
+            granted,
+        }
+    }
+
+    /// Whether reading `at` (real, outside the project or named like a key in it) goes without asking —
+    /// `file`: a file read whole (Read's rule), else a place searched (Grep's: the keys in it count). A
+    /// worker's.
+    pub fn judge(&self, at: &Path, file: bool) -> Result<(), Box<Ask>> {
+        if self.granted.iter().any(|g| at.starts_with(g)) {
+            return Ok(());
+        }
+        let (tool, input) = match file {
+            true => ("Read", json!({ "file_path": at })),
+            false => ("Grep", json!({ "path": at })),
+        };
+        let (look, ok, defaults) =
+            decide(tool, &input, &self.root, self.store.as_deref(), self.temp, &self.chat, &self.made);
+        if ok {
+            return Ok(());
+        }
+        let class = match look.keys.is_empty() {
+            true => crate::cards::class(look.at.as_deref(), &defaults, crate::allow::home().as_deref()),
+            false => crate::cards::Class::Secret,
+        };
+        let found = look.at.as_deref().map(crate::tokens::found_in).unwrap_or_default();
+        Err(Box::new(Ask { look, class, found }))
+    }
+}
+
+/// A call of tarae's own tools waits on the read card for `ask` (`Then`).
+pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
+    let generation = then.call.generation();
+    let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else {
+        return crate::tools::answer(ed, then.call, Err("the chat it came from is gone".into()));
+    };
+    let Ask { look, class, found } = ask;
+    c.reads.push_back(Pending {
+        request_id: String::new(),
+        generation,
+        input: then.args.clone(),
+        look,
+        class,
+        since: std::time::Instant::now(),
+        found,
+        own: None,
+        then: Some(then),
+    });
+    refold(ed);
+    next(ed);
+}
+
+/// The card's answer to whoever asked: a permission ask allowed or denied (`no` its message), a tool's call
+/// run again with the place let through, or answered no.
+fn reply(ed: &mut Editor, p: Pending, allowed: bool, no: &str) {
+    match p.then {
+        Some(mut t) if allowed => {
+            t.granted.extend(p.look.at);
+            match t.tool {
+                "search" => crate::nav::search_again(ed, t),
+                _ => crate::readtool::again(ed, t),
+            }
+        }
+        Some(t) => crate::tools::answer(ed, t.call, Err(no.to_string())),
+        None if allowed => crate::chat::respond(ed, &p.request_id, allow(&p.input)),
+        None => crate::chat::respond(ed, &p.request_id, json!({ "behavior": "deny", "message": no })),
+    }
 }
 
 /// What the user's own act sends that holds a file named like a key Claude may not read — asked on the same
@@ -633,6 +775,7 @@ pub fn ask_own(ed: &mut Editor, keys: Vec<PathBuf>, own: Own) {
         since: std::time::Instant::now(),
         found: Default::default(),
         own: Some(own),
+        then: None,
     };
     let keep = p.look.keys.iter().all(|k| crate::allow::keepable(k, crate::allow::home().as_deref()));
     let mut q = format!("{}\n\n{is} named like a key, and {what}. {y}.", p.look.given);
@@ -752,7 +895,17 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
             }
             let since = std::time::Instant::now();
             let own = None;
-            c.reads.push_back(Pending { request_id, generation, input, look, class, since, found, own });
+            c.reads.push_back(Pending {
+                request_id,
+                generation,
+                input,
+                look,
+                class,
+                since,
+                found,
+                own,
+                then: None,
+            });
             refold(ed);
             next(ed);
         }
@@ -996,10 +1149,10 @@ pub fn answer(
                 )
             }
         };
-        crate::chat::respond(ed, &p.request_id, json!({ "behavior": "deny", "message": no }));
+        reply(ed, p, false, &no);
         return next(ed);
     };
-    crate::chat::respond(ed, &p.request_id, allow(&p.input));
+    reply(ed, p.clone(), true, "");
     if scope == Scope::Once
         && p.look.keys.is_empty()
         && let (Some(c), Some(at)) = (ed.session.chat.as_mut(), p.look.at.clone())
@@ -1026,7 +1179,7 @@ pub fn answer(
         let (through, wait): (Vec<_>, Vec<_>) = c.reads.drain(..).partition(opened);
         c.reads.extend(wait);
         for w in through {
-            crate::chat::respond(ed, &w.request_id, allow(&w.input));
+            reply(ed, w, true, "");
         }
     }
     next(ed);
@@ -1066,9 +1219,14 @@ fn own_answer(ed: &mut Editor, p: Pending, own: Own, scope: Option<Scope>, keep:
 /// The turn ended: nothing waits for these asks any more, and what its runs made asks again. (A card the
 /// user's pointing raised waits for them, not for the turn.)
 pub fn turn_over(ed: &mut Editor) {
+    let mut waiting = Vec::new();
     if let Some(c) = ed.session.chat.as_mut() {
-        c.reads.clear();
+        waiting.extend(c.reads.drain(..).filter_map(|p| p.then));
         c.ran.clear();
+    }
+    // (a call of tarae's tools is always answered — its card's going answers the one up: `asking_sync`)
+    for t in waiting {
+        crate::tools::answer(ed, t.call, Err("the turn ended before the user answered".into()));
     }
     ed.drop_cards(|w| matches!(w, crate::offer::What::Read { pending, .. } if pending.own.is_none()));
 }

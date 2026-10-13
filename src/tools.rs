@@ -65,8 +65,8 @@ impl Call {
 
 /// The tools whose calls wait on the editor's own work (servers, searches, a change set) — a run, tests and
 /// the screen wait on what may take long or on the user, and aren't watched.
-const WATCHED: [&str; 8] =
-    ["references", "search", "symbols", "definition", "hover", "diagnostics", "rename", "replace"];
+const WATCHED: [&str; 9] =
+    ["references", "search", "read", "symbols", "definition", "hover", "diagnostics", "rename", "replace"];
 
 /// An MCP message from claude → the `mcp_response` (None = answered later with `answer`). Either revision
 /// (`mcp.rs`): after `initialize`, or each request naming its own.
@@ -101,6 +101,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 crate::seeing::tool_schema(),
                 crate::nav::references_schema(),
                 crate::nav::search_schema(),
+                crate::readtool::schema(),
                 crate::nav::symbols_schema(),
                 crate::nav::definition_schema(),
                 crate::nav::hover_schema(),
@@ -113,6 +114,8 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             Ok(json!({ "tools": tools.map(annotated) }))
         }
         "tools/call" => {
+            // (side by side with another call still unanswered? — `calls.rs`; `sized` sees it answered)
+            ed.session.usage.tally.mcp_came();
             let params = &msg["params"];
             let args = &params["arguments"];
             let r = match params["name"].as_str() {
@@ -136,8 +139,8 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     return None;
                 }
                 Some(
-                    name @ ("references" | "search" | "symbols" | "definition" | "hover" | "diagnostics"
-                    | "rename" | "replace"),
+                    name @ ("references" | "search" | "read" | "symbols" | "definition" | "hover"
+                    | "diagnostics" | "rename" | "replace"),
                 ) => {
                     let call = call();
                     // (watched while it waits — one silent too long marks its session: `session::Doing::Stuck`)
@@ -156,6 +159,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                         "definition" => crate::nav::definition(ed, call, args),
                         "hover" => crate::nav::hover(ed, call, args),
                         "diagnostics" => crate::nav::diagnostics(ed, call, args),
+                        "read" => crate::readtool::call(ed, call, args),
                         _ => crate::nav::search(ed, call, args),
                     };
                     match asked {
@@ -190,6 +194,7 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
         "screen" => ("See the screen", Some("readOnlyHint")),
         "references" => ("Find references", Some("readOnlyHint")),
         "search" => ("Search the project", Some("readOnlyHint")),
+        "read" => ("Read files", Some("readOnlyHint")),
         "symbols" => ("File outline", Some("readOnlyHint")),
         "definition" => ("Go to definition", Some("readOnlyHint")),
         "hover" => ("Type and docs", Some("readOnlyHint")),
@@ -214,6 +219,7 @@ fn sized(ed: &mut Editor, tool: &str, r: &Result<String, String>, output: Option
     let (Ok(text) | Err(text)) = r;
     let session = ed.session.log();
     ed.session.usage.tool_result(&session, tool, text.len(), output);
+    ed.session.usage.tally.mcp_answered();
 }
 
 /// A tool's text as MCP content (Err = a tool error Claude can correct).
@@ -489,26 +495,32 @@ impl Waited<'_> {
 /// shows the first failure. One the user ran again (`blocked.rs`): Claude hears how it ended with the next
 /// message.
 pub fn tests_done(ed: &mut Editor) {
+    let failed = ed.session.test_run.as_ref().is_some_and(|r| matches!(r.state, RunState::Failed(_)));
+    let known = rules_known(ed, failed);
     let Some(r) = ed.session.test_run.as_mut() else { return };
+    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known));
+    let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
     if let Some(head) = r.tell.take() {
-        let text = report(&ed.session.root, r, Waited::No);
+        let text = report(&ed.session.root, r, Waited::No) + &guard;
+        rules_told(ed, said.as_ref());
         return told(ed, head, text);
     }
     let joined = std::mem::take(&mut r.joined);
     let Some(call) = r.chat.take() else { return };
     let snap = r.snap.take();
     let root = ed.session.root.clone();
-    let text = report(&root, r, Waited::of(r.started, r.queued.as_ref(), None));
+    let text = report(&root, r, Waited::of(r.started, r.queued.as_ref(), None)) + &guard;
     let others: Vec<(Call, String)> = joined
         .into_iter()
         .map(|j| {
             let how = Waited::of(r.started, r.queued.as_ref(), Some((j.asked, j.running)));
-            (j.call, report(&root, r, how))
+            (j.call, report(&root, r, how) + &guard)
         })
         .collect();
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
     let label = format!("tests: {}", r.target.label);
     let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
+    rules_told(ed, said.as_ref());
     crate::reads::run_ended(ed);
     let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;
@@ -588,16 +600,16 @@ pub(crate) fn run_schema() -> Value {
     json!({
         "name": "run",
         "description": format!("Run a shell command in the project, in the user's editor, and get how it ended and \
-    its output — build, lint, format, test suites, git. The user watches it in their task panel. Both output \
+    its output — build, lint, format, test suites, git. Not for reading or searching files: read and search do \
+    that in the editor, with no process and no card. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
     that. Checks ({checks}, git status/diff/log/show) \
-    start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq, sed -n \
-    'a,bp'. So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd \
-    echo nm otool strings size, sed -n 'a,bp', git blame/rev-parse/ls-files/branch/show, git diff --no-index; \
-    git -C <dir> too) whose paths stay in the project, the repository's other checkouts, the temp folders{code} — \
-    and lines of checks and reads joined by ; && || |, \
-    with cd, for/while-read loops of reads, or the same in sh -c '…' (no other $, no backticks or redirects \
-    to files). To run somewhere other than the project root, give cwd rather than a cd. Any other command \
+    start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq. So do \
+    read-only ones (ls find tree stat file du diff wc pwd echo nm otool strings size, git \
+    blame/rev-parse/ls-files/branch/show, git diff --no-index; git -C <dir> too) whose paths stay in the \
+    project, the repository's other checkouts, the temp folders{code} — and lines of checks and reads joined \
+    by ; && || |, with cd, for/while-read loops of reads, or the same in sh -c '…' (no other $, no backticks or \
+    redirects to files). To run somewhere other than the project root, give cwd rather than a cd. Any other command \
     waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing \
     interactive. For one test file or test, run_tests is better (it reads each failure). Commands run in a \
     sandbox; when one needs one unix socket outside it (a server's — colima's docker.sock), ask for that: \
@@ -2770,11 +2782,18 @@ pub fn unsandboxed(ed: &Editor) -> bool {
 /// The command Claude ran ended — how, and its output, go back; the editor shows the first error. One the
 /// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
 pub fn run_done(ed: &mut Editor) {
+    use crate::task::State;
+    let failed =
+        ed.session.task_run.as_ref().is_some_and(|r| matches!(r.state, State::Failed(_) | State::Stopped(_)));
+    let known = rules_known(ed, failed);
     let Some(r) = ed.session.task_run.as_mut() else { return };
+    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known));
+    let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
         let r = &*r;
-        let text = run_report(&ed.session.root, r, &r.places, Waited::No);
+        let text = run_report(&ed.session.root, r, &r.places, Waited::No) + &guard;
+        rules_told(ed, said.as_ref());
         return told(ed, head, text);
     }
     let joined = std::mem::take(&mut r.joined);
@@ -2783,14 +2802,15 @@ pub fn run_done(ed: &mut Editor) {
     let snap = r.snap.take();
     let r = &*r;
     let items = &r.places;
-    let text = run_report(&ed.session.root, r, items, Waited::of(r.started, r.queued.as_ref(), None));
+    let text =
+        run_report(&ed.session.root, r, items, Waited::of(r.started, r.queued.as_ref(), None)) + &guard;
     // (each call that joined it: the same run, its own wait)
     let others: Vec<(Call, String)> = joined
         .into_iter()
         .map(|j| {
             let how = Waited::of(r.started, r.queued.as_ref(), Some((j.asked, j.running)));
             let call = Call { output: Some(r.output_bytes), ..j.call };
-            (call, run_report(&ed.session.root, r, items, how))
+            (call, run_report(&ed.session.root, r, items, how) + &guard)
         })
         .collect();
     let first =
@@ -2801,6 +2821,7 @@ pub fn run_done(ed: &mut Editor) {
     if let Some(ran) = r.ran.clone() {
         crate::chat::mark_ran(ed, &cmd, ran);
     }
+    rules_told(ed, said.as_ref());
     crate::reads::run_ended(ed);
     let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;
@@ -2816,6 +2837,26 @@ pub fn run_done(ed: &mut Editor) {
     match snap {
         Some(snap) => run_changes(ed, snap, generation, cmd, told),
         None => told(ed, String::new()),
+    }
+}
+
+/// The digest of the sandbox's rules when Claude was told them in its conversation now (`Chat.rules_said`) —
+/// a quiet report leaves them out (`Guard::report_with`). None: say them — the conversation's first run, the
+/// first after a compaction or after they changed, and a run that failed (the rules may be why).
+fn rules_known(ed: &Editor, failed: bool) -> Option<u64> {
+    let c = ed.session.chat.as_ref()?;
+    (!failed && c.rules_said.0 == c.conversation).then_some(c.rules_said.1).flatten()
+}
+
+/// A run's sandbox report went into its result: the rules it would say are told, and a run the sandbox
+/// blocked is counted (`calls.rs`).
+fn rules_told(ed: &mut Editor, said: Option<&crate::sandbox::Report>) {
+    let Some(r) = said else { return };
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.rules_said = (c.conversation.clone(), Some(r.rules));
+    }
+    if r.blocked {
+        ed.session.usage.tally.blocked();
     }
 }
 
@@ -3059,11 +3100,10 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
             out.push_str(&format!("  {s}\n"));
         }
     }
+    // (the sandbox's report goes after it — `rules_known`)
     let lines = &r.output;
-    let guard = r.guard.as_ref().map(|g| format!("\n{}\n", g.report(&r.output))).unwrap_or_default();
     if lines.is_empty() {
         out.push_str("\n(no output)\n");
-        out.push_str(&guard);
         return out;
     }
     let cut = |l: &str| -> String {
@@ -3093,7 +3133,6 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
             out.push('\n');
         }
     }
-    out.push_str(&guard);
     out
 }
 
@@ -3174,9 +3213,7 @@ fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
             out.push('\n');
         }
     }
-    if let Some(g) = &r.guard {
-        out.push_str(&format!("\n{}\n", g.report(&r.output)));
-    }
+    // (the sandbox's report goes after it — `rules_known`)
     out
 }
 
@@ -5201,6 +5238,36 @@ mod tests {
         assert_eq!(v("killed in 3.0s\n$ cargo test\n"), "killed");
         assert_eq!(v("the user chose not to run `git push`"), "not run");
         assert_eq!(v("the command was stopped — the user stopped it"), "not run");
+    }
+
+    /// The sandbox's rules once a conversation: the first run's report says them, the next quiet one doesn't;
+    /// a failed run, a compaction, another conversation say them again; a run the sandbox blocked is counted
+    /// for `:usage` (its report says the rules itself — `Guard::report_with`).
+    #[test]
+    fn the_sandbox_rules_are_told_once_a_conversation() {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let mut c = crate::chat::Chat::new();
+        c.conversation = Some("c1".into());
+        ed.session.chat = Some(c);
+        let report = |blocked: bool| crate::sandbox::Report { text: String::new(), blocked, rules: 7 };
+        assert_eq!(super::rules_known(&ed, false), None, "the first run says them");
+        super::rules_told(&mut ed, Some(&report(false)));
+        assert_eq!(super::rules_known(&ed, false), Some(7), "known: a quiet report leaves them out");
+        assert_eq!(super::rules_known(&ed, true), None, "a failed run says them again");
+        let compacted = crate::compaction::Compaction {
+            trigger: "auto".into(),
+            pre_tokens: None,
+            post_tokens: None,
+            at_ms: 0,
+        };
+        crate::compaction::on_compacted(&mut ed, compacted);
+        assert_eq!(super::rules_known(&ed, false), None, "a compaction may have dropped them");
+        super::rules_told(&mut ed, Some(&report(true)));
+        assert_eq!(super::rules_known(&ed, false), Some(7));
+        ed.session.chat.as_mut().unwrap().conversation = Some("c2".into());
+        assert_eq!(super::rules_known(&ed, false), None, "another conversation hasn't heard them");
+        let calls = ed.session.usage.tally.end(&[], None, 0);
+        assert_eq!(calls.sums.run_refused, 1, "the blocked run");
     }
 
     /// Long output comes as its start and its end, a line too long cut; the places come first.

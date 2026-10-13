@@ -1108,6 +1108,26 @@ for. What's read goes to Claude.
   …) have their line too, as `why=own · shadow=own`, and so does an answer by a card's own letter (`w`, `p`,
   `X`, `c` …)
 
+### Reading and searching in the editor
+
+Claude reads and searches through tarae itself — no process, no sandbox to start, and inside the project no card:
+
+- **`search`** — the editor's own search (ripgrep's engine, the same as `space /`): a regex or plain text, in one
+  or several folders or files, by glob or by file type, across lines if asked, hit lines that match another
+  pattern left out; each hit's line, or the files with hits, or how many per file; or with no pattern, the files
+  themselves. Each hit says the function or type it's in (from the file's syntax tree), so a hit is often enough
+  without reading the file. The answer says the total and where the next page starts.
+- **`read`** — several files and line ranges in one call: `src/a.rs:10-40,90-120`, `src/a.rs:-30` (the last 30
+  lines), `src/a.rs:run_search` or `src/a.rs:Editor::open` (a function, type or module by name, from its syntax
+  tree), or a file whole. A file over 16 KB asked whole comes as its outline with line numbers, and says how to
+  ask for its text.
+
+They run in tarae, outside every sandbox, so they keep Read's rules themselves: a file named like a key, or a
+place outside the project and the places above, asks on the same card as Read — a link in the project to a
+place outside is asked about as that place — and the call goes on once you answer. Claude Code's Edit still
+needs its own Read of what it changes. `run`'s description sends reading and searching here, and `:usage`
+counts the runs that only read text, by program.
+
 ### Notes
 
 ![A note thread under its line: Claude's remark, your reply, and Claude's answer, with the line end showing ¶ and the reply count](screenshots/notes.png)
@@ -1172,9 +1192,22 @@ has a column with each session's cache and its total so far. `:usage` opens a bu
 window claude has said: used, when it resets, as of when, and whether a `rate_limit_event` or `get_usage` said it),
 the credential the session's claude reported it runs on (`apiKeySource`; on an API key, Console is where billing
 is authoritative), a row per turn (time, model, input, cache write, cache read, output, hit rate, API price), the
-session's total, what every request in the conversation starts with (its first request: the system prompt, the
-tools, CLAUDE.md and the first message), and today's total across sessions. It updates as turns end and as
-limits come.
+session's total, the turns' tool calls, what every request in the conversation starts with (its first request: the
+system prompt, the tools, CLAUDE.md and the first message), and today's total across sessions. It updates as turns
+end and as limits come.
+
+**Tool calls**, a row per turn: model requests, calls, calls a request, what a request carried, the time split
+into the model's, the tools' and — of the tools' — waiting for you (a card of Claude's, an edit to review), and the
+calls wasted: a range read again with nothing written since (Read's offset/limit, a read-only run's `sed -n`,
+`head`, `cat`), an edit claude reported failed (not one you or tarae declined — those are counted apart), a run that
+didn't run or that the sandbox blocked. Then the calls by tool, and the runs that only read text by program — each
+a process tarae's own reads could spare. `tarae state` has the same under each session's `usage` (`last_turn.calls`,
+`totals.calls`), and `--watch usage` hears it with each turn. Counted from what tarae sees of claude's stream —
+nothing asked of claude; a turn kept before they were counted shows none.
+
+A sandboxed run's result tells Claude the sandbox's rules once a conversation: again after a compaction, when the
+rules changed (a grant), for a run that failed, and whenever something was blocked. A quiet run in between says
+only that the sandbox blocked nothing (each telling was ~400 tokens that every later request read again).
 
 **Where the limits come from.** Every claude says where one window stands as it starts, and when it changes (a
 `rate_limit_event`). For the rest, tarae asks the chat's claude `get_usage`, skipping its transcript scan, when no

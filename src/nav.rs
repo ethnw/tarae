@@ -49,6 +49,8 @@ const ROWS_SHOWN: usize = 400;
 const FILES_SHOWN: usize = 300;
 const HITS_MAX: usize = 10_000;
 const CONTEXT_MAX: u64 = 10;
+/// What `limit` may ask for, at most.
+const LIMIT_MAX: usize = 1000;
 
 /// A line's text in an answer, at most (chars).
 const LINE_MAX: usize = 240;
@@ -347,6 +349,7 @@ fn finish(ed: &mut Editor, n: u64) {
     ed.events.jobs().spawn(move || {
         let places = crate::lsp_editor::read_places(all, &open);
         let mut t = crate::testcode::Tests::new(&root);
+        t.prefetch(&places.iter().map(|p| p.path.clone()).collect::<Vec<_>>());
         let places: Vec<(Place, bool)> = places
             .into_iter()
             .map(|mut p| {
@@ -529,11 +532,20 @@ const SYMS_SHOWN: usize = 300;
 /// One symbol: how deep it sits, what kind it is (`fn`, `struct` — empty when its name says it: `impl X`),
 /// its name, its first and last line (from 0).
 #[derive(Clone, Debug, PartialEq)]
-struct Sym {
-    depth: usize,
-    kind: &'static str,
-    name: String,
-    lines: (usize, usize),
+pub(crate) struct Sym {
+    pub(crate) depth: usize,
+    pub(crate) kind: &'static str,
+    pub(crate) name: String,
+    pub(crate) lines: (usize, usize),
+}
+
+impl Sym {
+    /// As an answer names it: `fn run_search (1936–2047)` — lines from 1.
+    pub(crate) fn said(&self) -> String {
+        let (a, b) = (self.lines.0 + 1, self.lines.1 + 1);
+        let kind = if self.kind.is_empty() { String::new() } else { format!("{} ", self.kind) };
+        format!("{kind}{} ({a}–{b})", self.name)
+    }
 }
 
 /// A `symbols` question asked of a server.
@@ -682,7 +694,7 @@ fn outline(ed: &mut Editor, call: Call, path: PathBuf, line: Option<usize>, why:
     });
 }
 
-fn outline_syms(path: &Path, text: Option<ropey::Rope>) -> Result<Vec<Sym>, String> {
+pub(crate) fn outline_syms(path: &Path, text: Option<ropey::Rope>) -> Result<Vec<Sym>, String> {
     let spec = crate::syntax::detect(path).ok_or("tarae doesn't know this file's language")?;
     let lang = crate::syntax::Loader::global()
         .load(spec)
@@ -1282,9 +1294,13 @@ fn tree_found(root: &Path, word: &str, goto: Goto, keys: &crate::reads::Keys) ->
         globs: &[],
         context: 0,
         mode: crate::grep::Mode::Lines,
+        types: &[],
+        multiline: false,
+        exclude: "",
+        judged: false,
     };
     let mut files: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-    crate::grep::search(root, None, &q, &|| false, &mut |f| {
+    crate::grep::search(root, &[], &q, &|| false, &mut |f| {
         let path = root.join(&f.rel);
         if keys.shut(&path) {
             return true;
@@ -1824,27 +1840,32 @@ fn diags_text(ed: &Editor, w: &DiagWait, settled: Option<bool>) -> String {
 pub fn search_schema() -> Value {
     json!({
         "name": "search",
-        "description": "Search the project's files for a regex — the editor's own project search \
-    (ripgrep's engine). Use it over Grep for finding code and text in the project. Hits come by file then line, each \
-    with its line of code (and context lines around it if you ask), capped and said so — narrow with path \
-    or glob, or page with offset. Smart case: an all-lowercase pattern matches any case. Skips what \
-    .gitignore skips; hidden files are searched — files named like keys (.env, *.pem) only once Read was let \
-    read them. Inside the project only. For where a function, type or \
-    variable is used, references is better (the language server's, not text).",
+        "description": "Search files for a regex — the editor's own search (ripgrep's engine, in the editor: \
+    no process, and no card inside the project). Use it rather than Grep, or grep/rg in run. Hits come by file \
+    then line, each with its line and the function or type it's in (and context lines if you ask) — often \
+    enough without reading the file; the answer says the total and the offset of the next page. Smart case: \
+    an all-lowercase pattern matches any case. Skips what .gitignore skips; hidden files are searched — files \
+    named like keys (.env, *.pem) only once Read was let read them. Outside the project it asks the user, as \
+    Read does. For where a function, type or variable is used, references is better (the language server's, \
+    not text).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "A regex (Rust/ripgrep syntax) — plain text with literal" },
-                "path": { "type": "string", "description": "A folder or file in the project to search, relative to its root — the whole project if left out" },
+                "pattern": { "type": "string", "description": "A regex (Rust/ripgrep syntax) — plain text with literal. Left out with output files: the files path, glob and type take in" },
+                "path": { "type": "string", "description": "Folders or files to search, space-separated, relative to the project's root — the whole project if left out" },
                 "glob": { "type": "string", "description": "Only files matching these globs, space-separated (`*.rs`, `src/**/*.{ts,tsx}`, `!*_test.go`)" },
+                "type": { "type": "string", "description": "Only files of these types, space-separated (rg's: rust py js ts go java md …)" },
                 "context": { "type": "integer", "description": "Lines of context before and after each hit (up to 10)" },
                 "output": { "type": "string", "enum": ["lines", "files", "count"], "description": "lines (default): each hit's line · files: the files with hits · count: hits per file" },
                 "case": { "type": "string", "enum": ["smart", "sensitive", "insensitive"], "description": "smart (default): case-insensitive when the pattern is all lowercase" },
                 "literal": { "type": "boolean", "description": "The pattern is plain text, not a regex" },
+                "multiline": { "type": "boolean", "description": "A match may span lines; `.` takes a line's end too" },
+                "exclude": { "type": "string", "description": "Hit lines that also match this regex are left out (grep -v)" },
+                "limit": { "type": "integer", "description": "Hits (lines) or files listed at most — 200 by default, 1000 at most" },
                 "offset": { "type": "integer", "description": "Skip this many hits (lines) or files — the next page" },
                 "tests": tests_schema()
             },
-            "required": ["pattern"]
+            "required": []
         }
     })
 }
@@ -1854,6 +1875,8 @@ enum Output {
     Lines,
     Files,
     Count,
+    /// The files the walk takes in, no pattern read (`output: files` without one — what Glob lists).
+    Names,
 }
 
 #[derive(Clone, Debug)]
@@ -1861,23 +1884,36 @@ struct Query {
     pattern: String,
     literal: bool,
     case: Case,
+    /// Where it looks, as given (relative to the root, or absolute) — the project when none.
+    paths: Vec<String>,
     globs: Vec<String>,
+    types: Vec<String>,
     context: usize,
     output: Output,
+    multiline: bool,
+    exclude: String,
     offset: usize,
+    /// Hits (lines) or files listed at most.
+    limit: usize,
     /// Hits in test code included (listed last) or left out.
     tests: bool,
 }
 
-/// The tool: the pattern checked now (a typo is answered at once), searched on a worker.
-pub fn search(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
+/// What `search`'s arguments ask — a typo answered at once.
+fn query_of(args: &Value) -> Result<Query, String> {
     let s = |k: &str| args[k].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
-    let pattern = args["pattern"].as_str().filter(|p| !p.is_empty()).ok_or("pattern is required")?;
-    let output = match s("output").as_deref() {
-        None | Some("lines" | "content") => Output::Lines,
-        Some("files" | "files_with_matches") => Output::Files,
-        Some("count") => Output::Count,
-        Some(o) => return Err(format!("output is lines, files or count — not {o}")),
+    let words =
+        |k: &str| s(k).map(|g| g.split_whitespace().map(str::to_string).collect()).unwrap_or_default();
+    let pattern = args["pattern"].as_str().unwrap_or_default().to_string();
+    let output = match (s("output").as_deref(), pattern.is_empty()) {
+        (None | Some("lines" | "content"), false) => Output::Lines,
+        (Some("files" | "files_with_matches"), false) => Output::Files,
+        (Some("files" | "files_with_matches"), true) => Output::Names,
+        (Some("count"), false) => Output::Count,
+        (None | Some("lines" | "content" | "count"), true) => {
+            return Err("pattern is required — but with output files, which lists the files".into());
+        }
+        (Some(o), _) => return Err(format!("output is lines, files or count — not {o}")),
     };
     let case = match s("case").as_deref() {
         None | Some("smart") => Case::Smart,
@@ -1885,32 +1921,115 @@ pub fn search(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         Some("insensitive") => Case::Insensitive,
         Some(c) => return Err(format!("case is smart, sensitive or insensitive — not {c}")),
     };
+    let default_limit = if output == Output::Lines { HITS_SHOWN } else { FILES_SHOWN };
     let q = Query {
-        pattern: pattern.to_string(),
+        pattern,
         literal: args["literal"].as_bool().unwrap_or(false),
         case,
-        globs: s("glob").map(|g| g.split_whitespace().map(str::to_string).collect()).unwrap_or_default(),
+        paths: words("path"),
+        globs: words("glob"),
+        types: words("type"),
         context: args["context"].as_u64().unwrap_or(0).min(CONTEXT_MAX) as usize,
         output,
+        multiline: args["multiline"].as_bool().unwrap_or(false),
+        exclude: s("exclude").unwrap_or_default(),
         offset: args["offset"].as_u64().unwrap_or(0) as usize,
+        limit: args["limit"].as_u64().map_or(default_limit, |l| (l as usize).clamp(1, LIMIT_MAX)),
         tests: args["tests"].as_bool().unwrap_or(true),
     };
+    let not_regex = |what: &str, e: regex::Error| {
+        format!("{what}: {}", e.to_string().lines().last().unwrap_or("invalid").trim())
+    };
     if !q.literal {
-        regex::RegexBuilder::new(&q.pattern).build().map_err(|e| {
-            format!("not a regex: {}", e.to_string().lines().last().unwrap_or("invalid").trim())
-        })?;
+        regex::RegexBuilder::new(&q.pattern).build().map_err(|e| not_regex("not a regex", e))?;
     }
+    if !q.exclude.is_empty() {
+        regex::RegexBuilder::new(&q.exclude).build().map_err(|e| not_regex("exclude isn't a regex", e))?;
+    }
+    Ok(q)
+}
+
+/// The tool: the arguments checked now, searched on a worker.
+pub fn search(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
+    let q = query_of(args)?;
+    go_search(ed, call, q, args.clone(), Vec::new());
+    Ok(())
+}
+
+/// A search that waited on the read card, run again with what it let through (`reads::Then`).
+pub fn search_again(ed: &mut Editor, t: crate::reads::Then) {
+    match query_of(&t.args) {
+        Ok(q) => go_search(ed, t.call, q, t.args, t.granted),
+        Err(e) => answer(ed, t.call, Err(e)),
+    }
+}
+
+fn go_search(ed: &mut Editor, call: Call, q: Query, args: Value, granted: Vec<PathBuf>) {
     let root = project_root(ed);
-    let path = s("path");
     // Unsaved buffers aren't what's on disk — said, when they're in what's searched
     let unsaved: Vec<PathBuf> =
         ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
     let keys = crate::reads::Keys::of(ed);
+    let gate = crate::reads::Gate::of(ed, granted.clone());
+    // (where its time goes, as one `timing` line: the worker's start, the walk, test code told apart, the
+    // enclosing symbols, the main loop's turn)
+    let mut trace = crate::trace::Trace::new(format!("claude's search: {}", clip(&q.pattern, 60)));
     ed.events.jobs().spawn(move || {
-        let r = run_search(&root, path.as_deref(), &q, &unsaved, &keys);
-        move |ed: &mut Editor| answer(ed, call, r)
+        trace.step("worker");
+        let r = scopes(&root, &q.paths, &keys, &gate)
+            .map(|s| s.map(|scopes| run_search_traced(&root, &scopes, &q, &unsaved, &keys, &mut trace)));
+        move |ed: &mut Editor| {
+            trace.step("main loop");
+            crate::log::line("tarae", "timing", &trace.line());
+            match r {
+                Ok(Ok(text)) => answer(ed, call, text),
+                Ok(Err(ask)) => {
+                    let then = crate::reads::Then { call, tool: "search", args, granted };
+                    crate::reads::tool_ask(ed, then, *ask)
+                }
+                Err(e) => answer(ed, call, Err(e)),
+            }
+        }
     });
-    Ok(())
+}
+
+/// Where a search looks (real paths): each path given — the project when none. In the project as it is (a
+/// file named like a key there refused by name, as the walk leaves those out); elsewhere as Read's rules
+/// say (`reads::Gate`) — Ok(Err): the question for the user's card — before anything is said of the place
+/// (whether it's there is read too). A link in the project to a place outside is that place.
+fn scopes(
+    root: &Path,
+    paths: &[String],
+    keys: &crate::reads::Keys,
+    gate: &crate::reads::Gate,
+) -> Result<Result<Vec<PathBuf>, Box<crate::reads::Ask>>, String> {
+    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for p in paths {
+        let abs = root.join(p);
+        let real = crate::paths::real(&abs);
+        match &real {
+            Some(r) if r.starts_with(&root) => {}
+            // (a `..` past what's there: where it leads can't be told — the card says the path as given)
+            other => {
+                let at = other.clone().unwrap_or(abs);
+                if let Err(ask) = gate.judge(&at, at.is_file()) {
+                    return Ok(Err(ask));
+                }
+            }
+        }
+        let Some(real) = real.filter(|r| r.exists()) else {
+            return Err(format!("{p}: no such file or folder"));
+        };
+        if real.starts_with(&root) && real.is_file() && keys.shut(&real) {
+            return Err(crate::reads::key_left_out(&rel(&root, &real)));
+        }
+        out.push(real);
+    }
+    if out.is_empty() {
+        out.push(root);
+    }
+    Ok(Ok(out))
 }
 
 /// One line of a file in the answer: its number (from 1), whether it's a hit (else context), its text.
@@ -1924,6 +2043,9 @@ struct Row {
 /// The search on a worker → the answer's text. A file named like a key Claude hasn't been let read
 /// (`reads::Keys`) isn't in it, hits or names — and isn't counted either: whether it had hits says what's in
 /// it (a pattern a character longer each time reads a key out). The tool's description says it once.
+/// (Tests: `path` judged as the tool does, nothing let through — a place the user would be asked about is
+/// an error saying so.)
+#[cfg(test)]
 fn run_search(
     root: &Path,
     path: Option<&str>,
@@ -1931,14 +2053,24 @@ fn run_search(
     unsaved: &[PathBuf],
     keys: &crate::reads::Keys,
 ) -> Result<String, String> {
-    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-    let scope = match path {
-        Some(p) => crate::paths::existing_inside(&root, &root.join(p), p, "search looks inside it only")?,
-        None => root.clone(),
-    };
-    if scope.is_file() && keys.shut(&scope) {
-        return Err(crate::reads::key_left_out(&rel(&root, &scope)));
+    let paths: Vec<String> = path.map(|p| vec![p.to_string()]).unwrap_or_default();
+    let gate = crate::reads::Gate::for_test(root);
+    match scopes(root, &paths, keys, &gate)? {
+        Ok(scopes) => run_search_traced(root, &scopes, q, unsaved, keys, &mut crate::trace::Trace::new("")),
+        Err(ask) => Err(format!("asks the user: {}", ask.at_said())),
     }
+}
+
+/// The search of `scopes` (real paths `scopes` judged), its steps said in `trace`.
+fn run_search_traced(
+    root: &Path,
+    scopes: &[PathBuf],
+    q: &Query,
+    unsaved: &[PathBuf],
+    keys: &crate::reads::Keys,
+    trace: &mut crate::trace::Trace,
+) -> Result<String, String> {
+    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let shut = |f: &crate::grep::File| keys.shut(&root.join(&f.rel));
     let query = crate::grep::Query {
         pattern: &q.pattern,
@@ -1946,18 +2078,24 @@ fn run_search(
         case: q.case,
         word: false,
         globs: &q.globs,
+        types: &q.types,
         context: q.context,
         mode: match q.output {
             Output::Lines => crate::grep::Mode::Lines,
             Output::Files => crate::grep::Mode::Files,
             Output::Count => crate::grep::Mode::Count,
+            Output::Names => crate::grep::Mode::Names,
         },
+        multiline: q.multiline,
+        exclude: &q.exclude,
+        // (its scopes judged — each file read only where it really is in one: `grep::Query::judged`)
+        judged: true,
     };
     let search = |each: &mut dyn FnMut(crate::grep::File) -> bool| {
-        crate::grep::search(&root, Some(&scope), &query, &|| false, each)
+        crate::grep::search(&root, scopes, &query, &|| false, each)
     };
     let unsaved: Vec<String> =
-        unsaved.iter().filter(|p| p.starts_with(&scope)).map(|p| rel(&root, p)).collect();
+        unsaved.iter().filter(|p| scopes.iter().any(|s| p.starts_with(s))).map(|p| rel(&root, p)).collect();
     let note = match unsaved.is_empty() {
         true => String::new(),
         false => {
@@ -1981,14 +2119,19 @@ fn run_search(
                 files.entry(f.rel).or_default().extend(rows);
                 hits < HITS_MAX
             })?;
+            trace.step(format!("walked ({} files hit)", files.len()));
             if files.is_empty() {
                 return no_hits(warn, q);
             }
             let mut t = crate::testcode::Tests::new(&root);
-            let entries = entries(files, &mut |path, line| t.at(&root.join(path), line - 1));
-            lines_text(entries, q.tests, hits >= HITS_MAX, q.offset) + &warned(warn)
+            t.prefetch(&files.keys().map(|f| root.join(f)).collect::<Vec<_>>());
+            let mut entries = entries(files, &mut |path, line| t.at(&root.join(path), line - 1));
+            trace.step(format!("test code told ({} parsed, {} KB)", t.parsed, t.parsed_bytes / 1024));
+            let outlined = enclose(&mut entries, &root, q.tests, q.offset, q.limit);
+            trace.step(format!("symbols ({outlined} outlines)"));
+            lines_text(entries, q.tests, hits >= HITS_MAX, q.offset, q.limit) + &warned(warn)
         }
-        Output::Files | Output::Count => {
+        Output::Files | Output::Count | Output::Names => {
             let mut rows: Vec<String> = Vec::new();
             let counts = q.output == Output::Count;
             let warn = search(&mut |f| {
@@ -1997,6 +2140,7 @@ fn run_search(
                 }
                 true
             })?;
+            trace.step(format!("walked ({} files hit)", rows.len()));
             if rows.is_empty() {
                 return no_hits(warn, q);
             }
@@ -2010,8 +2154,9 @@ fn run_search(
                     (r, test)
                 })
                 .collect();
+            trace.step(format!("test code told ({} parsed, {} KB)", t.parsed, t.parsed_bytes / 1024));
             crate::sorting::by(&mut rows, |a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
-            files_text(rows, q.tests, counts, q.offset) + &warned(warn)
+            files_text(rows, q.tests, q.output, q.offset, q.limit) + &warned(warn)
         }
     };
     Ok(text + &note)
@@ -2020,6 +2165,7 @@ fn run_search(
 fn no_hits(warn: Option<String>, q: &Query) -> Result<String, String> {
     match warn {
         Some(w) => Err(w),
+        None if q.output == Output::Names => Ok("no files there".into()),
         None if q.globs.is_empty() => Ok(format!("no matches for `{}`", q.pattern)),
         None => Ok(format!("no matches for `{}` in files matching {}", q.pattern, q.globs.join(" "))),
     }
@@ -2035,6 +2181,9 @@ struct Entry {
     path: String,
     runs: Vec<Vec<Row>>,
     test: bool,
+    /// By run, by row: the symbol a hit row is in (`Sym::said`, and its first line from 1) — none known:
+    /// shorter or empty.
+    within: Vec<Vec<Option<(String, usize)>>>,
 }
 
 impl Entry {
@@ -2066,20 +2215,44 @@ fn entries(files: BTreeMap<String, Vec<Row>>, is_test: &mut dyn FnMut(&str, usiz
             if is_test(&path, at) { t.push(run) } else { c.push(run) }
         }
         if !c.is_empty() {
-            code.push(Entry { path: path.clone(), runs: c, test: false });
+            code.push(Entry { path: path.clone(), runs: c, test: false, within: Vec::new() });
         }
         if !t.is_empty() {
-            tests.push(Entry { path, runs: t, test: true });
+            tests.push(Entry { path, runs: t, test: true, within: Vec::new() });
         }
     }
     code.extend(tests);
     code
 }
 
+/// The symbol each hit `lines_text` will show is in (`Entry.within`), from the files' outlines
+/// (`outlines.rs`, kept while unchanged) — the entries up to hit `offset + limit` (the shown ones; a few
+/// past, test code being listed last). The files whose outline was read.
+fn enclose(entries: &mut [Entry], root: &Path, tests: bool, offset: usize, limit: usize) -> usize {
+    let mut seen = 0;
+    let mut read = 0;
+    for e in entries.iter_mut().filter(|e| tests || !e.test) {
+        if seen >= offset + limit {
+            break;
+        }
+        seen += e.hits();
+        let Ok(syms) = crate::outlines::of(&root.join(&e.path)) else { continue };
+        read += 1;
+        let of = |r: &Row| {
+            let s = crate::outlines::holding(&syms, r.line.saturating_sub(1)).filter(|_| r.hit)?;
+            Some((s.said(), s.lines.0 + 1))
+        };
+        e.within = e.runs.iter().map(|run| run.iter().map(of).collect()).collect();
+    }
+    read
+}
+
 /// Hits by file, each run of lines together (`--` between runs), hit lines `12:`, context `13-` (as rg
-/// prints them), test code last under its heading (or left out, `tests` false); from hit `offset` on, at
-/// most `HITS_SHOWN` hits and `ROWS_SHOWN` rows.
-fn lines_text(entries: Vec<Entry>, tests: bool, stopped: bool, offset: usize) -> String {
+/// prints them), over a hit the symbol it's in when that changes (`in fn x (12–40)`; not over the symbol's
+/// own first line, which says it; `at the top level` after one), test code last under its heading (or left out, `tests` false); from hit `offset` on, at most `limit` hits and
+/// twice as many rows (`ROWS_SHOWN` at least).
+fn lines_text(entries: Vec<Entry>, tests: bool, stopped: bool, offset: usize, limit: usize) -> String {
+    let rows_max = ROWS_SHOWN.max(2 * limit);
     let in_tests: usize = entries.iter().filter(|e| e.test).map(Entry::hits).sum();
     let entries: Vec<Entry> = entries.into_iter().filter(|e| tests || !e.test).collect();
     if entries.is_empty() {
@@ -2093,41 +2266,53 @@ fn lines_text(entries: Vec<Entry>, tests: bool, stopped: bool, offset: usize) ->
     let mut rest: Vec<(String, usize)> = Vec::new();
     let mut last_shown = 0;
     let mut in_heading = false;
-    for Entry { path, runs, test } in entries {
+    for Entry { path, runs, test, mut within } in entries {
         let mut shown_here = Vec::new();
         let mut left = 0;
-        for run in runs {
+        within.resize(runs.len(), Vec::new());
+        for (run, within) in runs.into_iter().zip(within) {
             let n = run.iter().filter(|r| r.hit).count();
             if seen + n <= offset {
                 seen += n;
                 continue;
             }
-            if hits >= HITS_SHOWN || rows >= ROWS_SHOWN {
+            if hits >= limit || rows >= rows_max {
                 left += n;
                 continue;
             }
-            let run: Vec<Row> = run.into_iter().take(ROWS_SHOWN - rows).collect();
+            let run: Vec<Row> = run.into_iter().take(rows_max - rows).collect();
             let (all, n) = (n, run.iter().filter(|r| r.hit).count());
             left += all - n;
             seen += n;
             hits += n;
             rows += run.len();
             last_shown = seen;
-            shown_here.push(run);
+            shown_here.push((run, within));
         }
         if !shown_here.is_empty() {
             if test && !in_heading {
                 in_heading = true;
                 out.push_str(TESTS_HEADING);
             }
-            let w = shown_here.iter().flatten().map(|r| r.line).max().unwrap_or(1).to_string().len();
+            let w = shown_here.iter().flat_map(|r| &r.0).map(|r| r.line).max().unwrap_or(1).to_string().len();
             out.push_str(&path);
             out.push('\n');
-            for (k, run) in shown_here.iter().enumerate() {
+            let mut said: Option<&String> = None;
+            for (k, (run, within)) in shown_here.iter().enumerate() {
                 if k > 0 {
                     out.push_str("  --\n");
                 }
-                for r in run {
+                for (i, r) in run.iter().enumerate() {
+                    let sym = within.get(i).and_then(Option::as_ref);
+                    if r.hit && sym.map(|s| &s.0) != said {
+                        match sym {
+                            Some((s, first)) if *first != r.line => out.push_str(&format!("  in {s}\n")),
+                            Some(_) => {}
+                            None if !within.is_empty() => out.push_str("  at the top level\n"),
+                            None => {}
+                        }
+                        said = sym.map(|s| &s.0);
+                    }
                     let sep = if r.hit { ':' } else { '-' };
                     out.push_str(&format!("  {:>w$}{sep} {}\n", r.line, r.text));
                 }
@@ -2155,21 +2340,26 @@ fn lines_text(entries: Vec<Entry>, tests: bool, stopped: bool, offset: usize) ->
 }
 
 /// `--files-with-matches` / `--count` lines, each with whether its file is all test code — sorted, those
-/// last under their heading (or left out, `tests` false): from `offset` on, at most `FILES_SHOWN`.
-fn files_text(rows: Vec<(String, bool)>, tests: bool, counts: bool, offset: usize) -> String {
+/// last under their heading (or left out, `tests` false): from `offset` on, at most `limit`. `kind`: files
+/// with hits, counts, or the files alone (`Output::Names`).
+fn files_text(rows: Vec<(String, bool)>, tests: bool, kind: Output, offset: usize, limit: usize) -> String {
     let in_tests = rows.iter().filter(|r| r.1).count();
     let rows: Vec<(String, bool)> = rows.into_iter().filter(|r| tests || !r.1).collect();
     if rows.is_empty() {
-        return format!("no matches outside test code{}", tests_said(in_tests, false));
+        let none = if kind == Output::Names { "no files" } else { "no matches" };
+        return format!("{none} outside test code{}", tests_said(in_tests, false));
     }
     let total = rows.len();
-    let shown: Vec<&(String, bool)> = rows.iter().skip(offset).take(FILES_SHOWN).collect();
+    let shown: Vec<&(String, bool)> = rows.iter().skip(offset).take(limit).collect();
     let said = tests_said(in_tests, tests);
-    let mut head = if counts {
-        let lines: usize = rows.iter().filter_map(|r| r.0.rsplit_once(':')?.1.parse::<usize>().ok()).sum();
-        format!("{} in {}{said}", count(lines, "matching line"), count(total, "file"))
-    } else {
-        format!("{} with matches{said}", count(total, "file"))
+    let mut head = match kind {
+        Output::Count => {
+            let lines: usize =
+                rows.iter().filter_map(|r| r.0.rsplit_once(':')?.1.parse::<usize>().ok()).sum();
+            format!("{} in {}{said}", count(lines, "matching line"), count(total, "file"))
+        }
+        Output::Names => format!("{}{said}", count(total, "file")),
+        _ => format!("{} with matches{said}", count(total, "file")),
     };
     if shown.is_empty() {
         return format!("{head}; none past offset {offset}");
@@ -2389,30 +2579,30 @@ mod tests {
         let mut is_test = |p: &str, l: usize| p.starts_with("tests/") || l >= 40;
         let e = entries(files.clone(), &mut is_test);
         assert_eq!(
-            lines_text(e, true, false, 0),
+            lines_text(e, true, false, 0, HITS_SHOWN),
             "3 matching lines in 2 files; 2 in test code, listed last:\na.rs\n  3: t3\n\
              in test code:\na.rs\n  40: t40\n  41- t41\ntests/t.rs\n  1: t1"
         );
         let e = entries(files.clone(), &mut is_test);
         assert_eq!(
-            lines_text(e, false, false, 0),
+            lines_text(e, false, false, 0, HITS_SHOWN),
             "1 matching line in 1 file; 2 more in test code, left out:\na.rs\n  3: t3"
         );
         let mut only_tests = BTreeMap::new();
         only_tests.insert("tests/t.rs".to_string(), rows(&[(1, true)]));
         let e = entries(only_tests, &mut is_test);
         assert_eq!(
-            lines_text(e, false, false, 0),
+            lines_text(e, false, false, 0, HITS_SHOWN),
             "no matches outside test code; 1 more in test code, left out"
         );
         let rows =
             vec![("a.rs".to_string(), false), ("b.rs".to_string(), false), ("tests/t.rs".to_string(), true)];
         assert_eq!(
-            files_text(rows.clone(), true, false, 0),
+            files_text(rows.clone(), true, Output::Files, 0, FILES_SHOWN),
             "3 files with matches; 1 in test code, listed last:\na.rs\nb.rs\nin test code:\ntests/t.rs"
         );
         assert_eq!(
-            files_text(rows, false, false, 0),
+            files_text(rows, false, Output::Files, 0, FILES_SHOWN),
             "2 files with matches; 1 more in test code, left out:\na.rs\nb.rs"
         );
     }
@@ -2429,7 +2619,7 @@ mod tests {
         files.insert("a.rs".to_string(), rows(&[(9, false), (10, true), (11, false), (40, true)]));
         files.insert("b.rs".to_string(), rows(&[(2, true)]));
         let lines_text = |files: BTreeMap<String, Vec<Row>>, stopped, offset| {
-            lines_text(entries(files, &mut |_, _| false), true, stopped, offset)
+            lines_text(entries(files, &mut |_, _| false), true, stopped, offset, HITS_SHOWN)
         };
         let text = lines_text(files.clone(), false, 0);
         assert_eq!(
@@ -2457,11 +2647,11 @@ mod tests {
     fn files_and_counts_page_too() {
         let rows: Vec<(String, bool)> = (0..5).map(|i| (format!("f{i}:{}", i + 1), false)).collect();
         assert_eq!(
-            files_text(rows.clone(), true, true, 0),
+            files_text(rows.clone(), true, Output::Count, 0, FILES_SHOWN),
             "15 matching lines in 5 files:\nf0:1\nf1:2\nf2:3\nf3:4\nf4:5"
         );
         let names: Vec<(String, bool)> = (0..FILES_SHOWN + 2).map(|i| (format!("f{i:03}"), false)).collect();
-        let text = files_text(names, true, false, 0);
+        let text = files_text(names, true, Output::Files, 0, FILES_SHOWN);
         assert!(text.starts_with("302 files with matches — 1–300 below:\nf000\n"), "{}", &text[..60]);
         assert!(text.ends_with("… 2 more — offset: 300 for the next ones"));
     }
@@ -2563,6 +2753,11 @@ mod tests {
             output,
             offset: 0,
             tests: true,
+            paths: Vec::new(),
+            types: Vec::new(),
+            multiline: false,
+            exclude: String::new(),
+            limit: HITS_SHOWN,
         };
         let (shut, open) = (crate::reads::Keys::none_opened(&dir), crate::reads::Keys::none_opened(&dir));
         let open = open.opening(env.clone());
@@ -2583,8 +2778,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A link in the project to a place outside it: the project's search doesn't go through it (the walk
+    /// takes no links), and a search of the link itself is a search of where it leads — Read's card asks.
+    #[test]
+    fn search_through_a_link_outside_asks() {
+        let base = std::env::temp_dir().join(format!("tarae-nav-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, outside) = (base.join("p"), base.join("outside"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("a.txt"), "marker in\n").unwrap();
+        std::fs::write(outside.join("o.txt"), "marker out\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("o.txt"), dir.join("o.txt")).unwrap();
+        let q = query_of(&json!({ "pattern": "marker" })).unwrap();
+        let keys = crate::reads::Keys::none_opened(&dir);
+        let text = run_search(&dir, None, &q, &[], &keys).unwrap();
+        assert!(text.starts_with("1 matching line in 1 file:\na.txt"), "{text}");
+        let real = crate::paths::real(&outside).unwrap();
+        for link in ["out", "o.txt"] {
+            let e = run_search(&dir, Some(link), &q, &[], &keys).unwrap_err();
+            assert!(e.starts_with(&format!("asks the user: {}", real.display())), "{link}: {e}");
+        }
+        // Whether a place outside is there is read too: asked before "no such file" could say it
+        let nope = real.join("nope");
+        let e = run_search(&dir, nope.to_str(), &q, &[], &keys).unwrap_err();
+        assert_eq!(e, format!("asks the user: {}", nope.display()));
+        let e = run_search(&dir, Some("nope"), &q, &[], &keys).unwrap_err();
+        assert_eq!(e, "nope: no such file or folder", "in the project: said");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// The search itself (in-process — rg or not): smart case, a glob, a folder, context, hidden files in
-    /// and `.gitignore`d out; outside the project refused; an unsaved buffer said.
+    /// and `.gitignore`d out; outside the project asked about (Read's rules — `reads::Gate`); an unsaved
+    /// buffer said.
     #[test]
     fn search_looks_inside_the_project() {
         let dir = std::env::temp_dir().join(format!("tarae-nav-search-{}", std::process::id()));
@@ -2608,12 +2835,21 @@ mod tests {
             output: Output::Lines,
             offset: 0,
             tests: true,
+            paths: Vec::new(),
+            types: Vec::new(),
+            multiline: false,
+            exclude: String::new(),
+            limit: HITS_SHOWN,
         };
         let text = run_search(&dir, None, &q("alpha"), &[], &crate::reads::Keys::none_opened(&dir)).unwrap();
         assert!(text.starts_with("4 matching lines in 3 files:"), "{text}");
         assert!(text.contains(".github/ci.yml\n  1: alpha: ci"), "hidden files are searched: {text}");
         assert!(!text.contains("ignored"), ".gitignore'd: {text}");
-        assert!(text.contains("src/a.rs\n  1: fn Alpha() {}\n  2: let alpha = 1;"), "{text}");
+        // (a hit on a symbol's own first line says it; the next, outside it, is said so)
+        assert!(
+            text.contains("src/a.rs\n  1: fn Alpha() {}\n  at the top level\n  2: let alpha = 1;"),
+            "{text}"
+        );
         let text = run_search(&dir, None, &q("Alpha"), &[], &crate::reads::Keys::none_opened(&dir)).unwrap();
         assert!(
             text.starts_with("1 matching line in 1 file:"),
@@ -2666,7 +2902,7 @@ mod tests {
         assert_eq!(text, "no matches for `a.rs(`");
         let e = run_search(&dir, Some(".."), &q("alpha"), &[], &crate::reads::Keys::none_opened(&dir))
             .unwrap_err();
-        assert!(e.contains("outside the project"), "{e}");
+        assert!(e.starts_with("asks the user: "), "outside the project: Read's card — {e}");
         let unsaved = [std::fs::canonicalize(dir.join("src/a.rs")).unwrap()];
         let text =
             run_search(&dir, Some("src"), &q("alpha"), &unsaved, &crate::reads::Keys::none_opened(&dir))
@@ -2752,8 +2988,10 @@ mod tests {
 
     /// A search over this repository that hits most of its files, test code told apart (`testcode.rs`) — a
     /// number for `cargo perf` (11.3 s once, 0.72 s since each file's declarations are read once an answer;
-    /// measured 2026-10-03). At opt-level 0 (the test profile) it skips itself, saying so past libtest's
-    /// capture (`test_results::SELF_SKIP`) — `cargo perf` runs it.
+    /// measured 2026-10-03; 1.7 s by 2026-10-13 as the repository grew, nearly all of it parsing — 0.37 s
+    /// since a file is parsed once for both, on 4 threads) — and the same search again, its files' parses
+    /// kept (42 ms). At opt-level 0 (the test profile) it skips itself, saying so past libtest's capture
+    /// (`test_results::SELF_SKIP`) — `cargo perf` runs it.
     #[test]
     fn perf_search_wide_with_test_code() {
         if crate::test_results::unoptimized("nav::tests::perf_search_wide_with_test_code") {
@@ -2769,14 +3007,36 @@ mod tests {
             output: Output::Lines,
             offset: 0,
             tests: true,
+            paths: Vec::new(),
+            types: Vec::new(),
+            multiline: false,
+            exclude: String::new(),
+            limit: HITS_SHOWN,
         };
-        let t0 = std::time::Instant::now();
-        let text = run_search(root, None, &q, &[], &crate::reads::Keys::none_opened(root)).unwrap();
-        let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        assert!(text.contains("in test code, listed last"), "{}", text.lines().next().unwrap_or_default());
-        let line = format!("PERF search_wide_with_test_code_ms {ms:.3} budget=3000 noise=100\n");
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        let keys = crate::reads::Keys::none_opened(root);
+        // (the first search after a start parses the files it hit; the next finds them kept)
+        crate::testcode::forget_parsed();
+        let mut said = String::new();
+        let mut took = Vec::new();
+        for _ in 0..2 {
+            let t0 = std::time::Instant::now();
+            let mut trace = crate::trace::Trace::new("search");
+            let scopes = [std::fs::canonicalize(root).unwrap()];
+            let text = run_search_traced(root, &scopes, &q, &[], &keys, &mut trace).unwrap();
+            took.push(t0.elapsed().as_secs_f64() * 1000.0);
+            assert!(
+                text.contains("in test code, listed last"),
+                "{}",
+                text.lines().next().unwrap_or_default()
+            );
+            said += &format!("{}\n", trace.line());
+        }
+        let (ms, again) = (took[0], took[1]);
+        said += &format!("PERF search_wide_with_test_code_ms {ms:.3} budget=3000 noise=100\n");
+        said += &format!("PERF search_wide_again_ms {again:.3} budget=300 noise=20\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), said.as_bytes());
         assert!(ms < 3000.0, "{ms:.0} ms (budget 3000)");
+        assert!(again < 300.0, "{again:.0} ms (budget 300)");
     }
 
     /// With no server: tarae's outline from the syntax tree (when the grammar is there).

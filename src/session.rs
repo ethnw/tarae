@@ -664,6 +664,7 @@ impl Editor {
         self.session_list_sync();
         self.inbox_sync();
         self.asking_sync();
+        self.waiting_sync();
         // (a shared server's folders follow the checkouts — `share.rs`)
         self.share_sync();
         if self.sessions.is_empty() {
@@ -695,6 +696,24 @@ impl Editor {
             .collect();
         for id in woken {
             self.attach_lsp(id);
+        }
+    }
+
+    /// Each session's turn under way counts the time its Claude waits for the user — a card of its, an edit
+    /// to review (`calls.rs`). After every event: waiting starts and ends only with one.
+    fn waiting_sync(&mut self) {
+        let now = crate::usage::now_ms();
+        let waits: Vec<(SessionId, bool)> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .map(|l| {
+                let busy = l.chat.as_ref().is_some_and(crate::chat::Chat::busy);
+                (l.id, busy && self.doing(l) == Doing::Waiting)
+            })
+            .collect();
+        for l in std::iter::once(&mut self.session).chain(&mut self.sessions) {
+            if let Some(&(_, on)) = waits.iter().find(|(id, _)| *id == l.id) {
+                l.usage.tally.waiting(on, now);
+            }
         }
     }
 

@@ -218,12 +218,18 @@ pub struct Turn {
     /// Claude compacted the conversation in it — its trigger (`auto` · `manual`): a `/compact` turn reports
     /// 0 tokens and the summary's cost, said so rather than as a turn that read nothing.
     pub compacted: Option<String>,
+    /// Its tool calls (`calls.rs`) — None: a one-turn process's, or a turn kept before they were counted.
+    pub calls: Option<crate::calls::Calls>,
 }
 
 impl Turn {
     fn json(&self) -> Value {
-        json!({ "at": self.at_ms, "model": self.model, "counts": self.counts.json(), "cost": self.cost,
-                "requests": self.requests, "ms": self.ms, "compacted": self.compacted })
+        let mut v = json!({ "at": self.at_ms, "model": self.model, "counts": self.counts.json(), "cost": self.cost,
+                "requests": self.requests, "ms": self.ms, "compacted": self.compacted });
+        if let Some(c) = &self.calls {
+            v["calls"] = c.json();
+        }
+        v
     }
 
     /// It compacted and reported no tokens of its own (`/compact`'s turn).
@@ -241,6 +247,7 @@ impl Turn {
             requests: v["requests"].as_u64().unwrap_or(0) as usize,
             ms: v["ms"].as_u64(),
             compacted: v["compacted"].as_str().map(String::from),
+            calls: crate::calls::Calls::from_json(&v["calls"]),
         })
     }
 }
@@ -296,12 +303,19 @@ pub struct Totals {
     /// The cost of the turns that reported one · how many didn't.
     pub cost: f64,
     pub unpriced: usize,
+    /// The tool calls of the turns that counted them · how many those were.
+    pub calls: crate::calls::Sums,
+    pub counted: usize,
 }
 
 impl Totals {
     fn add(&mut self, t: &Turn) {
         self.turns += 1;
         self.counts.add(t.counts);
+        if let Some(c) = &t.calls {
+            self.calls.add(c.sums);
+            self.counted += 1;
+        }
         match t.cost {
             Some(c) => self.cost += c,
             None => self.unpriced += 1,
@@ -360,6 +374,8 @@ pub struct Usage {
     pub plan_event: bool,
     /// The turn under way compacted the conversation — its trigger, for its `Turn`.
     compacting: Option<String>,
+    /// The turn under way's tool calls, counted as they come (`calls.rs`).
+    pub tally: crate::calls::Tally,
 }
 
 impl Usage {
@@ -430,6 +446,7 @@ impl Usage {
     /// turn under way says it compacted.
     pub fn compacted(&mut self, k: &crate::compaction::Compaction) {
         self.compacting = Some(k.trigger.clone());
+        self.tally.forget();
         if let Some(c) = self.conv.as_mut() {
             c.compacted_to = k.post_tokens;
         }
@@ -468,6 +485,8 @@ impl Usage {
             model = requests.iter().map(|r| r.model.clone()).filter(|m| !m.is_empty()).collect();
             model.dedup();
         }
+        let contexts: Vec<u64> = requests.iter().filter_map(|r| r.counts.context()).collect();
+        let calls = self.tally.end(&contexts, s.ms, s.at_ms);
         self.turns.push(Turn {
             at_ms: s.at_ms,
             conversation: if s.conversation.is_empty() {
@@ -481,6 +500,7 @@ impl Usage {
             requests: requests.len(),
             ms: s.ms,
             compacted: self.compacting.take(),
+            calls: Some(calls),
         });
         self.turns.last().expect("just pushed")
     }
@@ -498,12 +518,15 @@ impl Usage {
             requests: 0,
             ms: s.ms,
             compacted: None,
+            calls: None,
         });
     }
 
     /// The turn ended with no result (claude exited, cut off): what its requests said, no cost.
     pub fn cut_off(&mut self, at_ms: u64) {
         if self.requests.is_empty() && self.compacting.is_none() {
+            // (no request: no call either — whatever was counted goes with it)
+            self.tally.end(&[], None, at_ms);
             return;
         }
         let conversation = self.conv.as_ref().map(|c| c.id.clone()).unwrap_or_default();
@@ -515,6 +538,7 @@ impl Usage {
         self.conv = None;
         self.requests.clear();
         self.compacting = None;
+        self.tally = crate::calls::Tally::default();
     }
 
     /// Whether anything was reported at all.
@@ -597,6 +621,8 @@ impl Usage {
             }
         }
         self.requests.clear();
+        // (what it read before isn't known here)
+        self.tally = crate::calls::Tally::default();
         self.conv = Some(Conv {
             id: id.into(),
             last: Request::from_json(&v["last"]),
@@ -835,6 +861,7 @@ pub fn report(
             2,
         );
     }
+    out += &calls_section(u);
     if let Some(c) = &u.conv {
         out += "\n## Every request starts with\n\n";
         out += &match &c.fixed {
@@ -868,6 +895,90 @@ pub fn report(
                 }
             }
         }
+    }
+    out
+}
+
+/// `:usage`'s tool calls (`calls.rs`): a row per turn that counted them and the total — calls a request, what
+/// a request carried, where the time went, the calls wasted, the runs that only read — then the calls by tool
+/// and the read-only runs by program. Nothing when no turn counted calls.
+fn calls_section(u: &Usage) -> String {
+    use crate::calls::Sums;
+    let counted: Vec<(&Turn, &crate::calls::Calls)> =
+        u.turns.iter().filter_map(|t| Some((t, t.calls.as_ref()?))).collect();
+    if counted.is_empty() {
+        return String::new();
+    }
+    let clock = |ms: u64| crate::log::clock(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+    let secs = |ms: u64| crate::term::duration(ms as f32 / 1000.0);
+    let cells = |s: &Sums| {
+        vec![
+            s.requests.to_string(),
+            s.calls.to_string(),
+            s.per_request().map_or_else(|| "—".into(), |p| format!("{p:.1}")),
+            s.context_mean().map_or_else(|| "—".into(), tokens),
+            secs(s.model_ms),
+            secs(s.tool_ms),
+            secs(s.waiting_ms),
+            s.reread.to_string(),
+            s.edit_failed.to_string(),
+            s.run_refused.to_string(),
+            s.read_only.to_string(),
+            s.parallel.to_string(),
+        ]
+    };
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut tools: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut programs: BTreeMap<&str, u64> = BTreeMap::new();
+    for (t, c) in &counted {
+        let mut row = vec![clock(t.at_ms)];
+        row.extend(cells(&c.sums));
+        rows.push(row);
+        for (k, n) in &c.tools {
+            *tools.entry(k).or_default() += n;
+        }
+        for (k, n) in &c.programs {
+            *programs.entry(k).or_default() += n;
+        }
+    }
+    let total = u.totals();
+    let mut row = vec!["total".to_string()];
+    row.extend(cells(&total.calls));
+    rows.push(row);
+    let mut out = "\n## Tool calls\n\n".to_string();
+    out += &table(
+        &[
+            "time",
+            "requests",
+            "calls",
+            "a request",
+            "context a request",
+            "model",
+            "tools",
+            "of it waiting",
+            "read again",
+            "edits failed",
+            "runs refused",
+            "read-only runs",
+            "side by side",
+        ],
+        &rows,
+        1,
+    );
+    let listed = |by: &BTreeMap<&str, u64>| {
+        let mut v: Vec<(&&str, &u64)> = by.iter().collect();
+        crate::sorting::by_key(&mut v, |(_, n)| std::cmp::Reverse(**n));
+        v.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ")
+    };
+    out += &format!("\nBy tool: {}\n", listed(&tools));
+    if !programs.is_empty() {
+        out += &format!(
+            "\nRead-only runs by program (each a process tarae's reads could spare): {}\n",
+            listed(&programs)
+        );
+    }
+    if total.calls.declined > 0 {
+        out += &format!("\nDeclined by you or tarae (not counted as wasted): {}\n", total.calls.declined);
     }
     out
 }

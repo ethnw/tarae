@@ -896,10 +896,18 @@ impl UsageState {
             if let Some(k) = &t.compacted {
                 v["compacted"] = json!(k);
             }
+            // (its tool calls — `calls.rs`; none for a one-turn process's)
+            if let Some(calls) = &t.calls {
+                v["calls"] = calls.json();
+            }
             v
         });
         let mut totals = c(&self.totals.counts);
         totals["turns"] = json!(self.totals.turns);
+        if self.totals.counted > 0 {
+            totals["calls"] = self.totals.calls.json();
+            totals["calls"]["turns"] = json!(self.totals.counted);
+        }
         // (the cost of the turns that reported one — none did: null; `unpriced` counts the others)
         let priced = self.totals.turns > self.totals.unpriced;
         totals["cost"] = if priced { json!(self.totals.cost) } else { Value::Null };

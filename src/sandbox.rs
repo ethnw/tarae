@@ -138,6 +138,15 @@ impl ReachOut {
     }
 }
 
+/// What a run's sandbox report said (`Guard::report_with`): its text, whether it said something was
+/// blocked, and the digest of the rules it would say — `known` for the next report.
+#[derive(Debug)]
+pub struct Report {
+    pub text: String,
+    pub blocked: bool,
+    pub rules: u64,
+}
+
 impl Guard {
     /// The run's watch, when it ran in the sandbox.
     pub fn watch(&self) -> Option<&std::sync::Arc<Watch>> {
@@ -223,10 +232,32 @@ impl Guard {
     /// then what the sandbox allows. Blocked = what tarae has its own record of (`Watch`: Seatbelt's log,
     /// Landlock's audit log, the supervisor's refusals). `output` = the run's lines: what they say was refused
     /// where the profile denies it (`Policy::said_in_output` — the kernel's own report of a denial gets lost)
-    /// is said apart, as the output's words (`output_says`): such a line may be the command's own.
+    /// is said apart, as the output's words (`output_says`): such a line may be the command's own. (Tests:
+    /// runs say it through `report_with`.)
+    #[cfg(test)]
     pub fn report(&self, output: &[(bool, String)]) -> String {
+        self.report_with(output, None).text
+    }
+
+    /// `report`, the rules left out of a quiet one when `known` is their digest — Claude was told them in
+    /// this conversation (`tools::rules_known`): ~400 tokens each run, read again by every later request. A
+    /// report that says something was blocked, that tarae couldn't watch, or where nothing is watched (a
+    /// refusal shows only in the output) always says them.
+    pub fn report_with(&self, output: &[(bool, String)], known: Option<u64>) -> Report {
         let rules = self.rules();
-        let Guard::In(p) = self else { return rules };
+        let digest = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            rules.hash(&mut h);
+            h.finish()
+        };
+        let quiet_rules = if known == Some(digest) { String::new() } else { rules.clone() };
+        let (text, blocked) = self.report_text(output, rules, quiet_rules);
+        Report { text, blocked, rules: digest }
+    }
+
+    fn report_text(&self, output: &[(bool, String)], rules: String, quiet_rules: String) -> (String, bool) {
+        let Guard::In(p) = self else { return (rules, false) };
         let unwatched = match p.denials_from() {
             Some(from) => format!(
                 " What it refused is read {from}: \"Permission denied\" on a file, \"Operation not permitted\" on \
@@ -252,7 +283,8 @@ impl Guard {
             }
         }
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
-            return format!("{ps}{rules}{unwatched}");
+            // (nothing watched: a refusal shows only in the output — the rules are how Claude reads it)
+            return (format!("{ps}{rules}{unwatched}"), false);
         }
         if b.total > 0 || o.total > 0 {
             let mut s = match (&b.failed, b.total) {
@@ -305,11 +337,11 @@ impl Guard {
                      (outside_sandbox, with your reason); don't work around it.",
                 );
             }
-            return s;
+            return (s, true);
         }
         let quiet = quiet_said(&b).unwrap_or_default();
-        match b.failed {
-            None => format!("The sandbox blocked nothing. {quiet}{ps}{rules}"),
+        let text = match b.failed {
+            None => format!("The sandbox blocked nothing. {quiet}{ps}{quiet_rules}"),
             Some(why) => {
                 let mut s =
                     format!("tarae couldn't watch what the sandbox blocked ({why}). {ps}{rules}{unwatched}");
@@ -322,7 +354,8 @@ impl Guard {
                 }
                 s
             }
-        }
+        };
+        (text, false)
     }
 
     /// What among `seen` the profile keeps on purpose, each said with why and what to do instead — and
@@ -5939,6 +5972,35 @@ mod tests {
         assert!(!r.contains("If the command needs one of these"), "nothing left to open: {r}");
         let none = Guard::In(Box::new(Policy::for_project(&env(Path::new("/Users/u/p"))))).report(&[]);
         assert!(!none.contains("copies of") && !none.contains("T0"), "{none}");
+    }
+
+    /// A quiet run's report leaves out the rules Claude was told (`known`: their digest); one that says
+    /// something was blocked says them all the same; another policy's rules aren't the ones known.
+    #[test]
+    fn a_quiet_report_leaves_out_the_rules_already_told() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let quiet = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("rules-once.")), ..p.clone() }));
+        let rules = quiet.rules();
+        let first = quiet.report_with(&[], None);
+        assert!(first.text.contains(&rules) && !first.blocked, "{}", first.text);
+        let again = quiet.report_with(&[], Some(first.rules));
+        assert!(!again.text.contains(&rules), "{}", again.text);
+        assert!(again.text.starts_with("The sandbox blocked nothing."), "{}", again.text);
+        let w = Watch::quiet("rules-once-blocked.");
+        w.record(Denial {
+            process: "sh".into(),
+            op: "file-write-create".into(),
+            target: "/Users/u/elsewhere/x".into(),
+        });
+        let blocked =
+            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(&[], Some(first.rules));
+        assert!(blocked.blocked && blocked.text.contains(&rules), "{}", blocked.text);
+        // Nothing watched: a refusal would show only in the output — the rules always come with it
+        let unwatched = Guard::In(Box::new(Policy { watch: None, ..p.clone() }));
+        let told = unwatched.report_with(&[], Some(unwatched.report_with(&[], None).rules));
+        assert!(!told.blocked && told.text.contains(&unwatched.rules()), "{}", told.text);
+        let open = Guard::In(Box::new(Policy { localhost: !p.localhost, ..p }));
+        assert_ne!(open.report_with(&[], None).rules, first.rules);
     }
 
     /// Files named like keys in the project (7a, names from the data — `secretnames`): the profile denies their

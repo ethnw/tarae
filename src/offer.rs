@@ -347,7 +347,10 @@ impl Offer {
             What::NoSandbox { call, .. } | What::ProtectedMade { call, .. } | What::Screen { call } => {
                 Some(Asker::Tool(call.clone()))
             }
-            // (one the user's pointing raised holds no call — `reads::point`)
+            // (one the user's pointing raised holds no call — `reads::point`; one of tarae's tools holds its call)
+            What::Read { pending, .. } if pending.then.is_some() => {
+                pending.then.as_ref().map(|t| Asker::Tool(t.call.clone()))
+            }
             What::Read { pending, .. } if pending.own.is_none() => Some(Asker::Permission {
                 request_id: pending.request_id.clone(),
                 generation: pending.generation,
