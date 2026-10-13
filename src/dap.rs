@@ -196,10 +196,12 @@ pub(crate) fn setsid(c: &mut Command) -> &mut Command {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is safe to call between fork and exec.
+        // SAFETY: setsid and `restore`'s setrlimit are safe to call between fork and exec.
         unsafe {
             c.pre_exec(|| {
                 libc::setsid();
+                // (the descriptor limit tarae started with — `nofile`)
+                crate::nofile::restore();
                 Ok(())
             });
         }

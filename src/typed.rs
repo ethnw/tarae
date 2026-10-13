@@ -1,7 +1,6 @@
 //! `:` typed commands. Names and aliases match helix.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::editor::Editor;
 use crate::{config, settings};
@@ -621,7 +620,9 @@ fn shell(editor: &mut Editor, cmd: &str) -> Result<(), String> {
 /// `:sh`'s command, run by your shell in `dir` (the editor's root).
 fn run_shell(cmd: &str, dir: &std::path::Path) -> Result<Option<String>, String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
-    let out = Command::new(shell).arg("-c").arg(cmd).current_dir(dir).output().map_err(|e| e.to_string())?;
+    // (the descriptor limit tarae started with — `nofile`)
+    let out =
+        crate::nofile::command(shell, Some(dir)).arg("-c").arg(cmd).output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(if out.status.success() { &out.stdout } else { &out.stderr });
     let first = text.lines().find(|l| !l.trim().is_empty()).map(str::to_string);
     if out.status.success() {

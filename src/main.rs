@@ -74,6 +74,7 @@ mod mcp;
 mod models;
 mod movement;
 mod nav;
+mod nofile;
 mod notes;
 mod offer;
 mod packs;
@@ -181,11 +182,16 @@ config: $XDG_CONFIG_HOME/tarae/config.toml (default ~/.config/tarae/config.toml)
         inside tarae: :set <path> [value], :set! (also saves), :toggle, :config-show";
 
 fn main() -> Result<()> {
+    // The shim (`tarae --nofile N <path> <argv0> args…`, `nofile`): a child of tarae's given back the descriptor limit
+    // tarae started with, then exec'd — before anything of the editor reads its environment or config
+    nofile::shim_main();
     // A session's keeper (Linux's sandbox): nothing of the editor runs in it
     #[cfg(target_os = "linux")]
     if std::env::args_os().nth(1).is_some_and(|a| a == sandbox::keeper::FLAG) {
         sandbox::keeper::main();
     }
+    // (before any thread starts: the soft limit on open descriptors up to the hard one — said once the log is)
+    let raised = nofile::raise();
     // (what tarae was handed open goes no further than tarae)
     spawn::close_on_exec();
     restart::remember_exe();
@@ -263,6 +269,9 @@ fn main() -> Result<()> {
     let ui = uisocket::bind();
     // (threads may start now: the last tarae's children still running, waited for as they end — #136)
     restart::wait_for(old_children);
+    if let Some(said) = raised {
+        log::line("tarae", "info", &said);
+    }
     // Theme "default" (meok/hanji) follows the terminal background — before reading config (config reads it).
     // A restart knows it already (and the query's answer could mix with keys typed meanwhile).
     let light = restarted.as_ref().and_then(|s| s["light"].as_bool());
@@ -315,6 +324,8 @@ fn main() -> Result<()> {
     editor.events.jobs().background(move || runhomes::prune_now(days));
     // Run folders a tarae that's gone left in tarae's cache (`sandbox::prune_runs`; a worker's)
     editor.events.jobs().background(sandbox::prune_runs);
+    // (and the pins of tarae's binary such a tarae left — macOS's shim, `nofile::pin`)
+    editor.events.jobs().background(nofile::prune_pins);
     if !files.is_empty() {
         editor.current = 0;
     }
@@ -348,6 +359,8 @@ fn main() -> Result<()> {
     // its failure), an error, or a signal (`Recovery.keep`)
     let restarting = editor.restart.as_ref().is_some_and(|r| r.ready().is_some());
     editor.recovery_end(result.is_err() || restarting);
+    // (a `:restart`'s new tarae pins its own binary)
+    nofile::unpin();
     if result.is_ok()
         && let Some(bin) = editor.restart.as_ref().and_then(|r| r.ready()).map(PathBuf::from)
     {

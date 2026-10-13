@@ -90,6 +90,31 @@ fn perf_e2e_startup_to_first_frame() {
     report("e2e_startup_to_first_frame_ms", median(runs), 500.0, 0.5);
 }
 
+/// What the descriptor-limit shim (`tarae --nofile N <path> <argv0> args…`, nofile.rs) adds to a child's start: `true`
+/// started and waited for straight, and through the built tarae as the shim — alternating, 200 of each, medians;
+/// the difference is the number. (Inside macOS's sandbox each exec costs more: measure outside it.)
+#[test]
+fn perf_e2e_nofile_shim_start() {
+    if unoptimized("perf_e2e_nofile_shim_start") {
+        return;
+    }
+    let program =
+        ["/bin/true", "/usr/bin/true"].into_iter().find(|p| std::path::Path::new(p).exists()).unwrap();
+    let time = |cmd: &mut std::process::Command| {
+        let t0 = Instant::now();
+        assert!(cmd.status().unwrap().success());
+        ms(t0.elapsed())
+    };
+    let (mut straight, mut shimmed) = (Vec::new(), Vec::new());
+    for _ in 0..200 {
+        straight.push(time(&mut std::process::Command::new(program)));
+        shimmed.push(time(std::process::Command::new(BIN).args(["--nofile", "256", program, "true"])));
+    }
+    let (s, w) = (median(straight), median(shimmed));
+    eprintln!("nofile shim: {program} straight {s:.3} ms, through the shim {w:.3} ms");
+    report("e2e_nofile_shim_added_ms", w - s, 10.0, 0.3);
+}
+
 /// A key in a 200k-line file to its frame on the terminal (the median of many moves and edits).
 #[test]
 fn perf_e2e_key_in_a_big_file() {

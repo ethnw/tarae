@@ -42,8 +42,9 @@ struct Entry {
     n: u32,
     /// tarae's master — the run's is the same open file (`ADDFD`); while tarae holds it the pty is that inode.
     master: Option<OwnedFd>,
-    /// Its other end, `O_PATH` (no terminal opened): the inode the rules grant.
-    slave: OwnedFd,
+    /// Its other end, `O_PATH` (no terminal opened): the inode the rules grant — closed once they hold it
+    /// (`granted`): a rule keeps its own reference to the inode, and tarae's master keeps the pty that inode.
+    slave: Option<OwnedFd>,
     state: State,
     /// The looks at what the run holds begun when it was last handed (`Inner.looks`): only a look begun after
     /// that judges it (`settle`).
@@ -118,7 +119,7 @@ impl Entry {
             (master, n)
         };
         let slave = peer(master.as_fd(), libc::O_PATH)?;
-        Ok(Entry { n, master: Some(master), slave, state: State::Free, handed: 0 })
+        Ok(Entry { n, master: Some(master), slave: Some(slave), state: State::Free, handed: 0 })
     }
 
     /// Back as a new one, for the next pty the run makes: what waits on either side emptied, its other end's
@@ -205,9 +206,27 @@ impl Ptys {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// `f` on each pty's other end (`O_PATH`) and its number — what `linux::confine` grants.
+    /// `f` on each pty's other end (`O_PATH`) and its number — what `linux::confine` grants (before `granted`).
     pub fn each(&self, mut f: impl FnMut(BorrowedFd<'_>, u32) -> io::Result<()>) -> io::Result<()> {
-        self.inner().entries.iter().try_for_each(|e| f(e.slave.as_fd(), e.n))
+        self.inner()
+            .entries
+            .iter()
+            .filter_map(|e| Some((e.slave.as_ref()?, e.n)))
+            .try_for_each(|(s, n)| f(s.as_fd(), n))
+    }
+
+    /// The pool's pty numbers (a test's look at what's open).
+    #[cfg(test)]
+    pub fn numbers(&self) -> Vec<u32> {
+        self.inner().entries.iter().map(|e| e.n).collect()
+    }
+
+    /// The rules hold every pty's other end: their `O_PATH`s closed — half the pool's descriptors (a Landlock
+    /// rule keeps its own reference to the inode it was given; tarae's master keeps the pty that inode).
+    pub fn granted(&self) {
+        for e in &mut self.inner().entries {
+            e.slave = None;
+        }
     }
 
     /// Whether pty `n` is one of the pool's (not gone) — the run's descriptor of it is then tarae's master's open

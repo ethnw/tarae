@@ -371,6 +371,8 @@ impl Keeper {
                     libc::dup2(raw, RAW_FD);
                     libc::close(raw);
                 }
+                // (the limit tarae started with: the keeper's runs inherit it — `nofile`)
+                crate::nofile::restore();
                 let mut mask: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut mask);
                 libc::sigaddset(&mut mask, libc::SIGCHLD);
@@ -3780,11 +3782,28 @@ mod tests {
     /// this process's (tarae's stand-in) Pss / Rss grown per session, for the keepers and then for the runs; its
     /// threads more, by name, and its descriptors more, by kind. Where a run can't be made (descriptors run out),
     /// the row says after how many, and the tier's larger counts aren't tried. The runs' own processes (the test
-    /// binary) are neither's. A measurement, no budget (the user, 2026-10-10).
+    /// binary) are neither's. A measurement, no budget (the user, 2026-10-10). Run in a process of its own with the
+    /// descriptor limit raised as tarae's `main` raises it (`nofile::raise` changes the process) — not raised with
+    /// `TARAE_TEST_NO_RAISE` set, as before it was.
     #[test]
     fn perf_keepers_memory_per_session() {
         if crate::test_results::unoptimized("sandbox::keeper::tests::perf_keepers_memory_per_session") {
             return;
+        }
+        let status = scene_cmd("keepers_memory_scene", &[]).status().unwrap();
+        assert!(status.success(), "the scene failed: {status}");
+    }
+
+    #[test]
+    #[ignore = "run by perf_keepers_memory_per_session, in a process of its own"]
+    fn keepers_memory_scene() {
+        if std::env::var_os(SCENE).is_none() {
+            return;
+        }
+        if std::env::var_os("TARAE_TEST_NO_RAISE").is_none()
+            && let Some(said) = crate::nofile::raise()
+        {
+            println!("{said}");
         }
         let Some(tiers) = served_tiers("perf_keepers_memory_per_session", false) else { return };
         let Some(ip) = outside() else { return };
@@ -3938,6 +3957,59 @@ mod tests {
         k.end();
         mine.kill().ok();
         mine.wait().ok();
+    }
+
+    /// A keeper is born with the descriptor limit tarae started with (`nofile::restore` before its exec), so its runs
+    /// have that one, not tarae's raised one — no shim needed for them. A scene of its own (tarae's raise changes the
+    /// process), started with a soft limit of 256.
+    #[test]
+    fn a_keepers_runs_get_the_descriptor_limit_tarae_started_with() {
+        use std::os::unix::process::CommandExt as _;
+        if open_rules("a_keepers_runs_get_the_descriptor_limit_tarae_started_with").is_none() {
+            return;
+        }
+        let mut cmd = scene_cmd("keeper_limit_scene", &[]);
+        // SAFETY: getrlimit/setrlimit only, between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut l = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                libc::getrlimit(libc::RLIMIT_NOFILE, &mut l);
+                l.rlim_cur = 256;
+                libc::setrlimit(libc::RLIMIT_NOFILE, &l);
+                Ok(())
+            });
+        }
+        let said = said_by("keeper_limit_scene", cmd);
+        if said == "nothing to raise" {
+            eprintln!(
+                "a_keepers_runs_get_the_descriptor_limit_tarae_started_with: the hard limit is 256 here"
+            );
+            return;
+        }
+        assert_eq!(said, "raised, its run has 256");
+    }
+
+    #[test]
+    #[ignore = "run by a_keepers_runs_get_the_descriptor_limit_tarae_started_with, in a process of its own"]
+    fn keeper_limit_scene() {
+        if std::env::var_os(SCENE).is_none() {
+            return;
+        }
+        if crate::nofile::raise().is_none() || crate::nofile::original() != Some(256) {
+            println!("scene: nothing to raise");
+            return;
+        }
+        let k = keeper_in("nofile", Ns::NONE);
+        let (_, plain, root) = project_served("nofile", Vec::new(), Some(&k), &[], Err("plain".into()));
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "ulimit -Sn"]).current_dir(&root);
+        let s = k.start_confined(&cmd, &crate::landlock::thread_name(), &plain).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(s.spawned.pid).unwrap();
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+        println!("scene: raised, its run has {}", out.trim());
     }
 
     /// What tells a scene it was started by its test.
@@ -6594,7 +6666,8 @@ mod tests {
     /// — and no other: a terminal of the user's is neither read (what's typed there) nor written, and a master it
     /// made whose number it read without asking tarae (`fdinfo`: no call tarae sees) is refused its other end —
     /// that pty isn't one the rules grant (Landlock grants inodes), nor ever has a pool pty's number (tarae holds
-    /// those). The same master asked for its number as programs do is then the pool's, and opens.
+    /// those). The same master asked for its number as programs do is then the pool's, and opens. All that with
+    /// none of the pool's `O_PATH` other ends left open in tarae once the rules are made (`Ptys::granted`).
     #[test]
     fn a_run_opens_only_the_ptys_it_makes() {
         let test = "a_run_opens_only_the_ptys_it_makes";
@@ -6608,6 +6681,23 @@ mod tests {
             s.end();
             return;
         }
+        // (the rules made, tarae keeps no other end of the pool's — half its descriptors, `Ptys::granted` — and the
+        // run below still opens its own: a rule holds its inode)
+        let pool = s.confine.ptys.as_ref().unwrap();
+        let mut ends = 0;
+        pool.each(|_, _| {
+            ends += 1;
+            Ok(())
+        })
+        .unwrap();
+        let ours: Vec<String> = pool.numbers().iter().map(|n| format!("/dev/pts/{n}")).collect();
+        let open = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .flatten()
+            .filter_map(|e| std::fs::read_link(e.path()).ok())
+            .filter(|to| ours.iter().any(|o| to.as_os_str() == o.as_str()))
+            .count();
+        assert_eq!((ends, open), (0, 0), "no O_PATH other end of the pool's left open");
         let (_m, _s, other) = pty_opened().expect("a pty of this process's: another terminal of the user's");
         let said = helper_said(s.helper("ptys", &[("TARAE_TO", &other)]));
         let tier = s.confine.tier;

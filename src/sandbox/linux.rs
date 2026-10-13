@@ -971,7 +971,12 @@ pub fn confine(
     // (the mount table its runs see: the keeper's — a run's own namespace is a copy of it — read where it's made)
     let at = keeper.map_or("/proc/self/mountinfo".to_string(), |k| format!("/proc/{}/mountinfo", k.pid));
     let own = Own { ptys: ptys.as_deref(), mounts, table: std::fs::read_to_string(at).ok() };
-    confine_in(r, p, audit, make_first, serve, net, own).map(|c| Confine { no_userns, tier, ns, ptys, ..c })
+    let c = confine_in(r, p, audit, make_first, serve, net, own)?;
+    // (the rules hold the pool's ptys now: their `O_PATH`s go — half the pool's descriptors per held run)
+    if let Some(ptys) = &ptys {
+        ptys.granted();
+    }
+    Ok(Confine { no_userns, tier, ns, ptys, ..c })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only

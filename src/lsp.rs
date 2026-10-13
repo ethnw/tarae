@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Sender};
 
 use ropey::Rope;
@@ -821,9 +821,9 @@ impl Client {
         events: crate::event::Tx,
     ) -> Result<Client, String> {
         let root = roots.first().ok_or("no folder")?.as_path();
-        let mut child = Command::new(&spec.command)
+        // (the descriptor limit tarae started with — what it builds and runs inherits it: `nofile`)
+        let mut child = crate::nofile::command(&spec.command, Some(root))
             .args(&spec.args)
-            .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

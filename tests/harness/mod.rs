@@ -59,6 +59,8 @@ pub struct Sandbox {
     tools: Vec<PathBuf>,
     /// More variables for the child (`with_env`).
     vars: Vec<(OsString, OsString)>,
+    /// The soft descriptor limit tarae starts with (`with_soft_nofile`) — else the test's own.
+    soft_nofile: Option<u64>,
 }
 
 impl Sandbox {
@@ -73,7 +75,7 @@ impl Sandbox {
         fs::create_dir_all(&dir).unwrap();
         // Real path (macOS: /var → /private/var) — tarae canonicalizes the paths it opens.
         let root = fs::canonicalize(&dir).unwrap();
-        let sb = Sandbox { root, live: false, tools: Vec::new(), vars: Vec::new() };
+        let sb = Sandbox { root, live: false, tools: Vec::new(), vars: Vec::new(), soft_nofile: None };
         for d in
             ["home/.config/tarae", "home/.local/state", "home/.local/share", "home/.cache", "claude", "work"]
         {
@@ -116,6 +118,12 @@ impl Sandbox {
     /// One more variable in the child's environment (a measurement's hook: `TARAE_TREES_UNSEEN`).
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.vars.push((key.into(), value.into()));
+        self
+    }
+
+    /// tarae starts with this soft limit on open descriptors (set in its child, before the exec).
+    pub fn with_soft_nofile(mut self, n: u64) -> Self {
+        self.soft_nofile = Some(n);
         self
     }
 
@@ -359,12 +367,19 @@ impl Term {
             .stdin(stdio())
             .stdout(stdio())
             .stderr(stdio());
+        let soft = sb.soft_nofile;
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 // `setsid` + the pty as its controlling terminal: /dev/tty works, SIGWINCH arrives.
                 cvt(libc::setsid())?;
                 cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
+                if let Some(n) = soft {
+                    let mut l = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                    cvt(libc::getrlimit(libc::RLIMIT_NOFILE, &mut l))?;
+                    l.rlim_cur = n;
+                    cvt(libc::setrlimit(libc::RLIMIT_NOFILE, &l))?;
+                }
                 Ok(())
             });
         }

@@ -724,7 +724,7 @@ pub fn ran(cmd: &Command, input: Option<&[u8]>) -> Result<Ran, String> {
             });
             (s, Some(feed))
         }
-        None => (crate::spawn::setsid(cmd).map_err(said)?, None),
+        None => (crate::spawn::setsid_git(cmd).map_err(said)?, None),
     };
     // (stderr read beside stdout: a full pipe of warnings can't hold git up)
     let errs = s.stderr.map(|mut e| {

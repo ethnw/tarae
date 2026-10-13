@@ -4,7 +4,7 @@
 //! result applies only if the document hasn't changed meanwhile — one undo step.
 
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::document::DocId;
 use crate::editor::Editor;
@@ -50,10 +50,10 @@ struct Run {
 
 /// `cmd` run in `dir` (the editor's root).
 fn run(cmd: &str, input: Option<&str>, dir: &std::path::Path) -> Result<Run, String> {
-    let mut child = Command::new("sh")
+    // (the descriptor limit tarae started with — `nofile`)
+    let mut child = crate::nofile::command("sh", Some(dir))
         .arg("-c")
         .arg(cmd)
-        .current_dir(dir)
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

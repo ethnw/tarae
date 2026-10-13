@@ -708,9 +708,16 @@ fn picks(v: &Value, pick: &[(String, Value)]) -> bool {
 /// Runs the build in `cwd` and gives what it built — on failure, its first error as the pack says to read
 /// it (else its stderr's last lines). On a worker.
 pub fn run_build(b: &Build, cwd: &Path) -> Result<PathBuf, String> {
-    let out = Command::new(&b.run[0])
+    // (the project's code runs in it: the descriptor limit tarae started with — `nofile`; found on the `PATH`
+    // the build gets)
+    let path = b
+        .env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| OsString::from(v))
+        .or_else(|| std::env::var_os("PATH"));
+    let out = crate::nofile::command_on(&b.run[0], Some(cwd), path.as_deref())
         .args(&b.run[1..])
-        .current_dir(cwd)
         .envs(b.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .output()

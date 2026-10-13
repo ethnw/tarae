@@ -21,6 +21,89 @@ use harness::*;
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+/// The shim (`tarae --nofile N <absolute path> <argv0> args…`, nofile.rs): the program gets soft limit N and the
+/// `argv[0]` given, and runs as this process; anything else of that shape is refused with an exit and the usage —
+/// never run as the editor — and a program that can't run is said, as a shell says it (127). (A guard ends one
+/// that hangs, failing.)
+#[test]
+fn the_nofile_shim_gives_its_program_the_limit_and_refuses_any_other_shape() {
+    let run = |args: &[&str]| {
+        let mut child = Command::new(BIN)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > end {
+                child.kill().ok();
+                panic!("tarae {args:?} didn't end — run as the editor?");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let out = child.wait_with_output().unwrap();
+        let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    let args = ["--nofile", "256", "/bin/sh", "sh", "-c", "echo $(ulimit -Sn) $0 $1", "one", "two"];
+    let (code, out, _) = run(&args);
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), "256 one two"),
+        "the limit, then the program with its arguments"
+    );
+    // (its argv[0] as the process has it: a shell reading its commands from stdin says it as `$0`)
+    let mut sh = Command::new(BIN)
+        .args(["--nofile", "256", "/bin/sh", "named-sh", "-s"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut sh.stdin.take().unwrap(), b"echo \"$0\"\n").unwrap();
+    let out = sh.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "named-sh", "the argv[0] given, not the path");
+    for shape in [
+        &["--nofile"][..],
+        &["--nofile", "256"],
+        &["--nofile", "256", "/bin/sh"],
+        &["--nofile", "many", "/bin/sh", "sh", "-c", "true"],
+        &["--nofile", "-1", "/bin/sh", "sh", "-c", "true"],
+        &["--nofile", "256", "sh", "sh", "-c", "true"],
+    ] {
+        let (code, out, err) = run(shape);
+        assert_eq!(code, Some(2), "{shape:?} refused: {out} {err}");
+        assert!(err.contains("usage: tarae --nofile N <absolute path> <argv0>"), "{shape:?}: {err}");
+    }
+    let (code, _, err) = run(&["--nofile", "256", "/nonexistent/tarae-shim-test", "tarae-shim-test"]);
+    assert_eq!(code, Some(127), "{err}");
+    assert!(err.contains("/nonexistent/tarae-shim-test"), "{err}");
+}
+
+/// Started under a low soft limit on open descriptors, tarae raises its own (said once in its log, from → to) and
+/// what it starts gets the old one back — `:sh` here (through the shim, posix_spawn's).
+#[test]
+fn tarae_raises_its_descriptor_limit_and_sh_gets_the_old_one() {
+    let sb = Sandbox::new("nofile").with_soft_nofile(256);
+    sb.write("a.txt", "hi\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("hi");
+    t.command("sh echo nofile=$(ulimit -Sn)");
+    t.wait_text("nofile=256");
+    let log = sb.state().join("tarae.log");
+    let end = std::time::Instant::now() + sb.timeout();
+    let raised = loop {
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = text.lines().find(|l| l.contains("open descriptors:")) {
+            break line.to_string();
+        }
+        assert!(std::time::Instant::now() < end, "never said in {}", log.display());
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(raised.contains("raised 256 →") && raised.contains("gets 256 back"), "{raised}");
+}
+
 #[test]
 fn version_and_help_print_without_a_terminal() {
     let out = Command::new(BIN).arg("--version").output().unwrap();

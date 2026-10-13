@@ -839,14 +839,48 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   32 of them are the run's pty pool (3b: `ptys::POOL` = 16, a master and an `O_PATH` other end each). In A+ it's
   17, with no pool. colima's soft `RLIMIT_NOFILE` is 1024, systemd's default too. There the 20th session's run
   couldn't be made: `EMFILE` making its rules, both times. Debian's container allowed 1048576 and reached 32.
-  tarae never raises its soft limit, and its servers, files and terminal take from the same 1024 (open items).
+  tarae never raised its soft limit, and its servers, files and terminal took from the same 1024.
+
+### Many sessions, the descriptor limit raised (linux7 piece 9, 2026-10-13)
+
+- **What changed**: tarae raises its soft `RLIMIT_NOFILE` to the hard limit first thing in `main` (macOS: to
+  `kern.maxfilesperproc` at most), and what it starts gets the old one back (`nofile.rs`). A pool pty's `O_PATH`
+  other end is closed once the run's rules are made: a Landlock rule keeps its own reference to the inode, and
+  tarae's master keeps the pty that inode. Broken once, closed before the rules, every pool pty is refused
+  (`EACCES`). `ptys::POOL` stays 16: nothing measured says fewer is enough, and tarae's own e2e suite holds a pty
+  per test thread.
+- **How**: as piece 8, colima, C. The measurement now runs in a process of its own, raised as `main` raises it
+  (`TARAE_TEST_NO_RAISE=1` runs it without).
+- **Per session in C**: keeper 5 descriptors (the same), a held served run **28** (was 44): 16 ptys (was 32),
+  5 pipes, 4 sockets, ruleset, pidfd, seccomp notify.
+- **Reached 32 sessions** with a run each: 1062 descriptors open, under 524288 (1024 → 524288 raised). Without the
+  raise the pool change alone gets 30 runs, then `EMFILE` making session 31's rules (it was 19).
+- **Memory unchanged**: keepers' Pss 4.2 / 23.7 / 43.7 / 82.9 MB at 1 / 8 / 16 / 32 sessions, 2.6 MB each at 32.
+- **What tarae starts** gets the old limit as it's made. A fork's child (`pre_exec`: the terminal's shell, debug
+  adapters, plugins' programs) sets it itself. The keeper sets it at its birth, so its runs (every sandboxed run on
+  Linux) inherit it, with no shim and no rule for one. A posix_spawn child that runs the project's code or the
+  user's commands (tasks, tests, Claude's runs outside the keeper, `:sh`, shell pipes, language servers, a debug
+  build) goes through tarae's own binary (`tarae --nofile N <path> <argv0> args…`: the program sees the
+  `argv[0]` it was given). On Linux that's `/proc/self/exe`. On macOS it's a hard link to the binary made at
+  start (`nofile::pin`), so a build replacing the file or a `cargo clean` never changes which shim runs. It lives
+  in `shims/<pid>` in tarae's state folder, not its cache, whose run homes runs write. No sandboxed run reads
+  there, and none may write there (`nofile::tests`, against `sandbox::write_places`). It's made through no link:
+  the folder 0700 and this user's, opened without following one, and the pin linked and renamed inside it. Its
+  (device, inode) is checked before each start: if it changed behind tarae's back, there's no shim from then on
+  (the raised limit), said in the log once. Between that check and the shim's exec, nothing inside the sandbox
+  can swap it. Each pin has a lock its tarae holds; at start, on a worker, pins whose lock is free (a crashed
+  tarae's, each keeping an old build alive) are removed. Where no hard link can be made (the state folder on
+  another volume), there's no pin: the binary itself is checked the same way, so after a rebuild what tarae
+  posix_spawns keeps the raised limit. That's said once in the log. That costs **+0.29–0.36 ms** per start on colima (two runs: 0.17 → 0.47 and
+  0.19 → 0.55 ms, `true`, perf profile, `perf_e2e_nofile_shim_start`), **+2.1–2.3 ms** on macOS (inside Seatbelt; any extra exec costs ~1 ms
+  there). macOS gets the shim too: there `FD_SET` skips a descriptor past 1024 and `select` refuses such an
+  `nfds` (measured, `nofile::tests`), but a program built with an SDK older than macOS 11, or one setting the bits
+  itself, still writes past its set. Left raised: git (tarae's own, started often — it sizes its open packs by the
+  limit), claude (started at 256, node's child sees 1048575 and Bun's unlimited: the runtime raises its own), and
+  tarae's short queries of fixed tools (a pack's `ask`, the container engine's CLI, the clipboard, the log
+  readers), which open a handful of descriptors and end.
 
 ## Open items
-
-- **Descriptors with many sessions (piece 8).** A served run in tier C holds 49 of tarae's descriptors, 32 of
-  them its pty pool. Under a soft limit of 1024 (systemd's default) about 20 sessions each with a run reach it:
-  the next run can't be made. Raising the soft limit to the hard one at start, or a pool opened as it's needed,
-  would lift it. Not built.
 
 - **macOS: this machine's own addresses beyond loopback.** Seatbelt names a port by `localhost` only, so with
   `llm.sandbox-network` on a command reaches the risky ports (Docker's 2375, Jupyter's 8888…) on this machine's

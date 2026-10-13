@@ -234,11 +234,13 @@ fn spawn(
     }
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid and ioctl are async-signal-safe, called between fork and exec.
+        // SAFETY: setsid, ioctl and `restore`'s setrlimit are async-signal-safe, called between fork and exec.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
                 libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+                // (the descriptor limit tarae started with — your shell's `ulimit -n` as outside tarae)
+                crate::nofile::restore();
                 Ok(())
             });
         }

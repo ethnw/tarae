@@ -70,8 +70,13 @@ pub fn keep_from_userns(cmd: &mut Command, acts: Acts) -> io::Result<()> {
     if acts.kept_here() {
         use std::os::unix::process::CommandExt;
         let filter = crate::seccomp::NoUserns::new()?;
-        // SAFETY: `apply` makes raw calls only, between fork and exec.
-        unsafe { cmd.pre_exec(move || filter.apply()) };
+        // SAFETY: `apply` and `restore` make raw calls only, between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                crate::nofile::restore();
+                filter.apply()
+            })
+        };
     }
     let _ = (cmd, acts);
     Ok(())
@@ -80,19 +85,35 @@ pub fn keep_from_userns(cmd: &mut Command, acts: Acts) -> io::Result<()> {
 /// `cmd`'s program, arguments, environment changes and folder, started in a session of its own: stdin
 /// `/dev/null`, stdout and stderr pipes (what `cmd` says of its stdio isn't read — `Command` doesn't tell;
 /// nor `env_clear`: a variable to leave out is removed by name — `sandbox::from_run_env`).
+/// It gets the descriptor limit tarae started with (`nofile`).
 pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
-    start(cmd, false).map(|(s, _)| s)
+    start(cmd, false, Limit::Original).map(|(s, _)| s)
 }
 
-/// `setsid` with a pipe for its stdin (tarae's git fed a buffer's text — `gitrepo`): the end to write it,
+/// `setsid` keeping tarae's raised descriptor limit — tarae's own git (`gitrepo`), started often: git sizes its
+/// open packs by the limit and never `select`s on many (`nofile`).
+pub fn setsid_git(cmd: &Command) -> io::Result<Spawned> {
+    start(cmd, false, Limit::Raised).map(|(s, _)| s)
+}
+
+/// `setsid_git` with a pipe for its stdin (tarae's git fed a buffer's text — `gitrepo`): the end to write it,
 /// to drop once written.
 pub fn setsid_fed(cmd: &Command) -> io::Result<(Spawned, PipeWriter)> {
-    let (s, input) = start(cmd, true)?;
+    let (s, input) = start(cmd, true, Limit::Raised)?;
     Ok((s, input.ok_or_else(|| io::Error::other("no stdin pipe"))?))
 }
 
+/// Which descriptor limit a process started here gets (`nofile`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Limit {
+    /// The one tarae started with — through the shim where tarae raised it.
+    Original,
+    /// tarae's own, raised.
+    Raised,
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn start(cmd: &Command, fed: bool) -> io::Result<(Spawned, Option<PipeWriter>)> {
+fn start(cmd: &Command, fed: bool, limit: Limit) -> io::Result<(Spawned, Option<PipeWriter>)> {
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
 
@@ -101,9 +122,24 @@ fn start(cmd: &Command, fed: bool) -> io::Result<(Spawned, Option<PipeWriter>)> 
     let path_var = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_os_str());
     let program = resolve(cmd.get_program(), cwd.as_deref(), path_var)?;
     let c = |s: &OsStr| CString::new(s.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput));
-    let program_c = c(program.as_os_str())?;
-    let argv: Vec<CString> =
-        std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(c).collect::<io::Result<_>>()?;
+    let args = cmd.get_args().map(c);
+    // (through the shim where tarae raised the descriptor limit: the program gets the one tarae started with, and
+    // the `argv[0]` it was given; one that isn't there isn't shimmed — its spawn fails as before, not the shim)
+    let shim = match limit {
+        Limit::Original if executable(&program) => {
+            std::path::absolute(&program).ok().and_then(|p| crate::nofile::shim(&p, cmd.get_program()))
+        }
+        Limit::Original | Limit::Raised => None,
+    };
+    let (program_c, argv): (CString, Vec<CString>) = match shim {
+        Some((exe, before)) => {
+            (exe.clone(), [exe].into_iter().chain(before).map(Ok).chain(args).collect::<io::Result<_>>()?)
+        }
+        None => (
+            c(program.as_os_str())?,
+            std::iter::once(c(cmd.get_program())).chain(args).collect::<io::Result<_>>()?,
+        ),
+    };
     let envp: Vec<CString> = env
         .iter()
         .map(|(k, v)| {
@@ -167,7 +203,7 @@ fn start(cmd: &Command, fed: bool) -> io::Result<(Spawned, Option<PipeWriter>)> 
 
 /// Elsewhere: the fork as before.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn start(cmd: &Command, fed: bool) -> io::Result<(Spawned, Option<PipeWriter>)> {
+fn start(cmd: &Command, fed: bool, _limit: Limit) -> io::Result<(Spawned, Option<PipeWriter>)> {
     use std::os::fd::OwnedFd;
     use std::process::Stdio;
     let mut c = Command::new(cmd.get_program());
@@ -264,7 +300,7 @@ pub(crate) fn resolve(program: &OsStr, cwd: Option<&Path>, path_var: Option<&OsS
     Err(not_found())
 }
 
-fn executable(p: &Path) -> bool {
+pub(crate) fn executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
