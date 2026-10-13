@@ -353,9 +353,99 @@ stay their guard. Abstract names are per netns: in `Routed` tarae binds and conn
 so a run reaches only its session's (D-f; this machine's listener on the same name isn't reached); in C they stay
 refused.
 
-**Where sessions share a loopback** (tiers C and A without a netns of their own), D18's rule: tarae makes every
-internet socket in served mode, so one table holds each socket's inode against its session; a loopback listener is
-looked up by inode (`/proc/net/{tcp,tcp6,udp,udp6}`) and refused if it is another session's.
+**Where sessions share a loopback** (*built*, step 8, `owners.rs`; tier C, and every session served by copies — born
+without a netns), D18's rule: tarae makes every internet socket a run has, so one table (`owners::OWNERS`) holds each
+socket's cookie (`SO_COOKIE`: 64-bit, never reused) against its session and its keeper, from the served `socket`
+(again at `bind`, `listen`, a connect and a send). A connect
+or an addressed send that `route` sends to this machine (`Machine`, `OwnAddress` — an own address lands on what
+listens on every address) asks for the sockets on that port of tarae's netns (`NETLINK_SOCK_DIAG`, filtered by port
+in the kernel, a TCP ask listeners only; `owners::diag`), takes those the kernel would deliver it to
+(`owners::listener_at`: an exact address before a wildcard one, an IPv6 `::` socket takes IPv4 unless
+`IPV6_V6ONLY`, every member of a `SO_REUSEPORT` group), and if one is another session's the call is refused with
+`ECONNREFUSED` — what a session's own loopback says where nothing listens (user decision 8) — and the report a
+line: "connecting to 127.0.0.1:5173 — port 5173 is another tarae session's". The run's own session's sockets — a
+daemon an earlier run left too — and sockets of no session's (the user's listener on an opened port, tarae's) are
+reached as before. A call to `0.0.0.0` or `::` (which the kernel sends to loopback) is asked about every socket of its
+family on the port.
+
+A bind naming a port — and a `listen` — can't join another session's socket either. The kernel lets one user's
+sockets share a port (`SO_REUSEPORT`: a group the kernel spreads calls over; `SO_REUSEADDR`: a TCP listener at an
+exact address beside one at every address, UDP sockets even at one address), so a run could take in what was meant for another session's listener. A bind
+naming a port (an IPv4 socket's `AF_UNSPEC` too, which the kernel takes as every address at that port) is refused
+with `EADDRINUSE` — what the kernel says of a port taken — and said ("binding 0.0.0.0:5173 — port 5173 is another
+tarae session's"), when another session has a socket of that protocol on the port at an address that overlaps it
+(`owners::overlap`, as the kernel's bind conflict compares two: the same address, either at its family's every
+address, IPv6's `::` at IPv4's too unless `IPV6_V6ONLY`, a mapped address as its IPv4 one): of TCP its listeners,
+of UDP every one — and, of UDP, one *connected to* that port at an address the bind takes: tarae serves its connect
+once, never its plain `send()`s after, which would land on whatever binds there later (nothing was there when it
+connected, or its own session's socket that has since closed). The kernel lists a TCP socket only once it listens, so two bound side by side before either
+listened pass the bind; the second `listen` is asked the same and refused. A port the kernel picks needs no such
+check for TCP — it never gives a port another socket holds (`inet_csk_find_open_port` asks for a conflict-free
+one, reuse options or not) — but does for UDP: with either reuse option on, `udp_lib_lport_inuse` counts a port held
+by a socket with them too as free, so a bind to port 0 (or a first send or connect, which binds the socket so) may
+be given another session's port — measured, `owners::tests::a_port_the_kernel_picks_is_another_sockets_only_for_udp_reusing`
+(the port made the only one the kernel may pick, `IP_LOCAL_PORT_RANGE`). tarae makes that bind with both options
+off and puts them back after (`supervisor::alone`; a first send or connect is bound so first, to every address at
+port 0 as the kernel would — `bound_alone`): the kernel then picks a port no socket has. That holds within a session
+too: a UDP port 0 never joins a socket's port, the session's own neither — a program that wants to share a port
+names it. A port it picks that another session's UDP socket is connected to is let go again — a disconnect unbinds a
+socket bound to port 0 (`udp_disconnect`) — and another asked for, four times at most, then refused and said
+(`supervisor::picked`): by chance one bind in tens of thousands, on purpose only by narrowing the range
+(`IP_LOCAL_PORT_RANGE`). By copies a port named or so narrowed that a closed socket's copy still holds is collected
+and tried again (`copied_again`), as before step 8.
+
+A keeper's rows go when it does — ended by tarae, at once; died, or killed for not ending in time, as each socket
+goes (`Owners::let_go`, asked from 100 ms, doubling to 30 s, on a thread, for an hour at most — `LET_GO_FOR`: what
+still holds a socket then outlived its keeper for good, and its rows stay as they are, a cookie naming one socket
+ever): what its runs left still holds them, and
+where ending it by its tag fails (it never came to tarae, or outlived the TERM) a listener it holds stays its
+session's — another session's to everyone else — until it's gone (pinned for both: died unasked, and asked but
+killed past `END_WITHIN`). A session past `owners::KEPT` rows keeps the sockets still in tarae's tables and those
+touched since the sweep before (made, or named by a served bind or listen, or by a connect or send while still
+unbound — where it binds itself, which makes it a row again; a bound one is in the kernel's list). The sweep reads
+that list with the table let go: every session's calls take the table, and a dump of every socket can take a while. Keyed by cookie, not inode:
+inode numbers come from one 32-bit counter the machine's pipes and pseudo files share, so a stale row would name a
+newer socket; sock_diag gives each socket's cookie in its sockid. Where sock_diag can't be had the lookup reads
+tarae's `/proc/net/{tcp,udp}[6]` whole, which find a row by its inode (no cookie) and don't say `IPV6_V6ONLY` — both
+err only to refusing; where neither can be read, whose the socket is can't be told and the call or bind is refused
+as that (`network-untold`, "refused: whose the port is couldn't be told here" — never said to be another
+session's; the report tells Claude to tell the user, the log says why: `supervisor::told`, `Refusal::Untold`). A
+UDP socket whose reuse options can't be turned off for the kernel's pick isn't bound, said (`network-bind`) and
+logged. Measured (M8.1, `owners::tests::perf_a_loopback_lookup`, 2026-10-14), a
+lookup with 100 / 1 000 / 10 000 sockets in the netns, median:
+
+| machine | TCP listeners: sock_diag | `/proc/net/tcp{,6}` | UDP sockets: sock_diag | `/proc/net/udp{,6}` |
+|---|---|---|---|---|
+| Ubuntu 24.04, kernel 7.0, amd64 (the real C) | 0.075 / 0.118 / 1.01 ms | 2.2 / 4.1 / 29.3 ms | 0.068 / 0.147 / 1.21 ms | 0.39 / 3.1 / 102 ms |
+| colima's VM, arm64 (C) | 0.41 / 0.41 / 0.74 ms | 1.6 / 2.2 / 11.3 ms | 0.025 / 0.063 / 0.66 ms | 0.22 / 1.1 / 27.6 ms |
+
+A UDP ask walks every UDP socket of the namespace in the kernel (no table of listeners, as TCP has), the port
+filtered there: on Ubuntu a fifth more than TCP's at 10 000 sockets, on colima no more — nothing to change for it. The `/proc` fallback for UDP is dearer than TCP's at 10 000 (102 ms against 30 a lookup,
+each served call to an opened loopback port): a machine without sock_diag and that many UDP sockets would want the
+tables read once per batch of calls — not built while no supported kernel lacks sock_diag.
+(An earlier Ubuntu run, TCP only: 0.045 / 0.127 / 0.98 ms, `/proc` 2.0 / 4.5 / 30.8 ms.) What step 8 adds to one
+served call (M8.3, `keeper::tests::perf_a_served_loopback_send`: 2 000 UDP sends to the run's own socket on an
+opened loopback port, and to 192.0.2.1 — away from loopback, refused where the network is closed, served all the
+same —, against the same session with step 8's work off, `supervisor::APART_OFF`; medians of five): loopback,
+Ubuntu 24.04 327 µs against 222, colima 109 against 76; away, 219 against 209 and 77 against 76 (only the unbound
+check: within the runs' spread) — a send that's never served (connected) 3–5 and 0.9 µs. The lookup is most of it. Not built, what would take it off a run that sends to one port again and
+again (statsd, a test's UDP server): its answer kept per port by the run's supervisor until any session's served
+bind, listen or made socket moves a tarae-wide count. `/proc` walks every connection of the namespace, so it's only
+the fallback. M8.2 (Debian 12, user namespaces served by copies — no netns; `TARAE_TEST_COPIES` makes the probe say
+copies): the rule holds. Accepted and said (user decision 10): the check and the call are two moments — a listener
+can go and another come between them. macOS has no such rule (decision 9): Seatbelt opens `localhost:*` whole, so
+the report says that what listens on an opened port is reached whoever's it is. Pinned by
+`keeper::tests::two_sessions_cant_reach_each_others_sockets` (TCP and UDP, IPv4 and IPv6: refused, said, nothing
+taken in), `a_bind_onto_another_sessions_port_is_refused` (TCP and UDP at its address, IPv4's and IPv6's every
+address refused, `[::1]` not, a late listen refused, port 0 never given it; the holder's own session's binds taken),
+`a_port_another_sessions_udp_socket_sends_to_is_kept_from_a_bind` (named, every address, port 0 and a first send
+narrowed to it: refused, said, nothing taken in; the sender's own session takes them and its datagrams),
+`a_dead_keepers_leftover_listener_stays_its_sessions`, `a_killed_keepers_leftover_listener_stays_its_sessions`,
+`a_session_reaches_its_own_listener`,
+`the_users_listener_is_reached_where_opened`, `an_ended_sessions_sockets_leave_the_table`,
+`supervisor::tests::a_lookup_falls_back_to_the_tables_then_refuses`, `owners::tests::a_listener_is_found_as_the_kernel_finds_it`,
+`addresses_overlap_as_the_kernel_compares_them`, `the_kernel_lists_a_ports_sockets_with_their_v6only`,
+`a_sweep_reads_the_kernels_list_with_the_table_let_go`.
 
 ### By copies (*built*, 6f′, `copies.rs`, `target/sb/step6fprime-design.md`)
 
@@ -650,9 +740,13 @@ Each lands on its own. The test that pins it is seen failing once with the chang
    - Tests: `two_sessions_cant_reach_each_other` (A+: loopback, abstract sockets, pids, IPC, pty, `/dev/shm`),
      `a_new_conversation_keeps_the_keeper`, `a_key_change_ends_the_keepers_daemons`.
    - Break once: one keeper for two sessions.
-7. **The loopback rule where sessions share a loopback** (D18, tiers C and A).
-   - Tests: `a_session_cant_reach_anothers_listener` (with `llm.sandbox-localhost` on), `a_session_reaches_its_own_listener`.
-   - Break once: skip the owner lookup.
+7. **The loopback rule where sessions share a loopback** (D18, tier C and served by copies) — *built* (step 8 of
+   `plan-7-10.md`).
+   - Tests: `two_sessions_cant_reach_each_others_sockets` (with `llm.sandbox-localhost` on),
+     `a_session_reaches_its_own_listener`, `the_users_listener_is_reached_where_opened`,
+     `an_ended_sessions_sockets_leave_the_table`.
+   - Broken once each: the owner lookup skipped; owners keyed by run; every unknown socket taken as another
+     session's; no prune at the keeper's end.
 8. **Showing it** (D7). Tests: golden `sandbox_report.txt` per tier, the `ui_state.json` snapshot; a screenshot first.
 9. **Docs and CLAUDE.md.**
 10. **Later, each its own step**: `:sandbox-expose <port>` (D3); the supervisor and the proxy as one confined process

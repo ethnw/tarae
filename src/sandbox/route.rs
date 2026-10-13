@@ -55,6 +55,13 @@ pub enum Refusal {
     /// Beyond this machine by no way that goes out: only the proxy (a tool that ignores `HTTPS_PROXY` can't) and the
     /// session's own network (TCP, names) do.
     Direct,
+    /// Where sessions share this machine's loopback, a socket of another session's is there (step 8, D18): the run
+    /// gets `ECONNREFUSED`, as where its session has a loopback of its own that nothing listens on.
+    Another,
+    /// Where sessions share this machine's loopback, whose the socket there is couldn't be told — neither the
+    /// kernel's list of sockets nor tarae's `/proc/net` tables could be read: refused as `Another` is, said for what
+    /// it is.
+    Untold,
 }
 
 /// What a run's policy opens.
@@ -213,6 +220,23 @@ pub fn route(
         // (beyond this machine only the session's network goes, and the proxy at its address: above)
         (true, false) if netns && reach.redirect => Route::Redirected,
         (true, false) => Route::Refused(Refusal::Direct),
+    }
+}
+
+/// `route`'s answer where sessions share this machine's loopback (no netns of the session's own: tier C, served by
+/// copies): a call it sends to this machine (`Machine`, `OwnAddress` — one of its own addresses lands on what
+/// listens on every address, loopback's too) that would land on another session's socket (`anothers`, asked only
+/// then) is refused (step 8, D18) — and one whose socket's owner can't be told (`anothers`' Err) too, as `Untold`.
+/// With a netns of its own a session's loopback is its own: nothing to ask.
+pub fn kept_apart(route: Route, netns: bool, anothers: impl FnOnce() -> Result<bool, String>) -> Route {
+    let shared = !netns && matches!(route, Route::Machine | Route::OwnAddress);
+    if !shared {
+        return route;
+    }
+    match anothers() {
+        Ok(true) => Route::Refused(Refusal::Another),
+        Ok(false) => route,
+        Err(_) => Route::Refused(Refusal::Untold),
     }
 }
 
@@ -646,6 +670,39 @@ mod tests {
             );
             assert_eq!(got, (netns, c), "{to} under {reach:?}");
         }
+    }
+
+    /// Where sessions share this machine's loopback (no netns), a call to this machine — loopback, or one of its
+    /// own addresses — that would land on another session's socket is refused (step 8, D18), one that wouldn't
+    /// goes as `route` said, and one whose socket's owner can't be told is refused as such (`Untold`, never said to
+    /// be another session's); with a netns of the session's own, and for every other way, nobody's socket is asked
+    /// after.
+    #[test]
+    fn a_shared_loopbacks_socket_of_another_session_is_refused() {
+        use Route::*;
+        let asked = std::cell::Cell::new(0);
+        let answer = |a: Result<bool, String>| {
+            let asked = &asked;
+            move || {
+                asked.set(asked.get() + 1);
+                a
+            }
+        };
+        let theirs = |yes: bool| answer(Ok(yes));
+        for r in [Machine, OwnAddress] {
+            assert_eq!(kept_apart(r, false, theirs(true)), Refused(Refusal::Another), "{r:?}");
+            assert_eq!(kept_apart(r, false, theirs(false)), r, "{r:?}: no other session's");
+            let untold = answer(Err("unread".into()));
+            assert_eq!(kept_apart(r, false, untold), Refused(Refusal::Untold), "{r:?}: can't be told");
+        }
+        assert_eq!(asked.get(), 6);
+        for r in [Machine, OwnAddress] {
+            assert_eq!(kept_apart(r, true, theirs(true)), r, "{r:?} in the session's netns");
+        }
+        for r in [Session, Redirected, Proxy, Refused(Refusal::Closed)] {
+            assert_eq!(kept_apart(r, false, theirs(true)), r, "{r:?}");
+        }
+        assert_eq!(asked.get(), 6, "asked only where it decides");
     }
 
     /// `resolv.conf` as glibc reads it: `nameserver` lines only, their first three, a zone left off, the rest

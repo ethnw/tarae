@@ -577,7 +577,11 @@ fn two_sessions_cant_reach_each_others_sockets() {
         ("sysv", Shared),
     ];
     let said_of = |what: &str| match what {
-        "tcp-open" => report.contains(&format!("this machine's ports {}", port(&open))),
+        // (step 8, decision 9: another session's listener on an opened port is reached here, and said)
+        "tcp-open" => {
+            report.contains(&format!("this machine's ports {}", port(&open)))
+                && report.contains("another tarae session's commands' too")
+        }
         "posix" | "sysv" => {
             report.contains("shares System V and POSIX shared memory with other sessions' commands")
         }

@@ -50,6 +50,8 @@ pub mod linux;
 pub mod marks;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod names;
+// (step 8: which session a socket is where sessions share a loopback — given on Linux, the lookup tested everywhere)
+pub mod owners;
 mod policy;
 #[cfg(target_os = "linux")]
 pub mod ptys;
@@ -329,7 +331,18 @@ impl Guard {
                      llm.sandbox-upstream = \"none\" (straight out) is theirs to change.",
                 );
             }
-            if !all || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
+            // (step 8: whose a port is couldn't be told — not a rule a grant opens, nor the command's to fix)
+            if all_seen.iter().any(|d| d.op == UNTOLD_OP) {
+                s.push_str(
+                    "\nWhat says network-untold isn't a rule: tarae couldn't read this machine's lists of sockets \
+                     (sock_diag, /proc/net) to tell whose that port is, so it refused — tell the user; tarae's \
+                     log says why.",
+                );
+            }
+            // (step 8: another session's port, or one whose can't be told — no grant opens it, so nothing to
+            // point at)
+            let openable = all_seen.iter().any(|d| d.op != SESSION_OP && d.op != UNTOLD_OP);
+            if (!all && openable) || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
                 s.push_str(
                     "\nIf the command needs one of these, tell the user — they can open it from the run's \
                      panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost, \
@@ -688,7 +701,7 @@ impl Guard {
                 let (names_where, net, linux) = match linux {
                     Some((said, notes)) => ("where they are now", said.unwrap_or(net), notes),
                     // (a Seatbelt policy's — made for macOS, `supervised` Linux's: the golden's stand-in too)
-                    None if !p.supervised => ("anywhere in it", net, MAC_SHARED.to_string()),
+                    None if !p.supervised => ("anywhere in it", net, mac_shared(p)),
                     None => ("anywhere in it", net, String::new()),
                 };
                 format!(
@@ -722,6 +735,30 @@ impl Guard {
 const MAC_SHARED: &str = " Here a command shares System V and POSIX shared memory with other sessions' commands \
      and the user's other programs — it can read and write what they keep there — and can lower their priority \
      (renice): macOS's sandbox has no rule for either.";
+
+/// A refusal's op where sessions share this machine's loopback and the socket there is another session's (step 8,
+/// `supervisor::anothers_at`): no grant opens it.
+pub const SESSION_OP: &str = "network-session";
+
+/// A refusal's op where sessions share this machine's loopback and whose the socket there is couldn't be told —
+/// neither the kernel's list of sockets nor `/proc/net` read (step 8, `supervisor::told`): refused, never said to be
+/// another session's.
+pub const UNTOLD_OP: &str = "network-untold";
+
+/// What a Seatbelt policy's runs share with other sessions' (`MAC_SHARED`) — and, where it opens this machine's
+/// ports, that what listens on them is reached whoever's it is (step 8, user decision 9: Linux refuses another
+/// session's listener there, macOS's sandbox can't tell whose one is). Pinned by
+/// `apart::two_sessions_cant_reach_each_others_sockets`.
+fn mac_shared(p: &Policy) -> String {
+    let ports = match p.localhost || !p.ports.is_empty() {
+        true => {
+            " What listens on this machine's ports it opens is reached whoever's it is — another tarae \
+                  session's commands' too: macOS's sandbox can't tell whose a listener is."
+        }
+        false => "",
+    };
+    format!("{MAC_SHARED}{ports}")
+}
 
 /// Whether Claude's runs are refused new user namespaces here (`tier::runs_refuse_userns`) — outside the sandbox
 /// too (`spawn::Acts`).
@@ -1570,6 +1607,34 @@ impl Denial {
                 None => self.shown(),
             },
             "network-bind" if self.target.starts_with('/') => format!("making socket {t}"),
+            // (step 8: where sessions share this machine's loopback — a call, `supervisor::anothers_at`; a bind or a
+            // listen joining another session's port, `supervisor::joins_another`)
+            SESSION_OP => {
+                let addr = |a: &str| a.parse::<std::net::SocketAddr>().ok();
+                match (t.strip_prefix("remote:").and_then(addr), t.strip_prefix("local:").and_then(addr)) {
+                    (Some(at), _) => format!(
+                        "connecting to {at} — port {} is another tarae session's: sessions' commands are kept apart, \
+                         on this machine's opened ports too",
+                        at.port()
+                    ),
+                    (_, Some(at)) => format!(
+                        "binding {at} — port {} is another tarae session's: sessions' commands are kept apart, \
+                         their ports too",
+                        at.port()
+                    ),
+                    _ => self.shown(),
+                }
+            }
+            UNTOLD_OP => {
+                let addr = |a: &str| a.parse::<std::net::SocketAddr>().ok();
+                let untold = "refused: whose the port is couldn't be told here (this machine's lists of sockets \
+                              unread), and sessions' commands are kept apart";
+                match (t.strip_prefix("remote:").and_then(addr), t.strip_prefix("local:").and_then(addr)) {
+                    (Some(at), _) => format!("connecting to {at} — {untold}"),
+                    (_, Some(at)) => format!("binding {at} — {untold}"),
+                    _ => self.shown(),
+                }
+            }
             // (Linux's supervisor: a run's netlink only reads, from the kernel — `supervisor::netlink_reads`)
             "network-netlink" => {
                 format!("netlink ({t}) — a command's netlink only reads the network, never changes it")

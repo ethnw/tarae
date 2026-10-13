@@ -61,6 +61,9 @@ const DEATHS_WITHIN: Duration = Duration::from_secs(600);
 /// A session's keeper, as tarae holds it.
 pub struct Keeper {
     pub pid: u32,
+    /// tarae's own number for it, never reused (a pid is): what its runs' sockets are known by where sessions
+    /// share a loopback (`owners::Owner.keeper`), let go when it's gone.
+    pub serial: u64,
     pub root: PathBuf,
     /// The namespaces it was born with.
     pub ns: Ns,
@@ -100,6 +103,8 @@ struct State {
     gone: Option<String>,
     /// tarae asked it to end (`end`): its going isn't a death.
     ending: bool,
+    /// It didn't end in time and tarae killed it (`ended_by`): what its runs left may outlive it.
+    killed: bool,
     /// A keeper of another policy took its place: no run more, and it ends once its last one has.
     superseded: bool,
     /// Its policy's key (`sandbox::policy_key`) — None: a probe's, any key takes it over.
@@ -420,8 +425,10 @@ impl Keeper {
                 .map_err(|e| format!("handing the keeper its scope: {e}"))?;
             Ok(RunsIn { scope: scope.path, level: scope.level, source })
         });
+        static SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let k = Arc::new(Keeper {
             pid: pid as u32,
+            serial: SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             root: root.to_path_buf(),
             ns,
             devices,
@@ -713,8 +720,9 @@ impl Keeper {
     }
 
     /// The keeper is gone (`why`): its runs' waits answer that, what they were is ended — failing closed —
-    /// and, not asked to end, it died: counted (D11), said, and what its runs left (tarae's now, the
-    /// subreaper) ended by their tag.
+    /// and, not asked to end, it died: counted (D11) and said. Died, or killed for not ending in time: what its
+    /// runs left (tarae's now, the subreaper) is ended by their tag, and what they held of this machine's
+    /// loopback is no session's only as each socket goes (`owners::Owners::let_go`).
     fn gone(&self, why: String) {
         let mut s = lock(&self.state);
         if s.gone.is_some() {
@@ -738,6 +746,13 @@ impl Keeper {
         if !asked {
             lock(&DEATHS).push((self.root.clone(), Instant::now()));
         }
+        // (what its runs had of this machine's loopback stays its session's while anything of theirs may still hold
+        // it: ended by the keeper itself, gone now; else — it died, or didn't end in time and was killed — as each
+        // socket goes, once what they left was ended, below. Rows are by keeper: one taking its place keeps its own)
+        let left_running = !asked || s.killed;
+        if !left_running {
+            super::owners::OWNERS.ended(self.serial);
+        }
         s.gone = Some(why);
         drop(s);
         self.changed.notify_all();
@@ -752,9 +767,21 @@ impl Keeper {
                 "warn",
                 &format!("{said} (pid {}, {})", self.pid, self.root.display()),
             );
-            let root = self.root.clone();
+        }
+        if left_running {
+            let (root, serial) = (self.root.clone(), self.serial);
             crate::event::thread("tarae-kleft", move || {
                 super::end_left_by_tag(&root);
+                let left = super::owners::OWNERS.let_go(serial, super::owners::live, std::thread::sleep);
+                if left > 0 {
+                    let why = format!(
+                        "{left} sockets of what a dead keeper's runs left ({}) still held after {} min: kept as its \
+                         session's, no longer asked after",
+                        root.display(),
+                        super::owners::LET_GO_FOR.as_secs() / 60
+                    );
+                    crate::log::line("sandbox", "info", &why);
+                }
             });
         }
     }
@@ -778,6 +805,8 @@ impl Keeper {
         while s.gone.is_none() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                // (what its runs left may outlive it now: `gone` ends it by tag)
+                s.killed = true;
                 drop(s);
                 // SAFETY: KILL to the keeper by its pidfd (no other process can be it).
                 unsafe {
@@ -1063,7 +1092,8 @@ impl Keeper {
         }
         // (6d: where its session has the TPROXY network, beyond is the run's own socket marked as its run's)
         let marks = lock(&self.network).as_ref().map(|n| n.marks.clone());
-        let to = super::supervisor::serve(policy, net, refused, marks, self.pid, c.ptys.clone())?;
+        let tree = (self.pid, self.serial);
+        let to = super::supervisor::serve(policy, net, refused, marks, tree, c.ptys.clone())?;
         let no_userns = super::tier::runs_refuse_userns();
         let (rules, covers) = c.rules_and_covers();
         let asks = Asks { no_userns, ptys: c.ptys.is_some(), covers: Some(covers) };
@@ -4241,6 +4271,205 @@ mod tests {
             "cgroupwrites" => helper_cgroup_writes(),
             "reach" => helper_reach(&std::env::var("TARAE_TO").unwrap_or_default()),
             // (step 7: another session's run holding what it holds until `done` is in its folder — 30 s at most)
+            // (step 8: `hold` started as its child, what that holds said, then gone — the child left running below
+            // the keeper, as a daemon a build starts is)
+            "leaves" => {
+                use std::os::unix::process::CommandExt as _;
+                // (a process group of its own, as `setsid sleep &` has it: the run's end ends its group; none of
+                // the run's output open in it — the run's reader would wait on it)
+                let mut left = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(std::env::args().skip(1))
+                    .env(HELPER, "hold")
+                    .process_group(0)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let out = io::BufReader::new(left.stdout.take().unwrap());
+                let said = io::BufRead::lines(out)
+                    .map_while(Result::ok)
+                    .find_map(|l| l.split_once("helper: ").map(|(_, s)| s.to_string()))
+                    .expect("the one left said nothing");
+                let said = format!("left={} {said}", left.id());
+                // (never waited here: it's left running, and the keeper — its subreaper once this is gone — reaps it)
+                std::mem::forget(left);
+                said
+            }
+            // (step 8: a UDP socket made and left unbound until `swept` is in its folder, then bound by its first send
+            // — its port said as `held` says one — and answering as `held`'s do, marked, until `done`; 30 s at most)
+            "unbound" => {
+                use std::os::fd::FromRawFd as _;
+                // SAFETY: plain call; the descriptor is this process's own from here.
+                let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+                assert!(fd >= 0, "{}", io::Error::last_os_error());
+                // SAFETY: just made, owned by nothing else.
+                let s = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+                println!("helper: made");
+                let by = Instant::now() + Duration::from_secs(30);
+                while !Path::new("swept").exists() && Instant::now() < by {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // (to a port nothing listens on: what matters is the port the kernel gives it)
+                let sent = s.send_to(b"x", "127.0.0.1:9");
+                let port = s.local_addr().map(|a| a.port()).unwrap_or(0);
+                println!("helper: tag=theirs udp={port} sent={}", tried(sent));
+                let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+                let mut b = [0u8; 64];
+                while !Path::new("done").exists() && Instant::now() < by {
+                    if let Ok((_, from)) = s.recv_from(&mut b) {
+                        let _ = std::fs::write("reached-udp", "");
+                        let _ = s.send_to(apart_marker("theirs-sock").as_bytes(), from);
+                    }
+                }
+                return;
+            }
+            // (step 8: a TCP listener and a UDP socket at 127.0.0.1 with `SO_REUSEADDR` and `SO_REUSEPORT` — a port
+            // another socket of the same user may join — and a TCP socket bound so, not listening (`late`), their
+            // ports said; `late` listening once `listen` is in its folder, said (`listened=`); held until `done`; 30 s
+            // at most)
+            "reuses" => {
+                use super::super::owners::tests::{bound, bound_only, listening, port_of};
+                let (tcp, udp) =
+                    (bound(true, "127.0.0.1:0", true, None), bound(false, "127.0.0.1:0", true, None));
+                let (tcp, udp) = (tcp.unwrap(), udp.unwrap());
+                let late = bound_only(true, "127.0.0.1:0", true, None).unwrap();
+                println!("helper: tcp={} udp={} late={}", port_of(&tcp), port_of(&udp), port_of(&late));
+                let by = Instant::now() + Duration::from_secs(30);
+                let mut listened = false;
+                while !Path::new("done").exists() && Instant::now() < by {
+                    if !listened && Path::new("listen").exists() {
+                        println!("helper: listened={}", tried(listening(&late)));
+                        listened = true;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return;
+            }
+            // (step 8: binds with `SO_REUSEADDR` and `SO_REUSEPORT` onto `reuses`'s ports — `$TARAE_TO`'s `tcp=` and
+            // `udp=` — at its address, every IPv4 address, every address (`[::]`, dual-stack) and `[::1]`, each closed
+            // again; and to port 0 with that port the only one the kernel may pick (`-picked`): each `ok` or its errno;
+            // `v6`: whether IPv6 is here. With `$TARAE_LATE`, first `late=`'s port bound so, said (`bound-late=`), and
+            // made to listen once `go` is in its folder: `late=` among the rest)
+            "binds" => {
+                use super::super::owners::tests::{bound, bound_only, listening};
+                let to = std::env::var("TARAE_TO").unwrap_or_default();
+                let late = match std::env::var_os("TARAE_LATE") {
+                    Some(_) => {
+                        let port = to.split_whitespace().find_map(|w| w.strip_prefix("late=")).unwrap();
+                        let s = bound_only(true, &format!("127.0.0.1:{port}"), true, None);
+                        println!(
+                            "helper: bound-late={}",
+                            tried(s.as_ref().map(drop).map_err(|e| io::Error::new(e.kind(), e.to_string())))
+                        );
+                        let by = Instant::now() + Duration::from_secs(30);
+                        while !Path::new("go").exists() && Instant::now() < by {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        format!(" late={}", tried(s.and_then(|s| listening(&s))))
+                    }
+                    None => String::new(),
+                };
+                let to: std::collections::HashMap<&str, &str> =
+                    to.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+                let mut said = vec![format!("v6={}", std::net::UdpSocket::bind("[::1]:0").is_ok())];
+                for (proto, tcp) in [("tcp", true), ("udp", false)] {
+                    let port: u16 = to[proto].parse().unwrap();
+                    for (what, ip) in
+                        [("", "127.0.0.1"), ("-any", "0.0.0.0"), ("6-any", "[::]"), ("6", "[::1]")]
+                    {
+                        let r = bound(tcp, &format!("{ip}:{port}"), true, None);
+                        said.push(format!("{proto}{what}={}", tried(r)));
+                    }
+                    let r = bound(tcp, "127.0.0.1:0", true, Some(port));
+                    said.push(format!("{proto}-picked={}", tried(r)));
+                }
+                format!("{}{late}", said.join(" "))
+            }
+            // (step 8: a UDP socket connected to 127.0.0.1:$TARAE_PORT, a port nothing is bound to, said (`aimed=`),
+            // sending on it with plain `send()` — never served — every 10 ms until `done`; 30 s at most)
+            "aims" => {
+                let port: u16 = std::env::var("TARAE_PORT").unwrap().parse().unwrap();
+                let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                println!("helper: aimed={port} connected={}", tried(s.connect(("127.0.0.1", port))));
+                let by = Instant::now() + Duration::from_secs(30);
+                while !Path::new("done").exists() && Instant::now() < by {
+                    let _ = s.send(apart_marker("theirs-sent").as_bytes());
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return;
+            }
+            // (step 8: UDP binds at `$TARAE_TO`'s `aimed=` port — at 127.0.0.1 (`named`), every address (`any`), port 0
+            // with that port the only one the kernel may pick (`picked`), and an unbound socket so narrowed sending
+            // (`sent`: its bind the kernel's, on the send) — each `ok` or its errno; `got`: whether any that bound
+            // there took in a datagram within 300 ms)
+            "bindsat" => {
+                use super::super::owners::tests::bound_only;
+                use std::os::fd::FromRawFd as _;
+                let to = std::env::var("TARAE_TO").unwrap_or_default();
+                let port: u16 =
+                    to.split_whitespace().find_map(|w| w.strip_prefix("aimed=")).unwrap().parse().unwrap();
+                let took = |s: &std::net::UdpSocket| {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(300)));
+                    s.recv(&mut [0u8; 64]).is_ok()
+                };
+                let mut said = Vec::new();
+                // (each tried, read from and let go before the next: the port free again)
+                for (what, at, range) in [
+                    ("named", format!("127.0.0.1:{port}"), None),
+                    ("any", format!("0.0.0.0:{port}"), None),
+                    ("picked", "127.0.0.1:0".to_string(), Some(port)),
+                ] {
+                    match bound_only(false, &at, false, range) {
+                        Ok(fd) => {
+                            let s = std::net::UdpSocket::from(fd);
+                            let on = s.local_addr().is_ok_and(|a| a.port() == port);
+                            said.push(format!("{what}=ok"));
+                            if on && took(&s) {
+                                said.push(format!("{what}-got=yes"));
+                            }
+                        }
+                        Err(e) => said.push(format!("{what}={}", tried::<()>(Err(e)))),
+                    }
+                }
+                // SAFETY: plain calls; the descriptor is this process's own from here.
+                let s = unsafe {
+                    let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+                    let range = u32::from(port) | (u32::from(port) << 16);
+                    let size = std::mem::size_of::<u32>() as libc::socklen_t;
+                    libc::setsockopt(fd, libc::SOL_IP, 51, (&raw const range).cast(), size);
+                    std::net::UdpSocket::from_raw_fd(fd)
+                };
+                let sent = s.send_to(b"x", "127.0.0.1:9");
+                let at = s.local_addr().map(|a| a.port()).unwrap_or(0);
+                said.push(format!("sent={}", tried(sent)));
+                if at == port && took(&s) {
+                    said.push("sent-got=yes".into());
+                }
+                said.join(" ")
+            }
+            // (M8.3: 2 000 UDP sends to a socket of its own on 127.0.0.1 — each addressed, served —, as many to
+            // 192.0.2.1 (TEST-NET-1: beyond this machine, refused where the network is closed — served all the same),
+            // then as many on the first socket connected to its own, never served: each's mean in µs)
+            "sendloop" => {
+                const N: u32 = 2000;
+                let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let to = rx.local_addr().unwrap();
+                let tx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let timed = |send: &dyn Fn() -> io::Result<usize>, must: bool| {
+                    let at = Instant::now();
+                    for _ in 0..N {
+                        let r = send();
+                        assert!(!must || r.is_ok(), "{r:?}");
+                    }
+                    at.elapsed().as_secs_f64() * 1e6 / f64::from(N)
+                };
+                let served = timed(&|| tx.send_to(b"x", to), true);
+                let away = timed(&|| tx.send_to(b"x", "192.0.2.1:9"), false);
+                tx.connect(to).unwrap();
+                let plain = timed(&|| tx.send(b"x"), true);
+                format!("loopback={served:.1} away={away:.1} plain={plain:.1}")
+            }
             "hold" => {
                 let h = held("theirs");
                 println!("helper: {}", h.said);
@@ -6153,49 +6382,73 @@ mod tests {
         _pty: Option<(OwnedFd, OwnedFd, String)>,
     }
 
-    /// `tag`'s things, made by this process: a TCP listener on `127.0.0.1`, an abstract unix one, one at
-    /// `apart-<tag>.sock` in its folder — each answering every connection with `apart_marker("<tag>-sock")` —,
+    /// `tag`'s things, made by this process: TCP listeners on `127.0.0.1` and `::1`, UDP sockets there answering
+    /// every datagram, an abstract unix listener, one at `apart-<tag>.sock` in its folder — each answering with
+    /// `apart_marker("<tag>-sock")` (IPv6's `unmade` where this system has none) —,
     /// a SysV shared memory segment at a key of its own and a file in `/dev/shm`, both holding
     /// `apart_marker("<tag>-mem")`, and a pty (its path, its `devpts` and its device number).
     fn held(tag: &str) -> Held {
         use std::os::linux::net::SocketAddrExt as _;
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::net::{SocketAddr, UnixListener};
+        // (each connection accepted, each datagram received, marked in its folder: `reached-<what>` — what came
+        // in, whether or not its answer got back)
         fn answering<L: Send + 'static, S: io::Write + 'static>(
             l: L,
             accept: fn(&L) -> io::Result<S>,
             answer: String,
+            mark: PathBuf,
         ) {
             std::thread::spawn(move || {
                 while let Ok(mut s) = accept(&l) {
+                    let _ = std::fs::write(&mark, "");
                     let _ = io::Write::write_all(&mut s, answer.as_bytes());
                 }
             });
         }
+        let here = std::env::current_dir().unwrap();
+        let mark = |what: &str| here.join(format!("reached-{what}"));
         let no = |e: io::Error| format!("no{}", tried::<()>(Err(e)));
         let answer = apart_marker(&format!("{tag}-sock"));
         let pid = std::process::id();
-        let tcp = match std::net::TcpListener::bind("127.0.0.1:0") {
+        let tcp = |at: &str, what: &str| match std::net::TcpListener::bind(at) {
             Ok(l) => {
                 let port = l.local_addr().unwrap().port();
-                answering(l, |l| l.accept().map(|(s, _)| s), answer.clone());
+                answering(l, |l| l.accept().map(|(s, _)| s), answer.clone(), mark(what));
                 port.to_string()
             }
             Err(e) => no(e),
         };
+        let (tcp, tcp6) = (tcp("127.0.0.1:0", "tcp"), tcp("[::1]:0", "tcp6"));
+        let udp = |at: &str, what: &str| match std::net::UdpSocket::bind(at) {
+            Ok(s) => {
+                let port = s.local_addr().unwrap().port();
+                let (answer, mark) = (answer.clone(), mark(what));
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 64];
+                    while let Ok((_, from)) = s.recv_from(&mut b) {
+                        let _ = std::fs::write(&mark, "");
+                        let _ = s.send_to(answer.as_bytes(), from);
+                    }
+                });
+                port.to_string()
+            }
+            Err(e) => no(e),
+        };
+        let (udp, udp6) = (udp("127.0.0.1:0", "udp"), udp("[::1]:0", "udp6"));
         let name = format!("tarae-apart-{tag}-{pid}");
         let abs =
             match SocketAddr::from_abstract_name(name.as_bytes()).and_then(|a| UnixListener::bind_addr(&a)) {
                 Ok(l) => {
-                    answering(l, |l| l.accept().map(|(s, _)| s), answer.clone());
+                    answering(l, |l| l.accept().map(|(s, _)| s), answer.clone(), mark("abstract"));
                     name
                 }
                 Err(e) => no(e),
             };
-        let sock = std::env::current_dir().unwrap().join(format!("apart-{tag}.sock"));
+        let sock = here.join(format!("apart-{tag}.sock"));
         let path = match UnixListener::bind(&sock) {
             Ok(l) => {
-                answering(l, |l| l.accept().map(|(s, _)| s), answer);
+                answering(l, |l| l.accept().map(|(s, _)| s), answer, mark("path"));
                 sock.display().to_string()
             }
             Err(e) => no(e),
@@ -6239,7 +6492,10 @@ mod tests {
             std::fs::remove_file(&sock).ok();
         };
         Held {
-            said: format!("tag={tag} tcp={tcp} abstract={abs} path={path} ipc={ipc} shm={shm} pty={pty}"),
+            said: format!(
+                "tag={tag} tcp={tcp} tcp6={tcp6} udp={udp} udp6={udp6} abstract={abs} path={path} ipc={ipc} \
+                 shm={shm} pty={pty}"
+            ),
             undo: Box::new(undo),
             _pty: opened,
         }
@@ -6296,15 +6552,48 @@ mod tests {
             Some(v) if !v.starts_with("no") => format!("{what}={}", f(v)),
             _ => format!("{what}=unmade"),
         };
+        let stream = |ip: std::net::IpAddr, port: &str| {
+            let to = std::net::SocketAddr::new(ip, port.parse().unwrap_or(9));
+            read(
+                std::net::TcpStream::connect_timeout(&to, wait)
+                    .and_then(|s| s.set_read_timeout(Some(wait)).map(|()| Box::new(s) as Box<dyn io::Read>)),
+            )
+        };
+        // (from a socket bound to every address and a port the kernel picks: one bound to an address stays in its
+        // session — `supervisor::swapped_for`; nothing back within a second, or refused: nothing of the holder's)
+        let datagram = |ip: std::net::IpAddr, port: &str| {
+            let from = if ip.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+            let s = match std::net::UdpSocket::bind(from) {
+                Ok(s) => s,
+                Err(e) => return tried::<()>(Err(e)),
+            };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+            let gone = |e: &io::Error| {
+                e.raw_os_error() == Some(libc::ECONNREFUSED)
+                    || matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+            };
+            let to = std::net::SocketAddr::new(ip, port.parse().unwrap_or(9));
+            let mut b = [0u8; 128];
+            match s.send_to(b"x", to).and_then(|_| s.recv_from(&mut b)) {
+                Ok((n, _)) => judged(&b[..n], "sock"),
+                Err(e) if gone(&e) => "unseen".into(),
+                Err(e) => tried::<()>(Err(e)),
+            }
+        };
+        let (v4, v6) = (std::net::Ipv4Addr::LOCALHOST.into(), std::net::Ipv6Addr::LOCALHOST.into());
+        // (the same ports at every address, `0.0.0.0`: the kernel sends it to loopback — `owners::listener_at`)
+        let any = std::net::Ipv4Addr::UNSPECIFIED.into();
+        let at_any = |what: &str, f: &dyn Fn(&str) -> String| match got.get(what) {
+            Some(v) if !v.starts_with("no") => format!("{what}-any={}", f(v)),
+            _ => format!("{what}-any=unmade"),
+        };
         [
-            each("tcp", &|port| {
-                let to = std::net::SocketAddr::from(([127, 0, 0, 1], port.parse().unwrap_or(9)));
-                read(
-                    std::net::TcpStream::connect_timeout(&to, wait).and_then(|s| {
-                        s.set_read_timeout(Some(wait)).map(|()| Box::new(s) as Box<dyn io::Read>)
-                    }),
-                )
-            }),
+            each("tcp", &|port| stream(v4, port)),
+            each("tcp6", &|port| stream(v6, port)),
+            each("udp", &|port| datagram(v4, port)),
+            each("udp6", &|port| datagram(v6, port)),
+            at_any("tcp", &|port| stream(any, port)),
+            at_any("udp", &|port| datagram(any, port)),
             each("abstract", &|name| {
                 read(unix(
                     SocketAddr::from_abstract_name(name.as_bytes())
@@ -6456,14 +6745,17 @@ mod tests {
         }
     }
 
-    /// Step 7: two sessions side by side — from a run of one at what a run of the other holds (`held`): a
-    /// loopback TCP listener, an abstract unix one, a unix socket in its project, a SysV shared memory segment,
-    /// a file in `/dev/shm`, a pty. Each is the session's own where its keeper has the namespace — the network
-    /// (its `lo`, its abstract names), IPC and its own `/dev/shm` and `devpts` (A+, A) —; a unix socket by path
-    /// is the supervisor's to refuse outside the project, in every tier served. Without them (C/D) what goes
-    /// through is shared, pinned as shared and said (the user's decision 2026-10-10) — the loopback row is
-    /// step 8's (a session's own loopback), pinned as it is now. The trying run reaches its own of each first:
-    /// a try that reaches nothing would pass.
+    /// Step 7: two sessions side by side — from a run of one at what a run of the other holds (`held`):
+    /// loopback TCP listeners and UDP sockets, IPv4 and IPv6, an abstract unix listener, a unix socket in its
+    /// project, a SysV shared memory segment, a file in `/dev/shm`, a pty. Each is the session's own where its
+    /// keeper has the namespace — the network (its `lo`, its abstract names), IPC and its own `/dev/shm` and
+    /// `devpts` (A+, A) —; a unix socket by path is the supervisor's to refuse outside the project, in every tier
+    /// served. Without them (C/D) what goes through is shared, pinned as shared and said (the user's decision
+    /// 2026-10-10) — but the loopback: the trying session opens every port of this machine's
+    /// (`llm.sandbox-localhost`), and where sessions share that loopback the other session's sockets on it are
+    /// refused (step 8, D18) — `ECONNREFUSED`, what a loopback of the session's own with nothing there says, and
+    /// the report says whose port it was. The trying run reaches its own of each first: a try that reaches
+    /// nothing would pass.
     #[test]
     fn two_sessions_cant_reach_each_others_sockets() {
         use Reach::*;
@@ -6471,7 +6763,9 @@ mod tests {
         if open_rules(test).is_none() {
             return;
         }
-        let (mine, theirs) = (Apart::new("socks-mine"), Apart::new("socks-theirs"));
+        let (mut open, root) = project_policy("socks-mine", Vec::new(), &[]);
+        open.localhost = true;
+        let (mine, theirs) = (Apart::of("socks-mine", open, root), Apart::new("socks-theirs"));
         let mut hold = theirs.helper("hold", &[]);
         let mut out = io::BufReader::new(hold.spawned.stdout.take().unwrap());
         let held = loop {
@@ -6481,12 +6775,20 @@ mod tests {
                 break s.trim().to_string();
             }
         };
-        let said = helper_said(mine.helper("sockets", &[("TARAE_TO", &held)]));
+        let (tried, refused) = mine.helper_told("sockets", &[("TARAE_TO", &held)]);
+        let said = helper_said(tried);
+        let refused: Vec<super::super::Denial> = refused.try_iter().collect();
         std::fs::write(theirs.root.join("done"), "").unwrap();
         let mut rest = String::new();
         io::Read::read_to_string(&mut out, &mut rest).unwrap();
         io::Read::read_to_string(&mut hold.spawned.stderr.take().unwrap(), &mut rest).unwrap();
         crate::spawn::wait(hold.spawned.pid).unwrap();
+        // (what came in to the holder's sockets: its marks)
+        let reached: Vec<String> = std::fs::read_dir(&theirs.root)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_prefix("reached-").map(String::from))
+            .collect();
         let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier);
         let ptys = mine.confine.ptys.is_some();
         // What the report says a run of this session's can't be kept from (`linux_said`'s notes)
@@ -6497,7 +6799,11 @@ mod tests {
         theirs.end();
         let got: std::collections::HashMap<&str, &str> =
             said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
-        let line = format!("tier {tier} ({ns:?}, {net:?}): held {held}\n  tried: {said}\n  notes:{notes}\n");
+        let refusals: Vec<String> = refused.iter().map(|d| d.reported()).collect();
+        let line = format!(
+            "tier {tier} ({ns:?}, {net:?}): held {held}\n  tried: {said}\n  came in: {reached:?}\n  refused: \
+             {refusals:#?}\n  notes:{notes}\n"
+        );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
         let verdict = |what: &str| match got[what] {
             "ok" => Shared,
@@ -6508,10 +6814,24 @@ mod tests {
         };
         // Without a supervisor a run has no socket but netlink
         let sockets = net != RunNet::Plain;
-        // The control: the trying run reaches its own — a loopback listener and an abstract name only in its
-        // session's network (without one a port the policy doesn't open is refused, its own too: measured, C)
+        // (IPv6 judged only where it's carried: on this system's loopback — a container's often has none, so
+        // neither session makes one — and, in a session's own netns, by its network, which carries only the
+        // families tarae's own network has: `Families::here`, step 6)
+        let v6 = got["own-tcp6"] != "unmade" && (!ns.net || super::Families::here().v6);
+        if !v6 {
+            eprintln!("{test}: IPv6 not judged — not carried here");
+        }
+        let loopback =
+            [("tcp", true), ("tcp6", v6), ("udp", true), ("udp6", v6), ("tcp-any", true), ("udp-any", true)];
+        // The control: the trying run reaches its own — its loopback sockets (its ports all opened) and an
+        // abstract name only in its session's network
         for (what, want) in [
-            ("tcp", sockets && ns.net),
+            ("tcp", sockets),
+            ("tcp6", sockets && v6),
+            ("udp", sockets),
+            ("udp6", sockets && v6),
+            ("tcp-any", sockets),
+            ("udp-any", sockets),
             ("abstract", sockets && ns.net),
             ("path", sockets),
             ("ipc", true),
@@ -6521,15 +6841,18 @@ mod tests {
             let own = got[&*format!("own-{what}")];
             assert_eq!(own == "ok", want, "its own {what}: {line}");
         }
-        // Step 8's: without a network of the session's own the loopback is this system's — a port the policy
-        // doesn't open is refused (this one's opens none), one it opens would be shared. Pinned as it is.
-        let loopback = Refused;
         // 3b: without a `devpts` of the session's own a served run opens only the ptys it makes (`ptys.rs`)
         assert_eq!(ptys, ns.serves_ptys(net), "{line}");
         let pty = if ptys { Refused } else { Shared };
-        // (attempt, in the session's own namespace for it, without one)
+        // (attempt, in the session's own namespace for it, without one — the loopback refused as if nothing
+        // were there, step 8: below, said)
         let table = [
-            ("tcp", ns.net, Unnamed, loopback),
+            ("tcp", ns.net, Unnamed, Unnamed),
+            ("tcp6", ns.net, Unnamed, Unnamed),
+            ("udp", ns.net, Unnamed, Unnamed),
+            ("udp6", ns.net, Unnamed, Unnamed),
+            ("tcp-any", ns.net, Unnamed, Unnamed),
+            ("udp-any", ns.net, Unnamed, Unnamed),
             ("abstract", ns.net, Unnamed, Unmade),
             ("path", false, Refused, Refused),
             ("ipc", ns.user, Unnamed, Shared),
@@ -6549,8 +6872,13 @@ mod tests {
         };
         let mut wrong = Vec::new();
         for (what, own, in_own, without) in table {
+            if !loopback.iter().all(|(w, judged)| w != &what || *judged) {
+                continue;
+            }
             let want = match (sockets, what) {
-                (false, "tcp" | "abstract" | "path") => Unmade,
+                (false, "tcp" | "tcp6" | "udp" | "udp6" | "tcp-any" | "udp-any" | "abstract" | "path") => {
+                    Unmade
+                }
                 _ if own => in_own,
                 _ => without,
             };
@@ -6561,11 +6889,570 @@ mod tests {
                 wrong.push(format!("{what} is shared between sessions here, and the report doesn't say so"));
             }
         }
+        // Step 8: nothing of the trying run's came in to the other session's loopback sockets (`held`'s marks:
+        // a datagram arrives whether or not its answer gets back); where sessions share this machine's loopback
+        // each was refused by tarae, said by its port — and only there (a loopback of its own has nothing of theirs)
+        for (what, _) in loopback.iter().filter(|(_, made)| *made) {
+            if reached.iter().any(|r| r == what) {
+                wrong.push(format!("{what}: the other session's socket took it in"));
+            }
+        }
+        let theirs_at: std::collections::HashMap<&str, &str> =
+            held.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let shared = sockets && !ns.net;
+        for (what, _) in loopback.iter().filter(|(_, made)| *made) {
+            // (to every address: said by the same port, the socket's)
+            let port = format!(":{}", theirs_at[what.trim_end_matches("-any")]);
+            let said = refused.iter().any(|d| {
+                d.op == super::super::SESSION_OP
+                    && d.target.ends_with(&port)
+                    && d.plain().contains("is another tarae session's")
+            });
+            if said != shared {
+                wrong.push(format!("{what}: refused as another session's {said}, where shared {shared}"));
+            }
+        }
         assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
         // …and nothing says it where it isn't so — the ptys kept apart said as such
         assert_eq!(notes.contains("other sessions' commands"), !(ns.user && ns.shm), "{line}");
         assert_eq!(notes.contains("the user's own too"), !ns.user && !ptys, "{line}");
         assert_eq!(notes.contains("it opens only those it makes"), ptys, "{line}");
+    }
+
+    /// Step 8: a session's runs reach its own loopback sockets, where sessions share this machine's loopback as
+    /// where they don't — one that a run left running (a daemon: Gradle's) after that run ended, from a later
+    /// run: the rule is by session, never by run. Its ports all opened (`llm.sandbox-localhost`).
+    #[test]
+    fn a_session_reaches_its_own_listener() {
+        let test = "a_session_reaches_its_own_listener";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let (mut open, root) = project_policy("own-listener", Vec::new(), &[]);
+        open.localhost = true;
+        let s = Apart::of("own-listener", open, root);
+        if s.confine.net == RunNet::Plain {
+            s.end();
+            eprintln!("{test}: skipped — no sockets without a supervisor");
+            return;
+        }
+        // (the run that left it is over: its supervisor serves what it left)
+        let left = helper_said(s.helper("leaves", &[]));
+        let (tried, refused) = s.helper_told("sockets", &[("TARAE_TO", &left)]);
+        let said = helper_said(tried);
+        let refused: Vec<String> = refused.try_iter().map(|d| d.reported()).collect();
+        std::fs::write(s.root.join("done"), "").unwrap();
+        let (tier, ns) = (s.confine.tier, s.keeper.ns);
+        s.end();
+        let got: std::collections::HashMap<&str, &str> =
+            said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let line = format!("tier {tier}: left {left}\n  tried: {said}\n  refused: {refused:#?}\n");
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        // (IPv6 only where it's carried, as in `two_sessions_cant_reach_each_others_sockets`)
+        let v6 = got["own-tcp6"] != "unmade" && (!ns.net || super::Families::here().v6);
+        let tried =
+            [("tcp", true), ("tcp6", v6), ("udp", true), ("udp6", v6), ("tcp-any", true), ("udp-any", true)];
+        for (what, judged) in tried {
+            if judged {
+                assert_eq!(got[what], "ok", "{what}: {line}");
+            }
+        }
+        assert!(refused.iter().all(|r| !r.contains("network-session")), "{line}");
+    }
+
+    /// Step 8: where sessions share this machine's loopback, a socket a sweep let go — made, and left unbound past
+    /// two of its session's sweeps — is its session's again once a send binds it (`supervisor::destination` touches
+    /// it): another session's datagram to it is refused and said, and nothing comes in. Both sessions open every
+    /// port (theirs: its first send goes out). Elsewhere a session's loopback is its own: nothing to sweep.
+    #[test]
+    fn a_socket_a_sweep_let_go_is_its_sessions_again_once_it_binds() {
+        let test = "a_socket_a_sweep_let_go_is_its_sessions_again_once_it_binds";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let opened = |name: &str| {
+            let (mut p, root) = project_policy(name, Vec::new(), &[]);
+            p.localhost = true;
+            Apart::of(name, p, root)
+        };
+        let (mine, theirs) = (opened("swept-mine"), opened("swept-theirs"));
+        if mine.confine.net == RunNet::Plain || mine.keeper.ns.net {
+            let tier = mine.confine.tier;
+            mine.end();
+            theirs.end();
+            eprintln!("{test}: skipped — tier {tier}: no loopback shared between sessions");
+            return;
+        }
+        let owners = &super::super::owners::OWNERS;
+        let mut hold = theirs.helper("unbound", &[]);
+        let mut out = io::BufReader::new(hold.spawned.stdout.take().unwrap());
+        let said = |out: &mut io::BufReader<_>| loop {
+            let mut line = String::new();
+            assert!(io::BufRead::read_line(out, &mut line).unwrap() > 0, "the holder said nothing");
+            if let Some((_, s)) = line.split_once("helper: ") {
+                break s.trim().to_string();
+            }
+        };
+        assert_eq!(said(&mut out), "made");
+        let session = theirs.policy.session;
+        let made = owners.of(session);
+        // (twice: a sweep keeps what was touched since the one before)
+        let live = super::super::owners::live().expect("tarae's tables");
+        owners.swept(session, &live);
+        owners.swept(session, &live);
+        let swept = owners.of(session);
+        std::fs::write(theirs.root.join("swept"), "").unwrap();
+        let held = said(&mut out);
+        let (tried, refused) = mine.helper_told("sockets", &[("TARAE_TO", &held)]);
+        let tried = helper_said(tried);
+        let refused: Vec<super::super::Denial> = refused.try_iter().collect();
+        std::fs::write(theirs.root.join("done"), "").unwrap();
+        io::Read::read_to_end(&mut out, &mut Vec::new()).unwrap();
+        io::Read::read_to_end(&mut hold.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
+        crate::spawn::wait(hold.spawned.pid).unwrap();
+        let reached = theirs.root.join("reached-udp").exists();
+        mine.end();
+        theirs.end();
+        let got: std::collections::HashMap<&str, &str> =
+            tried.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let theirs_at: std::collections::HashMap<&str, &str> =
+            held.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let refusals: Vec<String> = refused.iter().map(|d| d.reported()).collect();
+        let line = format!(
+            "rows {made} made, {swept} once swept twice; held {held}\n  tried: {tried}\n  came in: {reached}\n  \
+             refused: {refusals:#?}\n"
+        );
+        assert!(made >= 1 && swept == 0, "the unbound socket wasn't let go — nothing tested: {line}");
+        assert_eq!(theirs_at["sent"], "ok", "its first send: {line}");
+        assert!(!reached, "the other session's datagram came in: {line}");
+        assert_eq!(got["udp"], "unseen", "{line}");
+        let port = format!(":{}", theirs_at["udp"]);
+        let said = refused.iter().any(|d| d.op == super::super::SESSION_OP && d.target.ends_with(&port));
+        assert!(said, "refused as another session's, said: {line}");
+    }
+
+    /// Step 8: a loopback listener of no session's — this test's, standing for the user's own — is reached on a
+    /// port the policy opens (`llm.sandbox-ports`), and stays refused on one it doesn't, in every tier: the rule
+    /// refuses another session's socket, never one it knows nothing of.
+    #[test]
+    fn the_users_listener_is_reached_where_opened() {
+        let test = "the_users_listener_is_reached_where_opened";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let (opened, closed) = (
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+        );
+        let port = |l: &std::net::TcpListener| l.local_addr().unwrap().port();
+        let (policy, root) = project_policy("users-listener", vec![port(&opened)], &[]);
+        let s = Apart::of("users-listener", policy, root);
+        if s.confine.net == RunNet::Plain {
+            s.end();
+            eprintln!("{test}: skipped — no sockets without a supervisor");
+            return;
+        }
+        let tried = |l: &std::net::TcpListener| {
+            let said = helper_said(s.helper("loopback", &[("TARAE_PORT", &port(l).to_string())]));
+            said.split_once("tarae's=").map(|(_, r)| r.to_string()).unwrap_or(said)
+        };
+        let (to_opened, to_closed) = (tried(&opened), tried(&closed));
+        let tier = s.confine.tier;
+        s.end();
+        assert_eq!(to_opened, "ok", "tier {tier}: the opened port");
+        assert_ne!(to_closed, "ok", "tier {tier}: the closed port");
+    }
+
+    /// Step 8: where sessions share this machine's loopback the sockets a session's runs make are known as its
+    /// (`owners`), and when its keeper ends none of them is any more — another session's stay. Without (a
+    /// session's own netns) nothing is known: nothing to keep apart.
+    #[test]
+    fn an_ended_sessions_sockets_leave_the_table() {
+        let test = "an_ended_sessions_sockets_leave_the_table";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let owners = &super::super::owners::OWNERS;
+        let (one, two) = (Apart::new("ended-one"), Apart::new("ended-two"));
+        let shared = one.confine.net != RunNet::Plain && !one.keeper.ns.net;
+        let holds = |s: &Apart| {
+            let mut hold = s.helper("hold", &[]);
+            let mut out = io::BufReader::new(hold.spawned.stdout.take().unwrap());
+            let mut line = String::new();
+            while !line.contains("helper: ") {
+                line.clear();
+                assert!(io::BufRead::read_line(&mut out, &mut line).unwrap() > 0, "the holder said nothing");
+            }
+            (hold, out)
+        };
+        let (h1, h2) = (holds(&one), holds(&two));
+        let sessions = (one.policy.session, two.policy.session);
+        let rows = |(a, b): (u64, u64)| (owners.of(a), owners.of(b));
+        let before = rows(sessions);
+        for (s, (mut h, mut out)) in [(&one, h1), (&two, h2)] {
+            std::fs::write(s.root.join("done"), "").unwrap();
+            io::Read::read_to_end(&mut out, &mut Vec::new()).unwrap();
+            io::Read::read_to_end(&mut h.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
+            crate::spawn::wait(h.spawned.pid).unwrap();
+        }
+        one.end();
+        let after = rows(sessions);
+        two.end();
+        let gone = rows(sessions);
+        let line = format!("rows (one, two): {before:?} held, {after:?} once one ended, {gone:?} once both");
+        if shared {
+            // (each holder made its TCP and UDP listeners, IPv6's too where there is IPv6)
+            assert!(before.0 >= 2 && before.1 >= 2, "{line}");
+            assert_eq!(after, (0, before.1), "{line}");
+        } else {
+            assert_eq!(before, (0, 0), "{line}");
+        }
+        assert_eq!(gone, (0, 0), "{line}");
+    }
+
+    /// Step 8: where sessions share this machine's loopback, a bind onto a port another session's socket holds —
+    /// a TCP listener, a UDP socket, both with `SO_REUSEADDR` and `SO_REUSEPORT`, which the kernel lets another
+    /// socket of the same user join — at an address that overlaps it (its own, every IPv4 address, IPv6's every
+    /// address) is refused, `EADDRINUSE`, said by its address; `[::1]` beside its `127.0.0.1` isn't. A UDP bind to
+    /// port 0 isn't given that port either (`supervisor::alone`: the kernel would). A TCP socket bound beside the
+    /// holder's before either listened is refused at its listen, the holder's listening first. A run of the holder's
+    /// own session makes the same binds — the control: the kernel takes them — but the port picked: never a taken one.
+    #[test]
+    fn a_bind_onto_another_sessions_port_is_refused() {
+        let test = "a_bind_onto_another_sessions_port_is_refused";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let (mine, theirs) = (Apart::new("binds-mine"), Apart::new("binds-theirs"));
+        if mine.confine.net == RunNet::Plain || mine.keeper.ns.net {
+            let tier = mine.confine.tier;
+            mine.end();
+            theirs.end();
+            eprintln!("{test}: skipped — tier {tier}: no loopback shared between sessions");
+            return;
+        }
+        // (what a run says next after `helper: `)
+        fn next_said(out: &mut impl io::BufRead) -> String {
+            loop {
+                let mut line = String::new();
+                assert!(out.read_line(&mut line).unwrap() > 0, "the run said nothing more");
+                if let Some((_, s)) = line.split_once("helper: ") {
+                    break s.trim().to_string();
+                }
+            }
+        }
+        let mut hold = theirs.helper("reuses", &[]);
+        let mut out = io::BufReader::new(hold.spawned.stdout.take().unwrap());
+        let held = next_said(&mut out);
+        // Another session's binds — and its `late` one: a TCP socket bound beside the holder's before either
+        // listens (the kernel lists a TCP socket only once it listens: no bind can tell), the holder's listening
+        // first, then this one
+        let (mut late, refused) = mine.helper_told("binds", &[("TARAE_TO", &held), ("TARAE_LATE", "1")]);
+        let mut late_out = io::BufReader::new(late.spawned.stdout.take().unwrap());
+        let bound_late = next_said(&mut late_out);
+        std::fs::write(theirs.root.join("listen"), "").unwrap();
+        let listened = next_said(&mut out);
+        std::fs::write(mine.root.join("go"), "").unwrap();
+        let by_mine = next_said(&mut late_out);
+        io::Read::read_to_end(&mut late.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
+        crate::spawn::wait(late.spawned.pid).unwrap();
+        let refused_mine: Vec<super::super::Denial> = refused.try_iter().collect();
+        let (started, refused) = theirs.helper_told("binds", &[("TARAE_TO", &held)]);
+        let by_theirs = helper_said(started);
+        let refused_theirs: Vec<super::super::Denial> = refused.try_iter().collect();
+        std::fs::write(theirs.root.join("done"), "").unwrap();
+        io::Read::read_to_end(&mut out, &mut Vec::new()).unwrap();
+        io::Read::read_to_end(&mut hold.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
+        crate::spawn::wait(hold.spawned.pid).unwrap();
+        let tier = mine.confine.tier;
+        mine.end();
+        theirs.end();
+        let said = |d: &[super::super::Denial]| d.iter().map(|d| d.reported()).collect::<Vec<String>>();
+        let line = format!(
+            "tier {tier}: held {held}\n  another session's: {bound_late}, then the holder {listened}; {by_mine}\n  \
+             refused: {:#?}\n  its own session's: {by_theirs}\n  refused: {:#?}\n",
+            said(&refused_mine),
+            said(&refused_theirs)
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        let got = |s: &str| -> std::collections::HashMap<String, String> {
+            s.split_whitespace()
+                .filter_map(|w| w.split_once('='))
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect()
+        };
+        let (mine_got, theirs_got) = (got(&by_mine), got(&by_theirs));
+        let v6 = mine_got["v6"] == "true";
+        let in_use = libc::EADDRINUSE.to_string();
+        let mut wrong = Vec::new();
+        for proto in ["tcp", "udp"] {
+            // (what, overlaps the holder's 127.0.0.1, judged)
+            for (what, overlaps, judged) in
+                [("", true, true), ("-any", true, true), ("6-any", true, v6), ("6", false, v6)]
+            {
+                if !judged {
+                    continue;
+                }
+                let key = format!("{proto}{what}");
+                let want_mine = if overlaps { &in_use } else { "ok" };
+                if mine_got[&key] != want_mine {
+                    wrong.push(format!("another session's {key}: {}, not {want_mine}", mine_got[&key]));
+                }
+                if theirs_got[&key] != "ok" {
+                    wrong.push(format!("its own session's {key}: {}, not ok", theirs_got[&key]));
+                }
+            }
+            // (a port picked: never the taken one, whoever's — where the kernel can be made to pick only it)
+            for (whose, got) in [("another session's", &mine_got), ("its own session's", &theirs_got)] {
+                let picked = &got[&format!("{proto}-picked")];
+                if picked != &libc::ENOPROTOOPT.to_string() && picked != &in_use {
+                    wrong.push(format!("{whose} {proto} port 0 given the taken port: {picked}"));
+                }
+            }
+        }
+        // (the late one: bound beside it, the holder listening first — the kernel lets both —, then refused)
+        if (bound_late.as_str(), listened.as_str()) != ("bound-late=ok", "listened=ok") {
+            wrong.push(format!("the late one: {bound_late}, the holder {listened} — nothing tested"));
+        }
+        if mine_got["late"] != in_use {
+            wrong.push(format!("another session's late listen: {}, not {in_use}", mine_got["late"]));
+        }
+        let theirs_at: std::collections::HashMap<&str, &str> =
+            held.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        for proto in ["tcp", "udp", "late"] {
+            let at = format!("local:127.0.0.1:{}", theirs_at[proto]);
+            let refused = |d: &super::super::Denial| {
+                d.op == super::super::SESSION_OP
+                    && d.target == at
+                    && d.plain().contains("is another tarae session's")
+            };
+            if !refused_mine.iter().any(refused) {
+                wrong.push(format!("{proto}: the bind at {at} not said as another session's"));
+            }
+        }
+        if refused_theirs.iter().any(|d| d.op == super::super::SESSION_OP) {
+            wrong.push("its own session's binds said as another's".into());
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
+    }
+
+    /// Step 8: where sessions share this machine's loopback, a UDP socket of one session's connected to a loopback
+    /// port nothing is bound to sends there with plain `send()`, which tarae never serves — so the port is that
+    /// session's to bind, not another's: another session's bind there (at that address, at every address), its port 0
+    /// narrowed to it (`IP_LOCAL_PORT_RANGE`: `supervisor::picked` lets the kernel's pick go and refuses) and a first
+    /// send's bind so narrowed are refused, `EADDRINUSE`, said, and nothing comes in. The control: a run of the
+    /// sender's own session makes the same binds and takes in its datagrams — what the refusal keeps from the other.
+    #[test]
+    fn a_port_another_sessions_udp_socket_sends_to_is_kept_from_a_bind() {
+        let test = "a_port_another_sessions_udp_socket_sends_to_is_kept_from_a_bind";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let opened = |name: &str| {
+            let (mut p, root) = project_policy(name, Vec::new(), &[]);
+            p.localhost = true;
+            Apart::of(name, p, root)
+        };
+        let (mine, theirs) = (opened("aimed-mine"), opened("aimed-theirs"));
+        if mine.confine.net == RunNet::Plain || mine.keeper.ns.net {
+            let tier = mine.confine.tier;
+            mine.end();
+            theirs.end();
+            eprintln!("{test}: skipped — tier {tier}: no loopback shared between sessions");
+            return;
+        }
+        // (a port free, found outside any run: by copies a run's socket closed stays bound in tarae's copy until
+        // collected — a port found so would be taken)
+        let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut aims = theirs.helper("aims", &[("TARAE_PORT", &free.to_string())]);
+        let mut out = io::BufReader::new(aims.spawned.stdout.take().unwrap());
+        let aimed = loop {
+            let mut line = String::new();
+            assert!(io::BufRead::read_line(&mut out, &mut line).unwrap() > 0, "the sender said nothing");
+            if let Some((_, s)) = line.split_once("helper: ") {
+                break s.trim().to_string();
+            }
+        };
+        let binds = |s: &Apart| {
+            let (started, refused) = s.helper_told("bindsat", &[("TARAE_TO", &aimed)]);
+            (helper_said(started), refused.try_iter().collect::<Vec<super::super::Denial>>())
+        };
+        let ((by_mine, refused), (by_theirs, _)) = (binds(&mine), binds(&theirs));
+        std::fs::write(theirs.root.join("done"), "").unwrap();
+        io::Read::read_to_end(&mut out, &mut Vec::new()).unwrap();
+        io::Read::read_to_end(&mut aims.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
+        crate::spawn::wait(aims.spawned.pid).unwrap();
+        let tier = mine.confine.tier;
+        mine.end();
+        theirs.end();
+        let refusals: Vec<String> = refused.iter().map(|d| d.reported()).collect();
+        let line = format!(
+            "tier {tier}: {aimed}\n  another session's: {by_mine}\n  refused: {refusals:#?}\n  its own session's: \
+             {by_theirs}\n"
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        let got = |s: &str| -> std::collections::HashMap<String, String> {
+            s.split_whitespace()
+                .filter_map(|w| w.split_once('='))
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect()
+        };
+        let (mine_got, theirs_got, at) = (got(&by_mine), got(&by_theirs), got(&aimed));
+        assert_eq!(at["connected"], "ok", "the sender connected: {line}");
+        // (port 0 narrowed only where the kernel has `IP_LOCAL_PORT_RANGE`)
+        let narrowed = mine_got["picked"] != libc::ENOPROTOOPT.to_string();
+        let tried: &[&str] = if narrowed { &["named", "any", "picked", "sent"] } else { &["named", "any"] };
+        let in_use = libc::EADDRINUSE.to_string();
+        let mut wrong = Vec::new();
+        for what in tried {
+            if mine_got[*what] != in_use {
+                wrong.push(format!("another session's {what}: {}, not {in_use}", mine_got[*what]));
+            }
+            if mine_got.contains_key(&format!("{what}-got")) {
+                wrong.push(format!("another session's {what} took in the sender's datagrams"));
+            }
+            if theirs_got[*what] != "ok" || !theirs_got.contains_key(&format!("{what}-got")) {
+                wrong.push(format!(
+                    "its own session's {what}: {} — the control didn't take them in",
+                    theirs_got[*what]
+                ));
+            }
+        }
+        let port = format!(":{}", at["aimed"]);
+        let said =
+            refused.iter().filter(|d| d.op == super::super::SESSION_OP && d.target.ends_with(&port)).count();
+        if said < tried.len() {
+            wrong.push(format!("{said} of {} said as another session's", tried.len()));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
+    }
+
+    /// M8.3: what step 8 adds to a served call — a UDP send to an opened loopback port, each one served: the
+    /// lookup of the port's sockets (`supervisor::anothers_at`) and the socket's checks — against the same session
+    /// without it (`supervisor::APART_OFF`), 2 000 sends each, five times; a send that's never served (on a connected
+    /// socket) beside. Where sessions share this machine's loopback.
+    #[test]
+    fn perf_a_served_loopback_send() {
+        if crate::test_results::unoptimized("sandbox::keeper::tests::perf_a_served_loopback_send") {
+            return;
+        }
+        let test = "perf_a_served_loopback_send";
+        if open_rules(test).is_none() {
+            return;
+        }
+        let (mut p, root) = project_policy("sendloop", Vec::new(), &[]);
+        p.localhost = true;
+        let s = Apart::of("sendloop", p, root);
+        if s.confine.net == RunNet::Plain || s.keeper.ns.net {
+            s.end();
+            eprintln!("{test}: skipped — no loopback shared between sessions here");
+            return;
+        }
+        let off = &super::super::supervisor::APART_OFF;
+        let mut said = Vec::new();
+        for round in 0..10 {
+            let without = round % 2 == 1;
+            off.store(if without { s.policy.session } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+            said.push(format!(
+                "{}: {}",
+                if without { "without" } else { "with" },
+                helper_said(s.helper("sendloop", &[]))
+            ));
+        }
+        off.store(0, std::sync::atomic::Ordering::Relaxed);
+        let tier = s.confine.tier;
+        s.end();
+        let line = format!("M8.3, tier {tier}, µs a send — {}\n", said.join(" · "));
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+    }
+
+    /// Step 8: a session's keeper killed unasked (it died), what its runs left running — a listener a build's
+    /// daemon holds, here one ending by tag doesn't reach (these tests' runs carry none tarae knows) — stays that
+    /// session's while it holds its sockets: another session's call to it is refused, said, and nothing comes in;
+    /// once it's gone, so are its rows. Where sessions share this machine's loopback, and the keeper has no PID
+    /// namespace (with one, what it left dies with it).
+    #[test]
+    fn a_dead_keepers_leftover_listener_stays_its_sessions() {
+        leftover_stays_its_sessions("a_dead_keepers_leftover_listener_stays_its_sessions", false);
+    }
+
+    /// Step 8: as `a_dead_keepers_leftover_listener_stays_its_sessions`, the keeper asked to end and killed for not
+    /// ending in time (`ended_by` past its deadline — here one already past, the end asked but never sent: it
+    /// couldn't end what its runs left) — asked, yet what its runs left may outlive it (`State.killed`).
+    #[test]
+    fn a_killed_keepers_leftover_listener_stays_its_sessions() {
+        leftover_stays_its_sessions("a_killed_keepers_leftover_listener_stays_its_sessions", true);
+    }
+
+    /// `a_dead_keepers_leftover_listener_stays_its_sessions`, the keeper killed unasked — or, `overran`, asked to end
+    /// and killed past its deadline.
+    fn leftover_stays_its_sessions(test: &str, overran: bool) {
+        if open_rules(test).is_none() {
+            return;
+        }
+        let tag = if overran { "killed" } else { "dead" };
+        let (mine_name, theirs_name) = (format!("leftover-{tag}-mine"), format!("leftover-{tag}-theirs"));
+        let (mut open, root) = project_policy(&mine_name, Vec::new(), &[]);
+        open.localhost = true;
+        let (mine, theirs) = (Apart::of(&mine_name, open, root), Apart::new(&theirs_name));
+        if mine.confine.net == RunNet::Plain || mine.keeper.ns.net || theirs.keeper.ns.pid {
+            let tier = mine.confine.tier;
+            mine.end();
+            theirs.end();
+            eprintln!(
+                "{test}: skipped — tier {tier}: no loopback shared, or what a keeper leaves dies with it"
+            );
+            return;
+        }
+        let owners = &super::super::owners::OWNERS;
+        let session = theirs.policy.session;
+        let left = helper_said(theirs.helper("leaves", &[]));
+        if overran {
+            // (asked to end, and its time past: `ended_by` kills it — the end never sent, it ended nothing itself)
+            lock(&theirs.keeper.state).ending = true;
+            theirs.keeper.ended_by(Instant::now());
+        } else {
+            // SAFETY: KILL to the test's own keeper, by its pid (still ours: unreaped until `wait_gone`).
+            unsafe { libc::kill(theirs.keeper.pid as i32, libc::SIGKILL) };
+        }
+        assert!(gone_within(&theirs.keeper, Duration::from_secs(5)), "the keeper ended");
+        let rows_dead = owners.of(session);
+        let (tried, refused) = mine.helper_told("sockets", &[("TARAE_TO", &left)]);
+        let tried = helper_said(tried);
+        let refused: Vec<super::super::Denial> = refused.try_iter().collect();
+        std::fs::write(theirs.root.join("done"), "").unwrap();
+        // (its rows go as its sockets do: asked again from 100 ms, doubling)
+        let by = Instant::now() + Duration::from_secs(15);
+        while owners.of(session) > 0 && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let rows_after = owners.of(session);
+        let reached: Vec<String> = std::fs::read_dir(&theirs.root)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_prefix("reached-").map(String::from))
+            .collect();
+        mine.end();
+        theirs.end();
+        let got: std::collections::HashMap<&str, &str> =
+            tried.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let theirs_at: std::collections::HashMap<&str, &str> =
+            left.split_whitespace().filter_map(|w| w.split_once('=')).collect();
+        let refusals: Vec<String> = refused.iter().map(|d| d.reported()).collect();
+        let line = format!(
+            "rows {rows_dead} once the keeper died, {rows_after} once what it left ended; left {left}\n  tried: \
+             {tried}\n  came in: {reached:?}\n  refused: {refusals:#?}\n"
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        assert!(rows_dead >= 2, "what it left isn't its session's: {line}");
+        for what in ["tcp", "udp"] {
+            assert_ne!(got[what], "ok", "{what}: {line}");
+            assert!(!reached.iter().any(|r| r == what), "{what} came in: {line}");
+            let port = format!(":{}", theirs_at[what]);
+            let said = refused.iter().any(|d| d.op == super::super::SESSION_OP && d.target.ends_with(&port));
+            assert!(said, "{what}: refused as another session's, said: {line}");
+        }
+        assert_eq!(rows_after, 0, "{line}");
     }
 
     /// Step 7: two sessions side by side, files — from a run of one into each place a run of the other writes

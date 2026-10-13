@@ -76,7 +76,16 @@ pub enum Serving {
 /// How tarae serves its runs' calls here — or why it can't. Asked once (a worker's: it starts a thread).
 pub fn serving() -> Result<Serving, String> {
     static HOW: std::sync::OnceLock<Result<Serving, String>> = std::sync::OnceLock::new();
-    HOW.get_or_init(probe).clone()
+    HOW.get_or_init(|| {
+        // (a measurement's other way, on a machine that takes a run's sockets: served by copies — and so the
+        // session born without a netns, `tier::probe_with` — as where a filter refuses `pidfd_getfd`; M8.2)
+        #[cfg(test)]
+        if std::env::var_os("TARAE_TEST_COPIES").is_some() && probe().is_ok() {
+            return Ok(Serving::Copies);
+        }
+        probe()
+    })
+    .clone()
 }
 
 /// Why tarae can't serve its runs' calls here — None when it can.
@@ -222,6 +231,9 @@ pub struct Served {
     ptys: Option<Arc<super::ptys::Ptys>>,
     /// Its keeper, below which its processes are (what they hold of its ptys: `ptys::holders`).
     tree: u32,
+    /// That keeper's serial (`Keeper.serial`): what the run's sockets are known by where sessions share a
+    /// loopback (`owners`).
+    keeper: u64,
 }
 
 impl Served {
@@ -254,6 +266,16 @@ impl Served {
     /// Whether tarae made the run's internet sockets, bound to `lo` (tier C: served or by copies).
     fn makes_sockets(&self) -> bool {
         matches!(self.net, RunNet::Served | RunNet::Copied)
+    }
+
+    /// Whether a connect's or a send's work of step 8 is done for this run: where sessions share this machine's
+    /// loopback (`makes_sockets`) — but, in tests, a session measured without it (`APART_OFF`).
+    fn kept_apart(&self) -> bool {
+        #[cfg(test)]
+        if APART_OFF.load(Relaxed) == self.session {
+            return false;
+        }
+        self.makes_sockets()
     }
 
     /// The caller's socket `n` as tarae's own (the same open socket): taken (`pidfd_getfd`) — or, by copies,
@@ -316,6 +338,21 @@ impl Served {
             Some(c) => c.keep(fd).map_err(|e| errno(&e)),
             None => Ok(()),
         }
+    }
+
+    /// An internet socket the run holds — tarae made it, or a call tarae served just bound it or made it listen —
+    /// known as its session's where sessions share this machine's loopback (step 8, `owners`; a bound one again:
+    /// a sweep may have let it go before). Elsewhere (the session's own netns) nothing to know.
+    fn owned(&self, sock: &OwnedFd) {
+        if !self.makes_sockets() {
+            return;
+        }
+        let domain = sockopt(sock, libc::SO_DOMAIN);
+        let (Ok(libc::AF_INET | libc::AF_INET6), Ok(ino), Ok(cookie)) = (domain, inode(sock), cookie(sock))
+        else {
+            return;
+        };
+        super::owners::OWNERS.made((cookie, ino), self.session, self.keeper, super::owners::live);
     }
 }
 
@@ -434,6 +471,10 @@ impl Totals {
     }
 }
 
+/// Tests (M8.3): the session whose connects and sends skip step 8's work (`Served::kept_apart`) — 0: none.
+#[cfg(test)]
+pub static APART_OFF: AtomicU64 = AtomicU64::new(0);
+
 /// Tests (M4): every supervisor's calls so far (`Totals::since` for a span).
 #[cfg(test)]
 pub fn totals() -> Totals {
@@ -445,14 +486,14 @@ pub fn totals() -> Totals {
 /// the run's listener (taken from the run's process: `sandbox::keeper`), then answers that run's calls until no
 /// process of it is left, its refusals out on `refused`. The sender dropped unsent: it ends. `net`: `Served`,
 /// `Routed` or `Copied` (`Served`). `marks`: the session's (6d), where its network takes what goes beyond. `tree`:
-/// its keeper, below which its processes are (by copies: what's read for the sockets they hold, `copies.rs`).
-/// `ptys`: its pool, where its filter hands over the way to a pty's other end (`pty_ioctl`).
+/// its keeper's pid, below which its processes are (by copies: what's read for the sockets they hold, `copies.rs`),
+/// and serial (`owners`). `ptys`: its pool, where its filter hands over the way to a pty's other end (`pty_ioctl`).
 pub fn serve(
     policy: Arc<Policy>,
     net: RunNet,
     refused: std::sync::mpsc::Sender<Denial>,
     marks: Option<Arc<super::marks::Marks>>,
-    tree: u32,
+    tree: (u32, u64),
     ptys: Option<Arc<super::ptys::Ptys>>,
 ) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
@@ -463,6 +504,7 @@ pub fn serve(
         ..policy.egress.clone()
     });
     let run = policy.run_id;
+    let (tree, keeper) = tree;
     let policy = Arc::new(Served {
         policy,
         net,
@@ -476,6 +518,7 @@ pub fn serve(
         copies: (net == RunNet::Copied).then(|| super::copies::Copies::new(tree)),
         ptys,
         tree,
+        keeper,
     });
     if let Some(ptys) = &policy.ptys {
         ptys.watch(tree);
@@ -806,7 +849,7 @@ fn refuse_with(p: &Served, c: &Caller, errno: i32, op: &str, target: String) -> 
 }
 
 /// An integer socket option of `fd`'s.
-fn sockopt(fd: &OwnedFd, name: libc::c_int) -> Result<i32, i32> {
+pub(super) fn sockopt(fd: &OwnedFd, name: libc::c_int) -> Result<i32, i32> {
     opt(fd, libc::SOL_SOCKET, name)
 }
 
@@ -835,7 +878,245 @@ fn routed(p: &Served, c: &Caller, to: SocketAddr, kind: i32) -> Route {
         true => session_listens_at(c, to, kind),
         false => session_listens(c, to.port(), kind),
     };
-    super::route::route(to, p.netns(), &p.reach(kind), listens, |ip| p.mine(ip))
+    let route = super::route::route(to, p.netns(), &p.reach(kind), listens, |ip| p.mine(ip));
+    // (step 8: where sessions share this machine's loopback, never to another session's socket)
+    // (asked only where sessions share this machine's loopback: there's no netns of the session's own)
+    super::route::kept_apart(route, !p.kept_apart(), || anothers_at(p, to, kind))
+}
+
+/// Whether a call to `to` on a socket of `kind` would land on another session's socket here (step 8, `owners`): the
+/// sockets on its port as the kernel lists them (`owners::diag`) — where it can't, tarae's whole tables
+/// (`/proc/net`: slower, the same answer but `IPV6_V6ONLY`, which there errs to refusing). Neither readable: Err —
+/// whose it is can't be told (`told`), refused as `Refusal::Untold`.
+fn anothers_at(p: &Served, to: SocketAddr, kind: i32) -> Result<bool, String> {
+    let tcp = kind == libc::SOCK_STREAM;
+    let listed = || super::owners::diag::on_port(tcp, to.port());
+    anothers_by(&super::owners::OWNERS, to, (tcp, p.session), listed, proc_net)
+}
+
+/// `anothers_at` by `owners`, the port's sockets from `listed`, else `table` (tests: each way it falls back).
+fn anothers_by(
+    owners: &super::owners::Owners,
+    to: SocketAddr,
+    (tcp, session): (bool, u64),
+    listed: impl FnOnce() -> io::Result<Vec<super::owners::Row>>,
+    table: impl Fn(&str) -> io::Result<String>,
+) -> Result<bool, String> {
+    told(owners.another_at(to, (tcp, session), listed, table), to.port())
+}
+
+/// Whether a bind or a listen of the caller's at local `at` (`IPV6_V6ONLY` beside it; a socket of `kind`) would join
+/// another session's socket on an address that overlaps it (step 8, `owners::Owners::another_on`): a
+/// `SO_REUSEPORT` group, an address beside its `SO_REUSEADDR` one — refused, as the kernel refuses a port taken.
+/// Err: can't be told (`told`).
+fn joins_another(p: &Served, at: (SocketAddr, bool), kind: i32) -> Result<bool, String> {
+    let tcp = kind == libc::SOCK_STREAM;
+    let listed = || super::owners::diag::bound_on(tcp, at.0.port());
+    let answer = super::owners::OWNERS.another_on(at, (tcp, p.session), listed, proc_net);
+    told(answer, at.0.port())
+}
+
+/// A bind or a listen of the caller's at `at` (with its `IPV6_V6ONLY`), as `joins_another` answers it: onto another
+/// session's socket — refused, `EADDRINUSE`, said by its port (`SESSION_OP`); whose can't be told — refused, said so
+/// (`UNTOLD_OP`).
+fn refuse_joining(p: &Served, c: &Caller, at: (SocketAddr, bool), kind: i32) -> Result<(), i32> {
+    let target = format!("local:{}", at.0);
+    match joins_another(p, at, kind) {
+        Ok(false) => Ok(()),
+        Ok(true) => refuse_with(p, c, libc::EADDRINUSE, super::SESSION_OP, target).map(drop),
+        Err(_) => refuse_with(p, c, libc::EADDRINUSE, super::UNTOLD_OP, target).map(drop),
+    }
+}
+
+/// The local address a bind of `addr` on internet socket `sock` asks for — an IPv4 socket's `AF_UNSPEC` too, which
+/// the kernel takes as every address at the port it names (`inet_bind`'s compatibility rule); None: no internet
+/// address (a unix or netlink socket's, or one the kernel refuses).
+fn asked_at(sock: &OwnedFd, addr: &[u8]) -> Result<Option<SocketAddr>, i32> {
+    Ok(match (sockopt(sock, libc::SO_DOMAIN)?, parse(addr)) {
+        (libc::AF_INET | libc::AF_INET6, Ok(Addr::Ip(a))) => Some(a),
+        (libc::AF_INET, Ok(Addr::Unspec)) if addr.len() >= 4 => {
+            Some(SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, u16::from_be_bytes([addr[2], addr[3]]))))
+        }
+        _ => None,
+    })
+}
+
+/// An IPv6 socket's `IPV6_V6ONLY` (an IPv4 one's: false).
+fn v6only(sock: &OwnedFd) -> Result<bool, i32> {
+    match sockopt(sock, libc::SO_DOMAIN)? {
+        libc::AF_INET6 => Ok(opt(sock, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY)? != 0),
+        _ => Ok(false),
+    }
+}
+
+/// `bind` — the kernel picking a UDP socket's port — run with the socket's `SO_REUSEADDR` and `SO_REUSEPORT` off,
+/// each put back after (step 8). With either on, the port the kernel picks may be one another socket holds with
+/// them too (`udp_lib_lport_inuse` leaves such a port free) — another session's, whose datagrams it would then take:
+/// pinned by `owners::tests::a_port_the_kernel_picks_is_another_sockets_only_for_udp_reusing`. With both off it
+/// picks one no socket has. (TCP never shares a port it picks: `inet_csk_find_open_port`.) Where they can't be
+/// turned off the bind isn't made: `refused` says why (a denial in the run's report) and answers the call; the log too.
+pub(super) fn alone(
+    sock: &OwnedFd,
+    bind: impl FnOnce() -> Answer,
+    refused: impl FnOnce(String) -> Answer,
+) -> Answer {
+    let set = |o: libc::c_int, v: i32| {
+        // SAFETY: an int and its size, live for the call, on the caller's socket (ours through `pidfd_getfd`).
+        let size = std::mem::size_of::<i32>() as libc::socklen_t;
+        match unsafe { libc::setsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, o, (&raw const v).cast(), size) }
+        {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    };
+    alone_with(|o| sockopt(sock, o).unwrap_or(0), set, bind, refused)
+}
+
+/// `alone`, the socket's options read by `get` and set by `set` (tests: one that can't be set).
+fn alone_with(
+    get: impl Fn(libc::c_int) -> i32,
+    set: impl Fn(libc::c_int, i32) -> io::Result<()>,
+    bind: impl FnOnce() -> Answer,
+    refused: impl FnOnce(String) -> Answer,
+) -> Answer {
+    let on: Vec<libc::c_int> =
+        [libc::SO_REUSEADDR, libc::SO_REUSEPORT].into_iter().filter(|o| get(*o) != 0).collect();
+    if on.is_empty() {
+        return bind();
+    }
+    if let Some(e) = on.iter().find_map(|o| set(*o, 0).err()) {
+        for o in &on {
+            let _ = set(*o, 1);
+        }
+        let why = format!(
+            "a UDP socket's SO_REUSEADDR/SO_REUSEPORT couldn't be turned off for the port the kernel picks ({e}): \
+             not bound — it could have been given another session's port"
+        );
+        crate::log::line("sandbox", "warn", &why);
+        return refused(why);
+    }
+    let r = bind();
+    for o in on {
+        if let Err(e) = set(o, 1) {
+            crate::log::line(
+                "sandbox",
+                "warn",
+                &format!("a socket's option {o} not put back after its bind: {e}"),
+            );
+        }
+    }
+    r
+}
+
+/// `bind` — and, by copies, again where its port was taken: that may be a closed socket's copy, kept until collected
+/// (collected now, tried again: `Copies::bind_again`) — a port named, or the only one the kernel may pick.
+fn copied_again(p: &Served, bind: impl Fn() -> Answer) -> Answer {
+    let r = bind();
+    match (&r, &p.copies) {
+        (Err(libc::EADDRINUSE), Some(copies)) => {
+            copies.bind_again(bind, |e| *e == libc::EADDRINUSE).unwrap_or(r)
+        }
+        _ => r,
+    }
+}
+
+/// How many ports the kernel is asked for at most (`picked`) before a UDP bind to port 0 is refused.
+const PICKS: usize = 4;
+
+/// `bind` (`alone`) giving the caller's UDP socket `sock` a port the kernel picks, where sessions share this
+/// machine's loopback (step 8): a port that a UDP socket of another session's is connected to — its plain sends,
+/// which tarae never serves, would come here — is let go again (a disconnect unbinds a socket bound to port 0:
+/// `udp_disconnect`) and another asked for, `PICKS` times at most; then refused, said, as a port taken
+/// (`EADDRINUSE`). The kernel picks at random over the ephemeral range, so only a socket that narrowed it
+/// (`IP_LOCAL_PORT_RANGE`) or a full range is refused.
+fn picked(p: &Served, c: &Caller, sock: &OwnedFd, bind: impl Fn() -> Answer) -> Answer {
+    if !p.makes_sockets() {
+        return bind();
+    }
+    let mut last = None;
+    for _ in 0..PICKS {
+        let r = bind()?;
+        let Some(at) = local_addr(sock) else { return Ok(r) };
+        match joins_another(p, (at, v6only(sock)?), libc::SOCK_DGRAM) {
+            Ok(false) => return Ok(r),
+            Ok(true) => unbind(sock)?,
+            // (whose can't be told: no other port would be told either)
+            Err(_) => {
+                unbind(sock)?;
+                return refuse_with(p, c, libc::EADDRINUSE, super::UNTOLD_OP, format!("local:{at}"));
+            }
+        }
+        last = Some(at);
+    }
+    let at = last.map_or_else(String::new, |a| format!("local:{a}"));
+    refuse_with(p, c, libc::EADDRINUSE, super::SESSION_OP, at)
+}
+
+/// A UDP socket bound to port 0 let go of its port (`connect` to `AF_UNSPEC`: `udp_disconnect` unhashes one whose
+/// port wasn't named), to be bound again.
+fn unbind(sock: &OwnedFd) -> Result<(), i32> {
+    // SAFETY: an all-zero sockaddr is valid; its family set, the size its own, live for the call.
+    let r = unsafe {
+        let mut a: libc::sockaddr = std::mem::zeroed();
+        a.sa_family = libc::AF_UNSPEC as libc::sa_family_t;
+        libc::connect(
+            sock.as_raw_fd(),
+            &raw const a,
+            std::mem::size_of::<libc::sockaddr>() as libc::socklen_t,
+        )
+    };
+    result(r as isize).map(drop)
+}
+
+/// Where sessions share this machine's loopback, a UDP socket still unbound that a connect or a send of the caller's
+/// is about to bind (the kernel binds it to every address, at a port of its picking: `inet_autobind`) bound so here
+/// first — `alone` and `picked`, as a bind to port 0 is (step 8) —, and known as one the run never bound
+/// (`any_port`).
+fn bound_alone(p: &Served, c: &Caller, sock: &OwnedFd) -> Result<(), i32> {
+    if !p.kept_apart() || local_addr(sock).is_some() {
+        return Ok(());
+    }
+    let every = match sockopt(sock, libc::SO_DOMAIN)? {
+        libc::AF_INET => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+        libc::AF_INET6 => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+        _ => return Ok(()),
+    };
+    let (a, len) = super::proxy::raw_addr(every);
+    // SAFETY: the socket and an address of ours, live for the call.
+    let bind = || result(unsafe { libc::bind(sock.as_raw_fd(), (&raw const a).cast(), len) } as isize);
+    let unturned = |why| refuse_with(p, c, libc::EADDRINUSE, "network-bind", why);
+    match picked(p, c, sock, || copied_again(p, || alone(sock, bind, unturned))) {
+        // (one bound meanwhile — another thread's call — is as bound as this would have made it)
+        Ok(_) | Err(libc::EINVAL) => {}
+        Err(e) => return Err(e),
+    }
+    p.any_port.lock().unwrap_or_else(|e| e.into_inner()).insert(inode(sock)?);
+    Ok(())
+}
+
+/// One of tarae's `/proc/net` tables, by name.
+fn proc_net(table: &str) -> io::Result<String> {
+    std::fs::read_to_string(format!("/proc/thread-self/net/{table}"))
+}
+
+/// An answer of `owners`' — neither the kernel's list nor tarae's tables read (Err): whose the socket on `port` is
+/// can't be told, which the caller refuses as such (`UNTOLD_OP`), why said in the log.
+fn told(answer: Result<bool, String>, port: u16) -> Result<bool, String> {
+    answer.inspect_err(|why| crate::log::line("sandbox", "warn", &format!("{why}: port {port} refused")))
+}
+
+/// The local address `sock` is bound to — None: unbound (port 0), or not an internet socket.
+fn local_addr(sock: &OwnedFd) -> Option<SocketAddr> {
+    let mut me = [0u8; std::mem::size_of::<libc::sockaddr_storage>()];
+    let mut len = me.len() as libc::socklen_t;
+    // SAFETY: a sockaddr buffer and its length for the call to fill.
+    if unsafe { libc::getsockname(sock.as_raw_fd(), me.as_mut_ptr().cast(), &mut len) } != 0 {
+        return None;
+    }
+    match parse(&me[..(len as usize).min(me.len())]) {
+        Ok(Addr::Ip(a)) if a.port() != 0 => Some(a),
+        _ => None,
+    }
 }
 
 /// Whether the session has a server at `to` itself (6e, port 53): a TCP listener (`kind` stream) or a bound UDP socket
@@ -931,6 +1212,19 @@ fn inode(fd: &OwnedFd) -> Result<u64, i32> {
     }
     // SAFETY: filled by the successful fstat above.
     Ok(unsafe { st.assume_init() }.st_ino)
+}
+
+/// A socket's cookie (`SO_COOKIE`: 64-bit, never reused) — what it's known by in `owners`.
+fn cookie(fd: &OwnedFd) -> Result<u64, i32> {
+    let (mut v, mut len) = (0u64, std::mem::size_of::<u64>() as libc::socklen_t);
+    // SAFETY: a u64 and its length, live for the call.
+    let r = unsafe {
+        libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_COOKIE, (&raw mut v).cast(), &mut len)
+    };
+    if r < 0 {
+        return Err(errno(&io::Error::last_os_error()));
+    }
+    Ok(v)
 }
 
 /// The options a swap carries from the run's socket to tarae's, read back from the one and set on the other
@@ -1115,6 +1409,7 @@ fn swapped_for(
     // the session's own, in tarae's namespace
     let new_ino = inode(&new)?;
     p.keep(&new)?;
+    p.owned(&new);
     let old = {
         let mut swapped = p.swapped.lock().unwrap_or_else(|e| e.into_inner());
         swapped.insert(new_ino, route);
@@ -1170,6 +1465,13 @@ fn routed_socket(
             refuse(p, c, "network-outbound", format!("remote:{to}")).map(|_| sock)
         }
         Route::Refused(Refusal::Never) => refuse(p, c, "network-never", format!("remote:{to}")).map(|_| sock),
+        // (as where the session's own loopback has nothing there: refused — the report says whose it is)
+        Route::Refused(Refusal::Another) => {
+            refuse_with(p, c, libc::ECONNREFUSED, super::SESSION_OP, format!("remote:{to}")).map(|_| sock)
+        }
+        Route::Refused(Refusal::Untold) => {
+            refuse_with(p, c, libc::ECONNREFUSED, super::UNTOLD_OP, format!("remote:{to}")).map(|_| sock)
+        }
         Route::Refused(Refusal::Direct) => {
             let resolver =
                 |r: &SocketAddr| r.ip().to_canonical() == to.ip().to_canonical() && r.port() == to.port();
@@ -1384,6 +1686,7 @@ fn socket(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
         result(r as isize)?;
     }
     p.keep(&fd)?;
+    p.owned(&fd);
     l.add_fd(n.id, &fd, None, flags & libc::SOCK_CLOEXEC != 0).map_err(|e| errno(&e))
 }
 
@@ -1703,18 +2006,36 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
         (libc::AF_NETLINK, _) => (addr, None),
         _ => return Err(libc::EPERM),
     };
-    // SAFETY: the socket and an address of ours, live for the call.
-    let bound = || unsafe { libc::bind(sock.as_raw_fd(), to.as_ptr().cast(), to.len() as libc::socklen_t) };
-    let mut r = result(bound() as isize);
-    // (by copies: a port taken may be a closed socket's copy, kept until collected — collected now, tried again)
-    if r == Err(libc::EADDRINUSE)
-        && let Some(copies) = &p.copies
-        && let Some(again) = copies.bind_again(|| result(bound() as isize), |e| *e == libc::EADDRINUSE)
+    // (step 8: where sessions share this machine's loopback, never onto another session's port — one named, checked
+    // here; one the kernel picks, picked as no one's: `alone`)
+    let kind = sockopt(&sock, libc::SO_TYPE)?;
+    let asked = match p.makes_sockets() {
+        true => asked_at(&sock, &to)?,
+        false => None,
+    };
+    if let Some(at) = asked
+        && at.port() != 0
     {
-        r = again;
+        refuse_joining(p, &c, (at, v6only(&sock)?), kind)?;
     }
+    // SAFETY: the socket and an address of ours, live for the call.
+    let bound = || {
+        result(
+            unsafe { libc::bind(sock.as_raw_fd(), to.as_ptr().cast(), to.len() as libc::socklen_t) } as isize
+        )
+    };
+    let r = match asked {
+        Some(at) if at.port() == 0 && kind == libc::SOCK_DGRAM => {
+            let unturned = |why| refuse_with(p, &c, libc::EADDRINUSE, "network-bind", why);
+            picked(p, &c, &sock, || copied_again(p, || alone(&sock, bound, unturned)))
+        }
+        _ => copied_again(p, bound),
+    };
     if r.is_ok() && matches!(parse(&to), Ok(Addr::Ip(a)) if a.ip().is_unspecified() && a.port() == 0) {
         p.any_port.lock().unwrap_or_else(|e| e.into_inner()).insert(inode(&sock)?);
+    }
+    if r.is_ok() {
+        p.owned(&sock);
     }
     r
 }
@@ -1738,8 +2059,20 @@ fn listen(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     if p.netns() && !in_session(&c, &sock) {
         return refuse(p, &c, "network-bind", "a socket from outside the session".into());
     }
+    // (step 8: a TCP socket bound beside another session's before either listened joins it here — the kernel lists
+    // a bound one only once it listens, so the bind couldn't tell)
+    if p.makes_sockets()
+        && let Some(at) = local_addr(&sock)
+    {
+        refuse_joining(p, &c, (at, v6only(&sock)?), sockopt(&sock, libc::SO_TYPE)?)?;
+    }
     // SAFETY: plain call on the caller's socket, ours through `pidfd_getfd`.
-    result(unsafe { libc::listen(sock.as_raw_fd(), n.data.args[1] as i32) } as isize)
+    let r = result(unsafe { libc::listen(sock.as_raw_fd(), n.data.args[1] as i32) } as isize);
+    // (an unbound one bound itself here)
+    if r.is_ok() {
+        p.owned(&sock);
+    }
+    r
 }
 
 /// Where a connect or a send naming `addr` (read once) goes, from the caller's descriptor `fd` (`sock`): the
@@ -1755,11 +2088,24 @@ fn destination(
     (fd, sock): (u64, OwnedFd),
     addr: Vec<u8>,
 ) -> Result<(OwnedFd, Vec<u8>, Option<OwnedFd>), i32> {
-    match (sockopt(&sock, libc::SO_DOMAIN)?, parse(&addr)?) {
+    let domain = sockopt(&sock, libc::SO_DOMAIN)?;
+    // (where sessions share a loopback: a socket still unbound binds itself on this call — a UDP socket's first send
+    // or connect, a disconnect's after — so it's touched here, a row again if a sweep took it: `owners`. One bound is
+    // in the kernel's list, which a sweep keeps: nothing to touch)
+    let inet = matches!(domain, libc::AF_INET | libc::AF_INET6);
+    if inet && p.kept_apart() && local_addr(&sock).is_none() {
+        p.owned(&sock);
+    }
+    match (domain, parse(&addr)?) {
         (libc::AF_INET | libc::AF_INET6, Addr::Unspec) => Ok((sock, addr, None)),
         (libc::AF_INET | libc::AF_INET6, Addr::Ip(a)) => {
-            let route = routed(p, c, a, sockopt(&sock, libc::SO_TYPE)?);
-            Ok((routed_socket(l, n, p, c, (fd, sock), route, a)?, addr, None))
+            let kind = sockopt(&sock, libc::SO_TYPE)?;
+            let route = routed(p, c, a, kind);
+            let on = routed_socket(l, n, p, c, (fd, sock), route, a)?;
+            if kind == libc::SOCK_DGRAM {
+                bound_alone(p, c, &on)?;
+            }
+            Ok((on, addr, None))
         }
         (libc::AF_INET | libc::AF_INET6, _) => Err(libc::EAFNOSUPPORT),
         (libc::AF_UNIX, Addr::Path(named)) => {
@@ -2049,6 +2395,75 @@ fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Step 8: a call's lookup where the kernel's list of a port's sockets can't be had falls back to tarae's
+    /// `/proc/net` tables — another session's listener (this test's, known by its inode only, as those tables name
+    /// it) found there, its own session's not —; and where neither can be read whose the socket is can't be told —
+    /// an Err, refused as such (`Refusal::Untold`), its own session's too, never said to be another session's.
+    #[test]
+    fn a_lookup_falls_back_to_the_tables_then_refuses() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let to = l.local_addr().unwrap();
+        let fd = OwnedFd::from(l.try_clone().unwrap());
+        let owners = super::super::owners::Owners::with_cap(super::super::owners::KEPT);
+        owners.made((cookie(&fd).unwrap(), inode(&fd).unwrap()), 7, 1, || None);
+        let unlisted = || Err(io::Error::other("no sock_diag here"));
+        let unread = |_: &str| Err(io::Error::other("no /proc/net here"));
+        assert_eq!(
+            anothers_by(&owners, to, (true, 8), unlisted, proc_net),
+            Ok(true),
+            "another's, by the tables"
+        );
+        assert_eq!(
+            anothers_by(&owners, to, (true, 7), unlisted, proc_net),
+            Ok(false),
+            "its own, by the tables"
+        );
+        let neither = anothers_by(&owners, to, (true, 7), unlisted, unread);
+        assert!(
+            neither.as_ref().is_err_and(|e| e.contains("no /proc/net here")),
+            "neither read: {neither:?}"
+        );
+    }
+
+    /// A UDP socket's reuse options are off while the kernel picks its port and back after; where they can't be
+    /// turned off the bind isn't made — what's refused says why (the report) — and what was turned off is turned
+    /// back on.
+    #[test]
+    fn a_bind_whose_reuse_options_cant_be_turned_off_is_refused_and_said() {
+        let opts = std::cell::RefCell::new(std::collections::HashMap::from([
+            (libc::SO_REUSEADDR, 1),
+            (libc::SO_REUSEPORT, 1),
+        ]));
+        let get = |o| opts.borrow()[&o];
+        let set = |o, v| {
+            opts.borrow_mut().insert(o, v);
+            Ok(())
+        };
+        let bound_with = std::cell::Cell::new(None);
+        let bind = || {
+            bound_with.set(Some((get(libc::SO_REUSEADDR), get(libc::SO_REUSEPORT))));
+            Ok(0)
+        };
+        assert_eq!(alone_with(get, set, bind, |_| panic!("not refused")), Ok(0));
+        assert_eq!(bound_with.get(), Some((0, 0)), "bound with both off");
+        assert_eq!((get(libc::SO_REUSEADDR), get(libc::SO_REUSEPORT)), (1, 1), "both back after");
+        // (SO_REUSEPORT can't be turned off)
+        bound_with.set(None);
+        let stuck = |o, v| match (o, v) {
+            (libc::SO_REUSEPORT, 0) => Err(io::Error::from_raw_os_error(libc::EPERM)),
+            _ => set(o, v),
+        };
+        let said = std::cell::RefCell::new(String::new());
+        let refused = |why: String| {
+            *said.borrow_mut() = why;
+            Err(libc::EADDRINUSE)
+        };
+        assert_eq!(alone_with(get, stuck, bind, refused), Err(libc::EADDRINUSE));
+        assert_eq!(bound_with.get(), None, "not bound");
+        assert!(said.borrow().contains("couldn't be turned off"), "said: {}", said.borrow());
+        assert_eq!((get(libc::SO_REUSEADDR), get(libc::SO_REUSEPORT)), (1, 1), "turned back on");
+    }
 
     /// The probe (6f′): a listener and `pidfd_getfd` working → served on taken descriptors; `pidfd_getfd` refused
     /// (Docker's default filter) → served by copies, not "can't serve"; no listener (inside another supervisor's

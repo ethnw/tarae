@@ -351,6 +351,21 @@ fn the_report_is_pinned() {
     let both = Guard::In(Box::new(Policy { watch: Some(seen), ..p.clone() }));
     out.push_str("══ denied, and said in the output\n");
     out.push_str(&both.report(&output));
+    // (Linux, step 8: where sessions share this machine's loopback, another session's listener on a port the policy
+    // opens, and a bind joining another session's port — a supervised policy's: macOS's reaches either)
+    let theirs = Watch::quiet("golden-theirs.");
+    for (process, op, target) in [
+        ("node", SESSION_OP, "remote:127.0.0.1:5173"),
+        ("vite", SESSION_OP, "local:0.0.0.0:5173"),
+        // (whose a port is couldn't be told: refused, never said to be another session's)
+        ("curl", UNTOLD_OP, "remote:127.0.0.1:8080"),
+    ] {
+        theirs.record(Denial { process: process.into(), op: op.into(), target: target.into() });
+    }
+    let apart =
+        Guard::In(Box::new(Policy { watch: Some(theirs), ports: vec![5173], supervised: true, ..p.clone() }));
+    out.push_str("\n══ another session's port\n");
+    out.push_str(&apart.report(&[]));
     out.push_str("\n══ denied nothing\n");
     let calm = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("golden-calm.")), ..p }));
     out.push_str(&calm.report(&[]));

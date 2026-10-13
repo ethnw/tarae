@@ -1838,7 +1838,7 @@ pub fn pair(
 
 /// `a` as the kernel takes it.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn raw_addr(a: std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+pub(super) fn raw_addr(a: std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     // SAFETY: an all-zero sockaddr_storage is valid; each arm writes the family's own struct, which fits in it.
     unsafe {
         let mut ss: libc::sockaddr_storage = std::mem::zeroed();
