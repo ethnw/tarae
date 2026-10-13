@@ -412,7 +412,7 @@ impl Editor {
         if items.is_empty() {
             return self.set_status("nothing waits for you — no card, no edit, in any session");
         }
-        let p = crate::picker::Picker::new(INBOX, items, false).without_preview();
+        let p = crate::picker::Picker::of("inbox", INBOX, items, false).without_preview();
         self.open_picker(p, None);
     }
 

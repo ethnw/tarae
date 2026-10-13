@@ -1152,7 +1152,7 @@ impl Editor {
     /// `L` in the git tab — the log (500 commits), each commit's diff as the preview; Enter opens it in a buffer.
     pub fn git_log_picker(&mut self) {
         let cwd = self.git_cwd();
-        let picker = crate::picker::Picker::new("log", Vec::new(), false);
+        let picker = crate::picker::Picker::of("log", "log", Vec::new(), false);
         self.open_picker(
             picker,
             Some(Box::new(move || {
@@ -1204,7 +1204,7 @@ impl Editor {
     /// another worktree says where.
     pub fn git_branch_picker(&mut self) {
         let cwd = self.git_cwd();
-        let picker = crate::picker::Picker::new("branches", Vec::new(), false)
+        let picker = crate::picker::Picker::of("branches", "branches", Vec::new(), false)
             .without_preview()
             .making("branch", "git-branch-new");
         self.open_picker(

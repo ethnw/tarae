@@ -98,7 +98,7 @@ pub fn picker(ed: &mut Editor) {
         })
         .collect();
     // A small card over the code, on the one in use (nothing to preview)
-    let mut p = crate::picker::Picker::new("model", items, false).without_preview();
+    let mut p = crate::picker::Picker::of("model", "model", items, false).without_preview();
     p.compact = true;
     p.selected = at;
     ed.open_picker(p, None);
@@ -136,7 +136,7 @@ pub fn effort_picker(ed: &mut Editor) {
         glyph: Some(if *l == now { ("●", "ui.accent") } else { ("◦", "ui.virtual") }),
         action: Action::Typed(format!("effort {l}")),
     }));
-    let mut p = crate::picker::Picker::new("effort", items, false).without_preview();
+    let mut p = crate::picker::Picker::of("effort", "effort", items, false).without_preview();
     p.compact = true;
     p.selected = if now.is_empty() { 0 } else { levels.iter().position(|l| *l == now).map_or(0, |i| i + 1) };
     ed.open_picker(p, None);

@@ -34,6 +34,9 @@ You don't need to know the keys to start:
   wheel moves the selection and a click opens. (Your terminal's own text selection is usually shift+drag.)
 - **Key hints** — while a completion, a picker or a docs window is open, the keys that operate it show dimmed on the
   status line, right after the mode pill
+- **What you use** — with `features.count` on in your config, `:features` shows which commands, cards, panels,
+  pickers and Claude tools you use and which you never do; counted on this machine only, never sent
+  ([feature counts](feature-counts.md))
 
 ## Editing
 

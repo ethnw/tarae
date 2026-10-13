@@ -285,6 +285,14 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::usage::open(editor);
             Ok(())
         }
+        "features" => {
+            editor.features_open();
+            Ok(())
+        }
+        "features-reset" => {
+            editor.features_reset();
+            Ok(())
+        }
         "log-open" => {
             let path = crate::log::path().ok_or("no state directory for the log")?;
             if !path.exists() {

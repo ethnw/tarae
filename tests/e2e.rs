@@ -958,6 +958,42 @@ fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
     assert!((3..=13).contains(&n), "{n} frames a second after focus came back");
 }
 
+/// Counting which features get used (`features.count` on, `features.rs`) wakes nothing: after keys counted,
+/// an idle tarae draws nothing and sleeps — what's counted is written once it ends, not on a timer of its own;
+/// `tarae state --features` has them meanwhile.
+#[test]
+fn counting_features_wakes_nothing_and_is_written_at_the_end() {
+    let sb = Sandbox::new("features");
+    sb.write_config(&format!("{BASE_CONFIG}\n[features]\ncount = true\n"));
+    sb.write("a.txt", "one\ntwo\nthree\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("three");
+    t.send("jj");
+    t.wait_state("two keys handled", |s| s["input"].as_u64().is_some_and(|n| n >= 2));
+    // Settled (a second with no frame), then two seconds: no frame, next to no wakes
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let frames = t.frames();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if t.frames() == frames || std::time::Instant::now() > end {
+            break;
+        }
+    }
+    let (frames, before) = (t.frames(), t.usage());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (drawn, used) = (t.frames() - frames, t.usage() - before);
+    assert!(drawn == 0 && used.switches < 30, "counting: {drawn} frames, {used:?} in 2 s");
+    let path = sb.state().join("features.json");
+    assert!(!path.exists(), "nothing written yet — no timer of its own");
+    let said: serde_json::Value = serde_json::from_str(&t.state(&["--features", "--json"])).unwrap();
+    let row = said["features"].as_array().unwrap().iter().find(|r| r["uses"] == 2).cloned();
+    assert!(row.is_some_and(|r| r["area"] == "command" && r["key"] == "j"), "{said}");
+    t.command("q");
+    assert_eq!(t.wait_exit().code(), Some(0));
+    let saved = fs::read_to_string(&path).expect("written as it ended");
+    assert!(saved.contains(":[2,"), "{saved}");
+}
+
 /// `space f` in the real binary: the tree picker's first frame (the list still coming from its worker —
 /// no rows yet) draws, then the files show; a query nothing matches draws too.
 /// An idle tarae sleeps — a file open in a git repository, then the side panel, the git tab, the terminal,

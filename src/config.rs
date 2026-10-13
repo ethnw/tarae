@@ -81,6 +81,8 @@ pub struct EditorConfig {
     pub scrollbar: bool,
     /// Where sessions' checkouts go ("" = `$XDG_DATA_HOME/tarae/worktrees`; `worktree.rs`).
     pub session_worktrees: String,
+    /// Count which features get used, on this machine only (`features.rs`) — only your own config turns it on.
+    pub features_count: bool,
     /// A command (its words) run once a session's checkout is removed (empty = none; `ended.rs`).
     pub session_ended: Vec<String>,
     pub theme: String,
@@ -138,6 +140,7 @@ impl Default for EditorConfig {
             offer_installs: true,
             scrollbar: true,
             session_worktrees: String::new(),
+            features_count: false,
             session_ended: Vec::new(),
             theme: "default".into(),
             llm: LlmConfig::default(),

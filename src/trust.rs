@@ -53,10 +53,10 @@ pub const RISKY: [&str; 21] = [
 ];
 
 /// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
-/// trusted or not (said): they decide whose credentials Claude uses and who pays, and what Claude's chat edits
-/// with (`llm.edit-tools`) — a project never does.
-pub const YOURS_ONLY: [&str; 4] =
-    ["llm.environment-key", "llm.billing", "llm.reviewer-billing", "llm.edit-tools"];
+/// trusted or not (said): they decide whose credentials Claude uses and who pays, what Claude's chat edits
+/// with (`llm.edit-tools`), and whether what you use is counted (`features.count`) — a project never does.
+pub const YOURS_ONLY: [&str; 5] =
+    ["llm.environment-key", "llm.billing", "llm.reviewer-billing", "llm.edit-tools", "features.count"];
 
 pub fn yours_only(setting: &str) -> bool {
     YOURS_ONLY.contains(&setting)

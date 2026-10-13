@@ -1825,7 +1825,7 @@ fn file_picker(cx: &mut Context) {
         .as_deref()
         .and_then(|p| p.strip_prefix(&root).ok())
         .map(|r| r.to_string_lossy().replace('\\', "/"));
-    let picker = crate::picker::Picker::new(title, Vec::new(), true).with_tree(root.clone(), reveal);
+    let picker = crate::picker::Picker::of("files", title, Vec::new(), true).with_tree(root.clone(), reveal);
     cx.editor.open_picker(picker, Some(Box::new(move || Ok(crate::picker::file_items(&root)))));
 }
 
@@ -1885,7 +1885,8 @@ fn command_palette(cx: &mut Context) {
     }
     // Bound commands first (the frequently used ones), then by name
     crate::sorting::by(&mut items, |a, b| (a.hint.is_empty(), &a.label).cmp(&(b.hint.is_empty(), &b.label)));
-    cx.editor.open_picker(crate::picker::Picker::new("commands", items, false).without_preview(), None);
+    cx.editor
+        .open_picker(crate::picker::Picker::of("commands", "commands", items, false).without_preview(), None);
 }
 
 /// Theme picker: small window at top center — the code behind previews the highlighted theme live
@@ -1923,7 +1924,7 @@ fn open_theme_picker(ed: &mut Editor, names: &[String], current: &str) {
             glyph: None,
         })
         .collect();
-    let mut p = crate::picker::Picker::new("themes", items, false).without_preview();
+    let mut p = crate::picker::Picker::of("themes", "themes", items, false).without_preview();
     p.compact = true;
     p.selected = names.iter().position(|n| n == current).unwrap_or(0);
     ed.open_picker(p, None);
@@ -2145,7 +2146,7 @@ fn dap_unwatch(cx: &mut Context) {
                 hint: String::new(),
                 glyph: None,
             });
-            let picker = crate::picker::Picker::new("remove watch", items, false).without_preview();
+            let picker = crate::picker::Picker::of("watches", "remove watch", items, false).without_preview();
             cx.editor.open_picker(picker, None);
         }
     }
@@ -2250,7 +2251,7 @@ fn buffer_picker(cx: &mut Context) {
             glyph: None,
         })
         .collect();
-    cx.editor.open_picker(crate::picker::Picker::new(crate::picker::BUFFERS, items, true), None);
+    cx.editor.open_picker(crate::picker::Picker::of("buffers", crate::picker::BUFFERS, items, true), None);
 }
 
 fn global_search(cx: &mut Context) {

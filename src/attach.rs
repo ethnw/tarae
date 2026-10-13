@@ -194,7 +194,7 @@ impl Editor {
                 glyph: None,
             })
             .collect();
-        let mut p = crate::picker::Picker::new("attach", items, false).without_preview();
+        let mut p = crate::picker::Picker::of("attach", "attach", items, false).without_preview();
         p.compact = true;
         self.open_picker(p, None);
     }

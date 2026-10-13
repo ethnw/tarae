@@ -175,7 +175,7 @@ impl crate::editor::Editor {
         let total: usize = plans.iter().map(|f| f.count).sum();
         self.replace_plan = plans;
         let title = format!("replace {total} · /{pattern}/ → {replacement}");
-        self.open_picker(crate::picker::Picker::new(title, items, true).grouped(root), None);
+        self.open_picker(crate::picker::Picker::of("replace", title, items, true).grouped(root), None);
     }
 
     /// Apply plan files `files` — one undo step each; a file changed since the plan is skipped.

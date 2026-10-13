@@ -298,10 +298,23 @@ pub struct Picker {
     pub keys: bool,
     /// The buffer with unsaved changes `C-x` was pressed on once (the buffer list) — again closes it.
     pub closing: Option<crate::document::DocId>,
+    /// What it is, as counted (`features::PICKERS`) — never its title, which may name a file.
+    pub kind: &'static str,
 }
 
 impl Picker {
+    /// A picker of kind `kind` (one of `features::PICKERS`).
+    pub fn of(kind: &'static str, title: impl Into<String>, items: Vec<Item>, paths: bool) -> Self {
+        Picker { kind, ..Picker::untyped(title, items, paths) }
+    }
+
+    /// A test's picker, of no kind.
+    #[cfg(test)]
     pub fn new(title: impl Into<String>, items: Vec<Item>, paths: bool) -> Self {
+        Picker::untyped(title, items, paths)
+    }
+
+    fn untyped(title: impl Into<String>, items: Vec<Item>, paths: bool) -> Self {
         let config = if paths { Config::DEFAULT.match_paths() } else { Config::DEFAULT };
         let mut p = Picker {
             id: 0,
@@ -338,6 +351,7 @@ impl Picker {
             made: None,
             keys: false,
             closing: None,
+            kind: "test",
         };
         p.refilter();
         p

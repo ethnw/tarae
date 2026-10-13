@@ -1128,8 +1128,13 @@ impl Editor {
                         glyph: None,
                     })
                     .collect();
-                let mut p = crate::picker::Picker::new(format!("{cmd}: which session?"), items, false)
-                    .without_preview();
+                let mut p = crate::picker::Picker::of(
+                    "rebase-session",
+                    format!("{cmd}: which session?"),
+                    items,
+                    false,
+                )
+                .without_preview();
                 p.compact = true;
                 self.open_picker(p, None);
                 Ok(())

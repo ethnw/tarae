@@ -245,7 +245,58 @@ pub enum What {
     /// The plan's weekly window refused a session's Claude (`billing.rs`): `y` that session on your key · `a` new
     /// sessions and the reviewer too, until the reset (when it's known) · `n` waits. Its session's.
     Limit(Box<crate::billing::LimitAsk>),
+    /// `:features-reset` (`features.rs`): `y` empties the feature counts · `n` keeps them.
+    FeaturesReset,
 }
+
+/// Every card's kind (`Offer::kind`) — what `:features` lists, so a card never asked shows as 0
+/// (`every_card_kind_is_listed` reads them from `kind`).
+pub const KINDS: &[&str] = &[
+    "grammars",
+    "fetch",
+    "plugin-permissions",
+    "plugin-ask",
+    "install",
+    "run",
+    "no-sandbox",
+    "protected-made",
+    "review-at-end",
+    "read",
+    "grant",
+    "outside",
+    "project-trust",
+    "claude-settings",
+    "git-trust",
+    "screen",
+    "preflight",
+    "branch-delete",
+    "force-push",
+    "session-new",
+    "session-end",
+    "close-reviewed",
+    "change-set",
+    "review-end",
+    "rebase",
+    "rebase-held",
+    "rebased",
+    "rebase-resolved",
+    "up-to",
+    "hooks",
+    "restart",
+    "restart-same",
+    "restart-cancel",
+    "notes-stale",
+    "notes-close",
+    "recover",
+    "stuck",
+    "host",
+    "host-raw",
+    "lookup",
+    "containers",
+    "billing-switch",
+    "limit",
+    "features-reset",
+];
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
 /// for every turn, and their calls end with it.
@@ -270,6 +321,7 @@ impl What {
             What::SessionEnd(e) => Again(format!("session-end {}", e.name)),
             What::Rebase(m) | What::Rebased(m) | What::UpTo(m) => Again(format!("session-bring {}", m.name)),
             What::BranchDelete { branch, .. } => Again(format!("git-branch-delete {branch}")),
+            What::FeaturesReset => Again("features-reset".into()),
             What::Grammars { .. }
             | What::Fetch { .. }
             | What::Install { .. }
@@ -457,6 +509,7 @@ impl Offer {
                     | What::RestartCancel { .. }
                     | What::NotesClose { .. }
                     | What::BillingSwitch { .. }
+                    | What::FeaturesReset
             ),
         }
     }
@@ -893,6 +946,7 @@ impl Offer {
                 vec![('y', "This session"), ('a', "New sessions too"), ('n', "Wait")]
             }
             W::Limit(_) => vec![('y', "This session"), ('n', "Wait")],
+            W::FeaturesReset => vec![('y', "Empty them"), ('n', "Keep them")],
         }
     }
 
@@ -943,6 +997,7 @@ impl Offer {
             W::Containers(_) => "containers",
             W::BillingSwitch { .. } => "billing-switch",
             W::Limit(_) => "limit",
+            W::FeaturesReset => "features-reset",
         }
     }
 }
@@ -1014,6 +1069,7 @@ impl crate::editor::Editor {
         }
         // From a session behind: it waits in that session, and comes up when the session is in front (`session_in`)
         if self.background() {
+            self.count(crate::features::Area::Card, o.kind());
             return self.session.parked.push(o);
         }
         // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
@@ -1049,6 +1105,8 @@ impl crate::editor::Editor {
             // (lent: back to the chat once it's answered — `chat_lent_sync`)
             self.session.chat_lent.get_or_insert(o.id);
         }
+        // (asked: counted once it's stacked — one asked again while it's up only refreshed the one there, above)
+        self.count(crate::features::Area::Card, o.kind());
         let at = self.offer_place(&o);
         self.offers.insert(at, o);
     }
@@ -1260,8 +1318,7 @@ impl crate::editor::Editor {
             return self.offer_refused(why);
         }
         let mut o = self.offers.remove(0);
-        o.said(&self.session.log(), &key.to_string());
-        self.card_how(o.id, format!("answered {key}"));
+        self.offer_said(&o, key);
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
@@ -1348,6 +1405,7 @@ impl crate::editor::Editor {
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
             What::BillingSwitch { session, to, .. } => self.switch_answer(id, session, to),
             What::Limit(a) => self.limit_answer(id, *a, false),
+            What::FeaturesReset => self.features_reset_answer(id, true),
         }
     }
 
@@ -1384,8 +1442,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(&self.session.log(), "s");
-        self.card_how(o.id, "answered s");
+        self.offer_said(&o, 's');
         self.card_answered(o.id);
         match o.what {
             What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
@@ -1404,8 +1461,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(&self.session.log(), "D");
-        self.card_how(o.id, "answered D");
+        self.offer_said(&o, 'D');
         self.card_answered(o.id);
         if let What::Recover(f) = o.what {
             crate::recovery::discard(self, *f);
@@ -1457,8 +1513,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(&self.session.log(), &c.to_string());
-        self.card_how(o.id, format!("answered {c}"));
+        self.offer_said(&o, c);
         self.card_answered(o.id);
         if let What::RebaseHeld(h) = o.what {
             match c {
@@ -1488,8 +1543,7 @@ impl crate::editor::Editor {
             return;
         }
         let mut o = self.offers.remove(0);
-        o.said(&self.session.log(), if both { "D" } else { "R" });
-        self.card_how(o.id, if both { "answered D" } else { "answered R" });
+        self.offer_said(&o, if both { 'D' } else { 'R' });
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
@@ -1768,9 +1822,7 @@ impl crate::editor::Editor {
     }
 
     fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
-        let key = if scope == crate::allow::Scope::Always { "A" } else { "a" };
-        o.said(&self.session.log(), key);
-        self.card_how(o.id, format!("answered {key}"));
+        self.offer_said(&o, if scope == crate::allow::Scope::Always { 'A' } else { 'a' });
         self.card_answered(o.id);
         match o.what {
             What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
@@ -1805,9 +1857,18 @@ impl crate::editor::Editor {
     /// Card `o`, taken off by key `key` (one of its own letters, past `y` `n`): its `card` line, how it went
     /// for the gone ring, and its call told it's answered.
     fn offer_answered(&mut self, o: &Offer, key: char) {
+        self.offer_said(o, key);
+        self.card_answered(o.id);
+    }
+
+    /// Card `o` answered by key `key`: its `card` line, how it went for the gone ring, its answer counted
+    /// (`features.rs`) — every answer goes through here.
+    fn offer_said(&mut self, o: &Offer, key: char) {
         o.said(&self.session.log(), &key.to_string());
         self.card_how(o.id, format!("answered {key}"));
-        self.card_answered(o.id);
+        if self.counting() {
+            self.features.answer(o.kind(), key);
+        }
     }
 
     pub fn offer_dismiss(&mut self) {
@@ -1815,8 +1876,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
-        o.said(&self.session.log(), "n");
-        self.card_how(o.id, "answered n");
+        self.offer_said(&o, 'n');
         self.card_answered(o.id);
         match o.what {
             What::Grammars { lang, names, .. } => {
@@ -1899,6 +1959,7 @@ impl crate::editor::Editor {
                 self.set_status(format!("{name} stays {stays}"));
             }
             What::Limit(a) => self.limit_wait(&a),
+            What::FeaturesReset => self.features_reset_answer(o.id, false),
         }
     }
 

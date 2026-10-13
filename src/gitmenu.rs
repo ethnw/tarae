@@ -410,7 +410,10 @@ impl Editor {
                     })
                     .collect();
                 ed.session.changed_files = list;
-                ed.open_picker(crate::picker::Picker::new("changed files", items, true).grouped(cwd), None);
+                ed.open_picker(
+                    crate::picker::Picker::of("changed-files", "changed files", items, true).grouped(cwd),
+                    None,
+                );
             }
         });
     }

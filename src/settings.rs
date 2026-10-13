@@ -590,6 +590,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.context_lines = n(v),
     },
     Setting {
+        path: "features.count",
+        kind: Kind::Bool,
+        doc: "Count which of tarae's features you use — each command, card, panel, picker and Claude tool's count and last day, never what it was used on — in features.json in tarae's state folder, on this machine only (:features shows them). Only your own config turns it on",
+        get: |c| Value::from(c.features_count),
+        set: |c, v| c.features_count = b(v),
+    },
+    Setting {
         path: "session.worktrees",
         kind: Kind::Str,
         doc: "Where sessions' checkouts go, a folder per repository (\"\" = $XDG_DATA_HOME/tarae/worktrees)",

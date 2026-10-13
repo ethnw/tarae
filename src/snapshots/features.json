@@ -1,0 +1,79 @@
+{
+  "features": [
+    {
+      "area": "command",
+      "by": "keys",
+      "key": "j",
+      "last": "2025-10-13",
+      "name": "move_line_down",
+      "palette": 0,
+      "uses": 12
+    },
+    {
+      "area": "command",
+      "by": "keys",
+      "key": "space f",
+      "last": "2025-10-12",
+      "name": "file_picker",
+      "palette": 1,
+      "uses": 0
+    },
+    {
+      "area": "typed",
+      "by": "keys",
+      "last": "2025-10-13",
+      "name": "write",
+      "uses": 4
+    },
+    {
+      "area": "plugin",
+      "by": "keys",
+      "last": null,
+      "name": "k8s-pods",
+      "uses": 0
+    },
+    {
+      "answers": {
+        "y": 2
+      },
+      "area": "card",
+      "asked": 2,
+      "by": "keys",
+      "last": "2025-10-09",
+      "name": "run"
+    },
+    {
+      "area": "panel",
+      "by": "keys",
+      "last": null,
+      "name": "files",
+      "uses": 0
+    },
+    {
+      "area": "picker",
+      "by": "keys",
+      "last": null,
+      "name": "files",
+      "uses": 0
+    },
+    {
+      "area": "claude",
+      "by": "claude",
+      "last": "2025-10-13",
+      "name": "read",
+      "uses": 30
+    },
+    {
+      "area": "claude",
+      "by": "claude",
+      "last": "2025-10-13",
+      "name": "other",
+      "uses": 1
+    }
+  ],
+  "keys": "one count: a person's keys and a driver's reach tarae alike — not told apart",
+  "on": true,
+  "since": "2025-10-09",
+  "today": "2025-10-13",
+  "v": 1
+}

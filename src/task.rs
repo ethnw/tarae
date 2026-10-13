@@ -522,7 +522,7 @@ impl Editor {
                 })
                 .collect())
         };
-        let picker = crate::picker::Picker::new("tasks", Vec::new(), false).without_preview();
+        let picker = crate::picker::Picker::of("tasks", "tasks", Vec::new(), false).without_preview();
         self.open_picker(picker, Some(Box::new(fill)));
     }
 

@@ -342,6 +342,11 @@ fn local(at: std::time::SystemTime) -> (i32, i32, i32, i32, i32, i32) {
     (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
+/// Seconds local time is east of UTC at `at`.
+pub fn utc_offset(at: std::time::SystemTime) -> i64 {
+    local_tm(at).tm_gmtoff
+}
+
 fn local_tm(at: std::time::SystemTime) -> libc::tm {
     let secs = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let t = secs as libc::time_t;

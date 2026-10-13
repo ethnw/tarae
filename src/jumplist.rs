@@ -213,7 +213,7 @@ impl Editor {
         if items.is_empty() {
             return self.set_status("no jumps yet (go-tos, searches, gg/ge and file switches add them)");
         }
-        self.open_picker(crate::picker::Picker::new("jumps", items, true), None);
+        self.open_picker(crate::picker::Picker::of("jumps", "jumps", items, true), None);
     }
 
     /// `ga` — back to the document shown before this one in this pane.

@@ -627,7 +627,7 @@ pub fn is_list(title: &str) -> bool {
 /// card's list follows, `stale_sync`). No key of the code's changes meaning; the card stays under it.
 pub fn stale_list(ed: &mut Editor) {
     let items = list_items(ed, STALE);
-    ed.open_picker(crate::picker::Picker::new(STALE, items, false), None);
+    ed.open_picker(crate::picker::Picker::of("notes-stale", STALE, items, false), None);
 }
 
 /// The rows of the list titled `title`: every note, or the stale card's drafts.
@@ -941,7 +941,7 @@ pub fn picker(ed: &mut Editor) {
             .set_status("no notes yet — Claude pins them while it explores, or space n asks about a line");
     }
     let items = picker_items(ed);
-    ed.open_picker(crate::picker::Picker::new(NOTES, items, false), None);
+    ed.open_picker(crate::picker::Picker::of("notes", NOTES, items, false), None);
 }
 
 /// The notes list's rows, newest first.

@@ -658,6 +658,22 @@ mod tests {
         ed.handle_key(k.parse().unwrap());
     }
 
+    /// A plugin's command typed on the command line is counted by the name it registered — never its words
+    /// (`features.rs`).
+    #[test]
+    fn a_plugin_command_counts_by_its_name() {
+        let (mut ed, dir) = setup("count", "x\n");
+        ed.config.features_count = true;
+        for c in ":shout zqxmarker".chars() {
+            ed.handle_key(crate::key::Key::plain(crate::key::Code::Char(c)));
+        }
+        key(&mut ed, "ret");
+        let pending = ed.features.pending();
+        assert!(pending.iter().any(|(k, c)| k == "plugin:shout" && c.n == 1), "{pending:?}");
+        assert!(pending.iter().all(|(k, _)| !k.contains("zqxmarker")), "{pending:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// A message starting `what` about a file named `name`.
     fn said(ed: &Editor, what: &str, name: &str) -> bool {
         ed.toasts.iter().any(|t| t.text.starts_with(what) && t.text.contains(name))

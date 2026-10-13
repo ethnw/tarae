@@ -85,6 +85,12 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `llm.sandbox-protect` | list of strings | `[]` | Chat: paths in the project the sandbox keeps Claude's commands from changing ("migrations/"); the protected names (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always, anywhere in it |
 | `llm.context-lines` | integer 0–1000 | `20` | Lines of context sent around each selection |
 
+## `[features]`
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `features.count` | bool | `false` | Count which of tarae's features you use — each command, card, panel, picker and Claude tool's count and last day, never what it was used on — in features.json in tarae's state folder, on this machine only (:features shows them). Only your own config turns it on |
+
 ## `[session]`
 
 | Setting | Type | Default | Description |

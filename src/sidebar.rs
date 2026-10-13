@@ -594,6 +594,7 @@ impl Editor {
         self.session.side_last = mode;
         // A review's rail holds the panel's place — `space e` gives it the keys
         if mode == Mode::Files && self.session.code_review.is_some() {
+            self.count(crate::features::Area::Panel, crate::features::panel(mode));
             return crate::codereview::rail_focus(self);
         }
         // Another tab (`space o`, `space q`) goes in front of the rail, as the git tab does — #154: it had the
@@ -606,6 +607,9 @@ impl Editor {
             if let Some(s) = self.session.sidebar.as_mut() {
                 s.focus = false;
             }
+        }
+        if !self.session.sidebar.as_ref().is_some_and(|s| s.mode == mode && s.focus) {
+            self.count(crate::features::Area::Panel, crate::features::panel(mode));
         }
         match self.session.sidebar.as_mut() {
             Some(s) if s.mode == mode && s.focus => {

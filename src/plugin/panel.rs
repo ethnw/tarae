@@ -347,7 +347,7 @@ impl Editor {
             .collect();
         let title = format!("{plugin} · {}", one_line(&pick.title, 60));
         // (nothing to preview: the small picker, over the code)
-        let mut picker = crate::picker::Picker::new(title, items, false);
+        let mut picker = crate::picker::Picker::of("plugin", title, items, false);
         picker.compact = true;
         self.open_picker(picker, None);
     }

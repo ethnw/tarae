@@ -4330,6 +4330,22 @@ mod tests {
         (ed, dir)
     }
 
+    /// `space e` under a review gives the rail the keys — the files tab shown all the same, counted as one
+    /// (`features.rs`).
+    #[test]
+    fn space_e_under_a_review_counts_the_files_tab() {
+        let (mut ed, dir) = reviewing("count-files", &[("a.txt", "one\n", "two\n")]);
+        ed.config.features_count = true;
+        if let Some(r) = ed.session.code_review.as_mut() {
+            r.focus = false;
+        }
+        feed(&mut ed, "<space>e");
+        assert!(ed.session.code_review.as_ref().is_some_and(|r| r.focus), "the rail has the keys");
+        let pending = ed.features.pending();
+        assert!(pending.iter().any(|(k, c)| k == "panel:files" && c.n == 1), "{pending:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Lines `0..n` made by `line`, each ended.
     fn text_of(n: usize, line: impl Fn(usize) -> String) -> String {
         (0..n).map(|i| line(i) + "\n").collect()

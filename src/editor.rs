@@ -633,6 +633,8 @@ pub struct Editor {
     pub sizes: crate::sizes::Sizes,
     pub sizes_path: Option<PathBuf>,
     pub sizes_seq: u64,
+    /// What's counted of the features used and not saved yet (`features.rs`; its path None in tests).
+    pub features: crate::features::Counts,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
@@ -840,6 +842,11 @@ impl Editor {
             },
             sizes_path: if cfg!(test) { None } else { crate::sizes::Sizes::path() },
             sizes_seq: 0,
+            features: crate::features::Counts::new(if cfg!(test) {
+                None
+            } else {
+                crate::config::state_dir().map(|d| d.join(crate::features::FILE))
+            }),
             dragging: None,
             picker_click: None,
             card_keys: false,
@@ -1520,7 +1527,10 @@ impl Editor {
                 )),
             })
             .collect();
-        self.open_picker(crate::picker::Picker::new("messages", items, false).without_preview(), None);
+        self.open_picker(
+            crate::picker::Picker::of("messages", "messages", items, false).without_preview(),
+            None,
+        );
     }
 
     /// After a frame (`term::render`): the card drawn, its messages have been seen; not drawn (a picker over
@@ -2445,6 +2455,7 @@ impl Editor {
         self.picker_ids += 1;
         let id = self.picker_ids;
         picker.id = id;
+        self.count(crate::features::Area::Picker, picker.kind);
         // (tests wait for particular events — no filtering ones)
         picker.asynchronous = !cfg!(test);
         if let Some(fill) = fill {
@@ -2504,7 +2515,7 @@ impl Editor {
     /// with the match standing out (`pattern`: what's typed already).
     pub(crate) fn global_search(&mut self, pattern: String) {
         let root = self.search_root();
-        let mut picker = Picker::new("search", Vec::new(), false).grouped(root);
+        let mut picker = Picker::of("search", "search", Vec::new(), false).grouped(root);
         picker.live = true;
         picker.query = pattern;
         self.open_picker(picker, None);
@@ -2729,6 +2740,14 @@ impl Editor {
             }
             (Code::Enter, _) => {
                 let action = p.current().map(|i| i.action.clone());
+                // (a command chosen in the palette: counted as the palette's — a `:` one as typed)
+                if p.kind == "commands" {
+                    match &action {
+                        Some(Action::Command(name)) => self.count(crate::features::Area::Palette, name),
+                        Some(Action::Typed(line)) => self.count_typed(line),
+                        _ => {}
+                    }
+                }
                 self.keep_last_picker();
                 self.theme_before = None;
                 if let Some(a) = action {
@@ -3436,6 +3455,15 @@ impl Editor {
         let sticky = cmds.is_some() && pending.len() > 1 && pending[0].plain_char() == Some('Z');
         match (cmds, pending.split_last()) {
             (Some(cmds), _) => {
+                // (the command a key ran — never the key: `features.rs`)
+                if self.counting() {
+                    for c in &cmds {
+                        match c {
+                            MappableCommand::Static(s) => self.features.key(s),
+                            MappableCommand::Typed(line) => self.count_typed(line),
+                        }
+                    }
+                }
                 self.run(&cmds, count);
                 if self.on_next_char.is_some() {
                     self.char_for = pending.iter().map(Key::to_string).collect();
@@ -3772,7 +3800,10 @@ impl Editor {
 
     fn submit_prompt(&mut self, kind: PromptKind, text: String) {
         match kind {
-            PromptKind::Command => self.run(&[MappableCommand::Typed(text)], None),
+            PromptKind::Command => {
+                self.count_typed(&text);
+                self.run(&[MappableCommand::Typed(text)], None)
+            }
             PromptKind::Search { reverse } => {
                 // Empty search = repeat the previous search term
                 let pat = if text.is_empty() { self.search.clone().unwrap_or_default() } else { text };
@@ -4765,6 +4796,54 @@ mod tests {
         feed(&mut ed, "<C-g>");
         assert_eq!(ed.doc().text.byte_to_line(ed.doc().selection().primary().cursor(&ed.doc().text)), 1);
         assert!(ed.session.chat.as_ref().unwrap().focused);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Counting which features get used keeps nothing of what they were used on: a search, a `:` line's words, a
+    /// file opened, the paths Claude read, a tool name it made up — none of it is in the counts, the file or the
+    /// report (`features.rs`). The marker stands in for any of it.
+    #[test]
+    fn feature_counts_hold_no_content() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-features-content-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let marker = "zqxmarker";
+        let path = dir.join(crate::features::FILE);
+        let mut ed = editor("one zqxmarker two\n");
+        ed.session.root = dir.clone();
+        ed.config.features_count = true;
+        ed.features.path = Some(path.clone());
+        let tool = |id: &str, name: &str| {
+            let input = json!({ "file_path": dir.join(format!("{marker}.txt")) });
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": id, "name": name, "input": input}]}})
+        };
+        fake_claude_stream(
+            &mut ed,
+            &[
+                tool("t1", "Read"),
+                tool("t2", &format!("mcp__tarae__{marker}")),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        let file = dir.join(format!("{marker}.txt"));
+        feed(&mut ed, &format!("/{marker}<ret>:{marker}-cmd {marker}<ret>:vs {}<ret>", file.display()));
+        feed(&mut ed, &format!("<space>l{marker}<ret>"));
+        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        let pending = ed.features.pending();
+        let n = |k: &str| pending.iter().find(|(p, _)| p == k).map_or(0, |(_, c)| c.n);
+        assert_eq!((n("claude:Read"), n("claude:other"), n("typed:vsplit")), (1, 1, 1), "{pending:?}");
+        assert!(pending.iter().all(|(k, _)| !k.contains(marker)), "{pending:?}");
+        let universe = crate::features::Universe::of(&ed);
+        let r = crate::features::Report::new(true, &universe, &Default::default(), &pending, ed.features.day);
+        let (text, json) = (r.markdown(), r.json().to_string());
+        ed.features_flush();
+        let saved = std::fs::read_to_string(&path).expect("written at the end");
+        for (what, said) in [("the file", &saved), ("the report", &text), ("the JSON", &json)] {
+            assert!(!said.contains(marker), "{what} holds the marker:\n{said}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

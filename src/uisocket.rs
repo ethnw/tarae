@@ -11,11 +11,14 @@
 //!   (`uistate::ChatTurn`) — the user's level; Claude's never reads another session's.
 //! - `"review": "s1"` → that session's reviewer, its verdict and findings whole (`uistate::ReviewReport`) —
 //!   the user's level, as `chat`.
+//! - `{"get":"features"}` → which features get used, every one with its count (`features::Report`, its file
+//!   read on a worker); `"format":"text"` → `:features`' text. The user's level only.
 //! - `{"get":"frame"}` → the frame drawn, as the terminal got it: `{"frame":{cols, rows, frames, input,
 //!   bytes}}` (`after_input` as for the state) — what `cargo xtask shot --live` draws. The user's level: a frame
 //!   shows every session's tabs and cards, and Claude's `screen` is a card.
 //!
-//! `tarae state [--json] [--pid N] [--after-input N] [--chat [S] | --review [S] | --frame FILE]` is the client
+//! `tarae state [--json] [--pid N] [--after-input N] [--chat [S] | --review [S] | --frame FILE | --features]` is
+//! the client
 //! (`cli`).
 
 use std::io::{BufRead, BufReader, Write};
@@ -253,12 +256,15 @@ fn answer(req: &str, line: &[u32], tx: &crate::event::Tx) -> Value {
     let session = |k: &str| req[k].as_str().map(String::from);
     let what = match req["get"].as_str() {
         Some("frame") => Asked::Frame,
+        Some("features") => Asked::Features,
         Some("state") => match (session("chat"), session("review")) {
             (Some(s), _) => Asked::Chat(s),
             (None, Some(s)) => Asked::Review(s),
             (None, None) => Asked::State,
         },
-        _ => return json!({ "error": "unknown request — {\"get\":\"state\"} or {\"get\":\"frame\"}" }),
+        _ => {
+            return json!({ "error": "unknown request — {\"get\":\"state\"}, {\"get\":\"frame\"} or {\"get\":\"features\"}" });
+        }
     };
     let text = req["format"] == "text" && what != Asked::Frame;
     let after_input = req["after_input"].as_u64().unwrap_or(0);
@@ -347,7 +353,7 @@ fn ancestors(pid: u32) -> Vec<u32> {
 
 const USAGE: &str = "\
 usage: tarae state [--json] [--pid PID] [--after-input N]
-                   [--chat [SESSION] | --review [SESSION] | --frame FILE | --watch [KINDS]]
+                   [--chat [SESSION] | --review [SESSION] | --frame FILE | --features | --watch [KINDS]]
   the UI state of a running tarae: where the keys go, the mode, the sessions, the cards, the panels,
   the runs, the toasts, what each session's Claude costs, its processes (:procs)
   --json             as JSON (the schema: docs/design/ui-state.md)
@@ -358,17 +364,21 @@ usage: tarae state [--json] [--pid PID] [--after-input N]
   --review [SESSION] instead: a session's reviewer — its verdict and findings whole (space v r)
   --frame FILE       instead: the frame drawn, as the terminal got it, into FILE (`cargo xtask shot --live`
                      draws it as a picture)
+  --features         instead: which features get used, and which never (:features; counted only with
+                     features.count on)
   --watch [KINDS]    what changes, a line an event, until interrupted — KINDS: keys,cards,sessions,reviewer,
                      turns,runs,toasts,usage,procs (all when left out)";
 
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
     let (mut json, mut pid, mut after, mut watching) = (false, None, 0u64, None::<Vec<String>>);
     let (mut chat, mut review, mut frame) = (None::<String>, None::<String>, None::<PathBuf>);
+    let mut features = false;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         let num = |v: Option<&String>| v.and_then(|v| v.parse::<u64>().ok());
         match a.as_str() {
             "--json" => json = true,
+            "--features" => features = true,
             "--chat" => chat = Some(it.next_if(|s| !s.starts_with("--")).cloned().unwrap_or_default()),
             "--review" => review = Some(it.next_if(|s| !s.starts_with("--")).cloned().unwrap_or_default()),
             "--frame" => {
@@ -414,7 +424,12 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    let mut req = json!({ "get": if frame.is_some() { "frame" } else { "state" }, "after_input": after });
+    let get = match (&frame, features) {
+        (Some(_), _) => "frame",
+        (None, true) => "features",
+        (None, false) => "state",
+    };
+    let mut req = json!({ "get": get, "after_input": after });
     if !json {
         req["format"] = json!("text");
     }

@@ -192,6 +192,8 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
             ev
         };
         let until = std::time::Instant::now() + std::time::Duration::from_millis(16);
+        // (today, for what this batch counts — and what's counted saved now and then: `features.rs`)
+        editor.features_turn();
         let (unchanged, whole) = handle_batch(editor, ev, until);
         if whole {
             screen.invalidate();
@@ -200,6 +202,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
     }
     // (quitting waited for them already — this covers any other way out)
     editor.flush_saves();
+    editor.features_flush();
     Ok(())
 }
 

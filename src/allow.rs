@@ -794,8 +794,8 @@ impl crate::editor::Editor {
                 false => Ok(items),
             }
         });
-        let p =
-            crate::picker::Picker::new("allowed — enter takes it back", Vec::new(), false).without_preview();
+        let p = crate::picker::Picker::of("allowed", "allowed — enter takes it back", Vec::new(), false)
+            .without_preview();
         self.open_picker(p, Some(fill));
     }
 

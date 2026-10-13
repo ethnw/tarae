@@ -1485,6 +1485,9 @@ pub enum Asked {
     Review(String),
     /// The frame drawn, as the terminal got it (`tarae state --frame`, `cargo xtask shot --live`) — always JSON.
     Frame,
+    /// Which features get used (`tarae state --features`, `features.rs`) — the file read on a worker, answered
+    /// from there.
+    Features,
 }
 
 /// A session's last turn as its chat shows it (#204: a driver read the conversation's own files to know
@@ -1810,6 +1813,10 @@ pub fn after_frame(ed: &mut Editor) {
                 Ok(r) => r.text(),
                 Err(e) => error(e),
             },
+            (Asked::Features, _) => {
+                ed.features_answer(a.json, a.reply);
+                continue;
+            }
             // (after a frame: there is one)
             (Asked::Frame, _) => {
                 ed.frame_json().map_or_else(|| error("nothing drawn yet".into()), |f| f.to_string())

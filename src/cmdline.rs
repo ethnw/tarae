@@ -96,6 +96,8 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["messages"], Arg::None, "The notifications since tarae started, newest first"),
     c(&["inbox"], Arg::None, "What waits for your answer, every session's, oldest first"),
     c(&["usage"], Arg::None, "What Claude's turns cost here and today, and its cache"),
+    c(&["features"], Arg::None, "Which features you use, and which never (features.count)"),
+    c(&["features-reset"], Arg::None, "Empty the feature counts (a card asks first)"),
     c(&["redraw"], Arg::None, "Draw the whole screen again (when something else wrote over it)"),
     c(&["lsp-restart"], Arg::None, "Restart this file's language server"),
     c(&["plugin-permissions"], Arg::None, "What each plugin may do beyond the buffer"),

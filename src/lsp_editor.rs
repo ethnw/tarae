@@ -1485,7 +1485,7 @@ impl Editor {
             .filter(|(_, l)| **l <= cur)
             .max_by_key(|(_, l)| **l)
             .map_or(0, |(i, _)| i);
-        let mut p = Picker::new(format!("symbols in {}", doc.display_name_short()), items, false);
+        let mut p = Picker::of("symbols", format!("symbols in {}", doc.display_name_short()), items, false);
         p.selected = start;
         self.open_picker(p, None);
     }
@@ -1495,7 +1495,7 @@ impl Editor {
         if self.doc().lsp.clients().next().is_none() {
             return self.set_status("no language server for this file");
         }
-        let mut p = Picker::new("workspace symbols", Vec::new(), false);
+        let mut p = Picker::of("workspace-symbols", "workspace symbols", Vec::new(), false);
         p.requery = true;
         p.loading = true;
         self.open_picker(p, None);
@@ -2514,7 +2514,7 @@ impl Editor {
                 }
             })
             .collect();
-        self.open_picker(Picker::new("code actions", items, false), None);
+        self.open_picker(Picker::of("code-actions", "code actions", items, false), None);
         self.code_action_preview();
     }
 
@@ -2856,7 +2856,7 @@ impl Editor {
                     _ => return,
                 };
                 // (short — the title holds a few words; the server's state is said beside it)
-                let mut picker = Picker::new("text matches", items, true).grouped(here);
+                let mut picker = Picker::of("text-matches", "text matches", items, true).grouped(here);
                 picker.emphasis = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&name))).ok();
                 ed.open_picker(picker, None);
                 ed.lsp.refs.texts = ed.picker.as_ref().map(|p| p.id);
@@ -3110,7 +3110,8 @@ impl Editor {
                     }
                     return;
                 }
-                let mut picker = Picker::new(goto.noun(), items, true).grouped(ed.session.root.clone());
+                let mut picker =
+                    Picker::of("places", goto.noun(), items, true).grouped(ed.session.root.clone());
                 let name = &ed.lsp.refs.name;
                 picker.emphasis = (!name.is_empty())
                     .then(|| regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).ok())
@@ -3200,7 +3201,7 @@ impl Editor {
                 }
             })
             .collect();
-        self.open_picker(Picker::new("diagnostics", items, false), None);
+        self.open_picker(Picker::of("diagnostics", "diagnostics", items, false), None);
     }
 
     /// `space D` — diagnostics in every file the servers reported: open ones (live), then the rest; errors
@@ -3235,7 +3236,10 @@ impl Editor {
         }
         crate::sorting::by(&mut rows, |a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         let items = rows.into_iter().map(|r| r.2).collect();
-        self.open_picker(Picker::new("workspace diagnostics", items, true).grouped(root), None);
+        self.open_picker(
+            Picker::of("workspace-diagnostics", "workspace diagnostics", items, true).grouped(root),
+            None,
+        );
     }
 
     /// For the status line — what the current document's server is doing.

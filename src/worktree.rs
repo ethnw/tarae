@@ -1344,7 +1344,8 @@ impl Editor {
             return self.set_status("its name first — then C-b picks what it's made from");
         }
         let root = self.session.root.clone();
-        let picker = crate::picker::Picker::new(format!("{name} from"), Vec::new(), false).without_preview();
+        let picker = crate::picker::Picker::of("session-base", format!("{name} from"), Vec::new(), false)
+            .without_preview();
         self.open_picker(
             picker,
             Some(Box::new(move || {
@@ -1646,7 +1647,8 @@ impl Editor {
     /// it, `b` brings it into its base, `n` makes a new one. Git's part is read on a worker (the last read
     /// shown meanwhile); the processes are looked at once.
     pub fn session_list(&mut self) {
-        let mut p = crate::picker::Picker::new("sessions", self.session_items(), false).without_preview();
+        let mut p =
+            crate::picker::Picker::of("sessions", "sessions", self.session_items(), false).without_preview();
         p.keys = true;
         let front = self.session.id;
         p.select_where(|a| *a == crate::picker::Action::Session(front));

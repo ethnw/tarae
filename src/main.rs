@@ -42,6 +42,7 @@ mod edits;
 mod edittool;
 mod ended;
 mod event;
+mod features;
 mod fetch;
 mod filetree;
 mod filters;

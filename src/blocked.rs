@@ -237,7 +237,8 @@ impl Editor {
             glyph: Some(("▲", "warning")),
         });
         self.session.blocked = Some((run, list));
-        let p = crate::picker::Picker::new("what the sandbox blocked", items, false).without_preview();
+        let p =
+            crate::picker::Picker::of("blocked", "what the sandbox blocked", items, false).without_preview();
         self.open_picker(p, None);
     }
 

@@ -842,7 +842,10 @@ pub fn past_picker(ed: &mut Editor) {
             Ok(items)
         }
     });
-    ed.open_picker(crate::picker::Picker::new("conversations", Vec::new(), false), Some(fill));
+    ed.open_picker(
+        crate::picker::Picker::of("conversations", "conversations", Vec::new(), false),
+        Some(fill),
+    );
 }
 
 /// `:chat-resume <id>` — continue that conversation (read on a worker).
@@ -1140,6 +1143,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             c.state = State::Thinking;
             c.calls.push(Called { id: id.clone(), name: name.clone(), input: input.clone() });
+            if ed.config.features_count {
+                ed.features.bump(crate::features::Area::Claude, crate::features::claude_tool(&name));
+            }
             let now = crate::usage::now_ms();
             ed.session.usage.tally.called(&id, &name, &input, &ed.session.root, ed.session.wrote, now);
             let mut look = look(&ed.session.root, &name, &input);
