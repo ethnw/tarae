@@ -156,22 +156,11 @@ impl Change {
 /// What changed in the project at `root` from tree `then` to `now`: the files (absolute paths), and those it
 /// can't take back, named (a symlink, a submodule, only the mode changed).
 pub fn changes(root: &Path, then: &str, now: &str) -> Result<(Vec<Change>, Vec<String>), String> {
-    let raw = git_bytes(root, &["diff-tree", "-r", "-z", "--no-renames", "--relative", then, now], None)?;
-    let mut fields = raw.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut files: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     let mut skipped = Vec::new();
-    // (`:100644 100644 <old> <new> M` then the path)
-    while let (Some(head), Some(path)) = (fields.next(), fields.next()) {
-        let head = String::from_utf8_lossy(head);
-        let path = String::from_utf8_lossy(path).into_owned();
-        let [modes_a, mode_b, a, b, _status] =
-            head.trim_start_matches(':').split(' ').collect::<Vec<_>>()[..]
-        else {
-            continue;
-        };
-        let zero = |id: &str| id.bytes().all(|c| c == b'0');
+    for Entry { path, modes, ids: (a, b) } in entries(root, then, now)? {
         let regular = |m: &str| m == "000000" || m.starts_with("100");
-        if !regular(modes_a) || !regular(mode_b) {
+        if !regular(&modes.0) || !regular(&modes.1) {
             skipped.push(format!("{path} (a link or a submodule)"));
             continue;
         }
@@ -179,8 +168,7 @@ pub fn changes(root: &Path, then: &str, now: &str) -> Result<(Vec<Change>, Vec<S
             skipped.push(format!("{path} (its mode)"));
             continue;
         }
-        let side = |id: &str| (!zero(id)).then(|| id.to_string());
-        files.push((path, side(a), side(b)));
+        files.push((path, a, b));
     }
     let ids: Vec<&str> = files.iter().flat_map(|(_, a, b)| [a, b]).flatten().map(String::as_str).collect();
     let texts = texts(root, &ids)?;
@@ -204,6 +192,173 @@ pub fn changes(root: &Path, then: &str, now: &str) -> Result<(Vec<Change>, Vec<S
         })
         .collect();
     Ok((changes, skipped))
+}
+
+/// One path that differs between two trees (or commits): its modes and blobs then and now (None: not there).
+struct Entry {
+    path: String,
+    modes: (String, String),
+    ids: (Option<String>, Option<String>),
+}
+
+/// What differs from tree `then` to `now` in the project at `root` (`diff-tree`, paths from `root`).
+fn entries(root: &Path, then: &str, now: &str) -> Result<Vec<Entry>, String> {
+    let raw = git_bytes(root, &["diff-tree", "-r", "-z", "--no-renames", "--relative", then, now], None)?;
+    let mut fields = raw.split(|&b| b == 0).filter(|f| !f.is_empty());
+    let mut out = Vec::new();
+    // (`:100644 100644 <old> <new> M` then the path)
+    while let (Some(head), Some(path)) = (fields.next(), fields.next()) {
+        let head = String::from_utf8_lossy(head);
+        let [mode_a, mode_b, a, b, _status] = head.trim_start_matches(':').split(' ').collect::<Vec<_>>()[..]
+        else {
+            continue;
+        };
+        let side = |id: &str| (!id.bytes().all(|c| c == b'0')).then(|| id.to_string());
+        out.push(Entry {
+            path: String::from_utf8_lossy(path).into_owned(),
+            modes: (mode_a.to_string(), mode_b.to_string()),
+            ids: (side(a), side(b)),
+        });
+    }
+    Ok(out)
+}
+
+/// The commit HEAD names in the checkout at `root` — None: none yet (an unborn branch), or git can't say.
+fn head(root: &Path) -> Option<String> {
+    let id = git(root, &["rev-parse", "--verify", "-q", "HEAD^{commit}"], None).ok()?;
+    Some(id.trim().to_string()).filter(|id| !id.is_empty())
+}
+
+/// The commits the checkout's refs name (branches, remote branches, tags) — None: git can't say.
+fn tips(root: &Path) -> Option<Vec<String>> {
+    let out = git(root, &["for-each-ref", "--format=%(objectname)"], None).ok()?;
+    Some(out.lines().map(str::to_string).collect())
+}
+
+/// HEAD moved while a run ran (a merge, a pull, a checkout, a reset, a commit): from which commit to which,
+/// whether it was a pure fast-forward (`came`: every commit between already there before the run — the only
+/// move whose files leave the turn), how many files that left out (#225: a `git merge --ff-only main` was
+/// "changed 90 files" in the turn's review), and how many commits the run made itself (`own`). Any other move
+/// keeps every file the turn's, as before #225, and is only said (user decision 2026-10-14: small and safe).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeadMove {
+    pub from: String,
+    pub to: String,
+    /// `to`'s short form (`rev-parse --short`).
+    pub short: String,
+    /// A pure fast-forward: forward, every commit between one a ref had before the run.
+    pub came: bool,
+    /// Forward from where it was (`from` is `to`'s ancestor).
+    pub forward: bool,
+    /// The files that came with a pure fast-forward — left out of the turn.
+    pub files: usize,
+    /// The commits the run made (none a ref had before it).
+    pub own: usize,
+}
+
+impl HeadMove {
+    /// `HEAD moved: fast-forward to 1a2b3c4` (its files left out) — every other move keeps its files:
+    /// `HEAD moved: a commit made by this run — its files stay in this turn` · `HEAD moved to 1a2b3c4 — not a
+    /// fast-forward; its files stay in this turn` · `HEAD moved to 1a2b3c4 — its files stay in this turn`
+    /// (forward, but the refs before couldn't be read).
+    pub fn said(&self) -> String {
+        let short = &self.short;
+        match self.own {
+            _ if self.came => format!("HEAD moved: fast-forward to {short}"),
+            0 if !self.forward => {
+                format!("HEAD moved to {short} — not a fast-forward; its files stay in this turn")
+            }
+            0 => format!("HEAD moved to {short} — its files stay in this turn"),
+            1 => "HEAD moved: a commit made by this run — its files stay in this turn".to_string(),
+            n => format!("HEAD moved: {n} commits made by this run — its files stay in this turn"),
+        }
+    }
+
+    /// Which move, in a few words: `fast-forward` · `made by this run` · `not a fast-forward` · `moved`.
+    pub fn kind(&self) -> &'static str {
+        match self.own {
+            _ if self.came => "fast-forward",
+            0 if !self.forward => "not a fast-forward",
+            0 => "moved",
+            _ => "made by this run",
+        }
+    }
+
+    /// As a turn keeps it (`checkpoint.rs`).
+    pub fn to_json(&self) -> serde_json::Value {
+        let (from, to, short) = (&self.from, &self.to, &self.short);
+        let (came, forward, files, own) = (self.came, self.forward, self.files, self.own);
+        serde_json::json!({ "from": from, "to": to, "short": short, "came": came, "forward": forward,
+            "files": files, "own": own })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<HeadMove> {
+        let s = |k: &str| v[k].as_str().map(str::to_string);
+        Some(HeadMove {
+            from: s("from")?,
+            to: s("to")?,
+            short: s("short")?,
+            came: v["came"].as_bool()?,
+            forward: v["forward"].as_bool()?,
+            files: v["files"].as_u64()? as usize,
+            own: v["own"].as_u64()? as usize,
+        })
+    }
+}
+
+/// HEAD's move from `from` to `to` at `root`. Only a pure fast-forward — `to` a descendant of `from`, and
+/// every commit between one a ref had before the run (`tips`: `Before.refs`) — takes files out of `files`:
+/// one whose blobs then and now are the two commits' came with it; one the run changed over what it brought
+/// stays, from what it brought (`space u` takes back the run's part — the file stays as the new HEAD has it).
+/// Every other move keeps every file (user decision 2026-10-14, after review findings): a commit the run made
+/// (an edit committed, a merge, a rebase — Claude's work, or a mix no blob can split), a checkout or reset
+/// backward or sideways, a fast-forward the refs before can't vouch for (`tips` unknown).
+fn head_moved(
+    root: &Path,
+    from: &str,
+    to: &str,
+    tips: Option<&[String]>,
+    files: &mut Vec<Change>,
+) -> Result<HeadMove, String> {
+    let forward = git(root, &["merge-base", "--is-ancestor", from, to], None).is_ok();
+    // (the commits between no ref had before the run — the run's own; None: can't tell)
+    let own = match tips {
+        Some(tips) => {
+            let not: String = tips.iter().map(|t| format!("^{t}\n")).collect();
+            let args = ["rev-list", "--stdin", to, &format!("^{from}")];
+            let out = crate::gitrepo::finish(&command(root, &args, None)?, Some(not.as_bytes()))?;
+            Some(String::from_utf8_lossy(&out).lines().count())
+        }
+        None => None,
+    };
+    let came = forward && own == Some(0);
+    let moved = if came { entries(root, from, to)? } else { Vec::new() };
+    let id = |b: &Option<Blob>| b.as_ref().map(|b| b.id.clone());
+    let of = |c: &Change| moved.iter().find(|e| root.join(&e.path) == c.path && e.ids.0 == id(&c.before));
+    let before = files.len();
+    files.retain(|c| of(c).is_none_or(|e| e.ids.1 != id(&c.after)));
+    let brought = before - files.len();
+    // (the run's change over the move's: its before is the move's — both sides' texts read again, as `changes`)
+    let over: Vec<(usize, Option<String>)> =
+        files.iter().enumerate().filter_map(|(i, c)| Some((i, of(c)?.ids.1.clone()))).collect();
+    let ids: Vec<String> =
+        over.iter().flat_map(|(i, b)| [b.clone(), id(&files[*i].after)]).flatten().collect();
+    let texts = texts(root, &ids.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let blob = |id: String| Blob { text: texts.iter().find(|(i, _)| *i == id).map(|(_, t)| t.clone()), id };
+    for (i, b) in over {
+        let c = &mut files[i];
+        (c.before, c.after) = (b.map(blob), id(&c.after).map(blob));
+        if !c.text() {
+            for s in [&mut c.before, &mut c.after].into_iter().flatten() {
+                s.text = None;
+            }
+        }
+    }
+    let short = git(root, &["rev-parse", "--short", to], None)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| to.chars().take(7).collect());
+    let (from, to, own) = (from.into(), to.into(), own.unwrap_or(0));
+    Ok(HeadMove { from, to, short, came, forward, files: brought, own })
 }
 
 /// The blobs among `ids` that are text (UTF-8, no NUL, at most `TEXT_MAX`), with their text — sizes first
@@ -299,12 +454,17 @@ pub struct Before {
     pub wrote: Vec<PathBuf>,
     /// The ignored files and folders there were (`ignored`) — None: git couldn't say.
     pub ignored: Option<Vec<String>>,
+    /// The commit HEAD named (`head`).
+    pub head: Option<String>,
+    /// The commits every ref named (`tips`) — what a move of HEAD can have come from (`head_moved`). None:
+    /// git couldn't say.
+    pub refs: Option<Vec<String>>,
 }
 
 /// What a run changed (`Before::since`): the files, those it can't take back (named — `changes`), how many
 /// new files weren't kept, before or after it (`NEW_MAX`), the ignored files and folders it deleted —
 /// named only: no tree has them, so nothing takes them back — and the protected names it made
-/// (`protected_made`).
+/// (`protected_made`) — and HEAD's move, with the files it brought left out of `files` (`HeadMove`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Found {
     pub files: Vec<Change>,
@@ -312,6 +472,7 @@ pub struct Found {
     pub left_out: usize,
     pub ignored_gone: Vec<String>,
     pub protected: Vec<String>,
+    pub head: Option<HeadMove>,
 }
 
 /// The protected names (`sandbox::protected_in`: not below `target/` or `node_modules/`) a run made where
@@ -345,7 +506,8 @@ impl Before {
     /// Taken now (on a worker).
     pub fn take(root: &Path) -> Before {
         let ignored = ignored(root).ok();
-        Before { root: root.to_path_buf(), tree: snap(root), wrote: Vec::new(), ignored }
+        let (head, refs) = (head(root), tips(root));
+        Before { root: root.to_path_buf(), tree: snap(root), wrote: Vec::new(), ignored, head, refs }
     }
 
     /// What the run changed: the checkout taken again and compared (on a worker) — Err: it can't tell.
@@ -372,8 +534,16 @@ impl Before {
             .into_iter()
             .filter(|p| !self.wrote.contains(&self.root.join(p.trim_end_matches('/'))))
             .collect();
+        // (a protected name HEAD's move brought is asked about all the same: it runs later outside the sandbox)
         let protected = protected_made(&self.root, &files, &ignored_new);
-        Ok(Found { files, skipped, left_out, ignored_gone, protected })
+        // (HEAD moved: what came with it isn't the run's — said instead; can't tell — all of it stays)
+        let head = match (&self.head, head(&self.root)) {
+            (Some(from), Some(to)) if *from != to => {
+                head_moved(&self.root, from, &to, self.refs.as_deref(), &mut files).ok()
+            }
+            _ => None,
+        };
+        Ok(Found { files, skipped, left_out, ignored_gone, protected, head })
     }
 }
 

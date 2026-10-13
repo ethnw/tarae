@@ -208,7 +208,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
 
 /// Handles `ev` and the events queued behind it (pastes, key bursts, job results) — what the next frame shows
 /// at once — for at most a frame's time, so a flood of them can't keep the screen from updating. A key or the
-/// wheel ends the batch while the review waits on a high-risk change taller than the pane
+/// wheel ends the batch while the review waits on a high-risk change with lines no frame drew yet
 /// (`codereview::frame_per_key`): what it scrolled past is drawn before the next key moves on. Whether every
 /// event said it changed nothing, and whether the screen goes whole (a resize, focus back). `until`: the
 /// batch's end (a frame's time from now).
@@ -8589,6 +8589,14 @@ fn rail_tail(r: &crate::codereview::CodeReview, f: &crate::codereview::File) -> 
     s
 }
 
+/// A turn's HEAD move as one row of the review rail, `w` cells: the sentence, else `HEAD → id (kind)`, else
+/// `HEAD → id` (20 cells at the rail's narrowest: an id of up to 13).
+fn head_moved_row(h: &crate::snapshot::HeadMove, w: usize) -> String {
+    let forms = [h.said(), format!("HEAD → {} ({})", h.short, h.kind()), format!("HEAD → {}", h.short)];
+    let line = forms.iter().find(|f| f.width() <= w).unwrap_or(&forms[2]);
+    fit_ellipsis(line, w)
+}
+
 /// The review rail's key hints — with its keys, on Claude's turn, or a review's (`send n` with drafts; on a
 /// high-risk change not looked at, `h looked at` — `high`).
 fn review_rail_hints(
@@ -8780,9 +8788,21 @@ fn draw_review_rail(
     rows.push((Vec::new(), card, None));
     // Claude's turn: what it was asked, under the head
     let turn = match &r.base {
-        crate::codereview::Base::Turn { question, .. } => {
+        crate::codereview::Base::Turn { question, at } => {
             let q = format!("“{}”", question.lines().next().unwrap_or_default());
             rows.push((vec![sp(fit_ellipsis(&q, w), dim)], card, None));
+            // (HEAD moved in its runs: what came with it isn't in the files below — #225. One row: the
+            // sentence, else `HEAD → id (kind)`, else `HEAD → id` — the id at the dim level, findable)
+            for h in editor.session.checkpoints.list.get(*at).map_or(&[][..], |c| &c.head[..]) {
+                let line = head_moved_row(h, w);
+                let row = match line.split_once(h.short.as_str()) {
+                    Some((a, b)) => {
+                        vec![sp(a.to_string(), faint), sp(h.short.clone(), dim), sp(b.to_string(), faint)]
+                    }
+                    None => vec![sp(line, faint)],
+                };
+                rows.push((row, card, None));
+            }
             true
         }
         _ => false,
@@ -12732,6 +12752,51 @@ mod tests {
             let s = risk_line_end(why, room);
             assert!(s.width() <= room, "{room}: {s}");
             assert!(s.ends_with("space v h") || room < "high · space v h".width(), "{room}: {s}");
+        }
+    }
+
+    /// A turn's HEAD move is one row of the review rail at any width it can have (#225: wrapped, its id
+    /// stood alone on a second row): the sentence where it fits, the kind folded first, then `HEAD → id` —
+    /// which fits the narrowest rail with a long id (git's `--short` grows with the repository).
+    #[test]
+    fn a_head_move_is_one_rail_row_at_every_width() {
+        use crate::chrome::{GAP, PAD, PAD_R};
+        let narrowest = REVIEW_RAIL_MIN - (GAP + PAD + PAD_R);
+        let widest = REVIEW_RAIL_MAX - (GAP + PAD + PAD_R);
+        let h = |short: &str, forward: bool| crate::snapshot::HeadMove {
+            from: "a".repeat(40),
+            to: "b".repeat(40),
+            short: short.into(),
+            came: true,
+            forward,
+            files: 90,
+            own: 0,
+        };
+        // (any move but a pure fast-forward keeps its files: no files left out)
+        let kept = |forward: bool, own: usize| crate::snapshot::HeadMove {
+            came: false,
+            files: 0,
+            own,
+            ..h("0bb3b49", forward)
+        };
+        let (own, back) = (kept(true, 1), kept(false, 0));
+        for (m, rows) in [
+            (
+                h("0bb3b49", true),
+                ["HEAD → 0bb3b49", "HEAD → 0bb3b49 (fast-forward)", "HEAD moved: fast-forward to 0bb3b49"],
+            ),
+            (back, ["HEAD → 0bb3b49", "HEAD → 0bb3b49", "HEAD → 0bb3b49 (not a fast-forward)"]),
+            (
+                h("b2560741abcd", true),
+                ["HEAD → b2560741abcd", "HEAD → b2560741abcd", "HEAD moved: fast-forward to b2560741abcd"],
+            ),
+            (own, ["HEAD → 0bb3b49", "HEAD → 0bb3b49", "HEAD → 0bb3b49 (made by this run)"]),
+        ] {
+            for (w, want) in [narrowest, 30, widest].into_iter().zip(rows) {
+                let row = head_moved_row(&m, w);
+                assert_eq!(row, want, "at {w}");
+                assert!(row.width() <= w, "{row} at {w}");
+            }
         }
     }
 

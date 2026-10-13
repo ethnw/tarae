@@ -3102,12 +3102,13 @@ fn run_changes_now(
         let found = snap.since();
         move |ed: &mut Editor| {
             let said = match found {
-                Ok(crate::snapshot::Found { files, skipped, left_out, ignored_gone, protected })
+                Ok(crate::snapshot::Found { files, skipped, left_out, ignored_gone, protected, head })
                     if !files.is_empty()
                         || !skipped.is_empty()
                         || left_out > 0
                         || !ignored_gone.is_empty()
-                        || !protected.is_empty() =>
+                        || !protected.is_empty()
+                        || head.is_some() =>
                 {
                     let root = ed.session.root.clone();
                     let named: Vec<String> = files
@@ -3124,16 +3125,46 @@ fn run_changes_now(
                     let said = some_named(&named);
                     let turn =
                         ed.session.chat.as_ref().is_some_and(|c| c.generation() == generation && c.busy());
+                    // HEAD moved (a merge, a checkout): the files it brought aren't the turn's — said, in the
+                    // chat and in the turn's review, instead of counted with its changes
+                    let moved = head.as_ref().map(crate::snapshot::HeadMove::said);
+                    if let (Some(said), Some(h)) = (&moved, &head) {
+                        if turn {
+                            ed.session.checkpoints.head.push(h.clone());
+                        }
+                        if let Some(c) = &mut ed.session.chat {
+                            c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, said.clone(), ""));
+                        }
+                    }
                     if turn && !files.is_empty() {
                         crate::checkpoint::record_run(ed, files);
                     } else if !files.is_empty()
-                        && let Some(n) = crate::checkpoint::record_run_alone(ed, &format!("ran `{cmd}`"), files)
+                        && let Some(n) = crate::checkpoint::record_run_alone(
+                            ed,
+                            &format!("ran `{cmd}`"),
+                            files,
+                            head.clone().into_iter().collect(),
+                        )
                         && let Some(c) = &mut ed.session.chat
                     {
                         let row = format!("its run changed {n} after the turn · space v t · space u undo");
                         c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, row, ""));
                     }
                     let mut out = String::new();
+                    match (&moved, &head) {
+                        (Some(said), Some(h)) if h.files > 0 => {
+                            let brought = match h.files {
+                                1 => "the file it brought isn't one of this turn's changes".to_string(),
+                                n => format!("the {n} files it brought aren't this turn's changes"),
+                            };
+                            out.push_str(&format!(
+                                "\n{said} — {brought}: not in its review, not taken back with it.\n"
+                            ))
+                        }
+                        // (any move but a pure fast-forward: its files stayed the turn's — the sentence says so)
+                        (Some(said), _) => out.push_str(&format!("\n{said}.\n")),
+                        _ => {}
+                    }
                     if !named.is_empty() {
                         out.push_str(&format!(
                             "\nIt changed in the checkout: {said} — part of this turn's changes, which the \

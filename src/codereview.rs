@@ -145,6 +145,9 @@ pub struct CodeReview {
     /// Of each document, the lines already counted in `drawn` at its version and its diff's (a frame's rows
     /// hashed once).
     drawn_rows: std::collections::HashMap<DocId, ((u64, u64), std::collections::HashSet<usize>)>,
+    /// `frame_per_key`'s answer, by what it read (`FrameStamp`): it's asked after every key, and working it
+    /// out hashes every line of every high-risk change not looked at.
+    frames_due: std::cell::Cell<Option<(FrameStamp, bool)>>,
     /// Files graded whole, as their blob would be (git converts them — `converted`): their open document's
     /// text isn't what a commit stores, so it isn't graded again as it changes.
     pub whole: std::collections::HashSet<PathBuf>,
@@ -189,6 +192,7 @@ impl CodeReview {
             moved: Default::default(),
             drawn: Default::default(),
             drawn_rows: Default::default(),
+            frames_due: Default::default(),
             whole: Default::default(),
             defs: Default::default(),
             failed_to_load: grammar_failed,
@@ -1878,7 +1882,19 @@ fn open_at(
         .or_else(|| files.iter().position(|f| here.as_ref() == Some(&f.path)))
         .unwrap_or(0);
     let said = match &base {
-        Base::Turn { .. } => "Claude changed".to_string(),
+        // (HEAD moved in its runs: said here too — a pane too narrow for the rail shows no head — #225)
+        Base::Turn { at, .. } => {
+            let head = ed.session.checkpoints.list.get(*at).map_or(&[][..], |c| &c.head[..]);
+            let moves: Vec<String> = head
+                .iter()
+                .filter(|h| h.files > 0)
+                .map(|h| format!("{} that came with HEAD → {}", crate::nav::count(h.files, "file"), h.short))
+                .collect();
+            match moves.is_empty() {
+                true => "Claude changed".to_string(),
+                false => format!("Claude changed (not the {})", moves.join(", ")),
+            }
+        }
         Base::Replay { label, .. } => format!("resolved, against {label}"),
         _ => "changed".to_string(),
     };
@@ -1907,6 +1923,7 @@ fn open_at(
         moved,
         drawn: Default::default(),
         drawn_rows: Default::default(),
+        frames_due: Default::default(),
         whole,
         defs,
         failed_to_load: grammar_failed,
@@ -2578,9 +2595,9 @@ fn take(ed: &mut Editor, whole_file: bool) {
             );
             return ed.set_status(match (partly(g), g.piece) {
                 (true, _) => format!(
-                    "this high-risk change was looked at but for {} — {} of them not on screen yet ({}): \
-                     bring them on screen, then space v h with the cursor in the change",
-                    crate::nav::count(g.left(looked).len(), "line since"),
+                    "this high-risk change was looked at, but {} changed since — {} of them not on screen yet \
+                     ({}): bring them on screen, then space v h with the cursor in the change",
+                    crate::nav::count(g.left(looked).len(), "line"),
                     lines.len(),
                     line_ranges(&lines, 3)
                 ),
@@ -3383,8 +3400,8 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
     let look = match rows > 0 && lines > rows {
         _ if since > 0 => {
             format!(
-                "looked at but for {}: space v h once they're on screen",
-                crate::nav::count(since, "line since")
+                "looked at, but {} changed since: space v h once they're on screen",
+                crate::nav::count(since, "line")
             )
         }
         false if piece.is_some() => {
@@ -3401,25 +3418,50 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
 }
 
 /// Whether each key gets a frame of its own (`term::handle_batch`): the file in front is one of the review's
-/// with a high-risk change taller than the pane no one has looked at — it's looked at once every line of it
-/// was drawn, and keys handled together (a held `C-d`, a wheel burst) scroll past lines no frame showed.
-/// Only then: everywhere else a burst stays one frame.
+/// with a high-risk change no one has looked at that has lines no frame drew yet — a tall one, a piece of one
+/// and `space v H`'s whole file are looked at once every line was drawn, and keys handled together (a held
+/// `C-d`, a wheel burst) scroll past lines no frame showed (#224: a new file's pieces, none taller than the
+/// pane, were scrolled past). Only then: once every such line was drawn a burst is one frame again.
 pub fn frame_per_key(ed: &Editor) -> bool {
     let Some(r) = ed.session.code_review.as_ref() else { return false };
-    let rows = ed.viewport.0;
-    if rows == 0 || ed.doc().review_base.is_none() {
+    let doc = ed.doc();
+    // (its diff behind its text: what was drawn can't be told — `drawn_sync` waits too)
+    if ed.viewport.0 == 0 || doc.review_base.is_none() || doc.git_version != doc.version() {
         return false;
     }
     let Some(i) = r.current(ed) else { return false };
-    let looked = &ed.session.looked;
-    // (one partly looked at: when what's left of it is taller than the pane)
-    let tall = |g: &crate::risk::Graded| match g.left(looked)[..] {
-        [] => false,
-        [first, .., last] if g.keys.iter().any(|k| looked.contains(k)) => last + 1 - first > rows,
-        _ => g.lines > rows,
+    let (f, looked) = (&r.files[i], &ed.session.looked);
+    // (asked again with nothing new read: the last answer — every key of a burst once all is drawn. What it
+    // reads of the grades is their high-risk changes as `graded` gives them now — itself kept — by where
+    // they are: a tree landing, the pane's height, the review's grades, whatever changed them, is seen)
+    let graded = r.graded(ed, f);
+    let mut highs = std::hash::DefaultHasher::new();
+    for g in graded.iter().filter(|g| g.grade == Grade::High) {
+        std::hash::Hash::hash(&(g.at, g.lines, g.keys.len(), g.piece), &mut highs);
+    }
+    let highs = std::hash::Hasher::finish(&highs);
+    let stamp = (doc.id, doc.version(), doc.git_version, highs, r.drawn.len(), looked.len());
+    if let Some((s, due)) = r.frames_due.get()
+        && s == stamp
+    {
+        return due;
+    }
+    let occ = r.occurrences(doc);
+    let undrawn = |l: usize| l < doc.text.len_lines() && !r.drawn.contains(&drawn_key(&f.rel, doc, &occ, l));
+    // (the lines `take` asks for: one partly looked at, only its lines since)
+    let waits = |g: &crate::risk::Graded| match g.keys.iter().any(|k| looked.contains(k)) {
+        true => g.left(looked).into_iter().any(undrawn),
+        false => (g.at..g.at + g.lines).any(undrawn),
     };
-    r.graded(ed, &r.files[i]).iter().any(|g| g.grade == Grade::High && tall(g))
+    let due = graded.iter().any(|g| g.grade == Grade::High && !g.looked_at(looked) && waits(g));
+    r.frames_due.set(Some((stamp, due)));
+    due
 }
+
+/// What `frame_per_key`'s answer reads: the document in front, its text's and diff's versions, its high-risk
+/// changes as graded (a digest of where each is), how many lines were drawn and looked at — both only grow
+/// while a review is open (`drawn`; `looked` only loses what an opening review prunes).
+type FrameStamp = (DocId, u64, u64, u64, usize, usize);
 
 /// What line `l` of document `d` (of `rel`; `occ`: its `occurrences`) drawn in a review is kept as
 /// (`CodeReview.drawn`) — a SHA-256 key (`risk::key`: none one could make collide with a line that was drawn).
@@ -4391,7 +4433,7 @@ mod tests {
         frame(&mut ed);
         feed(&mut ed, "]h");
         assert_eq!(ed.cursor_line(), 64, "landed on the line, not the change's top");
-        assert!(status(&ed).contains("looked at but for 1 line since"), "{}", status(&ed));
+        assert!(status(&ed).contains("looked at, but 1 line changed since:"), "{}", status(&ed));
         // Not drawn yet (no frame since `]h`): not taken, and which line is said
         feed(&mut ed, "<space>vh");
         assert_eq!(left(&ed), 1, "{}", status(&ed));
@@ -5414,40 +5456,149 @@ mod tests {
         let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
         let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
         let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-        // (keys queued at once, then the loop: a batch, a frame — until none is left)
+        // (every line of the tall change drawn in this review — told by the review's own record)
+        let change_drawn = |ed: &Editor| {
+            let (r, d) = (ed.session.code_review.as_ref().unwrap(), ed.doc());
+            let (occ, f) = (r.occurrences(d), &r.files[r.current(ed).unwrap()]);
+            let highs =
+                r.graded(ed, f).iter().filter(|g| g.grade == Grade::High).cloned().collect::<Vec<_>>();
+            highs
+                .iter()
+                .all(|g| (g.at..g.at + g.lines).all(|l| r.drawn.contains(&drawn_key("a.rs", d, &occ, l))))
+        };
+        // (keys queued at once, then the loop: a batch, a frame — until none is left; after each frame,
+        // `frame_per_key` and whether the change was all drawn)
         let burst = |ed: &mut Editor, keys: &[&str]| {
             let tx = ed.events.shared_sender();
             for k in keys {
                 tx.send(crate::event::Event::Key(k.parse().unwrap())).unwrap();
             }
-            let mut frames = 0;
+            let mut per_key = Vec::new();
             // (no frame's time running out: what's one batch is the rule's, not the machine's speed)
             let never = std::time::Instant::now() + std::time::Duration::from_secs(3600);
             while let Some(ev) = ed.events.try_recv() {
                 crate::term::handle_batch(ed, ev, never);
                 frame(ed);
-                frames += 1;
+                per_key.push((frame_per_key(ed), change_drawn(ed)));
             }
-            frames
+            per_key
         };
         frame(&mut ed);
         feed(&mut ed, "gg");
         frame(&mut ed);
         assert!(frame_per_key(&ed), "a tall change not looked at, in front");
-        let frames = burst(&mut ed, &["C-d"; 12]);
+        let per_key = burst(&mut ed, &["C-d"; 12]);
+        // A frame a key exactly while a line of it is undrawn — the burst moved on past none of them
+        assert!(per_key.last().is_some_and(|&(_, all)| all), "the burst drew it all: {per_key:?}");
+        assert!(per_key.iter().all(|&(per, all)| per == !all), "{per_key:?}");
         feed(&mut ed, "G");
         frame(&mut ed);
         ed.goto_line(10);
         frame(&mut ed);
         feed(&mut ed, "<space>vh");
         assert_eq!(left(&ed), 0, "{}", status(&ed));
-        // (jobs landing meanwhile — a parse — are events too: a frame at least per key)
-        assert!(frames >= 12, "a frame each: {frames}");
         // Looked at: a burst is one batch again
         assert!(!frame_per_key(&ed));
         feed(&mut ed, "gg");
-        let frames = burst(&mut ed, &["C-d"; 12]);
-        assert!(frames < 12, "the burst batched again: {frames} frames");
+        assert!(burst(&mut ed, &["C-d"; 12]).len() < 12, "the burst batched again");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `frame_per_key`'s kept answer follows the grades (review finding): asked before they were in — no
+    /// high-risk change, no frame a key — then they land, nothing new drawn or looked at: a frame a key now,
+    /// its lines being off screen (here: a file graded whole, its grades taken away and put back).
+    #[test]
+    fn frame_per_key_follows_grades_that_land_later() {
+        let fns: Vec<String> = (0..60).map(|i| format!("fn f{i}() {{}}")).collect();
+        let mut with = fns.clone();
+        with[50] = "fn f50() { unsafe { x() } }".into();
+        let dir =
+            bring_repo("frames-due", &[("a.rs", fns.join("\n") + "\n")], &[("a.rs", with.join("\n") + "\n")]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        assert!(frame_per_key(&ed), "line 50's change not drawn");
+        // Its grades not in yet: graded whole, none there — nothing waits
+        let path = dir.join("a.rs");
+        let r = ed.session.code_review.as_mut().unwrap();
+        r.whole.insert(path.clone());
+        let grades = r.grades.remove(&path).unwrap();
+        r.live.borrow_mut().clear();
+        assert!(!frame_per_key(&ed), "no high-risk change graded");
+        // They land (a fresh grading: `graded`'s own kept ones go) — no frame between
+        let r = ed.session.code_review.as_mut().unwrap();
+        r.grades.insert(path, grades);
+        r.live.borrow_mut().clear();
+        assert!(frame_per_key(&ed), "line 50's change, graded now, not drawn: a frame a key");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #224: a new file's one tall change is cut in pieces no taller than the pane — none of them "tall" — yet
+    /// `space v H` takes each only once every line of it was drawn: a `C-d` burst batched into one frame
+    /// scrolled past most of them, and they stayed "not all on screen yet". A frame a key until every line of
+    /// the file's high-risk changes was drawn, then batches again — no frame more than that takes.
+    #[test]
+    fn a_burst_over_a_tall_changes_pieces_draws_every_line_then_batches_again() {
+        // (a new file of 40 functions: one change of 120 lines, cut at its functions)
+        let new: String = (0..40).map(|i| format!("fn f{i}() {{\n    unsafe {{ x() }};\n}}\n")).collect();
+        let dir = bring_repo("burst-pieces", &[("b.rs", "fn b() {}\n".into())], &[("a.rs", new)]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 12).unwrap();
+        let pieces = |ed: &Editor| {
+            let Some(r) = ed.session.code_review.as_ref() else { return 0 };
+            let Some(i) = r.current(ed) else { return 0 };
+            r.graded(ed, &r.files[i]).iter().filter(|g| g.piece.is_some()).count()
+        };
+        settle_until(&mut ed, |ed| {
+            landed(ed) && ed.doc().path.as_deref() == Some(dir.join("a.rs").as_path())
+        });
+        frame(&mut ed);
+        settle_until(&mut ed, |ed| pieces(ed) > 0);
+        frame(&mut ed);
+        assert!(pieces(&ed) >= 10, "cut in pieces: {}", pieces(&ed));
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        // (every line of the file drawn in this review — told by the review's own record, not by the rule)
+        let all_drawn = |ed: &Editor| {
+            let (r, d) = (ed.session.code_review.as_ref().unwrap(), ed.doc());
+            let occ = r.occurrences(d);
+            (0..d.text.len_lines() - 1).all(|l| r.drawn.contains(&drawn_key("a.rs", d, &occ, l)))
+        };
+        // (keys queued at once, then the loop: a batch, a frame — until none is left; after each frame,
+        // `frame_per_key` and whether every line was drawn)
+        let burst = |ed: &mut Editor, keys: &[&str]| {
+            let tx = ed.events.shared_sender();
+            for k in keys {
+                tx.send(crate::event::Event::Key(k.parse().unwrap())).unwrap();
+            }
+            let mut per_key = Vec::new();
+            let never = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            while let Some(ev) = ed.events.try_recv() {
+                crate::term::handle_batch(ed, ev, never);
+                frame(ed);
+                per_key.push((frame_per_key(ed), all_drawn(ed)));
+            }
+            per_key
+        };
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        assert!(frame_per_key(&ed), "pieces with lines no frame drew, in front");
+        // (half a pane a key: 30 reach past the file's end)
+        let per_key = burst(&mut ed, &["C-d"; 30]);
+        assert!(per_key.last().is_some_and(|&(_, all)| all), "the burst drew every line: {per_key:?}");
+        // A frame a key exactly while a line is left undrawn: batched again from the frame that drew the last
+        // of them — not one frame later (nothing looked at yet)
+        assert!(per_key.iter().all(|&(per, all)| per == !all), "{per_key:?}");
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        assert!(burst(&mut ed, &["C-d"; 30]).len() < 30, "the burst batched again");
+        // …and the whole file taken at once
+        feed(&mut ed, "<space>vH");
+        assert_eq!(left(&ed), 0, "{}", status(&ed));
         std::fs::remove_dir_all(&dir).ok();
     }
 

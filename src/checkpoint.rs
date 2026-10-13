@@ -75,6 +75,8 @@ pub struct Checkpoint {
     /// Its texts were read back from that file (`with_texts`, an earlier tarae's moved over): they go again
     /// when its session goes behind (`shed`). A turn made since tarae started keeps its own.
     pub read: bool,
+    /// HEAD's moves in its runs — the files they brought aren't its own (said at its review's head).
+    pub head: Vec<crate::snapshot::HeadMove>,
 }
 
 /// A turn's files: with their texts, or as kept — paths only, the texts in the turn's file.
@@ -151,7 +153,8 @@ impl Touched {
 impl Checkpoint {
     pub fn new(question: String, files: Vec<Touched>) -> Self {
         let seen = !files.iter().any(|t| t.unseen);
-        Checkpoint { question, files: Files::Here(files), undone: false, seen, id: new_id(), read: false }
+        let (files, id) = (Files::Here(files), new_id());
+        Checkpoint { question, files, undone: false, seen, id, read: false, head: Vec::new() }
     }
 }
 
@@ -168,6 +171,8 @@ pub struct Checkpoints {
     pub list: Vec<Checkpoint>,
     /// The turn in flight.
     pub turn: Vec<Touched>,
+    /// HEAD's moves in the turn in flight's runs (`Checkpoint.head`).
+    pub head: Vec<crate::snapshot::HeadMove>,
     /// Where a move or copy of Claude's put a file it wrote unseen this turn, when that place held something
     /// that isn't text before (no `before` to keep for it in `turn`): named like the unseen ones all the same
     /// (`tools::moved`). Gone with the turn.
@@ -287,15 +292,16 @@ pub fn record_run(ed: &mut Editor, changes: Vec<crate::snapshot::Change>) {
 }
 
 /// `record_run` when the turn it ran in is over (stopped meanwhile): a checkpoint of its own, called
-/// `question`. The files row (`checkpoint::finish`).
+/// `question`, with HEAD's move in it said (`head`). The files row (`checkpoint::finish`).
 pub fn record_run_alone(
     ed: &mut Editor,
     question: &str,
     changes: Vec<crate::snapshot::Change>,
+    head: Vec<crate::snapshot::HeadMove>,
 ) -> Option<String> {
     let mut files = Vec::new();
     add_run(&mut files, changes);
-    finish(ed, question, files)
+    finish(ed, question, files, head)
 }
 
 fn add_run(turn: &mut Vec<Touched>, changes: Vec<crate::snapshot::Change>) {
@@ -348,7 +354,8 @@ pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &
 pub fn turn_over(ed: &mut Editor, question: &str) -> Option<String> {
     ed.session.checkpoints.carried.clear();
     let files = std::mem::take(&mut ed.session.checkpoints.turn);
-    finish(ed, question, files)
+    let head = std::mem::take(&mut ed.session.checkpoints.head);
+    finish(ed, question, files, head)
 }
 
 /// The chat turn ended having written files unseen (review at the end): what they are now is read on a
@@ -360,6 +367,7 @@ pub fn gather(ed: &mut Editor, question: &str) -> bool {
     }
     ed.session.checkpoints.carried.clear();
     let files = std::mem::take(&mut ed.session.checkpoints.turn);
+    let head = std::mem::take(&mut ed.session.checkpoints.head);
     ed.session.checkpoints.gathering = true;
     let question = question.to_string();
     let paths: Vec<PathBuf> = files.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
@@ -389,15 +397,21 @@ pub fn gather(ed: &mut Editor, question: &str) -> bool {
                 }
             }
             ed.session.checkpoints.gathering = false;
-            let n = finish(ed, &question, files);
+            let n = finish(ed, &question, files, head);
             crate::chat::turn_gathered(ed, n);
         }
     });
     true
 }
 
-/// The turn's `files` as a checkpoint — the files row (`lib.rs, sub.rs` · `4 files`), None if none changed.
-fn finish(ed: &mut Editor, question: &str, files: Vec<Touched>) -> Option<String> {
+/// The turn's `files` as a checkpoint, with HEAD's moves in it said (`head`) — the files row (`lib.rs,
+/// sub.rs` · `4 files`), None if none changed.
+fn finish(
+    ed: &mut Editor,
+    question: &str,
+    files: Vec<Touched>,
+    head: Vec<crate::snapshot::HeadMove>,
+) -> Option<String> {
     // (a file changed and changed back isn't a change)
     let files: Vec<Touched> = files.into_iter().filter(Touched::changed).collect();
     if files.is_empty() {
@@ -411,7 +425,7 @@ fn finish(ed: &mut Editor, question: &str, files: Vec<Touched>) -> Option<String
         .collect();
     let n = if names.len() <= 2 { names.join(", ") } else { format!("{} files", names.len()) };
     let question = question.lines().next().unwrap_or_default().to_string();
-    ed.session.checkpoints.list.push(Checkpoint::new(question, files));
+    ed.session.checkpoints.list.push(Checkpoint { head, ..Checkpoint::new(question, files) });
     keep(ed);
     Some(n)
 }
@@ -634,6 +648,8 @@ pub fn default_dir() -> Option<PathBuf> {
 pub struct Stored {
     pub list: Vec<Checkpoint>,
     pub turn: Vec<Touched>,
+    /// The turn in flight's HEAD moves (`Checkpoints.head`) — a turn cut short keeps them (review finding).
+    pub head: Vec<crate::snapshot::HeadMove>,
     pub question: String,
     /// When it was taken (`chats::seq`) — a slower save of an older one doesn't replace it.
     pub seq: u64,
@@ -759,6 +775,7 @@ fn read_index(index: &Path) -> Stored {
                 seen: c["seen"].as_bool().unwrap_or(true),
                 id: c["id"].as_u64()?,
                 read: false,
+                head: heads_of(&c["head"]),
             })
         })
         .filter(|c| !c.files.is_empty())
@@ -766,9 +783,15 @@ fn read_index(index: &Path) -> Stored {
     Stored {
         list,
         turn: files_of(&v["turn"]),
+        head: heads_of(&v["head"]),
         question: v["question"].as_str().unwrap_or_default().to_string(),
         seq: v["seq"].as_u64().unwrap_or(0),
     }
+}
+
+/// HEAD moves as kept (`HeadMove::to_json`) — one unreadable is left out.
+fn heads_of(v: &Value) -> Vec<crate::snapshot::HeadMove> {
+    v.as_array().into_iter().flatten().filter_map(crate::snapshot::HeadMove::from_json).collect()
 }
 
 /// An earlier tarae's file (`old_file`): its turns with their texts (nothing if unreadable).
@@ -786,12 +809,14 @@ fn read_old(body: &str) -> Stored {
             seen: c["seen"].as_bool().unwrap_or(true),
             id: new_id(),
             read: false,
+            head: Vec::new(),
         })
         .filter(|c| !c.files.is_empty())
         .collect();
     Stored {
         list,
         turn: files_of(&v["turn"]),
+        head: Vec::new(),
         question: v["question"].as_str().unwrap_or_default().to_string(),
         seq: v["seq"].as_u64().unwrap_or(0),
     }
@@ -814,11 +839,11 @@ fn load_both(dir: &Path, root: &Path) -> (Stored, bool) {
     list.extend(old.list);
     let n = list.len();
     list.drain(..n.saturating_sub(KEEP));
-    let (turn, question, seq) = match old.seq > index.seq {
-        true => (old.turn, old.question, old.seq),
-        false => (index.turn, index.question, index.seq),
+    let (turn, head, question, seq) = match old.seq > index.seq {
+        true => (old.turn, old.head, old.question, old.seq),
+        false => (index.turn, index.head, index.question, index.seq),
     };
-    (Stored { list, turn, question, seq }, true)
+    (Stored { list, turn, head, question, seq }, true)
 }
 
 /// `load` with every turn's texts read too (tests: what's kept, whole).
@@ -869,11 +894,15 @@ fn save(dir: &Path, root: &Path, s: Stored) -> bool {
         .iter()
         .map(|c| {
             let files: Vec<Value> = c.files.kept().iter().map(kept_json).collect();
-            json!({ "id": c.id, "question": c.question, "files": files, "undone": c.undone, "seen": c.seen })
+            let head: Vec<Value> = c.head.iter().map(crate::snapshot::HeadMove::to_json).collect();
+            let (id, q, seen) = (c.id, &c.question, c.seen);
+            json!({ "id": id, "question": q, "files": files, "undone": c.undone, "seen": seen, "head": head })
         })
         .collect();
     let turn: Vec<Value> = s.turn.iter().map(touched_json).collect();
-    let rest = json!({ "root": root, "list": list, "turn": turn, "question": s.question }).to_string();
+    let head: Vec<Value> = s.head.iter().map(crate::snapshot::HeadMove::to_json).collect();
+    let rest =
+        json!({ "root": root, "list": list, "turn": turn, "head": head, "question": s.question }).to_string();
     // (`seq` first: a save reads only it — `seq_of`)
     if !write(&index, format!("{{\"seq\":{},{}", s.seq, &rest[1..])) {
         return false;
@@ -951,6 +980,7 @@ fn saving(l: &crate::session::Session) -> Option<impl FnOnce() + Send + 'static>
     let s = Stored {
         list: list[list.len().saturating_sub(KEEP)..].to_vec(),
         turn: l.checkpoints.turn.clone(),
+        head: l.checkpoints.head.clone(),
         question,
         seq: crate::chats::seq(),
     };
@@ -1059,8 +1089,8 @@ pub fn restore_from(ed: &Editor, dir: PathBuf, root: PathBuf) {
         let (mut s, old) = load_both(&dir, &root);
         if old {
             let list = s.list.clone();
-            let moved =
-                Stored { list, turn: s.turn.clone(), question: s.question.clone(), seq: crate::chats::seq() };
+            let (turn, head, question) = (s.turn.clone(), s.head.clone(), s.question.clone());
+            let moved = Stored { list, turn, head, question, seq: crate::chats::seq() };
             // (not written: they stay held, texts and all — and the file stays)
             if save(&dir, &root, moved) {
                 let _ = std::fs::remove_file(old_file(&dir, &root));
@@ -1086,7 +1116,8 @@ pub fn restore_from(ed: &Editor, dir: PathBuf, root: PathBuf) {
         let kept = s.list.len();
         if !cut.is_empty() {
             let question = if s.question.is_empty() { CUT_SHORT.to_string() } else { s.question.clone() };
-            s.list.push(Checkpoint::new(question, cut));
+            let head = std::mem::take(&mut s.head);
+            s.list.push(Checkpoint { head, ..Checkpoint::new(question, cut) });
         }
         move |ed: &mut Editor| {
             ed.session.checkpoints.dir = Some(back);
@@ -1453,6 +1484,50 @@ mod tests {
             [false, true, false]
         );
         assert!(!old_file(&store, &root).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HEAD's moves are kept with their turn (#225, review finding): a checkpoint's come back as they were, and
+    /// the turn in flight's go with it when tarae ends mid-turn — its checkpoint, made at the next start, still
+    /// says what came with HEAD (the files it left out stay out).
+    #[test]
+    fn head_moves_are_kept_with_their_turn_and_a_turn_cut_short() {
+        let dir = temp("turns-head");
+        let (root, store) = (dir.join("p"), dir.join("turns"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        let h = |short: &str, files: usize| crate::snapshot::HeadMove {
+            from: "1".repeat(40),
+            to: "2".repeat(40),
+            short: short.into(),
+            came: true,
+            forward: true,
+            files,
+            own: 0,
+        };
+        let (done, flying) = (h("1a2b3c4", 90), h("5d6e7f8", 3));
+        let list = vec![Checkpoint { head: vec![done.clone()], ..one_to_two(&root, "q") }];
+        let t = Touched {
+            path: root.join("a.txt"),
+            before: Some(Rope::from_str("one\n")),
+            after: Rope::from_str("two\n"),
+            unseen: true,
+            ..Default::default()
+        };
+        let (turn, head, question) = (vec![t], vec![flying.clone()], "mid-turn".to_string());
+        let seq = crate::chats::seq();
+        assert!(save(&store, &root, Stored { list, turn, head, question, seq }));
+        // Read back as kept
+        let s = load(&store, &root);
+        assert_eq!((&s.list[0].head, &s.head), (&vec![done.clone()], &vec![flying.clone()]));
+        // A start: the turn cut short is a checkpoint, its HEAD move with it
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.turns_dir) = (root.clone(), Some(store.clone()));
+        ed.session_kept_back(ed.session.id);
+        settle(&mut ed, "its turns back", |ed| !ed.restoring());
+        let list = &ed.session.checkpoints.list;
+        let got: Vec<_> = list.iter().map(|c| (c.question.as_str(), c.head.clone())).collect();
+        assert_eq!(got, [("q", vec![done]), ("mid-turn", vec![flying])]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

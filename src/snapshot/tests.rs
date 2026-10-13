@@ -65,8 +65,9 @@ fn what_a_run_changed_text_blobs_deleted_new_and_not_ignored_files() {
     std::fs::write(dir.join("src/new.txt"), "fresh\n").unwrap();
     std::fs::write(dir.join("untracked.txt"), "mine, changed\n").unwrap();
     std::fs::write(dir.join("build/out.o"), "built again\n").unwrap();
-    let Found { files: c, skipped, left_out, ignored_gone, protected } = before.since().unwrap();
+    let Found { files: c, skipped, left_out, ignored_gone, protected, head } = before.since().unwrap();
     assert!(skipped.is_empty() && left_out == 0, "{skipped:?} {left_out}");
+    assert_eq!(head, None, "HEAD stayed");
     assert!(protected.is_empty(), "no protected name made: {protected:?}");
     assert!(ignored_gone.is_empty(), "an ignored file changed isn't one deleted: {ignored_gone:?}");
     assert_eq!(c.len(), 5, "{c:#?}");
@@ -456,6 +457,256 @@ fn a_runs_changes_join_the_turn_and_undo_takes_them_back() {
     assert!(!dir.join("src/gone.txt").exists(), "deleted again");
     assert_eq!(std::fs::read_to_string(dir.join("src/new.txt")).unwrap(), "made\n");
     assert_eq!(std::fs::read_to_string(dir.join("src/a.txt")).unwrap(), "one\nTHREE\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #225: a run that moves HEAD (Claude's `git merge --ff-only main`, with the user's yes) changed the
+/// checkout's files with it — they aren't the turn's changes: left out of the turn, its review and `space u`,
+/// and said instead ("HEAD moved: fast-forward to <short id>") — to Claude, in the chat, at the head of the
+/// turn's review. A file the run changed besides, one the move brought too, is the turn's all the same —
+/// from what the move left it: `space u` takes back the run's part, never the move's.
+#[test]
+fn what_came_with_heads_move_isnt_the_turns() {
+    let dir = repo("headmove");
+    // (a branch one commit ahead: a.txt changed, came.txt new)
+    git_in(&dir, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(dir.join("src/a.txt"), "one\nSIDE\n").unwrap();
+    std::fs::write(dir.join("src/came.txt"), "came\n").unwrap();
+    git_in(&dir, &["add", "src"]);
+    git_in(&dir, &["commit", "-q", "-m", "side"]);
+    git_in(&dir, &["checkout", "-q", "-"]);
+    let short =
+        std::process::Command::new("git").arg("-C").arg(&dir).args(["rev-parse", "--short", "side"]).output();
+    let short = String::from_utf8(short.unwrap().stdout).unwrap().trim().to_string();
+    let said = format!("HEAD moved: fast-forward to {short}");
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = dir.clone();
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !done(ed) {
+            assert!(Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    let answered = |n: u64| {
+        crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+    };
+    // (the test's own repository, no hooks; then a change of the run's own over a file the move brought)
+    let cmd = "git -c core.hooksPath=/dev/null merge -q --ff-only side && printf 'one\\nRUN\\n' > src/a.txt \
+               && printf 'mine, changed\\n' > untracked.txt";
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "run",
+        "arguments": {"command": cmd, "outside_sandbox": true, "reason": "a test of its own files"}}});
+    assert!(crate::tools::mcp(&mut ed, generation, "r1", &msg).is_none(), "it waits for the user");
+    pump(&mut ed, &|ed| !ed.offers.is_empty(), "its card");
+    ed.offer_accept();
+    pump(&mut ed, &|_| answered(1).is_some(), "it ran");
+    let report = answered(1).unwrap().unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join("src/came.txt")).unwrap(), "came\n", "{report}");
+    // Said to Claude, the move's files not among the run's
+    assert!(
+        report.contains(&format!("{said} — the file it brought isn't one of this turn's changes:")),
+        "{report}"
+    );
+    assert!(!report.contains("came.txt"), "{report}");
+    // The turn: the run's own changes only — a.txt's from what the move brought
+    let turn = &ed.session.checkpoints.turn;
+    let mut paths: Vec<&Path> = turn.iter().map(|t| t.path.strip_prefix(&dir).unwrap()).collect();
+    paths.sort();
+    assert_eq!(paths, [Path::new("src/a.txt"), Path::new("untracked.txt")], "{turn:#?}");
+    let a = turn.iter().find(|t| t.path.ends_with("a.txt")).unwrap();
+    assert_eq!(a.before.as_ref().map(|b| b.to_string()).as_deref(), Some("one\nSIDE\n"));
+    let saids = |h: &[HeadMove]| h.iter().map(HeadMove::said).collect::<Vec<_>>();
+    assert_eq!(saids(&ed.session.checkpoints.head), std::slice::from_ref(&said));
+    // Said in the chat
+    let chat = ed.session.chat.as_ref().unwrap();
+    assert!(chat.msgs.iter().any(|m| m.role == crate::chat::Role::Note && m.text == said));
+    // The turn ends: its checkpoint has the two files and says the move — at the head of its review
+    ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+    assert!(crate::checkpoint::gather(&mut ed, "bring main in"), "written unseen: gathered");
+    pump(&mut ed, &|ed| ed.session.checkpoints.list.len() == 1, "its checkpoint");
+    let cp = &ed.session.checkpoints.list[0];
+    assert_eq!((cp.files.len(), saids(&cp.head)), (2, vec![said.clone()]));
+    assert!(ed.session.checkpoints.head.is_empty(), "the next turn starts with none");
+    crate::codereview::start_turn(&mut ed, 0);
+    pump(&mut ed, &|ed| ed.session.code_review.as_ref().is_some_and(|r| r.files.len() == 2), "its review");
+    // (said as it opens too: a pane too narrow for the rail shows no head)
+    let toast = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    let not = format!("review: 2 files Claude changed (not the 1 file that came with HEAD → {short})");
+    assert!(toast.starts_with(&not), "{toast}");
+    let mut out = Vec::new();
+    crate::term::render(&mut ed, &mut out, 240, 30).unwrap();
+    let mut screen = vt100::Parser::new(30, 240, 0);
+    screen.process(&out);
+    // (the rail's side only: the chat on the right says it too)
+    let rail: Vec<String> = screen.screen().rows(0, 60).collect();
+    let row = |s: &str| rail.iter().position(|r| r.contains(s));
+    let moved = rail.iter().position(|r| r.contains("HEAD") && r.contains(&short));
+    let (q, files) = (row("“bring main in”"), row("2 files"));
+    assert!(q.is_some() && q < moved && moved < files, "one row, under the question: {rail:#?}");
+    // `space u`: the run's own changes back — the move's file stays, as git has it
+    crate::checkpoint::step(&mut ed, true).unwrap();
+    pump(&mut ed, &|_| std::fs::read_to_string(dir.join("untracked.txt")).unwrap() == "mine\n", "undone");
+    assert!(dir.join("src/came.txt").exists(), "what came with HEAD isn't taken back");
+    assert_eq!(std::fs::read_to_string(dir.join("src/a.txt")).unwrap(), "one\nSIDE\n", "as HEAD has it");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A commit the run made keeps every file the turn's (review finding on #225, user decision 2026-10-14):
+/// `edit && git commit -am x` moves HEAD and the files' blobs are the two commits' — yet they're the turn's.
+/// A fast-forward and then a commit of the run's isn't a pure fast-forward: what the fast-forward brought
+/// stays too, as before #225 — only said. (Plain git in the test's own repository.)
+#[test]
+fn a_commit_the_run_made_keeps_its_files() {
+    let dir = repo("commit");
+    // (a branch one commit ahead: came.txt new)
+    git_in(&dir, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(dir.join("src/came.txt"), "came\n").unwrap();
+    git_in(&dir, &["add", "src"]);
+    git_in(&dir, &["commit", "-q", "-m", "side"]);
+    git_in(&dir, &["checkout", "-q", "-"]);
+    let paths =
+        |f: &Found| f.files.iter().map(|c| c.path.strip_prefix(&dir).unwrap().to_owned()).collect::<Vec<_>>();
+    let said = "HEAD moved: a commit made by this run — its files stay in this turn";
+    // A fast-forward, then a commit of its own: not a pure fast-forward — every file stays
+    let before = Before::take(&dir);
+    git_in(&dir, &["merge", "-q", "--ff-only", "side"]);
+    std::fs::write(dir.join("src/mine.txt"), "mine\n").unwrap();
+    git_in(&dir, &["add", "src/mine.txt"]);
+    git_in(&dir, &["commit", "-q", "-m", "the run's own, after the merge"]);
+    let found = before.since().unwrap();
+    assert_eq!(paths(&found), [Path::new("src/came.txt"), Path::new("src/mine.txt")], "{found:?}");
+    let h = found.head.expect("HEAD moved");
+    assert!(!h.came && h.forward && h.files == 0 && h.own == 1, "{h:?}");
+    assert_eq!(h.said(), said);
+    // An edit and its commit: the turn's, said
+    let before = Before::take(&dir);
+    std::fs::write(dir.join("src/a.txt"), "one\nCOMMITTED\n").unwrap();
+    git_in(&dir, &["commit", "-q", "-am", "the run's own"]);
+    let found = before.since().unwrap();
+    assert_eq!(paths(&found), [Path::new("src/a.txt")], "{found:?}");
+    let a = &found.files[0];
+    assert_eq!(a.before.as_ref().and_then(|b| b.text.as_deref()), Some("one\ntwo\n"));
+    let h = found.head.expect("HEAD moved");
+    assert!(!h.came && h.files == 0 && h.own == 1, "{h:?}");
+    assert_eq!(h.said(), said);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A merge the run made that isn't a fast-forward, and a reset back (review findings, user decision
+/// 2026-10-14): neither is a pure fast-forward, so every file stays the turn's as before #225 — what both
+/// sides of the merge changed keeps its text from before the run (never the other side's, which the checkout
+/// never had), what the reset changed is the turn's — and the move is only said. (Plain git in the test's own
+/// repository.)
+#[test]
+fn a_merge_and_a_move_back_keep_their_files() {
+    let dir = repo("merge");
+    // (the other side: a.txt's last line, came.txt new; this side: a.txt's first line — apart: no conflict)
+    std::fs::write(dir.join("src/a.txt"), "one\ntwo\n3\n4\nfive\n").unwrap();
+    git_in(&dir, &["commit", "-q", "-am", "longer"]);
+    git_in(&dir, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(dir.join("src/a.txt"), "one\ntwo\n3\n4\nSIDE\n").unwrap();
+    std::fs::write(dir.join("src/came.txt"), "came\n").unwrap();
+    git_in(&dir, &["add", "src"]);
+    git_in(&dir, &["commit", "-q", "-m", "side"]);
+    git_in(&dir, &["checkout", "-q", "-"]);
+    std::fs::write(dir.join("src/a.txt"), "ONE\ntwo\n3\n4\nfive\n").unwrap();
+    git_in(&dir, &["commit", "-q", "-am", "this side"]);
+    let text = |c: &Change, before: bool| {
+        let b = if before { &c.before } else { &c.after };
+        b.as_ref().and_then(|b| b.text.clone())
+    };
+    // A merge made by the run: its own commit — a.txt from this side's text, came.txt the turn's
+    let before = Before::take(&dir);
+    git_in(&dir, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+    assert_eq!(std::fs::read_to_string(dir.join("src/a.txt")).unwrap(), "ONE\ntwo\n3\n4\nSIDE\n");
+    let found = before.since().unwrap();
+    let a = file(&found.files, &dir, "src/a.txt");
+    let (was, is) = ("ONE\ntwo\n3\n4\nfive\n", "ONE\ntwo\n3\n4\nSIDE\n");
+    assert_eq!((text(&a, true), text(&a, false)), (Some(was.into()), Some(is.into())));
+    file(&found.files, &dir, "src/came.txt");
+    let h = found.head.expect("HEAD moved");
+    assert!(!h.came && h.own == 1 && h.files == 0, "{h:?}");
+    assert_eq!(h.said(), "HEAD moved: a commit made by this run — its files stay in this turn");
+    // Back where it was (a reset to an ancestor): its files stay the turn's — a.txt back, came.txt gone
+    let before = Before::take(&dir);
+    git_in(&dir, &["reset", "-q", "--hard", "HEAD~1"]);
+    assert!(!dir.join("src/came.txt").exists());
+    let found = before.since().unwrap();
+    let a = file(&found.files, &dir, "src/a.txt");
+    assert_eq!((text(&a, true), text(&a, false)), (Some(is.into()), Some(was.into())));
+    assert!(file(&found.files, &dir, "src/came.txt").after.is_none());
+    let h = found.head.expect("HEAD moved");
+    assert!(!h.came && !h.forward && h.files == 0 && h.own == 0, "{h:?}");
+    let said = format!("HEAD moved to {} — not a fast-forward; its files stay in this turn", h.short);
+    assert_eq!(h.said(), said);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An edit and its commit in one run of Claude's (`edit && git commit -am x`): the commit didn't exist before
+/// the run, so its file is the turn's — in it from the text before the run, `space u` takes it back — and the
+/// move is said as the run's own ("HEAD moved: a commit made by this run — its files stay in this turn"), to
+/// Claude and in the chat.
+/// (The test's own repository, no hooks.)
+#[test]
+fn an_edit_and_its_commit_in_one_run_stay_the_turns() {
+    let dir = repo("editcommit");
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = dir.clone();
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !done(ed) {
+            assert!(Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    let answered = |n: u64| {
+        crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+    };
+    let said = "HEAD moved: a commit made by this run — its files stay in this turn";
+    let cmd = "printf 'one\\nCOMMITTED\\n' > src/a.txt && git -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+               -c user.email=t@example.invalid -c user.name=t commit -q -am 'the run s own'";
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "run",
+        "arguments": {"command": cmd, "outside_sandbox": true, "reason": "a test of its own files"}}});
+    assert!(crate::tools::mcp(&mut ed, generation, "r1", &msg).is_none(), "it waits for the user");
+    pump(&mut ed, &|ed| !ed.offers.is_empty(), "its card");
+    ed.offer_accept();
+    pump(&mut ed, &|_| answered(1).is_some(), "it ran");
+    let report = answered(1).unwrap().unwrap();
+    // Said to Claude and in the chat as the run's own; its file the turn's
+    assert!(report.contains(&format!("{said}.")), "{report}");
+    assert!(report.contains("It changed in the checkout: src/a.txt"), "{report}");
+    let chat = ed.session.chat.as_ref().unwrap();
+    assert!(chat.msgs.iter().any(|m| m.role == crate::chat::Role::Note && m.text == said));
+    let turn = &ed.session.checkpoints.turn;
+    assert_eq!(turn.iter().map(|t| t.path.clone()).collect::<Vec<_>>(), [dir.join("src/a.txt")]);
+    assert_eq!(turn[0].before.as_ref().map(|b| b.to_string()).as_deref(), Some("one\ntwo\n"));
+    // The turn ends: its review has the file; `space u` takes the edit back
+    ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+    assert!(crate::checkpoint::gather(&mut ed, "fix and commit"), "written unseen: gathered");
+    pump(&mut ed, &|ed| ed.session.checkpoints.list.len() == 1, "its checkpoint");
+    assert_eq!(ed.session.checkpoints.list[0].files.len(), 1);
+    crate::checkpoint::step(&mut ed, true).unwrap();
+    pump(&mut ed, &|_| std::fs::read_to_string(dir.join("src/a.txt")).unwrap() == "one\ntwo\n", "undone");
     std::fs::remove_dir_all(&dir).ok();
 }
 
