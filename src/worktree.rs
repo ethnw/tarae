@@ -3311,13 +3311,14 @@ mod tests {
         card_in_sight(&mut ed);
         feed(&mut ed, "n");
         assert!(card(&ed, "feat: rebasing 1/2").is_none());
-        // A card that came since, in the session tarae started in
+        // A card that came since, in the session tarae started in — one nobody's key asked for (one of the
+        // user's own, in front, would rank first: #205)
         assert!(ed.session_switch(0));
-        let later = crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() };
+        let later = crate::offer::What::Grammars { lang: "Lua".into(), names: Vec::new(), then: None };
         ed.push_offer(crate::offer::Offer::new("Later".into(), "…", "", String::new(), later));
         let inbox = ed.inbox();
         let kinds: Vec<&str> = inbox.iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, ["rebase", "review-end"], "the rebase waited longer: {inbox:?}");
+        assert_eq!(kinds, ["rebase", "grammars"], "the rebase waited longer: {inbox:?}");
         assert!(inbox[0].waited_ms >= 590_000, "git's ten minutes: {}", inbox[0].waited_ms);
         assert!(inbox[0].asks.starts_with("feat: rebasing 1/2 stopped"), "{}", inbox[0].asks);
         // One `C-q` (the card here put away first — this session's own go first): there, with the keys

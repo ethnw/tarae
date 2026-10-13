@@ -99,6 +99,19 @@ fn waited(ms: u64) -> String {
     }
 }
 
+/// The inbox's order — the one place it's decided: the card the user's own command just made while it's in
+/// front (`yours`, #205 — user decision 2026-10-13: `C-q` and `enter` go to it, Claude's stays stacked), then
+/// what asks for an answer before what doesn't, oldest first, then the order they came in (an entry, when it
+/// came, its card's id).
+fn in_line(a: &(Entry, Instant, u64), b: &(Entry, Instant, u64), yours: Option<u64>) -> std::cmp::Ordering {
+    let first = |e: &Entry| yours.is_none() || e.card() != yours;
+    let quiet = |e: &Entry| !e.asks_answer();
+    (first(&a.0).cmp(&first(&b.0)))
+        .then(quiet(&a.0).cmp(&quiet(&b.0)))
+        .then(a.1.cmp(&b.1))
+        .then(a.2.cmp(&b.2))
+}
+
 fn ms(since: Instant, now: Instant) -> u64 {
     now.saturating_duration_since(since).as_millis().min(u64::MAX as u128) as u64
 }
@@ -124,7 +137,7 @@ fn silent_runs(l: &crate::session::Session, now: Instant) -> Vec<(String, Slot, 
 }
 
 impl Editor {
-    /// What waits for the user, oldest first.
+    /// What waits for the user, oldest first — but the card the user's own command made, while in front.
     pub fn inbox(&self) -> Vec<Entry> {
         self.inbox_from(&self.ui_cards())
     }
@@ -212,10 +225,13 @@ impl Editor {
                 v.push(entry(format!("set#{s}:{i}"), "change-set", asks, since, "queued"));
             }
         }
-        let quiet = |e: &Entry| !e.asks_answer();
-        crate::sorting::by(&mut v, |a, b| {
-            (quiet(&a.0).cmp(&quiet(&b.0))).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
-        });
+        // (the front card here, when the user's own command made it)
+        let yours = self
+            .offers
+            .first()
+            .filter(|o| o.rank() == crate::offer::Rank::Yours && !o.installing())
+            .map(|o| o.id);
+        crate::sorting::by(&mut v, |a, b| in_line(a, b, yours));
         v.into_iter().map(|(e, ..)| e).collect()
     }
 

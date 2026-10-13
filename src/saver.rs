@@ -77,6 +77,9 @@ struct Shared {
 struct Wait {
     asked: u64,
     session: crate::event::SessionId,
+    /// The user's input it was asked under (`Queue.asked`): `then` runs as asked by it, as a job's result
+    /// does — what it makes (`:restart`'s card) is still the user's (#205).
+    input: Option<u64>,
     then: Box<dyn FnOnce(&mut Editor)>,
 }
 
@@ -222,7 +225,9 @@ impl Editor {
             quiet &= self.toasts.len() == toasts;
         }
         for w in ready {
+            let was = self.events.set_asked(w.input);
             quiet &= self.with_session(w.session, w.then);
+            self.events.set_asked(was);
         }
         quiet
     }
@@ -239,7 +244,8 @@ impl Editor {
             return then(self);
         }
         let first = self.saver.waits.is_empty();
-        self.saver.waits.push(Wait { asked, session: self.session.id, then: Box::new(then) });
+        let input = self.events.asked();
+        self.saver.waits.push(Wait { asked, session: self.session.id, input, then: Box::new(then) });
         if first {
             self.events.jobs().spawn(|| {
                 std::thread::sleep(SAY_WAITING);
@@ -504,7 +510,7 @@ mod tests {
         let woke = |ed: &mut Editor, session, step: bool| {
             let r = ran.clone();
             let then = Box::new(move |ed: &mut Editor| r.set(Some(ed.session.id)));
-            ed.saver.waits.push(Wait { asked: 0, session, then });
+            ed.saver.waits.push(Wait { asked: 0, session, input: None, then });
             if step {
                 ed.set_step(WAITING, "still writing files");
             }

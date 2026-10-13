@@ -640,16 +640,27 @@ pub fn before_input(ed: &Editor) -> Before {
 /// now if you went there — switched to it (the file you were in still open, in the same session), moved in
 /// it or changed it. Not a key that went elsewhere (a review's answer, the chat's input, `space l`, a
 /// picker that closed again: #46 — such files stayed, each keeping a language server), nor one that only
-/// brought it to the front by closing yours (`:bc`, `C-x` in the buffer list) or switching sessions.
+/// brought it to the front by closing yours (`:bc`, `C-x` in the buffer list) or switching sessions. One only
+/// Claude's turn opened (`claudes_only`) is yours the same way — and what was held back for it, a grammar or a
+/// server to offer, is offered then (#208).
 pub fn taken_up(ed: &mut Editor, before: Before) {
     let Before(Some((session, id, version, sel))) = before else { return };
     let d = ed.doc();
-    if !d.aside || ed.session.review.is_some() {
+    if !(d.aside || d.claudes_only) || ed.session.review.is_some() {
         return;
     }
     let switched = d.id != id && ed.session.id == session && ed.docs.iter().any(|d| d.id == id);
     if switched || (d.id == id && (d.version() != version || *d.selection() != sel)) {
-        ed.doc_mut().aside = false;
+        let d = ed.doc_mut();
+        d.aside = false;
+        if std::mem::take(&mut d.claudes_only) {
+            // (a load still under way offers as for any file now — it isn't Claude's only any more)
+            let (here, held) = (d.id, d.grammar_held.take());
+            if let Some(spec) = held {
+                ed.offer_grammar(spec);
+            }
+            ed.attach_lsp(here);
+        }
     }
 }
 

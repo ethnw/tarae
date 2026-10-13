@@ -1016,6 +1016,19 @@ fn ms(d: std::time::Duration) -> u64 {
 }
 
 impl Editor {
+    /// What a session's Claude is doing, in the state's words.
+    fn doing_said(&self, l: &crate::session::Session) -> String {
+        match self.doing(l) {
+            crate::session::Doing::Idle => "idle".into(),
+            crate::session::Doing::Working => "working".into(),
+            crate::session::Doing::Waiting => "waiting".into(),
+            crate::session::Doing::Done => "done".into(),
+            d @ crate::session::Doing::Stuck { .. } => format!("stuck {}", d.said().trim()),
+            // (at work, held back in line behind another run: `queued 2nd`)
+            d @ crate::session::Doing::Queued { .. } => d.said(),
+        }
+    }
+
     /// The state as of the last frame drawn.
     pub fn ui_state(&self) -> UiState {
         let front = &self.session;
@@ -1025,15 +1038,7 @@ impl Editor {
             name: l.label().to_string(),
             branch: l.branch.clone().or_else(|| l.git_branch.clone()),
             root: l.root.display().to_string(),
-            doing: match self.doing(l) {
-                crate::session::Doing::Idle => "idle".into(),
-                crate::session::Doing::Working => "working".into(),
-                crate::session::Doing::Waiting => "waiting".into(),
-                crate::session::Doing::Done => "done".into(),
-                d @ crate::session::Doing::Stuck { .. } => format!("stuck {}", d.said().trim()),
-                // (at work, held back in line behind another run: `queued 2nd`)
-                d @ crate::session::Doing::Queued { .. } => d.said(),
-            },
+            doing: self.doing_said(l),
             reviewer: l.reviewing().then_some("reviewing"),
             reviewer_run: ReviewerState::of(self, l),
             cards: if is_front { self.offers.len() + l.parked.len() } else { l.parked.len() },
@@ -1457,6 +1462,88 @@ pub struct Ask {
     pub reply: std::sync::mpsc::Sender<String>,
     /// Past this the asker has given up: dropped unanswered.
     pub until: std::time::Instant,
+    /// A session's chat instead of the state (`tarae state --chat`): its id or name, empty for the one in
+    /// front (`Editor::chat_turn`).
+    pub chat: Option<String>,
+}
+
+/// A session's last turn as its chat shows it (#204: a driver read the conversation's own files to know
+/// what Claude answered) — from the last message the user sent on: tool rows as the chat draws them, then
+/// the answer. The user's level only: it isn't part of `UiState`, which Claude's level is built from
+/// (`claude.rs` — another session is counts there), and only the socket asks for it.
+pub struct ChatTurn {
+    pub session: String,
+    pub name: String,
+    pub doing: String,
+    /// (role, text): `user` · `assistant` · `tool` · `thought` · `note`.
+    pub rows: Vec<(&'static str, String)>,
+}
+
+impl ChatTurn {
+    pub fn json(&self) -> Value {
+        json!({
+            "v": V,
+            "chat": {
+                "session": self.session, "name": self.name, "doing": self.doing,
+                "turn": self.rows.iter().map(|(role, text)| json!({ "role": role, "text": text })).collect::<Vec<_>>(),
+            },
+        })
+    }
+
+    pub fn text(&self) -> String {
+        let mut out = vec![format!("chat of {} {} — {}", self.session, self.name, self.doing)];
+        if self.rows.is_empty() {
+            out.push("no turn yet".into());
+        }
+        for (role, text) in &self.rows {
+            match *role {
+                "tool" | "note" => out.push(text.clone()),
+                _ => out.push(format!("{role}:\n{text}")),
+            }
+        }
+        out.join("\n") + "\n"
+    }
+}
+
+impl Editor {
+    /// `which` session's last turn (`ChatTurn`): by id (`s1`) or name, empty for the one in front. Err names
+    /// the sessions there are.
+    pub fn chat_turn(&self, which: &str) -> Result<ChatTurn, String> {
+        use crate::chat::Role;
+        let all = || std::iter::once(&self.session).chain(&self.sessions);
+        let l = all()
+            .find(|l| match which {
+                "" => l.id == self.session.id,
+                w => session_id(l.id) == w || l.label() == w,
+            })
+            .ok_or_else(|| {
+                let there: Vec<String> =
+                    all().map(|l| format!("{} {}", session_id(l.id), l.label())).collect();
+                format!("no session {which} — there are: {}", there.join(", "))
+            })?;
+        let msgs = l.chat.as_ref().map_or(&[][..], |c| &c.msgs[..]);
+        let from = msgs.iter().rposition(|m| m.role == Role::User).unwrap_or(msgs.len());
+        let rows = msgs[from..]
+            .iter()
+            .map(|m| match m.role {
+                Role::User => ("user", m.text.clone()),
+                Role::Assistant => ("assistant", m.text.clone()),
+                Role::Thought => ("thought", m.text.clone()),
+                Role::Note => ("note", m.text.clone()),
+                Role::Tool => {
+                    let row = m.look.as_ref().map(|k| format!("◦ {}  {}  {}", k.verb, k.what, k.range));
+                    let row = [row.unwrap_or_default().trim_end(), m.text.trim()].join(" ");
+                    ("tool", row.trim().to_string())
+                }
+            })
+            .collect();
+        Ok(ChatTurn {
+            session: session_id(l.id),
+            name: l.label().to_string(),
+            doing: self.doing_said(l),
+            rows,
+        })
+    }
 }
 
 /// After each frame (`term::render`): the gone ring and the watchers (`watch.rs`), then the snapshots waiting
@@ -1478,9 +1565,21 @@ pub fn after_frame(ed: &mut Editor) {
     if ready.is_empty() {
         return;
     }
-    let state = ed.ui_state();
+    // (built only when one asks for it, not for a chat)
+    let state = ready.iter().any(|a| a.chat.is_none()).then(|| ed.ui_state());
     for a in ready {
-        let _ = a.reply.send(if a.json { state.json().to_string() } else { state.text() });
+        let said = match (a.chat.as_deref().map(|w| ed.chat_turn(w)), &state) {
+            (None, Some(s)) if a.json => s.json().to_string(),
+            (None, Some(s)) => s.text(),
+            (None, None) => continue,
+            (Some(t), _) => match t {
+                Ok(t) if a.json => t.json().to_string(),
+                Ok(t) => t.text(),
+                Err(e) if a.json => json!({ "error": e }).to_string(),
+                Err(e) => format!("error: {e}\n"),
+            },
+        };
+        let _ = a.reply.send(said);
     }
 }
 

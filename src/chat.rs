@@ -232,7 +232,7 @@ impl Msg {
         }
     }
 
-    fn tool(look: Look, call: &str) -> Self {
+    pub(crate) fn tool(look: Look, call: &str) -> Self {
         Msg { look: Some(look), call: call.to_string(), ..Msg::new(Role::Tool, "", "") }
     }
 }

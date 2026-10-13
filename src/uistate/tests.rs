@@ -840,6 +840,50 @@ fn the_state_as_json_is_pinned() {
     );
 }
 
+/// #204: a session's last turn, as its chat shows it, for a driver (`tarae state --chat`) — from the last
+/// message sent on, the tool rows as drawn, then the answer — pinned like the state (`TARAE_BLESS=1`). By id
+/// or name; the one in front when none is named; an unknown one says which there are.
+#[test]
+fn a_sessions_last_turn_is_pinned() {
+    use crate::chat::{Chat, Look, Msg, Role};
+    let mut ed = editor();
+    (ed.session.name, ed.session.root) = ("main".into(), std::env::temp_dir().join("tarae-uistate-main"));
+    let id = ed.session_add(std::env::temp_dir().join("tarae-uistate-chat"));
+    let l = ed.session_by_id(id).unwrap();
+    l.name = "fix-login".into();
+    let mut c = Chat::new();
+    c.msgs.push(Msg::new(Role::User, "an earlier question", ""));
+    c.msgs.push(Msg::new(Role::Assistant, "an earlier answer", ""));
+    c.msgs.push(Msg::new(Role::User, "why does login fail?", "login.rs · L12"));
+    let look =
+        Look {
+            verb: "read", what: "src/login.rs".into(), pattern: false, range: "L1–40".into(), link: None
+        };
+    c.msgs.push(Msg::tool(look, "t1"));
+    c.msgs.push(Msg::new(Role::Assistant, "The token check runs before the refresh: src/login.rs:12.", ""));
+    l.chat = Some(c);
+    frame(&mut ed);
+    let t = ed.chat_turn(&format!("s{id}")).unwrap();
+    assert_eq!(ed.chat_turn("fix-login").unwrap().rows, t.rows, "by name too");
+    assert!(ed.chat_turn("").unwrap().rows.is_empty(), "the one in front, no conversation");
+    let e = ed.chat_turn("nope").err().unwrap();
+    assert!(e.contains("s0 main") && e.contains("fix-login"), "{e}");
+    let text = t.text();
+    assert!(!text.contains("earlier") && text.contains("◦ read  src/login.rs  L1–40"), "{text}");
+    let actual = serde_json::to_string_pretty(&t.json()).unwrap() + "\n";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/snapshots/ui_chat.json");
+    if std::env::var_os("TARAE_BLESS").is_some_and(|v| v == "1") {
+        std::fs::write(&path, &actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        expected == actual,
+        "{} differs — if intended: TARAE_BLESS=1 cargo test a_sessions_last_turn_is_pinned\n\n{actual}",
+        path.display()
+    );
+}
+
 /// The text form says the same in a few lines; the JSON parses back with what drivers read first.
 #[test]
 fn the_text_form_and_the_json_agree() {
@@ -870,8 +914,8 @@ fn a_snapshot_waits_for_its_input_and_a_frame() {
     let (tx, rx) = std::sync::mpsc::channel();
     let until = Instant::now() + Duration::from_secs(10);
     let input = ed.input_seq;
-    ed.ui_asks.push(Ask { after_input: input + 1, json: true, reply: tx.clone(), until });
-    ed.ui_asks.push(Ask { after_input: 0, json: false, reply: tx, until });
+    ed.ui_asks.push(Ask { after_input: input + 1, json: true, reply: tx.clone(), until, chat: None });
+    ed.ui_asks.push(Ask { after_input: 0, json: false, reply: tx, until, chat: None });
     frame(&mut ed);
     let first = rx.try_recv().expect("the plain one, with the frame");
     assert!(first.starts_with("tarae "), "{first}");

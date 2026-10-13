@@ -110,16 +110,25 @@ fn claudes_level_holds_back_unsent_text_and_other_sessions() {
     );
     (ed.offer_seq, parked.id) = (ed.offer_seq + 1, ed.offer_seq + 1);
     let theirs = format!("card#{}", parked.id);
-    ed.sessions.iter_mut().find(|l| l.id == other).unwrap().parked.push(parked);
+    let l = ed.sessions.iter_mut().find(|l| l.id == other).unwrap();
+    l.parked.push(parked);
+    // (its Claude's answer: the user's to read — `tarae state --chat`, #204 — never this Claude's)
+    let mut c = crate::chat::Chat::new();
+    c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "q", ""));
+    c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Assistant, "their own answer", ""));
+    l.chat = Some(c);
     card(&mut ed, "End the review?");
     frame(&mut ed);
     let full = ed.ui_state().text();
     assert!(full.contains("a secret prompt"), "the full level has it — the filter matters:\n{full}");
     assert!(full.contains("Their own card") && full.contains(&theirs), "{full}");
+    let turn = ed.chat_turn("other").unwrap().text();
+    assert!(turn.contains("their own answer"), "the user reads it:\n{turn}");
     let s = ed.ui_state_claude();
     let text = s.text_claude(false);
     // (not even its card's id — the inbox lists every session's)
-    for held in ["secret", "Their own card", "tarae-claude-level-other", theirs.as_str()] {
+    for held in ["secret", "Their own card", "tarae-claude-level-other", theirs.as_str(), "their own answer"]
+    {
         assert!(!text.contains(held), "{held:?} at Claude's level:\n{text}");
     }
     assert!(text.contains("other · waiting · 1 cards"), "the other session as counts:\n{text}");

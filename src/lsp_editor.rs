@@ -538,7 +538,9 @@ impl Editor {
                         .into_iter()
                         .map(|s| s.command)
                         .collect();
-                    if !tried.is_empty() && self.lsp.missing.insert(spec.name.clone()) {
+                    // (only Claude's turn opened it: nothing said or offered until the user takes it up — #208)
+                    let claudes_only = self.docs.iter().any(|d| d.id == id && d.claudes_only);
+                    if !tried.is_empty() && !claudes_only && self.lsp.missing.insert(spec.name.clone()) {
                         let msg = format!(
                             "no language server for {} — tried {} (not on PATH)",
                             spec.name,
@@ -3482,6 +3484,29 @@ mod tests {
         ed.open(&file).unwrap();
         let file = std::fs::canonicalize(&file).unwrap();
         (ed, file, log)
+    }
+
+    /// #208: a file only Claude's turn opened (follow, replay) gets no word of a missing server — no install
+    /// card mid-turn for a language nobody asked to edit. Once the user moves in it, it's theirs, and the
+    /// server is looked for and missed as for any file they open.
+    #[test]
+    fn a_missing_server_is_said_only_once_you_take_the_file_up() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-claudes-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let cfg = "[lsp.gone]\ncommand = \"tarae-test-no-such-server\"\n[lang.rust]\nlsp = [\"gone\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.open_for_claude(&file).unwrap();
+        assert!(ed.doc().claudes_only);
+        assert!(!ed.lsp.missing.contains("rust"), "only Claude's turn opened it: nothing said");
+        ed.handle_event(crate::event::Event::Key("l".parse().unwrap()));
+        assert!(!ed.doc().claudes_only, "moved in it: yours");
+        assert!(ed.lsp.missing.contains("rust"), "and now its server is missed, said and offered");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// What the stand-in server was sent, after a fixed while for the writer thread — only for checking

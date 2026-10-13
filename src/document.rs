@@ -218,6 +218,13 @@ pub struct Document {
     /// it closes when the turn ends, and `:restart` doesn't bring it back (#37 — such tabs stayed, each
     /// root keeping a language server).
     pub aside: bool,
+    /// Opened by Claude's turn — follow or replay showing what it read or wrote — and not taken up by the user
+    /// since (`edits::taken_up`): nobody asked to work in it, so no grammar or server is offered for it until
+    /// then (#208: an install card for a `.sh` Claude wrote came up mid-turn, in front of the turn's own).
+    pub claudes_only: bool,
+    /// Its grammar's offer held back while `claudes_only` (`load_language`): the language — offered when the
+    /// user takes it up (`edits::taken_up`).
+    pub grammar_held: Option<&'static crate::syntax::LangSpec>,
     /// An edit of Claude's that follow or replay shows here (`follow::sync_shown` — only while the buffer is
     /// the version it was seen in): its lines on the review's wash, the ones they replaced above them.
     pub shown: Option<Vec<crate::replay::Hunk>>,
@@ -262,6 +269,8 @@ impl Document {
             next_mark: 0,
             seen: None,
             aside: false,
+            claudes_only: false,
+            grammar_held: None,
             shown: None,
         }
     }

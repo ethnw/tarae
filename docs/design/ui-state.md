@@ -311,10 +311,18 @@ tarae state --json               # the JSON
 tarae state --pid 4182           # that one; with several and no match: lists them (pid, front session, root)
 tarae state --after-input 1035   # waits for the keys sent to be handled and drawn
 tarae state --watch cards,keys   # events, one per line, until interrupted
+tarae state --chat linux7        # that session's last turn as its chat shows it (an id — s1 — or a name)
 ```
 
 This is what an agent in zellij uses before sending keys: `tarae state` shows `keys → chat (text)`, so it
 doesn't send `y`.
+
+`--chat [SESSION]` (#204, 2026-10-13) answers instead of the state: one session's last turn, from the last
+message sent on — the tool rows as the chat draws them (`◦ read  src/a.rs  L1–40`), then the answer; the
+session in front when none is named. Over the socket: `"chat": "s1"` (`""` for the one in front) in the
+`state` request; the JSON is `{"v", "chat": {session, name, doing, turn: [{role, text}]}}`, pinned by
+`src/snapshots/ui_chat.json`. It's the user's level only: it isn't part of `UiState`, so Claude's level —
+another session as counts — never carries it.
 
 ### tarae's Claude: the `ui` tool and the context line
 

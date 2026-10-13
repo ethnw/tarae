@@ -959,7 +959,7 @@ fn go_range(ed: &mut Editor, path: &Path, lines: Range<usize>) {
     if !ed.session.chat.as_ref().is_some_and(|c| c.follow.jumped) {
         ed.push_jump();
     }
-    if let Err(e) = ed.open(path) {
+    if let Err(e) = ed.open_for_claude(path) {
         return ed.set_error(format!("{e:#}"));
     }
     let here = ed.doc().id;
@@ -1202,7 +1202,7 @@ fn show_stop(ed: &mut Editor, at: (usize, usize)) {
         .filter(|p| p.is_file() && std::fs::canonicalize(p).is_ok_and(|p| p.starts_with(&root)));
     if let Some(path) = place {
         let lines = stop.lines.clone().unwrap_or(0..1);
-        if let Err(e) = ed.open(&path) {
+        if let Err(e) = ed.open_for_claude(&path) {
             return ed.set_error(format!("{e:#}"));
         }
         if !ed.doc().loading {

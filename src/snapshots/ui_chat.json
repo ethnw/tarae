@@ -1,0 +1,22 @@
+{
+  "chat": {
+    "doing": "idle",
+    "name": "fix-login",
+    "session": "s1",
+    "turn": [
+      {
+        "role": "user",
+        "text": "why does login fail?"
+      },
+      {
+        "role": "tool",
+        "text": "◦ read  src/login.rs  L1–40"
+      },
+      {
+        "role": "assistant",
+        "text": "The token check runs before the refresh: src/login.rs:12."
+      }
+    ]
+  },
+  "v": 2
+}

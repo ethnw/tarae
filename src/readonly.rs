@@ -781,6 +781,9 @@ const COMMANDS: [&str; 21] = [
 /// them a path.
 const SAYS: [&str; 4] = ["echo", "printf", "true", "false"];
 
+/// Commands that read only what's piped in — no word of theirs names a file (`tr`'s are sets of characters).
+const STDIN_ONLY: [&str; 1] = ["tr"];
+
 /// Whether a command only says its words (`SAYS`).
 pub fn says(w: &[Word]) -> bool {
     w.first().is_some_and(|w| SAYS.contains(&w.text.as_str()))
@@ -799,6 +802,41 @@ pub fn read_only(cmd: &str) -> bool {
         Part::Cd(_) => true,
         Part::Cmd(w) => only_reads(w),
     })
+}
+
+/// What awk can do past reading its files and printing, by name — anywhere in any of its words, even in a
+/// string (no tokenizing to get wrong): run a command (`system`), read or write through a pipe or a file
+/// (`getline`, and `close`/`fflush` on one), read the environment (`ENVIRON`, `PROCINFO`), read a file its
+/// words don't name (`ARGV`/`ARGC` set in the program; `SYMTAB` reaches them by name), load code (`@load`,
+/// `@include`, `@f()`).
+const AWK_NEVER: [&str; 10] =
+    ["system", "getline", "close", "fflush", "ENVIRON", "PROCINFO", "ARGV", "ARGC", "SYMTAB", "@"];
+
+/// `awk` that only reads and prints to its output (#207): options `-F` and `-v` only (no `-f` file of code,
+/// `-i`/`-l` loading more, `-i inplace`), one program, then the files it reads (`files`; never a
+/// `name=value` operand) — none of `AWK_NEVER`, and no `>` or `|` after the first `print`/`printf`. A
+/// redirect (`> f`, `>> f`, `| "cmd"`, `|& "cmd"`) only ever follows one of those in the program's text (a
+/// pipe into awk needs `getline`), so a `>` before it is a comparison (`NR>=702`) — and after it, even a
+/// comparison asks.
+pub fn awk_reads(args: &[&str], files: bool) -> bool {
+    let mut program = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-F" | "-v" if i + 1 < args.len() => i += 1,
+            a if (a.starts_with("-F") || a.starts_with("-v")) && a.len() > 2 => {}
+            a if a.starts_with('-') => return false,
+            a if program.is_none() => program = Some(a),
+            a if files && !a.contains('=') => {}
+            _ => return false,
+        }
+        i += 1;
+    }
+    let Some(p) = program else { return false };
+    if args.iter().any(|a| AWK_NEVER.iter().any(|n| a.contains(n))) {
+        return false;
+    }
+    !p[p.find("print").unwrap_or(p.len())..].contains(['>', '|'])
 }
 
 /// Programs that move, copy or remove files and run none of them; git's below (#76).
@@ -945,6 +983,9 @@ fn reads_only(words: &[&str]) -> bool {
         "file" => !any(&|w| short(w, 'C') || long(w, "compile")),
         "tail" => !any(&|w| short(w, 'f') || short(w, 'F') || long(w, "follow")),
         "rg" => !any(&|w| w.starts_with("--pre")),
+        // (only what's piped in; its operands are sets of characters — #202)
+        "tr" => crate::filters::reads(words),
+        "awk" => awk_reads(args, true),
         // `uniq in out` writes `out` — `uniq - out` too (`-` is the input: an operand, not an option)
         "uniq" => args.iter().filter(|w| **w == "-" || !w.starts_with('-')).count() <= 1,
         _ => COMMANDS.contains(&name),
@@ -955,7 +996,8 @@ fn reads_only(words: &[&str]) -> bool {
 /// value (`--file=x`, `-f/x`); a glob as its fixed folder (`../*.rs` reads `..`). A word that names nothing
 /// (a pattern) is left out by `outside`.
 fn candidates(words: &[Word]) -> Vec<String> {
-    if words.first().is_some_and(|w| SAYS.contains(&w.text.as_str())) {
+    if words.first().is_some_and(|w| SAYS.contains(&w.text.as_str()) || STDIN_ONLY.contains(&w.text.as_str()))
+    {
         return Vec::new();
     }
     let mut rest = words.get(1..).unwrap_or_default();
@@ -1726,6 +1768,59 @@ mod tests {
             "allowed this chat"
         );
         assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed, &[]).unwrap().is_empty(), "kept");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #202, #207: lines read with every day that went to a card. A glob that's an option's value is filled in
+    /// where the run starts, so it reads that folder; `tr` reads only what's piped in (its words are sets of
+    /// characters, never files); an awk that only prints reads only the files it names. A glob or a file
+    /// outside is still outside, and an awk that could run, write, or read past its words isn't a read.
+    #[test]
+    fn a_glob_value_tr_and_a_printing_awk_read_only_what_they_name() {
+        for line in [
+            "grep -rn 'x' src --include=*.rs | head",
+            "grep -rln 'Command::new' src --include=*.rs | grep -v test | head -60 | tr '\\n' ' '",
+            "awk 'NR>=702 && NR<=800' src/offer.rs | grep -n x",
+            "awk -F: '$2 > 3 { print $1 }' a.txt b.txt",
+            "awk '/a|b/ { n++ } END { print n }' a.txt",
+            "cat a.txt | awk -F: -v n=2 '{ print $n }'",
+        ] {
+            assert!(read_only(line), "{line}");
+        }
+        for line in [
+            "awk '{ print > \"f\" }' a.txt",
+            "awk '{ print $1 >> \"f\" }' a.txt",
+            "awk 'NR > 1 { print | \"sh\" }' a.txt",
+            "awk '{ printf \"%s\", $0 |& \"sh\" }' a.txt",
+            "awk '{ xprint = 1; print > \"f\" }' a.txt",
+            "awk 'BEGIN { system(\"true\") }'",
+            "awk '{ \"date\" | getline d }' a.txt",
+            "awk '{ while ((getline l < \"/etc/hosts\") > 0) print l }'",
+            "awk 'BEGIN { ARGV[1] = \"/etc/hosts\"; ARGC = 2 } { print }'",
+            "awk 'BEGIN { SYMTAB[\"AR\" \"GC\"] = 2 }'",
+            "awk 'BEGIN { print ENVIRON[\"HOME\"] }'",
+            "awk '@load \"x\"' a.txt",
+            "awk -f x.awk a.txt",
+            "awk -i inplace '{ print }' a.txt",
+            "awk '{ print }' FS=: a.txt",
+            "awk",
+        ] {
+            assert!(!read_only(line), "{line}");
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-readonly-glob-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("p/src")).unwrap();
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (p, out) = (dir.join("p"), dir.join("out"));
+        std::fs::write(out.join("m.txt"), "x\n").unwrap();
+        let none = Allowed::default();
+        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none, &[]).unwrap();
+        assert!(at("grep -rn x src --include=*.rs | head").is_empty(), "the folder it starts in");
+        assert!(at("grep -rn x . --include=*.txt").is_empty());
+        assert_eq!(at("grep -rn x ../out --include=*.txt"), std::slice::from_ref(&out));
+        assert_eq!(at("grep x ../out/*.txt"), std::slice::from_ref(&out), "a glob climbing out");
+        assert_eq!(at("awk '{ print }' ../out/m.txt"), [out.join("m.txt")], "awk's files are reads");
+        assert!(at("ls | tr ../out/m.txt x").is_empty(), "tr's words name no file");
         std::fs::remove_dir_all(&dir).ok();
     }
 

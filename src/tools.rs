@@ -903,31 +903,10 @@ fn pipe_filter(w: &[crate::readonly::Word]) -> bool {
         return false;
     }
     match name {
-        "awk" => awk_reads(args),
+        "awk" => crate::readonly::awk_reads(args, false),
         "jq" => jq_reads(args),
         _ => crate::filters::reads(&words),
     }
-}
-
-/// `awk` that only prints: options `-F` and `-v` only (no `-f` file of code, `-i`/`-l` loading more), one
-/// program and no file — and nothing in the program that runs a command, writes, or reads past its input:
-/// `system`, `getline`, `ENVIRON`, `close`, a `|` or `>` (a pipe or a file — comparisons with `>` and `||`
-/// ask too), `@` (`@load`, `@include`).
-fn awk_reads(args: &[&str]) -> bool {
-    let mut program = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i] {
-            "-F" | "-v" if i + 1 < args.len() => i += 1,
-            a if (a.starts_with("-F") || a.starts_with("-v")) && a.len() > 2 => {}
-            a if a.starts_with('-') => return false,
-            a if program.is_none() => program = Some(a),
-            _ => return false,
-        }
-        i += 1;
-    }
-    let Some(p) = program else { return false };
-    !p.contains(['|', '>', '@']) && !["system", "getline", "ENVIRON", "close"].iter().any(|w| p.contains(w))
 }
 
 /// `jq` that only reads what's piped in: its output options and `--arg`/`--argjson`, one filter and no file
@@ -1206,11 +1185,17 @@ fn why_asked(cmd: &str, extra: &[String]) -> crate::cards::Why {
     };
     for p in &parts {
         let crate::readonly::Part::Cmd(w) = p else { continue };
-        if w.iter().any(|w| w.glob) {
-            return Why::Glob;
+        // (a read isn't why — its glob is judged as the folder it reads: #202, `grep x src --include=*.rs |
+        // tr …` was said as a glob while `tr` asked)
+        if crate::readonly::only_reads(w) {
+            continue;
         }
         let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
-        if !part_allowed(&words, extra) && !crate::readonly::only_reads(w) {
+        // (a check but for the glob the shell fills in: that's why)
+        if w.iter().any(|w| w.glob) && part_allowed(&words, extra) {
+            return Why::Glob;
+        }
+        if !part_allowed(&words, extra) {
             // (`cargo test --config …`: the check's words, but no rule takes that option — #169)
             if let Some(o) = writes_option(&words) {
                 return Why::Writes(o);
@@ -4484,7 +4469,7 @@ mod tests {
             let q = run_card(&mut ed, cmd);
             assert!(q.contains(said) && !q.contains("what it runs"), "{cmd}: {q}");
         }
-        for cmd in ["./tool --x", "python3 -c 'print(1)'", "awk '{print}' x.awk", "perl -e 1 run.pl"] {
+        for cmd in ["./tool --x", "python3 -c 'print(1)'", "awk '{ system(1) }' x.awk", "perl -e 1 run.pl"] {
             let q = run_card(&mut ed, cmd);
             assert!(!q.contains("what it runs"), "{cmd}: {q}");
         }
@@ -4702,6 +4687,16 @@ mod tests {
     /// #169: a card's `a` promised `cargo test …`, and the next `cargo test` with other arguments asked
     /// again — `--config` was what asked, and no allowance lifts it. What `a` offers, once taken, lets that
     /// command through again (#193: that one, exactly — its filters aside); a card it can't keep that for
+    /// #202: a card's why names the part that asked — two cards said `glob` for a read's `--include=*.rs`
+    /// while `tr` and `sysctl` were what asked. A glob is the why only for a check it keeps from running.
+    #[test]
+    fn why_names_the_part_that_asked_not_a_reads_glob() {
+        use crate::cards::Why;
+        let line = "grep -rn x src --include=*.rs | head; sysctl kern.maxfiles";
+        assert_eq!(super::why_asked(line, &[]), Why::NotACheck("sysctl".into()));
+        assert_eq!(super::why_asked("cargo test -- *.rs", &[]), Why::Glob);
+    }
+
     /// offers no `a` and says what asks.
     #[test]
     fn what_a_cards_a_offers_is_what_it_lets_through() {

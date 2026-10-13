@@ -2073,6 +2073,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #205, end to end: `:restart` typed while Claude's card is up — each key through `handle_event`, which
+    /// marks what it starts as asked by it — and its card, brought back by the jobs that key started (saved,
+    /// the checkouts looked up on a worker), comes in front of Claude's and is the inbox's first. Claude's stays,
+    /// unanswered. (The build is `true`, the binary a stand-in in the test's own folder; nothing is answered.)
+    #[test]
+    fn restarts_card_typed_while_claudes_is_up_comes_in_front_of_it() {
+        use crate::offer::{Offer, What};
+        let dir = temp("in-front");
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = editing(&dir, "true", &bin);
+        let what = What::Screen { call: crate::tools::Call::test(1) };
+        ed.push_offer(Offer::new("Claude asks".into(), "to see the screen", "", String::new(), what));
+        let claudes = ed.offers[0].id;
+        for k in [":", "r", "e", "s", "t", "a", "r", "t", "ret"] {
+            ed.handle_event(crate::event::Event::Key(k.parse().unwrap()));
+        }
+        let mine = |ed: &Editor| ed.offers.iter().find(|o| matches!(o.what, What::Restart(_))).map(|o| o.id);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while mine(&ed).is_none() {
+            let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
+            ed.handle_event(ev.unwrap_or_else(|| panic!("no restart card: {}", toasts(&ed))));
+        }
+        let ids: Vec<u64> = ed.offers.iter().map(|o| o.id).collect();
+        assert_eq!(ids, [mine(&ed).unwrap(), claudes], "yours in front, Claude's stacked");
+        assert_eq!(ed.inbox().first().and_then(|e| e.card()), mine(&ed), "and the inbox's first");
+        ed.restart = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Before it becomes the binary it built, the restart keeps that binary's dSYM (`dsyms::keep`, on a
     /// worker) — one it can't keep (here: the stand-in, in a cargo build's folder, is a script, not a Mach-O)
     /// doesn't stop the restart. No dSYM beside the binary: nothing to keep. Either way the state carries it

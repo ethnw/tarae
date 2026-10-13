@@ -65,6 +65,22 @@ pub struct Offer {
     /// The front run card's group (cardburden 6): the cards stacked behind it asking for the very same run
     /// (`same_run`), by id — its last paragraph lists them, and `Y` answers them with it (`offer_group_sync`).
     pub like: Vec<u64>,
+    /// The user's input count (`Editor.input_seq`) when it came (`push_offer`).
+    pub came: u64,
+    /// The user's own (`Offer::rank`, #205): a kind a command of theirs asks for, made by the input the user
+    /// gave last (`Queue.asked` — the key, or a job it started; nothing typed since).
+    pub yours: bool,
+}
+
+/// Where a card stands among the ones up (`Editor::offer_place`): the lower first, arrival order within.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Rank {
+    /// Asked for by the user's own command — what they're waiting on.
+    Yours,
+    /// Claude's turn waits on it.
+    Claudes,
+    /// The rest: a grammar or a server to install, a repository to trust, … — never in front of a turn's.
+    Other,
 }
 
 /// How the front run card's last paragraph starts when it lists the cards like it (`offer_group_sync`).
@@ -392,6 +408,52 @@ impl Offer {
             held_changes: Vec::new(),
             aside: false,
             like: Vec::new(),
+            came: 0,
+            yours: false,
+        }
+    }
+
+    /// Where it stands among the cards up (`Editor::offer_place`): the user's own (`yours` — #205: `space W`
+    /// `n`'s card went behind Claude's), Claude's turn's, or the rest.
+    pub fn rank(&self) -> Rank {
+        match () {
+            _ if self.yours => Rank::Yours,
+            _ if self.claudes() || self.asker().is_some() => Rank::Claudes,
+            _ => Rank::Other,
+        }
+    }
+
+    /// Whether it's a kind only a command of the user's asks for (a key, a `:` line, a click — also through
+    /// the work it starts) — not Claude's turn, nor nobody just now (a file shown, a plugin loaded, a turn's
+    /// end, a task that ended). A grammar, a server or a debugger is only when it resumes what the user
+    /// started (a launch, an attach). Its card is `yours` only when the input that asked is the last one.
+    pub fn yours_kind(&self) -> bool {
+        use crate::install::Then;
+        match &self.what {
+            What::Grammars { then, .. } => then.is_some(),
+            What::Fetch { then, .. } | What::Install { then, .. } => matches!(then, Then::Resume(_)),
+            w => matches!(
+                w,
+                What::Grant { .. }
+                    | What::Outside { .. }
+                    | What::Preflight { .. }
+                    | What::BranchDelete { .. }
+                    | What::ForcePush(_)
+                    | What::SessionNew(_)
+                    | What::SessionEnd(_)
+                    | What::CloseReviewed { .. }
+                    | What::ReviewEnd { .. }
+                    | What::Rebase(_)
+                    | What::RebaseHeld(_)
+                    | What::Rebased(_)
+                    | What::UpTo(_)
+                    | What::Hooks(_)
+                    | What::Restart(_)
+                    | What::RestartSame { .. }
+                    | What::RestartCancel { .. }
+                    | What::NotesClose { .. }
+                    | What::BillingSwitch { .. }
+            ),
         }
     }
 
@@ -935,6 +997,10 @@ impl crate::editor::Editor {
         self.offer_seq += 1;
         o.id = self.offer_seq;
         o.since = Instant::now();
+        // (the user's own: the input that asked is the last one given — a card that comes after more typing,
+        // or from work nobody's input started, waits its turn: #205)
+        o.came = self.input_seq;
+        o.yours = o.yours_kind() && self.events.asked() == Some(self.input_seq);
         // (the call it holds waits on it — watched until it's answered: `asking_sync`)
         if let Some(asker) = o.asker() {
             self.session.asking.push(Asking { card: o.id, asker, what: o.title.clone() });
@@ -976,7 +1042,26 @@ impl crate::editor::Editor {
             // (lent: back to the chat once it's answered — `chat_lent_sync`)
             self.session.chat_lent.get_or_insert(o.id);
         }
-        self.offers.push(o);
+        let at = self.offer_place(&o);
+        self.offers.insert(at, o);
+    }
+
+    /// Where a new card goes among those up: behind every one that ranks with it or before it
+    /// (`Offer::rank` — arrival order within a rank), so one the user's input just asked for comes in front of
+    /// Claude's (#205) and a grammar's or a server's never in front of a turn's (#208). Never in front of the
+    /// one at the front while it's being answered — its keys brought to it (`C-q`), its text open in its
+    /// buffer — nor, for one of the user's, of a front card that came after the input that asked (it came while
+    /// the work ran: maybe being read now). One that comes to the front settles again before `y` counts
+    /// (`offer_settled`: by id).
+    fn offer_place(&self, o: &Offer) -> usize {
+        let came_since = |f: &Offer| o.yours && f.came >= o.came;
+        let held = self
+            .offers
+            .first()
+            .is_some_and(|f| self.card_keys || self.offer_viewing() || self.offer_bar() || came_since(f));
+        let rank = o.rank();
+        let behind = self.offers.iter().enumerate().skip(usize::from(held)).find(|(_, x)| x.rank() > rank);
+        behind.map_or(self.offers.len(), |(i, _)| i)
     }
 
     /// Every event: the keys a card took from the chat (`push_offer`) go back to it once that card is gone —

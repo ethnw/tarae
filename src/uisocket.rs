@@ -7,8 +7,10 @@
 //! - `{"get":"state"}` → the state's JSON; `"format":"text"` → `{"text": …}`;
 //! - `"after_input": N` holds the answer until `input` ≥ N and a frame after that (the keys sent were handled
 //!   and drawn) — instead of sleeping after sending keys.
+//! - `"chat": "s1"` (an id or a name, `""` the session in front) → that session's last turn instead
+//!   (`uistate::ChatTurn`) — the user's level; Claude's never reads another session's.
 //!
-//! `tarae state [--json] [--pid N] [--after-input N]` is the client (`cli`).
+//! `tarae state [--json] [--pid N] [--after-input N] [--chat [S]]` is the client (`cli`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -246,6 +248,7 @@ fn answer(req: &str, line: &[u32], tx: &crate::event::Tx) -> Value {
     }
     let text = req["format"] == "text";
     let after_input = req["after_input"].as_u64().unwrap_or(0);
+    let chat = req["chat"].as_str().map(String::from);
     let wait = req["timeout_ms"].as_u64().map_or(WAIT, Duration::from_millis).min(WAIT_MAX);
     let (reply, got) = std::sync::mpsc::channel();
     let line = line.to_vec();
@@ -260,7 +263,7 @@ fn answer(req: &str, line: &[u32], tx: &crate::event::Tx) -> Value {
             ed.unchanged = true;
             return;
         }
-        ed.ui_asks.push(crate::uistate::Ask { after_input, json: !text, reply, until });
+        ed.ui_asks.push(crate::uistate::Ask { after_input, json: !text, reply, until, chat });
     };
     if tx.send(crate::event::Event::Job(Box::new(job))).is_err() {
         return json!({ "error": "tarae is ending" });
@@ -330,22 +333,26 @@ fn ancestors(pid: u32) -> Vec<u32> {
 // ── `tarae state` ────────────────────────────────────────────────────────
 
 const USAGE: &str = "\
-usage: tarae state [--json] [--pid PID] [--after-input N] [--watch [KINDS]]
+usage: tarae state [--json] [--pid PID] [--after-input N] [--chat [SESSION] | --watch [KINDS]]
   the UI state of a running tarae: where the keys go, the mode, the sessions, the cards, the panels,
   the runs, the toasts, what each session's Claude costs, its processes (:procs)
   --json            as JSON (the schema: docs/design/ui-state.md)
   --pid PID         that tarae (else $TARAE_UI's, or the one whose session holds this folder)
   --after-input N   once N keys and clicks were handled and drawn (read `input` first, add what you send)
+  --chat [SESSION]  instead: a session's last turn as its chat shows it — by id (s1) or name, else the
+                    one in front
   --watch [KINDS]   what changes, a line an event, until interrupted — KINDS: keys,cards,sessions,reviewer,
                     turns,runs,toasts,usage,procs (all when left out)";
 
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
     let (mut json, mut pid, mut after, mut watching) = (false, None, 0u64, None::<Vec<String>>);
+    let mut chat = None::<String>;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         let num = |v: Option<&String>| v.and_then(|v| v.parse::<u64>().ok());
         match a.as_str() {
             "--json" => json = true,
+            "--chat" => chat = Some(it.next_if(|s| !s.starts_with("--")).cloned().unwrap_or_default()),
             "--watch" => {
                 let kinds = it.next_if(|k| !k.starts_with("--"));
                 watching = Some(kinds.map(|k| k.split(',').map(String::from).collect()).unwrap_or_default());
@@ -387,6 +394,9 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
     let mut req = json!({ "get": "state", "after_input": after });
     if !json {
         req["format"] = json!("text");
+    }
+    if let Some(which) = chat {
+        req["chat"] = json!(which);
     }
     let v = ask(&path, &req).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     if let Some(e) = v["error"].as_str() {

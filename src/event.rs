@@ -55,12 +55,15 @@ pub struct Queue {
     /// The session in front — what `sender` and `jobs` tag their results with (set on a switch, and while a
     /// background session's result is applied).
     session: std::cell::Cell<SessionId>,
+    /// The user's input (its `input_seq`) whose handling is under way — or a job's result it started, through
+    /// jobs it started in turn (`Jobs` carries it): what a card it makes was asked by (#205).
+    asked: std::cell::Cell<Option<u64>>,
 }
 
 impl Default for Queue {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, session: Default::default() }
+        Self { tx, rx, session: Default::default(), asked: Default::default() }
     }
 }
 
@@ -77,18 +80,29 @@ impl Queue {
     }
 
     pub fn jobs(&self) -> Jobs {
-        Jobs { tx: self.sender() }
+        Jobs { tx: self.sender(), asked: self.asked.get() }
     }
 
     /// Jobs whose results are applied in whatever session is in front when they land — work about sessions
     /// themselves (making, ending one: `worktree.rs`), never swapped into the session it's about.
     pub fn shared_jobs(&self) -> Jobs {
-        Jobs { tx: self.shared_sender() }
+        Jobs { tx: self.shared_sender(), asked: self.asked.get() }
     }
 
     /// Results made from now on are for `session`.
     pub fn set_session(&self, session: SessionId) {
         self.session.set(session);
+    }
+
+    /// The user's input that what runs now was asked by (`Queue.asked`) — None: nobody's just now (a task's
+    /// output, a server, a timer).
+    pub fn asked(&self) -> Option<u64> {
+        self.asked.get()
+    }
+
+    /// What runs from now on was asked by input `n` (None: by nobody); what it was before.
+    pub fn set_asked(&self, n: Option<u64>) -> Option<u64> {
+        self.asked.replace(n)
     }
 
     pub fn recv(&self) -> Option<Event> {
@@ -134,6 +148,9 @@ impl Tx {
 #[derive(Clone)]
 pub struct Jobs {
     tx: Tx,
+    /// The input it was started under (`Queue.asked`): its result is applied as asked by it too — one-shot
+    /// work only; a long-lived sender (a task's output, a server's) carries none.
+    asked: Option<u64>,
 }
 
 impl Jobs {
@@ -143,9 +160,17 @@ impl Jobs {
         W: FnOnce() -> A + Send + 'static,
         A: FnOnce(&mut Editor) + Send + 'static,
     {
-        let tx = self.tx.clone();
+        let (tx, asked) = (self.tx.clone(), self.asked);
         run(Box::new(move || {
             let apply = work();
+            let apply = move |ed: &mut Editor| match asked {
+                None => apply(ed),
+                Some(_) => {
+                    let was = ed.events.set_asked(asked);
+                    apply(ed);
+                    ed.events.set_asked(was);
+                }
+            };
             let _ = tx.send(Event::Job(Box::new(apply)));
         }));
     }

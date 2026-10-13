@@ -1005,6 +1005,16 @@ impl Editor {
 
     /// Opens a file (a relative path is from the root). If already open, switches to that buffer.
     pub fn open(&mut self, path: &Path) -> Result<()> {
+        self.open_as(path, false)
+    }
+
+    /// `open` for Claude's turn (follow, replay): a file not open yet is `claudes_only` — no grammar or
+    /// server offered for it until the user takes it up (#208).
+    pub fn open_for_claude(&mut self, path: &Path) -> Result<()> {
+        self.open_as(path, true)
+    }
+
+    fn open_as(&mut self, path: &Path, claudes: bool) -> Result<()> {
         let path = self.path_of(path);
         let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path))?;
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
@@ -1014,7 +1024,7 @@ impl Editor {
         }
         let id = self.alloc_id();
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let doc = if size < ASYNC_LOAD_BYTES {
+        let mut doc = if size < ASYNC_LOAD_BYTES {
             Document::open(id, &path)?
         } else {
             // Big files load in the background — the first frame is instant regardless of file size.
@@ -1034,6 +1044,7 @@ impl Editor {
             });
             Document::placeholder(id, &path)
         };
+        doc.claudes_only = claudes;
         self.add_doc(doc);
         self.restore.opened = true;
         self.restore_position(self.current);
@@ -1644,6 +1655,9 @@ impl Editor {
         if input {
             self.unfocused = false;
         }
+        // (what it asks for — now, or through jobs it starts — was asked by this input: the count it's about to
+        // take, first thing in `handle_key`/`handle_paste`, at a click's press — #205)
+        let asked = input.then(|| self.events.set_asked(Some(self.input_seq + 1)));
         match ev {
             Event::Key(k) => {
                 self.handle_key(k);
@@ -1662,6 +1676,9 @@ impl Editor {
             }
             Event::Job(apply) => apply(self),
             Event::For(session, apply) => self.for_session(session, apply),
+        }
+        if let Some(was) = asked {
+            self.events.set_asked(was);
         }
         // Whether the event changed nothing on screen is the event's to say: what runs after every event below
         // can make it drawn, never not (#200: a look at a card behind said "nothing" for every key for 30 min)
@@ -2856,6 +2873,10 @@ impl Editor {
                 let Some(doc) = ed.docs.iter_mut().find(|d| d.id == id) else { return };
                 match result {
                     Ok(lang) => doc.syntax = Some(syntax::Syntax::new(lang)),
+                    // (only Claude's turn opened it: offered once the user takes it up — #208)
+                    Err(e) if e.starts_with("no grammar") && doc.claudes_only => {
+                        doc.grammar_held = Some(spec)
+                    }
                     // Grammar not downloaded yet — offer to download it (once per language until quit)
                     Err(e) if e.starts_with("no grammar") => ed.offer_grammar(spec),
                     Err(e) => ed.set_status(format!("no highlighting: {e}")),
@@ -9373,6 +9394,36 @@ mod tests {
         std::fs::remove_dir_all(&away).ok();
     }
 
+    /// #208, the grammar half: a file only Claude's turn opened, its language's grammar not here — no offer
+    /// (`grammar_hinted` records one first, whether offers are on or not, as `lsp.missing` does for servers).
+    /// Moved in, it's the user's: the grammar is looked for again and offered.
+    #[test]
+    fn a_missing_grammar_is_offered_only_once_you_take_the_file_up() {
+        let dir = std::env::temp_dir().join(format!("tarae-grammar-claudes-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let mut ed = Editor::new(Config::default());
+        ed.open_for_claude(&file).unwrap();
+        // A language whose grammar is never here (a real one may be downloaded on this machine), loaded as
+        // `attach_syntax` loads a file's
+        let mut lang = syntax::spec("lua").expect("lua's pack").clone();
+        (lang.name, lang.grammar) = ("tarae-test-lang".into(), "tarae-test-no-such-grammar".into());
+        let spec: &'static syntax::LangSpec = Box::leak(Box::new(lang));
+        ed.load_language(ed.doc().id, spec);
+        // (until its load is back: the grammar missing, its offer held)
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ed.doc().grammar_held.is_none() {
+            let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
+            ed.handle_event(ev.expect("its load back, the offer held"));
+        }
+        assert!(!ed.grammar_hinted.contains(&spec.grammar), "only Claude's turn opened it: nothing offered");
+        ed.handle_event(Event::Key("l".parse().unwrap()));
+        assert!(!ed.doc().claudes_only, "moved in it: yours");
+        assert!(ed.grammar_hinted.contains(&spec.grammar), "and its grammar offered");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #37: a file outside the project that a chat edit's review opened closes when the turn ends — its root
     /// keeps no language server — and a `:restart` meanwhile wouldn't bring it back. One the user pressed
     /// keys in stays theirs; keys typed in the chat's input don't take it up.
@@ -10141,7 +10192,7 @@ mod tests {
         // A UI-state ask, its input come — answered by the frame that's drawn for it
         let (tx, rx) = std::sync::mpsc::channel();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let ask = crate::uistate::Ask { after_input: ed.input_seq, json: true, reply: tx, until };
+        let ask = crate::uistate::Ask { after_input: ed.input_seq, json: true, reply: tx, until, chat: None };
         let (due, said) = wrongly_unchanged(&mut ed, move |ed| ed.ui_asks.push(ask));
         assert!(due && said.len() == 1 && said[0].contains("a UI-state ask"), "{said:?}");
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
@@ -10167,7 +10218,8 @@ mod tests {
         ed.set_error("an error under the picker");
         let (tx, _rx) = std::sync::mpsc::channel();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let ask = crate::uistate::Ask { after_input: ed.input_seq + 1, json: true, reply: tx, until };
+        let ask =
+            crate::uistate::Ask { after_input: ed.input_seq + 1, json: true, reply: tx, until, chat: None };
         ed.ui_asks.push(ask);
         ed.handle_key(Key::plain(Code::Down));
         assert!(ed.picker.is_some(), "the key went to the picker");

@@ -1006,6 +1006,104 @@ mod tests {
         ed.lsp_flush();
     }
 
+    /// #205: a card the user's own input just asked for — through the work it started, as `space W` `n`'s step
+    /// brings its card back — comes in front of Claude's card up, which stays, stacked and unanswered; it takes
+    /// the keys and is the inbox's first while it's in front. One nobody asked for just now (a grammar for a
+    /// file shown, #208) never goes in front of a turn's. And a card of the user's kind that comes late doesn't
+    /// take the front from a card that may be read or answered: from no input's work (a task that ended), after
+    /// more typing, behind a card that came while its work ran, or from a card being answered.
+    #[test]
+    fn a_card_your_command_asked_for_comes_in_front_of_claudes() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, _) = two_projects("yours-in-front");
+        let claudes = || {
+            let what = What::Screen { call: crate::tools::Call::test(1) };
+            Offer::new("Claude asks".into(), "to see the screen", "", String::new(), what)
+        };
+        let grammar = || {
+            let what = What::Grammars { lang: "Lua".into(), names: Vec::new(), then: None };
+            Offer::new("Lua syntax colors".into(), "Download it?", "", String::new(), what)
+        };
+        let yours = || {
+            let what = What::BranchDelete { top: front.clone(), branch: "x".into(), tip: "0".repeat(40) };
+            Offer::new("Delete branch x".into(), "It's on no other branch.", "", String::new(), what)
+        };
+        let titles = |ed: &Editor| ed.offers.iter().map(|o| o.title.clone()).collect::<Vec<_>>();
+        // An input, as `handle_event` has one (counted; what it starts asked by it), whose work brings the card
+        // back on a worker — `asked`: it lands later, `land`: until it's up. (Stood in for here, to time the
+        // late cases; the real wiring — keys through `handle_event`, the jobs and the saver's wait they start —
+        // is `restart::tests::restarts_card_typed_while_claudes_is_up_comes_in_front_of_it`.)
+        let asked = |ed: &mut Editor, o: Offer| {
+            ed.input_seq += 1;
+            let was = ed.events.set_asked(Some(ed.input_seq));
+            ed.events.jobs().spawn(move || move |ed: &mut Editor| ed.push_offer(o));
+            ed.events.set_asked(was);
+        };
+        let land = |ed: &mut Editor| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !ed.offers.iter().any(|o| o.title == "Delete branch x") {
+                let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
+                ed.handle_event(ev.expect("its card before timeout"));
+            }
+        };
+        ed.push_offer(claudes());
+        ed.push_offer(grammar());
+        asked(&mut ed, yours());
+        land(&mut ed);
+        assert_eq!(titles(&ed), ["Delete branch x", "Claude asks", "Lua syntax colors"]);
+        // The inbox too: yours first while it's in front (`C-q`, `enter` go to it), though Claude's came first
+        let first = |ed: &Editor| ed.inbox().first().and_then(|e| e.card());
+        let id_of = |ed: &Editor, t: &str| ed.offers.iter().find(|o| o.title == t).map(|o| o.id);
+        assert_eq!(first(&ed), id_of(&ed, "Delete branch x"));
+        let claudes_id = id_of(&ed, "Claude asks");
+        // (drawn and settled — a weighty card's key as it appears isn't an answer)
+        crate::term::render(&mut ed, &mut Vec::new(), 120, 30).unwrap();
+        let o = &ed.offers[0];
+        ed.offer_seen.set(Some((o.id, o.rev, std::time::Instant::now() - crate::offer::SETTLE * 2)));
+        feed(&mut ed, "n");
+        assert_eq!(titles(&ed), ["Claude asks", "Lua syntax colors"], "yours answered, Claude's still up");
+        assert_eq!(first(&ed), claudes_id, "answered: the oldest first again");
+        // Came first, but nobody asked for it just now: behind the turn's card
+        ed.offers.clear();
+        ed.push_offer(grammar());
+        ed.push_offer(claudes());
+        assert_eq!(titles(&ed), ["Claude asks", "Lua syntax colors"]);
+        let late = [
+            // From work no input started — a rebase's task that ended, a preflight's run
+            ("no input's work", &(|ed: &mut Editor| ed.push_offer(yours())) as &dyn Fn(&mut Editor)),
+            // Asked, but more was typed before it came — maybe toward the card up
+            ("typed since", &|ed: &mut Editor| {
+                asked(ed, yours());
+                ed.input_seq += 1;
+                land(ed);
+            }),
+            // Asked, and Claude's card came while its work ran — maybe read now
+            ("came meanwhile", &|ed: &mut Editor| {
+                ed.offers.clear();
+                asked(ed, yours());
+                ed.push_offer(claudes());
+                land(ed);
+            }),
+            // Asked, but the card up is being answered — its keys brought to it
+            ("being answered", &|ed: &mut Editor| {
+                ed.card_keys = true;
+                asked(ed, yours());
+                land(ed);
+            }),
+        ];
+        for (why, comes) in late {
+            ed.offers.retain(|o| o.title == "Claude asks");
+            comes(&mut ed);
+            assert_eq!(
+                titles(&ed),
+                ["Claude asks", "Delete branch x"],
+                "{why}: Claude's card keeps the front"
+            );
+            assert_eq!(first(&ed), id_of(&ed, "Claude asks"), "{why}: and the inbox's first");
+            ed.card_keys = false;
+        }
+    }
+
     /// #7: the card up says how many wait behind it — stacked, queued in its chat, in sessions behind — and
     /// `C-q` gives the keys to the one up here (#198: this session's own first, though the one behind came
     /// first), then goes to the session behind's, its card up there; once it's the card up, the keys.
