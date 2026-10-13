@@ -162,7 +162,9 @@ impl Editor {
             Some(crate::sandbox::Guard::In(p)) => p.denials_from(),
             _ => None,
         };
-        let task = self.session.task_run.as_ref().and_then(|r| {
+        // (a run on a commit's tree: not offered — its tree is gone, so neither a grant nor a run outside could
+        // run it again where it ran — review of #212)
+        let task = self.session.task_run.as_ref().filter(|r| r.base.is_none()).and_then(|r| {
             Some((
                 r.started,
                 BlockedRun {
@@ -190,6 +192,20 @@ impl Editor {
     /// `space m s` · `space x s` · `:sandbox-blocked` — what could open for what the sandbox blocked in that
     /// run: a list; Enter puts one on its card.
     pub fn sandbox_blocked(&mut self, which: Which) {
+        // (the run meant was on a commit's tree: said, before what it was refused — review of #212)
+        let base = self.session.task_run.as_ref().filter(|r| r.base.is_some());
+        let newer =
+            |t: &crate::task::Run| self.session.test_run.as_ref().is_none_or(|x| t.started >= x.started);
+        let on_base = match which {
+            Which::Task => base.is_some(),
+            Which::Test => false,
+            Which::Either => base.is_some_and(newer),
+        };
+        if on_base {
+            return self.set_status(
+                "that run was on a commit's tree, gone since — nothing of it to open or run again",
+            );
+        }
         let Some(run) = self.blocked_run(which) else {
             return self.set_status("the sandbox blocked nothing in that run — its panel says when it does");
         };
@@ -331,7 +347,7 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, run: BlockedRun, sco
         grant.shown(),
         if scope == Scope::Once { " this once" } else { "" }
     );
-    let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false };
+    let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
     crate::tools::guard_and_go(ed, For::User(head), run.job, true, extra);
 }
 
@@ -342,12 +358,35 @@ pub fn outside_answer(ed: &mut Editor, id: u64, run: BlockedRun, yes: bool) {
         return ed.set_status("not run — the sandbox stays as it was");
     }
     let head = format!("The user ran `{}` again outside the sandbox, this once. How it ended:", run.label());
-    crate::tools::guard_and_go(ed, For::User(head), run.job, true, Extra { grant: None, outside: true });
+    crate::tools::guard_and_go(
+        ed,
+        For::User(head),
+        run.job,
+        true,
+        Extra { grant: None, outside: true, base: None },
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of #212: a run on a commit's tree isn't offered to grant or run again outside — its tree is gone
+    /// (or another run's now), so either would run it where it no longer is; said instead.
+    #[test]
+    fn a_run_on_a_commits_tree_is_not_offered_again() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let tree = std::env::temp_dir().join(format!("tarae-blocked-base-{}", std::process::id()));
+        let task =
+            crate::task::Task { name: "cargo test".into(), cmd: "cargo test".into(), cwd: tree.clone() };
+        let mut r = crate::task::Run::for_test(task);
+        r.base = Some(crate::basetree::Base { rev: "HEAD".into(), tree, ..Default::default() });
+        ed.session.task_run = Some(r);
+        ed.sandbox_blocked(Which::Task);
+        assert!(ed.picker.is_none());
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.starts_with("that run was on a commit's tree"), "{said}");
+    }
 
     /// What a run's denials offer: the folders a write may open, a port that isn't a risky one — once each.
     #[test]

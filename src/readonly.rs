@@ -761,6 +761,75 @@ pub fn script_pins(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<(PathBuf, u
     Some(out)
 }
 
+/// What a command `a` allowed is pinned to (#93, #210): the scripts it runs by their path (`script_pins`) and
+/// the files the packs say it runs that its words don't name (`entry_pins`). None: one can't be pinned — the
+/// command runs this once only.
+pub fn run_pins(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<(PathBuf, u64)>> {
+    let mut pins = script_pins(cmd, cwd, root)?;
+    pins.extend(entry_pins_in(cmd, root, &crate::sandboxpack::get().entry, ENTRY_PIN_MAX)?);
+    Some(pins)
+}
+
+/// The most of an entry's files hashed for a pin (a bigger one isn't pinned: its command runs once only).
+const ENTRY_PIN_MAX: u64 = 64 << 20;
+
+/// The packs' `entry` files `cmd` runs (`sinceyes::entry_files`: `cargo xtask` runs `xtask/`), each by its real
+/// path with a hash of what's in it — a folder: every file (its bytes and mode) and link (where it points) in it,
+/// by name — on a worker. #210: `a` on `cargo xtask linux test` with Docker's socket let an `xtask/` edited since
+/// run with it unasked. One not there is pinned as not there. None: one is outside `root` (the session's
+/// checkout), or more than `max` bytes.
+pub fn entry_pins_in(
+    cmd: &str,
+    root: &Path,
+    entries: &[crate::sandboxpack::Entry],
+    max: u64,
+) -> Option<Vec<(PathBuf, u64)>> {
+    use std::hash::{Hash, Hasher};
+    let mut left = max;
+    let mut out = Vec::new();
+    for f in crate::sinceyes::entry_files_in(cmd, entries) {
+        let at = root.join(&f);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let real = match std::fs::canonicalize(&at) {
+            Ok(real) if real.starts_with(root) => {
+                tree_hash(&real, &mut h, &mut left)?;
+                real
+            }
+            Ok(_) => return None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                "not there".hash(&mut h);
+                at
+            }
+            Err(_) => return None,
+        };
+        out.push((real, h.finish()));
+    }
+    Some(out)
+}
+
+/// `p`'s content into `h` (`entry_pins_in`), `left` bytes still allowed — None past them, or unreadable.
+fn tree_hash(p: &Path, h: &mut impl std::hash::Hasher, left: &mut u64) -> Option<()> {
+    use std::hash::Hash;
+    use std::os::unix::fs::PermissionsExt;
+    let m = std::fs::symlink_metadata(p).ok()?;
+    if m.file_type().is_symlink() {
+        std::fs::read_link(p).ok()?.hash(h);
+    } else if m.is_dir() {
+        let mut names: Vec<std::ffi::OsString> =
+            std::fs::read_dir(p).ok()?.map(|e| e.map(|e| e.file_name())).collect::<Result<_, _>>().ok()?;
+        crate::sorting::sort(&mut names);
+        for n in names {
+            n.hash(h);
+            tree_hash(&p.join(&n), h, left)?;
+        }
+    } else {
+        *left = left.checked_sub(m.len())?;
+        m.permissions().mode().hash(h);
+        std::fs::read(p).ok()?.hash(h);
+    }
+    Some(())
+}
+
 /// The words of `line` when it's one command and nothing else (quotes taken off, no glob) — what runs,
 /// word for word: the checks and a chat's patterns are matched against these.
 pub fn one_command(line: &str) -> Option<Vec<String>> {
@@ -1590,6 +1659,57 @@ mod tests {
         let before = script_pins("sh x.sh", &p, &p).unwrap();
         std::fs::write(p.join("x.sh"), "echo another\n").unwrap();
         assert_ne!(script_pins("sh x.sh", &p, &p).unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #210: what a command runs that its words don't name (a pack's `entry`: `cargo xtask` runs `xtask/`) is
+    /// pinned as it is — any file in the folder changed, added or made executable, a link pointed elsewhere,
+    /// is another pin; the same content the same pin. One not there is pinned as not there (made later: another
+    /// pin); one reaching out of the checkout, or past the bytes allowed, can't be pinned. (Files only — nothing
+    /// here runs them.)
+    #[test]
+    fn what_a_packs_entry_runs_is_pinned_as_it_is() {
+        let dir = std::env::temp_dir().join(format!("tarae-entry-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("p/xtask/src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let p = dir.join("p");
+        std::fs::write(p.join("xtask/Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(p.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
+        let entries = [crate::sandboxpack::Entry {
+            run: vec!["cargo".into(), "xtask".into()],
+            files: vec!["xtask/".into(), "gen.toml".into()],
+        }];
+        let pins = |cmd: &str| entry_pins_in(cmd, &p, &entries, 1 << 20);
+        let first = pins("cargo xtask linux test -- a").unwrap();
+        let paths: Vec<&Path> = first.iter().map(|(f, _)| f.as_path()).collect();
+        assert_eq!(paths, [p.join("xtask").as_path(), p.join("gen.toml").as_path()]);
+        assert_eq!(pins("cargo test"), Some(vec![]), "no entry, nothing to pin");
+        assert_eq!(pins("cargo xtask linux test -- b"), Some(first.clone()), "the same files: the same pin");
+        let changed = |what: &str, first: &[(PathBuf, u64)]| {
+            let now = pins("cargo xtask linux test").unwrap();
+            assert_ne!(now[0].1, first[0].1, "{what}");
+            now
+        };
+        std::fs::write(p.join("xtask/src/main.rs"), "fn main() { other() }\n").unwrap();
+        let now = changed("a file changed", &first);
+        std::fs::write(p.join("xtask/src/new.rs"), "").unwrap();
+        let now = changed("a file added", &now);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p.join("xtask/src/new.rs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let now = changed("made executable", &now);
+        std::os::unix::fs::symlink("main.rs", p.join("xtask/src/l.rs")).unwrap();
+        let now = changed("a link", &now);
+        std::fs::remove_file(p.join("xtask/src/l.rs")).unwrap();
+        std::os::unix::fs::symlink("new.rs", p.join("xtask/src/l.rs")).unwrap();
+        let now = changed("the link pointed elsewhere", &now);
+        std::fs::write(p.join("gen.toml"), "").unwrap();
+        assert_ne!(pins("cargo xtask").unwrap()[1].1, now[1].1, "made since: another pin");
+        assert_eq!(entry_pins_in("cargo xtask", &p, &entries, 8), None, "past the bytes allowed");
+        std::fs::remove_dir_all(p.join("xtask")).unwrap();
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere"), p.join("xtask")).unwrap();
+        assert_eq!(pins("cargo xtask"), None, "out of the checkout");
         std::fs::remove_dir_all(&dir).ok();
     }
 

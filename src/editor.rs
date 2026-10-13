@@ -589,6 +589,9 @@ pub struct Editor {
     /// Claude reads the temp folders unasked (`allow::defaults`) — off in tests: their projects, and what
     /// they read "outside" them, are in the temp folder.
     pub read_temp: bool,
+    /// Where commit trees for `run`'s `base` go (`basetree::folder_for`): None — tarae's cache's; tests' a temp
+    /// folder, never the user's cache.
+    pub base_trees: Option<PathBuf>,
     /// The chat's claude starts once the project's Claude settings are read and, if they need it, answered
     /// (`claudetrust.rs`) — off in tests but their own: a worker's read before every chat test's claude.
     pub claude_settings_gate: bool,
@@ -808,6 +811,7 @@ impl Editor {
             tokens_said: if cfg!(test) { None } else { crate::tokens::said_path() },
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
+            base_trees: cfg!(test).then(|| std::env::temp_dir().join("tarae-test-base")),
             claude_settings_gate: !cfg!(test),
             claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
             claude_env: if cfg!(test) { Some(Default::default()) } else { None },
@@ -10192,7 +10196,13 @@ mod tests {
         // A UI-state ask, its input come — answered by the frame that's drawn for it
         let (tx, rx) = std::sync::mpsc::channel();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let ask = crate::uistate::Ask { after_input: ed.input_seq, json: true, reply: tx, until, chat: None };
+        let ask = crate::uistate::Ask {
+            after_input: ed.input_seq,
+            json: true,
+            reply: tx,
+            until,
+            what: crate::uistate::Asked::State,
+        };
         let (due, said) = wrongly_unchanged(&mut ed, move |ed| ed.ui_asks.push(ask));
         assert!(due && said.len() == 1 && said[0].contains("a UI-state ask"), "{said:?}");
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
@@ -10218,8 +10228,13 @@ mod tests {
         ed.set_error("an error under the picker");
         let (tx, _rx) = std::sync::mpsc::channel();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let ask =
-            crate::uistate::Ask { after_input: ed.input_seq + 1, json: true, reply: tx, until, chat: None };
+        let ask = crate::uistate::Ask {
+            after_input: ed.input_seq + 1,
+            json: true,
+            reply: tx,
+            until,
+            what: crate::uistate::Asked::State,
+        };
         ed.ui_asks.push(ask);
         ed.handle_key(Key::plain(Code::Down));
         assert!(ed.picker.is_some(), "the key went to the picker");

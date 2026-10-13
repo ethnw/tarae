@@ -215,6 +215,7 @@ commands! {
         review_claude => "A second Claude reviews",
         review_verdict => "The reviewer's verdict",
         review_hunk_seen => "Looked at this risky change",
+        review_file_seen => "Looked at all drawn in file",
         review_close => "End the review",
         review_at_end => "Claude's edits: review at end",
         review_turn => "Review Claude's last turn",
@@ -2276,6 +2277,10 @@ fn review_verdict(cx: &mut Context) {
 
 fn review_hunk_seen(cx: &mut Context) {
     crate::codereview::hunk_seen(cx.editor);
+}
+
+fn review_file_seen(cx: &mut Context) {
+    crate::codereview::file_seen(cx.editor);
 }
 
 fn undo_turn(cx: &mut Context) {

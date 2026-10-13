@@ -836,7 +836,24 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   run or `a` this socket for the rest of the conversation — whatever command asks for it. Asked for it again,
   it isn't a socket card; each command is still asked as any command is. Docker's socket is different: `a`
   there is this command with that socket, word for word (filters after it that only read may differ), and
-  any other command asking for it gets the socket card again
+  any other command asking for it gets the socket card again. On a command a language pack says takes test
+  names after its `--` (`cargo test`, `cargo xtask … test`), `a` also covers other test names there — words
+  like `sandbox::keeper` only, never an option, a path or another command — and the card says so (`and other
+  test names after --`). Anything else stays exact: after `cargo run --`, `make test --` or `ssh test --` the
+  words are the program's, targets, or a remote command. `a` holds only while what the command runs is
+  as it was: the scripts it runs by their path, and the files a language pack says it runs that its words
+  don't name (`cargo xtask` runs `xtask/`). One changed since — an edit of Claude's too — and it's the card
+  again, saying what changed
+- **On a commit's tree.** To tell a failure that's already there from one of its own, Claude can run a check
+  on a commit's tree (`base`: `HEAD`, a branch, a sha) instead of your checkout. tarae writes that commit's
+  files into a folder of its own (in its cache, apart from the project, out of every other run's reach) when
+  the run's turn comes; the run's sandbox takes that folder as its project, so it writes there only and its
+  build folder is that copy's own, kept from one such run to the next. Your checkout, its index and its
+  working tree aren't touched. The copy goes when the run ends, and Claude's report starts with which commit
+  it was (`On HEAD (be2fc5d)'s tree`). Only the project's checks run there — one command, nothing piped —
+  one at a time, across sessions too (the copy is the project's: a run asked while another has it waits a
+  moment, then says so); submodules come as empty folders. What the sandbox blocked in such a run isn't
+  offered to open or run again: its copy is gone
 - **Same as an earlier card.** When Claude asks again for a command whose card you answered (`y`, `a`, `A`
   or `n`) since tarae started, in this session — the same run, from the same folder, asked the same way (in
   the sandbox, with the same socket, or outside it: a `y` in the sandbox isn't one outside it) — its card
@@ -1429,7 +1446,10 @@ only. An edit elsewhere in the file takes nothing back, and a line edited since 
 waits in the file in front, each key gets a frame of its own, so a held `C-d` can't scroll past lines no frame
 drew. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
 the review's files; `space v h` with none under the cursor goes to the next one (going there is no look — press
-it again).
+it again). Once `space v h` has taken a change it goes on to the next one too, its first line at the pane's
+top so the change fills the pane, as `]h` lands: one key a change. `space v H` takes every high-risk change of the
+file in front whose lines have all been on screen since their text last changed, so you can scroll through a file
+once and press it once; it names the lines still to bring on screen for the rest.
 
 A high-risk change taller than the pane comes in pieces, cut at the definitions in it (the functions, tests and
 types `space o` lists), going into a definition that's taller than the pane, and joined back while they fit the
@@ -1508,7 +1528,8 @@ of repeating itself, and the log says where.
 | `space v s` / `:review-send` | Send the drafts to Claude |
 | `space v c` / `:review-claude` | The reviewer, a second Claude, reviews the changes: findings on the lines, a verdict |
 | `space v r` / `:review-verdict` | The reviewer's report: its verdict and findings |
-| `space v h` / `:review-hunk-seen` | The high-risk changes here (or under the selection): looked at — none here: to the next |
+| `space v h` / `:review-hunk-seen` | The high-risk changes here (or under the selection): looked at, then on to the next — none here: to the next |
+| `space v H` / `:review-file-seen` | Every high-risk change of the file whose lines were all on screen since they last changed: looked at |
 | `]h` / `[h` | Next / previous high-risk change not looked at, across files |
 | `space v q` / `:review-close` | End the review (asks first while files aren't viewed; held while a high-risk change isn't looked at) |
 | `space v t` / `:review-turn` | Review what Claude changed in its latest turn |

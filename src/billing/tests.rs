@@ -1123,3 +1123,60 @@ fn a_money_refusal_counts_only_for_the_turn_it_ends() {
     assert_eq!(notes(&ed).last().map(String::as_str), Some("Overloaded"), "{:?}", notes(&ed));
     assert!(ed.offers.is_empty(), "nothing left over from the turn the new chat cut off");
 }
+
+/// One card a session for one cause, also while the session is behind (#211: each refused turn of a session behind
+/// parked another identical card — the check looked only at the front's cards).
+#[test]
+fn a_session_behind_refused_twice_for_money_has_one_card() {
+    let place = Place::new("money-behind");
+    let mut ed = talking(&place);
+    on_key(&mut ed);
+    until(&mut ed, "the chat on the key", |_| place.starts().len() == 2);
+    let sid = ed.session.id;
+    std::fs::create_dir_all(place.dir.join("other")).unwrap();
+    let other = ed.session_add(place.dir.join("other"));
+    assert!(ed.session_switch(other));
+    failing(&place, "billing_error", CREDITS);
+    let parked = |ed: &Editor| {
+        let s = ed.sessions.iter().find(|s| s.id == sid).unwrap();
+        s.parked.iter().filter(|o| matches!(o.what, crate::offer::What::BillingSwitch { .. })).count()
+    };
+    let busy_behind =
+        |ed: &Editor| ed.sessions.iter().find(|s| s.id == sid).unwrap().chat.as_ref().unwrap().busy();
+    for text in ["one", "two"] {
+        ed.with_session(sid, |ed| send(ed, text));
+        until(&mut ed, "the turn behind", |ed| !busy_behind(ed) && parked(ed) > 0);
+    }
+    assert!(place.read("stdin").contains("two"), "the second turn went");
+    assert_eq!(parked(&ed), 1, "one card for the session behind");
+    assert!(ed.offers.is_empty(), "nothing up over the session in front");
+}
+
+/// A message queued during a turn refused for money isn't sent into the same refusal: it waits, said, and goes
+/// once the session's billing changes — `y` on the card.
+#[test]
+fn a_message_queued_behind_a_refusal_for_money_waits_for_the_billing() {
+    let place = Place::new("money-queued");
+    let mut ed = talking(&place);
+    on_key(&mut ed);
+    until(&mut ed, "the chat on the key", |_| place.starts().len() == 2);
+    failing(&place, "billing_error", CREDITS);
+    send(&mut ed, "one");
+    send(&mut ed, "queued two");
+    assert_eq!(
+        ed.session.chat.as_ref().unwrap().queued.as_deref(),
+        Some("queued two"),
+        "Claude was answering"
+    );
+    until(&mut ed, "the turn and its card", |ed| idle(ed) && !ed.offers.is_empty());
+    assert!(!place.read("stdin").contains("queued two"), "not sent into the refusal");
+    assert_eq!(ed.session.chat.as_ref().unwrap().queued.as_deref(), Some("queued two"));
+    assert!(notes(&ed).iter().any(|n| n.starts_with("Your queued message waits")), "{:?}", notes(&ed));
+    std::fs::remove_file(place.root.join("turn.limit")).unwrap();
+    std::fs::remove_file(place.root.join("turn.refused")).unwrap();
+    settled(&mut ed);
+    key(&mut ed, crate::key::Code::Char('y'));
+    assert_eq!(ed.session.billing, Billing::Subscription);
+    until(&mut ed, "the queued message sent on the plan", |_| place.read("stdin").contains("queued two"));
+    assert_eq!(ed.session.chat.as_ref().unwrap().queued, None);
+}

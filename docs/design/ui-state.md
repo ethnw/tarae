@@ -312,6 +312,9 @@ tarae state --pid 4182           # that one; with several and no match: lists th
 tarae state --after-input 1035   # waits for the keys sent to be handled and drawn
 tarae state --watch cards,keys   # events, one per line, until interrupted
 tarae state --chat linux7        # that session's last turn as its chat shows it (an id — s1 — or a name)
+tarae state --review linux7      # that session's reviewer: its verdict and findings whole
+tarae state --frame f.vt         # the frame drawn, as the terminal got it, into f.vt
+cargo xtask shot --live out.png  # that frame as a picture (--pid N, else $TARAE_UI's tarae)
 ```
 
 This is what an agent in zellij uses before sending keys: `tarae state` shows `keys → chat (text)`, so it
@@ -323,6 +326,22 @@ session in front when none is named. Over the socket: `"chat": "s1"` (`""` for t
 `state` request; the JSON is `{"v", "chat": {session, name, doing, turn: [{role, text}]}}`, pinned by
 `src/snapshots/ui_chat.json`. It's the user's level only: it isn't part of `UiState`, so Claude's level —
 another session as counts — never carries it.
+
+`--review [SESSION]` (#213) is the same for a session's reviewer, as `space v r` reads it: `"review": "s1"` in
+the `state` request; the JSON is `{"v", "review": {session, name, reviewer, verdict, findings: [{path, line,
+end, high, answered, thread: [{by, text}]}]}}` — `reviewer` is the state's `reviewer` row (null: none yet),
+`verdict` whole, `high` null when its review isn't the one open. The user's level only, as `--chat`. Beside
+them, `high_unseen` (#214): the high-risk changes of the session's open review no one has looked at yet —
+`[{path, line, end, why, since, text}]` (`since`: lines since an earlier look; `text`: the lines where the file is
+open, else null), null with no review open. A driver reads them to prepare a look; only a person's key in review
+mode (`space v h`, `space v H`) marks one.
+
+`--frame FILE` (#209) asks `{"get":"frame"}`: the last frame as the terminal got it — `{"v", "frame": {cols,
+rows, frames, input, bytes}}`, `after_input` as for the state, always JSON. `cargo xtask shot --live out.png`
+asks the same and draws it with the shot's renderer, so a driver sees colours, alignment and cards, not only
+text. It's the shot's fonts and background (a transparent theme's ground is the shot's), with no hardware
+cursor. The user's level only: a frame shows every session's tabs and cards, and Claude's own `screen` stays a
+card.
 
 ### tarae's Claude: the `ui` tool and the context line
 

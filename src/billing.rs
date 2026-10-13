@@ -886,7 +886,8 @@ impl Editor {
             });
         }
         let sid = self.session.id;
-        let up = self.offers.iter().any(|o| {
+        // (up in front, or parked while the session is behind — #211: a session behind got one per refused turn)
+        let up = self.session_cards().any(|o| {
             matches!(o.what, crate::offer::What::BillingSwitch { session, money: true, .. } if session == sid)
         });
         if refused.is_some() || up {

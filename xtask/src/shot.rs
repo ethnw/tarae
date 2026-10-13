@@ -2,6 +2,8 @@
 //! (as `tests/e2e.rs` does), drawn cell by cell the way a terminal draws them. The tarae is the `shot`
 //! profile's, built first (release's behavior; incremental, so seconds after an edit).
 //!
+//! `cargo xtask shot --live out.png [--pid N]` — instead, the frame a running tarae drew last (`live`).
+//!
 //! Keys are sent in order, 0.35 s apart (`\r` = Enter, `\t` = Tab, `\x1b` = Esc, `\xHH` = any byte; everything
 //! else, Korean too, goes out as UTF-8); `@3` waits 3 s taking screen updates; `@?ready` waits until `ready` is
 //! on screen (a language server indexing …) — at most 120 s, or `@30?ready` 30.
@@ -40,7 +42,11 @@ const FRAME_END: &[u8] = b"\x1b[?2026l";
 type Rgb = [u8; 3];
 
 pub fn run(args: &[String]) -> Result<()> {
-    let (out, keys) = args.split_first().ok_or("usage: cargo xtask shot out.png [keys …]")?;
+    if args.first().is_some_and(|a| a == "--live") {
+        return live(&args[1..]);
+    }
+    let (out, keys) =
+        args.split_first().ok_or("usage: cargo xtask shot out.png [keys …] | shot --live out.png")?;
     let num = |k: &str, d: u16| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let (cols, rows) = (num("TARAE_SHOT_COLS", 112), num("TARAE_SHOT_ROWS", 30));
     let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
@@ -65,6 +71,101 @@ pub fn run(args: &[String]) -> Result<()> {
     save_png(Path::new(out), w, h, &px)?;
     println!("saved {out} ({w}, {h})");
     Ok(())
+}
+
+// ── A running tarae ──────────────────────────────────────────────────────────
+
+/// `shot --live out.png [--pid N]` — the frame a running tarae drew last, as a picture (#209: a driver saw the
+/// live tarae only as text). Asked of its UI state socket (`{"get":"frame"}`, `tarae state --frame`'s request):
+/// tarae `N`'s, else the one `TARAE_UI` names (its terminal panel and your tasks have it), else the only one
+/// running. No tarae binary is run (see `linux::tarae_sessions`). The fonts and the ground are the shot's.
+fn live(args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: cargo xtask shot --live out.png [--pid N]";
+    let (mut out, mut pid) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pid" => pid = Some(it.next().and_then(|p| p.parse::<u32>().ok()).ok_or(USAGE)?),
+            o if out.is_none() && !o.starts_with('-') => out = Some(o.to_string()),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let out = out.ok_or(USAGE)?;
+    let sock = live_socket(pid, std::env::var_os("TARAE_UI"), ui_dir().as_deref())?;
+    let v = ui_ask(&sock, &serde_json::json!({ "get": "frame", "timeout_ms": 5000 }))?;
+    let f = &v["frame"];
+    let size = |k: &str| f[k].as_u64().and_then(|n| u16::try_from(n).ok()).filter(|&n| n > 0);
+    let (Some(cols), Some(rows)) = (size("cols"), size("rows")) else {
+        return Err(format!("{}: no frame in its answer", sock.display()));
+    };
+    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    vt.feed(f["bytes"].as_str().unwrap_or_default().as_bytes());
+    // (the frame as tarae drew it, before the terminal's update markers: ended here)
+    vt.feed(FRAME_END);
+    let fonts = Fonts::load()?;
+    let (w, h, px) = render(vt.parser.screen(), &fonts);
+    save_png(Path::new(&out), w, h, &px)?;
+    println!("saved {out} ({w}, {h}) — frame {} of {}", f["frames"], sock.display());
+    Ok(())
+}
+
+/// tarae's sockets' folder: `$XDG_STATE_HOME/tarae/ui` (default `~/.local/state/tarae/ui`), as tarae has it.
+fn ui_dir() -> Option<PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    Some(state.join("tarae").join("ui"))
+}
+
+/// The socket to ask: tarae `pid`'s, else `TARAE_UI`'s (`ui`), else the only one in `dir`. Err says which there
+/// are when it can't tell.
+fn live_socket(pid: Option<u32>, ui: Option<std::ffi::OsString>, dir: Option<&Path>) -> Result<PathBuf> {
+    let dir_or = || {
+        dir.map(Path::to_path_buf)
+            .ok_or_else(|| "no state folder (neither XDG_STATE_HOME nor HOME)".to_string())
+    };
+    if let Some(p) = pid {
+        return Ok(dir_or()?.join(format!("{p}.sock")));
+    }
+    if let Some(ui) = ui {
+        return Ok(PathBuf::from(ui));
+    }
+    let dir = dir_or()?;
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "sock"))
+        .collect();
+    found.sort();
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(format!("no tarae running ({} has no socket)", dir.display())),
+        _ => {
+            let pids: Vec<String> = found
+                .iter()
+                .filter_map(|p| p.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            Err(format!("several tarae — --pid one of {}", pids.join(", ")))
+        }
+    }
+}
+
+/// One request to a tarae's UI state socket, its answer (its `error` as Err).
+fn ui_ask(sock: &Path, req: &serde_json::Value) -> Result<serde_json::Value> {
+    use std::io::BufRead;
+    let said = |e: io::Error| format!("{}: {e}", sock.display());
+    let mut s = std::os::unix::net::UnixStream::connect(sock).map_err(said)?;
+    s.set_read_timeout(Some(Duration::from_secs(10))).map_err(said)?;
+    writeln!(s, "{req}").map_err(said)?;
+    let mut line = String::new();
+    io::BufReader::new(&s).read_line(&mut line).map_err(said)?;
+    let v: serde_json::Value = serde_json::from_str(&line).map_err(|e| format!("its answer: {e}"))?;
+    match v["error"].as_str() {
+        Some(e) => Err(e.to_string()),
+        None => Ok(v),
+    }
 }
 
 // ── The terminal ─────────────────────────────────────────────────────────────
@@ -602,6 +703,57 @@ mod tests {
         assert_eq!(folder("TARAE_SHOT_STATE", Some(missing.clone().into()), false), Ok(Some(missing)));
         assert_eq!(folder("TARAE_SHOT_XDG", Some(tmp.clone().into()), true), Ok(Some(tmp)));
         assert_eq!(folder("TARAE_SHOT_XDG", None, true), Ok(None));
+    }
+
+    /// `--live` asks tarae `N`'s socket, else `TARAE_UI`'s, else the only one running — several or none say so.
+    #[test]
+    fn a_live_shot_asks_the_tarae_named_else_the_only_one() {
+        let dir = std::env::temp_dir().join(format!("tarae-shot-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = live_socket(None, None, Some(&dir)).unwrap_err();
+        assert!(e.starts_with("no tarae running"), "{e}");
+        std::fs::write(dir.join("41.sock"), "").unwrap();
+        assert_eq!(live_socket(None, None, Some(&dir)), Ok(dir.join("41.sock")));
+        std::fs::write(dir.join("42.sock"), "").unwrap();
+        let e = live_socket(None, None, Some(&dir)).unwrap_err();
+        assert!(e.contains("--pid one of 41, 42"), "{e}");
+        assert_eq!(live_socket(Some(42), Some("/x.sock".into()), Some(&dir)), Ok(dir.join("42.sock")));
+        assert_eq!(live_socket(None, Some("/x.sock".into()), Some(&dir)), Ok(PathBuf::from("/x.sock")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The frame a tarae answers with (a stand-in socket here, answering as `{"get":"frame"}` does) is drawn
+    /// whole: its bytes come without the terminal's update markers, and still reach the screen.
+    #[test]
+    fn a_live_frame_is_drawn_whole() {
+        let dir = std::env::temp_dir().join(format!("tarae-shot-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("7.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::BufRead;
+            let (s, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            io::BufReader::new(&s).read_line(&mut req).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&req).unwrap();
+            let answer = match v["get"].as_str() {
+                Some("frame") => serde_json::json!({ "v": 1, "frame": {
+                    "cols": 10, "rows": 2, "frames": 3, "input": 0, "bytes": "\x1b[1;1Hab\x1b[2;1Hcd" } }),
+                _ => serde_json::json!({ "error": "unknown request" }),
+            };
+            writeln!(&s, "{answer}").unwrap();
+        });
+        let v = ui_ask(&sock, &serde_json::json!({ "get": "frame" })).unwrap();
+        server.join().unwrap();
+        let f = &v["frame"];
+        let mut vt = Vt { parser: vt100::Parser::new(2, 10, 0), held: Vec::new() };
+        vt.feed(f["bytes"].as_str().unwrap().as_bytes());
+        assert_eq!(vt.parser.screen().contents(), "", "held until a frame's end");
+        vt.feed(FRAME_END);
+        assert_eq!(vt.parser.screen().contents(), "ab\ncd");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

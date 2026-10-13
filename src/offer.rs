@@ -94,7 +94,7 @@ const LIKE_SAID: &str = "\n\n+";
 pub fn same_run(root: &std::path::Path, a: &crate::tools::RunCard, b: &crate::tools::RunCard) -> bool {
     let key = |r: &crate::tools::RunCard| {
         let job = crate::tools::Job::Command(r.cmd.clone(), r.cwd.clone());
-        crate::queued::key_of(root, &job, &crate::tools::Extra { grant: None, outside: false })
+        crate::queued::key_of(root, &job, &crate::tools::Extra { grant: None, outside: false, base: None })
     };
     a.cmd == b.cmd && a.cwd == b.cwd && key(a) == key(b) && a.reads == b.reads && a.shown == b.shown
 }

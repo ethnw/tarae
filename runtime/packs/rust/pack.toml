@@ -287,6 +287,9 @@ builders = ["cargo", "rustc"]
 # What runs that the words don't name: `cargo xtask` is the project's own `xtask/` crate (an alias in
 # `.cargo/config.toml`) — the card for it again says whether that changed since its last answer
 entry = [{ run = "cargo xtask", files = ["xtask/"] }]
+# What takes test names after `--` (libtest's filters; a project's xtask passing them on): `a` on one, with `test`
+# before its `--`, covers other test names there (#210) — `cargo run --` is the program's own words, not listed
+test-filters = ["cargo test", "cargo xtask"]
 # What a run card warns of (`cardwarn.rs`): a crate published can't be taken back — asked each time (D2)
 warn = [{ id = "cargo-publish", run = ["cargo publish"], asks = true, say = "It publishes the crate to its registry — a version published can't be taken back. Asked each time, whatever `a` said before." }]
 said = { rank = 10, run = "cargo build/check/test/clippy/fmt/tree/metadata", code = "the Rust toolchain's sources ($(rustc --print sysroot)/lib/rustlib/src) or cargo's downloaded crates", tests = "Rust (cargo test)", protect = "build.rs, Cargo.toml, .cargo" }

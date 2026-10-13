@@ -131,6 +131,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     ),
     c(&["review-verdict"], Arg::None, "The reviewer's verdict and findings"),
     c(&["review-hunk-seen"], Arg::None, "The high-risk change here: looked at"),
+    c(&["review-file-seen"], Arg::None, "The file's high-risk changes all drawn: looked at"),
     c(&["reviewer-stop"], Arg::None, "Stop the reviewer reading"),
     c(&["review-close"], Arg::None, "End the review"),
     c(

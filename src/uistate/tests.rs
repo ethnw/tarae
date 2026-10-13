@@ -914,8 +914,20 @@ fn a_snapshot_waits_for_its_input_and_a_frame() {
     let (tx, rx) = std::sync::mpsc::channel();
     let until = Instant::now() + Duration::from_secs(10);
     let input = ed.input_seq;
-    ed.ui_asks.push(Ask { after_input: input + 1, json: true, reply: tx.clone(), until, chat: None });
-    ed.ui_asks.push(Ask { after_input: 0, json: false, reply: tx, until, chat: None });
+    ed.ui_asks.push(Ask {
+        after_input: input + 1,
+        json: true,
+        reply: tx.clone(),
+        until,
+        what: crate::uistate::Asked::State,
+    });
+    ed.ui_asks.push(Ask {
+        after_input: 0,
+        json: false,
+        reply: tx,
+        until,
+        what: crate::uistate::Asked::State,
+    });
     frame(&mut ed);
     let first = rx.try_recv().expect("the plain one, with the frame");
     assert!(first.starts_with("tarae "), "{first}");
@@ -926,6 +938,37 @@ fn a_snapshot_waits_for_its_input_and_a_frame() {
     let v: Value = serde_json::from_str(&rx.try_recv().expect("after the key's frame")).unwrap();
     assert_eq!((v["input"].as_u64(), v["keys"]["region"].as_str()), (Some(input + 1), Some("prompt")));
     assert!(ed.ui_asks.is_empty());
+}
+
+/// #209: the frame asked over the socket is the one the terminal got, whole — what `cargo xtask shot --live`
+/// draws as a picture: after the keys sent, at its size, its bytes reading as the screen (the prompt opened by
+/// the key is on it). Always JSON, whatever the format asked.
+#[test]
+fn the_frame_asked_is_the_one_drawn_after_the_keys() {
+    let mut ed = editor();
+    frame(&mut ed);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let until = Instant::now() + Duration::from_secs(10);
+    let input = ed.input_seq;
+    ed.ui_asks.push(Ask { after_input: input + 1, json: true, reply: tx, until, what: Asked::Frame });
+    frame(&mut ed);
+    assert!(rx.try_recv().is_err(), "it waits for its key");
+    feed(&mut ed, &[":"]);
+    frame(&mut ed);
+    let v: Value = serde_json::from_str(&rx.try_recv().expect("after the key's frame")).unwrap();
+    let f = &v["frame"];
+    assert_eq!(
+        (f["cols"].as_u64(), f["rows"].as_u64(), f["input"].as_u64()),
+        (Some(120), Some(40), Some(input + 1))
+    );
+    let bytes = f["bytes"].as_str().unwrap();
+    assert_eq!(
+        bytes.as_bytes(),
+        ed.last_frame.as_ref().unwrap().0.as_slice(),
+        "the frame as the terminal got it"
+    );
+    let text = crate::screen::text(bytes.as_bytes(), 120, 40).unwrap();
+    assert!(text.contains("two") && text.lines().any(|l| l.trim_start().starts_with(':')), "{text}");
 }
 
 // ── The socket ───────────────────────────────────────────────────────────

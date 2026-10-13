@@ -623,7 +623,8 @@ pub(crate) fn run_schema() -> Value {
                 "cwd": { "type": "string", "description": "The folder it runs in, inside the project (relative to its root); the root if left out" },
                 "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
                 "unix_socket": { "type": "string", "description": "Ask the user to let it connect to this one unix socket (its path; with reason) — the rest stays sandboxed" },
-                "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with outside_sandbox or unix_socket; the user reads it" }
+                "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with outside_sandbox or unix_socket; the user reads it" },
+                "base": { "type": "string", "description": "A commit (HEAD, a branch, a sha): run this check on its tree instead — a copy apart from the project, removed after; to tell a failure already there from yours. Checks only, one command" }
             },
             "required": ["command"]
         }
@@ -874,15 +875,54 @@ pub struct Again {
 }
 
 impl Again {
-    /// Whether `cmd` is this command, its filters aside.
+    /// Whether `cmd` is this command, its filters aside — and its test names after `--` (`tests_vary`, #210).
     pub fn covers(&self, cmd: &str) -> bool {
-        head_of(cmd).is_some_and(|h| h == self.parts)
+        head_of(cmd).is_some_and(|h| {
+            h.len() == self.parts.len()
+                && self.parts.iter().zip(&h).all(|(a, b)| a == b || same_but_tests(a, b))
+        })
+    }
+
+    /// Whether other test names after `--` are covered too (#210, user decision 2026-10-13: each `cargo xtask linux
+    /// test -- <filters>` asked its Docker card again): a part with `test` before its `--` and only test names
+    /// after it (`tests_after`).
+    pub fn tests_vary(&self) -> bool {
+        self.parts.iter().any(|p| tests_after(p).is_some())
     }
 
     /// What it allows besides the command, as the card says it: ` and `x.sh` as it is now`.
     pub fn scripts_said(&self) -> String {
         self.scripts.iter().map(|s| format!(" and `{s}` as it is now")).collect()
     }
+
+    /// ` and other test names after `--`` when they may differ (`tests_vary`).
+    pub fn tests_said(&self) -> &'static str {
+        if self.tests_vary() { " and other test names after `--`" } else { "" }
+    }
+}
+
+/// A command's words up to its `--` (that included) when it's one a pack says takes test names there
+/// (`[claude] test-filters`: `cargo test`, `cargo xtask` — after the `NAME=value` words in front), a `test`
+/// comes before the `--`, and only test names after it — `[A-Za-z0-9_:]+` each, so never an option nor a path.
+/// Not for any other command: after `cargo run --`, `make test --`, `ssh test --` the words are its own (a
+/// program's arguments, targets, a remote command — review of #210).
+fn tests_after(part: &[String]) -> Option<&[String]> {
+    tests_after_in(part, &crate::sandboxpack::get().test_filters)
+}
+
+/// `tests_after` with the packs' `test-filters` given.
+fn tests_after_in<'a>(part: &'a [String], runners: &[Vec<String>]) -> Option<&'a [String]> {
+    let at = part.iter().position(|w| w == "--")?;
+    let (_, words) = crate::readonly::env_words(&part[..at])?;
+    let runner = runners.iter().any(|r| words.len() >= r.len() && words[..r.len()] == r[..]);
+    let name =
+        |w: &String| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+    (runner && words.iter().any(|w| w == "test") && part[at + 1..].iter().all(name)).then_some(&part[..=at])
+}
+
+/// Whether two parts are one command whose test names after `--` differ (`tests_after`).
+fn same_but_tests(a: &[String], b: &[String]) -> bool {
+    matches!((tests_after(a), tests_after(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// An `Again` the user allowed, and where: the folder it runs in, and Docker's socket when it was its card's
@@ -1122,6 +1162,40 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
     let mut call = call;
     call.trace = Some(crate::trace::RunTrace::new(format!("claude's run: {}", crate::task::traced(cmd))));
+    // On a commit's tree (#212): a check only, in the sandbox — written there when its turn comes (`basetree.rs`)
+    if let Some(rev) = args["base"].as_str().map(str::trim).filter(|r| !r.is_empty()) {
+        if args["outside_sandbox"].as_bool() == Some(true) || args["unix_socket"].as_str().is_some() {
+            return Err("base runs in the sandbox only — without outside_sandbox or unix_socket".into());
+        }
+        if !crate::basetree::rev_ok(rev) {
+            return Err(format!("base {rev}: give a commit — HEAD, a branch, a sha"));
+        }
+        // (one at a time: they'd write the same tree)
+        let s = &ed.session;
+        let base_run = |r: &Ride| r.extra.base.is_some();
+        if s.base_writing
+            || s.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running && r.base.is_some())
+            || s.runs_next
+                .iter()
+                .any(|n| matches!(&n.what, crate::queued::What::Guarded { ride, .. } if base_run(ride)))
+        {
+            return Err("a run on a commit's tree is under way — wait for its answer, then ask again".into());
+        }
+        if !allowed(cmd, &ed.config.llm.run_allow) {
+            return Err(format!(
+                "on a commit's tree only the project's checks run — one command, nothing piped (its output comes \
+                 back whole): `{cmd}` isn't one. Run it in the project, or ask the user"
+            ));
+        }
+        let rel = cwd.strip_prefix(&ed.session.root).unwrap_or(Path::new("")).to_path_buf();
+        let folder = crate::basetree::folder_for(&ed.session.root, ed.base_trees.as_deref())
+            .ok_or("no cache folder for the tree (neither XDG_CACHE_HOME nor HOME)")?;
+        let tree = folder.join("tree");
+        let base = crate::basetree::Base { rev: rev.to_string(), tree: tree.clone(), ..Default::default() };
+        let extra = Extra { base: Some(base), ..Default::default() };
+        guard_and_go(ed, For::Claude(call), Job::Command(cmd.to_string(), tree.join(rel)), false, extra);
+        return Ok(());
+    }
     // The same command sent again, while the first waits or runs what it would: one run, both answered (§3.4
     // of docs/design/async.md) — it was allowed or said yes to already, so no card
     let call = match outside {
@@ -1563,9 +1637,9 @@ fn read_only(
         let classes = reads.as_ref().map(|r| crate::cards::classes(r, &defaults)).unwrap_or_default();
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
         let runs_outside = crate::readonly::runs_outside(&judge, &cwd, &root, &expanded);
+        // (its scripts and the packs' entry files it runs — `cargo xtask`'s `xtask/` — #210)
         let pinned = pins.is_none_or(|pins| {
-            crate::readonly::script_pins(&judge, &cwd, &root)
-                .is_some_and(|s| s.iter().all(|p| pins.contains(p)))
+            crate::readonly::run_pins(&judge, &cwd, &root).is_some_and(|s| s.iter().all(|p| pins.contains(p)))
         });
         move |ed: &mut Editor| {
             use crate::cards::Why;
@@ -1594,7 +1668,7 @@ fn read_only(
                 Ok(r) if r.is_empty() => {
                     // (Docker's socket for this run alone — its card's `a` was this command's)
                     let grant = beyond.and_then(|b| b.socket).map(crate::allow::Grant::Socket);
-                    let extra = Extra { grant, outside: false };
+                    let extra = Extra { grant, outside: false, base: None };
                     return guard_and_go(ed, For::Claude(call), Job::Command(cmd, cwd), false, extra);
                 }
                 Ok(r) => (r, Why::ReadsOutside(classes)),
@@ -1751,14 +1825,16 @@ fn ask_with(
                 // (what `a` allows, said exactly — #182: read as this command's, it was the socket's; #193:
                 // Docker's is this command's only)
                 let a = match (g.as_outside(), again(&cmd).filter(|_| reads.is_empty())) {
-                    (true, Some(_)) => {
+                    (true, Some(a)) => format!(
                         "a lets this command connect again for the rest of this chat — with any filters after \
-                         it that only read — never another command."
-                    }
-                    (true, None) => "Nothing longer than this run can be allowed for it.",
+                         it that only read{} — never another command.",
+                        a.tests_said()
+                    ),
+                    (true, None) => "Nothing longer than this run can be allowed for it.".into(),
                     (false, _) => {
-                        "a for the rest of this chat, whatever command asks — each command is still asked as \
-                         usual."
+                        "a for the rest of this chat, whatever command asks — each command is still \
+                                   asked as usual."
+                            .into()
                     }
                 };
                 question.push_str(&format!(
@@ -1810,8 +1886,11 @@ fn ask_with(
     let asks = warned.iter().any(|w| w.asks);
     let offered = again(&cmd).filter(|_| (outside.is_none() || docker) && judged_reads && !asks);
     if let Some(a) = offered.as_ref().filter(|_| outside.is_none()) {
-        question
-            .push_str(&format!("\n\na — this exact command{} again unasked, this chat", a.scripts_said()));
+        question.push_str(&format!(
+            "\n\na — this exact command{}{} again unasked, this chat",
+            a.tests_said(),
+            a.scripts_said()
+        ));
     }
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
@@ -2102,11 +2181,13 @@ fn told(ed: &mut Editor, head: String, report: String) {
     ed.note("Claude hears how it ended with your next message");
 }
 
-/// What a run may do besides what's allowed (`allow.rs`): a grant just this once, or no sandbox at all.
+/// What a run may do besides what's allowed (`allow.rs`): a grant just this once, or no sandbox at all — and
+/// where: a commit's tree instead of the checkout (`basetree.rs`, #212).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Extra {
     pub grant: Option<crate::allow::Grant>,
     pub outside: bool,
+    pub base: Option<crate::basetree::Base>,
 }
 
 /// What a run may do past the settings (`with_allowed`).
@@ -2251,7 +2332,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     if let Some(g) = grant.as_ref().filter(|_| lasting && !docker) {
         crate::allow::grant(ed, g, crate::allow::Scope::ThisChat);
     }
-    let outside = Extra { grant, outside };
+    let outside = Extra { grant, outside, base: None };
     if keep {
         crate::allow::grant_reads(ed, &grants, scope);
     }
@@ -2262,7 +2343,10 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     // `a` (or `A` where reads are kept too): this exact command for the rest of this chat — never for good,
     // in this folder, with Docker's socket when it was its card's; its scripts as they are now (pinned on the
     // worker below)
-    let pin = lasting && again.as_ref().is_some_and(|a| !a.scripts.is_empty());
+    let pin = lasting
+        && again
+            .as_ref()
+            .is_some_and(|a| !a.scripts.is_empty() || !crate::sinceyes::entry_files(&cmd).is_empty());
     if let (Some(a), true) = (&again, lasting)
         && let Some(chat) = ed.session.chat.as_mut()
     {
@@ -2273,13 +2357,18 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         if let Some(s) = socket.as_ref().filter(|_| docker) {
             ed.session.checkpoints.tell.push(format!(
                 "The user let `{cmd}` connect to the socket {} again for the rest of this conversation — that \
-                 command only, word for word (filters after it that only read may differ); any other command \
+                 command only, word for word (filters after it that only read may differ{}); any other command \
                  with it is asked.",
-                crate::allow::tilde(s)
+                crate::allow::tilde(s),
+                match a.tests_vary() {
+                    true => ", and the test names after `--`",
+                    false => "",
+                }
             ));
         }
         ed.note(format!(
-            "this command{} runs again without asking for the rest of this chat",
+            "this command{}{} runs again without asking for the rest of this chat",
+            a.tests_said(),
             a.scripts_said()
         ));
     }
@@ -2301,8 +2390,9 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         let changed =
             shown.iter().find(|(p, text)| std::fs::read(p).ok().as_deref() != Some(text.as_bytes()));
         let changed = changed.map(|(p, _)| crate::chat::shown(&root, p));
-        // (none: one isn't a text script in the checkout — `script_pins` — it runs this once only)
-        let pins = pin.then(|| crate::readonly::script_pins(&cmd, &cwd, &root));
+        // (none: one isn't a text script in the checkout, or what the packs say it runs isn't all in it —
+        // `run_pins` — it runs this once only)
+        let pins = pin.then(|| crate::readonly::run_pins(&cmd, &cwd, &root));
         move |ed: &mut Editor| {
             // (its scripts as they are now, for the chat that asked — one pinned before gives way)
             if let Some(Some(pins)) = &pins
@@ -2313,8 +2403,8 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
             }
             if let Some(None) = pins {
                 ed.set_warning(
-                    "not allowed for the chat: what it runs by its path isn't a text script in this checkout — \
-                     it runs this once",
+                    "not allowed for the chat: what it runs by its path isn't a text script in this checkout, \
+                     or what it runs isn't all in it — it runs this once",
                 );
             }
             // (a file it showed changed since: it doesn't run, and the answer isn't kept — what's there now
@@ -2441,6 +2531,29 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     {
         return ask_made(ed, call.clone(), job, ride);
     }
+    // (on a commit's tree: written now, at its turn — a run before it in line may still be using the last)
+    if let Some(b) = ride.extra.base.as_ref().filter(|b| b.sha.is_none()) {
+        let (root, b) = (ed.session.root.clone(), b.clone());
+        if let For::Claude(call) = &who {
+            call.step("writing the commit's tree");
+        }
+        ed.session.base_writing = true;
+        return ed.events.jobs().spawn(move || {
+            let sha = crate::basetree::export(&root, &b);
+            move |ed: &mut Editor| {
+                ed.session.base_writing = false;
+                match sha {
+                    Ok((sha, claim)) => {
+                        let mut ride = ride;
+                        ride.extra.base =
+                            Some(crate::basetree::Base { sha: Some(sha), claim: Some(claim), ..b });
+                        guard_then_go(ed, who, job, ride)
+                    }
+                    Err(e) => fail(ed, who, ride.joined, format!("It didn't run: {e}")),
+                }
+            }
+        });
+    }
     if ride.extra.outside {
         return go(ed, who, job, Some(Guard::Outside), ride);
     }
@@ -2453,7 +2566,9 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     }
     let llm = ed.config.llm.clone();
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
+    // (on a commit's tree: that tree is the run's project — it writes there only, its build folder its own)
+    let root = ride.extra.base.as_ref().map_or_else(|| ed.session.root.clone(), |b| b.tree.clone());
+    let store = ed.allow_path.clone();
     let grant = ride.extra.grant.clone();
     let said = ed.tokens_said.clone();
     let here = ed.sandbox_here.clone();
@@ -2551,8 +2666,10 @@ fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride) {
         let reads = matches!(&job, Job::Command(cmd, _) if crate::readonly::read_only(cmd));
         // (its slot taken meanwhile: back in line now, its snapshot when its turn comes) (its card's answer
         // keeps what it runs from this snapshot — one that only reads too, outside the sandbox: `run_answer`)
+        // (one on a commit's tree can't write the checkout: nothing of it to take)
+        let base = ride.extra.base.is_some();
         match &who {
-            For::Claude(call) if (!reads || ride.answered.is_some()) && !slot_taken(ed, &job) => {
+            For::Claude(call) if (!reads || ride.answered.is_some()) && !base && !slot_taken(ed, &job) => {
                 call.step("snapshot");
                 let root = ed.session.root.clone();
                 let mut ride = ride;
@@ -2797,13 +2914,30 @@ pub fn run_done(ed: &mut Editor) {
         return told(ed, head, text);
     }
     let joined = std::mem::take(&mut r.joined);
+    // (on a commit's tree: said first, and the tree goes — its build folder stays for the next; the run keeps
+    // its `base`, without the claim, so what the sandbox blocked in it isn't offered again — its tree is gone)
+    let claim = r.base.as_mut().and_then(|b| b.claim.take());
+    let base = r.base.clone();
+    if let Some(b) = &base {
+        let tree = b.tree.clone();
+        // (the claim let go only once it's gone: a run asked meanwhile waits for it — review of #212)
+        ed.events.jobs().background(move || {
+            if let Err(e) = crate::basetree::remove(&tree) {
+                crate::log::line("basetree", "warning", &format!("{}: {e}", tree.display()));
+            }
+            drop(claim);
+        });
+    }
+    let Some(r) = ed.session.task_run.as_mut() else { return };
     let Some(mut call) = r.chat.take() else { return };
     call.output = Some(r.output_bytes);
     let snap = r.snap.take();
     let r = &*r;
     let items = &r.places;
-    let text =
-        run_report(&ed.session.root, r, items, Waited::of(r.started, r.queued.as_ref(), None)) + &guard;
+    let on = base.map(|b| format!("On {}'s tree — a copy apart from the project, removed now:\n", b.said()));
+    let text = on.unwrap_or_default()
+        + &run_report(&ed.session.root, r, items, Waited::of(r.started, r.queued.as_ref(), None))
+        + &guard;
     // (each call that joined it: the same run, its own wait)
     let others: Vec<(Call, String)> = joined
         .into_iter()
@@ -4932,6 +5066,62 @@ mod tests {
         assert!(!super::chain_allowed(shot, &rule), "a script isn't a check");
     }
 
+    /// #210 (user decision 2026-10-13): `a` on a test command covers other test names after its `--` — words
+    /// shaped as test names only, never an option, a path, a quoted phrase or more commands; the words before
+    /// `--` as they were. Not where nothing before `--` says `test`: after `cargo run --` the words are the
+    /// program's own, and after `-- --nocapture` it's options, so exactly that.
+    #[test]
+    fn other_test_names_after_the_dashes_are_the_same_command() {
+        let a = super::again("cargo xtask linux test -- sandbox::keeper").unwrap();
+        assert!(a.tests_vary());
+        assert_eq!(a.tests_said(), " and other test names after `--`");
+        for c in [
+            "cargo xtask linux test -- tools::tests::x other_one",
+            "cargo xtask linux test --",
+            "cargo xtask linux test -- a | grep b",
+        ] {
+            assert!(a.covers(c), "{c}");
+        }
+        for c in [
+            "cargo xtask linux test -- --ignored",
+            "cargo xtask linux test -- -x",
+            "cargo xtask linux test -- a/b",
+            "cargo xtask linux test -- 'a b'",
+            "cargo xtask linux test -- a -- b",
+            "cargo xtask linux clippy -- a",
+            "cargo xtask linux test --platform x -- a",
+            "cargo xtask linux test -- a && rm -rf x",
+            "cargo xtask linux test",
+        ] {
+            assert!(!a.covers(c), "{c}");
+        }
+        let run = super::again("cargo run -- one").unwrap();
+        assert!(!run.tests_vary() && !run.covers("cargo run -- two"), "the program's own words");
+        let opts = super::again("cargo test -- --nocapture").unwrap();
+        assert!(!opts.tests_vary() && !opts.covers("cargo test -- a"), "options: exactly");
+        assert_eq!(opts.tests_said(), "");
+        let named = super::again("RUST_LOG=x cargo test -q -- a").unwrap();
+        assert!(named.covers("RUST_LOG=x cargo test -q -- b"), "after the names in front");
+        assert!(!named.covers("RUST_LOG=y cargo test -q -- b"), "their values as they were");
+        // Review of #210: only what a pack says takes test names — a `test` word elsewhere is a pod, a host,
+        // a make target, and what follows `--` there is a command or another target
+        for (first, other) in [
+            ("make test -- unit", "make test -- deploy"),
+            ("ssh test -- uptime", "ssh test -- reboot"),
+            ("kubectl exec test -- ls", "kubectl exec test -- sh"),
+            ("echo cargo test -- a", "echo cargo test -- b"),
+        ] {
+            let a = super::again(first).unwrap();
+            assert!(!a.tests_vary() && !a.covers(other), "{first} → {other}");
+        }
+        let runners = [vec!["make".to_string()]];
+        let words = |l: &str| l.split(' ').map(String::from).collect::<Vec<_>>();
+        assert!(
+            super::tests_after_in(&words("make test -- unit"), &runners).is_some(),
+            "a pack that says so"
+        );
+    }
+
     /// #93: `a` on a scripted line's card allows its script as it is with the line — the same line runs again
     /// unasked; the script changed, and it asks again. #193 (user decision 2026-10-06): the line exactly —
     /// one argument changed asks (#93's prefix let `… target/x/2.png` through).
@@ -5020,6 +5210,159 @@ mod tests {
         pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
         assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "a card, not a run");
         assert!(!marker.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #212: `base` runs a check on a commit's tree — written apart when its turn comes, the run in it, its
+    /// report saying which commit, the tree gone after, the checkout as it was. Only a check, in the sandbox,
+    /// one at a time; a rev that isn't a commit is said. (The sandbox is off here — nested in a test's own run it
+    /// can't start; `cat` stands in for a check through `llm.run-allow`, reading what the commit has.)
+    #[test]
+    fn a_check_runs_on_a_commits_tree_apart_from_the_checkout() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-base-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("p/src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let p = dir.join("p");
+        let git = |args: &[&str]| crate::basetree::tests::git(&p, args);
+        std::fs::write(p.join("src/a.txt"), "committed\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(p.join("src/a.txt"), "working\n").unwrap();
+        let status = git(&["status", "--porcelain"]);
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = p.clone();
+        ed.base_trees = Some(dir.join("base"));
+        ed.config.llm.sandbox = false;
+        ed.config.llm.run_allow = vec!["cat a.txt".into()];
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let answered = |id: &str| {
+            super::ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| *i == json!(id)).map(|(_, r)| r.clone()))
+        };
+        let pump = |ed: &mut crate::editor::Editor, id: &str| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while answered(id).is_none() {
+                assert!(std::time::Instant::now() < end, "waited too long for {id}");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+            answered(id).unwrap()
+        };
+        let run = |ed: &mut crate::editor::Editor, id: &str, args: serde_json::Value| {
+            super::run(ed, super::Call::of(generation, id, json!(id)), &args)
+        };
+        run(&mut ed, "b1", json!({ "command": "cat a.txt", "cwd": "src", "base": "HEAD" })).unwrap();
+        assert!(ed.session.base_writing, "its tree being written");
+        let e = run(&mut ed, "b2", json!({ "command": "cat a.txt", "base": "HEAD" })).unwrap_err();
+        assert!(e.contains("under way"), "one at a time: {e}");
+        let said = pump(&mut ed, "b1").unwrap();
+        let sha = git(&["rev-parse", "--short=7", "HEAD"]);
+        assert!(said.starts_with(&format!("On HEAD ({})'s tree", sha.trim())), "{said}");
+        assert!(said.contains("committed") && !said.contains("working"), "the commit's file: {said}");
+        let tree = crate::basetree::folder_for(&p, Some(&dir.join("base"))).unwrap().join("tree");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tree.exists() {
+            assert!(std::time::Instant::now() < end, "the tree is still there");
+            std::thread::yield_now();
+        }
+        assert_eq!(git(&["status", "--porcelain"]), status, "the checkout as it was");
+        ed.session.task_run = None;
+        // Not a check, or past the sandbox: said at once, nothing written
+        let e = run(&mut ed, "b3", json!({ "command": "touch x", "base": "HEAD" })).unwrap_err();
+        assert!(e.contains("only the project's checks"), "{e}");
+        let e = run(
+            &mut ed,
+            "b4",
+            json!({ "command": "cat a.txt", "base": "HEAD", "outside_sandbox": true, "reason": "r" }),
+        )
+        .unwrap_err();
+        assert!(e.starts_with("base runs in the sandbox only"), "{e}");
+        // No such commit: said by the run's answer
+        run(&mut ed, "b5", json!({ "command": "cat a.txt", "base": "no-such" })).unwrap();
+        let e = pump(&mut ed, "b5").unwrap_err();
+        assert!(e.contains("base no-such: no such commit"), "{e}");
+        assert!(!tree.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #210: `a` on a line whose words run a pack's entry (`cargo xtask` runs `xtask/` — the built-in Rust
+    /// pack's) pins those files as they are: the same line runs again unasked while they're the same; once one
+    /// changed (an edit of Claude's, unasked at the end of a review), it's the card again — `a` with Docker's
+    /// socket let a changed `xtask/` run with it. (The line only echoes the entry's words: nothing of cargo
+    /// runs; a marker in the test's folder says whether it ran.)
+    #[test]
+    fn a_line_allowed_for_the_chat_asks_again_once_the_entry_it_runs_changed() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("xtask/src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let line = |t: &str| format!("touch ran && echo cargo xtask linux test -- {t}");
+        let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(ed) {
+                assert!(std::time::Instant::now() < end, "waited too long");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let ended = |ed: &crate::editor::Editor| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        };
+        let ran = dir.join("ran");
+        let send = |ed: &mut crate::editor::Editor, id: &str, tests: &str| {
+            ed.session.task_run = None;
+            let _ = std::fs::remove_file(&ran);
+            let args = json!({ "command": line(tests) });
+            super::run(ed, super::Call::of(generation, id, json!(id)), &args).unwrap();
+            pump(ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
+        };
+        send(&mut ed, "r1", "sandbox::keeper");
+        assert!(!ed.offers.is_empty(), "the first time: its card");
+        ed.offer_for_chat();
+        pump(&mut ed, &ended);
+        assert!(ran.exists(), "it ran");
+        let pins = ed.session.chat.as_ref().unwrap().run_scripts.clone();
+        assert_eq!(
+            pins.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+            [dir.join("xtask")],
+            "xtask/, pinned"
+        );
+        // Again, xtask/ the same: unasked (other test names: `other_test_names_after_the_dashes_…` — `echo` here
+        // stands in for cargo, and takes no test names)
+        send(&mut ed, "r2", "sandbox::keeper");
+        assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
+        pump(&mut ed, &ended);
+        assert!(ran.exists());
+        // An option after `--` isn't a test name: its card
+        send(&mut ed, "r4", "--ignored");
+        assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "an option: asked");
+        ed.offer_dismiss();
+        // xtask/ changed since: its card, nothing ran
+        std::fs::write(dir.join("xtask/src/main.rs"), "fn main() { other() }\n").unwrap();
+        send(&mut ed, "r3", "sandbox::keeper");
+        assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "a card for the changed entry");
+        assert!(!ran.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

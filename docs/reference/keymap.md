@@ -330,6 +330,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space v b` | `review_branch` | Review against a branch… |
 | `space v c` | `review_claude` | A second Claude reviews |
 | `space v h` | `review_hunk_seen` | Looked at this risky change |
+| `space v H` | `review_file_seen` | Looked at all drawn in file |
 | `space v m` | `review_viewed` | Mark this file viewed |
 | `space v q` | `review_close` | End the review |
 | `space v r` | `review_verdict` | The reviewer's verdict |
@@ -527,6 +528,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:review-claude` |  | A second Claude reviews the changes (uncommitted, or since a branch) |
 | `:review-verdict` |  | The reviewer's verdict and findings |
 | `:review-hunk-seen` |  | The high-risk change here: looked at |
+| `:review-file-seen` |  | The file's high-risk changes all drawn: looked at |
 | `:reviewer-stop` |  | Stop the reviewer reading |
 | `:review-close` |  | End the review |
 | `:review-at-end` |  | Claude's edits go in as it works, reviewed when its turn ends (on/off) |

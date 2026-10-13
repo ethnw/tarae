@@ -563,14 +563,44 @@ fn tally_in(
     l: &crate::session::Session,
     high: impl Fn(&std::path::Path, &std::ops::Range<usize>) -> bool,
 ) -> Option<Tally> {
-    let r = l.reviewer.as_ref()?;
     let mut t = Tally::default();
-    for n in r.findings.iter().filter_map(|id| l.notes.list.iter().find(|n| n.id == *id)) {
+    for n in findings_in(l)? {
         t.findings += 1;
         t.high += usize::from(high(&n.path, &n.lines));
-        t.answered += usize::from(n.thread.iter().skip(1).any(|e| e.by != crate::notes::By::Reviewer));
+        t.answered += usize::from(answered(n));
     }
     Some(t)
+}
+
+/// Session `l`'s reviewer's findings still pinned, in the order pinned — None: it never had a reviewer.
+pub fn findings_in(l: &crate::session::Session) -> Option<Vec<&crate::notes::Note>> {
+    let r = l.reviewer.as_ref()?;
+    Some(r.findings.iter().filter_map(|id| l.notes.list.iter().find(|n| n.id == *id)).collect())
+}
+
+/// Whether a finding was answered — by you or the author, after it.
+pub fn answered(n: &crate::notes::Note) -> bool {
+    n.thread.iter().skip(1).any(|e| e.by != crate::notes::By::Reviewer)
+}
+
+/// Whether lines `lines` (0-based) of `path` touch a high-risk change of session `l`'s open review — None when
+/// its reviewer's review isn't the one open (the grades are the open review's).
+pub fn on_high_in(
+    ed: &Editor,
+    l: &crate::session::Session,
+    path: &std::path::Path,
+    lines: &std::ops::Range<usize>,
+) -> Option<bool> {
+    let (r, of) = (l.code_review.as_ref()?, l.reviewer.as_ref()?.of);
+    if r.started != of {
+        return None;
+    }
+    let Some(f) = r.files.iter().find(|f| f.path == path) else { return Some(false) };
+    Some(
+        r.graded(ed, f)
+            .iter()
+            .any(|g| g.grade == crate::risk::Grade::High && g.at < lines.end && lines.start < g.at + g.lines),
+    )
 }
 
 /// The tally against the open review's grades (no review open: no finding counts as high).

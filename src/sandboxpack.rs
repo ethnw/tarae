@@ -79,6 +79,9 @@
 //! - `entry = [{ run, files }]`: what a command runs that its words don't name — a line with `run`'s words in
 //!   a row (after a wrapper too: `timeout 1800 cargo xtask`) runs the project's `files` (folders end in `/`):
 //!   the card for it again says whether they changed since its last answer, and shows how (`sinceyes.rs`).
+//! - `test-filters`: commands that take test names after their `--` (`cargo test`) — `a` on one, with `test`
+//!   before its `--`, covers other test names there (`tools::Again`, #210); never a command whose words after
+//!   `--` are its own (`cargo run`).
 //! - `said = { rank, run, code, tests, protect }`: the pack's words in Claude's prompt and tools, joined by
 //!   `rank` (lower first).
 //!
@@ -136,6 +139,8 @@ pub(crate) const CLAUDE_KEYS: &[(&str, Reach)] = &[
     ("builders", Reach::Added),
     // (narrows: more of what a command runs is shown on its card again)
     ("entry", Reach::Added),
+    // (widens: `a` on one covers other test names after its `--` — #210)
+    ("test-filters", Reach::BuiltIn),
     // (narrows: a card says more — and with `asks`, `a` lets less through; never less said)
     ("warn", Reach::Added),
     ("wrappers", Reach::Added),
@@ -336,6 +341,8 @@ pub struct Packs {
     pub expand: Vec<Expand>,
     pub builders: Vec<String>,
     pub entry: Vec<Entry>,
+    /// Commands that take test names after their `--` (`test-filters`), each its words.
+    pub test_filters: Vec<Vec<String>>,
     /// What a run card warns of (`cardwarn.rs`), every pack's — a runtime folder's adds.
     pub warn: Vec<crate::cardwarn::Warn>,
     /// Programs that run what follows their words (`timeout 600 docker …`) — a warning's command is found after
@@ -708,6 +715,16 @@ fn read_key_of(
                     (_, Some(f), _) => wrong.push(format!("`{f}` isn't a path in the project")),
                     (_, _, true) => wrong.push(format!("`{}` names no files", run.join(" "))),
                     _ => out.entry.push(Entry { run, files }),
+                }
+            }
+        }
+        ("claude", "test-filters") => {
+            for t in list(v)? {
+                let run: Vec<String> = t.split_whitespace().map(String::from).collect();
+                match !run.is_empty() && run.iter().all(|w| plain_word(w)) {
+                    true if !out.test_filters.contains(&run) => out.test_filters.push(run),
+                    true => {}
+                    false => wrong.push(format!("`{t}` isn't a command's words")),
                 }
             }
         }

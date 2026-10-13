@@ -6,6 +6,7 @@
 
 mod allow;
 mod attach;
+mod basetree;
 mod billing;
 mod blocked;
 mod builds;

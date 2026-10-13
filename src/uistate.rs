@@ -1470,9 +1470,21 @@ pub struct Ask {
     pub reply: std::sync::mpsc::Sender<String>,
     /// Past this the asker has given up: dropped unanswered.
     pub until: std::time::Instant,
-    /// A session's chat instead of the state (`tarae state --chat`): its id or name, empty for the one in
-    /// front (`Editor::chat_turn`).
-    pub chat: Option<String>,
+    pub what: Asked,
+}
+
+/// What a snapshot is of. Chat, review and frame are the user's level only: none of them is part of `UiState`,
+/// which Claude's level is built from, and only the socket asks for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Asked {
+    State,
+    /// A session's last turn (`tarae state --chat`): its id or name, empty for the one in front
+    /// (`Editor::chat_turn`).
+    Chat(String),
+    /// A session's reviewer, whole (`tarae state --review`, `Editor::review_report`).
+    Review(String),
+    /// The frame drawn, as the terminal got it (`tarae state --frame`, `cargo xtask shot --live`) — always JSON.
+    Frame,
 }
 
 /// A session's last turn as its chat shows it (#204: a driver read the conversation's own files to know
@@ -1518,17 +1530,7 @@ impl Editor {
     /// the sessions there are.
     pub fn chat_turn(&self, which: &str) -> Result<ChatTurn, String> {
         use crate::chat::Role;
-        let all = || std::iter::once(&self.session).chain(&self.sessions);
-        let l = all()
-            .find(|l| match which {
-                "" => l.id == self.session.id,
-                w => session_id(l.id) == w || l.label() == w,
-            })
-            .ok_or_else(|| {
-                let there: Vec<String> =
-                    all().map(|l| format!("{} {}", session_id(l.id), l.label())).collect();
-                format!("no session {which} — there are: {}", there.join(", "))
-            })?;
+        let l = self.asked_session(which)?;
         let msgs = l.chat.as_ref().map_or(&[][..], |c| &c.msgs[..]);
         let from = msgs.iter().rposition(|m| m.role == Role::User).unwrap_or(msgs.len());
         let rows = msgs[from..]
@@ -1552,6 +1554,220 @@ impl Editor {
             rows,
         })
     }
+
+    /// Session `which`: by id (`s1`) or name, empty for the one in front. Err names the sessions there are.
+    fn asked_session(&self, which: &str) -> Result<&crate::session::Session, String> {
+        let all = || std::iter::once(&self.session).chain(&self.sessions);
+        all()
+            .find(|l| match which {
+                "" => l.id == self.session.id,
+                w => session_id(l.id) == w || l.label() == w,
+            })
+            .ok_or_else(|| {
+                let there: Vec<String> =
+                    all().map(|l| format!("{} {}", session_id(l.id), l.label())).collect();
+                format!("no session {which} — there are: {}", there.join(", "))
+            })
+    }
+
+    /// `which` session's reviewer, whole (`ReviewReport`): as `chat_turn` names sessions.
+    pub fn review_report(&self, which: &str) -> Result<ReviewReport, String> {
+        let l = self.asked_session(which)?;
+        let findings = crate::reviewer::findings_in(l).unwrap_or_default();
+        let root = l.reviewer.as_ref().map_or(&l.root, |r| &r.root);
+        Ok(ReviewReport {
+            session: session_id(l.id),
+            name: l.label().to_string(),
+            reviewer: ReviewerState::of(self, l),
+            verdict: l.reviewer.as_ref().map(|r| r.verdict.clone()).unwrap_or_default(),
+            findings: findings
+                .into_iter()
+                .map(|n| Finding {
+                    path: crate::chat::shown(root, &n.path).to_string(),
+                    lines: n.lines.start + 1..n.lines.end.max(n.lines.start + 1) + 1,
+                    high: crate::reviewer::on_high_in(self, l, &n.path, &n.lines),
+                    answered: crate::reviewer::answered(n),
+                    thread: n.thread.iter().map(|e| (e.by.label(), e.text.clone())).collect(),
+                })
+                .collect(),
+            unseen: l.code_review.as_ref().map(|r| self.high_unseen_of(l, r)),
+        })
+    }
+
+    /// Session `l`'s high-risk changes no one has looked at in its review `r`, in the rail's order — with their
+    /// lines' text where the file is open (a file not open isn't read here: the main thread).
+    fn high_unseen_of(&self, l: &crate::session::Session, r: &crate::codereview::CodeReview) -> Vec<Unseen> {
+        let mut out = Vec::new();
+        for i in r.rail_order() {
+            let f = &r.files[i];
+            let doc = self.docs.iter().find(|d| d.path.as_deref() == Some(f.path.as_path()));
+            for g in r.graded(self, f).iter().filter(|g| g.grade == crate::risk::Grade::High) {
+                if g.looked_at(&l.looked) {
+                    continue;
+                }
+                let left = g.left(&l.looked);
+                let since = (g.keys.iter().any(|k| l.looked.contains(k))).then_some(left.len());
+                let lines = g.at + 1..g.at + g.lines.max(1) + 1;
+                let text = doc.map(|d| {
+                    (g.at..g.at + g.lines)
+                        .filter(|&n| n < d.text.len_lines())
+                        .map(|n| d.text.line(n).to_string().trim_end_matches(['\n', '\r']).to_string())
+                        .collect()
+                });
+                out.push(Unseen { path: f.rel.clone(), lines, why: g.why.clone(), since, text });
+            }
+        }
+        out
+    }
+
+    /// The frame drawn last, as the terminal got it (`Asked::Frame`) — None before the first.
+    pub fn frame_json(&self) -> Option<Value> {
+        let (frame, cols, rows) = self.last_frame.as_ref()?;
+        Some(json!({
+            "v": V,
+            "frame": {
+                "cols": cols, "rows": rows, "frames": self.frames, "input": self.input_seq,
+                "bytes": String::from_utf8_lossy(frame),
+            },
+        }))
+    }
+}
+
+/// A session's reviewer as `space v r` reads it, for a driver (#213: the verdict and findings were only on the
+/// screen, under toasts) — the user's level only, as `ChatTurn` is.
+pub struct ReviewReport {
+    pub session: String,
+    pub name: String,
+    /// None: it never had a reviewer since tarae started.
+    pub reviewer: Option<ReviewerState>,
+    /// The verdict, whole.
+    pub verdict: String,
+    pub findings: Vec<Finding>,
+    /// The high-risk changes of the session's open review no one has looked at (#214, the read half: a driver
+    /// reads them; only a person's key in review mode marks one) — None: no review open.
+    pub unseen: Option<Vec<Unseen>>,
+}
+
+/// A high-risk change not looked at yet.
+pub struct Unseen {
+    pub path: String,
+    /// 1-based, its end exclusive.
+    pub lines: std::ops::Range<usize>,
+    /// The rule and whose: `unsafe (rust pack)`.
+    pub why: String,
+    /// Looked at before, but for this many lines since.
+    pub since: Option<usize>,
+    /// Its lines as they are, where the file is open.
+    pub text: Option<Vec<String>>,
+}
+
+/// One of the reviewer's findings still pinned.
+pub struct Finding {
+    /// From the checkout it reviewed.
+    pub path: String,
+    /// 1-based, its end exclusive.
+    pub lines: std::ops::Range<usize>,
+    /// On a high-risk change — None when its review isn't the one open.
+    pub high: Option<bool>,
+    pub answered: bool,
+    /// (who, text): `reviewer` · `you` · `author`.
+    pub thread: Vec<(&'static str, String)>,
+}
+
+impl ReviewReport {
+    pub fn json(&self) -> Value {
+        let findings: Vec<Value> = self
+            .findings
+            .iter()
+            .map(|f| {
+                json!({
+                    "path": f.path, "line": f.lines.start, "end": f.lines.end - 1, "high": f.high,
+                    "answered": f.answered,
+                    "thread": f.thread.iter().map(|(by, text)| json!({ "by": by, "text": text })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let unseen = self.unseen.as_ref().map(|u| {
+            u.iter()
+                .map(|c| {
+                    json!({
+                        "path": c.path, "line": c.lines.start, "end": c.lines.end - 1, "why": c.why,
+                        "since": c.since, "text": c.text,
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        json!({
+            "v": V,
+            "review": {
+                "session": self.session, "name": self.name,
+                "reviewer": self.reviewer.as_ref().map(ReviewerState::json),
+                "verdict": self.verdict, "findings": findings, "high_unseen": unseen,
+            },
+        })
+    }
+
+    pub fn text(&self) -> String {
+        let mut out = match &self.reviewer {
+            Some(r) => vec![format!("reviewer of {} {} ({}) — {}", self.session, self.name, r.of, r.text())],
+            None => {
+                vec![format!("reviewer of {} {} — none yet (space v c asks one)", self.session, self.name)]
+            }
+        };
+        self.reviewer_text(&mut out);
+        // (#214: what's left for a person to look at — read here, marked only by their key)
+        match self.unseen.as_deref() {
+            None => {}
+            Some([]) => out.push("\nno high-risk change left to look at".into()),
+            Some(u) => {
+                out.push(format!(
+                    "\n{} not looked at (a person's space v h marks them):",
+                    crate::nav::count(u.len(), "high-risk change")
+                ));
+                for c in u {
+                    let lines = match c.lines.len() {
+                        1 => format!("{}", c.lines.start),
+                        _ => format!("{}–{}", c.lines.start, c.lines.end - 1),
+                    };
+                    let since = c
+                        .since
+                        .map(|n| format!(" · {} since a look", crate::nav::count(n, "line")))
+                        .unwrap_or_default();
+                    out.push(format!("- {}:{lines} {}{since}", c.path, c.why));
+                    out.extend(c.text.iter().flatten().map(|l| format!("    {l}")));
+                }
+            }
+        }
+        out.join("\n") + "\n"
+    }
+
+    /// The reviewer's verdict and findings, as lines (none: nothing).
+    fn reviewer_text(&self, out: &mut Vec<String>) {
+        if self.reviewer.is_none() {
+            return;
+        }
+        if !self.verdict.is_empty() {
+            out.push(format!("\nverdict:\n{}", self.verdict.trim_end()));
+        }
+        out.push(match self.findings.is_empty() {
+            true => "\nno findings".into(),
+            false => "\nfindings:".into(),
+        });
+        for f in &self.findings {
+            let lines = match f.lines.len() {
+                1 => format!("{}", f.lines.start),
+                _ => format!("{}–{}", f.lines.start, f.lines.end - 1),
+            };
+            let high = if f.high == Some(true) { " ▲ high" } else { "" };
+            let answered = if f.answered { " · answered" } else { "" };
+            out.push(format!("- {}:{lines}{high}{answered}", f.path));
+            for (by, text) in &f.thread {
+                let mut it = text.trim_end().lines();
+                out.push(format!("  {by}: {}", it.next().unwrap_or_default()));
+                out.extend(it.map(|l| format!("    {l}")));
+            }
+        }
+    }
 }
 
 /// After each frame (`term::render`): the gone ring and the watchers (`watch.rs`), then the snapshots waiting
@@ -1574,18 +1790,30 @@ pub fn after_frame(ed: &mut Editor) {
         return;
     }
     // (built only when one asks for it, not for a chat)
-    let state = ready.iter().any(|a| a.chat.is_none()).then(|| ed.ui_state());
+    let state = ready.iter().any(|a| a.what == Asked::State).then(|| ed.ui_state());
     for a in ready {
-        let said = match (a.chat.as_deref().map(|w| ed.chat_turn(w)), &state) {
-            (None, Some(s)) if a.json => s.json().to_string(),
-            (None, Some(s)) => s.text(),
-            (None, None) => continue,
-            (Some(t), _) => match t {
+        let error = |e: String| match a.json {
+            true => json!({ "error": e }).to_string(),
+            false => format!("error: {e}\n"),
+        };
+        let said = match (&a.what, &state) {
+            (Asked::State, Some(s)) if a.json => s.json().to_string(),
+            (Asked::State, Some(s)) => s.text(),
+            (Asked::State, None) => continue,
+            (Asked::Chat(w), _) => match ed.chat_turn(w) {
                 Ok(t) if a.json => t.json().to_string(),
                 Ok(t) => t.text(),
-                Err(e) if a.json => json!({ "error": e }).to_string(),
-                Err(e) => format!("error: {e}\n"),
+                Err(e) => error(e),
             },
+            (Asked::Review(w), _) => match ed.review_report(w) {
+                Ok(r) if a.json => r.json().to_string(),
+                Ok(r) => r.text(),
+                Err(e) => error(e),
+            },
+            // (after a frame: there is one)
+            (Asked::Frame, _) => {
+                ed.frame_json().map_or_else(|| error("nothing drawn yet".into()), |f| f.to_string())
+            }
         };
         let _ = a.reply.send(said);
     }

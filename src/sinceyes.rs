@@ -287,7 +287,7 @@ pub fn entry_files(cmd: &str) -> Vec<String> {
     entry_files_in(cmd, &crate::sandboxpack::get().entry)
 }
 
-fn entry_files_in(cmd: &str, entries: &[crate::sandboxpack::Entry]) -> Vec<String> {
+pub(crate) fn entry_files_in(cmd: &str, entries: &[crate::sandboxpack::Entry]) -> Vec<String> {
     let Some(head) = crate::readonly::before_pipe(cmd) else { return Vec::new() };
     let mut out: Vec<String> = Vec::new();
     for p in head {

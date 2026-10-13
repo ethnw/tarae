@@ -314,8 +314,9 @@ pub struct Chat {
     /// aside, where it ran, with Docker's socket when its card had it (`a` on a run card — `tools::again`,
     /// #193).
     pub run_again: Vec<crate::tools::RunAgain>,
-    /// The scripts those commands run by their path, as they were (real path, hash of what's in it —
-    /// `readonly::script_pins`, #93): one changed since, and the command asks again.
+    /// The scripts those commands run by their path, and the packs' entry files they run (`cargo xtask`'s
+    /// `xtask/`), as they were (real path, hash of what's in it — `readonly::run_pins`, #93, #210): one changed
+    /// since, and the command asks again.
     pub run_scripts: Vec<(PathBuf, u64)>,
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
@@ -681,7 +682,8 @@ pub fn restart_process(ed: &mut Editor) {
 }
 
 /// The session's billing changed (`:session-billing`, between turns): the next claude continues the same
-/// conversation (`--resume`) on it — one running stops and starts again at once.
+/// conversation (`--resume`) on it — one running stops and starts again at once. A message held after a
+/// refusal for money (`hold_queued`) goes now.
 pub(crate) fn billing_changed(ed: &mut Editor) {
     let billing = ed.session.billing;
     let Some(c) = ed.session.chat.as_mut() else { return };
@@ -693,6 +695,7 @@ pub(crate) fn billing_changed(ed: &mut Editor) {
         c.kill();
         ensure_proc(ed);
     }
+    send_queued(ed);
 }
 
 impl Drop for Chat {
@@ -1358,12 +1361,17 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 let resets = ed.limits.get(window, crate::usage::now_ms()).and_then(|r| r.resets_at_ms);
                 ed.limit_hit(window, resets);
             }
+            let broke = money.is_some();
             if let Some(m) = money {
                 ed.money_out(m);
             }
             // (a billing that waited for the turn's end — the limit card's `y` mid-turn)
             crate::billing::turn_over(ed);
-            send_queued(ed);
+            // (the key can't pay: a message queued behind the refused turn would only be refused too — #211)
+            match broke {
+                true => hold_queued(ed),
+                false => send_queued(ed),
+            }
         }
         StreamEv::Exit(err) => {
             c.proc = None;
@@ -1485,6 +1493,13 @@ pub(crate) fn send_queued(ed: &mut Editor) {
     {
         c.queued = Some(q);
     }
+}
+
+/// The turn ended refused for money: the message queued during it stays queued, said — it goes once the
+/// session's billing changes (`billing_changed`); `↑` takes it back.
+fn hold_queued(ed: &mut Editor) {
+    let Some(c) = ed.session.chat.as_mut().filter(|c| c.queued.is_some()) else { return };
+    c.note("Your queued message waits — it goes once this session's billing changes (↑ takes it back)");
 }
 
 /// Enter in the chat: the input goes as the next turn — or waits its turn while Claude works, or for the

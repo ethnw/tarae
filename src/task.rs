@@ -330,6 +330,8 @@ pub struct Run {
     pub snap: Option<crate::snapshot::Before>,
     /// Claude's: the containers it names from its prefix, stopped when it's stopped (`containers.rs`).
     pub containers: Option<crate::containers::Run>,
+    /// Claude's run on a commit's tree (`basetree.rs`): said in its report, the tree removed at its end.
+    pub base: Option<crate::basetree::Base>,
 }
 
 impl Run {
@@ -447,6 +449,7 @@ impl Run {
             queued: None,
             snap: None,
             containers: None,
+            base: None,
         }
     }
 }
@@ -625,7 +628,8 @@ impl Editor {
             Some(crate::sandbox::Guard::In(p)) => Some(&**p),
             _ => None,
         };
-        let feeds = crate::tools::is_check(&task.cmd);
+        // (one on a commit's tree: its places are in a copy that goes at its end — not for the list)
+        let feeds = crate::tools::is_check(&task.cmd) && ride.extra.base.is_none();
         // Where it runs, and what it warns of: its card's warnings — none, judged on its line now (it ran
         // unasked: said only on its chat row and in the log — D2)
         let ran = guard.as_ref().map(|g| {
@@ -659,6 +663,7 @@ impl Editor {
                 // (a time limit its own command sets: the stuck card waits for it — cardburden 5)
                 r.wait.limited(r.started, crate::stuck::limit(&r.task.cmd));
                 (r.key, r.joined, r.queued, r.snap) = (ride.key, ride.joined, ride.queued, ride.snap);
+                r.base = ride.extra.base;
                 Ok(())
             }
             None => Err(Box::new((who, ride))),
@@ -976,6 +981,7 @@ impl Editor {
             queued: None,
             snap: None,
             containers,
+            base: None,
         });
     }
 }

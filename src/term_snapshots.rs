@@ -1223,6 +1223,96 @@ fn snapshot_review_risk_and_the_reviewer() {
     assert!(has(&rows, "▲ looked at · piece 1/2 · unsafe (rust pack)"), "{rows:#?}");
 }
 
+/// #213: a driver reads the reviewer as `space v r` shows it — the verdict whole (the state has its first line
+/// only), each finding with its place, whether it's on a high-risk change, answered, and its thread — over the
+/// socket (`{"review": …}`, after a frame like any snapshot). A session with no reviewer says so; another
+/// session's is asked by its id.
+#[test]
+fn the_reviewers_verdict_and_findings_go_to_a_driver_whole() {
+    use crate::notes::By;
+    let base: String = (1..=5).map(|i| format!("let line_{i} = {i};\n")).collect();
+    let added = "let pid = unsafe { getpid() };\nlet quiet = 1;\n";
+    let mut s = review_of(112, 30, &base, &format!("{base}{added}"));
+    let path = s.ed.doc().path.clone().unwrap();
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
+    let (of, root) = (r.started, r.root.clone());
+    let high = crate::notes::add(&mut s.ed, &path, 5..6, By::Reviewer, "unsafe without a SAFETY comment.");
+    // (on a line the review didn't change: no grade)
+    let low =
+        crate::notes::add(&mut s.ed, &path, 1..2, By::Reviewer, "A name that says nothing.\nRename it.");
+    let n = s.ed.session.notes.list.iter_mut().find(|n| n.id == low).unwrap();
+    n.thread.push(crate::notes::Entry { by: By::You, text: "Kept on purpose.".into(), draft: false });
+    let verdict = "One risk: the unsafe call has no SAFETY comment.\nThe rest reads fine.";
+    s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
+        of,
+        root,
+        crate::reviewer::State::Done,
+        vec![high, low],
+        verdict,
+    ));
+    let other = s.ed.session_add(std::env::temp_dir().join("tarae-review-report-other"));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    for json in [true, false] {
+        let what = crate::uistate::Asked::Review(String::new());
+        s.ed.ui_asks.push(crate::uistate::Ask { after_input: 0, json, reply: tx.clone(), until, what });
+    }
+    s.frame();
+    let v: serde_json::Value =
+        serde_json::from_str(&rx.try_recv().expect("answered with the frame")).unwrap();
+    let r = &v["review"];
+    assert_eq!(r["verdict"], verdict, "whole");
+    assert_eq!(r["reviewer"]["state"], "done");
+    let f = r["findings"].as_array().unwrap();
+    assert_eq!(f.len(), 2);
+    assert_eq!(
+        (f[0]["path"].as_str(), &f[0]["line"], &f[0]["high"]),
+        (Some("src/demo.rs"), &json!(6), &json!(true))
+    );
+    assert_eq!(f[0]["end"], json!(6), "one line");
+    assert_eq!((&f[0]["answered"], &f[0]["thread"][0]["by"]), (&json!(false), &json!("reviewer")));
+    assert_eq!((&f[1]["high"], &f[1]["answered"]), (&json!(false), &json!(true)));
+    assert_eq!(f[1]["thread"][1], json!({ "by": "you", "text": "Kept on purpose." }));
+    let text = rx.try_recv().expect("the text form too");
+    assert!(text.contains("The rest reads fine."), "{text}");
+    assert!(text.contains("- src/demo.rs:6 ▲ high\n  reviewer: unsafe without"), "{text}");
+    assert!(
+        text.contains(
+            "- src/demo.rs:2 · answered\n  reviewer: A name that says nothing.\n    Rename it.\n  you: Kept"
+        ),
+        "{text}"
+    );
+    // #214, the read half: the high-risk changes no one has looked at, with their lines — read, never marked
+    let u = r["high_unseen"].as_array().expect("its review is open");
+    assert_eq!(u.len(), 1, "{u:?}");
+    assert_eq!(
+        (u[0]["path"].as_str(), &u[0]["line"], &u[0]["end"]),
+        (Some("src/demo.rs"), &json!(6), &json!(7))
+    );
+    assert!(u[0]["why"].as_str().unwrap().starts_with("unsafe"), "{}", u[0]["why"]);
+    assert_eq!(u[0]["text"], json!(["let pid = unsafe { getpid() };", "let quiet = 1;"]));
+    assert!(
+        text.contains(
+            "1 high-risk change not looked at (a person's space v h marks them):\n- src/demo.rs:6–7 unsafe"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\n    let pid = unsafe { getpid() };"), "{text}");
+    // (a person's key took it: none left)
+    s.ed.goto_line(6);
+    s.frame();
+    crate::codereview::hunk_seen(&mut s.ed);
+    let after = s.ed.review_report("").unwrap();
+    assert_eq!(after.unseen.as_ref().map(Vec::len), Some(0));
+    assert!(after.text().contains("no high-risk change left to look at"), "{}", after.text());
+    let none = s.ed.review_report(&format!("s{other}")).unwrap();
+    assert!(none.unseen.is_none(), "no review open there");
+    assert!(none.reviewer.is_none() && none.text().contains("none yet"), "{}", none.text());
+    assert!(s.ed.review_report("nope").is_err());
+}
+
 /// #195: while the reviewer reads, the rail says how long and how far — on its row where the rail is wide
 /// enough for the longest it gets, else on the row under it (the rail's width never changes in a review, so
 /// neither does where it is).

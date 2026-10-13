@@ -363,6 +363,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::codereview::hunk_seen(editor);
             Ok(())
         }
+        "review-file-seen" => {
+            crate::codereview::file_seen(editor);
+            Ok(())
+        }
         "review-verdict" => {
             crate::reviewer::verdict(editor);
             Ok(())

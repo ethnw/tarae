@@ -9,7 +9,7 @@
 //!   same file.
 //!   Run only when grammar commits or the bundle list change.
 //! - `shot out.png [keys …]` — the real screen as a PNG, for looking at a change before it's committed
-//!   (see [`shot`]).
+//!   (see [`shot`]); `shot --live out.png [--pid N]` — a running tarae's last frame as one.
 //! - `perf` (`cargo perf`) — the budgets and real-use scenarios in the `perf` profile, their numbers kept in
 //!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
 //! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see
