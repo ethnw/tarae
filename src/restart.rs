@@ -2448,18 +2448,16 @@ mod tests {
         let file = dir.join("a.txt");
         std::fs::write(&file, "two\n").unwrap();
         ed.session.checkpoints.gathering = false;
-        ed.session.checkpoints.list.push(crate::checkpoint::Checkpoint {
-            question: "q".into(),
-            files: vec![crate::checkpoint::Touched {
+        ed.session.checkpoints.list.push(crate::checkpoint::Checkpoint::new(
+            "q".into(),
+            vec![crate::checkpoint::Touched {
                 path: file,
                 before: Some(ropey::Rope::from_str("one\n")),
                 after: ropey::Rope::from_str("two\n"),
                 unseen: true,
                 ..Default::default()
             }],
-            undone: false,
-            seen: false,
-        });
+        ));
         crate::chat::turn_gathered(&mut ed, Some("a.txt".into()));
         assert!(ed.session.code_review.is_none(), "not over the restart");
         settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());

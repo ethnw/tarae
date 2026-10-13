@@ -660,7 +660,7 @@ fn a_stopped_run_and_one_past_its_turn_are_kept_too() {
     pump(&mut ed, &|ed| !ed.session.checkpoints.list.is_empty(), "a checkpoint of its own");
     let cp = &ed.session.checkpoints.list[0];
     assert!(cp.question.starts_with("ran `sleep 0.4") && !cp.seen, "{cp:?}");
-    assert!(cp.files.len() == 1 && cp.files[0].path.ends_with("src/late.txt"), "{cp:?}");
+    assert!(cp.files.len() == 1 && cp.files.paths()[0].ends_with("src/late.txt"), "{cp:?}");
     assert_eq!(ed.session.checkpoints.turn.len(), 1, "the turn in flight keeps only its own");
     let row = ed.session.chat.as_ref().unwrap().msgs.last().unwrap().text.clone();
     assert!(row.contains("late.txt after the turn"), "{row}");

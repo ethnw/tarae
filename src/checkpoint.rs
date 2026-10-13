@@ -16,11 +16,18 @@
 //! - A command of Claude's that isn't a check: what it changed in the checkout joins the turn the same way
 //!   (`record_run`, `snapshot.rs`) — a file it deleted comes back with undo, one that isn't text by its git
 //!   blob.
-//! - Kept on disk per project (`$XDG_STATE_HOME/tarae/turns/<project hash>.json` — the newest `KEEP`, and
-//!   the turn in flight), written on a worker at each change: a new tarae (`:restart`, a crash) still has
-//!   them. A turn cut short comes back as one of its own, its files as they are now.
+//! - Kept on disk per project (`$XDG_STATE_HOME/tarae/turns/<project hash>/` — the newest `KEEP`, and the
+//!   turn in flight), written on a worker at each change: a new tarae (`:restart`, a crash) still has them. A
+//!   turn cut short comes back as one of its own, its files as they are now.
+//! - Kept turns come back as their questions and paths only (`Files::Kept`, #218: 26 sessions' texts held
+//!   525 MB): `index.json` says them, each turn's texts are a file of their own (`<id>.json`, written once),
+//!   read on a worker when a step or a review needs them (`with_texts`) — and let go again when their session
+//!   goes behind (`shed`). The one file per project an earlier tarae kept (`<project hash>.json`, the texts in
+//!   it) is read back and moved over; one it writes after this one's (a `:restart` into it) beside the
+//!   folder joins it the same way — it never sees the folder, so never writes over it.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ropey::Rope;
 use serde_json::{Value, json};
@@ -57,12 +64,77 @@ pub struct Bytes {
 pub struct Checkpoint {
     /// What the user asked (its first line).
     pub question: String,
-    pub files: Vec<Touched>,
+    pub files: Files,
     pub undone: bool,
     /// Its changes have been looked at: each was reviewed as it came, or the user ended its review (`space
     /// v q`), or a git review showing all its files — not one written unseen whose review a later turn's
     /// replaced (`space v t` says so).
     pub seen: bool,
+    /// Its texts' file among the kept ones (`<id>.json`).
+    pub id: u64,
+    /// Its texts were read back from that file (`with_texts`, an earlier tarae's moved over): they go again
+    /// when its session goes behind (`shed`). A turn made since tarae started keeps its own.
+    pub read: bool,
+}
+
+/// A turn's files: with their texts, or as kept — paths only, the texts in the turn's file.
+#[derive(Clone, Debug)]
+pub enum Files {
+    Here(Vec<Touched>),
+    Kept(Vec<Kept>),
+}
+
+/// A file of a turn kept on disk, without its texts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Kept {
+    pub path: PathBuf,
+    pub unseen: bool,
+    pub gone: bool,
+    pub bytes: Option<Bytes>,
+}
+
+impl Files {
+    /// The files with their texts — None: they're on disk only (`with_texts`).
+    pub fn here(&self) -> Option<&[Touched]> {
+        match self {
+            Files::Here(v) => Some(v),
+            Files::Kept(_) => None,
+        }
+    }
+
+    pub fn paths(&self) -> Vec<&Path> {
+        match self {
+            Files::Here(v) => v.iter().map(|t| t.path.as_path()).collect(),
+            Files::Kept(v) => v.iter().map(|k| k.path.as_path()).collect(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Files::Here(v) => v.len(),
+            Files::Kept(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Without their texts.
+    fn kept(&self) -> Vec<Kept> {
+        match self {
+            Files::Here(v) => v
+                .iter()
+                .map(|t| Kept {
+                    path: t.path.clone(),
+                    unseen: t.unseen,
+                    gone: t.gone,
+                    bytes: t.bytes.clone(),
+                })
+                .collect(),
+            Files::Kept(v) => v.clone(),
+        }
+    }
 }
 
 impl Touched {
@@ -79,8 +151,16 @@ impl Touched {
 impl Checkpoint {
     pub fn new(question: String, files: Vec<Touched>) -> Self {
         let seen = !files.iter().any(|t| t.unseen);
-        Checkpoint { question, files, undone: false, seen }
+        Checkpoint { question, files: Files::Here(files), undone: false, seen, id: new_id(), read: false }
     }
+}
+
+/// A turn's id: when it was made (ns), one past the last given when that's later — never the same twice.
+fn new_id() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::chats::seq().max(1);
+    let next = |l: u64| l.max(now - 1) + 1;
+    next(LAST.try_update(Ordering::Relaxed, Ordering::Relaxed, |l| Some(next(l))).unwrap_or_else(|l| l))
 }
 
 #[derive(Default)]
@@ -102,6 +182,11 @@ pub struct Checkpoints {
     /// the middle of, put after them, nor those made since: a turn's review carried over `:restart` counts
     /// back from the last of these (`codereview::reopen_turn`).
     pub restored: usize,
+    /// Its kept turns are being read back (`restore_from`): tarae's memory isn't judged meanwhile
+    /// (`Editor::restoring`).
+    pub restoring: bool,
+    /// A turn's texts are being read (`with_texts`): a step waits.
+    pub reading: bool,
 }
 
 /// An accepted edit of Claude's landed in document `id`: `before` was its text just before (None = no such
@@ -344,18 +429,30 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
     if ed.session.checkpoints.gathering {
         return Err("reading what Claude wrote this turn — a moment".into());
     }
+    if ed.session.checkpoints.reading {
+        return Err("reading that turn's changes — a moment".into());
+    }
     let list = &ed.session.checkpoints.list;
     let i = if undo {
         list.iter().rposition(|c| !c.undone).ok_or("no turn of Claude's changed files — nothing to undo")?
     } else {
         list.iter().rposition(|c| c.undone).ok_or("no undone turn to bring back")?
     };
-    let cp = list[i].clone();
+    // (kept on disk only: read first, then this step again — the turn it finds then)
+    let Some(files) = list[i].files.here().map(<[Touched]>::to_vec) else {
+        with_texts(ed, i, move |ed, _| {
+            if let Err(e) = step(ed, undo) {
+                ed.set_warning(e);
+            }
+        });
+        return Ok(());
+    };
+    let question = list[i].question.clone();
     let mut changed = Vec::new();
     let mut kept = 0;
     let mut problems = Vec::new();
     let mut blobs = Vec::new();
-    for f in &cp.files {
+    for f in &files {
         // (not text: its blob written out on a worker — said there if it can't be)
         if let Some(b) = &f.bytes {
             let (expect, put) = if undo { (&b.after, &b.before) } else { (&b.before, &b.after) };
@@ -382,15 +479,14 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
         [one] => one.clone(),
         many => format!("{} files", many.len()),
     };
-    let mut msg =
-        format!("{what} “{}” — {files}{}", quote(&cp.question), if undo { " as before" } else { "" });
+    let mut msg = format!("{what} “{}” — {files}{}", quote(&question), if undo { " as before" } else { "" });
     if kept > 0 {
         msg.push_str(&format!(" · {kept} change(s) left as they are: you edited there since"));
     }
     ed.session.checkpoints.tell.push(format!(
         "The user {} your changes from the turn \"{}\" in {} — {}.",
         if undo { "undid" } else { "brought back" },
-        cp.question,
+        question,
         if changed.is_empty() { "no file".to_string() } else { changed.join(", ") },
         if undo { "those files are as they were before that turn" } else { "they're applied again" },
     ));
@@ -558,17 +654,19 @@ fn touched_json(t: &Touched) -> Value {
             "unseen": t.unseen, "gone": t.gone, "bytes": bytes })
 }
 
-fn touched_of(v: &Value) -> Option<Touched> {
+fn bytes_of(v: &Value) -> Option<Bytes> {
     let blob = |b: &Value| b.as_str().map(String::from);
+    v.is_object().then(|| Bytes { before: blob(&v["before"]), after: blob(&v["after"]) })
+}
+
+fn touched_of(v: &Value) -> Option<Touched> {
     Some(Touched {
         path: PathBuf::from(v["path"].as_str()?),
         before: v["before"].as_str().map(Rope::from_str),
         after: Rope::from_str(v["after"].as_str()?),
         unseen: v["unseen"].as_bool().unwrap_or(false),
         gone: v["gone"].as_bool().unwrap_or(false),
-        bytes: v["bytes"]
-            .is_object()
-            .then(|| Bytes { before: blob(&v["bytes"]["before"]), after: blob(&v["bytes"]["after"]) }),
+        bytes: bytes_of(&v["bytes"]),
     })
 }
 
@@ -576,20 +674,92 @@ fn files_of(v: &Value) -> Vec<Touched> {
     v.as_array().into_iter().flatten().filter_map(touched_of).collect()
 }
 
-/// The project at `root`'s turns kept in `dir` (nothing if none — or unreadable).
-pub fn load(dir: &Path, root: &Path) -> Stored {
-    let Ok(body) = std::fs::read_to_string(crate::chats::file(dir, root)) else { return Stored::default() };
+fn kept_json(k: &Kept) -> Value {
+    let bytes = k.bytes.as_ref().map(|b| json!({ "before": b.before, "after": b.after }));
+    json!({ "path": k.path, "unseen": k.unseen, "gone": k.gone, "bytes": bytes })
+}
+
+fn kept_of(v: &Value) -> Option<Kept> {
+    Some(Kept {
+        path: PathBuf::from(v["path"].as_str()?),
+        unseen: v["unseen"].as_bool().unwrap_or(false),
+        gone: v["gone"].as_bool().unwrap_or(false),
+        bytes: bytes_of(&v["bytes"]),
+    })
+}
+
+/// The folder the project at `root`'s turns are kept in (`<dir>/<project hash>/`).
+fn folder(dir: &Path, root: &Path) -> PathBuf {
+    crate::chats::file(dir, root).with_extension("")
+}
+
+/// The file an earlier tarae kept the project's turns in, texts and all (`<dir>/<project hash>.json`).
+fn old_file(dir: &Path, root: &Path) -> PathBuf {
+    crate::chats::file(dir, root)
+}
+
+/// The index of the project's kept turns — in the folder, so an earlier tarae (`old_file`) never sees it.
+fn index_file(dir: &Path, root: &Path) -> PathBuf {
+    folder(dir, root).join("index.json")
+}
+
+/// `files`' texts (as kept) from their turn's file — Err: whether they're gone for good (no such file, or it
+/// isn't their texts: written whole or not at all, `write_atomic`), and why. Any other failure to read it
+/// (too many files open, a permission) passes: the turn stays, asked again later.
+fn read_texts(path: &Path, files: &[Kept]) -> Result<Vec<Touched>, (bool, String)> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| (e.kind() == std::io::ErrorKind::NotFound, e.to_string()))?;
+    let v: Value = serde_json::from_str(&body).map_err(|e| (true, e.to_string()))?;
+    drop(body);
+    let texts =
+        v.as_array().filter(|t| t.len() == files.len()).ok_or((true, "not its files' texts".to_string()))?;
+    files
+        .iter()
+        .zip(texts)
+        .map(|(k, t)| {
+            Ok(Touched {
+                path: k.path.clone(),
+                before: t["before"].as_str().map(Rope::from_str),
+                after: Rope::from_str(
+                    t["after"].as_str().ok_or((true, "a file without its text after".to_string()))?,
+                ),
+                unseen: k.unseen,
+                gone: k.gone,
+                bytes: k.bytes.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The index's `seq` — it starts the file (`save`), so only its first bytes are read. 0: no index, or not one.
+fn seq_of(index: &Path) -> u64 {
+    use std::io::Read as _;
+    let mut head = Vec::new();
+    let Ok(f) = std::fs::File::open(index) else { return 0 };
+    let _ = f.take(40).read_to_end(&mut head);
+    let head = String::from_utf8_lossy(&head);
+    let digits: String =
+        head.strip_prefix("{\"seq\":").unwrap_or_default().chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().unwrap_or(0)
+}
+
+/// The index: its turns as kept (paths only), the turn in flight (texts and all).
+fn read_index(index: &Path) -> Stored {
+    let Ok(body) = std::fs::read_to_string(index) else { return Stored::default() };
     let Ok(v) = serde_json::from_str::<Value>(&body) else { return Stored::default() };
     let list = v["list"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|c| Checkpoint {
-            question: c["question"].as_str().unwrap_or_default().to_string(),
-            files: files_of(&c["files"]),
-            undone: c["undone"].as_bool().unwrap_or(false),
-            // (kept before this was: nothing to say about it)
-            seen: c["seen"].as_bool().unwrap_or(true),
+        .filter_map(|c| {
+            Some(Checkpoint {
+                question: c["question"].as_str().unwrap_or_default().to_string(),
+                files: Files::Kept(c["files"].as_array()?.iter().filter_map(kept_of).collect()),
+                undone: c["undone"].as_bool().unwrap_or(false),
+                seen: c["seen"].as_bool().unwrap_or(true),
+                id: c["id"].as_u64()?,
+                read: false,
+            })
         })
         .filter(|c| !c.files.is_empty())
         .collect();
@@ -601,27 +771,127 @@ pub fn load(dir: &Path, root: &Path) -> Stored {
     }
 }
 
-/// Written — unless what's there was taken later (on a worker).
-fn save(dir: &Path, root: &Path, s: Stored) {
+/// An earlier tarae's file (`old_file`): its turns with their texts (nothing if unreadable).
+fn read_old(body: &str) -> Stored {
+    let Ok(v) = serde_json::from_str::<Value>(body) else { return Stored::default() };
+    let list = v["list"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| Checkpoint {
+            question: c["question"].as_str().unwrap_or_default().to_string(),
+            files: Files::Here(files_of(&c["files"])),
+            undone: c["undone"].as_bool().unwrap_or(false),
+            // (kept before this was: nothing to say about it)
+            seen: c["seen"].as_bool().unwrap_or(true),
+            id: new_id(),
+            read: false,
+        })
+        .filter(|c| !c.files.is_empty())
+        .collect();
+    Stored {
+        list,
+        turn: files_of(&v["turn"]),
+        question: v["question"].as_str().unwrap_or_default().to_string(),
+        seq: v["seq"].as_u64().unwrap_or(0),
+    }
+}
+
+/// The project at `root`'s turns kept in `dir`: the index's (paths only), then an earlier tarae's file's
+/// (texts and all) — the turn in flight the later one's; the newest `KEEP` (nothing if none, or unreadable).
+#[cfg(test)]
+pub fn load(dir: &Path, root: &Path) -> Stored {
+    load_both(dir, root).0
+}
+
+/// `load`, and whether an earlier tarae's file was there.
+fn load_both(dir: &Path, root: &Path) -> (Stored, bool) {
+    let index = read_index(&index_file(dir, root));
+    let Ok(body) = std::fs::read_to_string(old_file(dir, root)) else { return (index, false) };
+    let old = read_old(&body);
+    drop(body);
+    let mut list = index.list;
+    list.extend(old.list);
+    let n = list.len();
+    list.drain(..n.saturating_sub(KEEP));
+    let (turn, question, seq) = match old.seq > index.seq {
+        true => (old.turn, old.question, old.seq),
+        false => (index.turn, index.question, index.seq),
+    };
+    (Stored { list, turn, question, seq }, true)
+}
+
+/// `load` with every turn's texts read too (tests: what's kept, whole).
+#[cfg(test)]
+pub fn load_whole(dir: &Path, root: &Path) -> Stored {
+    let mut s = load(dir, root);
+    for c in &mut s.list {
+        // (one a save removed meanwhile stays kept)
+        if let Files::Kept(k) = &c.files
+            && let Ok(texts) = read_texts(&folder(dir, root).join(format!("{}.json", c.id)), k)
+        {
+            c.files = Files::Here(texts);
+        }
+    }
+    s
+}
+
+/// Written — unless what's there was taken later (on a worker): each turn's texts a file of its own, written
+/// once (a kept turn's is there already), then the index, then the files of turns it doesn't name any more
+/// go. False: not written (a later one was, or the disk said no).
+fn save(dir: &Path, root: &Path, s: Stored) -> bool {
     let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
-    if load(dir, root).seq > s.seq {
-        return;
+    let (at, index) = (folder(dir, root), index_file(dir, root));
+    if seq_of(&index) > s.seq || std::fs::create_dir_all(&at).is_err() {
+        return false;
+    }
+    let write = |path: &Path, body: String| {
+        crate::disk::write_atomic(path, |w| std::io::Write::write_all(w, body.as_bytes())).is_ok()
+    };
+    for c in &s.list {
+        let Files::Here(files) = &c.files else { continue };
+        let path = at.join(format!("{}.json", c.id));
+        if std::fs::symlink_metadata(&path).is_ok() {
+            continue;
+        }
+        let texts: Vec<Value> = files
+            .iter()
+            .map(
+                |t| json!({ "before": t.before.as_ref().map(Rope::to_string), "after": t.after.to_string() }),
+            )
+            .collect();
+        if !write(&path, Value::Array(texts).to_string()) {
+            return false;
+        }
     }
     let list: Vec<Value> = s
         .list
         .iter()
         .map(|c| {
-            let files: Vec<Value> = c.files.iter().map(touched_json).collect();
-            json!({ "question": c.question, "files": files, "undone": c.undone, "seen": c.seen })
+            let files: Vec<Value> = c.files.kept().iter().map(kept_json).collect();
+            json!({ "id": c.id, "question": c.question, "files": files, "undone": c.undone, "seen": c.seen })
         })
         .collect();
     let turn: Vec<Value> = s.turn.iter().map(touched_json).collect();
-    let body =
-        json!({ "root": root, "seq": s.seq, "list": list, "turn": turn, "question": s.question }).to_string();
-    let _ = std::fs::create_dir_all(dir);
-    let _ = crate::disk::write_atomic(&crate::chats::file(dir, root), |w| {
-        std::io::Write::write_all(w, body.as_bytes())
-    });
+    let rest = json!({ "root": root, "list": list, "turn": turn, "question": s.question }).to_string();
+    // (`seq` first: a save reads only it — `seq_of`)
+    if !write(&index, format!("{{\"seq\":{},{}", s.seq, &rest[1..])) {
+        return false;
+    }
+    // The texts of turns it doesn't name (all under `SAVING`: an older save that comes after this one writes
+    // nothing — `seq_of` above — so it never removes a newer turn's texts, nor names one removed)
+    let named: std::collections::HashSet<String> = s.list.iter().map(|c| format!("{}.json", c.id)).collect();
+    for e in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // (`<id>.json`: not the index, nor a file being written)
+        let a_turns = name
+            .strip_suffix(".json")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if a_turns && !named.contains(&name) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    true
 }
 
 /// The turns as they are now, kept (the texts are written out on a worker).
@@ -649,7 +919,12 @@ pub(crate) fn keep_now(l: &crate::session::Session) {
 pub(crate) fn forget(ed: &Editor, root: PathBuf) {
     let Some(dir) = ed.turns_dir.clone() else { return };
     let none = Stored { seq: crate::chats::seq(), ..Default::default() };
-    ed.events.jobs().background(move || save(&dir, &root, none));
+    ed.events.jobs().background(move || {
+        // (an earlier tarae's file too: else the next start would bring its turns back)
+        if save(&dir, &root, none) {
+            let _ = std::fs::remove_file(old_file(&dir, &root));
+        }
+    });
 }
 
 /// `keep`, then `then` on the main loop once it's written (at once when nothing is kept — tests, or
@@ -679,24 +954,121 @@ fn saving(l: &crate::session::Session) -> Option<impl FnOnce() + Send + 'static>
         question,
         seq: crate::chats::seq(),
     };
-    Some(move || save(&dir, &root, s))
+    Some(move || {
+        save(&dir, &root, s);
+    })
+}
+
+/// Turn `at`'s texts in memory, then `then(ed, at)` — at once when they are; else read from its file on a
+/// worker first, the turn found again by its id (gone meanwhile: nothing more). Its file gone for good
+/// (`read_texts`): said, and the turn left out — nothing of it can be stepped or shown; one that can't be read
+/// just now: said, the turn kept as it is.
+pub fn with_texts(ed: &mut Editor, at: usize, then: impl FnOnce(&mut Editor, usize) + Send + 'static) {
+    let cps = &ed.session.checkpoints;
+    let Some(cp) = cps.list.get(at) else { return };
+    let Files::Kept(files) = &cp.files else { return then(ed, at) };
+    if cps.reading {
+        return ed.set_status("reading that turn's changes — a moment");
+    }
+    // (a kept turn came from `dir`: it's set as they come back)
+    let Some(dir) = cps.dir.clone() else { return };
+    let (id, files) = (cp.id, files.clone());
+    let path = folder(&dir, &ed.session.root).join(format!("{id}.json"));
+    ed.session.checkpoints.reading = true;
+    ed.events.jobs().spawn(move || {
+        let texts = read_texts(&path, &files);
+        move |ed: &mut Editor| {
+            let cps = &mut ed.session.checkpoints;
+            cps.reading = false;
+            let Some(at) = cps.list.iter().position(|c| c.id == id) else { return };
+            match texts {
+                Ok(texts) => {
+                    let c = &mut cps.list[at];
+                    if matches!(c.files, Files::Kept(_)) {
+                        (c.files, c.read) = (Files::Here(texts), true);
+                    }
+                    then(ed, at);
+                }
+                Err((false, e)) => {
+                    let question = quote(&cps.list[at].question);
+                    ed.set_warning(format!(
+                        "couldn't read the turn “{question}”'s changes just now ({e}) — try again"
+                    ));
+                }
+                Err((true, e)) => {
+                    // (a review on it — its texts are held while one is open, so none is: closed all the same)
+                    let on_it = |ed: &Editor| {
+                        matches!(ed.session.code_review.as_ref().map(|r| &r.base),
+                            Some(crate::codereview::Base::Turn { at: open, .. }) if *open == at)
+                    };
+                    if on_it(ed) {
+                        crate::codereview::close(ed);
+                    }
+                    let cps = &mut ed.session.checkpoints;
+                    let question = cps.list.remove(at).question;
+                    cps.restored -= usize::from(at < cps.restored);
+                    if let Some(crate::codereview::Base::Turn { at: open, .. }) =
+                        ed.session.code_review.as_mut().map(|r| &mut r.base)
+                        && *open > at
+                    {
+                        *open -= 1;
+                    }
+                    keep(ed);
+                    ed.set_warning(format!(
+                        "the turn “{}” isn't kept any more ({e}) — left out",
+                        quote(&question)
+                    ));
+                }
+            }
+        }
+    });
+}
+
+/// Session `l` goes behind: the texts read back from disk go again (their files still have them) — not the
+/// turn its review is open on (that reads them as it shows), nor one past the newest `KEEP` (the next save
+/// removes its file).
+pub(crate) fn shed(l: &mut crate::session::Session) {
+    let open = match l.code_review.as_ref().map(|r| &r.base) {
+        Some(crate::codereview::Base::Turn { at, .. }) => Some(*at),
+        _ => None,
+    };
+    let from = l.checkpoints.list.len().saturating_sub(KEEP);
+    for (i, c) in l.checkpoints.list.iter_mut().enumerate().skip(from) {
+        if c.read && Some(i) != open {
+            (c.files, c.read) = (Files::Kept(c.files.kept()), false);
+        }
+    }
 }
 
 /// `restore_from` the front session's own `dir` (tests set one; nothing is kept until they're back).
 #[cfg(test)]
 pub fn restore(ed: &mut Editor) {
     let Some(dir) = ed.session.checkpoints.dir.take() else { return };
+    ed.session.checkpoints.restoring = true;
     restore_from(ed, dir, ed.session.root.clone());
 }
 
 /// As a session is made (`Editor::session_kept_back`): the kept turns of the checkout in `root` come back
 /// from `dir` (read on a worker), before any made since, into the session the editor's results are for now
-/// — its `dir` set once they're back (a save before would write over them). A turn tarae ended in the
-/// middle of becomes a checkpoint of its own, its files as they are now.
+/// — its `dir` set once they're back (a save before would write over them). They come back as kept (paths
+/// only); an earlier tarae's file's are kept as this one keeps them first, and the file goes. A turn tarae
+/// ended in the middle of becomes a checkpoint of its own, its files as they are now.
 pub fn restore_from(ed: &Editor, dir: PathBuf, root: PathBuf) {
     ed.events.jobs().spawn(move || {
         let back = dir.clone();
-        let mut s = load(&dir, &root);
+        let (mut s, old) = load_both(&dir, &root);
+        if old {
+            let list = s.list.clone();
+            let moved =
+                Stored { list, turn: s.turn.clone(), question: s.question.clone(), seq: crate::chats::seq() };
+            // (not written: they stay held, texts and all — and the file stays)
+            if save(&dir, &root, moved) {
+                let _ = std::fs::remove_file(old_file(&dir, &root));
+                for c in &mut s.list {
+                    c.files = Files::Kept(c.files.kept());
+                }
+            }
+        }
         let mut cut = std::mem::take(&mut s.turn);
         for t in cut.iter_mut().filter(|t| t.bytes.is_none()) {
             // (gone: nothing in it now · unreadable: as it was kept)
@@ -719,6 +1091,7 @@ pub fn restore_from(ed: &Editor, dir: PathBuf, root: PathBuf) {
         move |ed: &mut Editor| {
             ed.session.checkpoints.dir = Some(back);
             ed.session.checkpoints.restored = kept;
+            ed.session.checkpoints.restoring = false;
             let n = s.list.len();
             if n > 0 {
                 let since = std::mem::take(&mut ed.session.checkpoints.list);
@@ -768,7 +1141,7 @@ pub fn rebase(base: &str, theirs: &str, ours: &str) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::rebase;
+    use super::*;
 
     #[test]
     fn rebase_keeps_the_users_edits_and_what_they_touched() {
@@ -792,10 +1165,11 @@ mod tests {
     }
 
     /// #218: what restoring sessions' turns costs — each session's kept turns (`KEEP` of them, every file
-    /// a turn touched with its whole text before and after) read as a restore reads them (`load`: the file,
-    /// a `serde_json::Value` of it, ropes), 26 sessions four at a time as the workers take them. The process's
-    /// footprint before, at its peak while loading, with the turns held, and once they're dropped. Stand-in
-    /// turns: `TARAE_TURN_FILES` files of `TARAE_TURN_KB` KB each (3 × 150 KB).
+    /// a turn touched with its whole text before and after) read as a restore reads them (`load`: the index,
+    /// paths only — an earlier tarae's one file was read whole, 525 MB held for these), 26 sessions four at a
+    /// time as the workers take them. The process's footprint before, at its peak while loading, with the
+    /// turns held, and once they're dropped. Stand-in turns: `TARAE_TURN_FILES` files of `TARAE_TURN_KB` KB
+    /// each (3 × 150 KB).
     #[test]
     fn perf_restored_turns_memory() {
         if crate::test_results::unoptimized("checkpoint::tests::perf_restored_turns_memory") {
@@ -829,8 +1203,13 @@ mod tests {
                 .collect();
             save(&dir, root, Stored { list, seq: 1, ..Default::default() });
         }
-        let on_disk: u64 =
-            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+        // (each project's folder: its index and its turns' texts)
+        let on_disk: u64 = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten())
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
         let me = std::process::id();
         let footprint = || {
             let os = crate::procs::tree(me).into_iter().find(|o| o.pid == me).unwrap();
@@ -910,6 +1289,273 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Events handled until `until` (5 s at most).
+    fn settle(ed: &mut Editor, what: &str, until: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !until(ed) {
+            assert!(std::time::Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// A temp folder of the test's own (real path), empty.
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tarae-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    /// A turn that made `root`'s `a.txt` "two\n" from "one\n".
+    fn one_to_two(root: &Path, question: &str) -> Checkpoint {
+        let (before, after) = (Some(Rope::from_str("one\n")), Rope::from_str("two\n"));
+        Checkpoint::new(
+            question.into(),
+            vec![Touched { path: root.join("a.txt"), before, after, ..Default::default() }],
+        )
+    }
+
+    /// What an earlier tarae kept for `root` (its one file, every turn's texts in it — its `save`, as it was).
+    fn write_old(store: &Path, root: &Path, questions: &[&str], seq: u64) {
+        let list: Vec<Value> = questions
+            .iter()
+            .map(|q| {
+                let Files::Here(files) = one_to_two(root, q).files else { unreachable!() };
+                let files: Vec<Value> = files.iter().map(touched_json).collect();
+                json!({ "question": q, "files": files, "undone": false, "seen": true })
+            })
+            .collect();
+        std::fs::create_dir_all(store).unwrap();
+        let body = json!({ "root": root, "seq": seq, "list": list, "turn": [], "question": "" });
+        std::fs::write(old_file(store, root), body.to_string()).unwrap();
+    }
+
+    /// #218: kept turns come back as their paths only, in every session — the one in front and those behind
+    /// — and `space u` / `space U` still take each back and bring it again across the start, its texts read
+    /// from its own file as the step asks. A session going behind lets the texts it read go again (their
+    /// file still has them); the one coming in front keeps what it read.
+    #[test]
+    fn every_sessions_turn_undoes_across_a_start_its_texts_read_as_asked() {
+        use super::*;
+        let dir = temp("turns-every");
+        let names = ["front", "b1", "b2"];
+        let store = dir.join("turns");
+        for n in names {
+            std::fs::create_dir_all(dir.join(n)).unwrap();
+            std::fs::write(dir.join(n).join("a.txt"), "two\n").unwrap();
+            let list = vec![one_to_two(&dir.join(n), &format!("turn in {n}"))];
+            assert!(save(
+                &store,
+                &dir.join(n),
+                Stored { list, seq: crate::chats::seq(), ..Default::default() }
+            ));
+        }
+        // A new tarae: the session in front and two behind, each with its kept turn
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.turns_dir) = (dir.join("front"), Some(store.clone()));
+        ed.session_kept_back(ed.session.id);
+        let ids = [ed.session.id, ed.session_add(dir.join("b1")), ed.session_add(dir.join("b2"))];
+        assert!(ed.restoring(), "reading them back");
+        let turns = |ed: &Editor, id| {
+            let l = std::iter::once(&ed.session).chain(&ed.sessions).find(|l| l.id == id).unwrap();
+            l.checkpoints.list.clone()
+        };
+        settle(&mut ed, "every session's turn back", |ed| {
+            !ed.restoring() && ids.iter().all(|&id| turns(ed, id).len() == 1)
+        });
+        let held = |ed: &Editor, id| turns(ed, id)[0].files.here().is_some();
+        for id in ids {
+            assert!(!held(&ed, id), "paths only: {:?}", turns(&ed, id));
+        }
+        for (id, n) in ids.into_iter().zip(names) {
+            let a = dir.join(n).join("a.txt");
+            let now = |want: &'static str| {
+                let a = a.clone();
+                move |_: &Editor| std::fs::read_to_string(&a).unwrap() == want
+            };
+            ed.with_session(id, |ed| step(ed, true).unwrap());
+            settle(&mut ed, &format!("{n}: undone"), now("one\n"));
+            ed.with_session(id, |ed| step(ed, false).unwrap());
+            settle(&mut ed, &format!("{n}: brought back"), now("two\n"));
+            assert!(held(&ed, id), "{n}: read once, held while it's where it was");
+        }
+        // The front one goes behind: what it read goes; b1, in front now, keeps its own
+        assert!(ed.session_switch(ids[1]));
+        assert!(!held(&ed, ids[0]) && held(&ed, ids[1]));
+        // …and is read again when asked
+        ed.with_session(ids[0], |ed| step(ed, true).unwrap());
+        let a = dir.join("front/a.txt");
+        settle(&mut ed, "front: undone again", |_| std::fs::read_to_string(&a).unwrap() == "one\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An earlier tarae kept a project's turns in one file, texts and all: they come back, kept as this tarae
+    /// keeps them (each turn's texts a file of their own, the index), and the file goes. A `:restart` into an
+    /// earlier tarae then: it reads only that one file — its reader (`read_old`, that tarae's `load`) on this
+    /// index reads no turn and doesn't fail — and never sees the folder, so never writes over it; the file it
+    /// writes beside it joins the index's turns at the next start, after them.
+    #[test]
+    fn an_earlier_taraes_turns_move_over_and_it_never_writes_over_ours() {
+        use super::*;
+        let dir = temp("turns-earlier");
+        let (root, store) = (dir.join("p"), dir.join("turns"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        write_old(&store, &root, &["first", "second"], crate::chats::seq());
+        let start = |root: &Path| {
+            let mut ed = Editor::new(crate::config::Config::default());
+            (ed.session.root, ed.turns_dir) = (root.to_path_buf(), Some(store.clone()));
+            ed.session_kept_back(ed.session.id);
+            settle(&mut ed, "its turns back", |ed| !ed.restoring());
+            ed
+        };
+        let questions = |l: &[Checkpoint]| l.iter().map(|c| c.question.clone()).collect::<Vec<_>>();
+        let mut ed = start(&root);
+        assert_eq!(questions(&ed.session.checkpoints.list), ["first", "second"]);
+        assert!(
+            ed.session.checkpoints.list.iter().all(|c| c.files.here().is_none()),
+            "kept as this tarae keeps them"
+        );
+        assert!(!old_file(&store, &root).exists(), "the earlier file went");
+        let whole = load_whole(&store, &root);
+        let texts = |c: &Checkpoint| {
+            c.files.here().map(|f| (f[0].before.as_ref().map(Rope::to_string), f[0].after.to_string()))
+        };
+        assert!(
+            whole.list.iter().all(|c| texts(c) == Some((Some("one\n".into()), "two\n".into()))),
+            "{whole:?}"
+        );
+        step(&mut ed, true).unwrap();
+        settle(&mut ed, "undone", |_| std::fs::read_to_string(root.join("a.txt")).unwrap() == "one\n");
+        let index = index_file(&store, &root);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !load(&store, &root).list.last().is_some_and(|c| c.undone) {
+            assert!(std::time::Instant::now() < end, "the undo kept");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(ed);
+        // An earlier tarae reading this index as its file: no turn, no failure
+        let ours = std::fs::read_to_string(&index).unwrap();
+        let read = read_old(&ours);
+        assert!(read.list.is_empty() && read.turn.is_empty(), "{read:?}");
+        // …it keeps a turn of its own in its file: ours is as it was
+        write_old(&store, &root, &["third"], crate::chats::seq());
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), ours, "never written over");
+        // Back in this tarae: its turn after ours, moved over too
+        let ed = start(&root);
+        assert_eq!(questions(&ed.session.checkpoints.list), ["first", "second", "third"]);
+        assert_eq!(
+            ed.session.checkpoints.list.iter().map(|c| c.undone).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        assert!(!old_file(&store, &root).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `space v t` on a turn kept from before the start: its texts read first, then its review opens on them —
+    /// the file against its text before the turn — and they stay while that review is open, its session
+    /// behind or not (the review's diff and its files read them as they're shown).
+    #[test]
+    fn a_kept_turns_review_reads_its_texts_first() {
+        let dir = temp("turns-review");
+        let (root, store) = (dir.join("p"), dir.join("turns"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        let list = vec![one_to_two(&root, "q")];
+        assert!(save(&store, &root, Stored { list, seq: crate::chats::seq(), ..Default::default() }));
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.turns_dir) = (root.clone(), Some(store.clone()));
+        ed.session_kept_back(ed.session.id);
+        settle(&mut ed, "its turn back", |ed| !ed.restoring());
+        assert!(ed.session.checkpoints.list[0].files.here().is_none());
+        crate::codereview::review_turn(&mut ed);
+        settle(&mut ed, "its review open", |ed| ed.session.code_review.is_some());
+        let r = ed.session.code_review.as_ref().unwrap();
+        let files: Vec<_> = r.files.iter().map(|f| (f.rel.as_str(), f.added, f.removed, f.new)).collect();
+        assert_eq!(files, [("a.txt", 1, 1, false)]);
+        shed(&mut ed.session);
+        assert!(ed.session.checkpoints.list[0].files.here().is_some(), "held while its review is open");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A turn's texts that can't be read just now (here a folder where its file is — a stand-in for too many
+    /// files open, as root too) leave the turn and its file as they are, said; its file gone for good leaves
+    /// the turn out, said, and the next undo takes the turn before it back.
+    #[test]
+    fn a_turn_whose_texts_cant_be_read_now_stays_and_one_gone_is_left_out() {
+        let dir = temp("turns-unread");
+        let (root, store) = (dir.join("p"), dir.join("turns"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        let (first, second) = (one_to_two(&root, "first"), one_to_two(&root, "second"));
+        let texts = folder(&store, &root).join(format!("{}.json", second.id));
+        let list = vec![first, second];
+        assert!(save(&store, &root, Stored { list, seq: crate::chats::seq(), ..Default::default() }));
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.turns_dir) = (root.clone(), Some(store.clone()));
+        ed.session_kept_back(ed.session.id);
+        settle(&mut ed, "its turns back", |ed| !ed.restoring());
+        let questions =
+            |ed: &Editor| ed.session.checkpoints.list.iter().map(|c| c.question.clone()).collect::<Vec<_>>();
+        let said = |ed: &Editor| ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>().join(" | ");
+        // Can't be read just now
+        std::fs::remove_file(&texts).unwrap();
+        std::fs::create_dir(&texts).unwrap();
+        step(&mut ed, true).unwrap();
+        settle(&mut ed, "read", |ed| !ed.session.checkpoints.reading);
+        assert_eq!(questions(&ed), ["first", "second"], "{}", said(&ed));
+        assert!(said(&ed).contains("couldn't read the turn “second”'s changes just now"), "{}", said(&ed));
+        assert!(texts.is_dir(), "left as it is");
+        // Gone for good
+        std::fs::remove_dir(&texts).unwrap();
+        step(&mut ed, true).unwrap();
+        settle(&mut ed, "read again", |ed| !ed.session.checkpoints.reading);
+        assert_eq!(questions(&ed), ["first"]);
+        assert!(said(&ed).contains("the turn “second” isn't kept any more"), "{}", said(&ed));
+        step(&mut ed, true).unwrap();
+        let a = root.join("a.txt");
+        settle(&mut ed, "the turn before undone", |_| std::fs::read_to_string(&a).unwrap() == "one\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A save reads only the index's `seq` (it starts the file — an index whose rest isn't JSON still says it):
+    /// an older save writes nothing; each turn's texts are written once, and those of a turn the index
+    /// doesn't name any more go; forgetting leaves no texts, and no earlier tarae's file.
+    #[test]
+    fn a_save_reads_only_seq_and_keeps_only_the_named_turns_texts() {
+        use super::*;
+        let dir = temp("turns-seq");
+        let (root, store) = (dir.join("p"), dir.join("turns"));
+        let (a, b) = (one_to_two(&root, "a"), one_to_two(&root, "b"));
+        let (at, index) = (folder(&store, &root), index_file(&store, &root));
+        let texts = |c: &Checkpoint| at.join(format!("{}.json", c.id));
+        let seq = crate::chats::seq();
+        let stored = |list: Vec<Checkpoint>, seq| Stored { list, seq, ..Default::default() };
+        assert!(save(&store, &root, stored(vec![a.clone(), b.clone()], seq)));
+        assert_eq!(seq_of(&index), seq);
+        assert!(texts(&a).is_file() && texts(&b).is_file());
+        assert!(!save(&store, &root, stored(vec![a.clone()], seq - 1)), "an older one");
+        assert!(texts(&b).is_file());
+        std::fs::write(&index, format!("{{\"seq\":{},not json", seq + 1)).unwrap();
+        assert_eq!(seq_of(&index), seq + 1, "only its head read");
+        assert!(!save(&store, &root, stored(vec![a.clone()], seq)));
+        // A later one without b: b's texts go, a's stay as written
+        let a_was = std::fs::metadata(texts(&a)).unwrap().modified().unwrap();
+        assert!(save(&store, &root, stored(vec![a.clone()], seq + 2)));
+        assert!(!texts(&b).exists());
+        assert_eq!(std::fs::metadata(texts(&a)).unwrap().modified().unwrap(), a_was, "written once");
+        // Forgotten: nothing left of either kind
+        write_old(&store, &root, &["old"], 1);
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.turns_dir = Some(store.clone());
+        forget(&ed, root.clone());
+        settle(&mut ed, "forgotten", |_| !texts(&a).exists() && !old_file(&store, &root).exists());
+        assert!(load(&store, &root).list.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Wave 3, gap 2: a session behind (back at a start, or opened again) kept its turns nowhere it read —

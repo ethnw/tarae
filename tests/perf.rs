@@ -765,8 +765,11 @@ fn perf_e2e_memory_with_a_working_set_open() {
 
 /// What a restored idle session costs (#218: after a `:restart` with 26 sessions the status line said "▲ tarae
 /// 620 MB", 313 MB moments later). A copy of this repository; `n` sessions made (`:session-new`, its card
-/// answered), four files opened in each, then `:restart` — tarae's footprint before it, a second after it
-/// came back, and settled (frames stopped, then 20 s more). The same with no session but the first is the
+/// answered), four files opened in each, every session's checkout given kept turns as `space u` keeps them
+/// (`TARAE_TURN_FILES` files of `TARAE_TURN_KB` KB each — 3 × 150 KB — over `KEEP` turns, in the format an
+/// earlier tarae wrote; `TARAE_TURN_FILES=0`: none), then `:restart` — tarae's footprint before it, a second
+/// after it came back, and settled (frames stopped, then 20 s more); then `:restart` once more, settled (what
+/// the turns cost once they're kept as this tarae keeps them). The same with no session but the first is the
 /// baseline: what's past it, per session, is what one costs. `TARAE_HEAP`: what's live in the heap at the end.
 /// `TARAE_RESTORED_N` sets `n` (26, as it happened).
 #[test]
@@ -776,22 +779,99 @@ fn perf_e2e_memory_restored_sessions() {
     }
     let n: usize = std::env::var("TARAE_RESTORED_N").ok().and_then(|v| v.parse().ok()).unwrap_or(26);
     let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-    let (base_first, base_settled) = restored_sessions(0).1;
-    let (live, (first, settled)) = restored_sessions(n);
-    let each = (settled - base_settled) / n.max(1) as f64;
+    let base = restored_sessions(0);
+    let got = restored_sessions(n);
+    let each = (got.settled - base.settled) / n.max(1) as f64;
+    let again_each = (got.again - base.again) / n.max(1) as f64;
     eprintln!(
-        "restored sessions: {n} — live before :restart {:.1} MB; after it: first {first:.1} MB, settled \
-         {settled:.1} MB; with none: first {base_first:.1} MB, settled {base_settled:.1} MB — {each:.1} MB a \
-         session",
-        mb(live)
+        "restored sessions: {n} — live before :restart {:.1} MB; after it: first {:.1} MB, settled {:.1} MB, \
+         restarted again {:.1} MB; with none: first {:.1} MB, settled {:.1} MB, again {:.1} MB — {each:.1} MB a \
+         session ({again_each:.1} MB the second time)",
+        mb(got.live),
+        got.first,
+        got.settled,
+        got.again,
+        base.first,
+        base.settled,
+        base.again
     );
     report("e2e_restored_session_each_mb", each, 40.0, 1.0);
-    report("e2e_restored_sessions_first_mb", first, 1000.0, 20.0);
+    report("e2e_restored_sessions_first_mb", got.first, 1000.0, 20.0);
 }
 
-/// `restored_sessions`' scene with `n` sessions besides the first: the footprint before `:restart` (bytes), and
-/// after it (MB) a second after it came back and settled.
-fn restored_sessions(n: usize) -> (u64, (f64, f64)) {
+/// `restored_sessions`' footprints: before `:restart` (bytes), after it (MB) a second after it came back and
+/// settled, and settled after a second `:restart`.
+struct Restored {
+    live: u64,
+    first: f64,
+    settled: f64,
+    again: f64,
+}
+
+/// Turns kept for every checkout in tarae's state folder (`turns/`), as an earlier tarae wrote them — one file
+/// per checkout, every turn's texts in it. The checkouts are those tarae keeps turns for already (a file each,
+/// named by the checkout's hash: `turns/<hash>.json`, or `turns/<hash>/index.json`), written over with a `seq`
+/// past any save of tarae's own.
+fn seed_turns(sb: &Sandbox, checkouts: usize) {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (files, kb) = (env("TARAE_TURN_FILES", 3), env("TARAE_TURN_KB", 150));
+    if files == 0 {
+        return;
+    }
+    let dir = sb.state().join("turns");
+    // (hash, root) of each kept checkout
+    let kept = || -> Vec<(String, String)> {
+        let Ok(rd) = fs::read_dir(&dir) else { return Vec::new() };
+        let mut v: Vec<(String, String)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let (hash, file) = match p.extension() {
+                    Some(x) if x == "json" => (p.file_stem()?.to_string_lossy().into_owned(), p.clone()),
+                    None if p.is_dir() => {
+                        (p.file_name()?.to_string_lossy().into_owned(), p.join("index.json"))
+                    }
+                    _ => return None,
+                };
+                let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(file).ok()?).ok()?;
+                Some((hash, v["root"].as_str()?.to_string()))
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let end = Instant::now() + Duration::from_secs(30);
+    while kept().len() < checkouts {
+        assert!(Instant::now() < end, "turns kept for {} checkouts of {checkouts}", kept().len());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for (hash, root) in kept() {
+        let text = |seed: usize| {
+            let line =
+                format!("    let x{seed} = compute(a, b, c); // a line of a source file, as long as most\n");
+            line.repeat(kb * 1024 / line.len())
+        };
+        let list: Vec<serde_json::Value> = (0..10)
+            .map(|t| {
+                let touched: Vec<serde_json::Value> = (0..files)
+                    .map(|f| {
+                        serde_json::json!({ "path": format!("{root}/src/f{f}.rs"), "before": text(t * 10 + f),
+                                            "after": text(t * 10 + f + 1), "unseen": false, "gone": false })
+                    })
+                    .collect();
+                serde_json::json!({ "question": format!("turn {t}"), "files": touched, "undone": false,
+                                    "seen": true })
+            })
+            .collect();
+        let body = serde_json::json!({ "root": root, "seq": u64::MAX / 2, "list": list, "turn": [],
+                                       "question": "" });
+        fs::write(dir.join(format!("{hash}.json")), body.to_string()).unwrap();
+    }
+}
+
+/// `restored_sessions`' scene with `n` sessions besides the first.
+fn restored_sessions(n: usize) -> Restored {
     let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
     let sb = Sandbox::new(&format!("perf-restored-{n}"));
     copy_repo(&sb);
@@ -840,12 +920,17 @@ fn restored_sessions(n: usize) -> (u64, (f64, f64)) {
         t.wait_text("README");
     }
     settled(&mut t);
+    seed_turns(&sb, n + 1);
     let live = t.usage().footprint;
-    t.command("restart");
-    front_card(&mut t, "the restart card", "restart");
-    t.send("y");
-    t.wait_raw("the new tarae", |r| r.windows(8).filter(|w| *w == b"\x1b[?1049h").count() >= 2);
-    t.wait_text("Restarted");
+    // (the `k`th tarae: its screen entered once more)
+    let restart = |t: &mut Term, k: usize| {
+        t.command("restart");
+        front_card(t, "the restart card", "restart");
+        t.send("y");
+        t.wait_raw("the new tarae", |r| r.windows(8).filter(|w| *w == b"\x1b[?1049h").count() >= k);
+        t.wait_text("Restarted");
+    };
+    restart(&mut t, 2);
     std::thread::sleep(Duration::from_secs(1));
     let first = t.usage().footprint;
     settled(&mut t);
@@ -854,7 +939,14 @@ fn restored_sessions(n: usize) -> (u64, (f64, f64)) {
     if std::env::var_os("TARAE_HEAP").is_some() {
         eprintln!("{n} sessions restored, settled:\n{}", heap(t.pid()));
     }
-    (live, (mb(first), mb(after)))
+    restart(&mut t, 3);
+    settled(&mut t);
+    std::thread::sleep(Duration::from_secs(20));
+    let again = t.usage().footprint;
+    if std::env::var_os("TARAE_HEAP").is_some() {
+        eprintln!("{n} sessions restored again, settled:\n{}", heap(t.pid()));
+    }
+    Restored { live, first: mb(first), settled: mb(after), again: mb(again) }
 }
 
 /// The repository's files as of this commit — what the scenes that copy "this repository" open and search.

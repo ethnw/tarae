@@ -9749,7 +9749,7 @@ mod tests {
         let root = test_root();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let kept = crate::checkpoint::load(store, &root);
+            let kept = crate::checkpoint::load_whole(store, &root);
             if ok(&kept) {
                 return kept;
             }
@@ -9916,7 +9916,7 @@ mod tests {
         settle_until(&mut ed, |ed| !ed.session.checkpoints.list.is_empty());
         let cp = &ed.session.checkpoints.list[0];
         assert_eq!(cp.question, "a turn cut short");
-        let f = &cp.files[0];
+        let f = &cp.files.here().expect("cut short this run: its texts held")[0];
         assert_eq!(
             (f.path.as_path(), f.before.as_ref().map(|b| b.to_string())),
             (main.as_path(), Some("line 1\nline 2\nline 3\n".into()))
@@ -9961,7 +9961,9 @@ mod tests {
         let was = |t: &crate::checkpoint::Touched| {
             t.path == main && t.before.as_ref().is_some_and(|b| *b == "line 1\nline 2\nline 3\n")
         };
-        turns_kept(&store, |k| k.turn.iter().any(was) || k.list.iter().any(|c| c.files.iter().any(was)));
+        turns_kept(&store, |k| {
+            k.turn.iter().any(was) || k.list.iter().any(|c| c.files.here().is_some_and(|f| f.iter().any(was)))
+        });
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&store).ok();
     }

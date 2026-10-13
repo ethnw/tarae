@@ -1713,9 +1713,15 @@ fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
 /// `start_turn_saying`, on the file `start` (relative) when it's among them — and said when `say`.
 fn start_turn_at(ed: &mut Editor, at: usize, earlier: usize, start: Option<String>, say: bool) {
     let Some(cp) = ed.session.checkpoints.list.get(at) else { return };
+    // (kept on disk only: its texts read first)
+    let Some(here) = cp.files.here() else {
+        return crate::checkpoint::with_texts(ed, at, move |ed, at| {
+            start_turn_at(ed, at, earlier, start, say)
+        });
+    };
     let base = Base::Turn { at, question: cp.question.clone() };
     let files: Vec<(PathBuf, Option<ropey::Rope>)> =
-        cp.files.iter().map(|t| (t.path.clone(), t.before.clone())).collect();
+        here.iter().map(|t| (t.path.clone(), t.before.clone())).collect();
     let root = ed
         .session
         .chat
@@ -2758,7 +2764,16 @@ pub(crate) fn diff_work(ed: &Editor) -> Option<impl FnOnce() -> String + Send + 
     let turn: Vec<(String, PathBuf, Option<ropey::Rope>)> = match &r.base {
         Base::Turn { at, .. } => {
             let before = |p: &PathBuf| {
-                ed.session.checkpoints.list.get(*at)?.files.iter().find(|t| &t.path == p)?.before.clone()
+                ed.session
+                    .checkpoints
+                    .list
+                    .get(*at)?
+                    .files
+                    .here()?
+                    .iter()
+                    .find(|t| &t.path == p)?
+                    .before
+                    .clone()
             };
             r.files.iter().map(|f| (f.rel.clone(), f.path.clone(), before(&f.path))).collect()
         }
@@ -2816,7 +2831,7 @@ fn turn_diff(files: &[(String, PathBuf, Option<ropey::Rope>)]) -> String {
 pub fn close(ed: &mut Editor) {
     if let Some(r) = ed.session.code_review.as_ref() {
         let shown = |c: &crate::checkpoint::Checkpoint| {
-            !c.files.is_empty() && c.files.iter().all(|t| r.files.iter().any(|f| f.path == t.path))
+            !c.files.is_empty() && c.files.paths().iter().all(|p| r.files.iter().any(|f| f.path == *p))
         };
         let seen: Vec<usize> = match &r.base {
             Base::Turn { at, .. } => vec![*at],
@@ -2872,7 +2887,7 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
                 .checkpoints
                 .list
                 .get(*at)
-                .and_then(|c| c.files.iter().find(|t| t.path == f.path))
+                .and_then(|c| c.files.here()?.iter().find(|t| t.path == f.path))
                 .and_then(|t| t.before.clone()),
         ),
         base => From::Git(r.root.clone(), base.rev().unwrap_or("HEAD").to_string()),

@@ -903,10 +903,20 @@ impl Editor {
         crate::notes::restore_in(self, id);
         let root = std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).map(|l| &l.root);
         if let (Some(root), Some(dir)) = (root.cloned(), self.turns_dir.clone()) {
+            if let Some(l) = std::iter::once(&mut self.session).chain(&mut self.sessions).find(|l| l.id == id)
+            {
+                l.checkpoints.restoring = true;
+            }
             self.events.set_session(id);
             crate::checkpoint::restore_from(self, dir, root);
             self.events.set_session(self.session.id);
         }
+    }
+
+    /// Some session's kept turns are still being read back (`checkpoint::restore_from`): tarae's own memory
+    /// isn't judged meanwhile (`Procs::restoring`).
+    pub fn restoring(&self) -> bool {
+        std::iter::once(&self.session).chain(&self.sessions).any(|l| l.checkpoints.restoring)
     }
 
     /// `:session-switch <n>` — session `id` to the front. What was up over the one in front closes (a
@@ -938,6 +948,8 @@ impl Editor {
         // it, so nothing else would come to say so (#189)
         let (out, name, waits) = (self.session.id, self.session.label().to_string(), self.session.waits());
         self.session.waiting_told = waits;
+        // (the texts of its turns read back go again: their files have them — #218)
+        crate::checkpoint::shed(&mut self.session);
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
         if waits {
             let msg = format!("{name} · waits for you — {}", self.c_q_says(out, true));

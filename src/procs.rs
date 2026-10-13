@@ -1293,6 +1293,9 @@ pub struct Procs {
     zombies: HashSet<u32>,
     pub usual: Usual,
     usual_path: Option<PathBuf>,
+    /// Sessions' kept turns are being read back (`Editor::restoring`): tarae's own memory is neither said nor
+    /// learned meanwhile — a restore's reading isn't what tarae usually takes (#218: "705 MB, usually 96 MB").
+    pub restoring: bool,
     /// Servers' exits (name, root, when) · the ones held.
     exits: Vec<(String, PathBuf, Instant)>,
     pub held: Vec<Held>,
@@ -1380,6 +1383,9 @@ impl Procs {
             }
             // Memory: its first minutes' peak is learned; far above its program's usual is said
             let m = r.memory();
+            if self.restoring && r.kind == Kind::Tarae {
+                continue;
+            }
             match r.up {
                 Some(up) if up < SETTLE => {
                     let p = self.peak.entry(r.key()).or_insert((0, false));
@@ -1842,6 +1848,7 @@ impl Editor {
         let groups = self.procs_groups();
         let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, &groups, secs);
         with_queued(&mut rows, &self.procs_queued(), &groups);
+        self.procs.restoring = self.restoring();
         let (mut found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
         found.extend(disk_check(&s.free));
         self.procs.free = s.free.clone();
@@ -2848,6 +2855,29 @@ mod tests {
         // The user's run: not judged
         p.usual.insert("prog3".into(), vec![10 * MB]);
         assert!(p.check(&[row(3, Kind::Task, 1.0, 4000, late)], &[], now).0.is_empty());
+    }
+
+    /// #218: while sessions' kept turns are read back (`restoring`), tarae's own memory is neither said nor
+    /// learned — a restore's reading isn't what tarae usually takes ("705 MB, usually 96 MB" at a restart);
+    /// once they're back it's judged again. Another program is judged meanwhile all the same.
+    #[test]
+    fn taraes_memory_waits_for_a_restore() {
+        let mut p = Procs::default();
+        let now = Instant::now();
+        let (early, late) = (SETTLE.as_secs() - 60, SETTLE.as_secs() + 60);
+        p.usual.insert("prog1".into(), vec![96 * MB]);
+        p.usual.insert("prog2".into(), vec![10 * MB]);
+        p.restoring = true;
+        let rows = [row(1, Kind::Tarae, 1.0, 705, early), row(2, Kind::Lsp(1), 1.0, 4000, late)];
+        let found = p.check(&rows, &[], now).0;
+        assert_eq!(found.iter().map(|f| f.pid).collect::<Vec<_>>(), [2], "the server, not tarae: {found:?}");
+        // (nor was the restore's peak learned as its first minutes')
+        p.restoring = false;
+        let (found, learned) = p.check(&[row(1, Kind::Tarae, 1.0, 120, late)], &[], now);
+        assert!(found.is_empty() && !learned, "{found:?}");
+        assert_eq!(p.usual.get("prog1"), Some(&vec![96 * MB]));
+        let found = p.check(&[row(1, Kind::Tarae, 1.0, 705, late)], &[], now).0;
+        assert_eq!(found.iter().map(|f| f.pid).collect::<Vec<_>>(), [1], "back: judged again");
     }
 
     /// A server with no file of it open past its own stop is stopped by the check; one that exits three

@@ -259,6 +259,115 @@ pub fn ago(then: u64, now: u64) -> String {
 mod tests {
     use super::*;
 
+    /// #218's next question: what restoring sessions' chats costs — each project's file full (`KEEP`
+    /// conversations of `ROWS` rows), read as a restored chat reads it (`chat::restore`: the whole file, a
+    /// `Value` of it, then one conversation's rows as the panel's), 26 sessions four at a time as the workers
+    /// take them. The process's footprint before, at its peak while loading, with each session's
+    /// conversation held, and once dropped. Stand-in rows, a turn's worth repeated: a question (300 B), an
+    /// answer (`TARAE_CHAT_ANSWER_B`, 1500 B), a thought (400 B), four tool rows.
+    #[test]
+    fn perf_restored_chats_memory() {
+        if crate::test_results::unoptimized("chats::tests::perf_restored_chats_memory") {
+            return;
+        }
+        let answer = std::env::var("TARAE_CHAT_ANSWER_B").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+        let sessions = 26;
+        let dir = std::env::temp_dir().join(format!("tarae-perf-chats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let said = |n: usize, i: usize| format!("{i} words of a sentence, as most are. ").repeat(n / 36 + 1);
+        let turn = |i: usize| -> Vec<Msg> {
+            let mut v = vec![
+                Msg::new(Role::User, said(300, i), String::from("main.rs · L12–18")),
+                Msg::new(Role::Thought, said(400, i), String::new()),
+            ];
+            for t in 0..4 {
+                let mut m = Msg::new(Role::Tool, String::new(), String::new());
+                m.look = Some(Look {
+                    verb: "read",
+                    what: format!("src/file{t}.rs"),
+                    pattern: false,
+                    range: "L10–90".into(),
+                    link: Some(Link { path: PathBuf::from(format!("/p/src/file{t}.rs")), line: 10 }),
+                });
+                v.push(m);
+            }
+            v.push(Msg::new(Role::Assistant, said(answer, i), String::new()));
+            v
+        };
+        let msgs: Vec<Msg> = (0..ROWS).flat_map(turn).take(ROWS).collect();
+        let rows = rows_of(&msgs);
+        let roots: Vec<PathBuf> = (0..sessions).map(|i| PathBuf::from(format!("/checkouts/s{i}"))).collect();
+        for root in &roots {
+            for c in 0..KEEP {
+                let id = format!("conv-{c}");
+                let chat = Saved {
+                    id,
+                    title: "a conversation".into(),
+                    updated: now(),
+                    rows: rows.clone(),
+                    plan: None,
+                    usage: None,
+                    seq: seq(),
+                };
+                save(&dir, root, chat);
+            }
+        }
+        drop((msgs, rows));
+        let on_disk: u64 =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+        let me = std::process::id();
+        let footprint = || {
+            let os = crate::procs::tree(me).into_iter().find(|o| o.pid == me).unwrap();
+            os.footprint.unwrap_or(os.rss)
+        };
+        let mb = |b: u64| b as f64 / (1 << 20) as f64;
+        let before = footprint();
+        let (stop, peak) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicU64::new(0));
+        // (as `chat::restore`: the file whole, the past list, the one conversation's rows as the panel's)
+        let restore = |root: &Path| {
+            let saved = load(&dir, root);
+            let past: Vec<(String, String, u64)> =
+                saved.iter().map(|s| (s.id.clone(), s.title.clone(), s.updated)).collect();
+            let s = saved.into_iter().find(|s| s.id == "conv-0").unwrap();
+            (past, msgs_of(&s.rows))
+        };
+        let held: Vec<_> = std::thread::scope(|s| {
+            crate::event::scoped(s, "tarae-peak", || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    peak.fetch_max(footprint(), std::sync::atomic::Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+            let mut held = Vec::new();
+            for four in roots.chunks(4) {
+                let loads: Vec<_> =
+                    four.iter().map(|r| crate::event::scoped(s, "tarae-load", || restore(r))).collect();
+                held.extend(loads.into_iter().map(|l| l.join().unwrap()));
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            held
+        });
+        let holding = footprint();
+        let rows_held: usize = held.iter().map(|(_, m)| m.len()).sum();
+        let text: usize = held.iter().flat_map(|(_, m)| m).map(|m| m.text.len()).sum();
+        drop(held);
+        let after = footprint();
+        let peak = peak.into_inner().max(holding);
+        eprintln!(
+            "restored chats: {sessions} sessions × {KEEP} conversations × {ROWS} rows ({:.0} MB on disk; \
+             {rows_held} rows held, {:.1} MB of text) — footprint before {:.0} MB, peak {:.0} MB, holding {:.0} MB, \
+             dropped {:.0} MB",
+            mb(on_disk),
+            mb(text as u64),
+            mb(before),
+            mb(peak),
+            mb(holding),
+            mb(after)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(rows_held, sessions * ROWS);
+    }
+
     #[test]
     fn rows_go_and_come_back_and_the_newest_conversation_leads() {
         let dir = std::env::temp_dir().join(format!("tarae-chats-{}", std::process::id()));
