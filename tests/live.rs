@@ -1096,10 +1096,21 @@ struct Measured {
     errors: usize,
     cards: usize,
     capped: bool,
-    /// Share of the question's key the answer names.
+    /// Share of the question's key the answer names (an edit task: 1 when its check passed, else 0).
     right: f64,
     tools: std::collections::BTreeMap<String, usize>,
     answer: String,
+    /// Edit calls that came back an error: Claude Code's Edit and Write, tarae's `edit`.
+    edit_errors: usize,
+    /// Calls of Claude Code's Edit and Write · of tarae's `edit`, and its items in all — each call is a review
+    /// the user would answer without review at the end.
+    edits_native: usize,
+    edits_tarae: usize,
+    edit_items: usize,
+    /// Claude Code's Reads of a file it then Edits or Writes — what its Edit's own read rule costs.
+    reads_for_edit: usize,
+    /// `run` calls that change files (`sed -i`, a redirect, `mv`, `rm` … — `writes_files`).
+    run_writes: usize,
 }
 
 /// Programs a read-only text pipeline is made of — what `search` and `read` are meant to replace.
@@ -1139,6 +1150,10 @@ fn reads_text_only(command: &str) -> bool {
             continue;
         }
         if !TEXT_READERS.contains(&first) {
+            return false;
+        }
+        // (sed's in-place edit writes the file it names)
+        if first == "sed" && p.split_whitespace().any(|w| w.starts_with("-i") || w == "--in-place") {
             return false;
         }
         any = true;
@@ -1199,6 +1214,11 @@ fn measure(stream: &str, work: &str) -> Measured {
                 for c in v["message"]["content"].as_array().into_iter().flatten() {
                     if c["type"] == "tool_result" && c["is_error"] == true {
                         m.errors += 1;
+                        let of = c["tool_use_id"].as_str().unwrap_or_default();
+                        let name = uses.iter().position(|u| u == of).map(|i| calls[i].0.as_str());
+                        if name.is_some_and(is_edit) {
+                            m.edit_errors += 1;
+                        }
                     }
                 }
             }
@@ -1245,8 +1265,48 @@ fn measure(stream: &str, work: &str) -> Measured {
         if again || covered {
             m.wasted += 1;
         }
+        match name.as_str() {
+            "Edit" | "Write" => m.edits_native += 1,
+            "mcp__tarae__edit" => {
+                m.edits_tarae += 1;
+                m.edit_items += input["edits"].as_array().map_or(0, Vec::len);
+            }
+            "Read"
+                if calls[i + 1..].iter().any(|(n, x)| {
+                    matches!(n.as_str(), "Edit" | "Write") && x["file_path"] == input["file_path"]
+                }) =>
+            {
+                m.reads_for_edit += 1
+            }
+            _ => {}
+        }
+        if tool == "run" && writes_files(input["command"].as_str().unwrap_or_default()) {
+            m.run_writes += 1;
+        }
     }
+    m.edit_items += m.edits_native;
     m
+}
+
+/// A tool that changes files: Claude Code's Edit and Write, tarae's `edit`.
+fn is_edit(name: &str) -> bool {
+    matches!(name, "Edit" | "Write" | "MultiEdit" | "mcp__tarae__edit")
+}
+
+/// Whether a `run` command changes files: a redirect to a file, or a program that writes, moves or removes
+/// them (`sed -i`, `perl -i`, `mv`, `cp`, `rm`, `tee`, `touch`, a here-document, a script).
+fn writes_files(command: &str) -> bool {
+    if reads_text_only(command) {
+        return false;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let writer = |w: &str| matches!(w, "mv" | "cp" | "rm" | "tee" | "touch" | "python" | "python3" | "patch");
+    words.iter().any(|w| writer(w))
+        || words
+            .windows(2)
+            .any(|p| matches!(p[0], "sed" | "perl") && (p[1].starts_with("-i") || p[1] == "-pi"))
+        || command.contains("<<")
+        || words.iter().any(|w| *w == ">" || *w == ">>" || (w.starts_with('>') && !w.starts_with(">&")))
 }
 
 /// The A/B's yardstick on a stream written by hand: a request counted once however many events carry it,
@@ -1279,6 +1339,56 @@ fn the_ab_reads_a_turn_from_claudes_stream() {
     assert_eq!(m.outside, 1, "the read climbing out — not the pattern starting with /, nor /p/a.rs");
     assert_eq!((m.tools["Read"], m.tools["run"], m.tools["search"]), (2, 3, 1));
     assert_eq!(m.answer, "It's setsid_as.");
+    assert_eq!((m.edits_native, m.edits_tarae, m.edit_errors, m.run_writes), (0, 0, 0, 0), "no edits here");
+}
+
+/// The edit A/B's counts on a stream written by hand: an error is an edit's only when its result answers an
+/// edit call (by its id); tarae's `edit` counts its items; a Read of a file Edit then changes is one its read
+/// rule cost (not one of a file only read); a run that moves, removes or redirects writes, a pipeline doesn't.
+/// Runs offline, in every `cargo test`.
+#[test]
+fn the_edit_ab_counts_edits_from_claudes_stream() {
+    let use_ = |msg: &str, id: &str, name: &str, input: &str| {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{msg}","usage":{{"input_tokens":10}},"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}]}}}}"#
+        )
+    };
+    let error = |id: &str| {
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","is_error":true}}]}}}}"#
+        )
+    };
+    let stream = [
+        use_("m1", "t1", "Read", r#"{"file_path":"/p/a.rs"}"#),
+        use_("m1", "t2", "Read", r#"{"file_path":"/p/b.rs"}"#),
+        use_("m2", "t3", "Edit", r#"{"file_path":"/p/a.rs","old_string":"x","new_string":"y"}"#),
+        error("t3"),
+        use_(
+            "m3",
+            "t4",
+            "mcp__tarae__edit",
+            r#"{"edits":[{"file_path":"a.rs"},{"file_path":"c.rs","delete":true}]}"#,
+        ),
+        error("t4"),
+        use_("m4", "t5", "mcp__tarae__run", r#"{"command":"mv src/a.rs src/b.rs"}"#),
+        error("t5"),
+        use_("m4", "t6", "mcp__tarae__run", r#"{"command":"grep -n x a.rs 2>&1 | head -3"}"#),
+        use_("m5", "t7", "mcp__tarae__run", r#"{"command":"sed -i 's/a/b/' a.rs"}"#),
+        use_("m5", "t8", "Write", r#"{"file_path":"/p/n.rs","content":"x"}"#),
+    ]
+    .join("\n");
+    let m = measure(&stream, "/p");
+    assert_eq!((m.edits_native, m.edits_tarae), (2, 1));
+    assert_eq!(m.edit_items, 4, "two of edit's, an Edit and a Write");
+    assert_eq!((m.errors, m.edit_errors), (3, 2), "the run's error isn't an edit's");
+    assert_eq!(m.reads_for_edit, 1, "a.rs, read then edited — not b.rs");
+    assert_eq!(m.run_writes, 2, "mv and sed -i, not the pipeline");
+    for w in ["rm -rf target/x", "cargo fmt > out.txt", "cat <<EOF > a.rs", "perl -pi -e 's/a/b/' a.rs"] {
+        assert!(writes_files(w), "{w}");
+    }
+    for r in ["cargo check 2>&1", "git diff", "grep -n 'a > b' x.rs"] {
+        assert!(!writes_files(r), "{r}");
+    }
 }
 
 /// What counts as a text pipeline: quoted text is the program's (`awk 'NR>=7'`, `grep 'a|b'`), a
@@ -1294,9 +1404,15 @@ fn a_text_pipeline_reads_and_writes_nothing() {
     ] {
         assert!(reads_text_only(read), "{read}");
     }
-    for not in
-        ["cat a.txt > b.txt", "sed -n 1,5p a.rs >> out", "grep x a.rs | xargs rm", "cargo test", "cd src"]
-    {
+    for not in [
+        "cat a.txt > b.txt",
+        "sed -n 1,5p a.rs >> out",
+        "grep x a.rs | xargs rm",
+        "cargo test",
+        "cd src",
+        "sed -i 's/a/b/' a.rs",
+        "sed -i.bak 's/a/b/' a.rs",
+    ] {
         assert!(!reads_text_only(not), "{not}");
     }
 }
@@ -1307,7 +1423,8 @@ fn requests_so_far(stream: &Path) -> usize {
 }
 
 /// One question asked of the chat and answered, caps kept; a card that comes up is answered `n` (the questions
-/// need none) and counted.
+/// need none) and counted. The stream's result ends the turn — once the chat says so too, or 15 s after (under
+/// review at the end the turn's review takes the screen, and the chat its focus).
 fn ab_turn(t: &mut Term, ask: &str, stream: &Path) -> (usize, bool) {
     if !t.screen().contains("enter send") {
         t.send(" l");
@@ -1320,10 +1437,14 @@ fn ab_turn(t: &mut Term, ask: &str, stream: &Path) -> (usize, bool) {
     let (mut cards, mut tries) = (0, 0);
     let ended =
         |stream: &Path| std::fs::read_to_string(stream).unwrap_or_default().contains("\"type\":\"result\"");
+    let mut ended_at: Option<Instant> = None;
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        if ended(stream) && chat_idle(&t.screen()) {
-            return (cards, false);
+        if ended(stream) {
+            let at = *ended_at.get_or_insert_with(Instant::now);
+            if chat_idle(&t.screen()) || at.elapsed() > Duration::from_secs(15) {
+                return (cards, false);
+            }
         }
         // The caps first: a card that never takes the keys or never goes mustn't keep the run going
         if requests_so_far(stream) > AB_MAX_REQUESTS || start.elapsed() > AB_MAX_TIME || tries > 10 {
@@ -1518,6 +1639,485 @@ fn chat_tools_ab() {
     }
     eprintln!("TOOLS_AB spent ${spent:.2}");
     assert!(!rows.is_empty(), "no run");
+}
+
+// ── The edit tools' A/B ──────────────────────────────────────────────────────
+
+/// What a run of an edit task copies of `TOOLS_CORPUS`: enough to build it (the workspace's members, the lock
+/// file, the build script, what the code includes from outside `src` — plugin-sdk's demo and template,
+/// packaging's AppArmor profile), so the change can be checked (`edit_corpus_builds`).
+const EDIT_CORPUS_PATHS: [&str; 15] = [
+    "src",
+    "runtime",
+    "docs",
+    "tests",
+    "xtask",
+    "netlink",
+    "plugin-sdk",
+    "packaging",
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "rust-toolchain.toml",
+    "README.md",
+    "CONTRIBUTING.md",
+    "clippy.toml",
+];
+
+/// The edit A/B's checks mean something on the corpus: it builds as it is (`cargo check --tests`); no task is
+/// done already — every task's files' check fails before a change; and every task can be done — its check passes
+/// once its known solution (`EditTask.solved`) is applied to a fresh copy. Run first by `chat_edit_ab`, before
+/// anything is spent; on its own it needs no Claude (the first run builds the corpus cold).
+fn edit_corpus_checked(check: &Path, target: &Path) -> Result<(), String> {
+    let sb = Sandbox::new("edit-ab-corpus");
+    assert!(sb.copy_commit(TOOLS_CORPUS, &EDIT_CORPUS_PATHS), "commit {TOOLS_CORPUS} in this clone");
+    let builds = EditTask {
+        name: "corpus",
+        ask: "",
+        cargo: &["check", "--tests", "-q"],
+        passes: None,
+        files: &[],
+        solved: &[],
+    };
+    edit_check(&builds, &sb.work(), check, target).map_err(|e| format!("the corpus as it is: {e}"))?;
+    for task in &EDIT_TASKS {
+        let as_is = EditTask { cargo: &["--version"], ..*task };
+        if edit_check(&as_is, &sb.work(), check, target).is_ok() {
+            return Err(format!("{}: its files' check holds before any change", task.name));
+        }
+        let done = Sandbox::new(&format!("edit-ab-solved-{}", task.name));
+        assert!(done.copy_commit(TOOLS_CORPUS, &EDIT_CORPUS_PATHS));
+        for (file, old, new) in task.solved {
+            let path = done.file(file);
+            let text = match old.is_empty() {
+                true => new.to_string(),
+                false => {
+                    let now = std::fs::read_to_string(&path).unwrap_or_default();
+                    assert!(now.contains(old), "{}: {file} has no {old:?} to solve it with", task.name);
+                    now.replacen(old, new, 1)
+                }
+            };
+            std::fs::write(&path, text).unwrap();
+        }
+        edit_check(task, &done.work(), check, target).map_err(|e| format!("{} solved: {e}", task.name))?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "live: run with `cargo live` (builds TOOLS_CORPUS)"]
+fn edit_corpus_builds() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (check, target) = (here.join("target/live/edit-ab-check"), here.join("target/live/edit-ab-target"));
+    if let Err(e) = edit_corpus_checked(&check, &target) {
+        panic!("{e}");
+    }
+}
+
+/// A small change of the edit A/B, with a result that can be checked: a cargo command that must succeed on the
+/// project after the turn (and print `passes`, when given), and texts each file must have or not.
+struct EditTask {
+    name: &'static str,
+    ask: &'static str,
+    cargo: &'static [&'static str],
+    passes: Option<&'static str>,
+    /// (file, text, there or not)
+    files: &'static [(&'static str, &'static str, bool)],
+    /// A known solution, (file, old, new) applied in order — old empty: the file made — that the check must
+    /// pass on (`edit_corpus_checked`).
+    solved: &'static [(&'static str, &'static str, &'static str)],
+}
+
+/// Said after each task: the change is checked once the turn ends, so a cold build of a big crate doesn't eat
+/// the run (the arms' edit tools are what's measured).
+const EDIT_TASKS: [EditTask; 3] = [
+    // (`reads::key_left_out`: its 3 callers — nav.rs:167, nav.rs:1940, refactor.rs:849. A new parameter isn't
+    // a rename or a replace: the definition, its message and each call change, each call its own way)
+    EditTask {
+        name: "add-param",
+        ask: "Add a second parameter `tool: &str` to the function reads::key_left_out, and make its message \
+              start with the tool's name: format!(\"{tool}: {shown} is named like a key — …\") with the rest as \
+              it is. Update its 3 callers: the two in src/nav.rs pass \"nav\", the one in src/refactor.rs passes \
+              \"refactor\". Change nothing else. Don't build or run tests — the change is checked after your turn.",
+        cargo: &["check", "--tests", "-q"],
+        passes: None,
+        files: &[
+            ("src/reads.rs", "key_left_out(shown: &str, tool: &str)", true),
+            ("src/reads.rs", "\"{tool}: {shown} is named like a key — tarae's tools leave it out", true),
+            ("src/nav.rs", "key_left_out(&shown, \"nav\")", true),
+            ("src/nav.rs", "key_left_out(&rel(&root, &scope), \"nav\")", true),
+            ("src/refactor.rs", "key_left_out(&nav::rel(&real_root, &real), \"refactor\")", true),
+        ],
+        solved: &[
+            (
+                "src/reads.rs",
+                "pub fn key_left_out(shown: &str) -> String {\n    format!(\"{shown} is named",
+                "pub fn key_left_out(shown: &str, tool: &str) -> String {\n    format!(\"{tool}: {shown} is named",
+            ),
+            ("src/nav.rs", "key_left_out(&shown)", "key_left_out(&shown, \"nav\")"),
+            ("src/nav.rs", "key_left_out(&rel(&root, &scope))", "key_left_out(&rel(&root, &scope), \"nav\")"),
+            (
+                "src/refactor.rs",
+                "key_left_out(&nav::rel(&real_root, &real))",
+                "key_left_out(&nav::rel(&real_root, &real), \"refactor\")",
+            ),
+        ],
+    },
+    // (`nav::count`: "1 file", "3 files", "2 matches")
+    EditTask {
+        name: "add-test",
+        ask: "Add a unit test named count_puts_the_noun_in_the_plural to the tests module in src/nav.rs: it \
+              checks that count(1, \"file\") is \"1 file\", count(3, \"file\") is \"3 files\" and count(2, \
+              \"match\") is \"2 matches\". Change nothing else. Don't build or run tests — the change is checked \
+              after your turn.",
+        cargo: &["test", "-q", "--bin", "tarae", "count_puts_the_noun_in_the_plural"],
+        passes: Some("1 passed"),
+        files: &[("src/nav.rs", "fn count_puts_the_noun_in_the_plural", true)],
+        solved: &[(
+            "src/nav.rs",
+            "mod tests {\n",
+            "mod tests {\n    #[test]\n    fn count_puts_the_noun_in_the_plural() {\n        \
+             assert_eq!(super::count(1, \"file\"), \"1 file\");\n        assert_eq!(super::count(3, \"file\"), \
+             \"3 files\");\n        assert_eq!(super::count(2, \"match\"), \"2 matches\");\n    }\n\n",
+        )],
+    },
+    // (`nav::clip`: 6 calls in nav.rs, 2 in refactor.rs)
+    EditTask {
+        name: "move",
+        ask: "Move the function clip from src/nav.rs into a new module src/cut.rs (declared in src/main.rs), and \
+              make every caller use it from there. Change nothing else. Don't build or run tests — the change \
+              is checked after your turn.",
+        cargo: &["check", "--tests", "-q"],
+        passes: None,
+        files: &[
+            ("src/nav.rs", "fn clip(", false),
+            ("src/cut.rs", "fn clip(", true),
+            ("src/main.rs", "mod cut;", true),
+            ("src/refactor.rs", "nav::clip(", false),
+        ],
+        solved: &[
+            (
+                "src/nav.rs",
+                "/// At most `max` chars, `…` when cut.\npub(crate) fn clip(s: &str, max: usize) -> String {\n    \
+                 match s.char_indices().nth(max) {\n        Some((i, _)) => format!(\"{}…\", &s[..i]),\n        \
+                 None => s.to_string(),\n    }\n}\n",
+                "pub(crate) use crate::cut::clip;\n",
+            ),
+            ("src/refactor.rs", "nav::clip(o.trim_end(), 200)", "crate::cut::clip(o.trim_end(), 200)"),
+            ("src/refactor.rs", "nav::clip(n.trim_end(), 200)", "crate::cut::clip(n.trim_end(), 200)"),
+            ("src/main.rs", "mod containers;\n", "mod containers;\nmod cut;\n"),
+            (
+                "src/cut.rs",
+                "",
+                "/// At most `max` chars, `…` when cut.\npub(crate) fn clip(s: &str, max: usize) -> String {\n    \
+                 match s.char_indices().nth(max) {\n        Some((i, _)) => format!(\"{}…\", &s[..i]),\n        \
+                 None => s.to_string(),\n    }\n}\n",
+            ),
+        ],
+    },
+];
+
+/// The task's check on the project at `work`: copied to one folder that stays (`check`, file times kept — so
+/// cargo's incremental cache, in `target`, serves every run), then its cargo command there and its files'
+/// texts. Ok, or what failed.
+fn edit_check(task: &EditTask, work: &Path, check: &Path, target: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(check);
+    std::fs::create_dir_all(check).unwrap();
+    let copied = Command::new("cp").arg("-Rp").arg(work.join(".")).arg(check).status();
+    assert!(copied.is_ok_and(|s| s.success()), "copying {} for its check", work.display());
+    let mut wrong = Vec::new();
+    for (file, text, there) in task.files {
+        let has = std::fs::read_to_string(check.join(file)).is_ok_and(|t| t.contains(text));
+        if has != *there {
+            wrong.push(format!("{file} {} {text:?}", if *there { "lacks" } else { "still has" }));
+        }
+    }
+    let out = Command::new("cargo")
+        .args(task.cargo)
+        .current_dir(check)
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_BUILD_BUILD_DIR", target)
+        .output()
+        .expect("cargo");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() || task.passes.is_some_and(|p| !said.contains(p)) {
+        let tail: Vec<&str> = said.lines().rev().take(12).collect();
+        wrong.push(format!(
+            "cargo {}: {}",
+            task.cargo.join(" "),
+            tail.into_iter().rev().collect::<Vec<_>>().join(" ⏎ ")
+        ));
+    }
+    if wrong.is_empty() { Ok(()) } else { Err(wrong.join("; ")) }
+}
+
+/// Does tarae's own `edit` beat Claude Code's Edit and Write, beside them or instead? One build, three arms
+/// (`llm.edit-tools`, in each run's own config): `native` (Edit and Write), `both`, `tarae` (only `edit` — the
+/// default since this A/B, 2026-10-13).
+/// Each makes the same small changes to `TOOLS_CORPUS` (`EDIT_TASKS`), one turn each, review at the end on (no
+/// card stops a run), the language server off; what each run cost is read from claude's stream, and the result
+/// is checked after the turn (`edit_check`: cargo, and the files' texts). Arms rotate per run. `TARAE_AB_BIN`
+/// (the build; else `TARAE_BIN`, else this one), `TARAE_AB_ARMS` ("native,both,tarae"), `TARAE_AB_RUNS` (1 — a
+/// pilot), `TARAE_AB_TASKS` (names; all), `TARAE_AB_BUDGET` ($, 10), `TARAE_AB_MODEL` ("opus"), `TARAE_AB_EFFORT`.
+/// Rows go to `target/live/edit-ab.tsv`, streams and summaries to `target/live/edit-ab/`; cargo's cache for the
+/// checks is `target/live/edit-ab-target` (the first check builds the corpus cold).
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_edit_ab() {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    if !have("claude") || !have("cargo") {
+        return;
+    }
+    let bin = var("TARAE_AB_BIN");
+    let arms_said = var("TARAE_AB_ARMS").unwrap_or_else(|| "native,both,tarae".into());
+    let arms: Vec<&str> = arms_said.split(',').map(str::trim).filter(|a| !a.is_empty()).collect();
+    let runs: usize = var("TARAE_AB_RUNS").and_then(|r| r.parse().ok()).unwrap_or(1);
+    let budget: f64 = var("TARAE_AB_BUDGET").and_then(|b| b.parse().ok()).unwrap_or(10.0);
+    let model = var("TARAE_AB_MODEL").unwrap_or_else(|| "opus".into());
+    let effort = var("TARAE_AB_EFFORT").unwrap_or_default();
+    let only = var("TARAE_AB_TASKS");
+    let tasks: Vec<&EditTask> = EDIT_TASKS
+        .iter()
+        .filter(|t| only.as_deref().is_none_or(|o| o.split(',').any(|n| n == t.name)))
+        .collect();
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tsv = here.join("target/live/edit-ab.tsv");
+    let kept = here.join("target/live/edit-ab");
+    let (check, target) = (here.join("target/live/edit-ab-check"), here.join("target/live/edit-ab-target"));
+    std::fs::create_dir_all(&kept).unwrap();
+    // (a check that can't pass, or passes already, measures nothing — found before anything is spent)
+    if let Err(e) = edit_corpus_checked(&check, &target) {
+        panic!("EDIT_AB not started: {e}");
+    }
+    let mut rows: Vec<(&str, &str, Measured)> = Vec::new();
+    let mut spent = 0.0;
+    'runs: for run in 0..runs {
+        for task in &tasks {
+            for k in 0..arms.len() {
+                let arm = arms[(k + run) % arms.len()];
+                if spent > budget {
+                    eprintln!("EDIT_AB budget: ${spent:.2} spent, past ${budget} — no more runs");
+                    break 'runs;
+                }
+                let mut sb = Sandbox::live(&format!("edit-ab-{}-{arm}", task.name));
+                if let Some(b) = &bin {
+                    sb = sb.with_bin(Path::new(b));
+                }
+                assert!(
+                    sb.copy_commit(TOOLS_CORPUS, &EDIT_CORPUS_PATHS),
+                    "commit {TOOLS_CORPUS} in this clone"
+                );
+                let llm = format!(
+                    "model = \"{model}\"\neffort = \"{effort}\"\nreview-at-end = true\nedit-tools = \"{arm}\"\n"
+                );
+                let stream = teed(&sb, &llm);
+                let mut t = sb.spawn(&["README.md"]);
+                let started = Instant::now();
+                let (cards, capped) = ab_turn(&mut t, task.ask, &stream);
+                let work = sb.work();
+                let mut m =
+                    measure(&std::fs::read_to_string(&stream).unwrap_or_default(), work.to_str().unwrap());
+                m.wall_ms = started.elapsed().as_millis() as u64;
+                (m.cards, m.capped) = (cards, capped);
+                drop(t);
+                let checked = edit_check(task, &work, &check, &target);
+                m.right = if checked.is_ok() { 1.0 } else { 0.0 };
+                spent += m.cost;
+                let said = format!(
+                    "EDIT_AB {} {arm} run {}: {} requests, {} calls {:?}, prompt mean {:.0}, {} tokens, ${:.3}, edit \
+                     calls {} native · {} tarae ({} items), edit errors {}, reads for Edit {}, run writes {}, \
+                     cards {}, capped {}, outside {}, check {}\n  answer: {}",
+                    task.name,
+                    run + 1,
+                    m.requests,
+                    m.calls,
+                    m.tools,
+                    m.prompt_mean,
+                    m.tokens,
+                    m.cost,
+                    m.edits_native,
+                    m.edits_tarae,
+                    m.edit_items,
+                    m.edit_errors,
+                    m.reads_for_edit,
+                    m.run_writes,
+                    m.cards,
+                    m.capped,
+                    m.outside,
+                    match &checked {
+                        Ok(()) => "ok".to_string(),
+                        Err(e) => format!("FAILED — {e}"),
+                    },
+                    m.answer.replace('\n', " ⏎ "),
+                );
+                eprintln!("{said}");
+                let name = format!("{}-{arm}-{}-{}", task.name, run + 1, std::process::id());
+                let _ = std::fs::copy(&stream, kept.join(format!("{name}.jsonl")));
+                std::fs::write(kept.join(format!("{name}.txt")), &said).unwrap();
+                let row = format!(
+                    "{TOOLS_CORPUS}\t{}\t{arm}\t{}\t{}\t{}\t{:.0}\t{}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\n",
+                    task.name,
+                    run + 1,
+                    m.requests,
+                    m.calls,
+                    m.prompt_mean,
+                    m.tokens,
+                    m.cost,
+                    m.edits_native,
+                    m.edits_tarae,
+                    m.edit_items,
+                    m.edit_errors,
+                    m.reads_for_edit,
+                    m.run_writes,
+                    m.cards,
+                    m.capped,
+                    m.right,
+                    m.tools,
+                );
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&tsv).unwrap();
+                f.write_all(row.as_bytes()).unwrap();
+                rows.push((task.name, arm, m));
+            }
+        }
+    }
+    eprintln!(
+        "EDIT_AB median (min–max) — task arm n: requests · tokens · $ · Edit+Write calls · edit calls · edit \
+         errors · reads for Edit · run writes · right (runs whose check passed)"
+    );
+    for task in &tasks {
+        for arm in &arms {
+            let of: Vec<&Measured> =
+                rows.iter().filter(|r| r.0 == task.name && r.1 == *arm).map(|r| &r.2).collect();
+            if of.is_empty() {
+                continue;
+            }
+            let at = |f: &dyn Fn(&Measured) -> f64, p: usize| {
+                let v: Vec<f64> = of.iter().map(|m| f(m)).collect();
+                let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+                format!("{:.p$} ({lo:.p$}–{hi:.p$})", median(v))
+            };
+            let right = of.iter().filter(|m| m.right == 1.0).count();
+            eprintln!(
+                "EDIT_AB {} {arm} {}: {} · {} · {} · {} · {} · {} · {} · {} · {right}/{}",
+                task.name,
+                of.len(),
+                at(&|m| m.requests as f64, 0),
+                at(&|m| m.tokens as f64, 0),
+                at(&|m| m.cost, 3),
+                at(&|m| m.edits_native as f64, 0),
+                at(&|m| m.edits_tarae as f64, 0),
+                at(&|m| m.edit_errors as f64, 0),
+                at(&|m| m.reads_for_edit as f64, 0),
+                at(&|m| m.run_writes as f64, 0),
+                of.len(),
+            );
+        }
+    }
+    eprintln!("EDIT_AB spent ${spent:.2}");
+    assert!(!rows.is_empty(), "no run");
+}
+
+/// `edit`'s error path, which no A/B run hit: the first old_string can't match (Claude is told to send it as
+/// written, unread), the answer lists the closest lines, and Claude's next call lands the change. With the
+/// default edit tools (`edit` alone); the stream is kept in `target/live/edit-recovers.jsonl`.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_edit_recovers_from_a_miss() {
+    if !have("claude") {
+        return;
+    }
+    let sb = Sandbox::live("edit-recovers");
+    let stream = teed(&sb, "review-at-end = true\n");
+    sb.write("greet.rs", "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {name}!\")\n}\n");
+    let mut t = sb.spawn(&["README.md"]);
+    let (_, capped) = ab_turn(
+        &mut t,
+        "This tests the edit tool's error message. Without reading greet.rs first, call edit on it with \
+         old_string `format!(\"Hello, {}!\", name)` and new_string `format!(\"Hi, {}!\", name)`, exactly as \
+         written. If it fails, make the same change (Hello to Hi) from what the error shows, keeping the file's \
+         own format string, and say in one line what the error told you.",
+        &stream,
+    );
+    let text = std::fs::read_to_string(&stream).unwrap_or_default();
+    let _ =
+        std::fs::copy(&stream, Path::new(env!("CARGO_MANIFEST_DIR")).join("target/live/edit-recovers.jsonl"));
+    // Each edit call's result in order: (an error?, its text)
+    let mut ids = Vec::new();
+    let mut results: Vec<(bool, String)> = Vec::new();
+    for v in text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        for c in v["message"]["content"].as_array().into_iter().flatten() {
+            if c["type"] == "tool_use" && c["name"] == "mcp__tarae__edit" {
+                ids.push(c["id"].clone());
+            }
+            if c["type"] == "tool_result" && ids.contains(&c["tool_use_id"]) {
+                results.push((c["is_error"] == true, c["content"].to_string()));
+            }
+        }
+    }
+    let m = measure(&text, sb.work().to_str().unwrap());
+    let now = std::fs::read_to_string(sb.file("greet.rs")).unwrap_or_default();
+    eprintln!(
+        "EDIT_RECOVERS calls {:?}, capped {capped}\n  edit results: {results:#?}\n  greet.rs now: {now:?}\n  answer: {}",
+        m.tools, m.answer
+    );
+    assert!(
+        results.first().is_some_and(|(e, r)| *e && r.contains("closest lines")),
+        "a miss first: {results:?}"
+    );
+    assert!(results.iter().skip(1).any(|(e, _)| !e), "then an edit that landed: {results:?}");
+    assert_eq!(now, "pub fn greet(name: &str) -> String {\n    format!(\"Hi, {name}!\")\n}\n");
+}
+
+/// Before the A/B: what Claude Code's Edit does with a file tarae's `edit` just changed — does it still ask for
+/// its own Read? One turn in the `both` arm on a small file: `edit` first, then Edit with no Read between; the
+/// Edit's result and claude's version (its `system` init) are said, and kept in `target/live/edit-then-edit.jsonl`.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_edit_then_native_edit() {
+    if !have("claude") {
+        return;
+    }
+    let sb = Sandbox::live("edit-then-edit");
+    let stream = teed(&sb, "review-at-end = true\nedit-tools = \"both\"\n");
+    sb.write("notes.txt", "alpha\nbeta\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    let (_, capped) = ab_turn(
+        &mut t,
+        "This is a test of two edit tools. First, with tarae's edit tool, change alpha to ALPHA in notes.txt. \
+         Then, with the Edit tool (not edit), change beta to BETA in notes.txt — call Edit directly, with no Read \
+         before it, even if it fails. Then say in one line what Edit answered.",
+        &stream,
+    );
+    let text = std::fs::read_to_string(&stream).unwrap_or_default();
+    let kept = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/live/edit-then-edit.jsonl");
+    let _ = std::fs::copy(&stream, &kept);
+    let version = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "system" && v["subtype"] == "init")
+        .and_then(|v| v["claude_code_version"].as_str().map(str::to_string));
+    // Each Edit call's result, as claude sent it back
+    let mut edit_ids = Vec::new();
+    let mut results = Vec::new();
+    for v in text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        for c in v["message"]["content"].as_array().into_iter().flatten() {
+            if c["type"] == "tool_use" && c["name"] == "Edit" {
+                edit_ids.push(c["id"].clone());
+            }
+            if c["type"] == "tool_result" && edit_ids.contains(&c["tool_use_id"]) {
+                results.push(format!("error {}: {}", c["is_error"], c["content"]));
+            }
+        }
+    }
+    let m = measure(&text, sb.work().to_str().unwrap());
+    eprintln!(
+        "EDIT_THEN_EDIT claude {version:?}, calls {:?}, capped {capped}\n  Edit answered: {results:#?}\n  notes.txt now: {:?}\n  answer: {}",
+        m.tools,
+        std::fs::read_to_string(sb.file("notes.txt")).unwrap_or_default(),
+        m.answer
+    );
+    assert!(version.is_some(), "claude's init in its stream");
 }
 
 /// A turn's edit, undone with `space u` (on disk too); after a restart the conversation goes on, and Claude

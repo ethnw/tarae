@@ -197,6 +197,14 @@ impl Tally {
                     self.reads.remove(&path(file));
                 }
             }
+            // tarae's `edit`: every file an item changes or moves (what's read of them since is new)
+            "edit" => {
+                for e in input["edits"].as_array().into_iter().flatten() {
+                    for file in ["file_path", "move_to"].iter().filter_map(|k| e[*k].as_str()) {
+                        self.reads.remove(&path(file));
+                    }
+                }
+            }
             "run" => {
                 let cmd = input["command"].as_str().unwrap_or_default();
                 if !crate::readonly::read_only(cmd) {
@@ -498,6 +506,23 @@ mod tests {
         run(&mut t, "9", "cargo fmt");
         read(&mut t, "10", 1, 40);
         assert_eq!(t.turn.sums.reread, 3);
+        // tarae's edit forgets each file an item changes, and where one moves to — those only (paths from the
+        // root, as its items give them)
+        let read_at = |t: &mut Tally, id: &str, file: &str| {
+            call(t, id, "Read", json!({ "file_path": file, "offset": 1, "limit": 40 }), 0)
+        };
+        read_at(&mut t, "e1", "/p/src/c.rs");
+        read_at(&mut t, "e2", "/p/src/d.rs");
+        let edit = json!({ "edits": [
+            { "file_path": "src/c.rs", "old_string": "x", "new_string": "y" },
+            { "file_path": "src/e.rs", "move_to": "src/d.rs" },
+        ] });
+        call(&mut t, "e3", "mcp__tarae__edit", edit, 0);
+        read_at(&mut t, "e4", "/p/src/c.rs");
+        read_at(&mut t, "e5", "/p/src/d.rs");
+        assert_eq!(t.turn.sums.reread, 3, "c.rs changed and d.rs moved onto: read anew");
+        read(&mut t, "e6", 1, 40);
+        assert_eq!(t.turn.sums.reread, 4, "a.rs wasn't in the edit: still read");
         // A save (the session's write) forgets too
         t.called(
             "11",
@@ -507,11 +532,11 @@ mod tests {
             Some(Instant::now()),
             0,
         );
-        assert_eq!(t.turn.sums.reread, 3);
+        assert_eq!(t.turn.sums.reread, 4);
         // A compaction does: the context no longer holds them
         t.forget();
         read(&mut t, "12", 1, 40);
-        assert_eq!(t.turn.sums.reread, 3);
+        assert_eq!(t.turn.sums.reread, 4);
     }
 
     /// An edit's failure is claude's (counted wasted) unless tarae said no first — declined, apart; a run

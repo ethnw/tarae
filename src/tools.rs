@@ -18,6 +18,8 @@
 //!   footprint, command line, folder — read on a worker, no card (`procs.rs`).
 //! - `rename` and `replace` are the editor's own refactoring — one call, one change set that lands as
 //!   Claude's edits do, in the review (`refactor.rs`).
+//! - `edit` is Claude's own replacements, new files, moves and deletes in one call, landing the same way
+//!   (`edittool.rs`) — listed unless the chat's process was started with `llm.edit-tools = "native"`.
 //! - `ui` says what's on the screen by id — the cards and what they ask, toasts, panes, panels, runs — at
 //!   Claude's level, answered at once, no card (`uistate/claude.rs`).
 
@@ -65,8 +67,18 @@ impl Call {
 
 /// The tools whose calls wait on the editor's own work (servers, searches, a change set) — a run, tests and
 /// the screen wait on what may take long or on the user, and aren't watched.
-const WATCHED: [&str; 9] =
-    ["references", "search", "read", "symbols", "definition", "hover", "diagnostics", "rename", "replace"];
+const WATCHED: [&str; 10] = [
+    "references",
+    "search",
+    "read",
+    "symbols",
+    "definition",
+    "hover",
+    "diagnostics",
+    "rename",
+    "replace",
+    "edit",
+];
 
 /// An MCP message from claude → the `mcp_response` (None = answered later with `answer`). Either revision
 /// (`mcp.rs`): after `initialize`, or each request naming its own.
@@ -93,7 +105,9 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
     let result = match method {
         "tools/list" => {
             sandbox_look(ed);
-            let tools = [
+            // (the edit tools its process was started with — `Chat.edit_tools`)
+            let arm = ed.session.chat.as_ref().map_or(ed.config.llm.edit_tools, |c| c.edit_tools);
+            let mut tools = vec![
                 crate::notes::tool_schema(),
                 run_tests_schema(),
                 run_schema(),
@@ -111,7 +125,10 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 crate::procs::tool_schema(),
                 crate::uistate::claude::tool_schema(),
             ];
-            Ok(json!({ "tools": tools.map(annotated) }))
+            if arm.tarae() {
+                tools.push(crate::edittool::schema());
+            }
+            Ok(json!({ "tools": tools.into_iter().map(annotated).collect::<Vec<_>>() }))
         }
         "tools/call" => {
             // (side by side with another call still unanswered? — `calls.rs`; `sized` sees it answered)
@@ -140,7 +157,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 }
                 Some(
                     name @ ("references" | "search" | "read" | "symbols" | "definition" | "hover"
-                    | "diagnostics" | "rename" | "replace"),
+                    | "diagnostics" | "rename" | "replace" | "edit"),
                 ) => {
                     let call = call();
                     // (watched while it waits — one silent too long marks its session: `session::Doing::Stuck`)
@@ -154,6 +171,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     let asked = match name {
                         "rename" => crate::refactor::rename(ed, call, args),
                         "replace" => crate::refactor::replace(ed, call, args),
+                        "edit" => crate::edittool::call(ed, call, args),
                         "references" => crate::nav::references(ed, call, args),
                         "symbols" => crate::nav::symbols(ed, call, args),
                         "definition" => crate::nav::definition(ed, call, args),
@@ -201,6 +219,7 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
         "diagnostics" => ("Diagnostics", Some("readOnlyHint")),
         "rename" => ("Rename a symbol", Some("destructiveHint")),
         "replace" => ("Replace in files", Some("destructiveHint")),
+        "edit" => ("Edit files", Some("destructiveHint")),
         "procs" => ("The editor's processes", Some("readOnlyHint")),
         "ui" => ("What's on screen, by id", Some("readOnlyHint")),
         _ => return schema,
@@ -1126,7 +1145,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     }
     if !crossed.is_empty() {
         return Err(format!(
-            "too long to put to the user: {} — put it in a script with Write, then run that",
+            "too long to put to the user: {} — put it in a script file, then run that",
             crossed.join(", and ")
         ));
     }
@@ -3137,7 +3156,7 @@ fn run_changes_now(
                             "It made {named} the sandbox keeps from your commands: what's in {it} runs later \
                              outside it (the user's builds, their terminal). The sandbox couldn't refuse {it} \
                              (none was there yet); the user is asked about {it} before your next command or \
-                             test runs. To change one, use Edit.\n"
+                             test runs. To change one, edit it with your edit tool.\n"
                         ));
                         for p in protected {
                             if !ed.session.made_protected.contains(&p) {

@@ -9,12 +9,16 @@
 //!   (`grep.rs` — `.gitignore`, hidden files, never `.git`), the replacement with `$1` groups; `preview`
 //!   lists what it would change and changes nothing. More than `max_files` (`MAX_FILES`) files is refused
 //!   unless Claude raises it.
+//! - `edit` (`edittool.rs`) is Claude's own replacements, new files, moves and deletes, in one call.
 //!
-//! Both land the way Claude's Edits do (`land`): every file inside the project, or nothing (said why). Under
+//! They land the way Claude's Edits do (`land`): every file inside the project, or nothing (said why). Under
 //! review at the end the files are written at once — on a worker, each only while it's still the text the
 //! change was worked out against — kept for `space u` as unseen, and the turn is reviewed when it ends;
-//! otherwise (and for a file with your unsaved edits, or one `llm.review-ask` names) each file comes up in
-//! the in-buffer review, one after another (`next`, every event). The answer says per file what happened.
+//! otherwise (and for a file with your unsaved edits, one `llm.review-ask` names, or a name Claude's runs
+//! can't write where it really leads — `edits::protected`, its review warns) each file comes up in the
+//! in-buffer review, one after another (`next`, every event). A move or a delete is never written unseen: it
+//! is on the change set's card, even alone (`y` · `v` · `n` — nothing to review one by one in a buffer). The
+//! answer says per file what happened.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -37,6 +41,47 @@ pub struct FileChange {
     pub before: Rope,
     pub after: Rope,
     pub places: usize,
+    /// What it does to the file itself.
+    pub op: Op,
+    /// It changes a name Claude's runs can't write (a build script, a manifest, `.git` …) where its path
+    /// really leads (`edits::protected`): never written unseen, and its review warns.
+    pub protected: bool,
+}
+
+/// What a change does to its file beyond the text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Op {
+    /// Its text changes.
+    #[default]
+    Text,
+    /// It's made — no file is there (`before` is empty).
+    Create,
+    /// It moves to `to` (real; `to_rel` from the root), with the text `after` there.
+    Move { to: PathBuf, to_rel: String },
+    /// It's deleted (`after` is empty).
+    Delete,
+}
+
+impl Op {
+    /// A move or a delete — never written unseen, always on the card.
+    pub fn of_path(&self) -> bool {
+        matches!(self, Op::Move { .. } | Op::Delete)
+    }
+}
+
+impl FileChange {
+    /// Decided on the card only: a move or a delete, or an empty new file — no buffer shows it as changes.
+    fn card_only(&self) -> bool {
+        self.op.of_path() || (self.op == Op::Create && self.after.len_bytes() == 0)
+    }
+
+    /// As the card and the answer name it (`a.rs → b.rs` for a move).
+    fn shown(&self) -> String {
+        match &self.op {
+            Op::Move { to_rel, .. } => format!("{} → {to_rel}", self.rel),
+            _ => self.rel.clone(),
+        }
+    }
 }
 
 /// What became of one file.
@@ -68,7 +113,7 @@ enum Stage {
     OneByOne,
 }
 
-/// A rename or replace landing: its files in review one at a time, what became of each.
+/// A rename, replace or edit landing: its files in review one at a time, what became of each.
 pub struct Landing {
     stage: Stage,
     call: Call,
@@ -79,6 +124,9 @@ pub struct Landing {
     noun: &'static str,
     /// Claude's words before the call (the review shows them).
     reason: String,
+    /// What tarae tells the user of how the change was worked out (an edit matched loosely) — on the card and
+    /// under Claude's words in each review; kept apart, so nothing of Claude's reads as tarae's.
+    told: String,
     pub(crate) review: VecDeque<FileChange>,
     /// How many went to review in all (`2 of 5` in the title).
     reviews: usize,
@@ -99,9 +147,24 @@ pub fn land(
     files: Vec<FileChange>,
     note: String,
 ) {
+    land_told(ed, call, what, noun, files, note, String::new())
+}
+
+/// `land`, with `told` for the user too — under Claude's words on the card and each review (an edit that
+/// matched only loosely says so there).
+pub fn land_told(
+    ed: &mut Editor,
+    call: Call,
+    what: String,
+    noun: &'static str,
+    files: Vec<FileChange>,
+    note: String,
+    told: String,
+) {
     let Some(c) = ed.session.chat.as_ref() else { return answer(ed, call, Err("the chat is gone".into())) };
     let (generation, reason) = (c.generation(), crate::edits::reason(c));
-    let files: Vec<FileChange> = files.into_iter().filter(|f| f.before != f.after).collect();
+    let files: Vec<FileChange> =
+        files.into_iter().filter(|f| f.before != f.after || f.op != Op::Text).collect();
     if files.is_empty() {
         return answer(
             ed,
@@ -115,9 +178,14 @@ pub fn land(
     let dirty = |p: &Path| {
         ed.docs.iter().any(|d| d.path.as_deref() == Some(p) && d.is_modified() && !d.unsaved_is_claudes())
     };
-    let (unseen, review): (Vec<_>, Vec<_>) = files
-        .into_iter()
-        .partition(|f| at_end && !dirty(&f.path) && !crate::edits::listed(Path::new(&f.rel), &ask));
+    // (a move or a delete, or a name that runs later outside the sandbox: always put to the user)
+    let (unseen, review): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| {
+        at_end
+            && !dirty(&f.path)
+            && !f.protected
+            && !f.op.of_path()
+            && !crate::edits::listed(Path::new(&f.rel), &ask)
+    });
     let l = Landing {
         stage: Stage::Fresh,
         call,
@@ -125,6 +193,7 @@ pub fn land(
         what,
         noun,
         reason,
+        told,
         reviews: review.len(),
         review: review.into(),
         done: Vec::new(),
@@ -134,44 +203,126 @@ pub fn land(
     if unseen.is_empty() {
         return queue(ed, l);
     }
-    // What each was is kept before anything is written (a crash between still has it)
-    let befores = unseen.iter().map(|f| (f.path.clone(), f.before.clone())).collect();
+    // What each was is kept before anything is written (a crash between still has it; a new file: none)
+    let befores = unseen.iter().map(|f| (f.path.clone(), was(f))).collect();
     crate::checkpoint::record_unseen_all(ed, befores, move |ed: &mut Editor| write(ed, l, unseen));
+}
+
+/// What a change's file was for `space u`: None — no file (one it makes).
+fn was(f: &FileChange) -> Option<Rope> {
+    (f.op != Op::Create).then(|| f.before.clone())
 }
 
 /// Review at the end: `unseen` written on a worker; open buffers without unsaved edits take the new text at
 /// once (as the watch would a moment later); then the rest of the landing goes on.
 fn write(ed: &mut Editor, mut l: Landing, unseen: Vec<FileChange>) {
+    let root = nav::project_root(ed);
     ed.events.jobs().spawn(move || {
         let written: Vec<(FileChange, Result<Option<crate::disk::Stamp>, Outcome>)> =
-            unseen.into_iter().map(|f| (write_file(&f), f)).map(|(r, f)| (f, r)).collect();
+            unseen.into_iter().map(|f| (write_file(&f, &root), f)).map(|(r, f)| (f, r)).collect();
         move |ed: &mut Editor| {
             for (f, r) in written {
                 let outcome = match r {
                     Ok(stamp) => {
-                        ed.disk_take(&f.path, &f.after, stamp);
-                        ed.wrote(&f.path);
+                        landed(ed, &f, stamp);
                         Outcome::Written
                     }
                     Err(o) => o,
                 };
-                l.done.push((f.rel, f.places, outcome));
+                l.done.push((f.shown(), f.places, outcome));
             }
             queue(ed, l);
         }
     });
 }
 
-/// `f.after` over the file — only while it's still `f.before` (else it changed since the change was worked
-/// out: left alone). On a worker.
-fn write_file(f: &FileChange) -> Result<Option<crate::disk::Stamp>, Outcome> {
-    let now = std::fs::read(&f.path).map_err(|e| Outcome::Failed(e.to_string()))?;
-    if !String::from_utf8(now).is_ok_and(|s| f.before == s.as_str()) {
+/// A change written: an open buffer takes the new text (a deleted or moved file's buffer closes — it never
+/// has the user's unsaved edits: `edittool` refuses those), what Claude knows of the file is its new stamp.
+fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>) {
+    let close = |ed: &mut Editor, p: &Path| {
+        if let Some(id) = ed.docs.iter().find(|d| d.path.as_deref() == Some(p)).map(|d| d.id) {
+            ed.close_doc(id);
+        }
+    };
+    ed.wrote(&f.path);
+    match &f.op {
+        Op::Text | Op::Create => {
+            ed.disk_take(&f.path, &f.after, stamp);
+            crate::edittool::saw(ed, &f.path, stamp);
+        }
+        Op::Delete => close(ed, &f.path),
+        Op::Move { to, .. } => {
+            close(ed, &f.path);
+            ed.wrote(to);
+            ed.disk_take(to, &f.after, stamp);
+            crate::edittool::saw(ed, to, stamp);
+        }
+    }
+}
+
+/// `f` over the disk — only while the file is still `f.before` (one it makes: while nothing's there; else
+/// it changed since the change was worked out: left alone). Every step goes through descriptors walked from
+/// the project root's real path with no link followed (`beneath.rs`): its folders opened (and a new file's or
+/// a move's made) one name at a time, the file read through no link, and the write made on those descriptors —
+/// never a path walked again after the check, so a folder swapped for a link meanwhile is never gone through.
+/// A move links the file at its new place first (`linkat` — never over anything there), then unlinks the old;
+/// its text after goes in once it's there. On a worker.
+fn write_file(f: &FileChange, root: &Path) -> Result<Option<crate::disk::Stamp>, Outcome> {
+    write_file_between(f, root, &|| {})
+}
+
+/// `write_file`, `between` run once its folders are open and the file is checked, before anything is written
+/// (tests: what a run swapping a folder for a link could do then).
+fn write_file_between(
+    f: &FileChange,
+    root: &Path,
+    between: &dyn Fn(),
+) -> Result<Option<crate::disk::Stamp>, Outcome> {
+    use crate::beneath::Dir;
+    let failed = |e: &dyn std::fmt::Display| Outcome::Failed(e.to_string());
+    let base = Dir::root(root).map_err(|e| failed(&e))?;
+    // A path's folder, opened from the root through no link (made on the way with `make`), and its name
+    let place = |p: &Path, make: bool| -> Result<(Dir, std::ffi::OsString), Outcome> {
+        let rel =
+            p.strip_prefix(&base.at).map_err(|_| failed(&format!("{} isn't in the project", p.display())))?;
+        let name = rel.file_name().ok_or_else(|| failed(&"no file named"))?.to_os_string();
+        let dir = base.folder(rel.parent().unwrap_or(Path::new("")), make).map_err(|e| failed(&e))?;
+        Ok((dir, name))
+    };
+    let (dir, name) = place(&f.path, f.op == Op::Create)?;
+    let now = dir.read(&name).map_err(|e| failed(&e))?;
+    let as_worked_out = match (&f.op, now) {
+        (Op::Create, now) => now.is_none(),
+        (_, Some(now)) => String::from_utf8(now).is_ok_and(|s| f.before == s.as_str()),
+        (_, None) => false,
+    };
+    if !as_worked_out {
         return Err(Outcome::Changed);
     }
-    crate::disk::write_atomic(&f.path, |w| f.after.write_to(w))
-        .map_err(|e| Outcome::Failed(format!("{e:#}")))?;
-    Ok(crate::disk::stamp(&f.path))
+    let to = match &f.op {
+        Op::Move { to, .. } => Some(place(to, true)?),
+        _ => None,
+    };
+    between();
+    let mut bytes = Vec::with_capacity(f.after.len_bytes());
+    f.after.write_to(&mut bytes).map_err(|e| failed(&e))?;
+    let written = match (&f.op, to) {
+        (Op::Text, _) => dir.replace(&name, &bytes).map(Some),
+        (Op::Create, _) => dir.create(&name, &bytes).map(Some),
+        (Op::Delete, _) => dir.remove(&name).map(|()| None),
+        (Op::Move { to_rel, .. }, Some((to_dir, to_name))) => {
+            dir.move_to(&name, &to_dir, &to_name).map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => failed(&format!("{to_rel} is there now — not moved")),
+                _ => failed(&e),
+            })?;
+            match f.after == f.before {
+                true => to_dir.stamp(&to_name).map(Some),
+                false => to_dir.replace(&to_name, &bytes).map(Some),
+            }
+        }
+        (Op::Move { .. }, None) => unreachable!("a move's place is opened above"),
+    };
+    written.map_err(|e| failed(&e))
 }
 
 /// Into the chat's queue of landings (answered at once when the chat it came from is gone).
@@ -196,12 +347,15 @@ pub fn next(ed: &mut Editor) {
     if background && !l.review.is_empty() {
         return;
     }
-    // Several files: one card for them all first (#75)
+    // Several files, or a move or delete: one card for them all first (#75)
     match l.stage {
         Stage::Asking | Stage::Writing => return,
-        Stage::Fresh if l.review.len() > 1 => {
+        Stage::Fresh if l.review.len() > 1 || l.review.iter().any(FileChange::card_only) => {
             l.stage = Stage::Asking;
-            let o = card(l);
+            let mut o = card(l);
+            if l.review.iter().any(|f| f.protected) {
+                warn(&mut o, &crate::edits::warned(ed));
+            }
             return ed.push_offer(o);
         }
         Stage::Fresh | Stage::OneByOne => {}
@@ -213,7 +367,12 @@ pub fn next(ed: &mut Editor) {
                 1 => l.what.clone(),
                 of => format!("{} · {n} of {of}", l.what),
             };
-            let reason = l.reason.clone();
+            // (Claude's words, then what tarae tells of how it was worked out)
+            let reason = [l.reason.as_str(), l.told.as_str()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
             show(ed, f, title, reason);
         }
         None => {
@@ -239,31 +398,60 @@ impl Landing {
 const CARD_FILES: usize = 8;
 
 /// The card for a landing's files in review: how many places in how many files, which — `y` accepts them
-/// all, `r` reviews them one by one, `v` shows every change, `n` declines them all.
+/// all, `r` reviews them one by one (not with a move or delete among them: no buffer shows one), `v` shows
+/// every change, `n` declines them all.
 fn card(l: &Landing) -> crate::offer::Offer {
-    let places: usize = l.review.iter().map(|f| f.places).sum();
+    let places: usize = l.review.iter().filter(|f| !f.op.of_path()).map(|f| f.places).sum();
     let mut files: Vec<&FileChange> = l.review.iter().collect();
     crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
+    let ops = files.iter().any(|f| f.card_only());
+    // What a file's row ends with: its count, or what happens to it
+    let tag = |f: &FileChange| match f.op {
+        Op::Text => f.places.to_string(),
+        Op::Create => "new".into(),
+        Op::Move { .. } => "moved".into(),
+        Op::Delete => "deleted".into(),
+    };
     // The change itself first, at full strength (in the title it was cut); then where, counts in a column
-    let mut q =
-        format!("{}\n\n{} in {}:", l.what, nav::count(places, l.noun), nav::count(files.len(), "file"));
+    let texts = files.iter().filter(|f| !f.op.of_path()).count();
+    let mut q = match texts {
+        0 => format!("{}\n\n{}:", l.what, nav::count(files.len(), "file")),
+        _ => format!("{}\n\n{} in {}:", l.what, nav::count(places, l.noun), nav::count(files.len(), "file")),
+    };
     let shown = &files[..files.len().min(CARD_FILES)];
-    let name_w = shown.iter().map(|f| f.rel.chars().count()).max().unwrap_or(0);
-    let num_w = shown.iter().map(|f| f.places.to_string().len()).max().unwrap_or(0);
+    let name_w = shown.iter().map(|f| f.shown().chars().count()).max().unwrap_or(0);
+    let tag_w = shown.iter().map(|f| tag(f).len()).max().unwrap_or(0);
     for f in shown {
-        let pad = " ".repeat(name_w - f.rel.chars().count());
-        q.push_str(&format!("\n  {}{pad}  {:>num_w$}", f.rel, f.places));
+        let name = f.shown();
+        let pad = " ".repeat(name_w - name.chars().count());
+        q.push_str(&format!("\n  {name}{pad}  {:>tag_w$}", tag(f)));
     }
     if files.len() > CARD_FILES {
         q.push_str(&format!("\n  … {} more — v shows every change", files.len() - CARD_FILES));
+    }
+    if !l.told.is_empty() {
+        q.push_str(&format!("\n\n{}", l.told));
     }
     crate::offer::Offer::new(
         format!("Claude changes {}", nav::count(files.len(), "file")),
         &q,
         "Writing…",
         "Claude's change".into(),
-        crate::offer::What::ChangeSet { generation: l.generation },
+        crate::offer::What::ChangeSet { generation: l.generation, ops },
     )
+}
+
+/// The warnings of a card with a file that runs later outside the sandbox: under what it asks, in the
+/// warning colour.
+fn warn(o: &mut crate::offer::Offer, warned: &[crate::cardwarn::Warned]) {
+    if warned.is_empty() {
+        return;
+    }
+    let lines: Vec<String> = warned.iter().map(|w| format!("▲ {}", w.line())).collect();
+    o.question.push_str("\n\n");
+    let at = o.question.split('\n').count() - 1;
+    o.question.push_str(&lines.join("\n"));
+    o.warnings.push(at..at + lines.len());
 }
 
 /// The front landing, while its card is up (`generation`: the chat it came from).
@@ -289,22 +477,34 @@ pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
     l.reviews = later.len();
     l.review = later.into();
     l.stage = Stage::Writing;
-    let files = now.iter().map(|f| (f.path.clone(), f.before.clone(), f.after.clone())).collect();
+    // (for `space u`: a deleted file has no text after — undo writes it again; a moved one is gone from its
+    // place and made at the new one)
+    let mut files = Vec::new();
+    for f in &now {
+        let after = match &f.op {
+            Op::Delete | Op::Move { .. } => None,
+            Op::Text | Op::Create => Some(f.after.clone()),
+        };
+        files.push((f.path.clone(), was(f), after));
+        if let Op::Move { to, .. } = &f.op {
+            files.push((to.clone(), None, Some(f.after.clone())));
+        }
+    }
+    let root = nav::project_root(ed);
     crate::checkpoint::record_all(ed, files, move |ed: &mut Editor| {
         ed.events.jobs().spawn(move || {
-            let written: Vec<_> = now.into_iter().map(|f| (write_file(&f), f)).collect();
+            let written: Vec<_> = now.into_iter().map(|f| (write_file(&f, &root), f)).collect();
             move |ed: &mut Editor| {
                 let mut done = Vec::new();
                 for (r, f) in written {
                     let outcome = match r {
                         Ok(stamp) => {
-                            ed.disk_take(&f.path, &f.after, stamp);
-                            ed.wrote(&f.path);
+                            landed(ed, &f, stamp);
                             Outcome::Accepted
                         }
                         Err(o) => o,
                     };
-                    done.push((f.rel, f.places, outcome));
+                    done.push((f.shown(), f.places, outcome));
                 }
                 let Some(c) = ed.session.chat.as_mut() else { return };
                 if let Some(l) = c.edits.sets.front_mut().filter(|l| l.generation == generation) {
@@ -319,6 +519,9 @@ pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
 
 /// `r` on the card: each file in the in-buffer review, one after another.
 pub fn one_by_one(ed: &mut Editor, id: u64, generation: u64) {
+    if asking(ed, generation).is_some_and(|l| l.review.iter().any(FileChange::card_only)) {
+        return ed.offer_refused("a move or delete is among them — y accepts all, v shows them, n declines");
+    }
     ed.offer_finished(id, Ok(()));
     if let Some(l) = asking(ed, generation) {
         l.stage = Stage::OneByOne;
@@ -329,7 +532,7 @@ pub fn one_by_one(ed: &mut Editor, id: u64, generation: u64) {
 /// `n` on the card (it's gone already): every file left as it was.
 pub fn decline_all(ed: &mut Editor, generation: u64) {
     if let Some(l) = asking(ed, generation) {
-        let declined: Vec<_> = l.review.drain(..).map(|f| (f.rel, f.places, Outcome::Declined)).collect();
+        let declined: Vec<_> = l.review.drain(..).map(|f| (f.shown(), f.places, Outcome::Declined)).collect();
         l.done.extend(declined);
         l.stage = Stage::OneByOne;
     }
@@ -369,7 +572,19 @@ pub fn view_all(ed: &mut Editor, generation: u64) {
 fn changes_text(files: &[FileChange]) -> String {
     let mut out = String::new();
     for f in files {
-        out.push_str(&format!("── {} ({})\n", f.rel, f.places));
+        let head = match &f.op {
+            Op::Text => format!("{} ({})", f.rel, f.places),
+            Op::Create => format!("{} (new)", f.rel),
+            Op::Move { .. } if f.after == f.before => format!("{} (moved)", f.shown()),
+            Op::Move { .. } => format!("{} (moved, {})", f.shown(), f.places),
+            Op::Delete => format!("{} (deleted, {})", f.rel, nav::count(f.before.len_lines(), "line")),
+        };
+        out.push_str(&format!("── {head}\n"));
+        // (a deleted file's lines aren't listed: they're all of it)
+        if f.op == Op::Delete {
+            out.push('\n');
+            continue;
+        }
         let before = f.before.to_string();
         for (from, _, old, new) in crate::editdiff::line_changes(&before, &f.after.to_string()) {
             let line = before[..from].matches('\n').count() + 1;
@@ -389,13 +604,18 @@ fn changes_text(files: &[FileChange]) -> String {
 /// What became of a file of the front landing.
 fn done_one(ed: &mut Editor, f: &FileChange, outcome: Outcome) {
     if let Some(l) = ed.session.chat.as_mut().and_then(|c| c.edits.sets.front_mut()) {
-        l.done.push((f.rel.clone(), f.places, outcome));
+        l.done.push((f.shown(), f.places, outcome));
     }
 }
 
 /// One file in the in-buffer review (y/n per change, as an Edit's) — if it's still what the change was
 /// worked out against.
 fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
+    // (a move or delete is decided on the card only — never here)
+    if f.card_only() {
+        return done_one(ed, &f, Outcome::Declined);
+    }
+    let warnings = if f.protected { crate::edits::warned(ed) } else { Vec::new() };
     if let Err(e) = ed.open(&f.path) {
         return done_one(ed, &f, Outcome::Failed(format!("{e:#}")));
     }
@@ -425,6 +645,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
     if let Some(r) = &mut ed.session.review {
         r.from_chat = from_chat;
         r.reason = reason;
+        r.warnings = warnings;
         // (its turn in the chat is the step)
         r.own_turn = false;
         let g = r.generation;
@@ -446,7 +667,9 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
         None => Outcome::Failed("its buffer was closed".into()),
         Some(now) if now == f.before => Outcome::Declined,
         Some(now) => {
-            crate::checkpoint::record(ed, doc_id, Some(f.before.clone()));
+            crate::checkpoint::record(ed, doc_id, was(&f));
+            // (saved in the background: its stamp isn't known here — no claim of what Claude has seen)
+            crate::edittool::forget(ed, &f.path);
             if dirty {
                 Outcome::InBuffer
             } else {
@@ -536,7 +759,7 @@ pub fn rename_schema() -> Value {
         "name": "rename",
         "description": "Rename a function, type, method, field, variable or module everywhere it's used — the \
     language server's rename (the editor's space r): every use, through imports and aliases, no same-named \
-    strangers. One call instead of an Edit per place; the change lands as your edits do (the user reviews it). \
+    strangers. One call instead of an edit per place; the change lands as your edits do (the user reviews it). \
     Give the file and line where the name is written (its declaration or any use) and the name, or a column \
     on that line, and the new name. The answer lists the files and places changed, or why the server refused. \
     While the language server is starting or loading it can't rename — try again later; for plain text \
@@ -861,7 +1084,9 @@ fn file_changes(
         };
         let after = crate::editdiff::apply_edits(&before, &edits, enc);
         let rel = nav::rel(&real_root, &real);
-        out.push(FileChange { path: real, rel, before, after, places: edits.len() });
+        let protected = crate::edits::protected(&real_root, &path);
+        let places = edits.len();
+        out.push(FileChange { path: real, rel, before, after, places, op: Op::Text, protected });
     }
     if !outside.is_empty() {
         return Err(format!(
@@ -1044,7 +1269,16 @@ fn plan(
         .into_iter()
         .map(|(path, before, edits, count)| {
             let after = crate::editdiff::apply_edits(&before, &edits, Encoding::Utf8);
-            FileChange { rel: nav::rel(&root, &path), path, before, after, places: count }
+            let protected = crate::edits::protected(&root, &path);
+            FileChange {
+                rel: nav::rel(&root, &path),
+                path,
+                before,
+                after,
+                places: count,
+                op: Op::Text,
+                protected,
+            }
         })
         .collect();
     let mut note = Vec::new();
@@ -1196,6 +1430,212 @@ mod tests {
         let e = file_changes(&dir, per.clone(), &none, Encoding::Utf8, &shut).err().unwrap();
         assert!(e.contains("refused whole") && e.contains(".env is named like a key"), "{e}");
         assert_eq!(file_changes(&dir, per, &none, Encoding::Utf8, &open).map(|f| f.len()), Ok(2), "opened");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A change is written only where it was worked out: a folder on its way swapped for a link to outside the
+    /// project since (a sandboxed run can do that while the card waits) — or the file itself — is refused for a
+    /// new file, a move and a text change, and nothing lands outside; without the link, the same new file is
+    /// written, its folders made. (Everything is the test's own: the project and the "outside" folder beside it
+    /// in its temp folder.)
+    #[test]
+    fn a_change_is_never_written_through_a_link_swapped_in_since() {
+        let base = std::env::temp_dir().join(format!("tarae-refactor-swapped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, outside) = (base.join("p"), base.join("outside"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let (dir, outside) = (std::fs::canonicalize(&dir).unwrap(), std::fs::canonicalize(&outside).unwrap());
+        std::fs::write(dir.join("a.rs"), "a\n").unwrap();
+        std::fs::write(outside.join("t.rs"), "t\n").unwrap();
+        let change = |rel: &str, before: &str, after: &str, op: Op| FileChange {
+            path: dir.join(rel),
+            rel: rel.into(),
+            before: Rope::from_str(before),
+            after: Rope::from_str(after),
+            places: 1,
+            op,
+            protected: false,
+        };
+        // Worked out while `sub/` and `sub2/` weren't there and t.rs was the project's own; then swapped
+        let create = change("sub/new.rs", "", "made\n", Op::Create);
+        let to = dir.join("sub2/b.rs");
+        let moved = change("a.rs", "a\n", "a\n", Op::Move { to, to_rel: "sub2/b.rs".into() });
+        let text = change("t.rs", "t\n", "changed\n", Op::Text);
+        std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("sub2")).unwrap();
+        std::os::unix::fs::symlink(outside.join("t.rs"), dir.join("t.rs")).unwrap();
+        for f in [&create, &moved, &text] {
+            match write_file(f, &dir) {
+                Err(Outcome::Failed(why)) => assert!(why.contains("is a link — not gone through"), "{why}"),
+                other => panic!("{}: {other:?}", f.rel),
+            }
+        }
+        assert!(dir.join("sub").is_symlink() && dir.join("t.rs").is_symlink(), "the links left as they are");
+        assert!(!outside.join("new.rs").exists() && !outside.join("b.rs").exists(), "nothing made outside");
+        assert_eq!(std::fs::read_to_string(outside.join("t.rs")).unwrap(), "t\n", "nothing changed outside");
+        assert_eq!(std::fs::read_to_string(dir.join("a.rs")).unwrap(), "a\n", "not moved");
+        // No link: written, its folders made
+        let fresh = change("deep/er/new.rs", "", "made\n", Op::Create);
+        assert!(write_file(&fresh, &dir).is_ok());
+        assert_eq!(std::fs::read_to_string(dir.join("deep/er/new.rs")).unwrap(), "made\n");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The race itself: a folder swapped for a link to outside after its descriptor was taken and the file
+    /// checked — between the check and the write (`write_file_between`) — never takes the write outside. It goes
+    /// into the folder that was opened (moved aside now), as a new file, a text change and a move each; the file
+    /// outside is never made or changed. (Everything is the test's own: the project and "outside" in its temp
+    /// folder.)
+    #[test]
+    fn a_folder_swapped_after_the_check_never_takes_the_write_outside() {
+        let base = std::env::temp_dir().join(format!("tarae-refactor-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("p/sub")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let dir = std::fs::canonicalize(base.join("p")).unwrap();
+        let outside = std::fs::canonicalize(base.join("outside")).unwrap();
+        std::fs::write(dir.join("sub/t.rs"), "t\n").unwrap();
+        std::fs::write(dir.join("a.rs"), "a\n").unwrap();
+        std::fs::write(outside.join("t.rs"), "t\n").unwrap();
+        let change = |rel: &str, before: &str, after: &str, op: Op| FileChange {
+            path: dir.join(rel),
+            rel: rel.into(),
+            before: Rope::from_str(before),
+            after: Rope::from_str(after),
+            places: 1,
+            op,
+            protected: false,
+        };
+        // `sub/` moved aside and a link to outside put in its place — what a run could do while tarae writes
+        let swap = || {
+            std::fs::rename(dir.join("sub"), dir.join("sub.aside")).unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        };
+        let back = || {
+            std::fs::remove_file(dir.join("sub")).unwrap();
+            std::fs::rename(dir.join("sub.aside"), dir.join("sub")).unwrap();
+        };
+        let read = |p: &Path| std::fs::read_to_string(p).ok();
+        // A new file
+        // (what's outside first: a write gone through the link is the failure to see, whatever came after it)
+        let create = change("sub/new.rs", "", "made\n", Op::Create);
+        let r = write_file_between(&create, &dir, &swap);
+        assert_eq!(read(&outside.join("new.rs")), None, "never made outside");
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(read(&dir.join("sub.aside/new.rs")).as_deref(), Some("made\n"), "in the folder opened");
+        back();
+        // A text change
+        let text = change("sub/t.rs", "t\n", "changed\n", Op::Text);
+        let r = write_file_between(&text, &dir, &swap);
+        assert_eq!(read(&outside.join("t.rs")).as_deref(), Some("t\n"), "never changed outside");
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(read(&dir.join("sub.aside/t.rs")).as_deref(), Some("changed\n"));
+        back();
+        // A move into it
+        let to = dir.join("sub/b.rs");
+        let moved = change("a.rs", "a\n", "a\n", Op::Move { to, to_rel: "sub/b.rs".into() });
+        let r = write_file_between(&moved, &dir, &swap);
+        assert_eq!(read(&outside.join("b.rs")), None, "never moved outside");
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(read(&dir.join("sub.aside/b.rs")).as_deref(), Some("a\n"));
+        assert_eq!(read(&dir.join("a.rs")), None, "moved, not copied");
+        back();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The card says what tarae told (an edit that matched loosely) and nothing of Claude's words as if tarae
+    /// said it — Claude's lines are only the review's reason, even one that reads like tarae's.
+    #[test]
+    fn the_card_says_only_what_tarae_told() {
+        let file = |rel: &str| FileChange {
+            path: PathBuf::from(format!("/p/{rel}")),
+            rel: rel.into(),
+            before: Rope::from_str("a\n"),
+            after: Rope::from_str("b\n"),
+            places: 1,
+            op: Op::Text,
+            protected: false,
+        };
+        let landing = |told: &str| Landing {
+            stage: Stage::Fresh,
+            call: Call::test(1),
+            generation: 1,
+            what: "edit 2 files".into(),
+            noun: "change",
+            reason: "edits[0] (x.rs) matched only with trailing whitespace ignored — check it".into(),
+            told: told.into(),
+            review: [file("a.rs"), file("b.rs")].into(),
+            reviews: 2,
+            done: Vec::new(),
+            note: String::new(),
+            since: std::time::Instant::now(),
+        };
+        let q = card(&landing("")).question;
+        assert!(!q.contains("matched only"), "Claude's words aren't tarae's: {q}");
+        let told = "edits[1] (b.rs) matched only with curly quotes and dashes read as plain ones — check it";
+        let q = card(&landing(told)).question;
+        assert!(q.ends_with(&format!("\n\n{told}")), "{q}");
+        assert!(!q.contains("x.rs"), "{q}");
+    }
+
+    /// A replace's or rename's file that's a name Claude's runs can't write is judged where its path really
+    /// leads (`edits::protected` — through a link too, as an Edit's is): never written unseen under review at
+    /// the end (`listed` on its real path holds that too), and its review warns as an Edit's does — what was
+    /// missing before. (The test's own files; the review is closed, nothing written.)
+    #[test]
+    fn a_protected_file_in_a_change_set_is_reviewed_with_its_warning() {
+        let dir = std::env::temp_dir().join(format!("tarae-refactor-protected-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("build.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(dir.join("a.rs"), "fn alpha() {}\n").unwrap();
+        std::os::unix::fs::symlink("../build.rs", dir.join("src/x.rs")).unwrap();
+        let none = HashMap::new();
+        let keys = crate::reads::Keys::none_opened(&dir);
+        let q = Replace {
+            pattern: "alpha".into(),
+            replacement: "beta".into(),
+            literal: true,
+            case: crate::grep::Case::Sensitive,
+            globs: Vec::new(),
+            path: None,
+            preview: false,
+            max_files: MAX_FILES,
+        };
+        let Ok(Planned::Apply(files, _)) = plan(&dir, &q, &regex_of(&q).unwrap(), &none, &[], &keys) else {
+            panic!("a change set")
+        };
+        let marked: Vec<(&str, bool)> = files.iter().map(|f| (f.rel.as_str(), f.protected)).collect();
+        assert_eq!(marked, [("a.rs", false), ("build.rs", true)]);
+        // A rename's edit naming the link: where it leads
+        let edit = json!([{"range": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 8}},
+            "newText": "beta"}]);
+        let per = vec![(dir.join("src/x.rs"), edit.as_array().unwrap().clone())];
+        let linked = file_changes(&dir, per, &none, Encoding::Utf8, &keys).unwrap();
+        assert!(linked[0].protected, "src/x.rs -> ../build.rs");
+        // Landed under review at the end: a.rs goes in, build.rs comes up in review with the warning
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), format!("cat > '{}'", dir.join("stdin.log").display())];
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        land(&mut ed, Call::test(77), "replace".into(), "match", files, String::new());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ed.session.review.is_none() {
+            assert!(std::time::Instant::now() < end, "build.rs's review");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let ids: Vec<String> =
+            ed.session.review.as_ref().unwrap().warnings.iter().map(|w| w.id.clone()).collect();
+        assert_eq!(ids, ["edit-protected"]);
+        assert_eq!(std::fs::read_to_string(dir.join("a.rs")).unwrap(), "fn beta() {}\n", "in unseen");
+        assert_eq!(std::fs::read_to_string(dir.join("build.rs")).unwrap(), "fn alpha() {}\n", "not written");
+        crate::llm::close_review(&mut ed);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -38,7 +38,7 @@ would touch, references. For finding code or text, search (the editor's project 
 function it's in); for lines of files, read (several files and ranges, or a function by name, in one call); \
 for a file's outline or which function a line is in, symbols — shell pipelines are for what \
 those can't do. Prefer the most direct tool, and ask for enough in one call to skip another turn: a turn \
-costs more than a few extra lines. Edit needs its own Read of the part it changes. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
+costs more than a few extra lines. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
 another way. After you change code, check your work: diagnostics with wait says in seconds whether it \
 compiles as the language servers see it (before any build), then the run_tests tool runs the tests that cover \
@@ -77,8 +77,20 @@ note(reply_to=N); the chat answer is a short summary.";
 /// For a change across many places: the editor's own refactoring.
 const SYSTEM_REFACTOR: &str = " For one change across many places — renaming a symbol, or the same text \
 replaced in many files — use rename (the language server's, every use and no strangers) or replace (the project \
-search's), one call and one review for the user, instead of many Edits; replace with preview first to see what \
+search's), one call and one review for the user, instead of many edits; replace with preview first to see what \
 it would touch.";
+
+/// The prompt's words on editing as Claude Code's Edit and Write have them (`SYSTEM`) — and as they are when
+/// the chat has tarae's `edit` beside them, or instead (`llm.edit-tools`). No "Edit needs its own Read": Claude
+/// Code 2.1.296 with this model edits a file it hasn't read (tests/live.rs `chat_edit_then_native_edit`,
+/// 2026-10-13) — the words only cost Reads; it's the model's and the CLI's to require (older ones did).
+const EDITS_NATIVE: &str = "You can change files with Edit and Write when the user asks for changes: each one is \
+shown";
+const EDITS_BOTH: &str = "You can change files with Edit and Write, or with edit (several replacements across \
+files in one call, new files, moves and deletes — one review), when the user asks for changes: each change is shown";
+const EDITS_TARAE: &str = "You change files with edit — every change, new files included (an empty old_string \
+where there's no file), several files and replacements in one call, moves and deletes too — when the user asks \
+for changes: each change is shown";
 
 /// What's on the screen, by id (`uistate/claude.rs`): the context's `ui:` line, the `ui` tool, what the user
 /// pointed at — and an id written in the answer is a link.
@@ -87,11 +99,26 @@ const SYSTEM_UI: &str = " The context's ui: line and the ui tool name what's on 
 make one up. <pointed id=…> is what the user pointed at.";
 
 /// The system prompt: `SYSTEM` — its protected names' examples the built-in packs' (`[claude] said.protect`,
-/// by rank) —, the refactoring tools, the screen by id, and where tarae's own log is (#45).
+/// by rank) —, the refactoring tools, the screen by id, and where tarae's own log is (#45). With the default
+/// edit tools (a chat's own: `system_for`).
+#[cfg(test)]
 pub(crate) fn system() -> String {
+    system_for(crate::llm::LlmConfig::default().edit_tools)
+}
+
+/// `system` for the chat's edit tools (`llm.edit-tools`).
+pub(crate) fn system_for(arm: crate::edittool::Arm) -> String {
+    use crate::edittool::Arm;
     let said = &crate::sandboxpack::get().said;
     let protect: Vec<&str> = said.iter().filter_map(|s| s.protect.as_deref()).collect();
     let base = SYSTEM.replace("{protect}", &protect.join(", "));
+    let base = match arm {
+        Arm::Native => base,
+        Arm::Both => base.replace(EDITS_NATIVE, EDITS_BOTH),
+        Arm::Tarae => base
+            .replace(EDITS_NATIVE, EDITS_TARAE)
+            .replace("change those with Edit)", "change those with edit)"),
+    };
     let mut s = format!("{base}{SYSTEM_REFACTOR}{SYSTEM_UI}");
     if let Some(log) = crate::log::path() {
         s.push_str(&format!(
@@ -110,18 +137,24 @@ pub(crate) fn system() -> String {
 /// come to tarae as permission requests and show as a review first (`edits.rs`). No Grep or Glob: tarae's
 /// `search` and `read` do what they did — 54 exploration turns on three builds called Grep never and Glob 3
 /// times, and leaving them out takes 1,570 tokens off every request (tests/live.rs `chat_tools_ab`, 2026-10-13).
-const TOOLS: &str = "Read,Edit,Write";
+/// Edit and Write only with `llm.edit-tools` "both" or "native" — by default (`tarae`) tarae's `edit` makes every
+/// change and `Read` is Claude Code's only tool (`edit` is `ALLOWED`'s, listed by `tools::mcp` when the chat's
+/// process has it). The A/B that decided it: tests/live.rs `chat_edit_ab`, 2026-10-13.
+fn tools(arm: crate::edittool::Arm) -> &'static str {
+    if arm.native() { "Read,Edit,Write" } else { "Read" }
+}
 /// Not Read: allowed by name it reads anywhere unasked (measured — `reads.rs` answers it).
 /// (`screen` asks the user itself — `seeing.rs`)
 /// (`references`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project only — `nav.rs`;
 /// `search` and `read` outside it only as Read would, on its card — `reads::Gate`; `rename` and `replace` land
-/// as Claude's edits do, in the review — `refactor.rs`; none of them reads or changes a file named like a key
-/// before Claude was let read it — `reads::Keys`; `procs` reads what `:procs` shows — `procs.rs`; `ui` the
-/// screen's structure at Claude's level, less than `screen` sends — `uistate/claude.rs`)
+/// as Claude's edits do, in the review — `refactor.rs`, and `edit` too — `edittool.rs`; none of them reads or
+/// changes a file named like a key before Claude was let read it — `reads::Keys`; `procs` reads what `:procs`
+/// shows — `procs.rs`; `ui` the screen's structure at Claude's level, less than `screen` sends —
+/// `uistate/claude.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
 mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__read,mcp__tarae__symbols,mcp__tarae__definition,\
 mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs,\
-mcp__tarae__ui";
+mcp__tarae__ui,mcp__tarae__edit";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`) — with what the
 /// project's own aren't trusted for held back (`claudetrust.rs`). `Skill` denied: a project skill's
@@ -358,6 +391,9 @@ pub struct Chat {
     /// Who pays for its claude — what the last one was started on (`billing.rs`), what its `apiKeySource` is
     /// checked against (the session's may have changed since: a restart's list coming back). None: none started.
     pub billing: Option<crate::billing::Billing>,
+    /// The edit tools its claude was started with (`llm.edit-tools`): what `tools/list` lists — a `:set` since
+    /// takes effect with the next chat process.
+    pub edit_tools: crate::edittool::Arm,
     /// What its conversation ran on before a switch of billing, model or effort since the last message went
     /// (`switchcost.rs`) — the line over the input says what the next one costs; sending clears it.
     pub switched: Option<crate::switchcost::Setup>,
@@ -542,6 +578,7 @@ impl Chat {
             rules_said: (None, None),
             settings: Default::default(),
             billing: None,
+            edit_tools: crate::edittool::Arm::Tarae,
             switched: None,
             money: None,
         }
@@ -1000,7 +1037,10 @@ fn ensure_proc(ed: &mut Editor) {
         false => None,
     };
     let Some(c) = &mut ed.session.chat else { return };
-    let mut args = llm::with_tools(&cfg.args, TOOLS, ALLOWED);
+    // (the edit tools are this process's for its life: `tools/list` reads them here — `Chat.edit_tools`)
+    let arm = cfg.edit_tools;
+    c.edit_tools = arm;
+    let mut args = llm::with_tools(&cfg.args, tools(arm), ALLOWED);
     // The conversation is kept by claude too, so it can be continued (`chats.rs`)
     args.retain(|a| a != "--no-session-persistence");
     // Only tarae's own MCP server, whatever `llm.args` says: under `-p` a project's `.mcp.json` servers connect
@@ -1019,7 +1059,7 @@ fn ensure_proc(ed: &mut Editor) {
         args = llm::with_flag(&args, "--permission-mode", "default");
     }
     let cfg = llm::LlmConfig { args, ..cfg };
-    let system = system();
+    let system = system_for(arm);
     let mut extra = vec!["--append-system-prompt", system.as_str(), "--permission-prompt-tool", "stdio"];
     if !c.no_thought_flag {
         extra.extend(["--thinking-display", "summarized"]);
@@ -2141,6 +2181,24 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
                 range = format!("{range} preview").trim().to_string();
             }
             Look { verb: "replace", what, pattern: true, range, link: None }
+        }
+        // tarae's `edit`: its first file, and how many more
+        "mcp__tarae__edit" => {
+            let items = input["edits"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let mut files: Vec<&str> = items.iter().filter_map(|e| e["file_path"].as_str()).collect();
+            files.dedup();
+            let path = resolve(files.first().copied().unwrap_or_default());
+            let range = match files.len() {
+                0 | 1 => String::new(),
+                n => format!("+{} more", n - 1),
+            };
+            Look {
+                verb: "edit",
+                what: shown(&path),
+                pattern: false,
+                range,
+                link: Some(Link { path, line: 0 }),
+            }
         }
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }
@@ -3341,7 +3399,7 @@ mod tests {
             "q",
             "",
             String::new(),
-            crate::offer::What::ChangeSet { generation },
+            crate::offer::What::ChangeSet { generation, ops: false },
         ));
         ed.sessions_sync();
         assert!(ed.session.usage.tally.is_waiting());
@@ -3388,6 +3446,41 @@ mod tests {
         let r =
             look(cwd, "mcp__tarae__references", &serde_json::json!({"path": "src/lib.rs", "symbol": "a"}));
         assert_eq!(r.verb, "references");
+        // tarae's edit: its first file, and how many more
+        let e = look(
+            cwd,
+            "mcp__tarae__edit",
+            &serde_json::json!({"edits": [{"file_path": "src/a.rs"}, {"file_path": "src/a.rs"},
+                {"file_path": "src/b.rs"}]}),
+        );
+        assert_eq!((e.verb, e.what.as_str(), e.range.as_str()), ("edit", "src/a.rs", "+1 more"));
+    }
+
+    /// Each `llm.edit-tools` has the prompt and tools it says: tarae's `edit` alone (the default — every change,
+    /// new files included), both, or Claude Code's Edit and Write — the prompt never sends Claude to a tool it
+    /// hasn't, and each one's words are really in (a `replace` that matched nothing would leave the native ones).
+    #[test]
+    fn each_edit_arm_says_its_own_tools() {
+        use crate::edittool::Arm;
+        let (native, both, tarae) = (system_for(Arm::Native), system_for(Arm::Both), system_for(Arm::Tarae));
+        assert_eq!(tarae, system(), "the default: tarae's edit alone");
+        assert!(native.contains(EDITS_NATIVE) && !native.contains("with edit"));
+        assert!(both.contains(EDITS_BOTH) && both.contains("change those with Edit)"));
+        assert!(tarae.contains(EDITS_TARAE), "{tarae}");
+        assert!(tarae.contains("every change, new files included"), "{tarae}");
+        assert!(!tarae.contains("Edit and Write") && !tarae.contains("with Edit"), "{tarae}");
+        assert!(tarae.contains("change those with edit)"));
+        // (no arm sends Claude to a Read before it edits: the CLI doesn't ask one of this model — it only cost Reads)
+        for (arm, s) in [("native", &native), ("both", &both), ("tarae", &tarae)] {
+            assert!(!s.contains("Edit needs") && !s.contains("Read first"), "{arm}: {s}");
+        }
+        let read = crate::readtool::schema()["description"].as_str().unwrap().to_string();
+        assert!(!read.contains("Before an Edit") && !read.contains("own read"), "{read}");
+        assert_eq!(
+            (tools(Arm::Native), tools(Arm::Both), tools(Arm::Tarae)),
+            ("Read,Edit,Write", "Read,Edit,Write", "Read")
+        );
+        assert!(ALLOWED.split(',').any(|t| t == "mcp__tarae__edit"));
     }
 
     /// The system prompt sends "where is X defined" to the language server by name (never a grep for `fn X`
@@ -3405,7 +3498,7 @@ mod tests {
         assert!(at("references.") < at("for lines of files, read"));
         assert!(at("for lines of files, read") < at("shell pipelines are for what those can't do"));
         assert!(!s.contains("Grep") && !s.contains("Glob"), "a tool the chat hasn't");
-        assert!(!TOOLS.split(',').any(|t| t == "Grep" || t == "Glob"));
+        assert!(!tools(crate::edittool::Arm::Native).split(',').any(|t| t == "Grep" || t == "Glob"));
     }
 
     /// A walk-through's stops as Claude writes them: parsed from its words, shown as link lines, a tag

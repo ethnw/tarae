@@ -11321,7 +11321,7 @@ mod tests {
         let shown_after = |cols: u16, rows: u16, chat: bool, keys: &[&str]| {
             let mut ed = Editor::new(crate::config::Config::default());
             let q = "Claude renames `a` to `b` in 3 files.\n\nOne review for the set.";
-            let what = What::ChangeSet { generation: 7 };
+            let what = What::ChangeSet { generation: 7, ops: false };
             ed.push_offer(Offer::new("Claude changes 3 files".into(), q, "", String::new(), what));
             // (gone back to the chat while it waits: in 50 columns the chat takes them all — no room for it)
             ed.session.chat = chat.then(|| {

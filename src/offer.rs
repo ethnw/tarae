@@ -179,9 +179,10 @@ pub enum What {
     /// Closing a buffer whose change is under review (#54): `y` declines the change and closes it, `n` keeps
     /// both. Not `force`d, unsaved edits of yours keep it open still.
     CloseReviewed { doc: crate::document::DocId, force: bool },
-    /// Claude's rename or replace across several files (`refactor.rs`, #75): `y` accepts them all, `r`
-    /// reviews them one by one, `v` shows every change, `n` declines them all. `generation` = its chat's.
-    ChangeSet { generation: u64 },
+    /// Claude's rename, replace or edit across several files, or with a move or delete (`refactor.rs`, #75):
+    /// `y` accepts them all, `r` reviews them one by one (not with `ops` — a move or delete among them, which
+    /// no buffer shows), `v` shows every change, `n` declines them all. `generation` = its chat's.
+    ChangeSet { generation: u64, ops: bool },
     /// Ending a code review with files not viewed (`codereview.rs`, #10): `y` ends it, `n` keeps reviewing.
     /// Its session's, and that review's (`started`) only — #159.
     ReviewEnd { session: crate::event::SessionId, started: Instant },
@@ -641,7 +642,7 @@ impl Offer {
     /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
     pub fn change_set(&self) -> Option<u64> {
         match self.what {
-            What::ChangeSet { generation } => Some(generation),
+            What::ChangeSet { generation, .. } => Some(generation),
             _ => None,
         }
     }
@@ -875,6 +876,9 @@ impl Offer {
             W::NotesClose { .. } => vec![('y', "Close them"), ('n', "Keep them")],
             // (throwing them away takes a capital, as removing does)
             W::Recover(_) => vec![('y', "Restore"), ('c', "Compare"), ('D', "Discard"), ('n', "Not now")],
+            W::ChangeSet { ops: true, .. } => {
+                vec![('y', "Accept all"), ('v', "See them"), ('n', "Decline all")]
+            }
             W::ChangeSet { .. } => {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
@@ -1114,6 +1118,7 @@ impl crate::editor::Editor {
             // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text)
             if let Some(generation) = o.change_set() {
                 match key.code {
+                    // (refused there when a move or delete is among them: decided on the card only)
                     Code::Char('r') => {
                         let id = o.id;
                         crate::refactor::one_by_one(self, id, generation);
@@ -1309,7 +1314,7 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.close_reviewed(doc, force);
             }
-            What::ChangeSet { generation } => crate::refactor::accept_all(self, id, generation),
+            What::ChangeSet { generation, .. } => crate::refactor::accept_all(self, id, generation),
             What::ReviewEnd { session, started } => {
                 self.offer_finished(id, Ok(()));
                 crate::codereview::close_answered(self, session, started);
@@ -1855,7 +1860,7 @@ impl crate::editor::Editor {
             What::CloseReviewed { .. } => {
                 self.set_status("kept open — Claude's change still waits for y or n")
             }
-            What::ChangeSet { generation } => crate::refactor::decline_all(self, generation),
+            What::ChangeSet { generation, .. } => crate::refactor::decline_all(self, generation),
             What::ReviewEnd { .. } => self.set_status("still reviewing — space v m marks a file viewed"),
             What::Rebase(m) => {
                 self.set_status(format!("Not rebased — {} as it is, nothing brought", m.branch))

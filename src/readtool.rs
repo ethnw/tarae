@@ -3,8 +3,8 @@
 //! inside the project, no card. It runs in tarae, outside every sandbox, so it keeps Read's rules itself
 //! (`reads::Gate`): what Read would ask about (outside the project and its allowed places, a file named like a
 //! key) it asks on the same card, and runs again once let through. A big file asked whole comes as its outline
-//! with line numbers (Zed's rule), saying how to ask for the text — not a page cut short. Claude Code's Edit
-//! still needs its own Read of what it changes; the description says so.
+//! with line numbers (Zed's rule), saying how to ask for the text — not a page cut short. What it read is
+//! what Claude saw of those files (`Edits.seen` — an `edit` of one changed since says so).
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,8 @@ const OUTLINE_MAX: usize = 300;
 /// A file whole asked of one without an outline: its first lines.
 const HEAD_LINES: usize = 100;
 
+/// The tool's schema. (It no longer sends Claude to Read before an Edit: Claude Code 2.1.296 with this model
+/// edits a file it hasn't read — tests/live.rs `chat_edit_then_native_edit`; older models needed the Read.)
 pub fn schema() -> Value {
     json!({
         "name": "read",
@@ -36,7 +38,7 @@ pub fn schema() -> Value {
     or `src/a.rs:Editor::open` (a function, type or module by name, from its syntax tree), or a path alone (the \
     whole file — over 16 KB it comes as its outline with line numbers; then ask for ranges or names). Lines \
     come numbered (`12: …`). Ask for enough in one call to skip another turn. Outside the project it asks the \
-    user, as Read does. Before an Edit, Read the part you change with Read (Edit needs its own read).",
+    user, as Read does.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -136,9 +138,23 @@ fn go(ed: &mut Editor, call: Call, items: Vec<Item>, args: Value, granted: Vec<P
         ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
     let gate = crate::reads::Gate::of(ed, granted.clone());
     ed.events.jobs().spawn(move || {
+        // (taken before it's read: a change while it reads counts as one since)
+        let stamps: Vec<(PathBuf, Option<crate::disk::Stamp>)> = items
+            .iter()
+            .filter_map(|it| std::fs::canonicalize(crate::chat::resolve(&root, &it.path)).ok())
+            .map(|p| {
+                let s = crate::disk::stamp(&p);
+                (p, s)
+            })
+            .collect();
         let r = read(&root, &items, &gate, &unsaved);
         move |ed: &mut Editor| match r {
-            Ok(Ok(text)) => answer(ed, call, Ok(text)),
+            Ok(Ok(text)) => {
+                for (p, s) in stamps {
+                    crate::edittool::saw(ed, &p, s);
+                }
+                answer(ed, call, Ok(text))
+            }
             Ok(Err(ask)) => {
                 let then = crate::reads::Then { call, tool: "read", args, granted };
                 crate::reads::tool_ask(ed, then, *ask)

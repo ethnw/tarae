@@ -462,8 +462,8 @@ impl Guard {
             let it = if names.len() == 1 { "it" } else { "them" };
             s.push_str(&format!(
                 "{}: tarae keeps {it} from your commands — what's in {it} runs later outside the sandbox (the \
-                 user's builds, their terminal) or sets how things run. To change {it}, use Edit: the user \
-                 reviews it. Don't work around it (another name, a copy, a link).\n",
+                 user's builds, their terminal) or sets how things run. To change {it}, edit {it} with your \
+                 edit tool: the user reviews it. Don't work around it (another name, a copy, a link).\n",
                 names.join(", ")
             ));
         }
@@ -693,7 +693,7 @@ impl Guard {
                 };
                 format!(
                     "In tarae's sandbox: it could {reads}write only in the project — not {names}, {names_where} \
-                     (Edit changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}\
+                     (your edits change those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}\
                      {keys}{copies}{linux}"
                 )
             }
@@ -6918,8 +6918,8 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// What Claude reads when the profile kept something on purpose: which names, and to use Edit (the user
-    /// reviews it); git's folder, and that git's writes are the user's; cargo's unpacked crates, and why —
+    /// What Claude reads when the profile kept something on purpose: which names, and to edit them with its edit
+    /// tool (the user reviews it — never "Edit", a tool the chat may not have: `llm.edit-tools`); git's folder, and that git's writes are the user's; cargo's unpacked crates, and why —
     /// with nothing else blocked, no "tell the user to open it" (they can't).
     #[test]
     fn the_report_says_what_was_kept_and_what_to_do_instead() {
@@ -6932,14 +6932,15 @@ mod tests {
         let r = g.report(&[]);
         assert!(
             r.contains("build.rs, crates/a/.cargo: tarae keeps them from your commands")
-                && r.contains("To change them, use Edit: the user reviews it."),
+                && r.contains("To change them, edit them with your edit tool: the user reviews it."),
             "{r}"
         );
+        assert!(!r.contains("use Edit"), "{r}");
         assert!(r.contains("  linking /Users/u/p/build.rs (forbidden-link-priv<file-write*>, touch)"), "{r}");
         // Every protected name said, the packs' and the core's
         assert!(protected_names().all(|n| r.contains(&format!(" {n},"))), "{r}");
         assert!(
-            r.contains(".tarae.local.toml, .git, anywhere in it (Edit changes those)")
+            r.contains(".tarae.local.toml, .git, anywhere in it (your edits change those)")
                 && r.contains(
                     "(not cargo's caches — its crates and git checkouts — while the network is closed)"
                 ),
@@ -9089,7 +9090,7 @@ mod tests {
     /// files beside them are written as before, and so are those names inside tools' output (`OUTPUTS`); a
     /// checkout whose own path holds such names (`.claude/worktrees`, `target`) stays writable. A file from
     /// outside (a stand-in key in a stand-in home) can't be linked into the project; the project's own files
-    /// can (cargo links its outputs). Claude reads what was kept and to use Edit, which asks the user
+    /// can (cargo links its outputs). Claude reads what was kept and to edit it, which asks the user
     /// (`edits::listed`). Harmless: plain-text stand-ins in a folder of the test's own under `target/`.
     #[cfg(target_os = "macos")]
     #[test]
@@ -9168,7 +9169,7 @@ mod tests {
         sh(&p, &format!("ln '{}' stolen; echo x > own; ln own own2", key.display()));
         assert!(!root.join("stolen").exists(), "a file from outside linked into the project");
         assert!(root.join("own2").exists(), "a link of the project's own file");
-        // What Claude reads: what was kept, and to use Edit
+        // What Claude reads: what was kept, and to edit it with its edit tool
         let tag = format!("tarae-test-{}-kept.", std::process::id());
         let w = Watch::start(&tag);
         std::thread::sleep(WATCH_READY);
@@ -9179,7 +9180,11 @@ mod tests {
         w.finish();
         assert_eq!(w.blocked().failed, None);
         let r = Guard::In(Box::new(watched)).report(&[]);
-        assert!(r.contains("build.rs: tarae keeps it from your commands") && r.contains("use Edit"), "{r}");
+        assert!(
+            r.contains("build.rs: tarae keeps it from your commands")
+                && r.contains("edit it with your edit tool"),
+            "{r}"
+        );
         assert!(r.contains("Git's own folder is kept"), "{r}");
         std::fs::remove_dir_all(&t).ok();
     }

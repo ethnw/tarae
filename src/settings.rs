@@ -421,6 +421,15 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.review_at_end = b(v),
     },
     Setting {
+        path: "llm.edit-tools",
+        kind: Kind::Enum(&["tarae", "both", "native"]),
+        doc: "Chat: what Claude edits with — \"tarae\": tarae's edit (replacements across files in one call, new files, moves and deletes, one review); \"both\": edit and Claude Code's Edit and Write; \"native\": Edit and Write only. A new chat (C-l) starts with it. Only your own config sets it",
+        get: |c| Value::from(c.llm.edit_tools.name()),
+        set: |c, v| {
+            c.llm.edit_tools = crate::edittool::Arm::parse(s(v)).unwrap_or(crate::edittool::Arm::Tarae)
+        },
+    },
+    Setting {
         path: "llm.chat-settings",
         kind: Kind::Bool,
         doc: "Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask)",

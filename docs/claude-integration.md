@@ -391,9 +391,29 @@ the wheel) scroll it, and `space`, `:` and `C-w` work over it. Under that title,
 words from just before it made the edit say why ([screenshot](screenshots/chat-edit-why.png)): what it
 concluded, in a row or two. Its full reasoning is in the chat. The accepted changes are what gets
 written. Accept part of a change, and only that part is written. Decline, and Claude is told so. Several edits
-queue up one after another. A rename or replace of Claude's across several files comes as one card instead
-(`Claude changes 10 files`, the change, each file's count): `y` accepts them all, `r` reviews them one by one,
-`v` shows every change in a buffer, `n` declines them all.
+queue up one after another. Several files in one change — Claude's edit, rename or replace — come as one card
+instead (`Claude changes 10 files`, the change, each file's count): `y` accepts them all, `r` reviews them one by
+one, `v` shows every change in a buffer, `n` declines them all. A build script, manifest or setting among them
+says so on its review.
+
+Claude edits with tarae's own `edit` tool: exact replacements (Claude Code's Edit fields), several files and
+replacements in one call, new files, moves and deletes — one change you review, or nothing changes and Claude is
+told which part failed and the lines closest to what it meant. An edit that matched only with trailing whitespace
+ignored, or curly quotes read as plain ones, says so on the card and the review. A move or a delete is always on
+the card, even alone and even under review at the end — `y`, `v` or `n`, nothing to review one by one — and never
+of a build script, a manifest, a file named like a key, a link, a file with your unsaved edits, or anything
+outside the project. `space u` brings a deleted file back and a moved one home.
+
+`llm.edit-tools` chooses what Claude edits with: `"tarae"` (the default — `edit` alone), `"both"` (`edit` and
+Claude Code's Edit and Write), `"native"` (Edit and Write alone). Only your own config sets it — a project's
+`.tarae.toml` or `.tarae.local.toml` can't — and a change, `:set` too, takes effect with the next chat (`C-l`).
+What `edit` writes, tarae writes through no link: each folder from the project's root opened without following
+one, and the write made there — a folder a command swapped for a link to outside meanwhile is never written
+through. Claude Code's own Edit and Write (`"both"`, `"native"`) write the file themselves, by its path, once
+tarae has said yes, so that gap stays open with them.
+The default was measured: on three changes to tarae's own code, three runs each, every arm got all of them right,
+and `edit` alone used 31 % fewer tokens and 27 % less money than Edit and Write — a six-place move was one call
+instead of four to six (tests/live.rs `chat_edit_ab`).
 
 A file with unsaved edits is a special case, because disk isn't what you're looking at. The accepted change stays
 in your buffer, and Claude is told the file changes when you save.
@@ -1142,8 +1162,10 @@ Claude reads and searches through tarae itself — no process, no sandbox to sta
 
 They run in tarae, outside every sandbox, so they keep Read's rules themselves: a file named like a key, or a
 place outside the project and the places above, asks on the same card as Read — a link in the project to a
-place outside is asked about as that place — and the call goes on once you answer. Claude Code's Edit still
-needs its own Read of what it changes. `run`'s description sends reading and searching here, and `:usage`
+place outside is asked about as that place — and the call goes on once you answer. Neither the prompt nor
+`read` sends Claude to its own Read before an Edit: Claude Code 2.1.296 with the current model edits a file it
+hasn't read. That depends on the model and the CLI — older models needed the Read first. `run`'s description
+sends reading and searching here, and `:usage`
 counts the runs that only read text, by program.
 
 ### Notes

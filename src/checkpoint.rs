@@ -146,11 +146,11 @@ pub fn record_unseen(
     }
 }
 
-/// `record_unseen` for many files at once (a rename or replace of Claude's, `refactor.rs`): `then` once
-/// what each was is on disk — kept once for them all.
+/// `record_unseen` for many files at once (a rename, replace or edit of Claude's, `refactor.rs`): each
+/// `(path, before)` (None = no such file) — `then` once what each was is on disk, kept once for them all.
 pub fn record_unseen_all(
     ed: &mut Editor,
-    files: Vec<(PathBuf, Rope)>,
+    files: Vec<(PathBuf, Option<Rope>)>,
     then: impl FnOnce(&mut Editor) + Send + 'static,
 ) {
     let turn = &mut ed.session.checkpoints.turn;
@@ -160,8 +160,8 @@ pub fn record_unseen_all(
             Some(t) if t.unseen => {}
             Some(t) => (t.unseen, new) = (true, true),
             None => {
-                let after = before.clone();
-                turn.push(Touched { path, before: Some(before), after, unseen: true, ..Default::default() });
+                let after = before.clone().unwrap_or_default();
+                turn.push(Touched { path, before, after, unseen: true, ..Default::default() });
                 new = true;
             }
         }
@@ -172,18 +172,22 @@ pub fn record_unseen_all(
     }
 }
 
-/// Accepted changes of Claude's to many files at once (a rename or replace accepted whole on its card,
-/// `refactor.rs`): each `(path, before, after)` — `then` once what each was is on disk, before any is written.
+/// Accepted changes of Claude's to many files at once (a change set accepted whole on its card,
+/// `refactor.rs`): each `(path, before, after)` — before None: no such file (one it makes); after None: no
+/// file after (deleted, or moved from there: undo writes it again) — `then` once what each was is on disk,
+/// before any is written.
 pub fn record_all(
     ed: &mut Editor,
-    files: Vec<(PathBuf, Rope, Rope)>,
+    files: Vec<(PathBuf, Option<Rope>, Option<Rope>)>,
     then: impl FnOnce(&mut Editor) + Send + 'static,
 ) {
     let turn = &mut ed.session.checkpoints.turn;
     for (path, before, after) in files {
+        let gone = after.is_none();
+        let after = after.unwrap_or_default();
         match turn.iter_mut().find(|t| t.path == path) {
-            Some(t) => t.after = after,
-            None => turn.push(Touched { path, before: Some(before), after, ..Default::default() }),
+            Some(t) => (t.after, t.gone) = (after, gone),
+            None => turn.push(Touched { path, before, after, gone, ..Default::default() }),
         }
     }
     keep_then(ed, then);

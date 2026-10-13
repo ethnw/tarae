@@ -43,10 +43,14 @@ pub struct Edits {
     /// Review at the end (`space v a`, agreed on its card): edits under this folder go in as Claude makes
     /// them, and the turn is reviewed when it ends.
     pub at_end: Option<PathBuf>,
-    /// Claude's renames and replaces landing (`refactor.rs`): the front one's files reviewed one at a time.
+    /// Claude's renames, replaces and edits landing (`refactor.rs`): the front one's files reviewed one at a
+    /// time.
     pub sets: VecDeque<crate::refactor::Landing>,
     /// An edit waiting while you type has been said (once until it's shown).
     pub waiting_told: bool,
+    /// Each file as Claude last saw it through tarae (`read`, or a change of its written) — its disk stamp; an
+    /// `edit` of one that has changed since says so (`edittool.rs`).
+    pub seen: std::collections::HashMap<PathBuf, crate::disk::Stamp>,
 }
 
 // ── Review at the end ───────────────────────────────────────────────────────
@@ -59,11 +63,10 @@ checks it runs (cargo test, cargo build) run that code.\n\nWhen its turn ends yo
 takes the turn back. Build scripts, settings and files outside the project still ask first.";
 
 /// What Claude hears with its next message when it's turned on · off.
-const TELL_ON: &str = "From now on in this conversation your Edit and Write calls are applied as you make them, \
+const TELL_ON: &str = "From now on in this conversation your edits are applied as you make them, \
 without the user seeing each one: they review all of your changes when your turn ends. Edits outside the project, \
-to build scripts and settings, and to files with unsaved edits still go to the user first.";
-const TELL_OFF: &str =
-    "Your Edit and Write calls are shown to the user one at a time again, before they're written.";
+to build scripts and settings, and to files with unsaved edits, moves and deletes still go to the user first.";
+const TELL_OFF: &str = "Your edits are shown to the user one at a time again, before they're written.";
 
 /// Whether the chat's edits are reviewed at the end of its turn.
 pub fn at_end(ed: &Editor) -> bool {
@@ -468,7 +471,7 @@ fn show(ed: &mut Editor, p: Pending) {
 /// What an edit that changes a name running later outside the sandbox warns of (`cardwarn.rs`, cardburden
 /// 4b — the fact, `edit-protected`, worked out where its path really leads: `protected`) — judged by the
 /// packs' entries and yours as a command's are, so the review's header says it in their words.
-fn warned(ed: &Editor) -> Vec<crate::cardwarn::Warned> {
+pub(crate) fn warned(ed: &Editor) -> Vec<crate::cardwarn::Warned> {
     let packs = crate::sandboxpack::get();
     let no = |_: &str| false;
     let facts = crate::cardwarn::Facts {

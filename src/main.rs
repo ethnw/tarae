@@ -7,6 +7,7 @@
 mod allow;
 mod attach;
 mod basetree;
+mod beneath;
 mod billing;
 mod blocked;
 mod builds;
@@ -38,6 +39,7 @@ mod dsyms;
 mod editdiff;
 mod editor;
 mod edits;
+mod edittool;
 mod ended;
 mod event;
 mod fetch;

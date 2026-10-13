@@ -94,6 +94,9 @@ pub struct LlmConfig {
     /// Chat: Claude's edits go in as it makes them, the turn reviewed when it ends — every new chat starts
     /// so (`space v a` turns it on and off, and keeps it here).
     pub review_at_end: bool,
+    /// Chat: the tools Claude edits with (`llm.edit-tools` — `edittool::Arm`), fixed for a chat process when it
+    /// starts. Only your own config sets it (`trust::YOURS_ONLY`).
+    pub edit_tools: crate::edittool::Arm,
     /// Chat: load CLAUDE.md files and Claude Code settings like `claude` does (hooks off, edits always ask).
     pub chat_settings: bool,
     /// An `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in tarae's environment goes on to claude (`llm.environment-key
@@ -159,6 +162,7 @@ impl Default for LlmConfig {
             follow: true,
             follow_resume: 20,
             review_at_end: false,
+            edit_tools: crate::edittool::Arm::Tarae,
             chat_settings: true,
             keep_env_key: false,
             billing: Default::default(),
