@@ -333,22 +333,39 @@ pub fn runs_refuse_userns() -> bool {
     *REFUSED.get_or_init(|| refuses_userns(restriction(), label().as_deref()))
 }
 
-/// Tests: whether tarae runs under a profile with Ubuntu's restriction on here (`runs_refuse_userns`) — else
-/// `test` (its whole path) says it skips, and why; a machine said to hold the profile (`TARAE_EXPECT_PROFILE=1`:
-/// the VM's run under it) fails instead.
+/// Tests: whether tarae runs here under a profile that lends user namespaces with Ubuntu's restriction on
+/// (`profile_lends`) — else `test` (its whole path) says it skips, and why; a machine said to hold the profile
+/// (`TARAE_EXPECT_PROFILE=1`: the VM's run under it) fails instead.
 #[cfg(test)]
 pub(crate) fn profiled(test: &str) -> bool {
-    if runs_refuse_userns() {
-        return true;
-    }
-    let label = label().unwrap_or_default();
-    let why = format!("no profile with Ubuntu's restriction here (tarae runs as `{label}`)");
+    let label = label();
+    let Err(why) = profile_lends(restriction(), label.as_deref()) else { return true };
     if std::env::var("TARAE_EXPECT_PROFILE").is_ok_and(|v| v == "1") {
         panic!("{test}: the profile expected here — {why}");
     }
     let line = format!("{}{test} — {why}\n", crate::test_results::SELF_SKIP);
     let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
     false
+}
+
+/// Tests: the profile tests' ground, from the restriction's value and tarae's label — or why it isn't here. Runs
+/// are refused user namespaces (`refuses_userns`) *and* the profile lends them, so the user's kind makes one as the
+/// tests' control: tarae's own (`flags=(unconfined)` with `userns,`). Under a refusing one (`docker-default
+/// (enforce)`, Docker's defaults, whose seccomp refuses them to every process) runs are refused too, but nothing
+/// can make one — the tests' controls would fail for Docker, not for tarae.
+#[cfg(test)]
+fn profile_lends(restrict: Option<u32>, label: Option<&str>) -> Result<(), String> {
+    let l = label.unwrap_or_default();
+    if !refuses_userns(restrict, label) {
+        return Err(format!("no profile with Ubuntu's restriction here (tarae runs as `{l}`)"));
+    }
+    if refusing(label) {
+        return Err(format!(
+            "tarae runs under `{l}`, a profile that refuses user namespaces to everything — these need tarae's \
+             own (`cargo xtask linux --userns test --installed` on a VM that has it)"
+        ));
+    }
+    Ok(())
 }
 
 /// `runs_refuse_userns` from what it reads: the restriction's value, tarae's label.
@@ -1008,6 +1025,29 @@ mod tests {
             "the restriction off: as Debian"
         );
         assert!(!refuses_userns(None, Some("/usr/bin/tarae (unconfined)")));
+    }
+
+    /// The profile tests (`profiled`) run where tarae's own profile lends what its runs are refused: the
+    /// restriction on and tarae under it (`--installed` on a VM with the profile). Not under Docker's defaults:
+    /// `docker-default (enforce)` refuses runs too, but its seccomp lets nothing make a user namespace — the tests'
+    /// controls can't be. Nor where runs aren't refused (unconfined, Debian's kernel without the restriction).
+    #[test]
+    fn the_profile_tests_run_only_under_a_profile_that_lends() {
+        assert_eq!(profile_lends(Some(1), Some("/usr/bin/tarae (unconfined)")), Ok(()));
+        assert_eq!(profile_lends(Some(1), Some("/opt/tarae/bin/tarae (unconfined)")), Ok(()));
+        let docker = profile_lends(Some(1), Some("docker-default (enforce)"));
+        assert!(
+            docker.as_ref().is_err_and(|w| w.contains("refuses user namespaces to everything")),
+            "{docker:?}"
+        );
+        for (restrict, label) in [(Some(1), Some("unconfined")), (None, Some("/usr/bin/tarae (unconfined)"))]
+        {
+            let off = profile_lends(restrict, label);
+            assert!(
+                off.as_ref().is_err_and(|w| w.starts_with("no profile")),
+                "{restrict:?} {label:?}: {off:?}"
+            );
+        }
     }
 
     /// What the probe finds on this system, said on stderr (each machine's tier, in the test output): no

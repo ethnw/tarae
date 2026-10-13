@@ -2244,8 +2244,10 @@ struct CapHeader {
 
 /// Every capability gone, for good: the bounding set (an exec as root would take them back from it — this
 /// needs `CAP_SETPCAP`, which only a root keeper has), the ambient set, then effective, permitted and
-/// inheritable. tarae run as a user has none to drop; as root in a container its runs would hold root's. (A
-/// keeper born in namespaces has dropped them all already: `capabilities_dropped`.)
+/// inheritable. tarae run as a user holds none of the others, and can't empty its bounding set: that stays this
+/// system's, inert under the keeper's `NoNewPrivs` (an exec of a setuid or file-capability program gains nothing
+/// from it); as root in a container its runs would hold root's. (A keeper born in namespaces has dropped them
+/// all already: `capabilities_dropped`.)
 fn drop_capabilities() {
     let h = CapHeader { version: 0x2008_0522, pid: 0 };
     let none = [0u32; 6];
@@ -2947,18 +2949,31 @@ mod tests {
         k.end();
     }
 
-    /// A run holds no capability — none effective, permitted, inheritable, ambient, nor in its bounding set (a
-    /// root keeper's dropped, `drop_capabilities`; a user's has none).
+    /// A run holds no capability — none effective, permitted, inheritable nor ambient — and gains none by an exec
+    /// (`NoNewPrivs`). Its bounding set is empty too where its keeper could empty it: root's (`drop_capabilities`)
+    /// or one born in namespaces (`capabilities_dropped`). A user's keeper without namespaces (tier C as a user)
+    /// can't (`CAP_SETPCAP`): the bounding set stays this system's, inert under `NoNewPrivs` — a setuid or
+    /// file-capability program gets nothing from it.
     #[test]
     fn a_command_holds_no_capability() {
         let Some(rules) = open_rules("a_command_holds_no_capability") else { return };
         let k = keeper("caps");
-        let (out, status) =
-            sh_through(&k, &rules, "exec grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb)' /proc/self/status");
-        assert!(status.success(), "{out}");
-        let held: Vec<&str> = out.lines().filter(|l| !l.ends_with("0000000000000000")).collect();
-        assert_eq!((out.lines().count(), held), (5, Vec::<&str>::new()), "{out}");
+        let (out, status) = sh_through(
+            &k,
+            &rules,
+            "exec grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs):' /proc/self/status",
+        );
         k.end();
+        assert!(status.success(), "{out}");
+        // SAFETY: a plain query.
+        let bounding_kept = unsafe { libc::geteuid() } != 0 && !ns().user;
+        let held: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("Cap") && !l.ends_with("0000000000000000"))
+            .filter(|l| !(bounding_kept && l.starts_with("CapBnd:")))
+            .collect();
+        assert_eq!((out.lines().count(), held), (6, Vec::<&str>::new()), "{out}");
+        assert!(out.lines().any(|l| l == "NoNewPrivs:\t1"), "no capability from an exec: {out}");
     }
 
     /// How a run ended comes from its keeper (`spawn::wait`: it isn't tarae's child), and stopping it

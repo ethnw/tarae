@@ -8526,8 +8526,12 @@ mod tests {
         };
         match check(&home, &second, Some((&home, &second))) {
             Ok(()) => {}
-            // (where tier A+ is said to be, a namespace of the test's own can be made: refused is a failure there)
-            Err(SecondBind::Refused(why)) if std::env::var_os("TARAE_EXPECT_TIER").is_none() => {
+            // (where a tier with user namespaces is said to be, a namespace of the test's own can be made: refused is
+            // a failure there; C/D's containers refuse it — the second mount below is theirs)
+            Err(SecondBind::Refused(why))
+                if !std::env::var("TARAE_EXPECT_TIER")
+                    .is_ok_and(|t| ["A+", "A", "B+", "B"].contains(&t.trim())) =>
+            {
                 refused = Some(why)
             }
             Err(e) => panic!("{e}"),
