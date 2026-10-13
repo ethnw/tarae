@@ -33,6 +33,8 @@ impl Part {
 /// Files looked at once each, in one answer's making.
 pub struct Tests {
     root: PathBuf,
+    /// The root's real path: only files really in it are read (`readable`).
+    real_root: Option<PathBuf>,
     files: HashMap<PathBuf, Part>,
     /// What each Rust file's parse found · folders' `.rs` files — each once an answer.
     found: HashMap<PathBuf, Found>,
@@ -118,9 +120,10 @@ pub fn forget_parsed() {
     *PARSED.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
-/// A Rust file parsed with `parser` — what it found, and the file's length (0: not parsed: no `test` in it).
-fn parse(parser: &mut tree_sitter::Parser, path: &Path) -> (Found, usize) {
-    let Some(src) = read_opened(path) else { return (Found::default(), 0) };
+/// A Rust file parsed with `parser`, by its real path (`Tests::readable`; None: not read) — what it found, and
+/// the file's length (0: not parsed: none, or no `test` in it).
+fn parse(parser: &mut tree_sitter::Parser, real: Option<&Path>) -> (Found, usize) {
+    let Some(src) = real.and_then(read_opened) else { return (Found::default(), 0) };
     if !src.contains("test") {
         return (Found::default(), 0);
     }
@@ -144,6 +147,7 @@ impl Tests {
         });
         Tests {
             root: root.to_path_buf(),
+            real_root: crate::paths::real(root),
             files: HashMap::new(),
             found: HashMap::new(),
             dirs: HashMap::new(),
@@ -174,7 +178,8 @@ impl Tests {
         }
         crate::sorting::sort(&mut needed);
         needed.dedup();
-        let mut todo: Vec<(PathBuf, Option<Stamp>)> = Vec::new();
+        // (each with its stamp and, when it's really in the root, its real path — what's read)
+        let mut todo: Vec<(PathBuf, Option<Stamp>, Option<PathBuf>)> = Vec::new();
         for path in needed {
             if self.found.contains_key(&path) {
                 continue;
@@ -184,7 +189,10 @@ impl Tests {
                 Some(found) => {
                     self.found.insert(path, found);
                 }
-                None => todo.push((path, s)),
+                None => {
+                    let real = self.readable(&path);
+                    todo.push((path, s, real))
+                }
             }
         }
         let Some(language) = self.language.clone() else { return };
@@ -203,8 +211,8 @@ impl Tests {
                 }
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((path, _)) = todo.get(i) else { break };
-                    let (found, bytes) = parse(&mut parser, path);
+                    let Some((_, _, real)) = todo.get(i) else { break };
+                    let (found, bytes) = parse(&mut parser, real.as_deref());
                     out.push((i, found, bytes));
                 }
                 out
@@ -214,11 +222,19 @@ impl Tests {
             handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
         for (i, found, bytes) in done {
-            let (path, s) = &todo[i];
+            let (path, s, _) = &todo[i];
             keep(path, *s, &found);
             self.counted(bytes);
             self.found.insert(path.clone(), found);
         }
+    }
+
+    /// `path`'s real path when it's really in the root — the only files read: a path given may not be a real
+    /// one (`/var` is `/private/var` on macOS; a server's paths), so it's resolved here, and `read_opened`
+    /// then refuses a file that isn't this very one when opened (changed in between). None: elsewhere.
+    fn readable(&self, path: &Path) -> Option<PathBuf> {
+        let root = self.real_root.as_ref()?;
+        crate::paths::real(path).filter(|r| r.starts_with(root))
     }
 
     fn counted(&mut self, bytes: usize) {
@@ -232,10 +248,11 @@ impl Tests {
     fn found(&mut self, path: &Path) -> &Found {
         if !self.found.contains_key(path) {
             let s = stamp(path);
+            let real = self.readable(path);
             let found = match (kept(path, s), self.parser.as_mut()) {
                 (Some(found), _) => found,
                 (None, Some(parser)) => {
-                    let (found, bytes) = parse(parser, path);
+                    let (found, bytes) = parse(parser, real.as_deref());
                     keep(path, s, &found);
                     self.counted(bytes);
                     found
@@ -481,6 +498,31 @@ mod tests {
         for a in ["#[cfg(not(test))]", "#[cfg(feature = \"testing\")]", "#[derive(Debug)]", "#[cfg(unix)]"] {
             assert!(!test_attribute(a), "{a}");
         }
+    }
+
+    /// Files are read where they really are, only in the root: a path that isn't a real one (macOS `/var` is
+    /// `/private/var`; a server's paths) is read, a link in the project to a file outside isn't — the
+    /// preflight's test step, outside the sandbox where `$TMPDIR` is under `/var`, caught the first.
+    #[test]
+    fn files_are_read_where_they_really_are_in_the_root() {
+        if Tests::new(Path::new("/")).parser.is_none() {
+            return; // (no Rust grammar in this build)
+        }
+        let base = std::env::temp_dir().join(format!("tarae-testcode-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("p/src")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let code = "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+        std::fs::write(base.join("p/src/a.rs"), code).unwrap();
+        std::fs::write(base.join("outside/b.rs"), code).unwrap();
+        std::os::unix::fs::symlink(base.join("outside/b.rs"), base.join("p/src/b.rs")).unwrap();
+        // (the project by a path that isn't its real one: through a link to it)
+        std::os::unix::fs::symlink(base.join("p"), base.join("alias")).unwrap();
+        let root = base.join("alias");
+        let mut t = Tests::new(&root);
+        assert!(t.at(&root.join("src/a.rs"), 1), "read by a path that isn't the real one");
+        assert!(!t.at(&root.join("src/b.rs"), 1), "a link to a file outside isn't read");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// What a parse found is kept while the file is unchanged — the next answer parses nothing — and found

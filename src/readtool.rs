@@ -547,12 +547,15 @@ mod tests {
         ask(&mut ed, 913, &elsewhere.join("q.txt"));
         ask(&mut ed, 914, &elsewhere.join("r.txt"));
         settle(&mut ed, &|ed| card(ed).is_some() && queued(ed) == 1);
+        // (which one is on the card: the first judged — the two are judged on workers, either may be)
+        let on_card = card(&ed).map(|(_, p)| p.input.to_string()).unwrap_or_default();
+        let (up, behind) = if on_card.contains("q.txt") { (913, 914) } else { (914, 913) };
         crate::reads::turn_over(&mut ed);
-        let ended = answered(914).expect("the one queued: answered at once");
+        let ended = answered(behind).expect("the one queued: answered at once");
         assert_eq!(ended, Err("the turn ended before the user answered".to_string()));
         ed.sessions_sync();
-        settle(&mut ed, &|_| answered(913).is_some());
-        assert_eq!(answered(913).unwrap(), Err(crate::offer::LOST.to_string()), "the one on the card");
+        settle(&mut ed, &|_| answered(up).is_some());
+        assert_eq!(answered(up).unwrap(), Err(crate::offer::LOST.to_string()), "the one on the card");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
