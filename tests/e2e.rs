@@ -102,6 +102,52 @@ fn tarae_raises_its_descriptor_limit_and_sh_gets_the_old_one() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert!(raised.contains("raised 256 →") && raised.contains("gets 256 back"), "{raised}");
+    // (macOS: the editor pins its binary for the shim — what the subcommands below must not do)
+    if cfg!(target_os = "macos") {
+        assert!(sb.state().join(format!("shims/{}", t.pid())).is_file(), "the editor's pin");
+    }
+}
+
+/// A subcommand that ends at once (`state`, `--version`, `grammar list`), started under a low soft limit, raises
+/// nothing and pins nothing — only the editor does: a pin made by each `tarae state` a driver runs every few
+/// seconds would pile up, the prune (the editor's, on a worker) never run. (Pins are macOS's: elsewhere there's
+/// none to leave, and this holds trivially.)
+#[test]
+fn a_subcommand_under_a_low_limit_leaves_no_pin() {
+    use std::os::unix::process::CommandExt as _;
+    let sb = Sandbox::new("nofile-sub");
+    let shims = sb.state().join("shims");
+    for args in [&["state"][..], &["--version"], &["grammar", "list"]] {
+        let mut c = Command::new(BIN);
+        c.args(args)
+            .env_clear()
+            .envs(sb.env())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: getrlimit/setrlimit only, between fork and exec.
+        unsafe {
+            c.pre_exec(|| {
+                let mut l = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                cvt(libc::getrlimit(libc::RLIMIT_NOFILE, &mut l))?;
+                l.rlim_cur = 256;
+                cvt(libc::setrlimit(libc::RLIMIT_NOFILE, &l))?;
+                Ok(())
+            });
+        }
+        let mut child = c.spawn().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > end {
+                child.kill().ok();
+                panic!("tarae {args:?} didn't end");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let left: Vec<_> =
+            fs::read_dir(&shims).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "tarae {args:?} left {left:?} in {}", shims.display());
+    }
 }
 
 #[test]

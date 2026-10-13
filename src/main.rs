@@ -193,8 +193,6 @@ fn main() -> Result<()> {
     if std::env::args_os().nth(1).is_some_and(|a| a == sandbox::keeper::FLAG) {
         sandbox::keeper::main();
     }
-    // (before any thread starts: the soft limit on open descriptors up to the hard one — said once the log is)
-    let raised = nofile::raise();
     // (what tarae was handed open goes no further than tarae)
     spawn::close_on_exec();
     restart::remember_exe();
@@ -263,6 +261,10 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
 
+    // (the editor's alone, before any thread starts: the soft limit on open descriptors up to the hard one, and
+    // tarae's binary pinned for the shim — said once the log is. A subcommand that ends at once — `state`, `grammar`,
+    // `plugin`, `--version` — raises nothing and pins nothing: it would leave a pin no prune of its sees)
+    let raised = nofile::raise();
     // (before any thread starts — SIGTERM and SIGHUP quit as `:q!` does, ending what tarae started)
     term::catch_signals();
     // (Linux: what Claude's runs leave running stays tarae's — served, reaped, ended with its session)

@@ -843,8 +843,9 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
 
 ### Many sessions, the descriptor limit raised (linux7 piece 9, 2026-10-13)
 
-- **What changed**: tarae raises its soft `RLIMIT_NOFILE` to the hard limit first thing in `main` (macOS: to
-  `kern.maxfilesperproc` at most), and what it starts gets the old one back (`nofile.rs`). A pool pty's `O_PATH`
+- **What changed**: the editor raises its soft `RLIMIT_NOFILE` to the hard limit in `main`, past the arguments,
+  before any thread runs (macOS: to `kern.maxfilesperproc` at most; a subcommand like `tarae state` raises and
+  pins nothing), and what it starts gets the old one back (`nofile.rs`). A pool pty's `O_PATH`
   other end is closed once the run's rules are made: a Landlock rule keeps its own reference to the inode, and
   tarae's master keeps the pty that inode. Broken once, closed before the rules, every pool pty is refused
   (`EACCES`). `ptys::POOL` stays 16: nothing measured says fewer is enough, and tarae's own e2e suite holds a pty

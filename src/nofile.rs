@@ -4,8 +4,9 @@
 //! The soft limit is often 1024 (systemd's default) or 256 (macOS's launchd), and a session with a held served
 //! run in tier C holds about 30 of tarae's descriptors, its servers, files and terminal more: the 20th session's
 //! run couldn't be made (`docs/design/sandbox-keeper.md` §Many sessions). So `raise` lifts the soft limit to the
-//! hard one first thing in `main` — on macOS to `kern.maxfilesperproc` at most (`setrlimit` refuses more) —
-//! never lower, and never an error when it can't.
+//! hard one in `main` once it knows it's the editor — a subcommand that ends at once (`state`, `--version`) raises
+//! and pins nothing — before any thread runs; on macOS to `kern.maxfilesperproc` at most (`setrlimit` refuses
+//! more); never lower, and never an error when it can't.
 //!
 //! What tarae starts that runs arbitrary programs gets the limit it started with back, as Go's runtime does since
 //! 1.19: a program using `select()` meets a descriptor numbered 1024 or more where under the old limit it got
@@ -81,7 +82,8 @@ fn limit() -> libc::rlimit {
     l
 }
 
-/// Raises the soft limit (`target`) — first thing in `main`, before any thread runs. What to say in the log
+/// Raises the soft limit (`target`) — the editor's alone (`main`, past the arguments), before any thread runs;
+/// on macOS it pins tarae's binary for the shim too (`pin`). What to say in the log
 /// once it's up (from → to, or why not); None when there was nothing to raise.
 pub fn raise() -> Option<String> {
     let l = limit();
