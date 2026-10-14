@@ -177,9 +177,11 @@ pub fn run(args: &[String]) -> Result<()> {
 /// 12 (2026-10-09, 11.05 then; ~10.95 with std's sorts back in `sorting` — target/sb/size-2026-10.md): the
 /// user's call — features grew it ~0.4 MB a day, no one cause; the size pass stays at the roadmap's end, and a
 /// dependency's jump is `SIZE_JUMP`'s to catch, not the budget's.
+/// Bundled 17 (2026-10-14, 16.84 then): the user's call — the bundled budget follows the default's 12 plus the
+/// grammars' ~5 MB (it stayed at 15 while the default went 9.5 → 10 → 12).
 const SIZES: [(&str, &[&str], &str, f64); 2] = [
     ("release_size_mb", &[], "target", 12.0),
-    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 15.0),
+    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 17.0),
 ];
 const SIZE_NOISE: f64 = 0.05;
 
