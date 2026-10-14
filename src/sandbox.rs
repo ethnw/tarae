@@ -293,7 +293,7 @@ impl Guard {
     }
 
     /// What its runs are kept apart from and share (`Policy::guarantees`) — None: not in the sandbox.
-    fn guarantees(&self) -> Option<guarantees::Guarantees> {
+    pub fn guarantees(&self) -> Option<guarantees::Guarantees> {
         match self {
             Guard::In(p) => p.guarantees(),
             _ => None,

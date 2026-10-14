@@ -448,7 +448,14 @@ fn start(ed: &mut Editor, call: Call, target: crate::testing::Target) {
     guarded(ed, call, Job::Tests(Box::new(target)), false);
 }
 
-fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard: Option<Guard>, ride: Ride) {
+/// Whether they started (else `fail` said why).
+fn start_tests(
+    ed: &mut Editor,
+    who: For,
+    target: crate::testing::Target,
+    guard: Option<Guard>,
+    ride: Ride,
+) -> bool {
     let before = ed.test_generation;
     let program = target.argv().first().cloned().unwrap_or_default();
     let trace = match &who {
@@ -465,8 +472,12 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
             }
             r.by_claude = true;
             (r.key, r.joined, r.queued, r.snap) = (ride.key, ride.joined, ride.queued, ride.snap);
+            true
         }
-        None => fail(ed, who, ride.joined, format!("couldn't start {program}")),
+        None => {
+            fail(ed, who, ride.joined, format!("couldn't start {program}"));
+            false
+        }
     }
 }
 
@@ -2154,11 +2165,16 @@ pub(crate) fn draws_as_itself(text: &str) -> bool {
 
 /// Claude's command into the task panel (`go_now` saw it free) — one that couldn't spawn is told to its
 /// callers.
-fn run_start(ed: &mut Editor, who: For, cmd: String, cwd: PathBuf, guard: Option<Guard>, ride: Ride) {
+/// Whether it started (else `fail` said why).
+fn run_start(ed: &mut Editor, who: For, cmd: String, cwd: PathBuf, guard: Option<Guard>, ride: Ride) -> bool {
     let task = crate::task::Task { name: cmd.clone(), cmd, cwd };
-    if let Err(back) = ed.task_start_for(task, who, guard, ride) {
-        let (who, ride) = *back;
-        fail(ed, who, ride.joined, "couldn't start sh".into());
+    match ed.task_start_for(task, who, guard, ride) {
+        Ok(()) => true,
+        Err(back) => {
+            let (who, ride) = *back;
+            fail(ed, who, ride.joined, "couldn't start sh".into());
+            false
+        }
     }
 }
 
@@ -2739,9 +2755,15 @@ fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride)
         };
         crate::reads::run_started(ed, dir);
     }
-    match job {
+    // (9d: the session's sandbox is this run's once it started — one that didn't spawn leaves the state as it was;
+    // `Session.sandbox`)
+    let sandbox = guard.as_ref().and_then(Guard::guarantees);
+    let started = match job {
         Job::Command(cmd, cwd) => run_start(ed, who, cmd, cwd, guard, ride),
         Job::Tests(target) => start_tests(ed, who, *target, guard, ride),
+    };
+    if let Some(g) = sandbox.filter(|_| started) {
+        crate::uistate::watch::sandbox(ed, g);
     }
 }
 
@@ -3479,6 +3501,37 @@ mod tests {
     /// A project root none of the reports' paths are under (they're shown whole).
     fn elsewhere() -> &'static std::path::Path {
         std::path::Path::new("/elsewhere")
+    }
+
+    /// 9d: the session's sandbox is a run's once it started — one that didn't spawn (its folder gone: the spawn's
+    /// `chdir` fails, nothing runs) leaves the state as it was; the next that starts (`true`) is said. macOS: a
+    /// policy made for it has Seatbelt's guarantees (Linux's need a keeper — `claudes_check_runs_in_the_linux_sandbox`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_sessions_sandbox_is_a_started_runs() {
+        use crate::sandbox::{Env, Guard, Policy, guarantees::Guarantees};
+        let dir = std::env::temp_dir().join(format!("tarae-9d-started-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        let guard =
+            || Guard::In(Box::new(Policy::for_project(&Env { root: dir.clone(), ..Default::default() })));
+        let its = guard().guarantees().expect("a policy made for macOS has Seatbelt's");
+        let before = Guarantees::seatbelt(true, true);
+        assert_ne!(its, before);
+        ed.session.sandbox = Some(before.clone());
+        let go = |ed: &mut crate::editor::Editor, cwd: std::path::PathBuf| {
+            let job = super::Job::Command("true".into(), cwd);
+            super::go_now(ed, super::For::User("again".into()), job, Some(guard()), Default::default());
+        };
+        go(&mut ed, dir.join("gone"));
+        assert!(ed.session.task_run.is_none(), "it didn't spawn");
+        assert_eq!(ed.session.sandbox.as_ref(), Some(&before), "a run that didn't start leaves it");
+        go(&mut ed, dir.clone());
+        assert!(ed.session.task_run.is_some(), "it started");
+        assert_eq!(ed.session.sandbox.as_ref(), Some(&its), "a run that started is said");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1,10 +1,12 @@
 //! What a run's sandbox keeps apart from other tarae sessions' commands (and the user's other programs) and what it
 //! shares (keeper step 9a, `docs/design/sandbox-keeper.md` §Showing it) — one value a run: built where its keeper is
 //! known (`linux::confine`, `Guarantees::landlock`) or from its Seatbelt policy (`Guarantees::seatbelt`), never kept
-//! by session (a policy that changes gets another keeper, D14). Its words are made here only: the state line
+//! by session for a run (a policy that changes gets another keeper, D14) — the session's copy is only shown
+//! (`Session.sandbox`). Its words are made here only: the state line
 //! (`pairs`), one sentence for Claude (`sentence`), a fallback's reason (`why`) and the report's sentences of what's
-//! shared (`shared_said` — the run's report reads them). Pure and built everywhere: its golden
-//! (`sandbox_guarantees.txt`) says every tier on any machine.
+//! shared (`shared_said` — the run's report reads them), and `tarae state`'s object (`json`, 9d: the session keeps its
+//! last run's — `Session.sandbox`). Pure and built everywhere: its golden (`sandbox_guarantees.txt`) says every tier
+//! on any machine.
 //!
 //! A keeper's namespaces (`Ns`), its tier (`Tier`) and how a run's sockets go (`RunNet`) are here for that — reading
 //! them from a process and making them are `tier.rs`'s.
@@ -139,6 +141,22 @@ pub enum Part {
     Loopback,
 }
 
+impl Part {
+    /// Its name in `tarae state` (`Guarantees::json`) — the same on every system (`Guarantees::name` is the
+    /// system's).
+    pub fn key(self) -> &'static str {
+        match self {
+            Part::Files => "files",
+            Part::Processes => "processes",
+            Part::Signals => "signals",
+            Part::Ipc => "ipc",
+            Part::Shm => "shm",
+            Part::Ptys => "ptys",
+            Part::Loopback => "loopback",
+        }
+    }
+}
+
 /// One part, kept apart or shared, and how in a few words (empty: nothing to add).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
@@ -173,10 +191,24 @@ pub enum Way {
     NoSocket,
 }
 
+impl Way {
+    /// Its name in `tarae state`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Way::Tproxy => "tproxy",
+            Way::Proxy => "proxy",
+            Way::Copies => "copies",
+            Way::NoSocket => "no-socket",
+        }
+    }
+}
+
 /// What a run's sandbox guarantees (the module's doc).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Guarantees {
     pub by: By,
+    /// Its keeper's namespaces, as read at its birth (`Found.ns`) — None: Seatbelt's (no keeper).
+    pub ns: Option<Ns>,
     /// Every part said, in `Part`'s order — a part not here isn't claimed either way.
     pub rows: Vec<Row>,
     /// Whether the policy opens the network, and how it goes.
@@ -303,6 +335,7 @@ impl Guarantees {
         }
         Guarantees {
             by: By::Landlock { tier, abi: f.abi, net },
+            ns: Some(f.ns),
             rows,
             network: f.network,
             way,
@@ -318,6 +351,7 @@ impl Guarantees {
         let loopback = if ports { "the ports it opens, whoever's" } else { "none of its ports open" };
         Guarantees {
             by: By::Seatbelt,
+            ns: None,
             rows: vec![
                 Row::new(Part::Files, true, "but the temp folders"),
                 Row::new(Part::Processes, false, "command lines, priority"),
@@ -348,7 +382,6 @@ impl Guarantees {
 }
 
 /// Its words for the places that show it — Claude's report (9b), `tarae state` (9d), the panel and `:procs` (9e).
-#[cfg_attr(all(target_os = "linux", not(test)), expect(dead_code, reason = "the state line: 9d"))]
 impl Guarantees {
     /// The parts it shares, in order.
     pub fn shared(&self) -> Vec<Part> {
@@ -398,6 +431,42 @@ impl Guarantees {
     /// The state line: `pairs`, a ` · ` between.
     pub fn line(&self) -> String {
         self.pairs().iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · ")
+    }
+
+    /// The state line after a `sandbox` label (the state's text forms): `Seatbelt · …`, not `sandbox Seatbelt · …`.
+    pub fn line_after_label(&self) -> String {
+        let line = self.line();
+        line.strip_prefix("sandbox ").map_or_else(|| line.clone(), String::from)
+    }
+
+    /// `tarae state`'s `sandbox` object of a session (9d, pinned by `ui_state.json`): what enforces it — the tier
+    /// and Landlock's ABI (null on macOS: `by` `seatbelt`), the keeper's namespaces (`netns`: a network namespace
+    /// of the session's own — false where it's served by copies, N1) — how the network goes, each part kept apart
+    /// or shared (`Part::key`, `how` where there's more to say), `why` not the top tier, and the state `line`.
+    /// `hint` is 9f's (how the tier would go up — the profile's step): null until then.
+    pub fn json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let (by, tier, abi) = match self.by {
+            By::Landlock { tier, abi, .. } => ("landlock", Some(tier.said()), Some(abi)),
+            By::Seatbelt => ("seatbelt", None, None),
+        };
+        let parts = |kept: bool| -> Vec<serde_json::Value> {
+            let rows = self.rows.iter().filter(|r| r.kept == kept);
+            rows.map(|r| match r.how.is_empty() {
+                true => json!({ "part": r.part.key() }),
+                false => json!({ "part": r.part.key(), "how": r.how }),
+            })
+            .collect()
+        };
+        let ns = self
+            .ns
+            .map(|n| json!({ "user": n.user, "net": n.net, "pid": n.pid, "shm": n.shm, "netns": n.netns() }));
+        json!({
+            "by": by, "tier": tier, "abi": abi, "partial": abi.is_some_and(|a| a < 3), "namespaces": ns,
+            "network": { "open": self.network, "way": self.way.key() },
+            "kept": parts(true), "shared": parts(false),
+            "why": self.why, "hint": null, "line": self.line(),
+        })
     }
 
     /// One sentence for Claude: the tier, what's kept apart from other sessions' commands and what's shared.

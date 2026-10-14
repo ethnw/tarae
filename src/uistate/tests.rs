@@ -821,6 +821,11 @@ fn the_state_as_json_is_pinned() {
     // (its Claude had a turn: a request writing to the 1h cache, then the result — `usage.rs`)
     let u = &mut ed.session_by_id(id).unwrap().usage;
     usage_turn(u);
+    // (its runs' sandboxes: in front a Linux keeper served by copies, behind macOS's with ports open — 9d)
+    let copied = landlock_run(crate::sandbox::guarantees::Ns::session(false, true), true);
+    ed.session.sandbox = Some(copied);
+    ed.session_by_id(id).unwrap().sandbox =
+        Some(crate::sandbox::guarantees::Guarantees::seatbelt(true, false));
     edit_review(&mut ed);
     task_panel(&mut ed);
     light_card(&mut ed);
@@ -1647,6 +1652,128 @@ fn a_watcher_of_usage_hears_a_turn_and_the_cache_going_cold() {
     assert!(sessions.try_iter().next().is_none(), "a watcher of sessions isn't told what they cost");
 }
 
+/// A Landlock run's sandbox (ABI 8, served) in a keeper born with `ns` — by tarae's copies of its sockets where
+/// `copies` (`pidfd_getfd` refused).
+fn landlock_run(ns: crate::sandbox::guarantees::Ns, copies: bool) -> crate::sandbox::guarantees::Guarantees {
+    crate::sandbox::guarantees::Guarantees::landlock(crate::sandbox::guarantees::Found {
+        ns,
+        served: Ok(()),
+        copies,
+        abi: 8,
+        ptys: None,
+        tproxy: if ns.netns() { Ok(()) } else { Err("no network namespace of its own".into()) },
+        lo_missing: Vec::new(),
+        short: None,
+        network: false,
+    })
+}
+
+/// Keeper 9d: a session's `sandbox` is its last sandboxed run's — null before one, then the tier, ABI, the keeper's
+/// namespaces, the network's way, what's kept and shared, why not the top tier and 9f's `hint` (null) — and a
+/// watcher of `sandbox` hears it once each time it changes (the first run, a keeper born with other namespaces, a
+/// policy opening ports), never for a run like the last, nor a watcher of `sessions`. Claude reads its own
+/// session's in its `ui` answer, why included, and no other's; the context's `ui:` line doesn't carry it.
+#[test]
+fn tarae_state_says_the_sandbox() {
+    use crate::sandbox::guarantees::{Guarantees, Ns};
+    let mut ed = editor();
+    frame(&mut ed);
+    assert_eq!(ed.ui_state().json()["sessions"][0]["sandbox"], Value::Null, "no sandboxed run yet");
+    let watcher = |ed: &mut Editor, kind: &str| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(watch::UNREAD);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ed.ui_watch_add(watch::Watcher { tx, kinds: vec![kind.into()], overflowed: flag });
+        rx
+    };
+    let (sandbox, sessions) = (watcher(&mut ed, "sandbox"), watcher(&mut ed, "sessions"));
+    let events = |ed: &mut Editor| -> Vec<Value> {
+        frame(ed);
+        sandbox.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
+    };
+    // The first run: its keeper has every namespace (A+, its own network: TPROXY)
+    let own = landlock_run(Ns::session(true, true), false);
+    let line = "tier A+ · Landlock ABI 8 · loopback its own · network closed · shared nothing";
+    watch::sandbox(&mut ed, own.clone());
+    let e = events(&mut ed);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(
+        (&e[0]["event"], &e[0]["session"], &e[0]["was"]),
+        (&json!("sandbox"), &json!("s0"), &Value::Null)
+    );
+    assert_eq!(e[0]["said"], format!("s0 {}: sandbox {line}", ed.session.label()));
+    let kept = ["files", "processes", "signals", "ipc", "shm", "ptys", "loopback"].map(|p| match p {
+        "files" => json!({ "part": p, "how": "but the temp folders" }),
+        "loopback" => json!({ "part": p, "how": "its own" }),
+        _ => json!({ "part": p }),
+    });
+    assert_eq!(
+        ed.ui_state().json()["sessions"][0]["sandbox"],
+        json!({
+            "by": "landlock", "tier": "A+", "abi": 8, "partial": false,
+            "namespaces": { "user": true, "net": true, "pid": true, "shm": true, "netns": true },
+            "network": { "open": false, "way": "tproxy" }, "kept": kept, "shared": [],
+            "why": null, "hint": null, "line": line,
+        })
+    );
+    // A run like the last: nothing said
+    watch::sandbox(&mut ed, own.clone());
+    assert_eq!(events(&mut ed), Vec::<Value>::new());
+    // A keeper born with other namespaces — served by copies, no network namespace of its own (N1): one event
+    watch::sandbox(&mut ed, landlock_run(Ns::session(false, true), true));
+    let e = events(&mut ed);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(
+        (&e[0]["was"], &e[0]["tier"], &e[0]["namespaces"]["netns"]),
+        (&json!(line), &json!("A+"), &json!(false))
+    );
+    assert_eq!(e[0]["network"]["way"], "copies");
+    assert_eq!(e[0]["why"], "served by tarae's copies of its sockets: pidfd_getfd refused");
+    // macOS: Seatbelt's (no tier, ABI or namespaces); a policy that opens ports, one event — its loopback shared
+    watch::sandbox(&mut ed, Guarantees::seatbelt(false, false));
+    assert_eq!(events(&mut ed).len(), 1);
+    watch::sandbox(&mut ed, Guarantees::seatbelt(false, false));
+    assert_eq!(events(&mut ed), Vec::<Value>::new());
+    watch::sandbox(&mut ed, Guarantees::seatbelt(true, false));
+    let e = events(&mut ed);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(
+        (&e[0]["by"], &e[0]["tier"], &e[0]["abi"], &e[0]["namespaces"]),
+        (&json!("seatbelt"), &Value::Null, &Value::Null, &Value::Null)
+    );
+    assert!(
+        e[0]["shared"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({ "part": "loopback", "how": "the ports it opens, whoever's" })),
+        "{e:?}"
+    );
+    assert!(sessions.try_iter().next().is_none(), "a watcher of sessions isn't told the sandbox");
+    // The text forms; Claude's level: its own session's, why included — not another's, not in the `ui:` line
+    let id = ed.session_add(std::env::temp_dir().join("tarae-uistate-sandbox"));
+    ed.session_by_id(id).unwrap().sandbox = Some(own);
+    ed.session.sandbox = Some(landlock_run(Ns::session(false, true), true));
+    let mine = ed.session.sandbox.clone().unwrap();
+    frame(&mut ed);
+    ed.session_by_id(id).unwrap().sandbox = Some(Guarantees::seatbelt(false, false));
+    let text = ed.ui_state().text();
+    let seatbelt = "sandbox s1: Seatbelt · loopback none of its ports open · network closed · shared processes, \
+                    System V shared memory, POSIX shared memory\n";
+    assert!(text.contains(seatbelt), "{text}");
+    ed.session_by_id(id).unwrap().sandbox = Some(landlock_run(Ns::session(true, true), false));
+    let text = ed.ui_state().text();
+    assert!(
+        text.contains(&format!("sandbox s0: {}\n", mine.line()))
+            && text.contains(&format!("sandbox s1: {line}\n")),
+        "{text}"
+    );
+    let c = ed.ui_state_claude();
+    let text = c.text_claude(false);
+    let said = format!("sandbox: {} — not the top tier: {}\n", mine.line(), mine.why.as_ref().unwrap());
+    assert!(text.contains(&said) && !text.contains(line), "{text}");
+    assert_eq!(c.json()["sessions"][1]["sandbox"], Value::Null, "another session's: not Claude's");
+    assert!(c.context_line().is_none_or(|(l, _)| !l.contains("sandbox")), "{:?}", c.context_line());
+}
+
 /// A watcher that doesn't read is let go once `UNREAD` events wait for it — its flag says why (its
 /// connection's last line); the others go on, and with none left, nothing more is kept.
 #[test]
@@ -1733,6 +1860,13 @@ fn claudes_answer_stays_small_on_a_busy_scene() {
     assert!(text.len() <= 1536, "{} bytes:\n{text}", text.len());
     assert!(line.len() <= 512, "{} bytes: {line}", line.len());
     assert!(!text.contains("cargo test -p tarae") && !line.contains("cargo test"), "{text}\n{line}");
+    // (its sandbox: one line of the answer, nothing in the context's line every request reads — 9d)
+    let mut bare = busy_scene();
+    bare.session.sandbox = None;
+    let b = bare.ui_state_claude();
+    let sandbox = text.lines().find(|l| l.starts_with("sandbox: ")).expect("its sandbox said");
+    assert_eq!(b.text_claude(false).len() + sandbox.len() + 1, text.len(), "{text}");
+    assert_eq!(b.context_line().map(|l| l.0), Some(line));
 }
 
 fn busy_scene() -> Editor {
@@ -1753,6 +1887,8 @@ fn busy_scene() -> Editor {
     task_panel(&mut ed);
     light_card(&mut ed);
     weighty_card(&mut ed);
+    // (its runs' sandbox: a keeper served by copies — the longest line Claude's answer gets, a fallback's why with it)
+    ed.session.sandbox = Some(landlock_run(crate::sandbox::guarantees::Ns::session(false, true), true));
     ed.set_warning("src/term.rs changed on disk — reloaded");
     ed.set_status("check passed");
     frame(&mut ed);

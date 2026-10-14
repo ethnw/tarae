@@ -81,6 +81,7 @@ impl Editor {
             l.rebasing = None;
             l.compacted = None;
             l.key_source = None;
+            l.sandbox = None;
         }
         // A reviewer — its own session's too — is how it goes and its counts, never its words: nothing of it
         // goes to the author until you send its findings (`space v s`), and its verdict never does
@@ -169,6 +170,12 @@ impl UiState {
             self.sessions.iter().find(|s| s.id == self.front).and_then(|s| s.reviewer_run.as_ref())
         {
             out.push(format!("reviewer: {}", r.text()));
+        }
+        // (its own session's sandbox, decision 13 — here, not in the context's `ui:` line every request reads: the
+        // run reports say it once a conversation)
+        if let Some(g) = self.sessions.iter().find(|s| s.id == self.front).and_then(|s| s.sandbox.as_ref()) {
+            let why = g.why.as_ref().map(|w| format!(" — not the top tier: {w}")).unwrap_or_default();
+            out.push(format!("sandbox: {}{why}", g.line_after_label()));
         }
         out.extend(self.card_lines());
         for p in &self.panels.code {

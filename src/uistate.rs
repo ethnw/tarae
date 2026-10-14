@@ -16,7 +16,8 @@ use crate::key::{Code, Key};
 use crate::sizes::Slot;
 
 /// The schema's version: a field removed, renamed or meaning something else bumps it; one added doesn't.
-/// 2: `panels.edit_review.by` went (an edit's review is always Claude's).
+/// 2: `panels.edit_review.by` went (an edit's review is always Claude's); since added: `sessions[].sandbox`, what
+/// its runs' sandbox keeps apart and shares (keeper 9d: `Guarantees::json`; null before its first sandboxed run).
 pub const V: u64 = 2;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
@@ -751,6 +752,8 @@ pub struct SessionState {
     pub key_source: Option<String>,
     /// Who pays for its Claude: `subscription` · `api` (`billing.rs`).
     pub billing: &'static str,
+    /// What its last sandboxed run's sandbox keeps apart and shares (`Session.sandbox`) — None: none yet.
+    pub sandbox: Option<crate::sandbox::guarantees::Guarantees>,
 }
 
 /// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
@@ -1057,6 +1060,7 @@ impl Editor {
             compacted: Some(l.compacted.clone()).filter(|c| c.count > 0),
             key_source: l.usage.key_source.clone(),
             billing: l.billing.name(),
+            sandbox: l.sandbox.clone(),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1265,6 +1269,7 @@ impl UiState {
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);
                 }
+                v["sandbox"] = s.sandbox.as_ref().map_or(Value::Null, |g| g.json());
                 v
             })
             .collect();
@@ -1367,6 +1372,9 @@ impl UiState {
             }
             if let Some(r) = &s.reviewer_run {
                 out.push(format!("reviewer {}: {}", s.id, r.text()));
+            }
+            if let Some(g) = &s.sandbox {
+                out.push(format!("sandbox {}: {}", s.id, g.line_after_label()));
             }
         }
         out.extend(self.card_lines());

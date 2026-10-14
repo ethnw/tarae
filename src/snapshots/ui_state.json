@@ -202,7 +202,53 @@
       "doing": "waiting",
       "id": "s0",
       "name": "main",
-      "root": "tarae-uistate-main"
+      "root": "tarae-uistate-main",
+      "sandbox": {
+        "abi": 8,
+        "by": "landlock",
+        "hint": null,
+        "kept": [
+          {
+            "how": "but the temp folders",
+            "part": "files"
+          },
+          {
+            "part": "processes"
+          },
+          {
+            "part": "signals"
+          },
+          {
+            "part": "ipc"
+          },
+          {
+            "part": "shm"
+          },
+          {
+            "part": "ptys"
+          },
+          {
+            "how": "this machine's, other sessions' sockets refused",
+            "part": "loopback"
+          }
+        ],
+        "line": "tier A+ · Landlock ABI 8 · loopback this machine's, other sessions' sockets refused · network closed · shared nothing",
+        "namespaces": {
+          "net": false,
+          "netns": false,
+          "pid": true,
+          "shm": true,
+          "user": true
+        },
+        "network": {
+          "open": false,
+          "way": "copies"
+        },
+        "partial": false,
+        "shared": [],
+        "tier": "A+",
+        "why": "served by tarae's copies of its sockets: pidfd_getfd refused"
+      }
     },
     {
       "billing": "subscription",
@@ -211,6 +257,45 @@
       "id": "s1",
       "name": "fix-login",
       "root": "tarae-uistate-golden",
+      "sandbox": {
+        "abi": null,
+        "by": "seatbelt",
+        "hint": null,
+        "kept": [
+          {
+            "how": "but the temp folders",
+            "part": "files"
+          },
+          {
+            "part": "signals"
+          }
+        ],
+        "line": "sandbox Seatbelt · loopback the ports it opens, whoever's · network closed · shared processes, System V shared memory, POSIX shared memory, loopback",
+        "namespaces": null,
+        "network": {
+          "open": false,
+          "way": "proxy"
+        },
+        "partial": false,
+        "shared": [
+          {
+            "how": "command lines, priority",
+            "part": "processes"
+          },
+          {
+            "part": "ipc"
+          },
+          {
+            "part": "shm"
+          },
+          {
+            "how": "the ports it opens, whoever's",
+            "part": "loopback"
+          }
+        ],
+        "tier": null,
+        "why": null
+      },
       "usage": {
         "cache": "warm",
         "context": {

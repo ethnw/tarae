@@ -181,8 +181,8 @@ fn peer(stream: UnixStream, tx: crate::event::Tx) {
 }
 
 /// The kinds of events a watcher may ask for (`{"watch":[…]}`; none: all).
-const KINDS: [&str; 9] =
-    ["keys", "cards", "sessions", "reviewer", "turns", "runs", "toasts", "usage", "procs"];
+const KINDS: [&str; 10] =
+    ["keys", "cards", "sessions", "reviewer", "turns", "runs", "toasts", "usage", "procs", "sandbox"];
 
 /// `{"watch":["keys","cards",…]}`: this connection is told what changes, a JSON line an event, from the frame
 /// after it's registered on (`uistate/watch.rs`). It ends when the reader goes — or reads too slowly: then its

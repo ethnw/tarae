@@ -7604,6 +7604,8 @@ mod tests {
             "{answer}"
         );
         assert!(!crate::tools::unsandboxed(&ed));
+        // (9d: the session's sandbox is its run's, in the state)
+        assert_eq!(ed.ui_state().json()["sessions"][0]["sandbox"]["by"], "seatbelt");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&kept).ok();
     }
@@ -7673,6 +7675,13 @@ mod tests {
             );
         }
         assert!(!crate::tools::unsandboxed(&ed));
+        // (9d: the session's sandbox is its run's keeper's, in the state)
+        let state = ed.ui_state().json()["sessions"][0]["sandbox"].clone();
+        assert_eq!(
+            (&state["by"], &state["abi"]),
+            (&serde_json::json!("landlock"), &serde_json::json!(abi)),
+            "{state}"
+        );
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&kept).ok();
     }

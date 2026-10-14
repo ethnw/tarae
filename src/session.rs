@@ -197,6 +197,12 @@ pub struct Session {
     /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:sandbox-allowed` lists and
     /// takes back; the proxy holds the answers itself (`hosts.rs`).
     pub hosts: Vec<(crate::sandbox::proxy::Kind, String, u16)>,
+    /// What its last sandboxed run's sandbox keeps apart and shares (9d) — its keeper's, or its Seatbelt policy's —
+    /// as the run's policy has it (`Guard::guarantees`: made on the worker that made the policy, `linux::confine`),
+    /// kept on the main loop once the run started (`tools::go_now` → `watch::sandbox`; one that didn't spawn
+    /// leaves it as it was): the state reads it with no lock or probe. Shown only, never a run's input. None: no
+    /// sandboxed run started yet — a keeper is born with the first.
+    pub sandbox: Option<crate::sandbox::guarantees::Guarantees>,
     /// Its id for tarae's proxy, with the root it was worked out for (`proxy_id`).
     proxy_id: std::cell::RefCell<(PathBuf, u64)>,
 }
@@ -315,6 +321,7 @@ impl Session {
             limit_asked: None,
             compacted: Default::default(),
             hosts: Vec::new(),
+            sandbox: None,
             proxy_id,
         }
     }

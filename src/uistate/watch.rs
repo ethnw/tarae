@@ -2,7 +2,7 @@
 //! change, instead of asking again and again. After each frame, a small summary — where the keys go, the
 //! cards (id, rev, where they are), what each session is doing, the toasts — is compared with the last one
 //! sent, and what changed goes out (`keys`, `card-up`, `session`, `toast`); what a diff can't tell is said
-//! where it happens (`card-gone` and how, `turn`, `run` — every step of a run's trace). Each carries
+//! where it happens (`card-gone` and how, `turn`, `run` — every step of a run's trace —, `sandbox`). Each carries
 //! `frame`, `input` and `said`, one line in plain words.
 //!
 //! Nobody watching: one branch a frame (and the gone ring's few ids). A watcher never wakes tarae or makes
@@ -282,6 +282,27 @@ pub fn usage(ed: &mut Editor, what: &str) {
     ev["session"] = json!(id);
     ev["what"] = json!(what);
     ev["said"] = json!(said);
+    ed.ui_said(ev);
+}
+
+/// Session `ed.session`'s run starts with sandbox `g` (`tools::go_now`, 9d): the session keeps it (`Session.sandbox`)
+/// — and when it isn't what the session had (its first run, a keeper born with other namespaces, a policy that opens
+/// or closes something) watchers of `sandbox` hear the state's new object; a run like the last says nothing.
+pub fn sandbox(ed: &mut Editor, g: crate::sandbox::guarantees::Guarantees) {
+    if ed.session.sandbox.as_ref() == Some(&g) {
+        return;
+    }
+    let was = ed.session.sandbox.replace(g).map(|w| w.line());
+    if !ed.ui_watch.watching() {
+        return;
+    }
+    let Some(g) = &ed.session.sandbox else { return };
+    let (id, name) = (super::session_id(ed.session.id), ed.session.label());
+    let mut ev = g.json();
+    ev["said"] = json!(format!("{id} {name}: sandbox {}", g.line()));
+    ev["event"] = json!("sandbox");
+    ev["session"] = json!(id);
+    ev["was"] = json!(was);
     ed.ui_said(ev);
 }
 
