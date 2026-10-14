@@ -330,13 +330,13 @@ impl Policy {
         }
     }
 
-    /// Linux: the tier its runs go at, `partial` below Landlock ABI 3 (`linux::Confine.tier`, as `confine`
-    /// decided it — empty for a probe's rules); None elsewhere (Seatbelt has no tiers).
+    /// Linux: the tier its runs go at, `partial` below Landlock ABI 3 (`linux::Confine::tier`, its guarantees' —
+    /// empty for a probe's rules); None elsewhere (Seatbelt has no tiers).
     pub fn tier_said(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         return Some(match &self.confine {
             Some(Ok(c)) => {
-                format!("{}{}", c.tier, if c.abi < 3 { " partial" } else { "" }).trim().to_string()
+                format!("{}{}", c.tier(), if c.abi < 3 { " partial" } else { "" }).trim().to_string()
             }
             _ => String::new(),
         });
@@ -377,7 +377,7 @@ impl Policy {
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
                  it before your next run), and the terminal multiplexers' folders in /tmp stay \
                  writable.{userns}{}{}{}{}{}",
-                linux::notes(c.abi, c.ns, c.ptys.is_some()),
+                c.guarantees.as_ref().map(|g| g.shared_said()).unwrap_or_default(),
                 linux::made_said(&c.made, &self.root),
                 linux::kept_said(&c.kept, &self.root),
                 linux::unread_said(&c.unread, &self.root),

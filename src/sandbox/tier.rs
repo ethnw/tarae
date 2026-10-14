@@ -13,48 +13,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// A keeper's namespaces: none (tiers C/D), or the session's — `user` with its ipc and mount namespaces,
-/// `pid` (and a fresh `/proc`) where it mounts, `net` (only `lo`, up) where the policy opens nothing, and a
-/// `/dev/shm` of its own (`shm`) but where the project or a place it writes is in this system's.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Ns {
-    pub user: bool,
-    pub net: bool,
-    pub pid: bool,
-    pub shm: bool,
-}
-
-/// How a run's internet sockets go (`Ns::run_net`): one answer its Landlock rules (`linux::confine`) and its
-/// seccomp mode (the keeper's run) both take.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunNet {
-    /// Without a network namespace of its own (tier C): tarae makes its internet sockets, bound to `lo`, and
-    /// every call naming an address (`seccomp::Mode::Served`); Landlock handles TCP and UDP.
-    Served,
-    /// In the network namespace its keeper made: its internet sockets its own, every call naming an address
-    /// tarae's, routed (`Mode::Routed`, `sandbox::route`); Landlock handles TCP and UDP (tarae's calls on its
-    /// sockets aren't the run's).
-    Routed,
-    /// Not served, in that network namespace, holding only `lo` (`Mode::OwnNetwork`); Landlock leaves TCP and UDP
-    /// to it (`Ruleset::new_own_network`).
-    Own,
-    /// None (`Mode::Plain`); Landlock handles TCP and UDP.
-    Plain,
-    /// Served where tarae can't take a run's descriptors (`pidfd_getfd` refused — Docker's default profile; 6f′):
-    /// tarae makes every socket the run has, its unix and netlink ones too, and keeps a copy of each
-    /// (`seccomp::Mode::Copied`, `supervisor::Copies`) — never in a network namespace (its sockets are tarae's). Landlock
-    /// handles TCP and UDP.
-    Copied,
-}
+// (what a keeper's namespaces are, its tier and how a run's sockets go: pure, `guarantees.rs`'s — built everywhere)
+pub use super::guarantees::{NO_NETNS, Ns, RunNet, Tier};
 
 impl Ns {
-    pub const NONE: Ns = Ns { user: false, net: false, pid: false, shm: false };
-
-    /// The session's namespaces: user, ipc and mount, a `/dev/shm` of its own — `net` and `pid` as said.
-    pub fn session(net: bool, pid: bool) -> Ns {
-        Ns { user: true, net, pid, shm: true }
-    }
-
     /// As `clone3`'s flags.
     pub fn clone_flags(self) -> u64 {
         let mut f = 0;
@@ -68,32 +30,6 @@ impl Ns {
             f |= libc::CLONE_NEWPID as u64;
         }
         f
-    }
-
-    /// Whether these make a network namespace (`net` without `user` makes none: `clone_flags`).
-    pub fn netns(self) -> bool {
-        self.clone_flags() & libc::CLONE_NEWNET as u64 != 0
-    }
-
-    /// How the internet sockets of a run of a keeper born with these go, `served` or not — by copies where tarae
-    /// can't take a run's descriptors (`copies`: every socket tarae's, whatever the namespaces) — decided once, in
-    /// `linux::confine` (`Confine.net`).
-    pub fn run_net(self, served: bool, copies: bool) -> RunNet {
-        match (served, self.netns()) {
-            (true, _) if copies => RunNet::Copied,
-            (true, true) => RunNet::Routed,
-            (true, false) => RunNet::Served,
-            (false, true) => RunNet::Own,
-            (false, false) => RunNet::Plain,
-        }
-    }
-
-    /// Whether a run of a keeper born with these, its sockets going as `net` says, gets only the ptys it makes
-    /// (3b, `sandbox::ptys`): without a `devpts` of the session's own (no `user`: C/D) and served — `D`'s runs
-    /// (`Plain`: no supervisor) keep this system's `/dev/pts`, said. One answer for its rules (`linux::confine`)
-    /// and its filter (the keeper's run).
-    pub fn serves_ptys(self, net: RunNet) -> bool {
-        !self.user && matches!(net, RunNet::Served | RunNet::Copied)
     }
 
     /// In the log's words: `user net ipc pid mnt`, or `none` — and, in the session's namespaces without a network
@@ -152,52 +88,10 @@ fn apart_in(apart: [bool; 5]) -> String {
 /// The links of `/proc/<pid>/ns/` an `Ns` stands for (`Ns::of_pid`), in `of_apart`'s order.
 const NS_LINKS: [&str; 5] = ["user", "ipc", "mnt", "net", "pid"];
 
-/// What the session's namespaces without a network one are (N1, 2026-10-14; only a keeper served by copies is born
-/// so): the keeper's own words, nothing of its runs — whether a run's loopback is kept from other sessions' is the
-/// run's (served or not), for its guarantees (9a) to say.
-pub const NO_NETNS: &str = "no network namespace of its own: its loopback is this machine's";
-
 /// Why the probe asks no network namespace where tarae serves by copies (`Probed.short`) — the one place the log's
 /// line says it.
 const BY_COPIES: &str = "served by copies: every socket a run has is tarae's, so a network namespace of the \
                          session's would hold none of them";
-
-/// A tier (§Tiers): the namespaces, and whether tarae serves the runs' calls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tier {
-    APlus,
-    A,
-    BPlus,
-    B,
-    C,
-    D,
-}
-
-impl Tier {
-    /// The tier of a keeper with `ns` — `net` aside: a policy that opens something has none until routing —
-    /// served or not.
-    pub fn of(ns: Ns, served: bool) -> Tier {
-        match (ns.user, ns.pid, served) {
-            (true, true, true) => Tier::APlus,
-            (true, false, true) => Tier::A,
-            (true, true, false) => Tier::BPlus,
-            (true, false, false) => Tier::B,
-            (false, _, true) => Tier::C,
-            (false, _, false) => Tier::D,
-        }
-    }
-
-    pub fn said(self) -> &'static str {
-        match self {
-            Tier::APlus => "A+",
-            Tier::A => "A",
-            Tier::BPlus => "B+",
-            Tier::B => "B",
-            Tier::C => "C",
-            Tier::D => "D",
-        }
-    }
-}
 
 /// What a keeper's birth failed at, before its exec — on its birth pipe as (code, errno), as a run's failure
 /// pipe has it.

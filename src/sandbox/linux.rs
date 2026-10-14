@@ -103,13 +103,10 @@ pub struct Confine {
     pub net: RunNet,
     /// Its runs make no user namespace (`tier::runs_refuse_userns`, the keeper's filter) — for the report to say.
     pub no_userns: bool,
-    /// The tier its runs go at (`tier::Tier`: the keeper's namespaces, served or not — `A+` … `D`), as `confine`
-    /// decided it — what a run's chat row says it ran in (cardburden 4). Empty: no keeper's (a probe's rules).
-    pub tier: &'static str,
-    /// The namespaces its keeper gave the session (`NONE`: no keeper's) — for the report to say what a run shares
-    /// with other sessions' (`notes`): their processes without a PID namespace of its own (A+, B+ have one), IPC
-    /// and terminals without the session's (C/D), `/dev/shm` without its own.
-    pub ns: super::tier::Ns,
+    /// What its runs are kept apart from and share (9a), from its keeper as `confine` found it — their tier (what a
+    /// run's chat row says it ran in, cardburden 4) and the report's notes of what's shared. None: no keeper's (a
+    /// probe's rules).
+    pub guarantees: Option<super::guarantees::Guarantees>,
     /// The ptys its run may open of this system's `/dev/pts` (3b, `tier::serves_ptys`) — what the supervisor puts
     /// in place of those the run makes; None: all of it (D) or the session's own (A+ … B).
     pub ptys: Option<Arc<super::ptys::Ptys>>,
@@ -139,6 +136,11 @@ pub struct Confine {
 }
 
 impl Confine {
+    /// The tier its runs go at (`A+` … `D`, its guarantees'); empty: no keeper's.
+    pub fn tier(&self) -> &'static str {
+        self.guarantees.as_ref().and_then(|g| g.tier()).map_or("", |t| t.said())
+    }
+
     /// The Landlock ruleset's descriptor with the files its run's child hides by mounts — what a keeper's run
     /// confines itself with (`Keeper::start_confined`, `start_served`): the rules alone would leave those files'
     /// folders whole with nothing over the files.
@@ -942,11 +944,8 @@ pub fn confine(
     serve: Result<(), String>,
 ) -> io::Result<Confine> {
     let ns = keeper.map_or(super::tier::Ns::NONE, |k| k.ns);
-    let net = ns.run_net(serve.is_ok(), super::supervisor::copies());
-    let tier = match keeper {
-        Some(_) => super::tier::Tier::of(ns, serve.is_ok()).said(),
-        None => "",
-    };
+    let copies = super::supervisor::copies();
+    let net = ns.run_net(serve.is_ok(), copies);
     let mut r = ruleset_for(net, abi)?;
     if let Some(k) = keeper.filter(|k| k.ns.user) {
         session_devices(&mut r, &k.devices, k.ns.shm)?;
@@ -976,7 +975,31 @@ pub fn confine(
     if let Some(ptys) = &ptys {
         ptys.granted();
     }
-    Ok(Confine { no_userns, tier, ns, ptys, ..c })
+    // (9a: what this run's keeper is — never a session's earlier one: a policy that changed has another keeper)
+    let guarantees = keeper.map(|k| {
+        let probed = super::tier::probed();
+        let tproxy = match k.network.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            true => Ok(()),
+            false if !ns.netns() => Err("no network namespace of its own".to_string()),
+            false => match probed.map(|p| &p.redirect) {
+                Some(Err(why)) => Err(why.clone()),
+                _ => Err("its keeper has no network of the session's".to_string()),
+            },
+        };
+        let lo = [(k.lo_missing.v4, "IPv4"), (k.lo_missing.v6, "IPv6")];
+        super::guarantees::Guarantees::landlock(super::guarantees::Found {
+            ns,
+            served: c.serve.clone(),
+            copies,
+            abi: c.abi,
+            ptys: ptys.as_ref().map(|_| super::ptys::POOL),
+            tproxy,
+            lo_missing: lo.into_iter().filter_map(|(m, f)| m.then_some(f)).collect(),
+            short: probed.and_then(|p| p.short.clone()),
+            network: p.network,
+        })
+    });
+    Ok(Confine { no_userns, guarantees, ptys, ..c })
 }
 
 /// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
@@ -1225,8 +1248,7 @@ pub(super) fn confine_in(
         serve,
         net,
         no_userns: false,
-        tier: "",
-        ns: super::tier::Ns::NONE,
+        guarantees: None,
         ptys: None,
         made: Arc::new(made),
         closed,
@@ -1283,47 +1305,6 @@ pub fn made_said(made: &Made, root: &Path) -> String {
          a build couldn't make them itself. What's still empty when it's over goes again.",
         names.join(", ")
     )
-}
-
-/// What a run of ABI `abi` can't be kept from, for the report: no signal scope below 6; without a PID namespace
-/// of its session's own (`ns`: A+, B+ have one), the other sessions' processes in sight — Landlock keeps their
-/// environment and tracing in its domain, not their command lines nor `setpriority`
-/// (`keeper::tests::two_sessions_cant_reach_each_others_processes`); without the session's namespaces (C/D),
-/// this system's SysV IPC, `/dev/shm` and — not served (`ptys` false: D) — every pty, the user's own terminals
-/// too; served, only the terminals it makes (3b). `/dev/shm` alone where the session has none of its own
-/// (`keeper::tests::two_sessions_cant_reach_each_others_sockets`).
-pub fn notes(abi: u32, ns: super::tier::Ns, ptys: bool) -> String {
-    let mut s = match abi {
-        n if n < 6 => format!(
-            " This kernel's Landlock (ABI {n}) can't keep a command's signals to its own processes (6 does)."
-        ),
-        _ => String::new(),
-    };
-    if !(ns.user && ns.pid) {
-        s.push_str(
-            " Here a command sees this system's processes — another session's commands and the user's others: \
-             it can read their command lines and lower their priority, never their environment, nor trace them.",
-        );
-    }
-    match (ns.user, ns.shm) {
-        (false, _) if ptys => s.push_str(&format!(
-            " Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and \
-             the user's other programs: it can read and write the shared memory they keep there. Of the \
-             terminals (/dev/pts) it opens only those it makes, up to {} at a time.",
-            super::ptys::POOL
-        )),
-        (false, _) => s.push_str(
-            " Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other \
-             sessions' commands and the user's other programs: it can read and write the shared memory they \
-             keep there and open any of those terminals — the user's own too, not only other sessions'.",
-        ),
-        (true, false) => s.push_str(
-            " Here a command shares this system's /dev/shm with other sessions' commands and the user's other \
-             programs: it can read and write the files they keep there.",
-        ),
-        (true, true) => {}
-    }
-    s
 }
 
 /// Where Landlock's audit records are read: the journal (the kernel's messages), or auditd's own log when

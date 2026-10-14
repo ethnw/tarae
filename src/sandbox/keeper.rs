@@ -6402,6 +6402,7 @@ mod tests {
         // with its keeper as a project's run's are
         let plain = Err("not served".into());
         let (mut p, c, _root) = project_served("apart", Vec::new(), Some(&mine), &[], plain);
+        let g = c.guarantees.clone().expect("a keeper's run has its guarantees");
         p.confine = Some(Ok(c));
         let (_, notes) = p.linux_said().unwrap();
         mine.end();
@@ -6453,6 +6454,14 @@ mod tests {
                 );
             }
         }
+        // 9a: what its guarantees say shared is what was found shared — the processes in sight (their command lines,
+        // their priority) and signals
+        use super::super::guarantees::{Part, reached_by_any, said_as_found};
+        let reached = |what: &str| (verdict(what) != Unnamed).then(|| verdict(what) == Shared);
+        let processes = reached_by_any(&[reached("cmdline"), reached("setpriority")]);
+        let found = [(Part::Processes, processes), (Part::Signals, reached("kill"))];
+        let wrong = said_as_found(&g, &found);
+        assert!(wrong.is_empty(), "{wrong:#?}\n{}\n{line}", g.line());
         // What the kernel let it do is what happened to the stand-in
         let moved = Some("7".to_string());
         assert_eq!(
@@ -6881,8 +6890,9 @@ mod tests {
             .flatten()
             .filter_map(|e| e.file_name().to_str()?.strip_prefix("reached-").map(String::from))
             .collect();
-        let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier);
+        let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier());
         let ptys = mine.confine.ptys.is_some();
+        let g = mine.confine.guarantees.clone().expect("a keeper's run has its guarantees");
         // What the report says a run of this session's can't be kept from (`linux_said`'s notes)
         let mut p = mine.policy.clone();
         p.confine = Some(Ok(mine.confine.clone()));
@@ -7004,7 +7014,23 @@ mod tests {
                 wrong.push(format!("{what}: refused as another session's {said}, where shared {shared}"));
             }
         }
-        assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
+        // 9a: what its guarantees say shared is what was found shared — System V IPC, /dev/shm, the terminals, the
+        // loopback (any of its sockets reached)
+        use super::super::guarantees::{Part, said_as_found};
+        let reached = |what: &str| match verdict(what) {
+            Unnamed | Unmade => None,
+            v => Some(v == Shared),
+        };
+        let judged = loopback.iter().filter(|(_, j)| *j);
+        let lo = sockets.then(|| judged.clone().any(|(what, _)| verdict(what) == Shared));
+        let found = [
+            (Part::Ipc, reached("ipc")),
+            (Part::Shm, reached("shm")),
+            (Part::Ptys, reached("pty")),
+            (Part::Loopback, lo),
+        ];
+        wrong.extend(said_as_found(&g, &found));
+        assert!(wrong.is_empty(), "{wrong:#?}\n{}\n{line}", g.line());
         // …and nothing says it where it isn't so — the ptys kept apart said as such
         assert_eq!(notes.contains("other sessions' commands"), !(ns.user && ns.shm), "{line}");
         assert_eq!(notes.contains("the user's own too"), !ns.user && !ptys, "{line}");
@@ -7034,7 +7060,7 @@ mod tests {
         let said = helper_said(tried);
         let refused: Vec<String> = refused.try_iter().map(|d| d.reported()).collect();
         std::fs::write(s.root.join("done"), "").unwrap();
-        let (tier, ns) = (s.confine.tier, s.keeper.ns);
+        let (tier, ns) = (s.confine.tier(), s.keeper.ns);
         s.end();
         let got: std::collections::HashMap<&str, &str> =
             said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
@@ -7069,7 +7095,7 @@ mod tests {
         };
         let (mine, theirs) = (opened("swept-mine"), opened("swept-theirs"));
         if mine.confine.net == RunNet::Plain || mine.keeper.ns.net {
-            let tier = mine.confine.tier;
+            let tier = mine.confine.tier();
             mine.end();
             theirs.end();
             eprintln!("{test}: skipped — tier {tier}: no loopback shared between sessions");
@@ -7149,7 +7175,7 @@ mod tests {
             said.split_once("tarae's=").map(|(_, r)| r.to_string()).unwrap_or(said)
         };
         let (to_opened, to_closed) = (tried(&opened), tried(&closed));
-        let tier = s.confine.tier;
+        let tier = s.confine.tier();
         s.end();
         assert_eq!(to_opened, "ok", "tier {tier}: the opened port");
         assert_ne!(to_closed, "ok", "tier {tier}: the closed port");
@@ -7217,7 +7243,7 @@ mod tests {
         }
         let (mine, theirs) = (Apart::new("binds-mine"), Apart::new("binds-theirs"));
         if mine.confine.net == RunNet::Plain || mine.keeper.ns.net {
-            let tier = mine.confine.tier;
+            let tier = mine.confine.tier();
             mine.end();
             theirs.end();
             eprintln!("{test}: skipped — tier {tier}: no loopback shared between sessions");
@@ -7256,7 +7282,7 @@ mod tests {
         io::Read::read_to_end(&mut out, &mut Vec::new()).unwrap();
         io::Read::read_to_end(&mut hold.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
         crate::spawn::wait(hold.spawned.pid).unwrap();
-        let tier = mine.confine.tier;
+        let tier = mine.confine.tier();
         mine.end();
         theirs.end();
         let said = |d: &[super::super::Denial]| d.iter().map(|d| d.reported()).collect::<Vec<String>>();
@@ -7347,7 +7373,7 @@ mod tests {
         };
         let (mine, theirs) = (opened("aimed-mine"), opened("aimed-theirs"));
         if mine.confine.net == RunNet::Plain || mine.keeper.ns.net {
-            let tier = mine.confine.tier;
+            let tier = mine.confine.tier();
             mine.end();
             theirs.end();
             eprintln!("{test}: skipped — tier {tier}: no loopback shared between sessions");
@@ -7374,7 +7400,7 @@ mod tests {
         io::Read::read_to_end(&mut out, &mut Vec::new()).unwrap();
         io::Read::read_to_end(&mut aims.spawned.stderr.take().unwrap(), &mut Vec::new()).unwrap();
         crate::spawn::wait(aims.spawned.pid).unwrap();
-        let tier = mine.confine.tier;
+        let tier = mine.confine.tier();
         mine.end();
         theirs.end();
         let refusals: Vec<String> = refused.iter().map(|d| d.reported()).collect();
@@ -7452,7 +7478,7 @@ mod tests {
             ));
         }
         off.store(0, std::sync::atomic::Ordering::Relaxed);
-        let tier = s.confine.tier;
+        let tier = s.confine.tier();
         s.end();
         let line = format!("M8.3, tier {tier}, µs a send — {}\n", said.join(" · "));
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
@@ -7488,7 +7514,7 @@ mod tests {
         open.localhost = true;
         let (mine, theirs) = (Apart::of(&mine_name, open, root), Apart::new(&theirs_name));
         if mine.confine.net == RunNet::Plain || mine.keeper.ns.net || theirs.keeper.ns.pid {
-            let tier = mine.confine.tier;
+            let tier = mine.confine.tier();
             mine.end();
             theirs.end();
             eprintln!(
@@ -7595,7 +7621,8 @@ mod tests {
                 _ => true,
             })
             .collect();
-        let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier);
+        let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier());
+        let g = mine.confine.guarantees.clone().expect("a keeper's run has its guarantees");
         mine.end();
         theirs.end();
         std::fs::remove_dir_all(&home).ok();
@@ -7604,14 +7631,18 @@ mod tests {
         let line = format!("tier {tier} ({ns:?}, {net:?}): {said}\n");
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
         let mut wrong = Vec::new();
+        // (emptying a file by its path: refused from ABI 3, below it reached — another session's files too)
+        let abi = crate::landlock::abi().unwrap();
+        let truncate = if abi >= 3 { "13" } else { "ok" };
         for (what, _) in &own {
-            for how in ["make", "write"] {
+            for (how, refused) in [("make", "13"), ("write", "13"), ("truncate", truncate)] {
                 if got[&*format!("own-{what}-{how}")] != "ok" {
                     wrong.push(format!("its own {what}: {how} not ok — the try reaches nothing"));
                 }
                 // (Landlock's refusal: EACCES)
-                if got[&*format!("{what}-{how}")] != "13" {
-                    wrong.push(format!("the other session's {what}: {how} not refused"));
+                let theirs = got[&*format!("{what}-{how}")];
+                if theirs != refused {
+                    wrong.push(format!("the other session's {what}: {how} {theirs}, not {refused}"));
                 }
             }
         }
@@ -7622,11 +7653,18 @@ mod tests {
             wrong
                 .push("a folder in home that's no checkout is read: the checkout's read pins nothing".into());
         }
+        // 9a: its guarantees say its files shared exactly where one of the other session's was made, written or emptied
+        let tries = ["make", "write", "truncate"];
+        let written =
+            others.iter().any(|(what, _)| tries.iter().any(|h| got[&*format!("{what}-{h}")] == "ok"));
+        let found = [(super::super::guarantees::Part::Files, Some(written || !landed.is_empty()))];
+        wrong.extend(super::super::guarantees::said_as_found(&g, &found));
         assert!(wrong.is_empty() && landed.is_empty(), "{wrong:#?}\nlanded: {landed:?}\n{line}");
     }
 
     /// The `files` helper: in each `$TARAE_OWN` folder, then each `$TARAE_TO` one (`what=folder` lines), a file
-    /// made and `there` appended to; each `$TARAE_READS` file read — `[own-]what-make=… what-write=… what-read=…`.
+    /// made, `there` appended to and emptied by its path; each `$TARAE_READS` file read — `[own-]what-make=…
+    /// what-write=… what-truncate=… what-read=…`.
     fn files_tried() -> String {
         let list = |var: &str| {
             let v = std::env::var(var).unwrap_or_default();
@@ -7646,7 +7684,17 @@ mod tests {
                     .append(true)
                     .open(dir.join("there"))
                     .and_then(|mut f| io::Write::write_all(&mut f, b"x"));
-                said.push(format!("{pre}{what}-make={} {pre}{what}-write={}", tried(made), tried(written)));
+                // (emptied by its path, no file opened to write: Landlock's truncating rule, from ABI 3)
+                let there = std::os::unix::ffi::OsStringExt::into_vec(dir.join("there").into_os_string());
+                let there = std::ffi::CString::new(there).unwrap();
+                // SAFETY: a plain call on a path; the file is the test's own.
+                let emptied = io_result(unsafe { libc::truncate(there.as_ptr(), 0) });
+                said.push(format!(
+                    "{pre}{what}-make={} {pre}{what}-write={} {pre}{what}-truncate={}",
+                    tried(made),
+                    tried(written),
+                    tried(emptied)
+                ));
             }
         }
         for (what, file) in list("TARAE_READS") {
@@ -7671,7 +7719,7 @@ mod tests {
         let s = Apart::new("ptys");
         if s.confine.ptys.is_none() {
             let why = if s.keeper.ns.user { "its session has a devpts of its own" } else { "not served" };
-            eprintln!("{test}: skipped — tier {}: {why}", s.confine.tier);
+            eprintln!("{test}: skipped — tier {}: {why}", s.confine.tier());
             s.end();
             return;
         }
@@ -7694,7 +7742,7 @@ mod tests {
         assert_eq!((ends, open), (0, 0), "no O_PATH other end of the pool's left open");
         let (_m, _s, other) = pty_opened().expect("a pty of this process's: another terminal of the user's");
         let said = helper_said(s.helper("ptys", &[("TARAE_TO", &other)]));
-        let tier = s.confine.tier;
+        let tier = s.confine.tier();
         s.end();
         let _ = io::Write::write_all(&mut io::stderr(), format!("tier {tier}: {said}\n").as_bytes());
         let refused = libc::EACCES;
@@ -7718,7 +7766,7 @@ mod tests {
         }
         let s = Apart::new("pty-refusals");
         if s.confine.ptys.is_none() {
-            eprintln!("{test}: skipped — tier {}: its ptys aren't tarae's to serve", s.confine.tier);
+            eprintln!("{test}: skipped — tier {}: its ptys aren't tarae's to serve", s.confine.tier());
             s.end();
             return;
         }
@@ -7803,6 +7851,89 @@ mod tests {
         assert!(status.success() && std::fs::read_to_string(root.join("made")).is_ok_and(|m| m == "made"));
         k.end();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 9a: a run's guarantees are what its own keeper and supervisor decide for it — never the session's first run's.
+    /// In every tier: runs on the session's keeper served, then not (no supervisor for that run), then served again
+    /// each say how their sockets go out (the network's way: TPROXY, tarae's proxy or by copies — then no socket). Where
+    /// the session has namespaces, also its keepers: a policy that writes in `/dev/shm` (its keeper born without a
+    /// `/dev/shm` of its own, D14: another keeper for another policy) between two that don't, each says theirs; without
+    /// namespaces `/dev/shm` is this system's for every keeper (said, not judged; a machine said to give them fails).
+    #[test]
+    fn the_guarantees_are_the_runs() {
+        let test = "the_guarantees_are_the_runs";
+        if open_rules(test).is_none() {
+            return;
+        }
+        use super::super::guarantees::{Part, Way};
+        let (outside, root) = project_policy("guarantees", Vec::new(), &[]);
+        // (both folders gone when the test ends, failed or not)
+        struct Gone(PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let _root = Gone(root.clone());
+        let shm = PathBuf::from(format!("/dev/shm/tarae-guarantees-{}", std::process::id()));
+        let _shm = Gone(shm.clone());
+        std::fs::create_dir_all(&shm).unwrap();
+        let write = [outside.write.clone(), vec![std::fs::canonicalize(&shm).unwrap()]].concat();
+        let inside = super::super::Policy { write, ..outside.clone() };
+        let said = |p: &super::super::Policy| {
+            let run = super::super::RunDir::new().ok();
+            let p = super::super::confined(super::super::Policy { run, ..p.clone() });
+            let c = p.confine.as_ref().unwrap().as_ref().unwrap_or_else(|e| panic!("{e}"));
+            let g = c.guarantees.as_ref().expect("a keeper's run has its guarantees");
+            (g.kept(Part::Shm), g.line(), c.keeper.clone().expect("its keeper"))
+        };
+        let got = [said(&outside), said(&inside), said(&outside)];
+        // (the session's keeper now: the last policy's)
+        let k = got[2].2.clone();
+        let abi = crate::landlock::abi().unwrap();
+        let way = |serve: Result<(), String>| {
+            let c = super::super::linux::confine(
+                &outside,
+                abi,
+                Err("not watched".into()),
+                false,
+                Some(&k),
+                serve,
+            )
+            .unwrap();
+            let g = c.guarantees.expect("a keeper's run has its guarantees");
+            (g.way, g.line())
+        };
+        let served = super::super::linux::served_here();
+        let ways = [way(served.clone()), way(Err("no supervisor for this run".into())), way(served.clone())];
+        for k in of(Some(&root)) {
+            k.end();
+        }
+        let lines: Vec<&String> = got.iter().map(|g| &g.1).chain(ways.iter().map(|w| &w.1)).collect();
+        if served.is_ok() {
+            let w = ways.each_ref().map(|w| w.0);
+            assert!(w[0] != Way::NoSocket && w[1] == Way::NoSocket && w[2] == w[0], "{w:?}\n{lines:#?}");
+        } else {
+            eprintln!("{test}: the network's way not judged — tarae serves no run here");
+        }
+        match super::super::tier::get().ns.user {
+            true => {
+                let shm = got.each_ref().map(|g| g.0);
+                assert_eq!(shm, [Some(true), Some(false), Some(true)], "{lines:#?}")
+            }
+            false => {
+                let why =
+                    "no namespaces here: /dev/shm is this system's for both, nothing of a keeper's to judge";
+                if let Ok(want) = std::env::var("TARAE_EXPECT_TIER")
+                    && ["A+", "A", "B+", "B"].contains(&want.trim())
+                {
+                    panic!("{test}: tier {want} expected here — {why}");
+                }
+                let line =
+                    format!("{}sandbox::keeper::tests::{test} — {why}\n", crate::test_results::SELF_SKIP);
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            }
+        }
     }
 
     /// D10: a run's pty comes from the session's own `devpts` — another instance than this process's (its device

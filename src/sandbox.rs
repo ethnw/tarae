@@ -39,6 +39,10 @@ pub mod channel;
 pub mod dbus;
 #[cfg(test)]
 mod golden;
+// (9a: what a run's sandbox keeps apart and shares — pure, built everywhere: its golden says every tier on any machine;
+// Landlock's said on Linux)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod guarantees;
 #[cfg(all(test, target_os = "linux"))]
 mod handed;
 #[cfg(target_os = "linux")]
@@ -701,7 +705,7 @@ impl Guard {
                 let (names_where, net, linux) = match linux {
                     Some((said, notes)) => ("where they are now", said.unwrap_or(net), notes),
                     // (a Seatbelt policy's — made for macOS, `supervised` Linux's: the golden's stand-in too)
-                    None if !p.supervised => ("anywhere in it", net, mac_shared(p)),
+                    None if !p.supervised => ("anywhere in it", net, seatbelt_guarantees(p).shared_said()),
                     None => ("anywhere in it", net, String::new()),
                 };
                 format!(
@@ -727,15 +731,6 @@ impl Guard {
     }
 }
 
-/// What Seatbelt can't keep apart, for the report (step 7, the user's decision 2026-10-10: shared, and said):
-/// shared memory, POSIX and System V — no rule names who made a segment — and `setpriority`, which no operation
-/// guards (`process-info-setcontrol` doesn't: measured). The command line and starting environment are said once
-/// a conversation (`runenv::OTHERS_READ`). Pinned by `apart::two_sessions_cant_reach_each_others_{processes,
-/// sockets}`; Linux's are `linux::notes`.
-const MAC_SHARED: &str = " Here a command shares System V and POSIX shared memory with other sessions' commands \
-     and the user's other programs — it can read and write what they keep there — and can lower their priority \
-     (renice): macOS's sandbox has no rule for either.";
-
 /// A refusal's op where sessions share this machine's loopback and the socket there is another session's (step 8,
 /// `supervisor::anothers_at`): no grant opens it.
 pub const SESSION_OP: &str = "network-session";
@@ -745,19 +740,11 @@ pub const SESSION_OP: &str = "network-session";
 /// another session's.
 pub const UNTOLD_OP: &str = "network-untold";
 
-/// What a Seatbelt policy's runs share with other sessions' (`MAC_SHARED`) — and, where it opens this machine's
-/// ports, that what listens on them is reached whoever's it is (step 8, user decision 9: Linux refuses another
-/// session's listener there, macOS's sandbox can't tell whose one is). Pinned by
-/// `apart::two_sessions_cant_reach_each_others_sockets`.
-fn mac_shared(p: &Policy) -> String {
-    let ports = match p.localhost || !p.ports.is_empty() {
-        true => {
-            " What listens on this machine's ports it opens is reached whoever's it is — another tarae \
-                  session's commands' too: macOS's sandbox can't tell whose a listener is."
-        }
-        false => "",
-    };
-    format!("{MAC_SHARED}{ports}")
+/// What a Seatbelt policy's runs are kept apart from and share (9a, `guarantees.rs`): its shared memory and priority
+/// — and, where it opens this machine's ports, what listens on them. Pinned by
+/// `apart::two_sessions_cant_reach_each_others_{processes,sockets}`.
+fn seatbelt_guarantees(p: &Policy) -> guarantees::Guarantees {
+    guarantees::Guarantees::seatbelt(p.localhost || !p.ports.is_empty(), p.network)
 }
 
 /// Whether Claude's runs are refused new user namespaces here (`tier::runs_refuse_userns`) — outside the sandbox
@@ -8155,7 +8142,7 @@ mod tests {
                     named like a key can't let what's new in it be read";
         assert!(notes.contains(said), "{notes}");
         // (root in a user namespace: why not mounts, said — 7d)
-        let namespaced = matches!(&c.confine, Some(Ok(c)) if c.ns.user);
+        let namespaced = matches!(&c.confine, Some(Ok(c)) if ["A+", "A", "B+", "B"].contains(&c.tier()));
         // SAFETY: a plain call.
         let root = unsafe { libc::geteuid() } == 0;
         let why = "not hidden by mounts of the run's own: tarae runs as root";
@@ -8169,7 +8156,7 @@ mod tests {
     fn skipped_for_mounts(p: &Policy, test: &str, mounts: bool) -> bool {
         let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
         let (here, tier) = match &c.confine {
-            Some(Ok(c)) => (!c.covers.keys.is_empty(), c.tier),
+            Some(Ok(c)) => (!c.covers.keys.is_empty(), c.tier()),
             _ => (false, "none"),
         };
         if here != mounts {
@@ -8765,7 +8752,7 @@ mod tests {
         let (_, out, err) = sh_confined(&c, &root, &script);
         assert!(!out.contains("tarae-fake-token"), "{out} {err}");
         let pids: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("pid ")).collect();
-        if conf.ns.pid {
+        if conf.keeper.as_ref().is_some_and(|k| k.ns.pid) {
             let (keeper, tarae) = (keeper.unwrap().to_string(), std::process::id().to_string());
             assert!(pids.contains(&"1"), "its keeper, as 1: {pids:?}");
             assert!(

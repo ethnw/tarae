@@ -374,6 +374,188 @@ fn the_report_is_pinned() {
     pinned("sandbox_report.txt", &f.named(&out, run.as_deref()));
 }
 
+/// 9a: what each tier's runs are kept apart from and share, in every place's words (`guarantees.rs`) — every tier,
+/// Landlock ABI 2 to 11, each network way (TPROXY, tarae's proxy by its variable, by copies — with the session's user
+/// namespace too —, no socket), and Seatbelt's, ports and the network each open or not. Beside the golden, what each
+/// must share whatever the words, written out per scene for ABI 2, 3 to 5 and 6 on — every ABI around a boundary
+/// tried (7, 9 and 11 add nothing a run is kept from) — and nothing else: what's shared is said shared everywhere, the
+/// rest kept.
+#[test]
+fn the_guarantees_say_each_tier() {
+    use super::guarantees::{Found, Guarantees, Ns, Part, Tier};
+    use Part::*;
+    let found = |ns: Ns, served: bool, copies: bool, tproxy: bool| {
+        let net = ns.run_net(served, copies);
+        Found {
+            ns,
+            served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
+            copies,
+            abi: 6,
+            ptys: ns.serves_ptys(net).then_some(16),
+            tproxy: match (tproxy, ns.netns()) {
+                (true, _) => Ok(()),
+                (false, true) => Err("this kernel has no nft_tproxy".into()),
+                (false, false) => Err("no network namespace of its own".into()),
+            },
+            lo_missing: Vec::new(),
+            short: None,
+            network: true,
+        }
+    };
+    let no_pid =
+        Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
+    let none = Some("no user namespaces: kernel.unprivileged_userns_clone is 0".to_string());
+    let a_plus = || found(Ns::session(true, true), true, false, true);
+    let a = |copies: bool, tproxy: bool| Found {
+        short: no_pid.clone(),
+        ..found(Ns::session(!copies, false), true, copies, tproxy)
+    };
+    // (what each shares at ABI 2 — no truncating rule: files; no signal scope —, at 3 to 5 — still no signal scope:
+    // signals where other processes are in sight —, and from 6; every ABI around a boundary tried, 3, 5 and 6 too)
+    // (its label, its tier, what its keeper is, what it shares at ABI 2, 3 to 5 and from 6)
+    type Scene = (&'static str, Option<Tier>, Found, [&'static [Part]; 3]);
+    let scenes: Vec<Scene> = vec![
+        ("A+, TPROXY", Some(Tier::APlus), a_plus(), [&[Files], &[], &[]]),
+        (
+            "A+, tarae's proxy",
+            Some(Tier::APlus),
+            found(Ns::session(true, true), true, false, false),
+            [&[Files], &[], &[]],
+        ),
+        (
+            "A+ by copies: the session's user namespace, no network one",
+            Some(Tier::APlus),
+            found(Ns::session(false, true), true, true, false),
+            [&[Files], &[], &[]],
+        ),
+        (
+            "A+, the project in /dev/shm",
+            Some(Tier::APlus),
+            found(Ns { shm: false, ..Ns::session(true, true) }, true, false, true),
+            [&[Files, Shm], &[Shm], &[Shm]],
+        ),
+        (
+            "A+, its lo without an IPv6 address",
+            Some(Tier::APlus),
+            Found { lo_missing: vec!["IPv6"], ..a_plus() },
+            [&[Files], &[], &[]],
+        ),
+        (
+            "A+, the network closed",
+            Some(Tier::APlus),
+            Found { network: false, ..a_plus() },
+            [&[Files], &[], &[]],
+        ),
+        (
+            "A, TPROXY",
+            Some(Tier::A),
+            a(false, true),
+            [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
+        ),
+        (
+            "A, tarae's proxy",
+            Some(Tier::A),
+            a(false, false),
+            [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
+        ),
+        (
+            "A by copies",
+            Some(Tier::A),
+            a(true, false),
+            [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
+        ),
+        ("B+", Some(Tier::BPlus), found(Ns::session(true, true), false, false, false), [&[Files], &[], &[]]),
+        (
+            "B",
+            Some(Tier::B),
+            Found { short: no_pid.clone(), ..found(Ns::session(true, false), false, false, false) },
+            [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
+        ),
+        (
+            "C, tarae's proxy",
+            Some(Tier::C),
+            Found { short: none.clone(), ..found(Ns::NONE, true, false, false) },
+            [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
+        ),
+        (
+            "C by copies",
+            Some(Tier::C),
+            Found { short: none.clone(), ..found(Ns::NONE, true, true, false) },
+            [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
+        ),
+        (
+            "D",
+            Some(Tier::D),
+            Found { short: none.clone(), ..found(Ns::NONE, false, false, false) },
+            [
+                &[Files, Processes, Signals, Ipc, Shm, Ptys],
+                &[Processes, Signals, Ipc, Shm, Ptys],
+                &[Processes, Ipc, Shm, Ptys],
+            ],
+        ),
+    ];
+    let mut all: Vec<(String, Option<Tier>, Guarantees, Vec<Part>)> = Vec::new();
+    for (label, tier, f, [at_2, to_5, from_6]) in scenes {
+        let abis =
+            [(2, at_2), (3, to_5), (4, to_5), (5, to_5), (6, from_6), (7, from_6), (9, from_6), (11, from_6)];
+        for (abi, shared) in abis {
+            let g = Guarantees::landlock(Found { abi, ..f.clone() });
+            all.push((format!("{label} · ABI {abi}"), tier, g, shared.to_vec()));
+        }
+    }
+    // (ports and the network apart: ports opened with the network closed is llm.sandbox-localhost alone, as this
+    // repository has it; the network open reaches this machine's ports only through tarae's proxy, none opened)
+    for (label, ports, network) in [
+        ("Seatbelt, no port open, the network closed", false, false),
+        ("Seatbelt, ports open, the network closed", true, false),
+        ("Seatbelt, no port open, the network open", false, true),
+        ("Seatbelt, ports and the network open", true, true),
+    ] {
+        let mut shared = vec![Processes, Ipc, Shm];
+        if ports {
+            shared.push(Loopback);
+        }
+        all.push((label.to_string(), None, Guarantees::seatbelt(ports, network), shared));
+    }
+    let mut out = String::new();
+    let mut wrong = Vec::new();
+    for (label, tier, g, mut want) in all {
+        let (line, sentence, said) = (g.line(), g.sentence(), g.shared_said());
+        out += &format!("══ {label}\nline: {line}\nsentence: {sentence}\n");
+        out += &format!(
+            "why: {}\nreport:{}\n",
+            g.why.as_deref().unwrap_or("—"),
+            if said.is_empty() { " —" } else { &said }
+        );
+        if g.tier() != tier {
+            wrong.push(format!("{label}: tier {:?}", g.tier()));
+        }
+        let order =
+            |p: &Part| [Files, Processes, Signals, Ipc, Shm, Ptys, Loopback].iter().position(|q| q == p);
+        want.sort_by_key(order);
+        if g.shared() != want {
+            wrong.push(format!("{label}: shares {:?}, not {want:?}", g.shared()));
+        }
+        // (each where every place says it: the sentence's half, the line's list, the report)
+        let (kept, shared) = sentence.split_once("; shared with them — ").unwrap();
+        let listed = line.rsplit_once(" · shared ").unwrap().1;
+        for r in &g.rows {
+            let name = g.name(r.part);
+            let (here, there) = if r.kept { (kept, shared) } else { (shared, kept) };
+            if !here.contains(name) || there.contains(name) || listed.contains(name) == r.kept {
+                wrong.push(format!("{label}: {name} not said {}", if r.kept { "kept" } else { "shared" }));
+            }
+        }
+        // (and below ABI 6 the report says signals whatever the tier: its session's own other commands are reached)
+        let below_6 = matches!(g.by, super::guarantees::By::Landlock { abi, .. } if abi < 6);
+        if said.is_empty() != (want.is_empty() && !below_6) {
+            wrong.push(format!("{label}: the report says {said:?} of {want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    pinned("sandbox_guarantees.txt", &out);
+}
+
 /// The words Claude's prompt and tools say of the sandbox, the checks and the toolchains.
 #[test]
 fn claudes_words_are_pinned() {

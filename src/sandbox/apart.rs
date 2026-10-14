@@ -361,6 +361,7 @@ fn two_sessions_cant_reach_each_others_processes() {
     // What the report says of what's left out of a run's environment, the first time
     let env_said = mine.policy.run_env.said(&mut Vec::new(), Os::Mac).unwrap_or_default();
     let report = mine.report();
+    let g = super::seatbelt_guarantees(&mine.policy);
     mine.end();
     theirs.end();
     std::fs::remove_dir_all(&t).ok();
@@ -401,6 +402,14 @@ fn two_sessions_cant_reach_each_others_processes() {
             }
         }
     }
+    // 9a: what its guarantees say shared is what was found shared — the other processes' command lines and priority,
+    // and signals
+    let reached = |of: &[&str]| Some(of.iter().any(|what| got[&*format!("their-{what}")] == "ok"));
+    let found = [
+        (super::guarantees::Part::Processes, reached(&["args", "env", "prio"])),
+        (super::guarantees::Part::Signals, reached(&["kill0", "cont"])),
+    ];
+    wrong.extend(super::guarantees::said_as_found(&g, &found));
     // What a `setpriority` went through did, and only then
     for (who, p) in [("their", their_prio), ("tarae", tarae_prio)] {
         if (got[&*format!("{who}-prio")] == "ok") != (p == 7) {
@@ -556,6 +565,7 @@ fn two_sessions_cant_reach_each_others_sockets() {
         libc::shmctl(seg, libc::IPC_RMID, std::ptr::null_mut());
     }
     let report = mine.report();
+    let g = super::seatbelt_guarantees(&mine.policy);
     mine.end();
     theirs.end();
     std::fs::remove_dir_all(&t).ok();
@@ -596,6 +606,16 @@ fn two_sessions_cant_reach_each_others_sockets() {
             wrong.push(format!("{what} is shared between sessions here, and the report doesn't say so"));
         }
     }
+    // 9a: what its guarantees say shared is what was found shared — the loopback (a listener on a port it opens),
+    // POSIX shared memory, System V's
+    use super::guarantees::Part;
+    let reached = |of: &[&str]| Some(of.iter().any(|what| got[*what] == "ok"));
+    let found = [
+        (Part::Loopback, reached(&["tcp-open", "tcp-closed"])),
+        (Part::Shm, reached(&["posix"])),
+        (Part::Ipc, reached(&["sysv"])),
+    ];
+    wrong.extend(super::guarantees::said_as_found(&g, &found));
     assert!(wrong.is_empty(), "{wrong:#?}\n{line}");
 }
 
