@@ -312,16 +312,25 @@ impl Profile {
     /// This project's folder of conversations (`own_project`) made where it isn't — claude can't make it under its
     /// profile (its path is denied, so it can't be moved whole). From claude's folder (real) down, each step made
     /// (`mkdirat`, 0700) and opened following no link (`open_dir_at`): a link in the way is never gone through nor
-    /// removed — Err, and claude runs unconfined, said.
+    /// removed — Err, and claude runs unconfined, said. No `~/.claude` yet (claude never run — a new user, e2e's
+    /// home): made too, from home's own folder, as the steps below it; one that's there, a link to elsewhere
+    /// included (dotfiles), is started from where it leads (`own_dirs` made it real).
     pub fn own_project_made(&self) -> Result<(), String> {
         use std::os::fd::AsRawFd;
-        let dir = &self.own_dirs()[0];
+        let own = self.home.join(OWN_DIRS[0]);
+        let missing =
+            std::fs::symlink_metadata(&own).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let (dir, mut names) = match missing {
+            true => (self.home.clone(), vec![OWN_DIRS[0].to_string()]),
+            false => (self.own_dirs()[0].clone(), Vec::new()),
+        };
+        names.extend([MEMORY[0].to_string(), project_folder(&self.root)]);
         let said =
             |at: &Path, e: std::io::Error| format!("{}: {e} — a link or no folder there", at.display());
         let c = super::c_name(dir.as_os_str())?;
-        let mut fd = super::open_dir_at(libc::AT_FDCWD, &c).map_err(|e| said(dir, e))?;
+        let mut fd = super::open_dir_at(libc::AT_FDCWD, &c).map_err(|e| said(&dir, e))?;
         let mut at = dir.clone();
-        for name in [MEMORY[0].to_string(), project_folder(&self.root)] {
+        for name in names {
             let c = super::c_name(std::ffi::OsStr::new(&name))?;
             at.push(&name);
             // SAFETY: a folder descriptor of ours and a name, live for the call (one there already: EEXIST).

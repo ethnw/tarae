@@ -274,6 +274,26 @@ fn claude_cant_read_a_key() {
     }
 }
 
+/// A home where claude never ran (no `~/.claude` — a new user, e2e's home): tarae makes `~/.claude` too, and the
+/// profile is made — claude starts confined on day one, not unconfined with a note. A `~/.claude` that's a link
+/// (dotfiles) is followed where it leads, as before.
+#[test]
+fn a_home_where_claude_never_ran_gets_its_folder_made() {
+    let h = Home::new("never-ran");
+    let claude = h.home.join(".claude");
+    std::fs::remove_dir_all(&claude).unwrap();
+    let p = h.profile(false);
+    p.own_project_made().expect("made from home");
+    assert!(claude.join("projects").join(project_folder(&h.root)).is_dir() && !claude.is_symlink());
+    // ~/.claude a link to a folder of yours: made where it leads
+    let mine = h.base.join("dotfiles-claude");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::remove_dir_all(&claude).unwrap();
+    std::os::unix::fs::symlink(&mine, &claude).unwrap();
+    h.profile(false).own_project_made().expect("through its real path");
+    assert!(mine.join("projects").join(project_folder(&h.root)).is_dir());
+}
+
 /// This project's folder of conversations is made by tarae before claude starts (claude can't: its path is
 /// denied) — through no link: a link in the way is neither gone through nor removed, and it says so.
 #[test]
