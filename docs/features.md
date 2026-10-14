@@ -125,7 +125,8 @@ configs carry over as they are.
 - **Processes** `:procs` — every process tarae started (language servers by project, the debugger, tasks and test
   runs, the terminal's shell, Claude, plugins' programs, and what each of them started), with what it's for, how long
   it's run, its CPU and its memory (the footprint Activity Monitor shows, on macOS, beside what's resident) — tarae
-  itself first. `s` stops one, `r` restarts it where that means something, `l` shows what it said (its panel, or
+  itself first. On Linux each session's sandbox keeper has a row with its tier: what that session's commands are
+  kept from and what they share with other sessions' ([on Linux](claude-integration.md#on-linux)). `s` stops one, `r` restarts it where that means something, `l` shows what it said (its panel, or
   tarae's log at its last line). tarae looks every 30 s while the list is closed (well under a thousandth of a
   core) and checks what it sees: busy for minutes, memory far above what that program usually takes, a server
   left running with no file of it open (stopped), one that keeps exiting (not started again until `r`), a child

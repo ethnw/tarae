@@ -18,7 +18,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 [features.md](features.md) and [claude-integration.md](claude-integration.md).
 
 - [Done](#done)
-- [Now: the Linux sandbox keeper](#now-the-linux-sandbox-keeper)
+  - [The Linux sandbox keeper](#the-linux-sandbox-keeper)
 - [Next](#next)
 - [Alongside, not ordered](#alongside-not-ordered)
 - [Later](#later)
@@ -36,7 +36,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, and risk grades mark what a person must look at ([code review](claude-integration.md#code-review)) |
 | **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0, P1, P2 and P5 of the card model are built ([design/cards.md](design/cards.md)) |
 | **Sandbox, macOS** | Claude's commands run under Seatbelt: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
-| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it ([on Linux](claude-integration.md#on-linux), [design/sandbox-keeper.md](design/sandbox-keeper.md) steps 1–4) |
+| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
 | **Repository trust** | A project's risky settings, and a repository's own git config and hooks, wait for a yes before anything of theirs runs |
 | **Queues** | A run waits its turn instead of being refused, and says what it waited for (phases 0, H and 1 of [design/async.md](design/async.md)) |
 | **UI state** | What's on screen as data: `tarae state`, a socket for outside programs, Claude's `ui` tool, ids that are links, pointing at things (phases 1–3 of [design/ui-state.md](design/ui-state.md)) |
@@ -47,13 +47,10 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 
 The Claude Code IDE protocol (M5) was retired on 2026-10-04, once the chat did all of it inside tarae.
 
-## Now: the Linux sandbox keeper
+### The Linux sandbox keeper
 
-Next on the main line: letting Claude Code run on the user's API credits, per session or role — not a native API
-backend (session `apibill`, a design note first; decided 2026-10-09/10). Then steps 7–10.
-
-The design is [design/sandbox-keeper.md](design/sandbox-keeper.md). It gives every session one long-lived keeper
-that forks its runs, so what a run leaves running is the session's and ends with it, and sessions are kept apart
+Done 2026-10-14. The design is [design/sandbox-keeper.md](design/sandbox-keeper.md). It gives every session one
+long-lived keeper that forks its runs, so what a run leaves running is the session's and ends with it, and sessions are kept apart
 from each other. Daemons such as Gradle's stay warm between runs.
 
 1. **Landlock's network rights** — done. The kernel refuses a run's own connects and binds; only tarae makes them.
@@ -77,23 +74,24 @@ from each other. Daemons such as Gradle's stay warm between runs.
    session with synthetic addresses, and no proxy variable is set. Raw TCP to a name and a name's SRV/TXT records
    each ask on a card of their own. The supervisor is slimmed. Docker's default profile is served by copies in
    tier C. Elsewhere step 5's per-run proxy stays.
-7. **Sessions kept apart** — tests that one session can't reach another's processes, sockets or files. Also: the
-   keepers' memory with many sessions, and tarae's log holding every session's activity. Also: a run asks before
-   it reads a file named like a key inside the project (`.env`, `*.pem`, `id_*` — the names in
-   runtime/secret-names.txt), with the sandbox's policy moved to its own module.
-8. **The loopback rule** where sessions share one loopback (tiers without a network namespace): a session reaches
-   only its own listeners. It now matters mostly in the per-run proxy's tier.
-9. **Showing the tier** — what the sandbox guarantees for a run, said in its report, the sandbox panel, `tarae
-   state` and the run's environment. Also when tarae's AppArmor profile would raise the tier.
-10. **Docs.**
+7. **Sessions kept apart** — done. Tests that one session can't reach another's processes, sockets or files, on
+   Linux in every tier and on macOS, and the fixes they found: a run's folder no other run can write, on macOS no
+   signal or terminal outside a run's own. The keepers' memory with many sessions, measured; tarae's log names each
+   session. A run asks before it reads a file named like a key inside the project (`.env`, `*.pem`, `id_*` — the
+   names in runtime/secret-names.txt).
+8. **The loopback rule** — done. Where sessions share one loopback (tiers without a network namespace), a
+   session reaches only its own listeners and binds onto none of the others' ports.
+9. **Showing the tier** — done. What a run's sandbox keeps apart and shares, said in Claude's result, the sandbox
+   panel, `:procs`, `tarae state` and the run's environment, and how tarae's AppArmor profile would raise it.
+10. **Docs** — done. The design's tier table is checked against the code by a test.
 
 ## Next
 
-In this order, after the keeper's last step.
+In this order.
 
 ### 1. Sandbox validation
 
-After step 10. The aim is to state what the sandbox guarantees and show that it holds.
+The aim is to state what the sandbox guarantees and show that it holds.
 
 1. **One threat-model document**: what is kept from a run and what isn't, per tier and per OS. It also decides
    whether the `claude` process itself should be confined. Today it has only Read, Grep, Glob, Edit and Write,

@@ -1,15 +1,17 @@
 # The sandbox keeper: one per session, its namespaces, one egress proxy (Linux)
 
-Design, 2026-10-06. Status: **decided** (D2–D23 below). Steps 1–4 are built (§Steps): every Linux session's
-sandboxed runs are forked by its keeper, born in the session's namespaces where user namespaces work
-(`src/sandbox/keeper.rs`, `src/sandbox/tier.rs`, `src/sandbox/channel.rs`); in the session's netns a run makes its
-own sockets and tarae routes every call that names an address (`src/sandbox/route.rs`, `supervisor.rs`).
-macOS is unchanged: Seatbelt, as `src/sandbox.rs` has it.
+Design, 2026-10-06. Status: **built** (2026-10-14: steps 1–9 of the [roadmap](../roadmap.md), §Steps). Every Linux
+session's sandboxed runs are forked by a keeper of its own, born in the session's namespaces where user namespaces
+work (`src/sandbox/keeper.rs`, `tier.rs`, `channel.rs`). tarae decides every call that names an address (`route.rs`,
+`supervisor.rs`). What goes out goes through one proxy in tarae: taken by the session's own network where it has one
+(`redirect.rs`), else named by the proxy's variable (`proxy.rs`). Where sessions share a loopback, a run reaches no
+other session's sockets (`owners.rs`). Each run says what its tier keeps apart and shares (`guarantees.rs`). macOS
+keeps Seatbelt, as `src/sandbox.rs` has it; its two-session tests are `apart.rs`.
 
 ## What it's for
 
-Today's Linux sandbox (`landlock.rs`, `seccomp.rs`, `sandbox/supervisor.rs`) confines each command's files and decides
-each address it reaches. It leaves four things open:
+Before the keeper, the Linux sandbox (`landlock.rs`, `seccomp.rs`, `sandbox/supervisor.rs`) confined each command's
+files and decided each address it reached. It left four things open:
 
 - **What a run leaves running is known only by a tag.** A leftover is a process whose environment carries `MARK`.
   `env -i` drops the tag, and then nothing ends that process with its session.
@@ -568,12 +570,46 @@ In every served tier opened ports and this machine's own addresses go by the swa
 leaves the supervisor (Landlock ABI 9's step, D2). The file guarantees (Landlock ABI ≥ 3 full, 2 partial, < 2 none)
 are orthogonal (`linux::availability`).
 
-**What C/D still keep apart between sessions**: writes (Landlock), unix sockets by path (the supervisor, ABI 9),
-loopback listeners (D18), abstract sockets and signals from ABI 6, the environment (`runenv.rs`), and leftovers (the
-keeper's tree). **What they don't**: one process view (`cmdline`, `status`, `/proc/<pid>/net`, and `setpriority`,
-`sched_setaffinity`, `prlimit64` on others' processes — no Landlock hook covers those), one SysV IPC, the user's ptys
-and `/dev/shm` (`DEVICES` grants them), and below ABI 6 signals. Reads of the repository's other checkouts and `/tmp`
-are shared in every tier (D16).
+### What each tier keeps apart
+
+What a run's sandbox keeps apart from other sessions' commands, and what it shares, is one value per run
+(`sandbox::Guarantees`, §Showing it). The table below is its golden, `src/snapshots/sandbox_guarantees.txt`, at
+Landlock ABI 6 and for Seatbelt; `the_docs_tier_table_is_the_codes` (`sandbox/golden.rs`) fails when the two differ,
+and prints the table to paste. The golden also has ABIs 2–5, 7, 9 and 11: below 6 a run can signal its own
+session's other commands (signals are kept apart only out of sight), and at ABI 2 files are shared too (no rule on
+truncating: a run can empty any file of the user's).
+
+<!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
+| Tier, and what differs | Network | Kept apart from other sessions' commands | Shared with them |
+|---|---|---|---|
+| A+, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| A+, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| A+ by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
+| A+, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| A+, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| A+, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| A, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| A, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| A by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
+| B+ | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| B | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| C, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| C by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| C, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| D | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| D, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| Seatbelt, no port open, the network closed | closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, priority), System V shared memory, POSIX shared memory |
+| Seatbelt, ports open, the network closed | closed | files (but the temp folders), signals | processes (command lines, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network open | tarae's proxy | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, priority), System V shared memory, POSIX shared memory |
+| Seatbelt, ports and the network open | tarae's proxy | files (but the temp folders), signals | processes (command lines, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+<!-- /tiers -->
+
+- **Processes shared** means one process view: command lines, `status`, `/proc/<pid>/net`, and `setpriority`,
+  `sched_setaffinity`, `prlimit64` on others' processes — no Landlock hook covers those. Another process's
+  environment is never read (Landlock keeps `/proc/<pid>/environ` to a run's own).
+- **Kept apart in every tier**: writes (Landlock), unix sockets by path (the supervisor), the environment
+  (`runenv.rs`), and what a run leaves running (the keeper's tree).
+- **Shared in every tier**: reads of the repository's other checkouts, and the temp folders (D16).
 
 **The probe**, once on a worker: Landlock's ABI and the seccomp architecture as today, then a keeper made for real and
 a `true` run through it under a time limit — a timeout is no namespaces, not success — and, with a netns, whether
@@ -594,171 +630,134 @@ second: it weakens the whole system). tarae ships no profile.
 
 ## Showing it
 
-One value, `sandbox::Guarantees`, said in four places, each true for that run: a sentence in the report Claude reads
-("its localhost is the session's own — what it leaves listening its later runs reach, nothing of yours"); the state
-line of `:sandbox-blocked`'s panel (`tier C  Landlock ABI 4  loopback …  network closed  shared …` as key hints, a
-fallback's reason in a few words faint below — `Guarantees::brief`, from `tier::brief` —, folded by
-`Guarantees::FOLD` when narrow — 9e) and `:procs`' keeper row; `tarae state`'s `sandbox` object (`uistate::V` up, `--watch
-sandbox`); `TARAE_SANDBOX_STATUS` = tier and ABI (`A+:8`, `C:6`) in the run's environment.
+*Built* (step 9). One value per run, `sandbox::Guarantees` (`guarantees.rs`, 9a): built where the run's keeper is
+known (`Guarantees::landlock`, in `linux::confine`) or from its Seatbelt policy (`Guarantees::seatbelt`), never cached
+by session. A session keeps only its last run's, to show it (`Session.sandbox`). Every place below says it in its
+words (`line`, `sentence`, `shared_said`, `brief`), pinned by `sandbox_guarantees.txt` (§What each tier keeps apart).
 
-Where Ubuntu's restriction is why and no profile is on tarae, the run's `Guarantees.hint` (9f, `tier::hint`) says how
-the tier would go up: the panel, faint under the why, "tarae's AppArmor profile would make this A+" (C → A+, D → B+:
-`Tier::with_namespaces`), and the list's last row copies the step ("copy the step that makes this tier A+" — needs
-sudo, then restart tarae; the system clipboard's one path, `clipboard::copy`); the whole hint with its step in `tarae
-state`'s `hint`. Not in Claude's report: Claude can't take the step (`sudo`, outside
-the sandbox, the machine's own policy), and its `ui` answer carries the state's `hint` when it's asked why.
+- **Claude's report** (9b): the tier's sentence once a conversation, and again when it changes — what the run is
+  kept from and what it shares with other sessions' commands, and what that means ("its localhost is the
+  session's own"). Pinned by `sandbox_report.txt` per tier and `golden::the_report_says_the_tier_once`.
+- **The run's environment** (9c): `TARAE_SANDBOX_STATUS` = `<tier>:<Landlock ABI>` (`A+:6`, `C:4`), or `seatbelt`.
+  Set after `runenv`'s floor, so the filter can't drop it; removed where a run has no sandbox
+  (`golden::the_status_is_the_tier_and_the_abi`).
+- **`tarae state`** (9d): each session's `sandbox` — tier, ABI, the keeper's namespaces, the network's way, what's
+  kept and shared, the hint — and `--watch sandbox` when it changes; `ui_state.json` pins it (`uistate::V` stays 2: a field added doesn't move it).
+  Claude's `ui` answer carries it; the `ui:` line each request carries doesn't.
+- **The sandbox panel** (9e, `:sandbox-blocked`, `space m s`): a header over the list (`Picker.head`) — `tier C
+  Landlock ABI 4  loopback …  network …  shared …` as key hints, a fallback's reason in a few words faint below
+  (`Guarantees::brief`, from `tier::brief`). Narrow, it folds whole items by `Guarantees::FOLD`; the tier always
+  shows. `:procs`' keeper row says the same words.
+- **How the tier would go up** (9f, `tier::hint`): where Ubuntu's restriction is why and no profile is on tarae, the
+  run's `Guarantees.hint` says "tarae's AppArmor profile would make this A+" (C → A+, D → B+:
+  `Tier::with_namespaces`), faint under the panel's why. The list's last row copies the step ("copy the step that
+  makes this tier A+" — needs sudo, then restart tarae) through the system clipboard (`clipboard::copy`). `tarae
+  state`'s `hint` has the whole of it. Not in Claude's report: Claude can't take the step (`sudo`, outside the
+  sandbox, the machine's own policy); its `ui` answer has the hint when it's asked why.
 
 ## Steps
 
-Each lands on its own. The test that pins it is seen failing once with the change broken.
+The roadmap's numbers ([roadmap.md](../roadmap.md#the-linux-sandbox-keeper)). Each landed on its own, its tests each
+seen failing once with the change broken — how is in the appendix, §How each test was seen failing; the story is in
+the step's commit message. "Ran" is where the whole suite passed.
 
-1. **Landlock's network rights.** *Built*: TCP (ABI 4), unix paths (ABI 9), UDP (ABI 10, shipped in Linux 7.2; the
-   numbers from the v7.2 tag's `include/uapi/linux/landlock.h`,
-   https://raw.githubusercontent.com/torvalds/linux/v7.2/include/uapi/linux/landlock.h).
-   - Tests: `landlock::tests::a_runs_own_connect_is_refused_by_the_kernel` (TCP connect and bind refused; tarae's
-     connect on the run's socket reaches the listener), `a_runs_own_unix_connect_is_refused_by_the_kernel` (from 9),
-     `a_runs_own_udp_send_is_refused_by_the_kernel` (from 10: a send to an address and a bind refused; a plain send
-     on a socket connected for it arrives), the supervisor's run tests unchanged, the golden `sandbox_landlock.txt`
-     for ABIs 3, 4, 6, 9 and 10.
-   - Broken once: no network right handled (TCP test); `RESOLVE_UNIX` granted, and UDP not handled (golden).
-   - Ran (2026-10-06): colima `tarae-test`, Linux 6.8, Landlock ABI 4 — every test, the unix and UDP ones skipping
-     themselves; a GCP VM on Ubuntu 26.10 daily, Linux 7.3.0-1002-gcp x86_64, which reports **ABI 11** — every
-     `landlock::tests` test ran, none skipped (TCP, unix paths, UDP, signal scopes), and `cargo xtask linux test
-     sandbox` passed (111), every supervisor run test with `RESOLVE_UNIX` handled and granted nowhere. ABI 11's
-     own addition isn't handled: tarae's rulesets ask for the rights up to 10.
-2. **The keeper without namespaces, for every session; the supervisor behind its few messages** (tiers C/D).
-   - *Built*:
-     - `channel.rs` (the protocol);
-     - `keeper.rs` (both sides; `--sandbox-keeper` first thing in `main`);
-     - the supervisor in, the policy at its run's start and its listener; out, `Refused` on a channel
-       (`supervisor::Served`, `sandbox::told`);
-     - the confining thread + `posix_spawn` path removed (`landlock::confined` stays for its own tests).
-   - Tests (`sandbox::keeper::tests`, `sandbox::channel::tests`), each broken once:
-     - `the_channel_parser_never_panics`: the protocol module's one fuzz loop, 200,000 mutations of every kind's
-       record, each answered with a message (that very record) or a refusal. Broken by reading without its bounds
-       check: a panic.
-     - `a_message_and_its_descriptors_cross_the_socket`.
-     - `the_keeper_ends_with_its_channel`. Broken by ignoring EOF.
-     - `the_keeper_is_not_dumpable`, as an ordinary user. Broken by dropping `PR_SET_DUMPABLE` 0.
-     - `a_command_holds_only_its_stdio`. Broken by leaving the channel open in the child.
-     - `a_command_holds_no_capability`, step 3's test, here for C/D. Broken by not dropping capabilities: root's set
-       showed.
-     - `exit_status_and_cancel_go_through_the_keeper`. Broken by ignoring `Signal`.
-     - `tarae_takes_the_listener_of_a_keeper_child`, as an ordinary user: a port the policy opens is reached, port 9
-       refused, and the refusal comes out through `Refused`. Broken by leaving the child non-dumpable: "handing its
-       calls to tarae: Operation not permitted".
-     - `leftovers_are_the_keepers_children` (a run forks `env -i setsid sleep`). Broken by no
-       `PR_SET_CHILD_SUBREAPER`: its parent was init.
-     - `the_sessions_keeper_is_known` (`:procs`). Broken by leaving the line out.
-     - `a_killed_keeper_fails_closed_and_is_remade`. Broken by leaving its runs' waits unanswered.
-     - `a_keeper_says_what_it_uses`.
-   - **As an ordinary user, the dumpability tests run in a process of their own** (uid 65534 when the container makes
-     it root). Root with `CAP_SYS_PTRACE` reads and takes from any process, and a test keeper's libtest main thread
-     keeps root's capabilities, so as root these tests couldn't fail.
-   - **Every Linux sandbox test passes on both VMs (121), with one changed**:
-     `supervisor::tests::a_runs_detached_child_is_served_after_its_run`. A detached child's parent is now the
-     session's keeper, not tarae. It's served, reaped and ended whether tarae itself is a subreaper or not, with
-     `CAP_SYS_PTRACE` dropped too.
-3. **Namespaces at the keeper's birth** (A+/A/B+/B). *Built*: maps, mounts, `lo`, capabilities dropped, the
-   session's device handles, a run's pid from its pidfd (held), plain mode's own network, the probe and its reasons
-   (`tier.rs`), the tier said in the log and `:procs` (the full showing is step 8).
-   - **Two interim rules**: D-a, no netns for a policy that opens anything, until step 4; and no private `/dev/shm`
-     for a project in it.
-   - **Tests**, each broken once (`target/sb/step3-notes.md`):
-     - `a_command_holds_no_capability`, broken by no bounding-set drop;
-     - `a_run_keeps_the_users_own_ids` (D5, as uid 1000), by a root map;
-     - `no_pid_namespace_without_its_own_proc` (D12, a locked overmount of the scene's own);
-     - `a_run_sees_only_its_sessions_processes` (pids, `lo`, SysV IPC);
-     - `the_session_mounts_keep_landlocks_rules`, by granting only this system's roots;
-     - `a_project_in_dev_shm_shares_dev_shm`;
-     - `a_pty_comes_from_the_sessions_devpts`;
-     - `a_command_cant_signal_the_keeper`, by a keeper with a TERM handler;
-     - `a_runs_pid_comes_from_its_pidfd`;
-     - `an_open_policys_keeper_has_no_netns_yet` (since step 4:
-       `an_opened_policys_keeper_has_its_netns_where_the_swap_works` — since 6f `an_opened_policys_keeper_has_its_netns`);
-     - `in_plain_mode_a_run_reaches_only_its_own_loopback`;
-     - `tier::tests::the_probe_says_why` and `the_probe_here`.
-   - **Every step-2 test runs in the probe's tier.** The test helpers `keeper::outer_pid` and `seen_by_runs` translate
-     the pids a run prints.
-   - **The tier tests reach a real A+** with `cargo xtask linux --userns` (the container's seccomp, AppArmor and
-     masked paths lifted; `--userns=masked` keeps `/proc` masked, tier A). `--env TARAE_EXPECT_TIER=A+` makes a
-     machine's expected tier fail rather than skip.
-   - **Ran (2026-10-06), 166 tests each, all passing:**
-     - Debian 12 (Linux 6.1, ABI 2): A+, A and C.
-     - colima (6.8, ABI 4): C under Docker's seccomp and under Ubuntu's restriction.
-     - GCP Ubuntu 26.10 (7.3, ABI 11): C both ways, and A+ with the restriction lifted by the user for the run.
-4. **Sockets inside the session, routing and the egress swap** (D2). *Built* (2026-10-07; plan and measurements
-   `target/sb/step4-plan.md`, `step4-notes.md`): `route.rs`, `seccomp::Mode::Routed`, `RunNet::Routed` and the
-   channel's `net`, the swap and its probe, D-a only where the swap is missing, D-c–D-f as decided (§Sockets and
-   routing), the session's `lo` mirroring tarae's address families (`Families`), the supervisor's counters (one log line per served run: calls by
-   kind, time in tarae).
-   - **Tests**, each seen failing once with its break:
-
-     | Test | Broken by |
-     |---|---|
-     | `route::tests::the_route_table` (every row, both tiers; GCP's resolver: port 53 out, its other ports never) | loopback always to this machine; a resolver matched by address alone |
-     | `route::tests::resolvers_are_read_as_glibc_reads_them` | every line's second word taken |
-     | `two_runs_share_the_sessions_loopback` (closed, and with `localhost` on: the session first) | loopback to this machine |
-     | `the_users_loopback_isnt_reached` | the same: the user's own listener was reached |
-     | `an_opened_port_reaches_this_machine` (and the session's own listener on that port first) | opened ports ignored |
-     | `a_swapped_socket_keeps_nonblocking` (`EINPROGRESS`, `O_NONBLOCK`, close-on-exec, options, no device) | `O_NONBLOCK` not carried |
-     | `a_bound_socket_isnt_swapped` (a port of its own refused; `0.0.0.0:0` goes out) | the bound check skipped |
-     | `a_resolvers_port_reaches_this_machine` (D-c, a stand-in resolver on its own port) | the resolvers row dropped |
-     | `the_never_reached_are_refused` (D-d; multicast, so a break sends nothing) | D-d's check removed |
-     | `in_tier_c_the_network_open_goes_out_too` (D-e) | C's out-bound connect left on its `lo`-bound socket |
-     | `a_routed_runs_own_connect_is_refused_by_the_kernel` (ABI ≥ 4) | `Routed`'s rules leaving TCP unhandled |
-     | `the_swap_is_probed` (gone in 6f with the probe) | answering without `SETFD` |
-     | `the_families_are_what_glibc_counts` (the decision, pure) | IPv4 never counted |
-     | `an_ipv4_lookup_finds_an_address_in_the_session` | no `SESSION_V4` on `lo`: `getaddrinfo -2`; IPv4 never counted |
-     | `an_ipv6_lookup_finds_an_address_where_tarae_has_ipv6` (the family forced at the birth: the test containers have no IPv6; without it, nothing found) | no `SESSION_V6` on `lo`: `getaddrinfo -2` |
-     | *After the review (2026-10-07):* | |
-     | `seccomp::tests::the_filter_knows_only_the_native_calls` (TCP/UDP by protocol in `Routed` and `OwnNetwork`; `listen` to tarae) and `a_run_makes_tcp_and_udp_sockets_only` (SCTP, MPTCP, UDP-Lite, ICMP refused in the session) | the protocol checks always allowing: SCTP and MPTCP sockets made on Debian (`0 0 0 0 0 13`) |
-     | `route::tests::this_machines_own_addresses_are_this_machine` and `this_machines_own_address_is_reached_only_where_opened` (the addresses as `Here::now` reads them; C and the netns: refused, then reached once opened) | own addresses never asked: a run reached a listener on the container's own address with the network open |
-     | `a_socket_put_out_of_the_session_isnt_listened_on` (C and the netns; after a refused connect, and after `connect(AF_UNSPEC)` undid one made) | the swapped check in `listen` skipped: `listen=0` |
-     | `a_swapped_socket_is_taraes_before_the_run_holds_it` (a second thread connects the same number to loopback while the supervisor pauses right after `add_fd` — `Policy.swap_pause`, test-only) | the swap recorded after `add_fd`: the second connect was made on tarae's socket and reached the user's loopback listener (`lo=0 out=106`) |
-     | `route::tests::unread_own_addresses_only_refuse` (own addresses unread: an opened port on any address refused, nothing out) | an unread list counted as "mine": `93.184.216.34:3000` became `OwnAddress` |
-     | `without_the_swap_nothing_goes_beyond_loopback` (gone in 6f: no kernel at or above the 5.14 floor lacks the swap) (tier C, the swap forced missing — `Policy.test_swap_missing`: out refused and said, the loopback port reached, the report loopback only) | the swap's check skipped: the connection arrived out |
-     | `a_socket_from_outside_the_session_is_refused` (two TCP sockets and a unix one made outside, handed over a unix socket in the project: connect to loopback, listen, abstract name) | the netns check always passing: `connect=0 listen=0 abstract=0` — the user's listener and an abstract name of this machine's reached |
-     | `route::tests::the_route_table`'s metadata rows (`route::METADATA`: Alibaba's, EKS Pod Identity's, Google's IPv6; NAT64 and mapped forms; Alibaba's neighbours out) | the non-link-local list dropped |
-     | `linux::tests::the_report_says_how_linux_differs`'s unread case ("connect to nothing but this machine's loopback … llm.sandbox-network notwithstanding") | the report's unread case skipped |
-     | `route::tests::the_route_table`'s NAT64 and 6to4 rows (and `64:ff9b:1::/48`, the local-use prefix whose embedding varies, pinned as not covered) | the carried IPv4 address not checked |
-     | `a_mirror_that_fails_leaves_the_birth_going` (both mirrors on a device that isn't there: born, `lo_missing` said, IPv6 lookup finds nothing) | the IPv6 mirror's failure fatal again: `BirthError { step: Lo, errno: 19 }` |
-
-   - **Changed for the routing**: in a netns a closed loopback port, a datagram there and an abstract name are the
-     session's own, so `this_machines_ports_as_the_policy_says` and `unix_sockets_where_macos_allows_them` expect
-     `ECONNREFUSED`/sent there, not a rule's `EPERM`; `gradle_builds_in_the_sandbox` builds with this machine's ports
-     closed (its daemon is the session's); the scenes that needed a refusal in every tier use `192.0.2.1:9` with the
-     network closed. The swap's tests reach a listener of theirs on the container's own address with a policy made
-     with no own addresses (`own_addresses: Some([])`), so the routing takes it as beyond: a target truly beyond
-     would send packets off the machine, which no test does.
-   - **Ran (2026-10-07)**: colima C (6.8, ABI 4) and Debian 12 `--userns` A+ (6.1, ABI 2) full suites; GCP Ubuntu
-     26.10 A+ (7.3, ABI 11, the restriction lifted for the run) full suite with `TARAE_EXPECT_TIER=A+`; macOS
-     clippy. After the review's four findings: colima C and Debian A+ full suites again (1637 + 43 e2e each).
-5. **The egress proxy.**
-   - Tests: `the_connect_parser_never_panics`, `the_sni_parser_never_panics`, `connect_heads_over_the_limit_are_refused`,
-     `a_slow_client_is_cut_at_the_time_limit`, `loopback_link_local_and_metadata_are_refused` (a stand-in resolver
-     answering `127.0.0.1`, `169.254.169.254`, `fe80::1`), `it_connects_to_the_address_it_checked`,
-     `sni_must_match_the_connect_host`, `plain_http_through_the_proxy_is_405`, `a_refusal_lands_in_the_sessions_report`,
-     `two_sessions_rules_stay_apart`, `the_proxy_knows_only_what_a_message_carries` (D23: the proxy runs against a
-     stand-in supervisor that only writes messages to its channel — a connection whose rules allow a name is
-     relayed, the same name under another message's rules is refused, and `Refused` comes back on the channel) — the
-     "outside" is always the test's own listeners on this machine.
-   - Break once: connect by name instead of the checked address.
-6. **Per session** (D13, D14).
-   - Tests: `two_sessions_cant_reach_each_other` (A+: loopback, abstract sockets, pids, IPC, pty, `/dev/shm`),
-     `a_new_conversation_keeps_the_keeper`, `a_key_change_ends_the_keepers_daemons`.
-   - Break once: one keeper for two sessions.
-7. **The loopback rule where sessions share a loopback** (D18, tier C and served by copies) — *built* (step 8 of
-   `plan-7-10.md`).
-   - Tests: `two_sessions_cant_reach_each_others_sockets` (with `llm.sandbox-localhost` on),
+1. **Landlock's network rights** (D4). A run's own connect, bind and addressed send are the kernel's to refuse:
+   TCP from ABI 4, unix paths from 9, UDP from 10 (Linux 7.2's `include/uapi/linux/landlock.h`). tarae's call on
+   the run's socket goes through. ABI 11's own addition isn't handled: the rulesets ask for the rights up to 10.
+   - Tests: `landlock::tests::a_runs_own_{connect,unix_connect,udp_send}_is_refused_by_the_kernel`; the golden
+     `sandbox_landlock.txt` for ABIs 3, 4, 6, 9 and 10.
+   - Ran (2026-10-06): colima `tarae-test` (6.8, ABI 4), the unix and UDP tests skipping themselves; GCP Ubuntu
+     26.10 (7.3.0-1002-gcp x86_64, **ABI 11**), none skipped, `cargo xtask linux test sandbox` 111 passing.
+2. **One keeper per session** (C, D). `channel.rs` (the protocol), `keeper.rs` (both sides; `--sandbox-keeper` first
+   thing in `main`), the supervisor behind a few messages: in, the policy at its run's start and its listener; out,
+   `Refused` on a channel (`supervisor::Served`, `sandbox::told`). The keeper is non-dumpable, a child subreaper, and
+   ends with its channel; a command holds only its stdio and no capability; a killed keeper fails its runs closed and
+   is remade.
+   - Tests (`sandbox::keeper::tests`, `sandbox::channel::tests`): `the_channel_parser_never_panics` (200,000
+     mutations of every kind's record, each a message or a refusal), `the_keeper_is_not_dumpable`,
+     `a_command_holds_only_its_stdio`, `a_command_holds_no_capability`, `leftovers_are_the_keepers_children`,
+     `a_killed_keeper_fails_closed_and_is_remade`.
+   - As an ordinary user, the dumpability tests run in a process of their own (uid 65534 where the container makes
+     it root): root with `CAP_SYS_PTRACE` reads any process, so as root they couldn't fail.
+   - Ran: both VMs (121).
+3. **Namespaces by tier** (A+ … B). Maps, mounts, `lo`, capabilities dropped, the session's device handles, a run's
+   pid from its pidfd, plain mode's own network, the probe and its reasons (`tier.rs`, §Tiers).
+   - Tests: `a_run_keeps_the_users_own_ids` (D5), `no_pid_namespace_without_its_own_proc` (D12),
+     `a_run_sees_only_its_sessions_processes`, `the_session_mounts_keep_landlocks_rules`,
+     `a_project_in_dev_shm_shares_dev_shm`, `a_pty_comes_from_the_sessions_devpts`,
+     `a_command_cant_signal_the_keeper`, `tier::tests::the_probe_says_why`. Every step-2 test runs in the probe's
+     tier (`keeper::outer_pid` and `seen_by_runs` translate the pids a run prints).
+   - Ran (2026-10-06, 166 tests each): Debian 12 (6.1, ABI 2) A+, A and C; colima (6.8, ABI 4) C under Docker's
+     seccomp and under Ubuntu's restriction; GCP Ubuntu 26.10 (7.3, ABI 11) C both ways, and A+ with the restriction
+     lifted by the user for the run.
+4. **Routing every socket** (D2, D-c–D-f). `route.rs` (one table, §Sockets and routing), `seccomp::Mode::Routed`,
+   `RunNet::Routed` and the channel's `net`, the swap, the session's `lo` mirroring tarae's address families
+   (`Families`), the supervisor's counters (one log line per served run: calls by kind, time in tarae).
+   - Tests: `route::tests::the_route_table` (every row, both tiers; the metadata, NAT64 and 6to4 rows),
+     `two_runs_share_the_sessions_loopback`, `the_users_loopback_isnt_reached`, `a_swapped_socket_is_taraes_before_the_run_holds_it`,
+     `a_socket_from_outside_the_session_is_refused`, `a_run_makes_tcp_and_udp_sockets_only`.
+   - In a netns a closed loopback port, a datagram there and an abstract name are the session's own: tests expect
+     `ECONNREFUSED` there, not a rule's `EPERM`. A test reaches "beyond" only at a listener of its own on the
+     container's address, with a policy that has no own addresses: a target truly beyond would send packets off
+     the machine.
+   - Ran (2026-10-07): colima C and Debian 12 `--userns` A+ (1637 + 43 e2e each); GCP Ubuntu 26.10 A+ with
+     `TARAE_EXPECT_TIER=A+`.
+5. **The egress proxy** (D17, D20, D23; §The egress proxy, `proxy.rs`). One proxy, threads in tarae: connections go
+   out by host name, read from the CONNECT line or the TLS SNI, never decrypted; plain HTTP too. A host the rules
+   don't name waits for the user's card (`llm.sandbox-hosts`); through tarae's own upstream proxy where it has one
+   (`llm.sandbox-upstream`).
+   - Tests: `the_connect_parser_never_panics`, `the_sni_parser_never_panics`, `it_connects_to_the_address_it_checked`,
+     `sni_must_match_the_connect_host`, `the_proxy_knows_only_what_a_message_carries` (D23). The "outside" is
+     always the test's own listeners on this machine.
+6. **The transparent proxy** (6c–6h). `target/sb/step6-plan.md` isn't kept in every checkout; the code's module
+   docs name each part.
+   - **The session's network** (6c, `redirect.rs`): in A+ and A, where the probe's batch lands
+     (`tier::Probed.redirect`), tarae sends the session's routes and one nf_tables table over netlink sockets the
+     keeper opened in its netns. A TCP connection or UDP datagram leaving the session is taken by tproxy rules to a
+     socket tarae planted there; anything else is dropped.
+   - **Marks** (6d, `marks.rs`): a served run's connect beyond is marked as its run's and program's; the planted
+     socket reads the mark back and hands the connection to the proxy, which decides its host as a CONNECT's.
+   - **Names** (6e, `names.rs`): tarae answers a run's lookups in the session with synthetic addresses
+     (`198.18.0.0/15`, a /64 beside the session's IPv6 one), so no proxy variable is set. Raw TCP to a looked-up name
+     and a name's SRV/TXT records each ask on a card of their own (6e+, §The egress proxy).
+   - **The 5.14 floor** (6f): the swap's probe and `Out` went; tier C goes out by the proxy's variable and the pair.
+   - **By copies** (6f′, `copies.rs`, §By copies): where `pidfd_getfd` is refused (Docker's default profile) the
+     supervisor makes every socket a run has and keeps a copy. Tier C.
+   - **A cgroup per run** (6g, `cgroup.rs`): where the keeper has a delegated scope, so a rule can tell runs apart.
+     Tested with `cargo xtask linux --userns --cgroup` (CONTRIBUTING: a throwaway VM only).
+   - **tarae's AppArmor profile** (6h, `apparmor.rs`, `packaging/apparmor/tarae`): lifts Ubuntu's restriction for
+     tarae's binary alone; the `.deb` ships it for `/usr/bin/tarae`. tarae never writes it.
+   - Without TPROXY (no `nft_tproxy`), step 5's proxy variable stays.
+7. **Sessions kept apart** (D13, D14). Two sessions side by side, from a run of one at what the other's runs have:
+   `keeper::tests::two_sessions_cant_reach_each_others_processes`, `…_sockets`, `two_sessions_cant_write_each_others_files`
+   in every tier `cargo xtask linux` reaches, and `apart.rs`'s same three on macOS. What they found is fixed:
+   - a run's own folder (`RunDir`) is in tarae's cache (`runs/<instance>/<n>`), out of every place another run may
+     write;
+   - on macOS a run signals and inspects only its own processes, and opens no terminal unless the project allows it;
+     on Linux, where a session has no terminals of its own, a run reaches only those it makes;
+   - a run can't read a file named like a key in the project unless that file is granted (Linux A+ … B: a mount in
+     the run's own namespace; C, D and root: its folders' rules; macOS: the profile), and Claude's reads of one ask;
+   - a session's keeper lives across a new conversation and ends with its policy (`a_new_conversation_keeps_the_keeper`,
+     `a_key_change_ends_the_keepers_daemons`, `a_new_conversation_after_a_grant_ends_the_keepers_daemons`);
+   - one log, each sandbox line naming its session, a busy one unable to push a quiet one's out;
+   - many sessions measured (§Measured): the keepers dominate the memory, descriptors were the limit, so the editor
+     raises its own and gives what it starts the old one back (`nofile.rs`).
+8. **The loopback rule** (D18; §Where sessions share a loopback, `owners.rs`). Tier C and every session served by
+   copies: a run reaches no other session's socket on this machine's loopback, nor binds onto its port — refused as
+   the kernel refuses (`ECONNREFUSED`, `EADDRINUSE`) and said by its port.
+   - Tests: `two_sessions_cant_reach_each_others_sockets` (refused now in C), `a_bind_onto_another_sessions_port_is_refused`,
      `a_session_reaches_its_own_listener`, `the_users_listener_is_reached_where_opened`,
      `an_ended_sessions_sockets_leave_the_table`.
-   - Broken once each: the owner lookup skipped; owners keyed by run; every unknown socket taken as another
-     session's; no prune at the keeper's end.
-8. **Showing it** (D7). Tests: golden `sandbox_report.txt` per tier, the `ui_state.json` snapshot; a screenshot first.
-9. **Docs and CLAUDE.md.**
-10. **Later, each its own step**: `:sandbox-expose <port>` (D3); the supervisor and the proxy as one confined process
-    per session (D21).
+   - Ran: Ubuntu 24.04, colima, and Debian 12 served by copies (`TARAE_TEST_COPIES`).
+9. **Showing the tier** (D7, 9a–9f; §Showing it). `Guarantees`, then Claude's report, `TARAE_SANDBOX_STATUS`,
+   `tarae state`, the panel's header and `:procs`, the profile's hint. Pinned by `sandbox_guarantees.txt`,
+   `sandbox_report.txt`, `ui_state.json` and the panel's snapshots.
+10. **Docs**: this document, [claude-integration.md](../claude-integration.md#on-linux), CLAUDE.md, CONTRIBUTING; the
+    tier table pinned by `the_docs_tier_table_is_the_codes`.
+
+Later, each its own step: `:sandbox-expose <port>` (D3); the supervisor and the proxy as one confined process per
+session (D21). The roadmap's "Sandbox validation" comes next: a threat model, fuzzing, a must-be-refused suite on
+several kernels, Yama 2, a speed comparison.
 
 ## Measured
 
@@ -906,7 +905,7 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   cargo's caches covers only the folders there when the policy is made (Landlock can't grant a path that isn't
   there). It predates step 4 (open items).
 
-### Many sessions, idle (linux7 piece 8, 2026-10-11)
+### Many sessions, idle (step 7, 2026-10-11)
 
 - **How**: `cargo xtask linux [--env TARAE_EXPECT_TIER=A+ --userns] test --profile perf --bin tarae -- --exact
   sandbox::keeper::tests::perf_keepers_memory_per_session --nocapture`, optimized, run as root in the container.
@@ -943,7 +942,7 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   couldn't be made: `EMFILE` making its rules, both times. Debian's container allowed 1048576 and reached 32.
   tarae never raised its soft limit, and its servers, files and terminal took from the same 1024.
 
-### Many sessions, the descriptor limit raised (linux7 piece 9, 2026-10-13)
+### Many sessions, the descriptor limit raised (step 7, 2026-10-13)
 
 - **What changed**: the editor raises its soft `RLIMIT_NOFILE` to the hard limit in `main`, past the arguments,
   before any thread runs (macOS: to `kern.maxfilesperproc` at most; a subcommand like `tarae state` raises and
@@ -952,7 +951,7 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   tarae's master keeps the pty that inode. Broken once, closed before the rules, every pool pty is refused
   (`EACCES`). `ptys::POOL` stays 16: nothing measured says fewer is enough, and tarae's own e2e suite holds a pty
   per test thread.
-- **How**: as piece 8, colima, C. The measurement now runs in a process of its own, raised as `main` raises it
+- **How**: as above, colima, C. The measurement now runs in a process of its own, raised as `main` raises it
   (`TARAE_TEST_NO_RAISE=1` runs it without).
 - **Per session in C**: keeper 5 descriptors (the same), a held served run **28** (was 44): 16 ptys (was 32),
   5 pipes, 4 sockets, ruleset, pidfd, seccomp notify.
@@ -1001,3 +1000,152 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   refused folder in both cases — today it does only when `~/.cargo` itself is missing (under an existing
   `~/.cargo` the policy calls the path writable, so `said_in_output` doesn't count it). A small follow-up, queued
   by the user.
+
+## Appendix: How each test was seen failing
+
+The test records §Steps condensed, word for word as this document had them while each step was built, grouped by
+the roadmap's step (the document's own numbers then, where they differ, in brackets). The commit messages hold few
+of them, so this is their copy.
+
+### Step 1, Landlock's network rights
+
+- Tests: `landlock::tests::a_runs_own_connect_is_refused_by_the_kernel` (TCP connect and bind refused; tarae's
+  connect on the run's socket reaches the listener), `a_runs_own_unix_connect_is_refused_by_the_kernel` (from 9),
+  `a_runs_own_udp_send_is_refused_by_the_kernel` (from 10: a send to an address and a bind refused; a plain send
+  on a socket connected for it arrives), the supervisor's run tests unchanged, the golden `sandbox_landlock.txt`
+  for ABIs 3, 4, 6, 9 and 10.
+- Broken once: no network right handled (TCP test); `RESOLVE_UNIX` granted, and UDP not handled (golden).
+- Ran (2026-10-06): colima `tarae-test`, Linux 6.8, Landlock ABI 4 — every test, the unix and UDP ones skipping
+  themselves; a GCP VM on Ubuntu 26.10 daily, Linux 7.3.0-1002-gcp x86_64, which reports **ABI 11** — every
+  `landlock::tests` test ran, none skipped (TCP, unix paths, UDP, signal scopes), and `cargo xtask linux test
+  sandbox` passed (111), every supervisor run test with `RESOLVE_UNIX` handled and granted nowhere. ABI 11's
+  own addition isn't handled: tarae's rulesets ask for the rights up to 10.
+
+### Step 2, one keeper per session
+
+- Tests (`sandbox::keeper::tests`, `sandbox::channel::tests`), each broken once:
+  - `the_channel_parser_never_panics`: the protocol module's one fuzz loop, 200,000 mutations of every kind's
+    record, each answered with a message (that very record) or a refusal. Broken by reading without its bounds
+    check: a panic.
+  - `a_message_and_its_descriptors_cross_the_socket`.
+  - `the_keeper_ends_with_its_channel`. Broken by ignoring EOF.
+  - `the_keeper_is_not_dumpable`, as an ordinary user. Broken by dropping `PR_SET_DUMPABLE` 0.
+  - `a_command_holds_only_its_stdio`. Broken by leaving the channel open in the child.
+  - `a_command_holds_no_capability`, step 3's test, here for C/D. Broken by not dropping capabilities: root's set
+    showed.
+  - `exit_status_and_cancel_go_through_the_keeper`. Broken by ignoring `Signal`.
+  - `tarae_takes_the_listener_of_a_keeper_child`, as an ordinary user: a port the policy opens is reached, port 9
+    refused, and the refusal comes out through `Refused`. Broken by leaving the child non-dumpable: "handing its
+    calls to tarae: Operation not permitted".
+  - `leftovers_are_the_keepers_children` (a run forks `env -i setsid sleep`). Broken by no
+    `PR_SET_CHILD_SUBREAPER`: its parent was init.
+  - `the_sessions_keeper_is_known` (`:procs`). Broken by leaving the line out.
+  - `a_killed_keeper_fails_closed_and_is_remade`. Broken by leaving its runs' waits unanswered.
+  - `a_keeper_says_what_it_uses`.
+- **As an ordinary user, the dumpability tests run in a process of their own** (uid 65534 when the container makes
+  it root). Root with `CAP_SYS_PTRACE` reads and takes from any process, and a test keeper's libtest main thread
+  keeps root's capabilities, so as root these tests couldn't fail.
+- **Every Linux sandbox test passes on both VMs (121), with one changed**:
+  `supervisor::tests::a_runs_detached_child_is_served_after_its_run`. A detached child's parent is now the
+  session's keeper, not tarae. It's served, reaped and ended whether tarae itself is a subreaper or not, with
+  `CAP_SYS_PTRACE` dropped too.
+
+### Step 3, namespaces by tier
+
+- **Tests**, each broken once (`target/sb/step3-notes.md`):
+  - `a_command_holds_no_capability`, broken by no bounding-set drop;
+  - `a_run_keeps_the_users_own_ids` (D5, as uid 1000), by a root map;
+  - `no_pid_namespace_without_its_own_proc` (D12, a locked overmount of the scene's own);
+  - `a_run_sees_only_its_sessions_processes` (pids, `lo`, SysV IPC);
+  - `the_session_mounts_keep_landlocks_rules`, by granting only this system's roots;
+  - `a_project_in_dev_shm_shares_dev_shm`;
+  - `a_pty_comes_from_the_sessions_devpts`;
+  - `a_command_cant_signal_the_keeper`, by a keeper with a TERM handler;
+  - `a_runs_pid_comes_from_its_pidfd`;
+  - `an_open_policys_keeper_has_no_netns_yet` (since step 4:
+    `an_opened_policys_keeper_has_its_netns_where_the_swap_works` — since 6f `an_opened_policys_keeper_has_its_netns`);
+  - `in_plain_mode_a_run_reaches_only_its_own_loopback`;
+  - `tier::tests::the_probe_says_why` and `the_probe_here`.
+- **Every step-2 test runs in the probe's tier.** The test helpers `keeper::outer_pid` and `seen_by_runs` translate
+  the pids a run prints.
+- **The tier tests reach a real A+** with `cargo xtask linux --userns` (the container's seccomp, AppArmor and
+  masked paths lifted; `--userns=masked` keeps `/proc` masked, tier A). `--env TARAE_EXPECT_TIER=A+` makes a
+  machine's expected tier fail rather than skip.
+- **Ran (2026-10-06), 166 tests each, all passing:**
+  - Debian 12 (Linux 6.1, ABI 2): A+, A and C.
+  - colima (6.8, ABI 4): C under Docker's seccomp and under Ubuntu's restriction.
+  - GCP Ubuntu 26.10 (7.3, ABI 11): C both ways, and A+ with the restriction lifted by the user for the run.
+
+### Step 4, routing every socket
+
+- **Tests**, each seen failing once with its break:
+
+  | Test | Broken by |
+  |---|---|
+  | `route::tests::the_route_table` (every row, both tiers; GCP's resolver: port 53 out, its other ports never) | loopback always to this machine; a resolver matched by address alone |
+  | `route::tests::resolvers_are_read_as_glibc_reads_them` | every line's second word taken |
+  | `two_runs_share_the_sessions_loopback` (closed, and with `localhost` on: the session first) | loopback to this machine |
+  | `the_users_loopback_isnt_reached` | the same: the user's own listener was reached |
+  | `an_opened_port_reaches_this_machine` (and the session's own listener on that port first) | opened ports ignored |
+  | `a_swapped_socket_keeps_nonblocking` (`EINPROGRESS`, `O_NONBLOCK`, close-on-exec, options, no device) | `O_NONBLOCK` not carried |
+  | `a_bound_socket_isnt_swapped` (a port of its own refused; `0.0.0.0:0` goes out) | the bound check skipped |
+  | `a_resolvers_port_reaches_this_machine` (D-c, a stand-in resolver on its own port) | the resolvers row dropped |
+  | `the_never_reached_are_refused` (D-d; multicast, so a break sends nothing) | D-d's check removed |
+  | `in_tier_c_the_network_open_goes_out_too` (D-e) | C's out-bound connect left on its `lo`-bound socket |
+  | `a_routed_runs_own_connect_is_refused_by_the_kernel` (ABI ≥ 4) | `Routed`'s rules leaving TCP unhandled |
+  | `the_swap_is_probed` (gone in 6f with the probe) | answering without `SETFD` |
+  | `the_families_are_what_glibc_counts` (the decision, pure) | IPv4 never counted |
+  | `an_ipv4_lookup_finds_an_address_in_the_session` | no `SESSION_V4` on `lo`: `getaddrinfo -2`; IPv4 never counted |
+  | `an_ipv6_lookup_finds_an_address_where_tarae_has_ipv6` (the family forced at the birth: the test containers have no IPv6; without it, nothing found) | no `SESSION_V6` on `lo`: `getaddrinfo -2` |
+  | *After the review (2026-10-07):* | |
+  | `seccomp::tests::the_filter_knows_only_the_native_calls` (TCP/UDP by protocol in `Routed` and `OwnNetwork`; `listen` to tarae) and `a_run_makes_tcp_and_udp_sockets_only` (SCTP, MPTCP, UDP-Lite, ICMP refused in the session) | the protocol checks always allowing: SCTP and MPTCP sockets made on Debian (`0 0 0 0 0 13`) |
+  | `route::tests::this_machines_own_addresses_are_this_machine` and `this_machines_own_address_is_reached_only_where_opened` (the addresses as `Here::now` reads them; C and the netns: refused, then reached once opened) | own addresses never asked: a run reached a listener on the container's own address with the network open |
+  | `a_socket_put_out_of_the_session_isnt_listened_on` (C and the netns; after a refused connect, and after `connect(AF_UNSPEC)` undid one made) | the swapped check in `listen` skipped: `listen=0` |
+  | `a_swapped_socket_is_taraes_before_the_run_holds_it` (a second thread connects the same number to loopback while the supervisor pauses right after `add_fd` — `Policy.swap_pause`, test-only) | the swap recorded after `add_fd`: the second connect was made on tarae's socket and reached the user's loopback listener (`lo=0 out=106`) |
+  | `route::tests::unread_own_addresses_only_refuse` (own addresses unread: an opened port on any address refused, nothing out) | an unread list counted as "mine": `93.184.216.34:3000` became `OwnAddress` |
+  | `without_the_swap_nothing_goes_beyond_loopback` (gone in 6f: no kernel at or above the 5.14 floor lacks the swap) (tier C, the swap forced missing — `Policy.test_swap_missing`: out refused and said, the loopback port reached, the report loopback only) | the swap's check skipped: the connection arrived out |
+  | `a_socket_from_outside_the_session_is_refused` (two TCP sockets and a unix one made outside, handed over a unix socket in the project: connect to loopback, listen, abstract name) | the netns check always passing: `connect=0 listen=0 abstract=0` — the user's listener and an abstract name of this machine's reached |
+  | `route::tests::the_route_table`'s metadata rows (`route::METADATA`: Alibaba's, EKS Pod Identity's, Google's IPv6; NAT64 and mapped forms; Alibaba's neighbours out) | the non-link-local list dropped |
+  | `linux::tests::the_report_says_how_linux_differs`'s unread case ("connect to nothing but this machine's loopback … llm.sandbox-network notwithstanding") | the report's unread case skipped |
+  | `route::tests::the_route_table`'s NAT64 and 6to4 rows (and `64:ff9b:1::/48`, the local-use prefix whose embedding varies, pinned as not covered) | the carried IPv4 address not checked |
+  | `a_mirror_that_fails_leaves_the_birth_going` (both mirrors on a device that isn't there: born, `lo_missing` said, IPv6 lookup finds nothing) | the IPv6 mirror's failure fatal again: `BirthError { step: Lo, errno: 19 }` |
+
+- **Changed for the routing**: in a netns a closed loopback port, a datagram there and an abstract name are the
+  session's own, so `this_machines_ports_as_the_policy_says` and `unix_sockets_where_macos_allows_them` expect
+  `ECONNREFUSED`/sent there, not a rule's `EPERM`; `gradle_builds_in_the_sandbox` builds with this machine's ports
+  closed (its daemon is the session's); the scenes that needed a refusal in every tier use `192.0.2.1:9` with the
+  network closed. The swap's tests reach a listener of theirs on the container's own address with a policy made
+  with no own addresses (`own_addresses: Some([])`), so the routing takes it as beyond: a target truly beyond
+  would send packets off the machine, which no test does.
+- **Ran (2026-10-07)**: colima C (6.8, ABI 4) and Debian 12 `--userns` A+ (6.1, ABI 2) full suites; GCP Ubuntu
+  26.10 A+ (7.3, ABI 11, the restriction lifted for the run) full suite with `TARAE_EXPECT_TIER=A+`; macOS
+  clippy. After the review's four findings: colima C and Debian A+ full suites again (1637 + 43 e2e each).
+
+### Step 5, the egress proxy
+
+- Tests: `the_connect_parser_never_panics`, `the_sni_parser_never_panics`, `connect_heads_over_the_limit_are_refused`,
+  `a_slow_client_is_cut_at_the_time_limit`, `loopback_link_local_and_metadata_are_refused` (a stand-in resolver
+  answering `127.0.0.1`, `169.254.169.254`, `fe80::1`), `it_connects_to_the_address_it_checked`,
+  `sni_must_match_the_connect_host`, `plain_http_through_the_proxy_is_405`, `a_refusal_lands_in_the_sessions_report`,
+  `two_sessions_rules_stay_apart`, `the_proxy_knows_only_what_a_message_carries` (D23: the proxy runs against a
+  stand-in supervisor that only writes messages to its channel — a connection whose rules allow a name is
+  relayed, the same name under another message's rules is refused, and `Refused` comes back on the channel) — the
+  "outside" is always the test's own listeners on this machine.
+- Break once: connect by name instead of the checked address.
+
+### Step 7, sessions kept apart (then "6. Per session", as planned)
+
+Written before it was built; its tests became step 7's `two_sessions_cant_reach_each_others_processes`, `…_sockets`
+and `two_sessions_cant_write_each_others_files`, whose breaks this document never recorded.
+
+- Tests: `two_sessions_cant_reach_each_other` (A+: loopback, abstract sockets, pids, IPC, pty, `/dev/shm`),
+  `a_new_conversation_keeps_the_keeper`, `a_key_change_ends_the_keepers_daemons`.
+- Break once: one keeper for two sessions.
+
+### Step 8, the loopback rule (then "7.")
+
+- Tests: `two_sessions_cant_reach_each_others_sockets` (with `llm.sandbox-localhost` on),
+  `a_session_reaches_its_own_listener`, `the_users_listener_is_reached_where_opened`,
+  `an_ended_sessions_sockets_leave_the_table`.
+- Broken once each: the owner lookup skipped; owners keyed by run; every unknown socket taken as another
+  session's; no prune at the keeper's end.

@@ -705,6 +705,55 @@ fn the_guarantees_say_each_tier() {
     pinned("sandbox_guarantees.txt", &out);
 }
 
+/// The docs' tier tables (between their two markers: the design doc's §What each tier keeps apart, and
+/// claude-integration.md's "On Linux", without the network) are the golden's: each Linux scene at Landlock ABI 6
+/// (the first without a gap of its own) and each Seatbelt one — its network, what it keeps apart, what it shares.
+/// A hand-kept table drifts; these can't.
+#[test]
+fn the_docs_tier_table_is_the_codes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let golden = std::fs::read_to_string(root.join("src/snapshots/sandbox_guarantees.txt")).unwrap();
+    let mut design = String::from(
+        "| Tier, and what differs | Network | Kept apart from other sessions' commands | Shared with them |\n\
+         |---|---|---|---|\n",
+    );
+    let mut users = String::from("| Tier, and what differs | Kept apart | Shared |\n|---|---|---|\n");
+    for scene in golden.split("══ ").skip(1) {
+        let (head, body) = scene.split_once('\n').unwrap();
+        let label = match head.strip_suffix(" · ABI 6") {
+            Some(l) => l,
+            None if head.starts_with("Seatbelt") => head,
+            None => continue,
+        };
+        let field = |name: &str| {
+            let start = format!("{name}: ");
+            body.lines()
+                .find_map(|l| l.strip_prefix(start.as_str()))
+                .unwrap_or_else(|| panic!("{head}: no {name}"))
+        };
+        let network = field("line").split(" · ").find_map(|p| p.strip_prefix("network ")).unwrap();
+        let said =
+            field("sentence").split_once("kept apart from other tarae sessions' commands — ").unwrap().1;
+        let (kept, shared) = said.split_once("; shared with them — ").unwrap();
+        let shared = shared.strip_suffix('.').unwrap_or(shared);
+        design.push_str(&format!("| {label} | {network} | {kept} | {shared} |\n"));
+        users.push_str(&format!("| {label} | {kept} | {shared} |\n"));
+    }
+    for (path, want) in [("docs/design/sandbox-keeper.md", design), ("docs/claude-integration.md", users)] {
+        let doc = std::fs::read_to_string(root.join(path)).unwrap();
+        let from = doc.find("<!-- tiers:").unwrap_or_else(|| panic!("{path}: the tier table's first marker"));
+        let from = from + doc[from..].find('\n').unwrap() + 1;
+        let to = from
+            + doc[from..]
+                .find("<!-- /tiers -->")
+                .unwrap_or_else(|| panic!("{path}: the tier table's last marker"));
+        assert!(
+            doc[from..to] == want,
+            "{path}'s tier table isn't the golden's — between its markers it should be:\n\n{want}"
+        );
+    }
+}
+
 /// The words Claude's prompt and tools say of the sandbox, the checks and the toolchains.
 #[test]
 fn claudes_words_are_pinned() {

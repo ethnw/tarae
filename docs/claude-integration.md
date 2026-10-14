@@ -978,8 +978,66 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
 
 The rules above are the same on Linux; how they're kept differs. The kernel's Landlock keeps files to the
 rules (writes, and reads in your home folder), seccomp keeps a command off sockets, and tarae itself decides
-every connection a command makes. Nothing to install, no root, no helper program: a command is started from a
-thread of tarae's that confined itself first, and everything it starts stays confined.
+every connection a command makes. Nothing to install, no root, no helper program: each session's commands are
+started by a keeper of its own — a small process of tarae's that forks each command, confined from its first
+instruction, and is the parent of whatever the command leaves running. Everything a command starts stays confined.
+
+**Sessions are kept apart as far as the system allows.** Where a program may make user namespaces, a session's
+keeper is born in namespaces of the session's own: its loopback, its process numbers, its System V IPC, `/dev/shm`
+and terminals. How much of that a session gets is its tier:
+
+- **A+**: user namespaces work.
+- **A**: the same, but `/proc` is masked (Docker's default), so the session has no process numbering of its own.
+- **B+, B**: as A+, A, but tarae can't serve a command's sockets (below): a command gets no socket.
+- **C**: no user namespaces — Ubuntu's restriction without tarae's profile, or a container's seccomp profile.
+- **D**: as C, and tarae can't serve a command's sockets.
+- **By copies**: in a container without `CAP_SYS_PTRACE` (below), tarae serves sockets by copies, and the session
+  has no network of its own: its loopback is this machine's, with other sessions' sockets on it refused.
+
+What each case keeps apart from other sessions' commands, and what it shares with them, at Landlock ABI 6 and on
+macOS (Seatbelt). A test keeps this table equal to the code:
+
+<!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
+| Tier, and what differs | Kept apart | Shared |
+|---|---|---|
+| A+, TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| A+, tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| A+ by copies: the session's user namespace, no network one | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
+| A+, the project in /dev/shm | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| A+, its lo without an IPv6 address | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| A+, the network closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| A, TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| A, tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| A by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
+| B+ | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| B | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| C, tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| C by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| C, Ubuntu's restriction, no profile | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| D | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| D, Ubuntu's restriction, no profile | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| Seatbelt, no port open, the network closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, priority), System V shared memory, POSIX shared memory |
+| Seatbelt, ports open, the network closed | files (but the temp folders), signals | processes (command lines, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network open | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, priority), System V shared memory, POSIX shared memory |
+| Seatbelt, ports and the network open | files (but the temp folders), signals | processes (command lines, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+<!-- /tiers -->
+
+- In every tier the temp folders are shared, and every session reads the repository's other checkouts. A
+  command never reads another process's environment.
+- Below Landlock ABI 6 a command can signal its own session's other commands; at ABI 2 files are shared too (a
+  command could empty any file of yours). The [design](design/sandbox-keeper.md#what-each-tier-keeps-apart) has
+  the network's way for each case too.
+- **On macOS** a loopback port a command may reach is reached whoever listens on it, another session's command
+  too: Seatbelt can't tell whose a listener is. Claude's result says so.
+- **Raising the tier.** Where Ubuntu's restriction is why, the sandbox panel says so faint under its header
+  ("tarae's AppArmor profile would make this A+"), and its last row copies the step that installs the profile:
+  run it with `sudo`, then restart tarae. In a container, `--cap-add SYS_PTRACE` turns copies into the full way of
+  serving sockets.
+- **Where it's said.** Claude's result says the tier once a conversation, and again when it changes: what its
+  commands are kept from and what they share. A command sees it in `TARAE_SANDBOX_STATUS` (`A+:6`, `C:4`, or
+  `seatbelt` on macOS). You see it over the sandbox panel's list (above) and on the keeper's row in `:procs`;
+  `tarae state` has it as `sandbox`, with the step that would raise it, and `tarae state --watch sandbox` says
+  when it changes. Claude's `ui` tool has it too. Claude isn't told the step: it can't take it.
 
 - **How much depends on the kernel.** tarae reads Landlock's version (its ABI) from the kernel, so a
   distribution's backport counts:
@@ -1052,7 +1110,8 @@ thread of tarae's that confined itself first, and everything it starts stays con
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
 - **Ubuntu and user namespaces.** From 23.10 on, Ubuntu lets a program make user namespaces only through an
   AppArmor profile that names it. Without one, tarae gives a session no namespaces of its own (tier C), and the
-  first sandboxed command says so once: why, and the `sudo` step that installs tarae's profile. tarae never
+  first sandboxed command says so once: why, and the `sudo` step that installs tarae's profile (the sandbox
+  panel's last row copies it). tarae never
   writes the profile itself, and offers it only for a tarae at a path only root can replace — its `.deb` puts
   tarae at `/usr/bin/tarae` with the profile beside it. With the profile, what tarae starts may make user
   namespaces, as what VS Code starts may under Ubuntu's own `vscode` profile: your terminal's shell (podman,
@@ -1066,10 +1125,9 @@ thread of tarae's that confined itself first, and everything it starts stays con
   and under its rules. What the sandbox refuses it is said in the result of the project's command going
   then — or the next one's. It's in `:procs` under its session, as `java · left by a run`, and it ends when
   its session ends, when tarae quits (or restarts), or when one of Claude's commands in that project starts
-  under other rules (a grant since, a setting): it holds the old ones. tarae tells it by its environment
-  (`TARAE_SANDBOXED` is the command's own tag — Gradle's daemon keeps it, and passes it to what it starts).
-  A process that drops or rewrites that variable isn't told: it isn't ended, and outlives tarae under the
-  rules it started with. Whatever a program tarae ran leaves is reaped by tarae once it has ended (on its
+  under other rules (a grant since, a setting): it holds the old ones. Its parent is the session's keeper,
+  whatever it does to its environment, and it ends with the keeper (in tier A+ the session's whole process
+  numbering goes at once). Whatever a program tarae ran leaves is reaped by tarae once it has ended (on its
   `:procs` look, after 10 seconds) — the terminal's `nohup`s too, which tarae otherwise leaves be. Never a
   process tarae started itself: that one is its owner's to wait for.
 - **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS — but a Gradle project's home is
