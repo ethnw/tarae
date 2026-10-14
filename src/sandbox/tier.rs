@@ -96,17 +96,71 @@ impl Ns {
         !self.user && matches!(net, RunNet::Served | RunNet::Copied)
     }
 
-    /// In the log's words: `user net ipc pid mnt`, or `none`.
+    /// In the log's words: `user net ipc pid mnt`, or `none` — and, in the session's namespaces without a network
+    /// one, what that leaves (`NO_NETNS`).
     pub fn said(self) -> String {
         if !self.user {
             return "none".into();
         }
         let net = if self.net { " net" } else { "" };
         let pid = if self.pid { " pid" } else { "" };
+        let own = if self.net { String::new() } else { format!("; {NO_NETNS}") };
         let shm = if self.shm { "" } else { "; /dev/shm shared: the project or a place it writes is in it" };
-        format!("user{net} ipc{pid} mnt{shm}")
+        format!("user{net} ipc{pid} mnt{own}{shm}")
+    }
+
+    /// What process `pid` is in apart from tarae's own namespaces — each of its `/proc/<pid>/ns/` links against
+    /// `/proc/self/ns/`'s (`of_apart`) — with a `/dev/shm` of its own where `shm` and it has a mount namespace of its
+    /// own (its birth mounts one there, or fails). What a keeper is in, not the flags its birth asked.
+    pub fn of_pid(pid: u32, shm: bool) -> io::Result<Ns> {
+        let link = |of: &str, name: &str| {
+            std::fs::read_link(format!("/proc/{of}/ns/{name}"))
+                .map_err(|e| io::Error::new(e.kind(), format!("/proc/{of}/ns/{name}: {e}")))
+        };
+        let mut apart = [false; 5];
+        for (i, name) in NS_LINKS.iter().enumerate() {
+            apart[i] = link(&pid.to_string(), name)? != link("self", name)?;
+        }
+        Ns::of_apart(apart, shm)
+    }
+
+    /// `of_pid` from which of `NS_LINKS` are apart from tarae's: the session's user namespace comes with its ipc and
+    /// mount ones (`clone_flags`), and a network or PID one only with it — anything else is no keeper's.
+    fn of_apart([user, ipc, mnt, net, pid]: [bool; 5], shm: bool) -> io::Result<Ns> {
+        if user != ipc || user != mnt || (!user && (net || pid)) {
+            return Err(io::Error::other(format!(
+                "in namespaces no keeper is born with: apart from tarae's in {}",
+                apart_in([user, ipc, mnt, net, pid])
+            )));
+        }
+        Ok(Ns { user, net, pid, shm: user && shm })
+    }
+
+    /// The links of `NS_LINKS` these say apart from tarae's, field by field: `user ipc mnt net pid`, or `none` — for
+    /// a birth that isn't what it asked (`net` without `user` asks what `clone_flags` makes none of).
+    pub fn apart_in(self) -> String {
+        apart_in([self.user, self.user, self.user, self.net, self.pid])
     }
 }
+
+/// Which of `NS_LINKS` are apart, by name — `none` when none is.
+fn apart_in(apart: [bool; 5]) -> String {
+    let names: Vec<&str> = NS_LINKS.iter().zip(apart).filter_map(|(n, a)| a.then_some(*n)).collect();
+    if names.is_empty() { "none".to_string() } else { names.join(" ") }
+}
+
+/// The links of `/proc/<pid>/ns/` an `Ns` stands for (`Ns::of_pid`), in `of_apart`'s order.
+const NS_LINKS: [&str; 5] = ["user", "ipc", "mnt", "net", "pid"];
+
+/// What the session's namespaces without a network one are (N1, 2026-10-14; only a keeper served by copies is born
+/// so): the keeper's own words, nothing of its runs — whether a run's loopback is kept from other sessions' is the
+/// run's (served or not), for its guarantees (9a) to say.
+pub const NO_NETNS: &str = "no network namespace of its own: its loopback is this machine's";
+
+/// Why the probe asks no network namespace where tarae serves by copies (`Probed.short`) — the one place the log's
+/// line says it.
+const BY_COPIES: &str = "served by copies: every socket a run has is tarae's, so a network namespace of the \
+                         session's would hold none of them";
 
 /// A tier (§Tiers): the namespaces, and whether tarae serves the runs' calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -562,12 +616,15 @@ pub fn get() -> &'static Probed {
             Some(hint) => format!("{said} — {hint}"),
             None => said,
         };
-        let said = match p.served.is_ok() && super::supervisor::copies() {
-            true => format!(
-                "{said} — its runs served by tarae's own copies of their sockets (pidfd_getfd refused: Docker's \
-                 default profile; --cap-add SYS_PTRACE gives the full way)"
-            ),
-            false => said,
+        // (with the session's namespaces `short` has said served by copies already: only why, then)
+        let why_copies =
+            "pidfd_getfd refused: Docker's default profile; --cap-add SYS_PTRACE gives the full way";
+        let said = match (p.served.is_ok() && super::supervisor::copies(), p.ns.user) {
+            (true, false) => {
+                format!("{said} — its runs served by tarae's own copies of their sockets ({why_copies})")
+            }
+            (true, true) => format!("{said} ({why_copies})"),
+            (false, _) => said,
         };
         crate::log::line("sandbox", "info", &said);
         // (Q5: the network's way and why, beside the tier)
@@ -671,6 +728,12 @@ fn probe_with(
             }
         }
         (Err(e), _) => without(e),
+    };
+    // (N1: served by copies the session's namespaces come without a network one — not all of them, so said why)
+    let short = match (copies && ns.user, short) {
+        (false, short) => short,
+        (true, None) => Some(BY_COPIES.to_string()),
+        (true, Some(why)) => Some(format!("{why}; {BY_COPIES}")),
     };
     let cgroups = match &redirect {
         Ok(()) => super::cgroup::conditions(&super::cgroup::facts()),
@@ -909,9 +972,41 @@ mod tests {
         let (by_copies, p) = asked(true);
         assert_eq!(by_copies, [(false, false)], "one keeper, no netns, no network tried");
         assert!(!p.ns.netns() && p.redirect.is_err(), "{:?}", p.ns);
+        // (N1: the letter as `Tier::of` has it, and what's missing said — why, and what it leaves)
+        assert_eq!(p.tier(), Tier::APlus);
+        assert_eq!(p.short.as_deref(), Some(BY_COPIES), "not all of them, and why");
+        assert!(p.ns.said().ends_with(NO_NETNS), "{}", p.ns.said());
         let (taken, p) = asked(false);
         assert_eq!(taken[0], (true, true), "the usual way: a netns and its network first");
         assert!(p.ns.netns());
+        assert!(!p.ns.said().contains(NO_NETNS), "{}", p.ns.said());
+    }
+
+    /// A keeper is what its `/proc/<pid>/ns/` links say (`Ns::of_pid`), not what its birth asked: the session's user
+    /// namespace with its ipc and mount ones, a network and a PID one each its own, `/dev/shm` its own only with them
+    /// — and links no birth makes (a user namespace without its mount one, a network one without the user one) no
+    /// keeper at all.
+    #[test]
+    fn a_keeper_is_what_its_links_say() {
+        let of = |apart: [bool; 5], shm: bool| Ns::of_apart(apart, shm).ok();
+        assert_eq!(of([true; 5], true), Some(Ns::session(true, true)));
+        assert_eq!(of([true, true, true, false, true], true), Some(Ns::session(false, true)), "by copies");
+        assert_eq!(of([true, true, true, true, false], true), Some(Ns::session(true, false)), "A");
+        assert_eq!(
+            of([true; 5], false),
+            Some(Ns { shm: false, ..Ns::session(true, true) }),
+            "/dev/shm shared"
+        );
+        assert_eq!(of([false; 5], true), Some(Ns::NONE), "none: no /dev/shm of its own either");
+        for apart in [
+            [true, false, true, true, true],
+            [true, true, false, true, true],
+            [false, true, true, false, false],
+            [false, false, false, true, false],
+            [false, false, false, false, true],
+        ] {
+            assert_eq!(of(apart, true), None, "{apart:?}");
+        }
     }
 
     /// Each of §Tiers' rows from what a stand-in system would show: the probe says why in the words of
@@ -1184,7 +1279,7 @@ mod tests {
             0
         );
         assert_eq!(Ns::session(true, true).said(), "user net ipc pid mnt");
-        assert_eq!(Ns::session(false, true).said(), "user ipc pid mnt");
+        assert_eq!(Ns::session(false, true).said(), format!("user ipc pid mnt; {NO_NETNS}"));
         assert_eq!(
             [(Ns::session(true, true), true), (Ns::session(true, false), false), (Ns::NONE, true)]
                 .map(|(n, s)| Tier::of(n, s).said()),

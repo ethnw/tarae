@@ -400,7 +400,21 @@ impl Keeper {
         let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
         drop(theirs);
         let (go, told) = birth.parents();
+        let mut had = ns;
         let ready = (|| {
+            // (what it's in, read from its own links — not the flags asked: its words and its runs' rules are what it
+            // has, and one outside what it asked for is no keeper. Read while it waits for `go`: a copy of tarae
+            // still, its namespaces its clone's. Once it runs it isn't dumpable — in the session's user namespace its
+            // links stay tarae's to read (tarae owns that namespace), but in tarae's own (none of the session's: C)
+            // they're closed to a tarae without CAP_SYS_PTRACE there, as on any desktop)
+            had = Ns::of_pid(pid as u32, ns.shm)?;
+            if had != ns {
+                return Err(io::Error::other(format!(
+                    "a keeper asked to be apart from tarae in {} is apart in {}",
+                    ns.apart_in(),
+                    had.apart_in()
+                )));
+            }
             if ns.user {
                 id_maps(pid as i32)?;
             }
@@ -414,6 +428,7 @@ impl Keeper {
             Ok(devices) => (Ok(()), devices),
             Err(e) => (Err(e), Vec::new()),
         };
+        let ns = had;
         // (6g: in a scope of its own before any run, its folder handed over — or why not, its runs in its cgroup;
         // only where its birth made /sys/fs/cgroup read-only: else a run could move itself between the scope's
         // cgroups, all the user's)
@@ -4139,6 +4154,81 @@ mod tests {
         false
     }
 
+    /// 9.0: a keeper's namespaces are read from its own links at its birth (`Ns::of_pid`), and a birth not in what it
+    /// asked for is refused — so a keeper born is what it asked, and what's checked here is its links read on their
+    /// own, after: apart from this process in each of `/proc/<pid>/ns/{user,ipc,mnt,net,pid}` exactly where its `ns`
+    /// says, for a keeper of no namespaces of the session's and one of this system's; its words say what's missing (a
+    /// network namespace: `tier::NO_NETNS`); asked for one its birth doesn't make (a network namespace without the
+    /// user one: `clone_flags` makes none), it isn't born at all rather than said to have it.
+    #[test]
+    fn a_keeper_is_in_the_namespaces_it_is_said_in() {
+        use super::super::tier::NO_NETNS;
+        let test = "a_keeper_is_in_the_namespaces_it_is_said_in";
+        let link = |pid: u32, name: &str| std::fs::read_link(format!("/proc/{pid}/ns/{name}"));
+        let me = std::process::id();
+        let mut asked = vec![("links-none", Ns::NONE)];
+        if ns().user {
+            asked.push(("links-here", ns()));
+        }
+        for (name, asked) in asked {
+            let k = keeper_in(name, asked);
+            let said = k.said();
+            match link(k.pid, "user") {
+                // (a running keeper isn't dumpable: one in tarae's own user namespace has its links closed to a tarae
+                // without CAP_SYS_PTRACE there — any host's; one in the session's stays readable, tarae owns it. A part
+                // of the test not done, said — not a skip of the test: the rest of it ran)
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied && !k.ns.user => {
+                    let line = format!(
+                        "sandbox::keeper::tests::{test}: in part — a keeper of no namespaces of the session's has its \
+                         links closed to this process without CAP_SYS_PTRACE ({e}): not compared; the rest ran\n"
+                    );
+                    let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+                }
+                _ => {
+                    let apart = |n: &str| link(k.pid, n).unwrap() != link(me, n).unwrap();
+                    assert_eq!(
+                        ["user", "ipc", "mnt", "net", "pid"].map(apart),
+                        [k.ns.user, k.ns.user, k.ns.user, k.ns.net, k.ns.pid],
+                        "apart where it says: {said}"
+                    );
+                }
+            }
+            // (where the probe serves by copies, a keeper of the session's namespaces is born without a network one
+            // and says so — the probe's choice reaching a birth, N1, M8.2; the words' own branch is
+            // `tier::tests::steps_and_flags`')
+            if k.ns.user && super::super::supervisor::copies() {
+                assert!(!k.ns.net && said.contains(NO_NETNS), "{said}");
+            }
+            k.end();
+        }
+        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-links-net", std::process::id()));
+        let asked = Ns { net: true, ..Ns::NONE };
+        let Err(e) = Keeper::born(&root, None, asked) else { panic!("no keeper born outside what it asked") };
+        assert!(e.to_string().contains("asked to be apart from tarae in net is apart in none"), "{e}");
+    }
+
+    /// Whether this system's keepers have a network namespace of the session's own — the session's namespaces, served
+    /// the usual way or not served (served by copies they come without one: 6f′, N1) — else says the test skips
+    /// itself, with the probe's reason. A machine said to give one (`TARAE_EXPECT_NETWORK=tproxy`) fails instead.
+    fn own_network(test: &str) -> bool {
+        if !namespaced(test) {
+            return false;
+        }
+        if ns().netns() {
+            return true;
+        }
+        let why = super::super::tier::get().short.clone().unwrap_or_default();
+        if std::env::var("TARAE_EXPECT_NETWORK").is_ok_and(|n| n == "tproxy") {
+            panic!("{test}: a network namespace expected here (TARAE_EXPECT_NETWORK), none — {why}");
+        }
+        let line = format!(
+            "{}sandbox::keeper::tests::{test} — no network namespace of the session's own here: {why}\n",
+            crate::test_results::SELF_SKIP
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        false
+    }
+
     /// What tells the test binary it's a run's program (`helper`), and which.
     const HELPER: &str = "TARAE_KEEPER_HELPER";
 
@@ -6067,7 +6157,9 @@ mod tests {
             });
         }
         let said = said_by("masked_proc_scene", cmd);
-        assert!(said.contains("(user net ipc mnt) nspid=1 — "), "{said}");
+        // (its network namespace as this system gives it — none served by copies: what's checked is the PID one)
+        let without_pid = Ns::session(ns().net, false).said();
+        assert!(said.contains(&format!("({without_pid}) nspid=1 — ")), "{said}");
         assert!(said.contains("a fresh /proc can't be mounted here"), "{said}");
     }
 
@@ -7844,7 +7936,7 @@ mod tests {
     #[test]
     fn an_opened_policys_keeper_has_its_netns() {
         use super::super::tier;
-        if !namespaced("an_opened_policys_keeper_has_its_netns") {
+        if !own_network("an_opened_policys_keeper_has_its_netns") {
             return;
         }
         let (closed, _, r1) = project_in("netns-closed", Vec::new(), None, &[]);
@@ -7948,7 +8040,7 @@ mod tests {
     /// there for it.
     #[test]
     fn in_plain_mode_a_run_reaches_only_its_own_loopback() {
-        if !namespaced("in_plain_mode_a_run_reaches_only_its_own_loopback") {
+        if !own_network("in_plain_mode_a_run_reaches_only_its_own_loopback") {
             return;
         }
         let Ok(abi) = crate::landlock::abi() else { return };
@@ -7986,7 +8078,7 @@ mod tests {
         let (_, c, _) = project_served("netrights-none", vec![], Some(&none), &[], unserved());
         assert_eq!((c.net, c.handled_net() != 0), (RunNet::Plain, nets), "no network namespace");
         none.end();
-        if !namespaced(test) {
+        if !own_network(test) {
             return;
         }
         let k = keeper("netrights");
@@ -8006,7 +8098,7 @@ mod tests {
     /// Whether this system's runs are routed — served, in the session's network namespace — else says the test
     /// skips itself, and why.
     fn routed_here(test: &str) -> bool {
-        if !namespaced(test) {
+        if !own_network(test) {
             return false;
         }
         match super::super::supervisor::unavailable() {
@@ -8952,7 +9044,7 @@ mod tests {
     #[test]
     fn a_mirror_that_fails_leaves_the_birth_going() {
         let test = "a_mirror_that_fails_leaves_the_birth_going";
-        if !namespaced(test) || !ns().net {
+        if !own_network(test) {
             return;
         }
         let Some(rules) = open_rules(test) else { return };
@@ -8996,7 +9088,7 @@ mod tests {
     #[test]
     fn a_routed_runs_own_connect_is_refused_by_the_kernel() {
         let test = "a_routed_runs_own_connect_is_refused_by_the_kernel";
-        if !namespaced(test) {
+        if !own_network(test) {
             return;
         }
         let abi = crate::landlock::abi().unwrap_or(0);
@@ -9037,7 +9129,7 @@ mod tests {
     /// own name, from `/etc/hosts`: where this process finds it that way, a run does too.
     #[test]
     fn an_ipv4_lookup_finds_an_address_in_the_session() {
-        if !namespaced("an_ipv4_lookup_finds_an_address_in_the_session") {
+        if !own_network("an_ipv4_lookup_finds_an_address_in_the_session") {
             return;
         }
         let Some(rules) = open_rules("an_ipv4_lookup_finds_an_address_in_the_session") else { return };
@@ -9072,7 +9164,7 @@ mod tests {
     #[test]
     fn an_ipv6_lookup_finds_an_address_where_tarae_has_ipv6() {
         let test = "an_ipv6_lookup_finds_an_address_where_tarae_has_ipv6";
-        if !namespaced(test) {
+        if !own_network(test) {
             return;
         }
         let Some(rules) = open_rules(test) else { return };
@@ -9094,7 +9186,7 @@ mod tests {
     /// says the test skips itself, and why. A machine said to give it (`TARAE_EXPECT_NETWORK=tproxy`) fails instead:
     /// a network broken there isn't a skip.
     fn network_here(test: &str) -> bool {
-        if !namespaced(test) {
+        if !own_network(test) {
             return false;
         }
         match (&super::super::tier::get().redirect, ns().netns()) {
