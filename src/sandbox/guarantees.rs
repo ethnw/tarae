@@ -429,6 +429,16 @@ impl Guarantees {
 }
 
 impl Guarantees {
+    /// The run's `TARAE_SANDBOX_STATUS` (9c, D7; decision 12): `<tier>:<Landlock ABI>` — `A+:8`, colima's `C:4`; a
+    /// partial ABI (below 3) is just its number, `B:2` — and Seatbelt's `seatbelt`. The tier's letter only: served by
+    /// copies is still its tier (N1), what it lacks is the state's to say.
+    pub fn status(&self) -> String {
+        match self.by {
+            By::Landlock { tier, abi, .. } => format!("{}:{abi}", tier.said()),
+            By::Seatbelt => "seatbelt".to_string(),
+        }
+    }
+
     /// What Claude's run report says of it, after the rules, once a conversation and again when it changes (9b,
     /// decision 11 and N2): the sentence, then what's shared in the report's words.
     pub fn told(&self) -> String {

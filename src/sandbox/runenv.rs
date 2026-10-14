@@ -17,8 +17,9 @@
 //! a password, an option giving one, a known prefix) is left out whole, whatever passed it —
 //! `CARGO_REGISTRY_TOKEN` inside `CARGO_*`, `YARN_NPM_AUTH_IDENT` inside `YARN_*`, a `GRADLE_OPTS` holding
 //! `-D…Password=…`, a proxy with a password — but a name the user wrote whole in `llm.sandbox-env`. What tarae
-//! sets goes on top (`sandbox::command`). What's left out is said by name (`RunEnv::said`, `:sandbox-env`), never by value; its
-//! `Debug` prints names only.
+//! sets goes on top (`sandbox::command`: `TARAE_SANDBOXED`, `GIT_OPTIONAL_LOCKS`, `TMPDIR`, `TARAE_SANDBOX_STATUS`
+//! …). What's left out is said by name (`RunEnv::said`, `:sandbox-env`), never by value; its `Debug` prints names
+//! only.
 
 use std::ffi::OsString;
 

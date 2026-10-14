@@ -91,6 +91,9 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// Set in a sandboxed command's environment (tarae's own tests read it: a sandbox can't start inside one).
 pub const MARK: &str = "TARAE_SANDBOXED";
 
+/// Set in a sandboxed command's environment: its tier and Landlock ABI, or `seatbelt` (`Guarantees::status`).
+pub const STATUS: &str = "TARAE_SANDBOX_STATUS";
+
 /// The shared temp folder, as a real path.
 const TMP: &str = if cfg!(target_os = "macos") { "/private/tmp" } else { "/tmp" };
 
@@ -3970,11 +3973,12 @@ fn output_in(
     serde_json::from_slice(&out.stdout).ok()
 }
 
-/// What tarae sets in every sandboxed run besides the packs' `env` (`inside_env`, `command`'s npm line,
-/// `task::color_off`, `containers::VAR`) — and `TARAE_UI`, never a run of Claude's: none said as left out of
-/// its environment.
-const SET_IN_RUNS: [&str; 6] = [
+/// What tarae sets in every sandboxed run besides the packs' `env` (`inside_env`, `command`'s npm line and its
+/// `STATUS`, `task::color_off`, `containers::VAR`) — and `TARAE_UI`, never a run of Claude's: none said as left
+/// out of its environment.
+const SET_IN_RUNS: [&str; 7] = [
     MARK,
+    STATUS,
     "GIT_OPTIONAL_LOCKS",
     "npm_config_update_notifier",
     "NO_COLOR",
@@ -4179,7 +4183,9 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
 
 /// `program args` inside `policy` — or as it is, without one. On Linux the sandbox comes with the spawn
 /// (`spawn`); here only what a sandboxed run's environment says: nothing of tarae's but `Policy::run_env`, then
-/// what tarae sets.
+/// what tarae sets — `MARK`, `GIT_OPTIONAL_LOCKS` (`inside_env`), the policy's own variables, `TMPDIR`, the
+/// token-less copies' variables, the proxy's, and last `STATUS` (9c: after the filter, which would drop the one an
+/// outer sandbox gave tarae). Without a policy (the user's own runs) nothing is set.
 pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Command {
     match policy {
         Some(p) => {
@@ -4209,6 +4215,11 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
                 let count = p.run_env.var("GIT_CONFIG_COUNT").and_then(|n| n.parse().ok());
                 c.envs(proxy::run_env(&url, count.unwrap_or(0)));
             }
+            // (a policy without guarantees says none — nor a value from outside, `llm.sandbox-env` passing tarae's)
+            match p.guarantees() {
+                Some(g) => c.env(STATUS, g.status()),
+                None => c.env_remove(STATUS),
+            };
             c
         }
         None => {
@@ -10312,6 +10323,106 @@ mod tests {
         std::fs::write(dir.join("probe"), said).unwrap();
         std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new(), Os::HOST).unwrap_or_default())
             .unwrap();
+    }
+
+    /// 9c: inside a sandboxed run `TARAE_SANDBOX_STATUS` is its tier — Linux: `<tier>:<ABI>` as the run's guarantees
+    /// say; macOS: `seatbelt` — even where tarae itself was started with one (an outer sandbox's: tarae's own tests
+    /// run by Claude), which the run's filter drops; a user's run gets nothing of tarae's making (only what tarae
+    /// was started with). In a process of its own, the outer value in its environment (`status_in_its_own_process`).
+    #[test]
+    fn a_run_knows_its_tier() {
+        #[cfg(target_os = "macos")]
+        if skipped_inside("sandbox::tests::a_run_knows_its_tier") {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if !crate::landlock::abi().is_ok_and(|n| n >= 2) {
+            let line = format!(
+                "{}sandbox::tests::a_run_knows_its_tier — needs Landlock ABI 2\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-status-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox::tests::status_in_its_own_process", "--ignored", "--nocapture"])
+            .env("TARAE_STATUS_PROBE", &dir)
+            .env(STATUS, "outer")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "the child ran it: {said}");
+        let read =
+            |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_else(|e| panic!("{f}: {e}\n{said}"));
+        let (run, want, user) = (read("run"), read("want"), read("user"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(want, "seatbelt");
+        #[cfg(target_os = "linux")]
+        {
+            let (tier, abi) = want.split_once(':').unwrap_or_else(|| panic!("<tier>:<ABI>: {want}"));
+            assert!(["A+", "A", "B+", "B", "C", "D"].contains(&tier) && abi.parse::<u32>().is_ok(), "{want}");
+        }
+        assert_eq!(run, want, "the run's own tier, not the outer one nor none");
+        assert_eq!(user, "outer", "a user's run: only what tarae was started with");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A run's `TARAE_SANDBOX_STATUS` is tarae's alone: where tarae was started with one (an outer sandbox's), it
+    /// isn't said left out of the run's environment — the run gets its own.
+    #[test]
+    fn a_runs_status_isnt_said_left_out() {
+        let here = Here { env: [(STATUS.to_string(), "outer".into())].into(), ..Here::default() };
+        let e = run_env_of(&here, &crate::llm::LlmConfig::default());
+        assert!(!e.left_out().any(|n| n == STATUS), "{e:?}");
+        assert_eq!(e.var(STATUS), None, "not passed either");
+    }
+
+    /// A policy without guarantees (a Linux one whose rules weren't made) gives its run no status — not even an
+    /// outer one the user's `llm.sandbox-env` passes; one with guarantees gives its own over it.
+    #[test]
+    fn a_run_without_guarantees_has_no_status() {
+        let here = Here { env: [(STATUS.to_string(), "outer".into())].into(), ..Here::default() };
+        let llm = crate::llm::LlmConfig { sandbox_env: vec![STATUS.into()], ..Default::default() };
+        let run_env = run_env_of(&here, &llm);
+        assert_eq!(run_env.var(STATUS).as_deref(), Some("outer"), "passed by the setting");
+        let p = Policy { run_env, ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let status = |p: &Policy| {
+            let c = command(Some(p), "/bin/true", &[]);
+            c.get_envs().find(|(k, _)| *k == STATUS).map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let none = Policy { supervised: true, ..p.clone() };
+        assert_eq!(none.guarantees(), None);
+        assert_eq!(status(&none), Some(None), "removed");
+        let seatbelt = Policy { supervised: false, ..p };
+        assert_eq!(status(&seatbelt), Some(Some("seatbelt".into())), "its own over the outer one");
+    }
+
+    /// `a_run_knows_its_tier`'s child: the policy for this checkout, a run in it and a user's run (no policy) each
+    /// saying its `TARAE_SANDBOX_STATUS` (`unset` when none), and what the run's guarantees say — into
+    /// `$TARAE_STATUS_PROBE`.
+    #[test]
+    #[ignore = "run by a_run_knows_its_tier in a process of its own"]
+    fn status_in_its_own_process() {
+        let Some(dir) = std::env::var_os("TARAE_STATUS_PROBE").map(PathBuf::from) else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let p = policy(root, &crate::llm::LlmConfig::default(), &[]).unwrap();
+        let script = ["-c".to_string(), format!("printf %s \"${{{STATUS}-unset}}\"")];
+        let said = |p: Option<&Policy>| {
+            let mut cmd = command(p, "/bin/sh", &script);
+            cmd.current_dir(root);
+            let s = spawn(p, &cmd).expect("the run starts");
+            let mut out = String::new();
+            io::Read::read_to_string(&mut s.stdout.unwrap(), &mut out).unwrap();
+            crate::spawn::wait(s.pid).unwrap();
+            out
+        };
+        std::fs::write(dir.join("run"), said(Some(&p))).unwrap();
+        std::fs::write(dir.join("user"), said(None)).unwrap();
+        let want = p.guarantees().map(|g| g.status()).unwrap_or_else(|| "no guarantees".into());
+        std::fs::write(dir.join("want"), want).unwrap();
     }
 
     /// A toolchain's probe (`output_in`) runs through the session's keeper, confined: its parent is the keeper

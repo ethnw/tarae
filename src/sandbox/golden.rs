@@ -435,6 +435,23 @@ fn tier_found(
     }
 }
 
+/// 9c, D7 (decision 12, N1): a run's `TARAE_SANDBOX_STATUS` is its tier's letter and Landlock's ABI — by copies still
+/// its tier's letter, a partial ABI just its number — or Seatbelt's `seatbelt`.
+#[test]
+fn the_status_is_the_tier_and_the_abi() {
+    use super::guarantees::{Found, Guarantees, Ns};
+    let status = |f: Found| Guarantees::landlock(f).status();
+    assert_eq!(status(Found { abi: 8, ..tier_found(Ns::session(true, true), true, false, true) }), "A+:8");
+    assert_eq!(
+        status(tier_found(Ns::session(false, true), true, true, false)),
+        "A+:6",
+        "by copies: still A+"
+    );
+    assert_eq!(status(Found { abi: 4, ..tier_found(Ns::NONE, true, false, false) }), "C:4", "colima's");
+    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::session(true, false), false, false, false) }), "B:2");
+    assert_eq!(Guarantees::seatbelt(true, true).status(), "seatbelt");
+}
+
 /// 9b, decision 11: Claude's report says the run's tier — what its sandbox keeps from other sessions' commands, what
 /// it shares, and the notes on that (N2) — with the conversation's first run, not with the next, and again once a
 /// policy change gives its runs another keeper: the network opened, the session's keeper has no network namespace of
