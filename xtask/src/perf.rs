@@ -17,9 +17,9 @@
 //!
 //! Only on a quiet machine: with a load of `BUSY` or more it waits up to `WAIT` for it to fall (a fat-LTO
 //! build leaves the load up), then says "not measured (machine busy)" and keeps nothing — numbers from a
-//! busy machine (or a sandboxed parallel run) would only be noise. A run during which the load reached it is
-//! dropped (`with_peak_load`, `quiet_runs`), and without all `RUNS` it's "not measured" too. A budget broken
-//! on a quiet machine is a failure.
+//! busy machine (or a sandboxed parallel run) would only be noise. A run during which other processes kept
+//! `OTHERS_BUSY` cores busy is dropped (`others_cores`, `quiet_runs`), and without all `RUNS` it's "not
+//! measured" too. A budget broken on a quiet machine is a failure.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -103,14 +103,16 @@ pub fn run(args: &[String]) -> Result<()> {
             return Ok(None);
         }
         eprintln!("run {} of {RUNS} …", i + 1);
-        let (out, load) = with_peak_load(load_now, LOAD_EVERY, || test(&filters(i)).output());
+        let before = Cpu::now();
+        let out = test(&filters(i)).output();
+        let others = Cpu::now().others_since(&before);
         let out = out.map_err(|e| format!("cargo: {e}"))?;
         let text =
             format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
             return Err(format!("run {} of {RUNS} failed:\n{}", i + 1, failures(&text)));
         }
-        Ok(Some((parse(&text), load)))
+        Ok(Some((parse(&text), others)))
     })?;
     let Some(runs) = runs else { return Ok(()) };
     let (said, runs) = quiet_runs(runs);
@@ -190,21 +192,21 @@ fn keep(
     Ok(slower)
 }
 
-/// A run's numbers and, when it was `BUSY` or more, the highest load seen while it ran.
+/// A run's numbers and, when it was busy (`OTHERS_BUSY` or more), the cores other processes kept busy.
 struct Run {
     perf: Vec<Perf>,
     busy: Option<f64>,
 }
 
-/// Up to `RUNS` runs, one at a time — `one(i)`: its numbers and the load read for it (`with_peak_load`), or
-/// `None` when the machine stayed busy before it (said there, nothing measured). A load of `BUSY` or more
-/// marks the run busy, and the loop stops after it: fewer than `RUNS` are left to keep then, and the rest
-/// would be thrown away (minutes each).
+/// Up to `RUNS` runs, one at a time — `one(i)`: its numbers and the cores other processes kept busy during
+/// it (`Cpu::others_since`), or `None` when the machine stayed busy before it (said there, nothing
+/// measured). `OTHERS_BUSY` or more marks the run busy, and the loop stops after it: fewer than `RUNS` are
+/// left to keep then, and the rest would be thrown away (minutes each).
 fn runs(mut one: impl FnMut(usize) -> Result<Option<(Vec<Perf>, f64)>>) -> Result<Option<Vec<Run>>> {
     let mut runs = Vec::new();
     for i in 0..RUNS {
-        let Some((perf, load)) = one(i)? else { return Ok(None) };
-        let busy = (load >= BUSY).then_some(load);
+        let Some((perf, others)) = one(i)? else { return Ok(None) };
+        let busy = (others >= OTHERS_BUSY).then_some(others);
         runs.push(Run { perf, busy });
         if busy.is_some() {
             break;
@@ -213,58 +215,126 @@ fn runs(mut one: impl FnMut(usize) -> Result<Option<(Vec<Perf>, f64)>>) -> Resul
     Ok(Some(runs))
 }
 
-/// How often the load is read while a run goes: the kernel's own step for the load averages.
-const LOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Cores other processes kept busy, on average over a run, at or above which the run is dropped. The load
+/// can't say it: the run's own threads lift it (a machine at 2.7 ended runs at 9.4, every run dropped —
+/// 2026-10-14). Measured on the 14-core machine that day: ~1 core outside with nothing building (the other
+/// sessions' servers and chats — 0.97, 1.14), and the run's own four CPU-bound children read as own (3.98
+/// of 4.47) leaving others at ~0.5. Three is the busy start's load of 5 less that idle core and some room:
+/// another build for a third of a run, or sustained work beside it.
+const OTHERS_BUSY: f64 = 3.0;
 
-/// `work`'s result and the highest load seen while it ran: `load` read every `every` on a thread of its own,
-/// and once more at the end. The load is waited on before each run, but the machine can get busy during one
-/// (another session's build) and it's in that run's numbers — a worst-of-keys number came out 7× its median
-/// under a load of 5.3 (2026-10-14). Read only at the end, a build that stopped a minute before the run did
-/// had decayed out of the 1-minute load; read all along it's seen. What it still misses: a burst too short
-/// to lift the 1-minute average to `BUSY` (it climbs over a minute: 10 busy cores for 10 s add ~1.5), and
-/// the run's own processes count as load too.
-fn with_peak_load<T>(
-    load: impl Fn() -> f64 + Sync,
-    every: std::time::Duration,
-    work: impl FnOnce() -> T,
-) -> (T, f64) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let done = AtomicBool::new(false);
-    let (load, done) = (&load, &done);
-    std::thread::scope(|s| {
-        let sampler = s.spawn(move || {
-            let mut peak = 0f64;
-            while !done.load(Ordering::Acquire) {
-                peak = peak.max(load());
-                std::thread::park_timeout(every);
-            }
-            peak
-        });
-        let out = work();
-        done.store(true, Ordering::Release);
-        sampler.thread().unpark();
-        let peak = sampler.join().unwrap_or(0.0).max(load());
-        (out, peak)
-    })
+/// What the machine's CPU counters said at a moment: all cores' busy and total ticks since boot (every
+/// process's), and the CPU time of this process's children and their children, reaped
+/// (`getrusage(RUSAGE_CHILDREN)`: cargo, the test binaries, the tareae they ran), in seconds.
+struct Cpu {
+    busy: u64,
+    all: u64,
+    own_s: f64,
+    at: std::time::Instant,
 }
 
-/// The runs whose numbers count, and what's said of the others: a run during which the load reached
-/// `BUSY` (`with_peak_load`) is dropped (`run 2 dropped: load 6.1`). Fewer than all `RUNS` left: "not
-/// measured", nothing kept, as with a busy start — a median of fewer runs is one run's word.
+impl Cpu {
+    fn now() -> Cpu {
+        let (busy, all) = machine_ticks();
+        // SAFETY: getrusage fills the struct given.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+        let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+        Cpu { busy, all, own_s: secs(ru.ru_utime) + secs(ru.ru_stime), at: std::time::Instant::now() }
+    }
+
+    /// The cores other processes kept busy from `before` to now (`others_cores`).
+    fn others_since(&self, before: &Cpu) -> f64 {
+        let ticks = |a: u64, b: u64| a.wrapping_sub(b) & TICK_MASK;
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+        let share = (ticks(self.busy, before.busy), ticks(self.all, before.all));
+        others_cores(share, cores, self.own_s - before.own_s, (self.at - before.at).as_secs_f64())
+    }
+}
+
+/// The cores other processes kept busy over a run, on average: the machine's busy share of its ticks
+/// (`busy` of `all`, every core) times its `cores`, less the run's own CPU time over its wall time. Both
+/// are counters over the same span, so the run's own bursts — four search walkers, a tarae starting — are
+/// its own whatever they lift the load to. What it misses: a burst much shorter than the run is averaged
+/// down (a 10-core build for a tenth of a 3-minute run is 1 core); a child the run left running unreaped
+/// counts as another's (dropped, not kept: the safe side).
+fn others_cores((busy, all): (u64, u64), cores: f64, own_s: f64, wall_s: f64) -> f64 {
+    if all == 0 || wall_s <= 0.0 {
+        return 0.0;
+    }
+    (busy as f64 / all as f64 * cores - own_s / wall_s).max(0.0)
+}
+
+/// The machine's busy and total CPU ticks since boot, all cores together (0, 0 when they can't be read).
+#[cfg(target_os = "macos")]
+fn machine_ticks() -> (u64, u64) {
+    // SAFETY: a struct of plain integers, all-zero valid.
+    let mut info: libc::host_cpu_load_info = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+    // (libc's is deprecated for the mach2 crate — one symbol of libSystem, declared here instead)
+    unsafe extern "C" {
+        fn mach_host_self() -> libc::mach_port_t;
+    }
+    // (the host port taken once: each `mach_host_self` adds a right, kept until the process ends)
+    static HOST: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
+    // SAFETY: mach_host_self takes no arguments; host_statistics fills `count` integers of the struct given.
+    let host = *HOST.get_or_init(|| unsafe { mach_host_self() });
+    let info_out = &mut info as *mut libc::host_cpu_load_info as *mut i32;
+    let r = unsafe { libc::host_statistics(host, libc::HOST_CPU_LOAD_INFO, info_out, &mut count) };
+    if r != 0 {
+        return (0, 0);
+    }
+    let t = info.cpu_ticks.map(u64::from);
+    let (user, system, idle, nice) = (t[0], t[1], t[2], t[3]);
+    (user + system + nice, user + system + idle + nice)
+}
+
+/// The machine's busy and total CPU ticks since boot, all cores together (0, 0 when they can't be read).
+#[cfg(not(target_os = "macos"))]
+fn machine_ticks() -> (u64, u64) {
+    // /proc/stat's first line: cpu user nice system idle iowait irq softirq steal (guest counted in user)
+    let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+    let t: Vec<u64> = stat
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .skip(1)
+        .take(8)
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    if t.len() < 8 {
+        return (0, 0);
+    }
+    let idle = t[3] + t[4];
+    (t.iter().sum::<u64>() - idle, t.iter().sum())
+}
+
+/// The ticks' width: Mach's are 32-bit counters per state (a sum's difference is right modulo 2³²), Linux's
+/// are 64-bit.
+#[cfg(target_os = "macos")]
+const TICK_MASK: u64 = u32::MAX as u64;
+#[cfg(not(target_os = "macos"))]
+const TICK_MASK: u64 = u64::MAX;
+
+/// The runs whose numbers count, and what's said of the others: a run during which other processes kept
+/// `OTHERS_BUSY` cores busy (`others_cores`) is dropped (`run 2 dropped: 3.1 cores busy outside it`). Fewer
+/// than all `RUNS` left: "not measured", nothing kept, as with a busy start — a median of fewer runs is one
+/// run's word.
 fn quiet_runs(runs: Vec<Run>) -> (Vec<String>, Option<Vec<Vec<Perf>>>) {
     let ran = runs.len();
     let mut said = Vec::new();
     let mut kept = Vec::new();
     for (i, r) in runs.into_iter().enumerate() {
         match r.busy {
-            Some(load) => said.push(format!("run {} dropped: load {load:.1}", i + 1)),
+            Some(others) => said.push(format!("run {} dropped: {others:.1} cores busy outside it", i + 1)),
             None => kept.push(r.perf),
         }
     }
     if kept.len() < RUNS {
         let not_run = if ran < RUNS { format!(", {} not run", RUNS - ran) } else { String::new() };
         said.push(format!(
-            "not measured (machine busy: {} of {ran} run{} stayed under load {BUSY}{not_run}; all {RUNS} needed)",
+            "not measured (machine busy: {} of {ran} run{} had under {OTHERS_BUSY} cores busy outside{not_run}; all {RUNS} needed)",
             kept.len(),
             if ran == 1 { "" } else { "s" }
         ));
@@ -747,9 +817,9 @@ mod tests {
             assert_eq!(
                 said,
                 [
-                    format!("run {} dropped: load 6.1", busy_at + 1),
+                    format!("run {} dropped: 6.1 cores busy outside it", busy_at + 1),
                     format!(
-                        "not measured (machine busy: {} of {RUNS} runs stayed under load 5; all {RUNS} needed)",
+                        "not measured (machine busy: {} of {RUNS} runs had under 3 cores busy outside; all {RUNS} needed)",
                         RUNS - 1
                     )
                 ]
@@ -761,36 +831,59 @@ mod tests {
         assert_eq!(
             said[1],
             format!(
-                "not measured (machine busy: 1 of 2 runs stayed under load 5, {} not run; all {RUNS} needed)",
+                "not measured (machine busy: 1 of 2 runs had under 3 cores busy outside, {} not run; all {RUNS} needed)",
                 RUNS - 2
             )
         );
         assert!(kept.is_none());
     }
 
-    /// The loop judges each run by the load read for it: all `RUNS` on a quiet machine (just under `BUSY`
-    /// is quiet), a stop right after the first busy one (at `BUSY` itself; the rest would be thrown away),
-    /// and nothing measured once the machine stayed busy before a run.
+    /// What the machine spent outside the run decides, not what it spent: a run keeping 6 of 14 cores busy
+    /// by itself (the load it lifts dropped every run, 2026-10-14) is kept; the same run beside another
+    /// process's 4 cores is dropped. Counters over the same span, so the run's own bursts are its own.
+    #[test]
+    fn only_cpu_that_isnt_the_runs_own_drops_it() {
+        let (cores, wall) = (14.0, 100.0);
+        // The machine 7 of 14 cores busy over 100 s (the idle sessions' 1, the run's own 6: 600 CPU-s)
+        let alone = others_cores((700, 1400), cores, 600.0, wall);
+        assert!((alone - 1.0).abs() < 1e-9, "{alone}");
+        // The same run beside a build's 4 cores
+        let beside = others_cores((1100, 1400), cores, 600.0, wall);
+        assert!((beside - 5.0).abs() < 1e-9, "{beside}");
+        let mut readings = [alone, beside].into_iter();
+        let judged = runs(|_| Ok(Some((Vec::new(), readings.next().unwrap_or(0.0))))).unwrap().unwrap();
+        assert_eq!(judged.iter().map(|r| r.busy).collect::<Vec<_>>(), [None, Some(beside)]);
+        // Own CPU over the machine's share (counters read a tick apart) isn't negative; nothing read is 0
+        assert_eq!(others_cores((100, 1400), cores, 600.0, wall), 0.0);
+        assert_eq!(
+            (others_cores((0, 0), cores, 1.0, 1.0), others_cores((1, 2), cores, 1.0, 0.0)),
+            (0.0, 0.0)
+        );
+    }
+
+    /// The loop judges each run by what was read for it: all `RUNS` on a quiet machine (just under
+    /// `OTHERS_BUSY` is quiet), a stop right after the first busy one (at `OTHERS_BUSY` itself; the rest would
+    /// be thrown away), and nothing measured once the machine stayed busy before a run.
     #[test]
     fn the_runs_stop_at_the_first_busy_one() {
         let mut started = Vec::new();
         let quiet = runs(|i| {
             started.push(i);
-            Ok(Some((vec![perf("a", 1.0, 16.0)], BUSY - 0.1)))
+            Ok(Some((vec![perf("a", 1.0, 16.0)], OTHERS_BUSY - 0.1)))
         })
         .unwrap()
         .unwrap();
         assert_eq!(quiet.iter().map(|r| r.busy).collect::<Vec<_>>(), vec![None; RUNS]);
         assert_eq!(started, (0..RUNS).collect::<Vec<_>>());
         let mut started = Vec::new();
-        let loads = [1.0, BUSY, 1.0];
+        let loads = [1.0, OTHERS_BUSY, 1.0];
         let busy = runs(|i| {
             started.push(i);
             Ok(Some((Vec::new(), loads[i])))
         })
         .unwrap()
         .unwrap();
-        assert_eq!(busy.iter().map(|r| r.busy).collect::<Vec<_>>(), [None, Some(BUSY)]);
+        assert_eq!(busy.iter().map(|r| r.busy).collect::<Vec<_>>(), [None, Some(OTHERS_BUSY)]);
         assert_eq!(started, [0, 1], "none after a busy run");
         let mut started = 0;
         let before = runs(|i| {
@@ -798,24 +891,6 @@ mod tests {
             Ok((i == 0).then(|| (Vec::new(), 1.0)))
         });
         assert_eq!((before.map(|r| r.is_none()), started), (Ok(true), 2), "busy before run 2: nothing kept");
-    }
-
-    /// A run is judged by the busiest load seen while it ran, not only at its end: a burst in its middle
-    /// that fell back by the end (decayed out of the 1-minute load) is still seen.
-    #[test]
-    fn a_runs_load_is_the_peak_while_it_ran() {
-        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-        let reads = AtomicUsize::new(0);
-        let seen = [1.0, 7.5, 2.0];
-        let load = || seen[reads.fetch_add(1, SeqCst).min(2)];
-        let (out, peak) = with_peak_load(load, std::time::Duration::from_millis(1), || {
-            // (until the reader has seen the burst and the fall after it)
-            while reads.load(SeqCst) < 3 {
-                std::thread::yield_now();
-            }
-            "ran"
-        });
-        assert_eq!((out, peak), ("ran", 7.5));
     }
 
     /// The bundled size's key is written only with the numbers: a run that keeps nothing writes neither (and
