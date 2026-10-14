@@ -12234,6 +12234,47 @@ mod tests {
         key + frame
     }
 
+    /// Rounds a worst-of-keys number is the worst of: each key's time is its best round.
+    const ROUNDS: usize = 3;
+
+    /// The slowest key and its time, each key's time the best of `ROUNDS` rounds — `round` times every key
+    /// once, in an editor of its own. A key's event work runs once a round (it changes the state), so a
+    /// single round's worst is the moment the machine took the thread away as often as what the key costs:
+    /// one such stall made conflicts_in_a_huge_file 7× its median under a loaded `cargo perf` (2026-10-14)
+    /// while the code was as fast as ever. A key slow in every round is still its slowness.
+    fn worst_of_best(keys: &[&str], mut round: impl FnMut() -> Vec<Duration>) -> (Duration, String) {
+        let mut best = vec![Duration::MAX; keys.len()];
+        for _ in 0..ROUNDS {
+            for (b, d) in best.iter_mut().zip(round()) {
+                *b = (*b).min(d);
+            }
+        }
+        let (i, worst) = best.into_iter().enumerate().max_by_key(|&(_, d)| d).unwrap_or_default();
+        (worst, keys.get(i).map_or(String::new(), |k| k.to_string()))
+    }
+
+    /// Every one of `ROUNDS` rounds runs; a stall in all but one of them is not a key's time; a key slow in
+    /// every round is, and it's named.
+    #[test]
+    fn a_worst_key_is_its_best_round() {
+        let ms = Duration::from_millis;
+        let keys = ["j", "k", "G"];
+        let mut rounds = 0;
+        // `k` stalls in every round but the last, `j` in the first
+        let stalled = worst_of_best(&keys, || {
+            rounds += 1;
+            let k = if rounds < ROUNDS { ms(9) } else { ms(1) };
+            vec![if rounds == 1 { ms(8) } else { ms(1) }, k, ms(2)]
+        });
+        assert_eq!((stalled, rounds), ((ms(2), "G".to_string()), ROUNDS));
+        let mut rounds = 0;
+        let slow = worst_of_best(&keys, || {
+            rounds += 1;
+            vec![ms(1), ms(7), ms(2)]
+        });
+        assert_eq!((slow, rounds), ((ms(7), "k".to_string()), ROUNDS));
+    }
+
     /// One frame at 60 Hz. `TARAE_PERF_SLACK` (a multiplier) loosens it on slow shared machines — CI sets 3,
     /// which still catches an order-of-magnitude regression.
     fn frame_budget() -> Duration {
@@ -12498,8 +12539,9 @@ mod tests {
         );
     }
 
-    /// Performance budget: in a 200k-line file, key input → finished frame within one frame (16 ms, 60 Hz).
-    /// Held even for debug builds — release is much faster.
+    /// Performance budget: in a 200k-line file, key input → finished frame within one frame (16 ms, 60 Hz) —
+    /// every key, each its best of `ROUNDS` (`worst_of_best`). Held even for debug builds — release is much
+    /// faster.
     #[test]
     fn perf_budget_key_to_frame_on_large_file() {
         if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_on_large_file") {
@@ -12508,24 +12550,20 @@ mod tests {
         let budget = frame_budget();
         let text: String =
             (0..200_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
-        let mut ed = Editor::new(Config::default());
-        ed.docs[0].text = Rope::from_str(&text);
-        let mut buf = Vec::with_capacity(1 << 16);
-        render(&mut ed, &mut buf, 120, 40).unwrap();
-
         let keys = [
             "j", "j", "w", "w", "e", "x", "x", "C", "C", "g", "e", "g", "g", "5", "0", "0", "0", "G", "i",
             "a", "esc", "u", "%", ";", "C-d", "C-u",
         ];
-        let mut worst = (Duration::ZERO, "");
-        for k in keys {
-            let dt = key_to_frame(&mut ed, &mut buf, k, 120, 40);
-            if dt > worst.0 {
-                worst = (dt, k);
-            }
-        }
-        measured("key_to_frame_on_large_file", worst.0, budget);
-        assert!(worst.0 < budget, "key {:?} took {:?} (budget {:?})", worst.1, worst.0, budget);
+        let rope = Rope::from_str(&text);
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = rope.clone();
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 120, 40).unwrap();
+            keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 120, 40)).collect()
+        });
+        measured("key_to_frame_on_large_file", worst, budget);
+        assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
     }
 
     /// The same keys in a 6.6 MB file with unsaved-buffer recovery on (`recovery.rs`), each as a whole event
@@ -13284,12 +13322,19 @@ mod tests {
     /// Keys (sent as events — every event ends with the panel following the editor) → frame, worst of all.
     /// Like `key_to_frame`: the events once, the frame the fastest of 3 (scheduling noise from parallel tests).
     fn events_to_frames(ed: &mut Editor, keys: &[&str], w: u16, h: u16) -> (Duration, String) {
+        let each = events_to_frames_each(ed, keys, w, h);
+        let (i, worst) = each.into_iter().enumerate().max_by_key(|&(_, d)| d).unwrap_or_default();
+        (worst, keys.get(i).map_or(String::new(), |k| k.to_string()))
+    }
+
+    /// Each key's events and frame (`events_to_frames`), in the keys' order.
+    fn events_to_frames_each(ed: &mut Editor, keys: &[&str], w: u16, h: u16) -> Vec<Duration> {
         let mut buf = Vec::with_capacity(1 << 16);
         render(ed, &mut buf, w, h).unwrap();
         // What goes to the terminal is worked out from the frame too (only what changed) — in the budget
         let mut screen = crate::screen::Screen::new();
         screen.present(&buf, w, h, &ed.screen.edges.borrow());
-        let mut worst = (Duration::ZERO, String::new());
+        let mut each = Vec::with_capacity(keys.len());
         for k in keys {
             let t = Instant::now();
             for k in k.split(' ') {
@@ -13307,12 +13352,9 @@ mod tests {
                 .unwrap();
             let t = Instant::now();
             screen.present(&buf, w, h, &ed.screen.edges.borrow());
-            let frame = frame + t.elapsed();
-            if events + frame > worst.0 {
-                worst = (events + frame, k.to_string());
-            }
+            each.push(events + frame + t.elapsed());
         }
-        worst
+        each
     }
 
     /// Same budget with the side panel on a 200k-file project, thousands of rows unfolded — its rows are
@@ -13467,7 +13509,8 @@ mod tests {
         assert!(worst < budget, "a batch of output took {worst:?} to show (budget {budget:?})");
     }
 
-    /// Same budget moving between merge conflicts in a 200k-line file (500 of them, the card on each).
+    /// Same budget moving between merge conflicts in a 200k-line file (500 of them, the card on each) — each
+    /// key its best of `ROUNDS` (`worst_of_best`).
     #[test]
     fn perf_budget_conflicts_in_a_huge_file() {
         if crate::test_results::unoptimized("term::tests::perf_budget_conflicts_in_a_huge_file") {
@@ -13481,14 +13524,19 @@ mod tests {
             }
             text.push_str(&format!("line {i} fn main() {{ let x = {i}; }}\n"));
         }
-        let mut ed = Editor::new(Config::default());
-        ed.docs[0].text = Rope::from_str(&text);
-        let t0 = Instant::now();
-        ed.conflicts_sync();
-        let scan = t0.elapsed();
-        assert_eq!(ed.doc().conflicts.len(), 500);
+        let rope = Rope::from_str(&text);
         let keys = ["] m", "] m", "] m", "[ m", "j", "k", "G", "[ m", "g g"];
-        let (worst, key) = events_to_frames(&mut ed, &keys, 160, 50);
+        let mut scan = None;
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = rope.clone();
+            let t0 = Instant::now();
+            ed.conflicts_sync();
+            scan.get_or_insert(t0.elapsed()); // (the first round's, as a fresh scan)
+            assert_eq!(ed.doc().conflicts.len(), 500);
+            events_to_frames_each(&mut ed, &keys, 160, 50)
+        });
+        let scan = scan.unwrap_or_default();
         measured("conflicts_in_a_huge_file", worst, budget);
         // (off the main thread — tracked, not budgeted against a frame)
         measured("conflict_scan_200k_lines", scan, Duration::from_secs(1));

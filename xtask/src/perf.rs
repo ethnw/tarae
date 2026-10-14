@@ -13,12 +13,13 @@
 //! The release binary's size is measured too (`SIZES`, against a budget), and a jump in it fails: more than
 //! `SIZE_JUMP` above the median of its last runs on this branch (`size_jump`) — the budget leaves room for
 //! the roadmap's features, so alone it wouldn't see a dependency's +0.5 MB. `--accept-jump` keeps one that's
-//! meant.
+//! meant. A size's failure is said after the table: the timings measured are shown, none kept (`report`).
 //!
 //! Only on a quiet machine: with a load of `BUSY` or more it waits up to `WAIT` for it to fall (a fat-LTO
 //! build leaves the load up), then says "not measured (machine busy)" and keeps nothing — numbers from a
-//! busy machine (or a sandboxed parallel run) would only be noise. A budget broken on a quiet machine is a
-//! failure.
+//! busy machine (or a sandboxed parallel run) would only be noise. A run during which the load reached it is
+//! dropped (`with_peak_load`, `quiet_runs`), and without all `RUNS` it's "not measured" too. A budget broken
+//! on a quiet machine is a failure.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -96,32 +97,205 @@ pub fn run(args: &[String]) -> Result<()> {
     if !st.success() {
         return Err("building the perf profile failed".into());
     }
-    let mut runs: Vec<Vec<Perf>> = Vec::new();
-    for i in 0..RUNS {
+    let runs = runs(|i| {
         if let Some(load) = wait_quiet() {
             println!("not measured (machine busy: load {load:.1} before run {})", i + 1);
-            return Ok(());
+            return Ok(None);
         }
         eprintln!("run {} of {RUNS} …", i + 1);
-        let out = test(&filters(i)).output().map_err(|e| format!("cargo: {e}"))?;
+        let (out, load) = with_peak_load(load_now, LOAD_EVERY, || test(&filters(i)).output());
+        let out = out.map_err(|e| format!("cargo: {e}"))?;
         let text =
             format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
             return Err(format!("run {} of {RUNS} failed:\n{}", i + 1, failures(&text)));
         }
-        runs.push(parse(&text));
+        Ok(Some((parse(&text), load)))
+    })?;
+    let Some(runs) = runs else { return Ok(()) };
+    let (said, runs) = quiet_runs(runs);
+    for l in said {
+        println!("{l}");
     }
+    let Some(runs) = runs else { return Ok(()) };
     let mut now = medians(&runs);
     if now.is_empty() {
         return Err("no PERF lines — did the tests run in the perf profile?".into());
     }
-    now.extend(sizes(&cargo, &root, all_sizes)?);
-    let file = root.join("target/perf/history.tsv");
+    let (mut failed, mut bundled) = (Vec::new(), None);
+    match sizes(&cargo, &root, all_sizes) {
+        Ok((sizes, key)) => {
+            now.extend(sizes);
+            bundled = key;
+        }
+        Err(e) => failed.push(e),
+    }
+    let file = root.join(HISTORY_FILE);
     let past = std::fs::read_to_string(&file).unwrap_or_default();
     let history = read_history(&past);
+    let jump = now.iter().find(|p| p.name == SIZE_JUMP.0).map(|size| {
+        let mut known: BTreeMap<String, bool> = BTreeMap::new();
+        let has = |c: &str| *known.entry(c.to_string()).or_insert_with(|| head_has(&root, c));
+        let jump = size_jump(size.value, &kept(&past, SIZE_JUMP.0), has);
+        let said = jump_said(SIZE_JUMP.0, size.value, &jump);
+        (jump, said)
+    });
+    let accept_jump = args.iter().any(|a| a == "--accept-jump");
+    let (lines, verdict) = report(&now, &history, &SizeSaid { failed, jump, accept_jump });
+    for l in lines {
+        println!("{l}");
+    }
+    let (date, commit) = (today(), commit(&root));
+    let slower = keep(&root, verdict, &now, past, (&date, &commit), bundled)?;
+    println!(
+        "{} numbers, median of {RUNS} runs, kept in {} ({commit}){}",
+        now.len(),
+        file.display(),
+        if slower > 0 { format!(" — {slower} slower than before") } else { String::new() }
+    );
+    Ok(())
+}
+
+/// Where the kept numbers are, from the checkout's root.
+const HISTORY_FILE: &str = "target/perf/history.tsv";
+
+/// What a run keeps once `report` said so (`verdict` Ok, passed through): `now`'s rows added to the history
+/// (`past`, its text before), stamped `date` and `commit`, then the bundled size's key when it was measured
+/// (`bundled`). The key only with the numbers: kept by a run that kept nothing (a size over budget, a refused
+/// jump), it would make the next run skip the bundled build, and its size stay out of the history until the
+/// grammars or the release profile change. `Err`: nothing written.
+fn keep(
+    root: &Path,
+    verdict: Result<usize>,
+    now: &[Perf],
+    past: String,
+    (date, commit): (&str, &str),
+    bundled: Option<String>,
+) -> Result<usize> {
+    let slower = verdict?;
+    let file = root.join(HISTORY_FILE);
+    let mut kept = past;
+    if kept.is_empty() {
+        kept.push_str("date\tcommit\tname\tvalue\tbudget\n");
+    }
+    for p in now {
+        kept.push_str(&format!("{date}\t{commit}\t{}\t{:.3}\t{}\n", p.name, p.value, p.budget));
+    }
+    std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&file, kept).map_err(|e| format!("{}: {e}", file.display()))?;
+    if let Some(key) = bundled {
+        let file = root.join(BUNDLED_KEY);
+        std::fs::write(&file, key).map_err(|e| format!("{}: {e}", file.display()))?;
+    }
+    Ok(slower)
+}
+
+/// A run's numbers and, when it was `BUSY` or more, the highest load seen while it ran.
+struct Run {
+    perf: Vec<Perf>,
+    busy: Option<f64>,
+}
+
+/// Up to `RUNS` runs, one at a time — `one(i)`: its numbers and the load read for it (`with_peak_load`), or
+/// `None` when the machine stayed busy before it (said there, nothing measured). A load of `BUSY` or more
+/// marks the run busy, and the loop stops after it: fewer than `RUNS` are left to keep then, and the rest
+/// would be thrown away (minutes each).
+fn runs(mut one: impl FnMut(usize) -> Result<Option<(Vec<Perf>, f64)>>) -> Result<Option<Vec<Run>>> {
+    let mut runs = Vec::new();
+    for i in 0..RUNS {
+        let Some((perf, load)) = one(i)? else { return Ok(None) };
+        let busy = (load >= BUSY).then_some(load);
+        runs.push(Run { perf, busy });
+        if busy.is_some() {
+            break;
+        }
+    }
+    Ok(Some(runs))
+}
+
+/// How often the load is read while a run goes: the kernel's own step for the load averages.
+const LOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `work`'s result and the highest load seen while it ran: `load` read every `every` on a thread of its own,
+/// and once more at the end. The load is waited on before each run, but the machine can get busy during one
+/// (another session's build) and it's in that run's numbers — a worst-of-keys number came out 7× its median
+/// under a load of 5.3 (2026-10-14). Read only at the end, a build that stopped a minute before the run did
+/// had decayed out of the 1-minute load; read all along it's seen. What it still misses: a burst too short
+/// to lift the 1-minute average to `BUSY` (it climbs over a minute: 10 busy cores for 10 s add ~1.5), and
+/// the run's own processes count as load too.
+fn with_peak_load<T>(
+    load: impl Fn() -> f64 + Sync,
+    every: std::time::Duration,
+    work: impl FnOnce() -> T,
+) -> (T, f64) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = AtomicBool::new(false);
+    let (load, done) = (&load, &done);
+    std::thread::scope(|s| {
+        let sampler = s.spawn(move || {
+            let mut peak = 0f64;
+            while !done.load(Ordering::Acquire) {
+                peak = peak.max(load());
+                std::thread::park_timeout(every);
+            }
+            peak
+        });
+        let out = work();
+        done.store(true, Ordering::Release);
+        sampler.thread().unpark();
+        let peak = sampler.join().unwrap_or(0.0).max(load());
+        (out, peak)
+    })
+}
+
+/// The runs whose numbers count, and what's said of the others: a run during which the load reached
+/// `BUSY` (`with_peak_load`) is dropped (`run 2 dropped: load 6.1`). Fewer than all `RUNS` left: "not
+/// measured", nothing kept, as with a busy start — a median of fewer runs is one run's word.
+fn quiet_runs(runs: Vec<Run>) -> (Vec<String>, Option<Vec<Vec<Perf>>>) {
+    let ran = runs.len();
+    let mut said = Vec::new();
+    let mut kept = Vec::new();
+    for (i, r) in runs.into_iter().enumerate() {
+        match r.busy {
+            Some(load) => said.push(format!("run {} dropped: load {load:.1}", i + 1)),
+            None => kept.push(r.perf),
+        }
+    }
+    if kept.len() < RUNS {
+        let not_run = if ran < RUNS { format!(", {} not run", RUNS - ran) } else { String::new() };
+        said.push(format!(
+            "not measured (machine busy: {} of {ran} run{} stayed under load {BUSY}{not_run}; all {RUNS} needed)",
+            kept.len(),
+            if ran == 1 { "" } else { "s" }
+        ));
+        return (said, None);
+    }
+    (said, Some(kept))
+}
+
+/// What the release sizes say beyond their numbers: what failed to be measured (a build) and the default
+/// binary's jump (`size_jump`) with its words, when it was measured.
+struct SizeSaid {
+    failed: Vec<String>,
+    jump: Option<(Jump, String)>,
+    accept_jump: bool,
+}
+
+/// What a measured run says, in order: every number with how it compares with its past (the table —
+/// timings and sizes alike), then the size's jump; and `Err` when the numbers aren't kept, said after the
+/// table: a size at or over its budget, one that failed to build, a jump not accepted (`--accept-jump`). A
+/// size's failure once came first and threw the timings away unseen (#234) — now they're shown, and still
+/// none is kept: kept, three runs again would make a broken size the median. `Ok`: how many are slower.
+fn report(
+    now: &[Perf],
+    history: &BTreeMap<String, Vec<f64>>,
+    sizes: &SizeSaid,
+) -> (Vec<String>, Result<usize>) {
     let width = now.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    let mut lines = Vec::new();
     let mut slower = 0;
-    for p in &now {
+    let mut failed = sizes.failed.clone();
+    for p in now {
         let was = history.get(&p.name).map(|v| median(v.iter().rev().take(HISTORY).copied().collect()));
         let vs = match was {
             Some(was) if is_slower(p.value, was, p.noise) => {
@@ -132,40 +306,25 @@ pub fn run(args: &[String]) -> Result<()> {
             _ => String::new(),
         };
         // A budget as it is (`{}`: 16 → "16", 9.5 → "9.5" — `{:.0}` said 10 for the size's 9.5)
-        println!("{:width$}  {:>10.3}  budget {:>6}{vs}", p.name, p.value, p.budget);
-    }
-    // A jump in the release size fails whatever room the budget has — and keeps nothing, as a broken budget
-    // doesn't: kept, three runs again would make it the median. One that's meant is kept with `--accept-jump`.
-    if let Some(size) = now.iter().find(|p| p.name == SIZE_JUMP.0) {
-        let mut known: BTreeMap<String, bool> = BTreeMap::new();
-        let has = |c: &str| *known.entry(c.to_string()).or_insert_with(|| head_has(&root, c));
-        let jump = size_jump(size.value, &kept(&past, SIZE_JUMP.0), has);
-        let said = jump_said(SIZE_JUMP.0, size.value, &jump);
-        match jump {
-            Jump::Over { .. } if !args.iter().any(|a| a == "--accept-jump") => return Err(said),
-            Jump::Over { .. } => println!("{said} — kept (--accept-jump)"),
-            _ => println!("{said}"),
+        lines.push(format!("{:width$}  {:>10.3}  budget {:>6}{vs}", p.name, p.value, p.budget));
+        if SIZES.iter().any(|s| s.0 == p.name) && p.value >= p.budget {
+            failed.push(format!("{}: {:.2} MB (budget {})", p.name, p.value, p.budget));
         }
     }
-    let (date, commit) = (today(), commit(&root));
-    let mut add = String::new();
-    if past.is_empty() {
-        add.push_str("date\tcommit\tname\tvalue\tbudget\n");
+    // A jump in the release size fails whatever room the budget has
+    match &sizes.jump {
+        Some((Jump::Over { .. }, said)) if !sizes.accept_jump => {
+            failed.push(format!("{said}: rerun with --accept-jump if the growth is accepted"));
+        }
+        Some((Jump::Over { .. }, said)) => lines.push(format!("{said} — kept (--accept-jump)")),
+        Some((_, said)) => lines.push(said.clone()),
+        None => {}
     }
-    for p in &now {
-        add.push_str(&format!("{date}\t{commit}\t{}\t{:.3}\t{}\n", p.name, p.value, p.budget));
+    if failed.is_empty() {
+        return (lines, Ok(slower));
     }
-    std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
-    let mut kept = past;
-    kept.push_str(&add);
-    std::fs::write(&file, kept).map_err(|e| format!("{}: {e}", file.display()))?;
-    println!(
-        "{} numbers, median of {RUNS} runs, kept in {} ({commit}){}",
-        now.len(),
-        file.display(),
-        if slower > 0 { format!(" — {slower} slower than before") } else { String::new() }
-    );
-    Ok(())
+    failed.push(format!("nothing kept: the numbers above aren't in {HISTORY_FILE}"));
+    (lines, Err(failed.join("\n")))
 }
 
 /// The release binary's size in MB (10⁶ bytes, as Finder and `ls -lh` say): `(name, cargo flags, target dir,
@@ -241,7 +400,7 @@ fn jump_said(name: &str, now: f64, j: &Jump) -> String {
         }
         Jump::Over { median, by, runs: r } => format!(
             "{name}: {now:.3} MB is {by:.3} MB above {median:.3}, the median of its last {} — more than the \
-             {} MB a jump may be (a dependency?). If it's meant: `cargo perf --accept-jump` keeps it",
+             {} MB a jump may be (a dependency?)",
             runs(r),
             SIZE_JUMP.1
         ),
@@ -317,11 +476,11 @@ fn release_profile(toml: &str) -> String {
 
 /// The `SIZES` binaries built (`cargo build --release`) and measured — the bundled one only when `all`, or
 /// when what makes it differ changed since it last was (`bundled_key`).
-fn sizes(cargo: &std::ffi::OsStr, root: &Path, all: bool) -> Result<Vec<Perf>> {
+fn sizes(cargo: &std::ffi::OsStr, root: &Path, all: bool) -> Result<(Vec<Perf>, Option<String>)> {
     let key = bundled_key(root);
     let kept = std::fs::read_to_string(root.join(BUNDLED_KEY)).unwrap_or_default();
     let bundled = all || kept.trim() != key;
-    let mut out = Vec::new();
+    let (mut out, mut measured) = (Vec::new(), None);
     for (name, flags, dir, budget) in SIZES {
         if !flags.is_empty() && !bundled {
             eprintln!(
@@ -342,17 +501,13 @@ fn sizes(cargo: &std::ffi::OsStr, root: &Path, all: bool) -> Result<Vec<Perf>> {
         let bin = root.join(dir).join("release/tarae");
         let len = std::fs::metadata(&bin).map_err(|e| format!("{}: {e}", bin.display()))?.len();
         let mb = len as f64 / 1e6;
-        if mb >= budget {
-            return Err(format!("{name}: {mb:.2} MB (budget {budget})"));
-        }
+        // (over its budget: `report` says so, after the table)
         out.push(Perf { name: name.to_string(), value: mb, budget, noise: SIZE_NOISE });
         if !flags.is_empty() {
-            let file = root.join(BUNDLED_KEY);
-            std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
-            std::fs::write(&file, &key).map_err(|e| format!("{}: {e}", file.display()))?;
+            measured = Some(key.clone());
         }
     }
-    Ok(out)
+    Ok((out, measured))
 }
 
 /// What failed, from libtest's output: each failed test with its panic's message — a budget's number, or
@@ -393,21 +548,21 @@ fn wait_quiet() -> Option<f64> {
     Some(load)
 }
 
-/// The 1-minute load when it's `BUSY` or more. `TARAE_PERF_LOAD` stands in for it (to see the busy path).
+/// The 1-minute load when it's `BUSY` or more.
 fn busy() -> Option<f64> {
-    let load = match std::env::var("TARAE_PERF_LOAD").ok().and_then(|l| l.parse().ok()) {
-        Some(l) => l,
-        None => {
-            let mut load = [0f64; 3];
-            // SAFETY: fills up to 3 values into the array given.
-            let n = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
-            if n < 1 {
-                return None;
-            }
-            load[0]
-        }
-    };
+    let load = load_now();
     (load >= BUSY).then_some(load)
+}
+
+/// The 1-minute load (0 when it can't be read). `TARAE_PERF_LOAD` stands in for it (to see the busy path).
+fn load_now() -> f64 {
+    if let Some(l) = std::env::var("TARAE_PERF_LOAD").ok().and_then(|l| l.parse().ok()) {
+        return l;
+    }
+    let mut load = [0f64; 3];
+    // SAFETY: fills up to 3 values into the array given.
+    let n = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+    if n < 1 { 0.0 } else { load[0] }
 }
 
 /// The `PERF <name> <value> budget=<value> [noise=<value>]` lines in a run's output.
@@ -573,6 +728,176 @@ mod tests {
         );
     }
 
+    fn perf(name: &str, value: f64, budget: f64) -> Perf {
+        Perf { name: name.into(), value, budget, noise: DEFAULT_NOISE }
+    }
+
+    /// A busy run is dropped and said; with fewer than all `RUNS` left nothing is kept and it's "not
+    /// measured" — a quiet set is kept whole, each run's numbers in its median.
+    #[test]
+    fn a_busy_run_is_dropped_and_then_nothing_is_kept() {
+        let run = |i: usize, busy| Run { perf: vec![perf("a", i as f64, 16.0)], busy };
+        let (said, kept) = quiet_runs((0..RUNS).map(|i| run(i, None)).collect());
+        assert!(said.is_empty(), "{said:?}");
+        assert_eq!(kept.map(|k| k.len()), Some(RUNS));
+        // A busy run anywhere among all of them is the same verdict
+        for busy_at in 0..RUNS {
+            let runs = (0..RUNS).map(|i| run(i, (i == busy_at).then_some(6.14))).collect();
+            let (said, kept) = quiet_runs(runs);
+            assert_eq!(
+                said,
+                [
+                    format!("run {} dropped: load 6.1", busy_at + 1),
+                    format!(
+                        "not measured (machine busy: {} of {RUNS} runs stayed under load 5; all {RUNS} needed)",
+                        RUNS - 1
+                    )
+                ]
+            );
+            assert!(kept.is_none(), "a median of {} runs was kept", RUNS - 1);
+        }
+        // As the loop leaves it (`runs`): the busy one last, the runs after it not run — and said so
+        let (said, kept) = quiet_runs(vec![run(0, None), run(1, Some(6.14))]);
+        assert_eq!(
+            said[1],
+            format!(
+                "not measured (machine busy: 1 of 2 runs stayed under load 5, {} not run; all {RUNS} needed)",
+                RUNS - 2
+            )
+        );
+        assert!(kept.is_none());
+    }
+
+    /// The loop judges each run by the load read for it: all `RUNS` on a quiet machine (just under `BUSY`
+    /// is quiet), a stop right after the first busy one (at `BUSY` itself; the rest would be thrown away),
+    /// and nothing measured once the machine stayed busy before a run.
+    #[test]
+    fn the_runs_stop_at_the_first_busy_one() {
+        let mut started = Vec::new();
+        let quiet = runs(|i| {
+            started.push(i);
+            Ok(Some((vec![perf("a", 1.0, 16.0)], BUSY - 0.1)))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(quiet.iter().map(|r| r.busy).collect::<Vec<_>>(), vec![None; RUNS]);
+        assert_eq!(started, (0..RUNS).collect::<Vec<_>>());
+        let mut started = Vec::new();
+        let loads = [1.0, BUSY, 1.0];
+        let busy = runs(|i| {
+            started.push(i);
+            Ok(Some((Vec::new(), loads[i])))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(busy.iter().map(|r| r.busy).collect::<Vec<_>>(), [None, Some(BUSY)]);
+        assert_eq!(started, [0, 1], "none after a busy run");
+        let mut started = 0;
+        let before = runs(|i| {
+            started += 1;
+            Ok((i == 0).then(|| (Vec::new(), 1.0)))
+        });
+        assert_eq!((before.map(|r| r.is_none()), started), (Ok(true), 2), "busy before run 2: nothing kept");
+    }
+
+    /// A run is judged by the busiest load seen while it ran, not only at its end: a burst in its middle
+    /// that fell back by the end (decayed out of the 1-minute load) is still seen.
+    #[test]
+    fn a_runs_load_is_the_peak_while_it_ran() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let reads = AtomicUsize::new(0);
+        let seen = [1.0, 7.5, 2.0];
+        let load = || seen[reads.fetch_add(1, SeqCst).min(2)];
+        let (out, peak) = with_peak_load(load, std::time::Duration::from_millis(1), || {
+            // (until the reader has seen the burst and the fall after it)
+            while reads.load(SeqCst) < 3 {
+                std::thread::yield_now();
+            }
+            "ran"
+        });
+        assert_eq!((out, peak), ("ran", 7.5));
+    }
+
+    /// The bundled size's key is written only with the numbers: a run that keeps nothing writes neither (and
+    /// leaves the key kept before), a kept one adds its rows and then the key, one without a bundled build
+    /// leaves the key alone.
+    #[test]
+    fn the_bundled_key_is_kept_only_with_the_numbers() {
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (history, key) = (dir.join(HISTORY_FILE), dir.join(BUNDLED_KEY));
+        let read = |f: &std::path::PathBuf| std::fs::read_to_string(f).ok();
+        let now = [perf("a", 1.0, 16.0)];
+        let stamp = ("2026-10-14", "abc");
+        let refused = || Err("a jump".to_string());
+        assert!(keep(&dir, refused(), &now, String::new(), stamp, Some("k1".into())).is_err());
+        assert_eq!((read(&history), read(&key)), (None, None), "a run that kept nothing");
+        assert_eq!(keep(&dir, Ok(2), &now, String::new(), stamp, Some("k1".into())), Ok(2));
+        let rows = "date\tcommit\tname\tvalue\tbudget\n2026-10-14\tabc\ta\t1.000\t16\n";
+        assert_eq!((read(&history).as_deref(), read(&key).as_deref()), (Some(rows), Some("k1")));
+        assert!(keep(&dir, refused(), &now, rows.into(), stamp, Some("k2".into())).is_err());
+        assert_eq!(read(&key).as_deref(), Some("k1"), "a refused run after a kept one");
+        assert_eq!(keep(&dir, Ok(0), &now, rows.into(), stamp, None), Ok(0));
+        assert_eq!(read(&history).map(|h| h.lines().count()), Some(3));
+        assert_eq!(read(&key).as_deref(), Some("k1"), "no bundled build");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The table comes first, every number in it — then what fails on the size, and that nothing is kept
+    /// (#234: a size over its budget had failed before the timings were shown). A jump not accepted says how
+    /// to accept it; one accepted, or none, is a line after the table and the numbers are kept.
+    #[test]
+    fn a_size_failure_comes_after_the_table_and_keeps_nothing() {
+        let history: BTreeMap<String, Vec<f64>> = [("key".to_string(), vec![0.2])].into();
+        let now = [perf("key", 0.5, 16.0), perf("release_size_mb", 12.3, 12.0)];
+        let quiet = SizeSaid { failed: Vec::new(), jump: None, accept_jump: false };
+        let (lines, verdict) = report(&now, &history, &quiet);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("key  ") && lines[0].ends_with("SLOWER than 0.200 (+150%)"),
+            "{lines:?}"
+        );
+        assert!(lines[1].starts_with("release_size_mb"), "{lines:?}");
+        assert_eq!(
+            verdict,
+            Err("release_size_mb: 12.30 MB (budget 12)\n\
+                 nothing kept: the numbers above aren't in target/perf/history.tsv"
+                .into())
+        );
+        // A size that didn't build: the timings still shown, nothing kept
+        let now = [perf("key", 0.2, 16.0)];
+        let failed = SizeSaid { failed: vec!["building the release binary  failed".into()], ..quiet };
+        let (lines, verdict) = report(&now, &history, &failed);
+        assert_eq!(lines.len(), 1);
+        assert!(verdict.is_err_and(|e| e.starts_with("building the release binary  failed\nnothing kept")));
+        // A jump: refused with how to accept it, or kept when accepted, said after the table either way
+        let now = [perf("key", 0.2, 16.0), perf("release_size_mb", 11.4, 12.0)];
+        let j = size_jump(11.4, &sizes_kept(&[11.0]), |_| true);
+        let said = jump_said("release_size_mb", 11.4, &j);
+        let jumped =
+            |accept_jump| SizeSaid { failed: Vec::new(), jump: Some((j.clone(), said.clone())), accept_jump };
+        let (lines, verdict) = report(&now, &history, &jumped(false));
+        assert_eq!(lines.len(), 2, "the table only: {lines:?}");
+        assert_eq!(
+            verdict,
+            Err(format!(
+                "{said}: rerun with --accept-jump if the growth is accepted\n\
+                 nothing kept: the numbers above aren't in target/perf/history.tsv"
+            ))
+        );
+        let (lines, verdict) = report(&now, &history, &jumped(true));
+        assert_eq!((lines.len(), &lines[2]), (3, &format!("{said} — kept (--accept-jump)")));
+        assert_eq!(verdict, Ok(0));
+        let within = size_jump(11.1, &sizes_kept(&[11.0]), |_| true);
+        let said = jump_said("release_size_mb", 11.1, &within);
+        let (lines, verdict) = report(
+            &now,
+            &history,
+            &SizeSaid { failed: Vec::new(), jump: Some((within, said.clone())), accept_jump: false },
+        );
+        assert_eq!((lines.last(), verdict), (Some(&said), Ok(0)));
+    }
+
     #[test]
     fn lines_medians_history_and_slower() {
         let out = "running 2 tests\nPERF a 1.500 budget=16\nnoise PERF b 1 budget=2\nPERF b 3.0 budget=100\nPERF bad x budget=1\n";
@@ -630,7 +955,7 @@ mod tests {
         );
         let said = jump_said("release_size_mb", 11.40, &j);
         assert!(said.starts_with("release_size_mb: 11.400 MB is 0.400 MB above 11.000, the median of its last 5 runs (2026-10-05 c4 11.050, 2026-10-04 c3 11.000,"), "{said}");
-        assert!(said.contains("--accept-jump"), "{said}");
+        assert!(said.ends_with("— more than the 0.3 MB a jump may be (a dependency?)"), "{said}");
         assert!(matches!(size_jump(11.31, &rows, |_| true), Jump::Over { .. }), "just over");
         assert!(matches!(size_jump(11.30, &rows, |_| true), Jump::Within { .. }), "0.3 itself");
     }
