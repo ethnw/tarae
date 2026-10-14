@@ -1016,10 +1016,10 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 | C, Ubuntu's restriction, no profile | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | D | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | D, Ubuntu's restriction, no profile | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
-| Seatbelt, no port open, the network closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, priority), System V shared memory, POSIX shared memory |
-| Seatbelt, ports open, the network closed | files (but the temp folders), signals | processes (command lines, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
-| Seatbelt, no port open, the network open | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, priority), System V shared memory, POSIX shared memory |
-| Seatbelt, ports and the network open | files (but the temp folders), signals | processes (command lines, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
+| Seatbelt, ports open, the network closed | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network open | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
+| Seatbelt, ports and the network open | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
 <!-- /tiers -->
 
 - In every tier the temp folders are shared, and every session reads the repository's other checkouts. A

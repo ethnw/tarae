@@ -487,7 +487,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox",
         kind: Kind::Bool,
-        doc: "Chat: Claude's commands run in a sandbox — they write only in the project (not .git, build.rs, pom.xml… — the protected names, every language pack's), temp and the build's folders, and connect to nothing but the ports you open (macOS)",
+        doc: "Chat: Claude's commands run in a sandbox (Seatbelt on macOS, Landlock and seccomp on Linux) — they write only in the project (not .git, build.rs, pom.xml… — the protected names, every language pack's), temp and the build's folders, read no keys, and connect only where llm.sandbox-ports, -localhost and -network open",
         get: |c| Value::from(c.llm.sandbox),
         set: |c, v| c.llm.sandbox = b(v),
     },

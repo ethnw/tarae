@@ -25,9 +25,11 @@
 //!   command line your other processes read — on macOS tarae's sandboxed runs too. So:
 //!   - every other variable → "". "" reads as unset there (live check L6: `ANTHROPIC_BASE_URL` held to "" sent
 //!     the request to Anthropic); for provider selection Claude Code says so ("treats the empty value as unset
-//!     for provider selection"), and "Subprocesses still inherit the empty value" — but the chat starts none:
-//!     no Bash (`chat::TOOLS`, chat.rs:107), hooks off (`chat::CHAT_SETTINGS`, chat.rs:123), `.mcp.json` off
-//!     (`--strict-mcp-config`, chat.rs:936), tarae's tools in-process (`sdkMcpServers`, llm.rs:283);
+//!     for provider selection"), and "Subprocesses still inherit the empty value" — the chat starts none of
+//!     its own: no Bash (`chat::tools`), hooks off (`chat::CHAT_SETTINGS`), `.mcp.json` off
+//!     (`--strict-mcp-config`, `chat::ensure_proc`), tarae's tools in-process (`sdkMcpServers`,
+//!     `llm::initialize_message`). claude itself starts a few (git, `security`, `sh` for `uname`/`ps`/`ioreg`:
+//!     measured, `docs/threat-model.md` §2): they inherit the empty values, never the project's;
 //!   - a variable your own Claude settings set too → that file isn't loaded at all (its source left out of
 //!     `--setting-sources`, so yours applies — for the project's file that's its CLAUDE.md too, Claude Code's
 //!     SDK docs: "To load CLAUDE.md project instructions, include `project`");
@@ -47,7 +49,7 @@
 //!
 //! A project skill's `allowed-tools` would pre-approve tools — "Workspace trust doesn't gate this field … even in
 //! a `-p` run" (Claude Code's skills docs). Not in the chat: skills run through the `Skill` tool (its tools
-//! reference), and the chat's `--tools` names only `chat::TOOLS`, which "restricts the session's built-in tools
+//! reference), and the chat's `--tools` names only `chat::tools`, which "restricts the session's built-in tools
 //! to the ones it names"; its `--settings` also denies `Skill` (a deny no level can allow). A skill typed as
 //! `/name` would be your own message — tarae's messages start with the editor context, never `/`.
 //!

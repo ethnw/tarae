@@ -705,8 +705,8 @@ fn the_guarantees_say_each_tier() {
     pinned("sandbox_guarantees.txt", &out);
 }
 
-/// The docs' tier tables (between their two markers: the design doc's §What each tier keeps apart, and
-/// claude-integration.md's "On Linux", without the network) are the golden's: each Linux scene at Landlock ABI 6
+/// The docs' tier tables (between their two markers: the design doc's §What each tier keeps apart and the threat
+/// model's §1.6, with the network; claude-integration.md's "On Linux", without it) are the golden's: each Linux scene at Landlock ABI 6
 /// (the first without a gap of its own) and each Seatbelt one — its network, what it keeps apart, what it shares.
 /// A hand-kept table drifts; these can't.
 #[test]
@@ -739,7 +739,12 @@ fn the_docs_tier_table_is_the_codes() {
         design.push_str(&format!("| {label} | {network} | {kept} | {shared} |\n"));
         users.push_str(&format!("| {label} | {kept} | {shared} |\n"));
     }
-    for (path, want) in [("docs/design/sandbox-keeper.md", design), ("docs/claude-integration.md", users)] {
+    let tables = [
+        ("docs/design/sandbox-keeper.md", design.clone()),
+        ("docs/threat-model.md", design),
+        ("docs/claude-integration.md", users),
+    ];
+    for (path, want) in tables {
         let doc = std::fs::read_to_string(root.join(path)).unwrap();
         let from = doc.find("<!-- tiers:").unwrap_or_else(|| panic!("{path}: the tier table's first marker"));
         let from = from + doc[from..].find('\n').unwrap() + 1;
@@ -752,6 +757,201 @@ fn the_docs_tier_table_is_the_codes() {
             "{path}'s tier table isn't the golden's — between its markers it should be:\n\n{want}"
         );
     }
+}
+
+/// What's wrong with a threat model's claims (`docs/threat-model.md`): each name after a "test:" (or "test (…):")
+/// that isn't a module path, or isn't a `#[test]` at its path under `src/`; and each bullet under a "Kept:" with
+/// no test that exists — its own, or in a section it points to (`§1.3`).
+fn unfounded_claims(doc: &str, src: &Path) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for name in named(doc) {
+        if !is_test_path(name) {
+            wrong.push(format!("not a test's path: {name}"));
+        } else if !test_exists(src, name) {
+            wrong.push(format!("no test {name}"));
+        }
+    }
+    let shown = |text: &str| named(text).iter().any(|n| is_test_path(n) && test_exists(src, n));
+    // (a § to a section with a test that exists founds a claim too; one to no section doesn't)
+    let pointed = |text: &str| {
+        text.split('§').skip(1).any(|r| {
+            let n = r.split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("");
+            section(doc, n.trim_end_matches('.')).is_some_and(shown)
+        })
+    };
+    // (a bullet is its "- " line and the indented ones after it; it's a kept one under a "Kept:" line)
+    let (mut kept, mut bullet) = (false, None::<String>);
+    let said = |b: Option<String>, kept: bool, wrong: &mut Vec<String>| {
+        if let Some(b) = b.filter(|_| kept)
+            && !shown(&b)
+            && !pointed(&b)
+        {
+            wrong.push(format!("kept with no test: {}", b.lines().next().unwrap_or("")));
+        }
+    };
+    for line in doc.lines() {
+        if let Some(first) = line.strip_prefix("- ") {
+            said(bullet.replace(first.to_string()), kept, &mut wrong);
+        } else if let (Some(b), true) = (bullet.as_mut(), line.starts_with("  ")) {
+            b.push('\n');
+            b.push_str(line);
+        } else {
+            said(bullet.take(), kept, &mut wrong);
+            if !line.trim().is_empty() {
+                kept = line == "Kept:";
+            }
+        }
+    }
+    said(bullet, kept, &mut wrong);
+    wrong
+}
+
+/// The backticked names after each "test:" (or "test (…):") in `text`, to the end of its bullet or paragraph —
+/// those that look like a test's: a `::` path, or one snake_case word (a test named without its module). Other
+/// code there (`$STATE`, `TARAE_SANDBOX_STATUS`, `cargo xtask linux`) is words.
+fn named(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    for (at, _) in text.match_indices("test") {
+        let rest = &text[at + "test".len()..];
+        let Some(rest) =
+            rest.strip_prefix(':').or_else(|| rest.strip_prefix(" (")?.split_once("):").map(|p| p.1))
+        else {
+            continue;
+        };
+        let end = [rest.find("\n\n"), rest.find("\n- ")].into_iter().flatten().min().unwrap_or(rest.len());
+        let word = |n: &str| {
+            n.contains('_') && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
+        names.extend(rest[..end].split('`').skip(1).step_by(2).filter(|n| n.contains("::") || word(n)));
+    }
+    names
+}
+
+/// The text of the doc's section `number` (`1.3` → from its `### 1.3 …` heading; `2` → `## 2. …`) up to the next
+/// heading as high or higher — None when there's no such heading.
+fn section<'a>(doc: &'a str, number: &str) -> Option<&'a str> {
+    if number.is_empty() {
+        return None;
+    }
+    let level = |l: &str| l.bytes().take_while(|&b| b == b'#').count();
+    let mut lines = doc.split_inclusive('\n');
+    let mut from = 0;
+    let mut head = 0;
+    for l in lines.by_ref() {
+        let title = l.trim_start_matches('#');
+        if level(l) > 0 && [" ", ". "].iter().any(|s| title.starts_with(&format!(" {number}{s}"))) {
+            head = level(l);
+            break;
+        }
+        from += l.len();
+    }
+    if head == 0 {
+        return None;
+    }
+    let start = from;
+    from += doc[from..].find('\n').map_or(doc.len() - from, |i| i + 1);
+    for l in lines {
+        if (1..=head).contains(&level(l)) {
+            break;
+        }
+        from += l.len();
+    }
+    Some(&doc[start..from])
+}
+
+/// `module::path::name`, lowercase, at least two parts.
+fn is_test_path(s: &str) -> bool {
+    s.contains("::")
+        && s.split("::").all(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
+/// Whether `name` is a `#[test]` fn at its module path, each part checked as Rust finds modules: a file
+/// (`a/b.rs`, `a/b/mod.rs`) beside the one before, or an inline `mod b {` in it. Of inline modules only the order
+/// is checked — each opens below the one before, the fn below the last — not that their braces hold it.
+fn test_exists(src: &Path, name: &str) -> bool {
+    let parts: Vec<&str> = name.split("::").collect();
+    let (mods, f) = parts.split_at(parts.len() - 1);
+    let (mut dir, mut file, mut text, mut after) = (src.to_path_buf(), None::<PathBuf>, String::new(), 0);
+    for m in mods {
+        let found =
+            [dir.join(format!("{m}.rs")), dir.join(m).join("mod.rs")].into_iter().find(|p| p.is_file());
+        if let Some(p) = found {
+            text = std::fs::read_to_string(&p).unwrap_or_default();
+            (file, after) = (Some(p), 0);
+        } else {
+            let open = format!("mod {m} {{");
+            match text.lines().enumerate().skip(after).find(|(_, l)| l.trim_end().ends_with(&open)) {
+                Some((i, _)) if file.is_some() => after = i + 1,
+                _ => return false,
+            }
+        }
+        dir.push(m);
+    }
+    let decl = format!("fn {}(", f[0]);
+    let lines: Vec<&str> = text.lines().collect();
+    file.is_some()
+        && lines.iter().enumerate().skip(after).any(|(i, l)| {
+            l.contains(&decl)
+                && lines[..i]
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    .take_while(|l| l.starts_with("#[") || l.starts_with("//"))
+                    .any(|l| l == "#[test]")
+        })
+}
+
+/// The threat model promises only what a test shows: every test it names is one in the source at the module path
+/// the doc gives, and every "kept" names one that exists (or points to a section that does). A test renamed,
+/// moved or removed would leave a promise standing on nothing — this fails instead, naming it. (Broken in the
+/// test itself on a stand-in doc, one case each.)
+#[test]
+fn every_claim_names_a_test_that_exists() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = root.join("src");
+    let doc = std::fs::read_to_string(root.join("docs/threat-model.md")).unwrap();
+    assert_eq!(unfounded_claims(&doc, &src), Vec::<String>::new());
+    // (it reads every name: against no source each is missing — and finds them where they are)
+    let names = unfounded_claims(&doc, &root.join("no-such-folder")).len();
+    assert!(names > 140, "{names} names read");
+    assert!(test_exists(&src, "sandbox::golden::every_claim_names_a_test_that_exists"));
+    assert!(test_exists(&src, "sandbox::proxy::tests::sni_must_match_the_connect_host"));
+    // broken: a test that isn't there, a non-test fn, a wrong module between, a name without its module or with a
+    // capital, a "test (…)" in prose, a § to no section and to one with no test, a "kept" with nothing — each claim
+    // founded only on a test that exists, its own or its §'s
+    let stand_in = "## 1. Shown\n\ntest: `sandbox::golden::every_claim_names_a_test_that_exists`\n\n\
+                    ## 2. Claims\n\nKept:\n\
+                    - Good.\n  test: `sandbox::tests::a_run_writes_only_its_own_run_folder`\n\
+                    - Points to a shown section, §1.\n\
+                    - Missing.\n  test: `sandbox::golden::no_such_test` · `sandbox::golden::unfounded_claims`\n\
+                    - Wrong middle.\n  test: `sandbox::bogus::a_run_writes_only_its_own_run_folder`\n\
+                    - No module.\n  test: `a_run_writes_only_its_own_run_folder`\n\
+                    - A capital.\n  test: `sandbox::tests::A_run_writes_only_its_own_run_folder`\n\
+                    - Prose only.\n  test (by hand): run it and see it refused.\n\
+                    - Points nowhere, §9.\n\
+                    - Points to an untested section, §3.\n\
+                    - Untested.\n\nNot kept:\n- Said.\n\n\
+                    ## 3. Untested\n\nWords only.\n";
+    assert_eq!(
+        unfounded_claims(stand_in, &src),
+        [
+            "no test sandbox::golden::no_such_test",
+            "no test sandbox::golden::unfounded_claims",
+            "no test sandbox::bogus::a_run_writes_only_its_own_run_folder",
+            "not a test's path: a_run_writes_only_its_own_run_folder",
+            "not a test's path: sandbox::tests::A_run_writes_only_its_own_run_folder",
+            "kept with no test: Missing.",
+            "kept with no test: Wrong middle.",
+            "kept with no test: No module.",
+            "kept with no test: A capital.",
+            "kept with no test: Prose only.",
+            "kept with no test: Points nowhere, §9.",
+            "kept with no test: Points to an untested section, §3.",
+            "kept with no test: Untested.",
+        ]
+    );
 }
 
 /// The words Claude's prompt and tools say of the sandbox, the checks and the toolchains.

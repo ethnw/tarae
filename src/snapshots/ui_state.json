@@ -279,7 +279,7 @@
         "partial": false,
         "shared": [
           {
-            "how": "command lines, priority",
+            "how": "command lines, starting environments, priority",
             "part": "processes"
           },
           {

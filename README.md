@@ -33,7 +33,8 @@ everything else works without it.
 
 ## Docs
 
-[Features](docs/features.md) · [Claude](docs/claude-integration.md) · [Languages](docs/languages.md) ·
+[Features](docs/features.md) · [Claude](docs/claude-integration.md) · [Threat model](docs/threat-model.md) ·
+[Languages](docs/languages.md) ·
 [Tests and debugging](docs/testing-and-debugging.md) · [Configuration](docs/configuration.md) ·
 [Plugins](docs/plugins.md) · [Keymap](docs/reference/keymap.md) · [Architecture](docs/architecture.md) ·
 [Contributing](CONTRIBUTING.md)

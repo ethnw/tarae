@@ -93,9 +93,10 @@ In this order.
 
 The aim is to state what the sandbox guarantees and show that it holds.
 
-1. **One threat-model document**: what is kept from a run and what isn't, per tier and per OS. It also decides
-   whether the `claude` process itself should be confined. Today it has only Read, Grep, Glob, Edit and Write,
-   and its commands go through tarae's `run` into the sandbox.
+1. **One threat-model document** — written: [threat-model.md](threat-model.md), what is kept from a run and what
+   isn't, per tier and per OS, each claim with its test. Next: the `claude` process itself under a files-only
+   profile (keys and what runs later denied, the network as it is). Today it has Read (Edit and Write when
+   turned on) and tarae's own tools, and its commands go through tarae's `run` into the sandbox.
 2. **Fuzzing the parsers that read what a run sends**: the supervisor's reading of system-call arguments, and the
    proxy's parsers.
 3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:

@@ -306,8 +306,9 @@ const PROCESSES_SAID: &str = " Here a command sees this system's processes — a
 
 /// What Seatbelt can't keep apart (step 7, the user's decision 2026-10-10: shared, and said): shared memory, POSIX and
 /// System V — no rule names who made a segment — and `setpriority`, which no operation guards
-/// (`process-info-setcontrol` doesn't: measured). The command line and starting environment are said once a
-/// conversation (`runenv::OTHERS_READ`). Pinned by `apart::two_sessions_cant_reach_each_others_{processes,sockets}`.
+/// (`process-info-setcontrol` doesn't: measured). Other processes' command lines and starting environments
+/// (`KERN_PROCARGS2`) are in the processes row's words, and said again once a conversation
+/// (`runenv::OTHERS_READ`). Pinned by `apart::two_sessions_cant_reach_each_others_{processes,sockets}`.
 const MAC_SHARED: &str = " Here a command shares System V and POSIX shared memory with other sessions' commands \
      and the user's other programs — it can read and write what they keep there — and can lower their priority \
      (renice): macOS's sandbox has no rule for either.";
@@ -419,7 +420,7 @@ impl Guarantees {
             ns: None,
             rows: vec![
                 Row::new(Part::Files, true, "but the temp folders"),
-                Row::new(Part::Processes, false, "command lines, priority"),
+                Row::new(Part::Processes, false, "command lines, starting environments, priority"),
                 Row::new(Part::Signals, true, ""),
                 Row::new(Part::Ipc, false, ""),
                 Row::new(Part::Shm, false, ""),
