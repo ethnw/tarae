@@ -574,6 +574,12 @@ impl Editor {
     /// its place in line (the same run, the same id).
     pub(crate) fn task_start_now(&mut self, task: Task, force: bool, trace: Option<crate::trace::RunTrace>) {
         let trace = trace.unwrap_or_else(|| crate::trace::RunTrace::new(format!("task: {}", task.name)));
+        // (it runs what's there outside the sandbox: what Claude's runs made that the sandbox keeps, looked at
+        // first — G23)
+        if !self.session.made_protected.is_empty() {
+            trace.step("protected-made card up");
+            return crate::tools::ask_made(self, crate::tools::MadeThen::Task { task, force, trace });
+        }
         self.auto_save(" · before the task");
         // (it runs what's on disk: once the saves are written — `after_saves`)
         self.after_saves(move |ed| {

@@ -149,7 +149,10 @@ pub struct Session {
     pub wrote: Option<Instant>,
     /// Protected names Claude's runs made where none was (`snapshot::Found::protected`, from its root) — its
     /// next run waits on a card about them (`tools::ask_made`); a `y` there clears it.
-    pub made_protected: Vec<String>,
+    pub made_protected: Vec<crate::snapshot::Made>,
+    /// Those kept on that card (`y`), as they were then — one a later run makes again holding the same isn't
+    /// asked about; holding something else, it is.
+    pub made_kept: Vec<crate::snapshot::Made>,
     /// A commit's tree being written for a run of its Claude's (`basetree.rs`) — another such run waits for
     /// that one's answer: they'd write the same tree.
     pub base_writing: bool,
@@ -306,6 +309,7 @@ impl Session {
             runs_next: Default::default(),
             wrote: None,
             made_protected: Vec::new(),
+            made_kept: Vec::new(),
             base_writing: false,
             answered: Vec::new(),
             asking: Vec::new(),

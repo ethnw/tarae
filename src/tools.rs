@@ -597,7 +597,8 @@ pub fn turn_over(ed: &mut Editor) {
     }
     ed.drop_cards(|w| {
         use crate::offer::What;
-        matches!(w, What::Run(_) | What::NoSandbox { .. } | What::ProtectedMade { .. })
+        matches!(w, What::Run(_) | What::NoSandbox { .. })
+            || matches!(w, What::ProtectedMade { then, .. } if then.call().is_some())
     });
     crate::seeing::turn_over(ed);
     crate::refactor::turn_over(ed);
@@ -2570,7 +2571,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     if let For::Claude(call) = &who
         && !ed.session.made_protected.is_empty()
     {
-        return ask_made(ed, call.clone(), job, ride);
+        return ask_made(ed, MadeThen::Claude { job, call: call.clone(), ride: Box::new(ride) });
     }
     // (on a commit's tree: written now, at its turn — a run before it in line may still be using the last)
     if let Some(b) = ride.extra.base.as_ref().filter(|b| b.sha.is_none()) {
@@ -2868,6 +2869,46 @@ pub fn unprotected_answer(
 }
 
 pub const MADE_TITLE: &str = "Claude wants to run — after it made a protected file";
+pub const MADE_YOURS_TITLE: &str = "Before your run — Claude's run made a protected file";
+
+/// What waits on the protected-made card (`What::ProtectedMade`): Claude's next run, or a run of yours in
+/// that checkout that runs what's there outside the sandbox — a task (your build), the preflight.
+#[derive(Clone, Debug)]
+pub enum MadeThen {
+    Claude { job: Job, call: Call, ride: Box<Ride> },
+    Task { task: crate::task::Task, force: bool, trace: crate::trace::RunTrace },
+    Preflight { all: Vec<crate::preflight::Step>, set: crate::preflight::Set },
+}
+
+impl MadeThen {
+    /// What it runs, as its card's first lines.
+    fn label(&self) -> String {
+        match self {
+            MadeThen::Claude { job, .. } => job.label(),
+            MadeThen::Task { task, .. } => task.cmd.clone(),
+            MadeThen::Preflight { all, set } => {
+                let names: Vec<String> = set.of(all).iter().map(|s| s.name.clone()).collect();
+                format!("{}: {}", set.title(all), names.join(", "))
+            }
+        }
+    }
+
+    /// Whether Claude's call waits on it (else it's yours).
+    pub fn call(&self) -> Option<&Call> {
+        match self {
+            MadeThen::Claude { call, .. } => Some(call),
+            _ => None,
+        }
+    }
+}
+
+/// An answer on the protected-made card: `y` keeps them, `r` removes them, `n` doesn't run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MadeAnswer {
+    Keep,
+    Remove,
+    No,
+}
 
 /// The protected names a run made, named — `(a.toml, a name` · `a, b — names`, then `it` · `them`) — for
 /// what follows: "… the sandbox keeps".
@@ -2878,55 +2919,165 @@ fn made_named(made: &[String]) -> (String, &'static str) {
     }
 }
 
-/// Claude's next run waits for the user (`What::ProtectedMade`): its last run made protected names where none
-/// was (`Session.made_protected`) — what Landlock couldn't refuse, and what runs outside the sandbox later.
-fn ask_made(ed: &mut Editor, call: Call, job: Job, ride: Ride) {
+/// A run waits for the user (`What::ProtectedMade`): Claude's last run made names the sandbox keeps where none
+/// was (`Session.made_protected`) — what Landlock couldn't refuse, and what runs outside the sandbox later:
+/// Claude's next run, or yours in this checkout (`then`) — your task, your preflight.
+pub(crate) fn ask_made(ed: &mut Editor, then: MadeThen) {
     use crate::cards::{Past, Request, Why};
-    let label = job.label();
+    let label = then.label();
     let made = ed.session.made_protected.clone();
-    let (named, it) = made_named(&made);
+    let paths: Vec<String> = made.iter().map(|m| m.path.clone()).collect();
+    let (named, it) = made_named(&paths);
     let among = if made.len() == 1 { "it's" } else { "they're" };
-    let question = format!(
-        "{label}\n\nIts last run made {named} the sandbox keeps from Claude's commands: what's in {it} runs \
-         outside the sandbox, in your builds and your terminal. The sandbox couldn't refuse {it}: none was \
-         there yet.\n\nLook at {it} before this runs — {among} among this turn's changes (space u takes the \
-         turn back)."
-    );
+    let (title, question) = match &then {
+        MadeThen::Claude { .. } => (
+            MADE_TITLE,
+            format!(
+                "{label}\n\nIts last run made {named} the sandbox keeps from Claude's commands: what's in {it} \
+                 runs outside the sandbox, in your builds and your terminal. The sandbox couldn't refuse {it}: \
+                 none was there yet.\n\nLook at {it} before this runs — {among} among this turn's changes \
+                 (space u takes the turn back); r removes {it} — a link itself, never what it leads to."
+            ),
+        ),
+        _ => (
+            MADE_YOURS_TITLE,
+            format!(
+                "{label}\n\nClaude's last run made {named} the sandbox keeps from its commands: what's in {it} \
+                 runs in this, outside the sandbox. The sandbox couldn't refuse {it}: none was there yet.\n\n\
+                 Look at {it} before this runs — {among} among Claude's changes (space u takes its turn back); \
+                 r removes {it} — a link itself, never what it leads to."
+            ),
+        ),
+    };
     let at = label.split('\n').count() + 1;
-    call.step("protected-made card up");
-    let what = crate::offer::What::ProtectedMade { job, call, ride: Box::new(ride), made };
+    if let Some(call) = then.call() {
+        call.step("protected-made card up");
+    }
+    let sandboxed = then.call().is_some();
+    let what = crate::offer::What::ProtectedMade { then: Box::new(then), made };
     let asked = crate::cards::Asked::new(
         Why::ProtectedMade,
-        Request::Run { past: Past::No, sandboxed: true, reads: Vec::new() },
+        Request::Run { past: Past::No, sandboxed, reads: Vec::new() },
     );
-    let o = crate::offer::Offer::new(MADE_TITLE.into(), &question, "", String::new(), what);
+    let o = crate::offer::Offer::new(title.into(), &question, "", String::new(), what);
     ed.push_offer(o.asked(asked).warning(at..at + 1));
 }
 
-/// The answer on that card: `y` runs it (the names seen — not asked about again), `n` tells Claude no (and
-/// the calls that joined it) — asked again before its next run.
+/// The answer on that card: `y` runs it (the names kept — not asked about again while they hold what they
+/// hold, `Session.made_kept`), `r` removes them first (on a worker, through no link —
+/// `snapshot::remove_made`; one it can't remove is asked about again), `n` doesn't run it (Claude hears no,
+/// with the calls that joined it) — asked again before the next.
 pub fn made_answer(
     ed: &mut Editor,
     id: u64,
-    (job, call, ride, made): (Job, Call, Ride, Vec<String>),
-    yes: bool,
+    then: MadeThen,
+    made: Vec<crate::snapshot::Made>,
+    how: MadeAnswer,
 ) {
-    ed.offer_finished(id, Ok(()));
-    if yes {
-        call.step("answered yes");
-        ed.session.made_protected.retain(|p| !made.contains(p));
-        return guard_then_go(ed, For::Claude(call), job, ride);
+    if let (Some(call), MadeAnswer::Keep | MadeAnswer::Remove) = (then.call(), how) {
+        call.step(if how == MadeAnswer::Keep { "answered yes" } else { "answered remove" });
     }
-    let (named, it) = made_named(&made);
-    let e = format!(
-        "Your last run made {named} the sandbox keeps (what's in {it} runs outside it), and the user chose not \
-         to run `{}` after it — ask them how to go on",
-        job.label()
-    );
-    for c in std::iter::once(call).chain(ride.joined.into_iter().map(|j| j.call)) {
-        answer(ed, c, Err(e.clone()));
+    match how {
+        MadeAnswer::Keep => {
+            ed.offer_finished(id, Ok(()));
+            ed.session.made_protected.retain(|p| !made.iter().any(|m| m.path == p.path));
+            ed.session.made_kept.retain(|p| !made.iter().any(|m| m.path == p.path));
+            // (one past what's hashed isn't kept: asked about whenever a run makes it — `Made::keepable`)
+            ed.session.made_kept.extend(made.into_iter().filter(crate::snapshot::Made::keepable));
+            made_go(ed, then)
+        }
+        MadeAnswer::Remove => {
+            let root = ed.session.root.clone();
+            ed.events.jobs().spawn(move || {
+                let gone = crate::snapshot::remove_made(&root, &made);
+                move |ed: &mut Editor| {
+                    ed.offer_finished(id, Ok(()));
+                    let (removed, left): (Vec<_>, Vec<_>) = gone.into_iter().partition(|(_, r)| r.is_ok());
+                    let removed: Vec<String> = removed.into_iter().map(|(m, _)| m.path).collect();
+                    ed.session.made_protected.retain(|p| !removed.contains(&p.path));
+                    if !removed.is_empty() {
+                        let (named, _) = made_named(&removed);
+                        ed.session.checkpoints.tell.push(format!(
+                            "The user removed {named} your last run made, which the sandbox keeps — don't make \
+                             it again; to change one, use your edit tool"
+                        ));
+                    }
+                    if !left.is_empty() {
+                        let why: Vec<String> = left.into_iter().filter_map(|(_, r)| r.err()).collect();
+                        ed.set_error(format!("not removed — asked about again: {}", why.join("; ")));
+                    } else {
+                        ed.set_success(format!("removed {}", some_named(&removed)));
+                    }
+                    made_go(ed, then)
+                }
+            });
+        }
+        MadeAnswer::No => {
+            ed.offer_finished(id, Ok(()));
+            let paths: Vec<String> = made.iter().map(|m| m.path.clone()).collect();
+            let (named, it) = made_named(&paths);
+            match then {
+                MadeThen::Claude { job, call, ride } => {
+                    let e = format!(
+                        "Your last run made {named} the sandbox keeps (what's in {it} runs outside it), and the \
+                         user chose not to run `{}` after it — ask them how to go on",
+                        job.label()
+                    );
+                    for c in std::iter::once(call).chain(ride.joined.into_iter().map(|j| j.call)) {
+                        answer(ed, c, Err(e.clone()));
+                    }
+                }
+                MadeThen::Task { trace, .. } => {
+                    trace.end("not run: a protected name Claude made");
+                    ed.set_status(format!("not run — Claude's last run made {}", some_named(&paths)));
+                }
+                MadeThen::Preflight { .. } => {
+                    // (`p` on the bring card: the bring waited for this preflight — said, as a failed one is)
+                    let made = some_named(&paths);
+                    match std::mem::take(&mut ed.session.bring_after_preflight) {
+                        true => {
+                            let name = ed.session.label().to_string();
+                            ed.set_warning(format!(
+                                "{name} not brought — the preflight didn't run: Claude's last run made {made}"
+                            ))
+                        }
+                        false => ed.set_status(format!("preflight not run — Claude's last run made {made}")),
+                    }
+                }
+            }
+            crate::queued::run_next(ed)
+        }
     }
-    crate::queued::run_next(ed)
+}
+
+/// What waited on the card goes on — asked again if names are still waiting (one `r` couldn't remove).
+fn made_go(ed: &mut Editor, then: MadeThen) {
+    match then {
+        MadeThen::Claude { job, call, ride } => guard_then_go(ed, For::Claude(call), job, *ride),
+        MadeThen::Task { task, force, trace } => ed.task_start_now(task, force, Some(trace)),
+        MadeThen::Preflight { all, set } => {
+            if let Err(e) = ed.preflight_run(all, set) {
+                ed.session.bring_after_preflight = false;
+                ed.set_error(e);
+            }
+        }
+    }
+}
+
+/// `v` on the protected-made card: what each name holds (a file's text, a link's target, a folder's names —
+/// read on a worker, through no link) under the card's text, in the card's own buffer.
+pub fn made_view(ed: &mut Editor) {
+    let Some(o) = ed.offers.first() else { return };
+    let crate::offer::What::ProtectedMade { made, .. } = &o.what else { return };
+    let (id, root, made) = (o.id, ed.session.root.clone(), made.clone());
+    ed.events.jobs().spawn(move || {
+        let text = crate::snapshot::made_shown(&root, &made);
+        move |ed: &mut Editor| {
+            if ed.offers.first().is_some_and(|o| o.id == id) {
+                ed.offer_view_with(text);
+            }
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3216,8 +3367,12 @@ fn run_changes_now(
                         ));
                     }
                     // (kept for the card before its next run — Landlock couldn't refuse them)
+                    // (one kept on its card, holding what it held then: not asked about again)
+                    let kept = &ed.session.made_kept;
+                    let protected: Vec<_> = protected.into_iter().filter(|m| !kept.contains(m)).collect();
                     if !protected.is_empty() {
-                        let (named, it) = made_named(&protected);
+                        let paths: Vec<String> = protected.iter().map(|m| m.path.clone()).collect();
+                        let (named, it) = made_named(&paths);
                         out.push_str(&format!(
                             "It made {named} the sandbox keeps from your commands: what's in {it} runs later \
                              outside it (the user's builds, their terminal). The sandbox couldn't refuse {it} \
@@ -3225,9 +3380,8 @@ fn run_changes_now(
                              test runs. To change one, edit it with your edit tool.\n"
                         ));
                         for p in protected {
-                            if !ed.session.made_protected.contains(&p) {
-                                ed.session.made_protected.push(p);
-                            }
+                            ed.session.made_protected.retain(|m| m.path != p.path);
+                            ed.session.made_protected.push(p);
                         }
                     }
                     out

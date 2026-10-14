@@ -54,11 +54,13 @@ pub fn tree(root: &Path) -> Result<String, String> {
 }
 
 /// A tree taken: its id, and how many new files it left out (more than `NEW_MAX` at once — then it has the
-/// files it had before, as they are now, and none of the new ones).
+/// files it had before, as they are now, and none of the new ones) — and, of those, the names asked about
+/// (`flagged_name`: names only, nothing read), so a run past `NEW_MAX` can't make a protected name unseen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tree {
     pub id: String,
     pub left_out: usize,
+    pub flagged: Vec<String>,
 }
 
 /// New files a snapshot keeps at most at once (not ignored, not in tarae's index yet). Measured 2026-10-05
@@ -122,13 +124,23 @@ fn seed(git_dir: &Path, to: &Path) -> Result<(), String> {
 
 fn stage(root: &Path, index: &Path) -> Result<Tree, String> {
     // (new to this index: none past `NEW_MAX` hashed and written)
-    let new = git_bytes(root, &["ls-files", "-z", "--others", "--exclude-standard", "--", "."], Some(index))?;
-    let new = new.split(|&b| b == 0).filter(|f| !f.is_empty()).count();
-    let all = new <= NEW_MAX;
+    let names =
+        git_bytes(root, &["ls-files", "-z", "--others", "--exclude-standard", "--", "."], Some(index))?;
+    let names: Vec<String> = names
+        .split(|&b| b == 0)
+        .filter(|f| !f.is_empty())
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    let all = names.len() <= NEW_MAX;
     // (a save's temp file isn't the run's: left out)
     git(root, &["add", if all { "-A" } else { "-u" }, "--", ".", crate::disk::NOT_TEMP], Some(index))?;
     let id = git(root, &["write-tree"], Some(index))?.trim().to_string();
-    Ok(Tree { id, left_out: if all { 0 } else { new } })
+    // (past it: the names left out looked at all the same — no contents, a stat for a link)
+    let flagged = match all {
+        true => Vec::new(),
+        false => names.iter().filter_map(|n| flagged_name(root, n)).collect(),
+    };
+    Ok(Tree { id, left_out: if all { 0 } else { names.len() }, flagged })
 }
 
 /// One side of a file a run changed: its blob, and its text when both sides are text (`changes`).
@@ -153,14 +165,25 @@ impl Change {
     }
 }
 
-/// What changed in the project at `root` from tree `then` to `now`: the files (absolute paths), and those it
-/// can't take back, named (a symlink, a submodule, only the mode changed).
-pub fn changes(root: &Path, then: &str, now: &str) -> Result<(Vec<Change>, Vec<String>), String> {
+/// `changes`' answer: the files, those named only, the names asked about.
+pub type Changes = (Vec<Change>, Vec<String>, Vec<String>);
+
+/// What changed in the project at `root` from tree `then` to `now`: the files (absolute paths), those it
+/// can't take back, named (a symlink, a submodule, only the mode changed) — and, of those, the links and
+/// repositories that are new where they are, asked about (`flagged`: a link by its own name, a repository by
+/// its `.git`).
+pub fn changes(root: &Path, then: &str, now: &str) -> Result<Changes, String> {
     let mut files: Vec<(String, Option<String>, Option<String>)> = Vec::new();
-    let mut skipped = Vec::new();
+    let (mut skipped, mut made) = (Vec::new(), Vec::new());
     for Entry { path, modes, ids: (a, b) } in entries(root, then, now)? {
         let regular = |m: &str| m == "000000" || m.starts_with("100");
         if !regular(&modes.0) || !regular(&modes.1) {
+            let new = modes.0 != modes.1;
+            match modes.1.as_str() {
+                "120000" if (new || a != b) && flagged(root, Path::new(&path)) => made.push(path.clone()),
+                "160000" if new => made.extend(flagged_name(root, &format!("{path}/"))),
+                _ => {}
+            }
             skipped.push(format!("{path} (a link or a submodule)"));
             continue;
         }
@@ -191,7 +214,7 @@ pub fn changes(root: &Path, then: &str, now: &str) -> Result<(Vec<Change>, Vec<S
             c
         })
         .collect();
-    Ok((changes, skipped))
+    Ok((changes, skipped, made))
 }
 
 /// One path that differs between two trees (or commits): its modes and blobs then and now (None: not there).
@@ -471,23 +494,255 @@ pub struct Found {
     pub skipped: Vec<String>,
     pub left_out: usize,
     pub ignored_gone: Vec<String>,
-    pub protected: Vec<String>,
+    pub protected: Vec<Made>,
     pub head: Option<HeadMove>,
 }
 
-/// The protected names (`sandbox::protected_in`: not below `target/` or `node_modules/`) a run made where
-/// none was, from the project's root: files new in the tree, and ignored files and folders new beside them
-/// (`.envrc` and `.tarae.local.toml` are often ignored). Seatbelt refuses them by name; Landlock can't (a
-/// path that isn't there has no rule) — so they're said before the next run (`tools::ask_made`).
+/// A name a run made that's asked about (`Found.protected`), from the project's root, and what it holds
+/// (`made_hash`) — one kept on its card (`y`) is asked about again only when a run makes it holding
+/// something else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Made {
+    pub path: String,
+    pub hash: String,
+}
+
+/// Entries a new ignored folder is looked through for at most (names only) — past it the folder itself is
+/// asked about: what's in it can't be told.
+const WALK_MAX: usize = 50_000;
+
+/// Whether `rel` (from the root), as a run left it, is asked about: a protected name (`sandbox::protected_in`
+/// — in any case, not below a tool's output), or a link to a folder (by its own name — what a later write
+/// through it lands in is that folder; the folder isn't walked), not below a tool's output.
+fn flagged(root: &Path, rel: &Path) -> bool {
+    let path = root.join(rel);
+    let output = || rel.iter().any(|p| crate::sandbox::outputs().iter().any(|o| p == o.as_str()));
+    crate::sandbox::protected_in(root, &path)
+        || (std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::metadata(&path).is_ok_and(|m| m.is_dir())
+            && !output())
+}
+
+/// `flagged` for a name git listed (`ls-files --others`): `sub/` is a repository there (git lists one whole)
+/// — asked about as `sub/.git`, what runs git's hooks and settings in it.
+fn flagged_name(root: &Path, name: &str) -> Option<String> {
+    match name.strip_suffix('/') {
+        Some(dir) => {
+            let git = format!("{dir}/.git");
+            std::fs::symlink_metadata(root.join(&git)).is_ok().then_some(git)
+        }
+        None => flagged(root, Path::new(name)).then(|| name.to_string()),
+    }
+}
+
+/// The names below `dir` (a new ignored folder, from the root) a run made that are asked about: the folder
+/// itself when its own name is one, else each entry `flagged` — names only, nothing read, no link followed, no
+/// folder of tools' output (`outputs`) gone into, nor one that is or is in one (a first build's `target/`: not
+/// walked, not named); past `max` entries (`WALK_MAX`), the folder.
+fn flagged_below(root: &Path, dir: &str, max: usize, out: &mut Vec<String>) {
+    let dir = Path::new(dir.trim_end_matches('/'));
+    let shown = |p: &Path| p.to_string_lossy().into_owned();
+    if dir.iter().any(|p| crate::sandbox::outputs().iter().any(|o| p == o.as_str())) {
+        return;
+    }
+    if flagged(root, dir) {
+        return out.push(shown(dir));
+    }
+    let (mut stack, mut seen, mut found) = (vec![dir.to_path_buf()], 0, Vec::new());
+    while let Some(folder) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else { continue };
+        for e in entries.flatten() {
+            seen += 1;
+            if seen > max {
+                return out.push(shown(dir));
+            }
+            let rel = folder.join(e.file_name());
+            // (`file_type` is the entry's own: a link isn't followed)
+            let into = e.file_type().is_ok_and(|t| t.is_dir());
+            if flagged(root, &rel) {
+                found.push(shown(&rel));
+            } else if into && !crate::sandbox::outputs().iter().any(|o| e.file_name() == o.as_str()) {
+                stack.push(rel);
+            }
+        }
+    }
+    out.extend(found);
+}
+
+/// What `made_hash` reads of a made name at most: a file's first `HASH_MAX` bytes (1 MiB, as `TEXT_MAX` — a
+/// build script or a manifest is far smaller), a folder's first `NAMES_MAX` names. Past either nothing more is
+/// read — a run's sparse 100 GB `build.rs` costs it no disk, and read whole it would be tarae's memory and time
+/// — and the name is told by what the system keeps of it (`BIG`: its size, inode and change time, which a
+/// write always moves): such a name is never kept (`Made::keepable`), it's asked about each time a run makes it.
+const HASH_MAX: u64 = TEXT_MAX;
+const NAMES_MAX: usize = 10_000;
+
+/// A `Made.hash` past `HASH_MAX` / `NAMES_MAX` starts with this.
+const BIG: &str = "big:";
+
+impl Made {
+    /// Whether `y` on its card may keep it: not one past what's hashed (`HASH_MAX`), nor one whose content
+    /// couldn't be told ("": gone, or not readable — a FIFO, a file of mode 000: a kept "" would match any later
+    /// unreadable one) — those are always asked about.
+    pub fn keepable(&self) -> bool {
+        !self.hash.is_empty() && !self.hash.starts_with(BIG)
+    }
+}
+
+/// What a made name holds, as a digest (`Made.hash`): a link's target, a folder's names, a file's bytes (read
+/// through no link) — within `HASH_MAX` and `NAMES_MAX`. Empty: gone, or not readable.
+fn made_hash(root: &Path, rel: &str) -> String {
+    made_hash_within(root, rel, (HASH_MAX, NAMES_MAX))
+}
+
+/// `made_hash`, reading at most `max`: (a file's bytes, a folder's names).
+fn made_hash_within(root: &Path, rel: &str, (max_bytes, max_names): (u64, usize)) -> String {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let big =
+        |m: &std::fs::Metadata| format!("{BIG}{}:{}:{}.{}", m.size(), m.ino(), m.ctime(), m.ctime_nsec());
+    let path = root.join(rel);
+    let Ok(m) = std::fs::symlink_metadata(&path) else { return String::new() };
+    let mut bytes = Vec::new();
+    if m.file_type().is_symlink() {
+        bytes.extend(b"link\0");
+        bytes.extend(
+            std::fs::read_link(&path).map(|t| t.into_os_string().into_encoded_bytes()).unwrap_or_default(),
+        );
+    } else if m.is_dir() {
+        let Ok(entries) = std::fs::read_dir(&path) else { return String::new() };
+        let mut names: Vec<Vec<u8>> =
+            entries.flatten().take(max_names + 1).map(|e| e.file_name().into_encoded_bytes()).collect();
+        if names.len() > max_names {
+            return big(&m);
+        }
+        crate::sorting::sort(&mut names);
+        bytes.extend(b"folder\0");
+        for n in names {
+            bytes.extend(n);
+            bytes.push(0);
+        }
+    } else {
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+            .ok()
+            .and_then(|f| Some((f.metadata().ok().filter(|m| m.is_file())?, f)));
+        let Some((m, f)) = opened else { return String::new() };
+        // (its size first, and never more than the cap read: one that grows meanwhile stops there too)
+        if m.len() > max_bytes {
+            return big(&m);
+        }
+        bytes.extend(b"file\0");
+        let head = bytes.len() as u64;
+        if f.take(max_bytes + 1).read_to_end(&mut bytes).is_err() {
+            return String::new();
+        }
+        if bytes.len() as u64 - head > max_bytes {
+            return big(&m);
+        }
+    }
+    crate::sha256::hex(&bytes)
+}
+
+/// `r` on the protected-made card: each name removed from the project at `root` — only that entry, through
+/// no link (`beneath.rs`: its folders opened from the root's real path, `unlinkat` — a link goes itself,
+/// never what it leads to); not a folder, nor one that holds something else than when it was asked about
+/// (`made_hash`). Each with how it went.
+pub fn remove_made(root: &Path, made: &[Made]) -> Vec<(Made, Result<(), String>)> {
+    let dir = crate::beneath::Dir::root(root).map_err(|e| format!("the project: {e}"));
+    made.iter()
+        .map(|m| {
+            let rel = Path::new(&m.path);
+            let gone = (|| {
+                let dir = dir.as_ref().map_err(String::clone)?;
+                let (Some(parent), Some(name)) = (rel.parent(), rel.file_name()) else {
+                    return Err(format!("{}: not a name in the project", m.path));
+                };
+                if std::fs::symlink_metadata(root.join(rel)).is_ok_and(|t| t.is_dir()) {
+                    return Err(format!("{}/ is a folder — only files and links are removed", m.path));
+                }
+                if made_hash(root, &m.path) != m.hash {
+                    return Err(format!("{} changed since it was asked about — left as it is", m.path));
+                }
+                dir.folder(parent, false).and_then(|d| d.remove(name)).map_err(|e| e.to_string())
+            })();
+            (m.clone(), gone)
+        })
+        .collect()
+}
+
+/// A made name's text at most, as `v` shows it.
+const SHOWN_MAX: u64 = 64 << 10;
+
+/// `v` on the protected-made card: each name and what it holds — a file's text (read through no link, up to
+/// `SHOWN_MAX`), a link's target (not followed), a folder's names.
+pub fn made_shown(root: &Path, made: &[Made]) -> String {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut out = String::new();
+    for m in made {
+        let path = root.join(&m.path);
+        let held = match std::fs::symlink_metadata(&path) {
+            Err(_) => "(gone)".to_string(),
+            Ok(t) if t.file_type().is_symlink() => match std::fs::read_link(&path) {
+                Ok(to) => format!("a link to {} — not followed", to.display()),
+                Err(e) => format!("a link: {e}"),
+            },
+            Ok(t) if t.is_dir() => {
+                let mut names: Vec<String> = std::fs::read_dir(&path)
+                    .map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                    .unwrap_or_default();
+                crate::sorting::sort(&mut names);
+                format!("a folder: {}", if names.is_empty() { "empty".into() } else { names.join(", ") })
+            }
+            Ok(_) => {
+                let opened = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&path)
+                    .ok()
+                    .filter(|f| f.metadata().is_ok_and(|m| m.is_file()));
+                let mut bytes = Vec::new();
+                match opened.map(|f| f.take(SHOWN_MAX + 1).read_to_end(&mut bytes)) {
+                    Some(Ok(_)) if bytes.contains(&0) => "not text".to_string(),
+                    Some(Ok(_)) => {
+                        let cut = bytes.len() as u64 > SHOWN_MAX;
+                        bytes.truncate(SHOWN_MAX as usize);
+                        let text = String::from_utf8_lossy(&bytes);
+                        let more = if cut { "\n    … (more)" } else { "" };
+                        format!(
+                            "\n{}{more}",
+                            text.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+                        )
+                    }
+                    _ => "not readable as a file".to_string(),
+                }
+            }
+        };
+        out.push_str(&format!("\n── {}: {held}\n", m.path));
+    }
+    out
+}
+
+/// The names (`flagged`) a run made where none was, from the project's root: protected names new in the
+/// tree, ignored files new beside them (`.envrc` and `.tarae.local.toml` are often ignored) and the names in
+/// a new ignored folder (`flagged_below`). Seatbelt refuses protected names by name; Landlock can't (a path
+/// that isn't there has no rule) — so they're said before the next run (`tools::ask_made`).
 fn protected_made(root: &Path, files: &[Change], ignored_new: &[String]) -> Vec<String> {
-    let new_files =
-        files.iter().filter(|c| c.before.is_none()).filter_map(|c| c.path.strip_prefix(root).ok());
-    let ignored = ignored_new.iter().map(|p| Path::new(p.trim_end_matches('/')));
-    new_files
-        .chain(ignored)
+    let mut out: Vec<String> = files
+        .iter()
+        .filter(|c| c.before.is_none())
+        .filter_map(|c| c.path.strip_prefix(root).ok())
         .filter(|rel| crate::sandbox::protected_in(root, &root.join(rel)))
         .map(|rel| rel.to_string_lossy().into_owned())
-        .collect()
+        .collect();
+    for p in ignored_new {
+        match p.ends_with('/') {
+            true => flagged_below(root, p, WALK_MAX, &mut out),
+            false => out.extend(flagged_name(root, p)),
+        }
+    }
+    out
 }
 
 /// The project's ignored files and folders, from its root (`.env`, `target/`): an ignored folder is one
@@ -525,8 +780,8 @@ impl Before {
             }
             _ => (Vec::new(), Vec::new()),
         };
-        let (mut files, skipped) = match then.id == now.id {
-            true => (Vec::new(), Vec::new()),
+        let (mut files, skipped, links) = match then.id == now.id {
+            true => (Vec::new(), Vec::new(), Vec::new()),
             false => changes(&self.root, &then.id, &now.id)?,
         };
         files.retain(|c| !self.wrote.contains(&c.path));
@@ -535,7 +790,15 @@ impl Before {
             .filter(|p| !self.wrote.contains(&self.root.join(p.trim_end_matches('/'))))
             .collect();
         // (a protected name HEAD's move brought is asked about all the same: it runs later outside the sandbox)
-        let protected = protected_made(&self.root, &files, &ignored_new);
+        let mut made = protected_made(&self.root, &files, &ignored_new);
+        // (links and repositories the tree has, and the names past `NEW_MAX` it hasn't — not ones left out
+        // before the run too: they were there)
+        made.extend(links.into_iter().chain(now.flagged.iter().cloned()));
+        made.retain(|p| !then.flagged.contains(p) && !self.wrote.contains(&self.root.join(p)));
+        crate::sorting::sort(&mut made);
+        made.dedup();
+        let protected =
+            made.into_iter().map(|path| Made { hash: made_hash(&self.root, &path), path }).collect();
         // (HEAD moved: what came with it isn't the run's — said instead; can't tell — all of it stays)
         let head = match (&self.head, head(&self.root)) {
             (Some(from), Some(to)) if *from != to => {

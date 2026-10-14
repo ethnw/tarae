@@ -2897,10 +2897,12 @@ mod tests {
         ed.session_by_id(id).unwrap().parked.push(card("End the review?", ended));
         // (a run of Claude's held after its last made a protected name: its job isn't run again blind)
         let made = What::ProtectedMade {
-            job: crate::tools::Job::Command("make".into(), back.clone()),
-            call: crate::tools::Call::test(1),
-            ride: Box::default(),
-            made: vec!["Makefile".into()],
+            then: Box::new(crate::tools::MadeThen::Claude {
+                job: crate::tools::Job::Command("make".into(), back.clone()),
+                call: crate::tools::Call::test(1),
+                ride: Box::default(),
+            }),
+            made: vec![crate::snapshot::Made { path: "Makefile".into(), hash: String::new() }],
         };
         ed.session_by_id(id).unwrap().parked.push(card("Run it after it made Makefile?", made));
         // (a rebase held back by its checkout's changes: `:session-bring` raises it again, looking afresh)

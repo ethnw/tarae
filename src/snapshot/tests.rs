@@ -230,9 +230,184 @@ fn protected_names_a_run_made_are_found() {
         std::fs::write(dir.join(rel), text).unwrap();
     }
     before.wrote.push(dir.join("edited/build.rs"));
-    let mut found = before.since().unwrap().protected;
-    found.sort();
+    let found = paths(&before.since().unwrap().protected);
     assert_eq!(found, [".envrc", "src/.cargo/config.toml", "sub/Cargo.toml"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The names of what a run made, as `Found.protected` has them (sorted).
+fn paths(made: &[Made]) -> Vec<String> {
+    made.iter().map(|m| m.path.clone()).collect()
+}
+
+/// G23: past `NEW_MAX` new files the tree keeps none of them — their names are looked at all the same (no
+/// contents): a protected name and a link to a folder among them are found; one that was there, left out
+/// before the run too, isn't the run's.
+#[test]
+fn past_new_max_the_new_names_are_still_looked_at() {
+    let dir = repo("many-names");
+    std::fs::create_dir_all(dir.join("gen/sub")).unwrap();
+    for i in 0..=NEW_MAX {
+        std::fs::write(dir.join(format!("gen/f{i}.txt")), "x\n").unwrap();
+    }
+    std::fs::write(dir.join("gen/Makefile"), "all:\n").unwrap();
+    let before = Before::take(&dir);
+    assert_eq!(before.tree.as_ref().unwrap().flagged, ["gen/Makefile"], "left out, named");
+    std::fs::write(dir.join("gen/sub/Cargo.toml"), "[package]\n").unwrap();
+    std::os::unix::fs::symlink("../src", dir.join("gen/up")).unwrap();
+    let found = before.since().unwrap();
+    assert!(found.left_out > NEW_MAX, "{}", found.left_out);
+    assert_eq!(paths(&found.protected), ["gen/sub/Cargo.toml", "gen/up"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G23: a new ignored folder (git lists it whole) is looked through by name: a protected name deep in it is
+/// found, and a link to a folder; a new folder whose own name is protected is named itself; nothing below a
+/// tool's output (`target/`, `node_modules/`), and not a file of another name.
+#[test]
+fn the_names_in_a_new_ignored_folder_are_looked_at() {
+    let dir = repo("ignored-walk");
+    std::fs::write(dir.join(".gitignore"), "build/\n.env.local\nout/\n.cargo/\n").unwrap();
+    let before = Before::take(&dir);
+    for (rel, text) in [
+        ("out/deep/er/Makefile", "all:\n"),
+        ("out/notes.txt", "x\n"),
+        ("out/target/pkg/build.rs", "fn main() {}\n"),
+        ("out/node_modules/p/Cargo.toml", "[package]\n"),
+        (".cargo/config.toml", "[build]\n"),
+    ] {
+        std::fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(rel), text).unwrap();
+    }
+    std::os::unix::fs::symlink("../src", dir.join("out/up")).unwrap();
+    std::os::unix::fs::symlink("../../src", dir.join("out/target/up")).unwrap();
+    let found = before.since().unwrap();
+    assert_eq!(paths(&found.protected), [".cargo", "out/deep/er/Makefile", "out/up"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The reviewer's finding: a made file is hashed within a cap — a sparse file far past it (a run's 100 GB
+/// `build.rs` costs it no disk) isn't read: it's told by its size, inode and change time, a write tells it apart,
+/// and it's never kept. A folder past its names likewise; within the caps, hashed as ever. (A sparse stand-in in
+/// the test's temp folder, the caps passed in.)
+#[test]
+fn a_made_name_past_the_cap_isnt_read_and_isnt_kept() {
+    use std::io::Write as _;
+    let dir = repo("big-hash");
+    let cap = (1024, 4);
+    std::fs::File::create(dir.join("build.rs")).unwrap().set_len(64 << 20).unwrap();
+    let hash = made_hash_within(&dir, "build.rs", cap);
+    assert!(hash.starts_with(BIG), "{hash}");
+    assert!(!Made { path: "build.rs".into(), hash: hash.clone() }.keepable());
+    std::fs::OpenOptions::new().append(true).open(dir.join("build.rs")).unwrap().write_all(b"x").unwrap();
+    assert_ne!(made_hash_within(&dir, "build.rs", cap), hash, "written since: told apart");
+    std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+    for i in 0..5 {
+        std::fs::write(dir.join(format!(".cargo/f{i}")), "x\n").unwrap();
+    }
+    assert!(made_hash_within(&dir, ".cargo", cap).starts_with(BIG), "a folder past its names");
+    std::fs::write(dir.join("Makefile"), "all:\n").unwrap();
+    let small = made_hash_within(&dir, "Makefile", cap);
+    assert!(!small.starts_with(BIG) && !small.is_empty(), "{small}");
+    assert!(Made { path: "Makefile".into(), hash: small }.keepable());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A made name whose content can't be told — a FIFO, a file of mode 000 — hashes to "" and is never kept: a
+/// kept "" would match any later unreadable one, never asked again. (Stand-ins in the test's temp folder.)
+#[test]
+fn a_made_name_that_cant_be_read_isnt_kept() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = repo("unreadable");
+    let fifo = std::ffi::CString::new(dir.join("Makefile").into_os_string().into_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path of the test's own folder, live for the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    std::fs::write(dir.join("build.rs"), "fn main() {}\n").unwrap();
+    std::fs::set_permissions(dir.join("build.rs"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    for p in ["Makefile", "build.rs"] {
+        let made = Made { path: p.into(), hash: made_hash(&dir, p) };
+        assert_eq!(made.hash, "", "{p}");
+        assert!(!made.keepable(), "{p}");
+    }
+    std::fs::set_permissions(dir.join("build.rs"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The reviewer's finding: `r`'s two refusals. A folder isn't removed (only files and links — it and what's
+/// in it stay, and the answer says why); a file that holds something else than when the card asked is left
+/// as it is. One as it was asked about is removed. (Stand-ins in the test's temp folder.)
+#[test]
+fn r_leaves_a_folder_and_a_file_changed_since_it_was_asked() {
+    let dir = repo("remove-refused");
+    std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join(".cargo/config.toml"), "[build]\n").unwrap();
+    std::fs::write(dir.join("Makefile"), "all:\n").unwrap();
+    std::fs::write(dir.join("sub/Cargo.toml"), "[package]\n").unwrap();
+    let made = |p: &str| Made { path: p.into(), hash: made_hash(&dir, p) };
+    let asked = [made(".cargo"), made("Makefile"), made("sub/Cargo.toml")];
+    std::fs::write(dir.join("Makefile"), "all: changed\n").unwrap();
+    let gone = remove_made(&dir, &asked);
+    let said = |p: &str| gone.iter().find(|(m, _)| m.path == p).map(|(_, r)| r.clone()).unwrap();
+    let folder = said(".cargo").unwrap_err();
+    assert!(folder.contains("is a folder"), "{folder}");
+    assert!(dir.join(".cargo/config.toml").exists());
+    let changed = said("Makefile").unwrap_err();
+    assert!(changed.contains("changed since it was asked about"), "{changed}");
+    assert_eq!(std::fs::read_to_string(dir.join("Makefile")).unwrap(), "all: changed\n");
+    assert!(said("sub/Cargo.toml").is_ok() && !dir.join("sub/Cargo.toml").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A first build's new ignored `target/` (or `node_modules/`, or a folder inside one) is a tool's output: not
+/// walked and not named — else past the walk's limit the folder itself would be asked about after most projects'
+/// first build. Another new folder past the limit is named (the limit holds). (Names only, the test's folder.)
+#[test]
+fn a_new_output_folder_is_neither_walked_nor_named() {
+    let dir = repo("output-walk");
+    for d in ["target/debug", "out/node_modules/p", "gen"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+        for i in 0..4 {
+            std::fs::write(dir.join(d).join(format!("f{i}")), "x\n").unwrap();
+        }
+    }
+    let walked = |folder: &str| {
+        let mut out = Vec::new();
+        flagged_below(&dir, folder, 2, &mut out);
+        out
+    };
+    assert_eq!(walked("target/"), Vec::<String>::new());
+    assert_eq!(walked("out/node_modules/"), Vec::<String>::new());
+    assert_eq!(walked("gen/"), ["gen"], "past the limit: named");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G23: links and repositories aren't files a tree takes back (named in `skipped`) — they're looked at all
+/// the same: a link named like a protected name, a link to a folder anywhere (by its own name — the folder it
+/// leads to isn't walked), a new repository by its `.git`; not a link to a file of another name, nor a link to
+/// a folder below a tool's output.
+#[test]
+fn links_and_repositories_a_run_made_are_looked_at() {
+    let dir = repo("links");
+    let before = Before::take(&dir);
+    std::os::unix::fs::symlink("a.txt", dir.join("src/build.rs")).unwrap();
+    std::os::unix::fs::symlink("src", dir.join("docs")).unwrap();
+    std::os::unix::fs::symlink("src/a.txt", dir.join("notes")).unwrap();
+    std::fs::create_dir_all(dir.join("target")).unwrap();
+    std::os::unix::fs::symlink("../src", dir.join("target/up")).unwrap();
+    let lib = dir.join("vendor/lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("x.txt"), "x\n").unwrap();
+    git_in(&lib, &["init", "-q"]);
+    git_in(&lib, &["add", "-A"]);
+    git_in(&lib, &["commit", "-q", "-m", "lib"]);
+    let found = before.since().unwrap();
+    assert_eq!(paths(&found.protected), ["docs", "src/build.rs", "vendor/lib/.git"]);
+    assert!(
+        found.skipped.iter().any(|s| s.starts_with("docs ")),
+        "still not taken back: {:?}",
+        found.skipped
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -860,6 +1035,197 @@ fn a_protected_name_a_run_made_is_asked_about_before_the_next_run() {
     ed.offer_accept();
     pump(&mut ed, &|_| answered(5).is_some(), "the fifth run");
     assert!(dir.join("five").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An editor in the test's repository `dir` with Claude's turn under way (no sandbox: the commands are
+/// harmless, in that folder) — and its chat's generation.
+fn turn_in(dir: &Path) -> (crate::editor::Editor, u64) {
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = dir.to_path_buf();
+    ed.config.llm.sandbox = false;
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    (ed, generation)
+}
+
+fn pump_until(ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while !done(ed) {
+        assert!(Instant::now() < end, "{what}");
+        if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+}
+
+/// Claude's run `n` of `cmd` in `dir`, and its answer once it's come.
+fn claude_runs(ed: &mut crate::editor::Editor, (generation, dir): (u64, &Path), n: u64, cmd: &str) {
+    let call = crate::tools::Call::of(generation, &format!("r{n}"), json!(n));
+    let job = crate::tools::Job::Command(cmd.into(), dir.to_path_buf());
+    crate::tools::guard_and_go(ed, crate::tools::For::Claude(call), job, false, Default::default());
+}
+
+fn answered(n: u64) -> Option<Result<String, String>> {
+    crate::tools::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+}
+
+/// The front card in sight long enough, and read whole (as drawing it would).
+fn settled(ed: &crate::editor::Editor) {
+    let o = (ed.offers[0].id, ed.offers[0].rev);
+    ed.offer_read_whole(o);
+    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+}
+
+/// G23: your own runs in the checkout wait on the card too — a task (your build) and the preflight run what's
+/// there outside the sandbox: `n` runs nothing, `y` runs it, and the one after doesn't ask. Not Claude's card:
+/// its turn ending doesn't take it. (Harmless commands: markers in the test's own repository.)
+#[test]
+fn your_task_and_preflight_wait_on_what_claudes_run_made() {
+    let dir = repo("yours");
+    let (mut ed, generation) = turn_in(&dir);
+    let me = (generation, dir.as_path());
+    claude_runs(&mut ed, me, 1, "mkdir sub && printf '[package]\\n' > sub/Cargo.toml");
+    pump_until(&mut ed, &|_| answered(1).is_some(), "Claude's run");
+    let task = crate::task::Task { name: "build".into(), cmd: "touch built".into(), cwd: PathBuf::new() };
+    ed.task_start(task.clone());
+    pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card before your task");
+    let o = &ed.offers[0];
+    assert_eq!(o.title, crate::tools::MADE_YOURS_TITLE);
+    assert!(o.question.starts_with("touch built\n\nClaude's last run made sub/Cargo.toml"), "{}", o.question);
+    assert!(!o.claudes() && o.weighty(), "yours, and it runs something");
+    ed.offer_dismiss();
+    assert!(ed.offers.is_empty() && !dir.join("built").exists(), "n: nothing ran");
+    // The preflight: asked the same, `y` runs it
+    let step = |cmd: &str| crate::preflight::Step {
+        name: "check".into(),
+        cmd: cmd.into(),
+        note: None,
+        from: "test".into(),
+        full: false,
+    };
+    // (`p` on the bring card: `n` here says the session wasn't brought, and nothing waits to bring it)
+    ed.session.bring_after_preflight = true;
+    let runs = ed.task_generation;
+    ed.preflight_run(vec![step("touch checked")], crate::preflight::Set::Quick).unwrap();
+    pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card before the preflight, to bring");
+    ed.offer_dismiss();
+    assert!(!ed.session.bring_after_preflight, "nothing waits to bring it");
+    assert!(ed.session.preflight.is_none() && ed.task_generation == runs, "no preflight started");
+    let said = ed.toasts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" | ");
+    assert!(said.contains("not brought — the preflight didn't run"), "{said}");
+    ed.preflight_run(vec![step("touch checked")], crate::preflight::Set::Quick).unwrap();
+    pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card before the preflight");
+    assert!(ed.offers[0].question.contains("check\n\nClaude's last run made sub/Cargo.toml"));
+    crate::tools::turn_over(&mut ed);
+    assert_eq!(ed.offers.len(), 1, "Claude's turn ending leaves your card");
+    settled(&ed);
+    ed.offer_accept();
+    let ended = |ed: &crate::editor::Editor| {
+        ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+    };
+    pump_until(&mut ed, &|ed| dir.join("checked").exists() && ended(ed), "the preflight");
+    // Kept: your task runs unasked
+    ed.task_start(task);
+    pump_until(&mut ed, &|_| dir.join("built").exists(), "your task, unasked");
+    assert!(ed.offers.is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// What `r` couldn't remove is asked about again before the run goes on: the card comes back with only that
+/// name, the run hasn't run, what was removed is gone — and `n` there tells Claude no. (A file changed after
+/// the card asked stands in for one `r` refuses; harmless files in the test's repository.)
+#[test]
+fn what_r_couldnt_remove_is_asked_again_before_the_run() {
+    let dir = repo("remove-again");
+    let (mut ed, generation) = turn_in(&dir);
+    let me = (generation, dir.as_path());
+    claude_runs(
+        &mut ed,
+        me,
+        1,
+        "mkdir sub && printf '[package]\\n' > sub/Cargo.toml && printf 'all:\\n' > Makefile",
+    );
+    pump_until(&mut ed, &|_| answered(1).is_some(), "the first run");
+    claude_runs(&mut ed, me, 2, "touch two");
+    pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card");
+    std::fs::write(dir.join("sub/Cargo.toml"), "[package]\nname = \"changed\"\n").unwrap();
+    settled(&ed);
+    ed.offer_one_by_one();
+    let again = |ed: &crate::editor::Editor| {
+        ed.offers.first().is_some_and(|o| {
+            !o.installing()
+                && matches!(&o.what, crate::offer::What::ProtectedMade { made, .. } if paths(made) == ["sub/Cargo.toml"])
+        })
+    };
+    pump_until(&mut ed, &again, "the card again, for what stayed");
+    assert!(!dir.join("Makefile").exists(), "what it could remove is gone");
+    assert!(dir.join("sub/Cargo.toml").exists() && !dir.join("two").exists(), "the run waits");
+    assert!(answered(2).is_none());
+    ed.offer_dismiss();
+    let no = answered(2).unwrap().unwrap_err();
+    assert!(no.contains("chose not to run `touch two`"), "{no}");
+    assert!(!dir.join("two").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G23: the card's answers. `v` shows what each name holds (a file's text, a link's target — not followed)
+/// under the card's text; `r` removes only those names — a link itself, never the folder it leads to — and
+/// the run goes on, Claude told; `y` keeps them, remembered by path and content: made again holding the same,
+/// not asked about; holding something else, asked. (Harmless files and commands in the test's repository.)
+#[test]
+fn the_cards_answers_view_remove_and_keep_by_content() {
+    let dir = repo("answers");
+    let (mut ed, generation) = turn_in(&dir);
+    let me = (generation, dir.as_path());
+    claude_runs(&mut ed, me, 1, "mkdir sub && printf '[package]\\n' > sub/Cargo.toml && ln -s ../src sub/up");
+    pump_until(&mut ed, &|_| answered(1).is_some(), "the first run");
+    claude_runs(&mut ed, me, 2, "touch two");
+    pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card");
+    settled(&ed);
+    // v
+    ed.offer_view();
+    let view = |ed: &crate::editor::Editor| {
+        ed.docs
+            .iter()
+            .find(|d| d.title.as_deref().is_some_and(|t| t.starts_with(crate::offer::CARD_VIEW)))
+            .map(|d| d.text.to_string())
+    };
+    pump_until(&mut ed, &|ed| view(ed).is_some(), "its view");
+    let text = view(&ed).unwrap();
+    assert!(text.contains("── sub/Cargo.toml: \n    [package]"), "{text}");
+    assert!(text.contains("── sub/up: a link to ../src — not followed"), "{text}");
+    // r
+    ed.offer_one_by_one();
+    pump_until(&mut ed, &|_| answered(2).is_some(), "the run after r");
+    assert!(dir.join("two").exists(), "it ran");
+    assert!(!dir.join("sub/Cargo.toml").exists() && std::fs::symlink_metadata(dir.join("sub/up")).is_err());
+    assert!(dir.join("src/a.txt").exists(), "not what the link led to");
+    assert!(ed.session.made_protected.is_empty());
+    assert!(ed.session.checkpoints.tell.iter().any(|t| t.contains("The user removed sub/Cargo.toml")));
+    // y: kept as it is
+    claude_runs(&mut ed, me, 3, "printf 'all:\\n' > Makefile");
+    pump_until(&mut ed, &|_| answered(3).is_some(), "the third run");
+    claude_runs(&mut ed, me, 4, "rm Makefile");
+    pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card for Makefile");
+    settled(&ed);
+    ed.offer_accept();
+    pump_until(&mut ed, &|_| answered(4).is_some(), "the fourth run");
+    // Made again, the same: not asked
+    claude_runs(&mut ed, me, 5, "printf 'all:\\n' > Makefile");
+    pump_until(&mut ed, &|_| answered(5).is_some(), "the fifth run");
+    assert!(ed.session.made_protected.is_empty(), "kept, holding the same");
+    // Made again, holding something else: asked
+    claude_runs(&mut ed, me, 6, "rm Makefile");
+    pump_until(&mut ed, &|_| answered(6).is_some(), "the sixth run");
+    claude_runs(&mut ed, me, 7, "printf 'all: x\\n' > Makefile");
+    pump_until(&mut ed, &|_| answered(7).is_some(), "the seventh run");
+    assert_eq!(paths(&ed.session.made_protected), ["Makefile"], "changed: asked again");
     std::fs::remove_dir_all(&dir).ok();
 }
 

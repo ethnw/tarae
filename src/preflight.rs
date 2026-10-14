@@ -689,11 +689,17 @@ impl Editor {
 
     /// The steps of `set` out of `all`, one after another, in the task panel (its tab named for the set) —
     /// started once the saves before it are written (`after_saves`; what stops it then is said there).
-    fn preflight_run(&mut self, all: Vec<Step>, set: Set) -> Result<(), String> {
+    pub(crate) fn preflight_run(&mut self, all: Vec<Step>, set: Set) -> Result<(), String> {
         self.preflight_free()?;
         let steps = set.of(&all);
         if steps.is_empty() {
             return Err("every preflight step is marked full = true — :preflight-full runs them".into());
+        }
+        // (it runs what's there outside the sandbox: what Claude's runs made that the sandbox keeps, looked at
+        // first — G23)
+        if !self.session.made_protected.is_empty() {
+            crate::tools::ask_made(self, crate::tools::MadeThen::Preflight { all, set });
+            return Ok(());
         }
         // (its trace named for the set, and the steps it runs)
         let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();

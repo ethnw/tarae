@@ -135,13 +135,9 @@ pub enum What {
         kind: crate::tools::Unsandboxed,
     },
     /// Claude's last run made protected names where none was (`made` — what Landlock can't refuse,
-    /// `tools::ask_made`): `y` runs its next anyway, `n` tells Claude no.
-    ProtectedMade {
-        job: crate::tools::Job,
-        call: crate::tools::Call,
-        ride: Box<crate::queued::Ride>,
-        made: Vec<String>,
-    },
+    /// `tools::ask_made`), before what runs next there (`then`: Claude's run, your task or preflight): `y`
+    /// keeps them and runs it, `r` removes them first, `v` shows them, `n` doesn't run it.
+    ProtectedMade { then: Box<crate::tools::MadeThen>, made: Vec<crate::snapshot::Made> },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
     /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
@@ -397,9 +393,8 @@ impl Offer {
     fn asker(&self) -> Option<Asker> {
         match &self.what {
             What::Run(r) => Some(Asker::Tool(r.call.clone())),
-            What::NoSandbox { call, .. } | What::ProtectedMade { call, .. } | What::Screen { call } => {
-                Some(Asker::Tool(call.clone()))
-            }
+            What::NoSandbox { call, .. } | What::Screen { call } => Some(Asker::Tool(call.clone())),
+            What::ProtectedMade { then, .. } => then.call().map(|c| Asker::Tool(c.clone())),
             // (one the user's pointing raised holds no call — `reads::point`; one of tarae's tools holds its call)
             What::Read { pending, .. } if pending.then.is_some() => {
                 pending.then.as_ref().map(|t| Asker::Tool(t.call.clone()))
@@ -667,6 +662,7 @@ impl Offer {
     pub fn weighty_answer(&self, c: char) -> bool {
         matches!(c, 'y' | 'a' | 'A' | 'D' | 'R' | 'c')
             || (c == 'Y' && !self.like.is_empty())
+            || (c == 'r' && self.made())
             || (c == 's' && (self.stashes() || self.for_session()))
             || (c == 'p' && self.preflights())
             || (c == 'X' && self.aborts())
@@ -756,11 +752,15 @@ impl Offer {
             self.what,
             What::Run(_)
                 | What::NoSandbox { .. }
-                | What::ProtectedMade { .. }
                 | What::Read { .. }
                 | What::Screen { .. }
                 | What::ChangeSet { .. }
-        )
+        ) || matches!(&self.what, What::ProtectedMade { then, .. } if then.call().is_some())
+    }
+
+    /// Whether it's the protected-made card (`r` removes them, `v` shows them).
+    pub fn made(&self) -> bool {
+        matches!(self.what, What::ProtectedMade { .. })
     }
 
     /// Whether it parks with its session when another comes to the front: Claude's, and a review's end
@@ -846,7 +846,9 @@ impl Offer {
             W::ClaudeSettings { .. } => vec![('y', "Trust"), ('n', "Hold back")],
             W::GitTrust(_) => vec![('y', "Let them run"), ('n', "Keep off")],
             W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
-            W::ProtectedMade { .. } => vec![('y', "Run"), ('n', "No")],
+            W::ProtectedMade { .. } => {
+                vec![('y', "Keep, run"), ('r', "Remove, run"), ('v', "See them"), ('n', "No")]
+            }
             W::Read { keep: true, .. } => {
                 vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
             }
@@ -1216,6 +1218,9 @@ impl crate::editor::Editor {
             Code::Char('Y') if !o.like.is_empty() => self.offer_accept_like(),
             // (the card stays: the list of its drafts over it, closed one by one there)
             Code::Char('r') if matches!(o.what, What::NotesStale { .. }) => crate::notes::stale_list(self),
+            // (the card stays while it's read)
+            Code::Char('v') if o.made() => crate::tools::made_view(self),
+            Code::Char('r') if o.made() => self.offer_accept_by('r'),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
                 self.offer_never()
@@ -1344,8 +1349,13 @@ impl crate::editor::Editor {
                 (job, call, *ride, kind),
                 crate::tools::Unprotected::Once,
             ),
-            What::ProtectedMade { job, call, ride, made } => {
-                crate::tools::made_answer(self, id, (job, call, *ride, made), true)
+            What::ProtectedMade { then, made } => {
+                let how = if key == 'r' {
+                    crate::tools::MadeAnswer::Remove
+                } else {
+                    crate::tools::MadeAnswer::Keep
+                };
+                crate::tools::made_answer(self, id, *then, made, how)
             }
             What::ReviewAtEnd => {
                 self.offer_finished(id, Ok(()));
@@ -1716,16 +1726,26 @@ impl crate::editor::Editor {
         }
     }
 
-    /// `v` on the front card: a change set's every change, else its whole text.
+    /// `v` on the front card: a change set's every change, the names a protected-made card is about, else its
+    /// whole text.
     pub fn offer_view(&mut self) {
+        if self.offers.first().is_some_and(Offer::made) && self.offer_seen_whole() {
+            return crate::tools::made_view(self);
+        }
         match self.offers.first().and_then(Offer::change_set) {
             Some(generation) => crate::refactor::view_all(self, generation),
             None => self.offer_view_all(),
         }
     }
 
-    /// `r` on a change set's card: one by one.
+    /// `r` on a change set's card: one by one — on a protected-made card: remove them (settled, as `y`).
     pub fn offer_one_by_one(&mut self) {
+        if self.offers.first().is_some_and(Offer::made) {
+            if self.offer_settled() {
+                self.offer_accept_by('r');
+            }
+            return;
+        }
         if let Some((id, generation)) = self.offers.first().and_then(|o| Some((o.id, o.change_set()?))) {
             crate::refactor::one_by_one(self, id, generation);
         }
@@ -1753,9 +1773,14 @@ impl crate::editor::Editor {
     /// `v` on a card cut to fit — its whole text in a throwaway buffer (one per card title: an earlier one
     /// gives way), and the card stays to answer.
     pub fn offer_view_all(&mut self) {
+        self.offer_view_with(String::new());
+    }
+
+    /// `offer_view_all`, `more` after the card's text (what a protected-made card's names hold).
+    pub fn offer_view_with(&mut self, more: String) {
         let Some(o) = self.offers.first() else { return };
         let (id, rev, title) = (o.id, o.rev, o.title.clone());
-        let text = format!("{title}\n\n{}\n", o.question);
+        let text = format!("{title}\n\n{}\n{more}", o.question);
         let name = format!("{CARD_VIEW}{title}");
         let old: Vec<_> = self
             .docs
@@ -1899,8 +1924,8 @@ impl crate::editor::Editor {
                 (job, call, *ride, kind),
                 crate::tools::Unprotected::No,
             ),
-            What::ProtectedMade { job, call, ride, made } => {
-                crate::tools::made_answer(self, o.id, (job, call, *ride, made), false)
+            What::ProtectedMade { then, made } => {
+                crate::tools::made_answer(self, o.id, *then, made, crate::tools::MadeAnswer::No)
             }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),

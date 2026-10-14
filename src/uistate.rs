@@ -406,6 +406,7 @@ impl Editor {
             v.extend(o.preflights().then_some('p'));
             v.extend(o.aborts().then_some('X'));
             v.extend(o.restart_other().then_some('f'));
+            v.extend(o.made().then_some('r'));
             v
         };
         if o.weighty() {
@@ -417,7 +418,7 @@ impl Editor {
                 t.extend(['n', 'N']);
                 t.extend(answers(o));
             }
-            if o.change_set().is_some() {
+            if o.change_set().is_some() || o.made() {
                 t.extend(['r', 'v']);
             }
             if !self.offer_seen_whole() {

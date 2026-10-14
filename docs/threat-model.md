@@ -118,11 +118,46 @@ Kept:
   `refactor::tests::a_protected_file_in_a_change_set_is_reviewed_with_its_warning`
 
 Not kept:
-- **Linux: a protected name made where none is yet.** Landlock only grants; a folder holding a protected name is
-  granted entry by entry, but a folder with none can take a new `Makefile`. tarae finds it after the run and asks
-  before the next one; the report says so.
+- **A protected name made where none is yet, or moved in inside a folder.** Linux: Landlock only grants; a folder
+  holding a protected name is granted entry by entry, but a folder with none can take a new `Makefile`. macOS:
+  Seatbelt checks a rename's two paths, not what's in a folder — a run makes `x/` in temp holding `build.rs`, then
+  moves it into the project as `crates/x` (G23). Neither is refused; both are **seen after the run and asked about
+  before anything runs them**. tarae compares the checkout as the run found it and left it: new files in its tree,
+  new ignored files and the names inside a new ignored folder (names only — none read), past 5,000 new files at once
+  their names (the tree keeps none of them), links — one named like a protected name, or one leading to a folder
+  anywhere in the project (by its own name; the folder isn't walked) — and new repositories (by their `.git`).
+  In or below a tool's output folder nothing is looked at, as nothing there is kept — a first build's new
+  `target/` isn't walked or named. What it finds is said in Claude's
+  report, and before what runs it next in that checkout — Claude's next command or test, your task (your build),
+  your preflight — one card asks: `y` keeps them and runs it, `r` removes them first (only those entries, through
+  no link: a link goes itself, never what it leads to; a folder isn't removed), `v` shows what each holds, `n`
+  doesn't run it. One you kept isn't asked about again until a run makes it holding something else (path and
+  content); one past what tarae reads to tell (a file over 1 MiB, a folder of over 10,000 names — a sparse
+  100 GB file costs a run no disk) or one it can't read (a FIFO, a file of mode 000) is never kept: it's asked
+  about each time.
   test (the catch, not the block): `snapshot::tests::protected_names_a_run_made_are_found` ·
-  `snapshot::tests::a_protected_name_a_run_made_is_asked_about_before_the_next_run`
+  `snapshot::tests::past_new_max_the_new_names_are_still_looked_at` ·
+  `snapshot::tests::the_names_in_a_new_ignored_folder_are_looked_at` ·
+  `snapshot::tests::a_new_output_folder_is_neither_walked_nor_named` ·
+  `snapshot::tests::a_made_name_past_the_cap_isnt_read_and_isnt_kept` ·
+  `snapshot::tests::a_made_name_that_cant_be_read_isnt_kept` ·
+  `snapshot::tests::r_leaves_a_folder_and_a_file_changed_since_it_was_asked` ·
+  `snapshot::tests::what_r_couldnt_remove_is_asked_again_before_the_run` ·
+  `snapshot::tests::links_and_repositories_a_run_made_are_looked_at` ·
+  `snapshot::tests::a_protected_name_a_run_made_is_asked_about_before_the_next_run` ·
+  `snapshot::tests::your_task_and_preflight_wait_on_what_claudes_run_made` ·
+  `snapshot::tests::the_cards_answers_view_remove_and_keep_by_content`
+
+  What the look doesn't see: names new inside an ignored folder that was there before the run (git lists an
+  ignored folder whole, so it's the same entry before and after); what a process left running makes after the
+  run's look (the next run finds it there already — §1.10); a project that isn't a git checkout (no tree, nothing
+  compared — the log says why). And what doesn't wait on the card: your test runs, `:restart`'s build, your
+  terminal, and rust-analyzer (G13) run what's there unasked.
+
+  Other tools, read from their sources (2026-10-15): none of sandbox-runtime, Codex or Gemini CLI handles a folder
+  moved in under a plain name. Codex's Linux sandbox watches a missing *top-level* protected name with inotify
+  (`IN_CREATE | IN_MOVED_TO`), deletes what appears and fails the run — top-level names only. sandbox-runtime and
+  Codex deny unlink and create on a protected path's ancestors, as the claude profile does for `~/.claude` (§2).
 - **Names no pack knows.** A tool that runs a file by another name (`Taskfile.yml`, `noxfile.py`,
   `.pre-commit-config.yaml`) is protected only once a pack lists it or you add it to `llm.sandbox-protect`.
 - **What you accept in a review.** A `build.rs` you accept runs at your next build — and rust-analyzer runs it as
@@ -586,7 +621,7 @@ Not Claude's, but a hostile repository reaches them:
 | G7 | macOS: LAN addresses' risky ports with the network on | Seatbelt names ports by `localhost` only | open; the proxy could check |
 | G8 | macOS: a leftover without its tag isn't ended | no subreaper | said; stays sandboxed |
 | G9 | Linux C/D: processes, SysV IPC, `/dev/shm` shared; A/B: processes | no namespaces there | said; the AppArmor profile raises C to A+ |
-| G10 | Linux: a new protected name in a folder without one | Landlock only grants | caught after the run, asked before the next |
+| G10 | Linux: a new protected name in a folder without one | Landlock only grants | caught after the run, asked before anything runs it — Claude's next run, your task, your preflight (§1.2) |
 | G11 | Linux ABI 2: truncation | kernel | every run asks |
 | G12 | The supervisor and proxy parse hostile input inside tarae | threads (D19) | fuzzing; a confined process (D21); a review |
 | G13 | rust-analyzer runs `build.rs`/proc macros untrusted | not tied to trust | later |
@@ -598,7 +633,7 @@ Not Claude's, but a hostile repository reaches them:
 | G19 | claude writes `~/.claude.json`, which holds your user-scope MCP servers (commands your own claude starts) | claude's state lives in it | said; the chat runs `--strict-mcp-config` |
 | G20 | claude inherits `SSH_AUTH_SOCK`: the agent signs with your keys for it | unix sockets stay open (files-only profile) | proposed: drop it from claude's environment, deny the socket |
 | G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: on Linux the folder is still readable to claude (no profile there) — nothing reads it now |
-| G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | not measured yet; proposed: after each run, look for protected names that weren't there (the run's tree snapshot, as Linux's G10) and ask before the next |
+| G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | caught after the run, asked before anything runs it, as G10 (§1.2: new files, ignored folders' names, names past 5,000 new files, links, repositories); left: an ignored folder that was there before, what a leftover makes later, no git checkout, your tests and `:restart`'s build |
 | G22 | A refusal of claude's own work (not a tool's) goes unseen; `~/.claude/` is a denylist | the kernel didn't report claude's refusals (V1d, live) | an allowlist of what claude writes, once its refusals can be seen — and with it a measurement of `shell-snapshots/` (kept closed unmeasured: whether a later claude sources one it didn't make can't be told from here) |
 
 ## 5. For a reviewer: where to start

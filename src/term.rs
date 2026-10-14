@@ -7928,7 +7928,8 @@ fn draw_follow_card(
     let asks = editor.offers.iter().any(|o| {
         use crate::offer::What;
         match &o.what {
-            What::Run(_) | What::NoSandbox { .. } | What::ProtectedMade { .. } | What::Screen { .. } => true,
+            What::Run(_) | What::NoSandbox { .. } | What::Screen { .. } => true,
+            What::ProtectedMade { then, .. } => then.call().is_some(),
             // (not one the user's pointing raised — `reads::point`)
             What::Read { pending, .. } => pending.own.is_none(),
             _ => false,
