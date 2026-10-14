@@ -924,7 +924,7 @@ impl Editor {
         let rows = self.viewport.0.max(1);
         let doc = self.doc_mut();
         if line < doc.top || line >= doc.top + rows {
-            doc.top = line.saturating_sub(rows / 3);
+            doc.set_top(line.saturating_sub(rows / 3));
         }
     }
 }

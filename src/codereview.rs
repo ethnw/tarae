@@ -594,8 +594,18 @@ type OccurrencesAt = (u64, u64, Arc<Occurrences>);
 
 /// The lines of `rel`'s high-risk changes (`now`) out of the order a person looked at them in (`orders`) —
 /// moved within their change since (a check moved after the call it guarded makes no new key) — not looked
-/// at where they are now: a high-risk change for each (`risk::moved`). `text`: its open document's, to name
-/// them.
+/// at where they are now: a high-risk change for each (`risk::moved`). A change is held against every order
+/// sharing two of its lines or more, each on its own — this gate errs on asking: a line out of any of them is
+/// moved. All but lines that carry nothing by themselves (`risk::trivial`): blank, or nothing but ASCII
+/// punctuation once trimmed — `}`, `{`, `)`, `]`, `});`, `},`, `];`, `;` … — which every change has, out of
+/// step with another piece's order (#224: a new file's pieces, just looked at, asked again for 23 `}` and blank
+/// lines). A repeated `check()?;` or `drop(guard);` moved anywhere is asked. A punctuation-only line is asked
+/// all the same when, against the look whose order holds its neighbours that say something, it now sits on the
+/// other side of a line that says something (`crossed`): a `}` moved above the lines it closed leaves them in
+/// order, unguarded. Moved only among blank and punctuation lines, or out of step with another piece's look,
+/// it isn't. Blank lines never are. (An `end` says something: the order check takes it; a dedent changes the
+/// line's text, indent and all — a new line.) `text`: its open document's, to name them and tell such a line
+/// (closed: every line is asked).
 fn moved_within(
     rel: &str,
     now: &[crate::risk::Graded],
@@ -609,19 +619,87 @@ fn moved_within(
     }
     for g in now.iter().filter(|g| g.grade == Grade::High && g.added > 1) {
         let added = &g.keys[g.removed..g.removed + g.added];
-        let mut moved: Vec<usize> = Vec::new();
+        let texts: Vec<Option<String>> = (0..added.len())
+            .map(|i| text.filter(|t| g.at + i < t.len_lines()).map(|t| line_at(t, g.at + i)))
+            .collect();
+        let plain = |i: usize| texts[i].as_deref().is_some_and(crate::risk::trivial);
+        let bracket = |i: usize| plain(i) && texts[i].as_deref().is_some_and(|t| !t.trim().is_empty());
+        let (mut moved, mut crossings) = (Vec::new(), Vec::new());
         for then in orders.iter().filter(|o| added.iter().filter(|k| o.keys.contains(k)).nth(1).is_some()) {
             moved.extend(crate::risk::out_of_order(&then.keys, added));
+            crossings.extend(crossed(&then.keys, added, &plain, &bracket));
         }
+        moved.retain(|&i| !plain(i));
+        moved.extend(crossings);
         crate::sorting::sort(&mut moved);
         moved.dedup();
         for i in moved {
+            let line = texts[i].as_deref();
             let around = (added[i], i.checked_sub(1).map(|j| added[j]), added.get(i + 1).copied());
-            let line = text.filter(|t| g.at + i < t.len_lines()).map(|t| line_at(t, g.at + i));
-            let m = crate::risk::moved(rel, g.at + i, line.as_deref(), around);
+            let m = crate::risk::moved(rel, g.at + i, line, around);
             if !m.looked_at(looked) {
                 out.push(m);
             }
+        }
+    }
+    out
+}
+
+/// Of `now` (a change's added lines, in order), where a bracket line (`bracket`: `}`, `{`, `});` … — never a blank
+/// one) crossed a line saying something (`plain` false) since `then` was looked at. The lines saying something
+/// both have are paired in order; between two of them now — and before the first, after the last — the bracket
+/// lines are held against what `then` had there — a gap that gained one asks for it, one that lost one asks for
+/// the line closing the gap, the last one for the end (what it runs under changed).
+fn crossed(
+    then: &[crate::risk::Key],
+    now: &[crate::risk::Key],
+    plain: &dyn Fn(usize) -> bool,
+    bracket: &dyn Fn(usize) -> bool,
+) -> Vec<usize> {
+    let brackets: std::collections::HashSet<crate::risk::Key> =
+        (0..now.len()).filter(|&i| bracket(i)).map(|i| now[i]).collect();
+    // (the lines saying something both have: where in `then`, where in `now`)
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    for j in (0..now.len()).filter(|&j| !plain(j)) {
+        if let Some(t) = then[from..].iter().position(|k| *k == now[j]) {
+            pairs.push((from + t, j));
+            from += t + 1;
+        }
+    }
+    let mut out = Vec::new();
+    let (Some(&(t_first, n_first)), Some(&(t_last, n_last))) = (pairs.first(), pairs.last()) else {
+        return out;
+    };
+    // (each gap: its stretch of `then`, of `now`, and the line closing it)
+    let mut gaps: Vec<_> =
+        pairs.windows(2).map(|w| (w[0].0 + 1..w[1].0, w[0].1 + 1..w[1].1, w[1].1)).collect();
+    // (the edges too — a `}` crossing every line of the change goes from one to the other, no gap between two
+    // changed — but only for a look not reaching past this change: another piece's or change's look has its
+    // own `}` there. Now's edge out to its first line saying something: past it, lines added since — their own
+    // `}` never crossed a line looked at)
+    let all: std::collections::HashSet<crate::risk::Key> = now.iter().copied().collect();
+    if then[..t_first].iter().chain(&then[t_last + 1..]).all(|k| all.contains(k)) {
+        let lo = (0..n_first).rev().take_while(|&i| plain(i)).last().unwrap_or(n_first);
+        let hi = (n_last + 1..now.len()).take_while(|&i| plain(i)).last().map_or(n_last + 1, |i| i + 1);
+        gaps.push((0..t_first, lo..n_first, n_first));
+        gaps.push((t_last + 1..then.len(), n_last + 1..hi, n_last));
+    }
+    for (ts, ns, closing) in gaps {
+        let mut count: std::collections::HashMap<crate::risk::Key, isize> = Default::default();
+        for k in then[ts].iter().filter(|k| brackets.contains(*k)) {
+            *count.entry(*k).or_default() -= 1;
+        }
+        for i in ns.clone().filter(|&i| bracket(i)) {
+            *count.entry(now[i]).or_default() += 1;
+        }
+        if count.values().all(|&c| c == 0) {
+            continue;
+        }
+        let gained: Vec<usize> = ns.filter(|&i| bracket(i) && count[&now[i]] > 0).collect();
+        match gained.is_empty() {
+            true => out.push(closing),
+            false => out.extend(gained),
         }
     }
     out
@@ -2698,8 +2776,6 @@ fn take(ed: &mut Editor, whole_file: bool) {
         }
     }
     let recorded: std::collections::HashSet<crate::risk::Key> = kept.iter().map(|l| l.added).collect();
-    // (a change's latest look is its order: an earlier order sharing a recorded line with it gives way — not
-    // one sharing only a `}`)
     let kept = ed.session.looked_orders.entry(rel).or_default();
     for o in kept.iter_mut() {
         for k in &done {
@@ -2708,10 +2784,9 @@ fn take(ed: &mut Editor, whole_file: bool) {
             }
         }
     }
-    for o in orders {
-        kept.retain(|k| !k.keys.iter().any(|x| recorded.contains(x) && o.keys.contains(x)));
-        kept.push(o);
-    }
+    let fresh_from = kept.len();
+    kept.extend(orders);
+    latest_looks(kept, fresh_from, &recorded);
     let left = r.high_unseen(ed).len();
     held_sync(ed);
     // (one: its marker went, in sight; several — a selection's — counted aloud)
@@ -2734,6 +2809,35 @@ fn take(ed: &mut Editor, whole_file: bool) {
         true => ed.set_status(said),
         false => ed.note(said),
     }
+}
+
+/// A file's looks (`kept`, oldest first; from `fresh` on, the ones just taken) without those a later one took
+/// the place of. A change's latest look is its order: an earlier order goes once the orders after it hold most
+/// of its `recorded` lines between them — the same change looked at again, whole or piece by piece (each piece
+/// alone holding less: the old one stayed, forever); with none recorded, most of its lines; none at all, it
+/// goes. A few lines shared don't make it go — a `}`, a line two changes both have (`check();`: the other
+/// change's look went, and its moves with it). The looks just taken all stay, however many lines they share: a
+/// file's pieces taken at once share `impl Owners {`, and two changes taken together most of a small one's.
+/// Only a look that stays holds lines: one going too would leave them in no look.
+fn latest_looks(
+    kept: &mut Vec<crate::risk::LookedOrder>,
+    fresh: usize,
+    recorded: &std::collections::HashSet<crate::risk::Key>,
+) {
+    // (from the newest back: the lines of every order after this one that stays — one going holds nothing)
+    let mut later: std::collections::HashSet<crate::risk::Key> = Default::default();
+    let mut stays = vec![true; kept.len()];
+    for (n, o) in kept.iter().enumerate().rev() {
+        let rec: Vec<&crate::risk::Key> = o.keys.iter().filter(|x| recorded.contains(x)).collect();
+        let rec = if rec.is_empty() { o.keys.iter().collect() } else { rec };
+        stays[n] = !rec.is_empty()
+            && (n >= fresh || 2 * rec.iter().filter(|x| later.contains(x)).count() <= rec.len());
+        if stays[n] {
+            later.extend(o.keys.iter().copied());
+        }
+    }
+    let mut stays = stays.into_iter();
+    kept.retain(|_| stays.next().unwrap_or(true));
 }
 
 /// After a look: a card held for high-risk changes (the review's end, a bring — `Offer.gate`) whose every
@@ -5050,6 +5154,172 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// An earlier look goes once the looks after it hold most of its lines between them: a change looked at
+    /// whole, then its pieces looked at one by one (each holding less than half of it) — its whole order goes,
+    /// a look a piece is what's kept. (Replaced only by one look holding most of it, it stayed for good: the
+    /// session's orders only grew, and every piece was held against it.)
+    #[test]
+    fn a_changes_old_look_goes_once_its_pieces_are_looked_at() {
+        let base = "fn main() {}\n";
+        let fns =
+            text_of(6, |i| format!("fn f{i}() {{\n    unsafe {{ x{i}() }};\n    y{i}();\n    z{i}();\n}}"));
+        let (mut ed, dir) = reviewing("old-look", &[("a.rs", base, &format!("{base}{fns}"))]);
+        let frame = |ed: &mut Editor, h: u16| crate::term::render(ed, &mut Vec::new(), 100, h).unwrap();
+        let orders = |ed: &Editor| ed.session.looked_orders.get("a.rs").map_or(0, Vec::len);
+        frame(&mut ed, 60);
+        feed(&mut ed, "]h");
+        frame(&mut ed, 60);
+        feed(&mut ed, "<space>vh");
+        assert_eq!((left(&ed), orders(&ed)), (0, 1), "looked at whole: {:?}", ed.status);
+        frame(&mut ed, 12);
+        let pieces: Vec<usize> = highs(&ed).iter().filter(|g| g.piece.is_some()).map(|g| g.at).collect();
+        assert!(pieces.len() > 2, "cut in pieces: {pieces:?}");
+        for &at in &pieces {
+            ed.goto_line(at);
+            frame(&mut ed, 12);
+            feed(&mut ed, "<space>vh");
+        }
+        assert_eq!(orders(&ed), pieces.len(), "a look a piece: {:?}", ed.status);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A line two changes both have (`drop(guard);` — it says something) moved to its change's last place since:
+    /// asked. Each change keeps its own look: taken one after the other, a later look takes an earlier one's
+    /// place only holding most of its lines; taken in one look (`space v H`), neither takes the other's — one
+    /// shared `drop(guard);` took it either way, and a move within that change went unasked.
+    #[test]
+    fn a_repeated_line_moved_to_a_changes_edge_is_asked() {
+        let base = "fn main() {\n    keep();\n}\nfn other() {\n    keep();\n}\n";
+        let now = "fn main() {\n    unsafe { a() }\n    drop(guard);\n    a1();\n    a2();\n    keep();\n    unsafe { b() }\n    drop(guard);\n    b1();\n}\nfn other() {\n    keep();\n}\n";
+        let at = |ed: &Editor, l: usize| ed.doc().text.line_to_byte(l);
+        let moved = |ed: &Editor| -> Vec<(usize, String)> {
+            highs(ed)
+                .into_iter()
+                .filter(|g| !g.looked_at(&ed.session.looked) && g.why.starts_with("moved since your look"))
+                .map(|g| (g.at, g.why))
+                .collect()
+        };
+        let (mut ed, dir) = reviewing("edge", &[("a.rs", base, now)]);
+        look(&mut ed);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // `drop(guard);` from under `unsafe { a() }` to after `a2();`, its change's last place; and in the
+        // other change `b1();` above its `drop(guard);`
+        let (c0, c1, after) = (at(&ed, 2), at(&ed, 3), at(&ed, 5));
+        let (b0, b1, above) = (at(&ed, 8), at(&ed, 9), at(&ed, 7));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::delete(c0, c1),
+                crate::transaction::Change::insert(after, "    drop(guard);\n"),
+                crate::transaction::Change::insert(above, "    b1();\n"),
+                crate::transaction::Change::delete(b0, b1),
+            ],
+        );
+        let m = moved(&ed);
+        assert!(m.contains(&(4, "moved since your look: `drop(guard);`".into())), "{m:?}");
+        assert!(m.iter().any(|m| m.0 >= 6), "the other change's look kept: {m:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        // Both taken in one look: `a2();` above `a1();` in the first
+        let (mut ed, dir) = reviewing("edge-one-look", &[("a.rs", base, now)]);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vH");
+        assert_eq!(left(&ed), 0, "{:?}", ed.status);
+        let (a0, a1, above) = (at(&ed, 4), at(&ed, 5), at(&ed, 3));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(above, "    a2();\n"),
+                crate::transaction::Change::delete(a0, a1),
+            ],
+        );
+        let m = moved(&ed);
+        assert!(m.iter().any(|m| m.0 < 6), "the first change's look kept: {m:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        // Taken in one look, the first change sharing most of its lines with the second (`drop(guard);`,
+        // `check();`): its look stays all the same — `unsafe { a() }` under its `drop(guard);` since is asked
+        let now = "fn main() {\n    unsafe { a() }\n    drop(guard);\n    check();\n    keep();\n    unsafe { b() }\n    drop(guard);\n    check();\n    b1();\n}\nfn other() {\n    keep();\n}\n";
+        let (mut ed, dir) = reviewing("edge-one-look-shared", &[("a.rs", base, now)]);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vH");
+        assert_eq!(left(&ed), 0, "{:?}", ed.status);
+        assert_eq!(ed.session.looked_orders["a.rs"].len(), 2);
+        let (u0, u1, under) = (at(&ed, 1), at(&ed, 2), at(&ed, 3));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::delete(u0, u1),
+                crate::transaction::Change::insert(under, "    unsafe { a() }\n"),
+            ],
+        );
+        let m = moved(&ed);
+        assert!(m.iter().any(|m| m.0 < 4), "the first change's look kept: {m:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two looked-at changes merged into one since (the line between them deleted): a line moved within the
+    /// smaller one's part is asked — the change is held against every look sharing its lines, the smaller one's
+    /// too (held against the best one only, the move was missed).
+    #[test]
+    fn a_line_moved_within_the_smaller_of_two_merged_changes_is_asked() {
+        let base = "fn main() {\n    keep1();\n    keep2();\n}\n";
+        let now = "fn main() {\n    unsafe { a() }\n    b1();\n    b2();\n    b3();\n    keep1();\n    unsafe { c() }\n    d1();\n    d2();\n    keep2();\n}\n";
+        let (mut ed, dir) = reviewing("merged", &[("a.rs", base, now)]);
+        look(&mut ed);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // `keep1();` gone (the two changes one), `d1();` after `d2();`
+        let at = |ed: &Editor, l: usize| ed.doc().text.line_to_byte(l);
+        let (k0, k1, d0, d1, after) = (at(&ed, 5), at(&ed, 6), at(&ed, 7), at(&ed, 8), at(&ed, 9));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::delete(k0, k1),
+                crate::transaction::Change::delete(d0, d1),
+                crate::transaction::Change::insert(after, "    d1();\n"),
+            ],
+        );
+        let asked: Vec<String> =
+            highs(&ed).into_iter().filter(|g| !g.looked_at(&ed.session.looked)).map(|g| g.why).collect();
+        assert!(asked.iter().any(|w| w.starts_with("moved since your look: `d")), "{asked:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A change looked at whole, then cut in pieces (the pane shorter): a line moved within a piece is asked —
+    /// the piece is held against the whole change's look, which shares its lines (held only against a look
+    /// most of whose lines it has, the move was missed).
+    #[test]
+    fn a_line_moved_within_a_piece_of_a_change_looked_at_whole_is_asked() {
+        let base = "fn main() {}\n";
+        let fns =
+            text_of(6, |i| format!("fn f{i}() {{\n    unsafe {{ x{i}() }};\n    y{i}();\n    z{i}();\n}}"));
+        let (mut ed, dir) = reviewing("split", &[("a.rs", base, &format!("{base}{fns}"))]);
+        let frame = |ed: &mut Editor, h: u16| crate::term::render(ed, &mut Vec::new(), 100, h).unwrap();
+        // (looked at in a pane taller than it: one change, every line drawn)
+        frame(&mut ed, 60);
+        feed(&mut ed, "]h");
+        frame(&mut ed, 60);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "{:?}", ed.status);
+        frame(&mut ed, 12);
+        assert!(highs(&ed).iter().filter(|g| g.piece.is_some()).count() > 1, "cut in pieces");
+        // `z3();` above `y3();`
+        let at = |ed: &Editor, l: usize| ed.doc().text.line_to_byte(l);
+        let (y0, z0, z1) = (at(&ed, 18), at(&ed, 19), at(&ed, 20));
+        assert_eq!(ed.doc().text.line(19).to_string(), "    z3();\n");
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(y0, "    z3();\n"),
+                crate::transaction::Change::delete(z0, z1),
+            ],
+        );
+        let asked: Vec<String> =
+            highs(&ed).into_iter().filter(|g| !g.looked_at(&ed.session.looked)).map(|g| g.why).collect();
+        assert!(asked.iter().any(|w| w.starts_with("moved since your look: `")), "{asked:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A binary file opened from the rail shows in a buffer of its own: `space v m` there marks that file — not
     /// the one read before (it took that one's mark back, unsaid) — and says which it marked.
     #[test]
@@ -5600,6 +5870,212 @@ mod tests {
         feed(&mut ed, "<space>vH");
         assert_eq!(left(&ed), 0, "{}", status(&ed));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #224 again: a new 700-line file (protected: high-risk) read top to bottom with `C-d`, then `space v H`
+    /// — every piece taken, and nothing asked again: its pieces share `}`, `{`, `});` and blank lines out of step
+    /// with each other's orders, and those carry nothing — never "moved" (23 of them were asked: "not all on
+    /// screen yet (lines 291–292, …)").
+    #[test]
+    fn a_new_files_changes_are_taken_after_reading_it_to_the_end() {
+        let (_, dir, _) = a_new_file_read_and_taken("new-file");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A look goes for the looks after it that stay: of three looks at one change, the middle one held most of
+    /// the oldest's lines and the newest most of the middle one's — the middle one goes, the oldest stays (its
+    /// lines the newest lacks are in no other look: going too, a move among them was never asked). Held by a
+    /// later look that stays, it goes; the looks just taken stay whatever they share.
+    #[test]
+    fn a_look_goes_only_for_later_looks_that_stay() {
+        let order = |keys: &[u128]| crate::risk::LookedOrder { keys: keys.to_vec(), ..Default::default() };
+        let recorded: std::collections::HashSet<u128> = (1..=10).collect();
+        let (a, b, c) = (order(&[1, 2, 3, 4]), order(&[1, 2, 3, 5, 6, 7, 8, 9]), order(&[5, 6, 7, 8, 9, 10]));
+        let mut kept = vec![a.clone(), b, c.clone()];
+        latest_looks(&mut kept, 2, &recorded);
+        assert_eq!(kept, vec![a.clone(), c], "the middle one went, the oldest stayed");
+        // (the middle one staying: it holds most of the oldest's, which goes)
+        let (b, c) = (order(&[1, 2, 3, 5]), order(&[6, 7]));
+        let mut kept = vec![a, b.clone(), c.clone()];
+        latest_looks(&mut kept, 2, &recorded);
+        assert_eq!(kept, vec![b.clone(), c.clone()]);
+        // (taken at once: both stay, the first held whole by the second)
+        let mut kept = vec![order(&[5, 6]), order(&[5, 6, 7])];
+        latest_looks(&mut kept, 0, &recorded);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// A `}` moved above the lines it closed over since the look: asked — they run unguarded now. Every line that
+    /// says something is still in the order looked at; only the bracket crossed them.
+    #[test]
+    fn a_brace_moved_across_the_lines_it_closed_is_asked() {
+        let base = "fn main() {\n    keep();\n}\n";
+        let now = "fn main() {\n    keep();\n    if authorized() {\n        unsafe { delete_all() }\n        log();\n    }\n    done();\n}\n";
+        let (mut ed, dir) = reviewing("brace-crossed", &[("a.rs", base, now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // `    }` from under `log();` up under `if authorized() {`
+        let at = |ed: &Editor, l: usize| ed.doc().text.line_to_byte(l);
+        assert_eq!(ed.doc().text.line(5).to_string(), "    }\n");
+        let (b0, b1, above) = (at(&ed, 5), at(&ed, 6), at(&ed, 3));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(above, "    }\n"),
+                crate::transaction::Change::delete(b0, b1),
+            ],
+        );
+        let asked = unseen_whys(&ed);
+        assert!(asked.iter().any(|w| w == "moved since your look: `}`"), "{asked:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        // The change's own `}` from its end over every line of it to its start: no gap between two lines saying
+        // something changed, only the edges — asked all the same
+        let closed = "fn main() {\n    keep();\n    if authorized() {\n        unsafe { delete_all() }\n        log();\n    }\n}\n";
+        let (mut ed, dir) = reviewing("brace-over-the-edge", &[("a.rs", base, closed)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        assert_eq!(ed.doc().text.line(5).to_string(), "    }\n");
+        let (b0, b1, above) = (at(&ed, 5), at(&ed, 6), at(&ed, 2));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(above, "    }\n"),
+                crate::transaction::Change::delete(b0, b1),
+            ],
+        );
+        let asked = unseen_whys(&ed);
+        assert!(asked.iter().any(|w| w == "moved since your look: `}`"), "{asked:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        // …and a block added after it since, or one and a line before it, their own `    }` and all: new lines,
+        // but no `}` moved
+        for (name, line, added) in [
+            ("brace-added-after", 6, "    if other() {\n        more();\n    }\n"),
+            ("brace-added-before", 2, "    if other() {\n        more();\n    }\n    again();\n"),
+        ] {
+            let (mut ed, dir) = reviewing(name, &[("a.rs", base, closed)]);
+            look(&mut ed);
+            assert_eq!(left(&ed), 0);
+            let into = at(&ed, line);
+            edited(&mut ed, vec![crate::transaction::Change::insert(into, added)]);
+            let asked = unseen_whys(&ed);
+            assert!(!asked.is_empty() && !asked.iter().any(|w| w.starts_with("moved")), "{name}: {asked:?}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        // An `end` (it says something: the order looked at holds it) moved up the same way, and the guarded line
+        // dedented out of its block (Python's way: its text, indent and all, is a new line) — both asked
+        let ended = "fn main() {\n    keep();\n    if authorized() then\n        unsafe { delete_all() }\n        log();\n    end\n    done();\n}\n";
+        for (name, now, from, to, line) in [
+            ("end-crossed", ended, 5, 3, "    end\n"),
+            ("dedented", now, 3, 3, "    unsafe { delete_all() }\n"),
+        ] {
+            let (mut ed, dir) = reviewing(name, &[("a.rs", base, now)]);
+            assert_eq!(ed.doc().text.line(from).to_string().trim(), line.trim(), "{name}");
+            look(&mut ed);
+            assert_eq!(left(&ed), 0);
+            let (l0, l1, into) = (at(&ed, from), at(&ed, from + 1), at(&ed, to));
+            let changes = match from == to {
+                true => vec![crate::transaction::Change { from: l0, to: l1, insert: line.into() }],
+                false => vec![
+                    crate::transaction::Change::insert(into, line),
+                    crate::transaction::Change::delete(l0, l1),
+                ],
+            };
+            edited(&mut ed, changes);
+            assert!(left(&ed) > 0, "{name}: {:?}", unseen_whys(&ed));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// Lines that carry nothing by themselves (`}`, a blank line) moved since the look: not asked — a `}` and the
+    /// blank line under it swapped, in a file looked at whole.
+    #[test]
+    fn a_brace_or_blank_line_moved_is_not_asked() {
+        let (mut ed, dir, new) = a_new_file_read_and_taken("brace");
+        let at = new.lines().position(|l| l == "    fn f75(&self) {").unwrap();
+        // (`fn f75`, `x75();`, `    }`, `}`, blank: the `}` and the blank swapped)
+        let text = &ed.doc().text;
+        assert_eq!(text.line(at + 3).to_string(), "}\n");
+        assert_eq!(text.line(at + 4).to_string(), "\n");
+        let (a, b, after) = (text.line_to_byte(at + 3), text.line_to_byte(at + 4), text.line_to_byte(at + 5));
+        edited(
+            &mut ed,
+            vec![crate::transaction::Change::delete(a, b), crate::transaction::Change::insert(after, "}\n")],
+        );
+        assert_eq!(unseen_whys(&ed), Vec::<String>::new());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A line one piece's look had, moved into the middle of another piece since: asked.
+    #[test]
+    fn a_line_moved_from_one_piece_into_another_is_asked() {
+        let (mut ed, dir, new) = a_new_file_read_and_taken("into-another");
+        let lines: Vec<&str> = new.lines().collect();
+        let from = lines.iter().position(|l| l.starts_with("struct T")).unwrap();
+        let at = lines.iter().position(|l| l.starts_with("    fn f75")).unwrap();
+        assert!(from + 30 < at, "pieces apart");
+        // (into `fn f75`'s body, after `x75();`)
+        let text = &ed.doc().text;
+        let (a, b, into) = (text.line_to_byte(from), text.line_to_byte(from + 1), text.line_to_byte(at + 2));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::delete(a, b),
+                crate::transaction::Change::insert(into, format!("{}\n", lines[from])),
+            ],
+        );
+        let asked = unseen_whys(&ed);
+        let said = format!("moved since your look: `{}`", lines[from]);
+        assert!(asked.contains(&said), "{said}: {asked:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Why each high-risk change of the file in front not looked at is one.
+    fn unseen_whys(ed: &Editor) -> Vec<String> {
+        highs(ed).into_iter().filter(|g| !g.looked_at(&ed.session.looked)).map(|g| g.why).collect()
+    }
+
+    /// A review of a new, protected file of 140 blocks (700-odd lines, every one high-risk), read top to bottom
+    /// with `C-d` a key and a frame at a time, then taken whole with `space v H` — nothing left. Its text.
+    fn a_new_file_read_and_taken(name: &str) -> (Editor, PathBuf, String) {
+        // (blocks of five kinds in no regular order: each line that says something its own, the pieces sharing
+        // `}`, `{`, `});` and blank lines out of step — as src/sandbox/owners.rs has them; block 75 an `impl`,
+        // its lines moved by the tests)
+        let new: String = (0..140usize)
+            .map(|i| match if i == 75 { 0 } else { (i * i * 7 + i / 5) % 5 } {
+                0 => format!("impl S{i} {{\n    fn f{i}(&self) {{\n        x{i}();\n    }}\n}}\n\n"),
+                1 => format!("fn g{i}() {{\n    y{i}();\n}}\n\n"),
+                2 => format!("fn h{i}() {{\n    if z{i}() {{\n\n        w{i}();\n    }}\n\n}}\n"),
+                3 => format!("struct T{i};\n\n"),
+                _ => format!("fn k{i}() {{\n    v{i}(|| {{\n        u{i}();\n    }});\n}}\n\n"),
+            })
+            .collect();
+        assert!(new.lines().count() >= 600, "{}", new.lines().count());
+        let dir = bring_repo(name, &[("b.rs", "fn b() {}\n".into())], &[("build.rs", new.clone())]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 30).unwrap();
+        settle_until(&mut ed, |ed| {
+            landed(ed) && ed.doc().path.as_deref() == Some(dir.join("build.rs").as_path())
+        });
+        frame(&mut ed);
+        let pieces = |ed: &Editor| {
+            let Some(r) = ed.session.code_review.as_ref() else { return 0 };
+            let Some(i) = r.current(ed) else { return 0 };
+            r.graded(ed, &r.files[i]).len()
+        };
+        settle_until(&mut ed, |ed| pieces(ed) > 0);
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        for _ in 0..80 {
+            feed(&mut ed, "<C-d>");
+            frame(&mut ed);
+        }
+        assert!(pieces(&ed) >= 20, "cut in pieces: {}", pieces(&ed));
+        feed(&mut ed, "<space>vH");
+        let left = ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(&ed).len());
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(left, 0, "{status}");
+        (ed, dir, new)
     }
 
     /// Unread lines said as runs, 1-based, the first few — the rest counted.

@@ -741,13 +741,13 @@ impl Layout {
     }
 }
 
-/// Panes: (view, rect, pane layout, doc index, top line, h-scroll, focused?). Left first (clearing to line
+/// Panes: (view, rect, pane layout, doc index, (top line, its rows above the pane), h-scroll, focused?). Left first (clearing to line
 /// end wipes the pane to its right, so left goes first). One window = one pane as before (no title row).
 #[allow(clippy::type_complexity)]
 fn panes(
     editor: &Editor,
     lay: &Layout,
-) -> Vec<(crate::split::ViewId, crate::split::Rect, Layout, usize, usize, usize, bool)> {
+) -> Vec<(crate::split::ViewId, crate::split::Rect, Layout, usize, (usize, usize), usize, bool)> {
     let area = crate::split::Rect {
         x: lay.rail_w,
         y: lay.text_top as usize,
@@ -771,8 +771,11 @@ fn panes(
             let doc = &editor.docs[idx];
             // Focused pane uses the doc's scroll (moved by scroll_to_cursor each frame); others their own —
             // clamped, since the doc may have shrunk under them (edited in another pane)
+            // (and the rows of its top line above it: each pane's own — another pane's would be on this one)
             let (top, left) =
                 if focused { (doc.top, doc.left) } else { (v.top.min(mv::last_line(&doc.text)), v.left) };
+            let rows = if focused { doc.top_rows } else { v.top_rows };
+            let top = (top, rows.filter(|&(l, _)| l == top).map_or(0, |r| r.1));
             Some((id, r, lay.pane(doc, r, many, editor), idx, top, left, focused))
         })
         .collect();
@@ -2451,7 +2454,7 @@ fn draw_panes(
         if many {
             draw_pane_title(editor, doc, *r, *focused, ui, out)?;
         }
-        let c = draw_text(editor, doc, *top, *left, *focused, view, ui, pl, out)?;
+        let c = draw_text(editor, doc, top.0, *left, *focused, view, ui, pl, out)?;
         if *focused {
             cursor = c;
         }
@@ -2533,6 +2536,12 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
             None => vec![crate::wrap::Row { start: 0, col: 0, end_col: usize::MAX, x0: 0 }],
         };
         let rows = |l: usize| wrapped(l).len() + removed_above(doc, l);
+        // The rows of a line that can go above the screen while it's the top line: its wrapped rows but the
+        // last (none under removed rows — those are shown whole)
+        let skippable = |l: usize| match removed_above(doc, l) {
+            0 => wrapped(l).len() - 1,
+            _ => 0,
+        };
         let here = wrapped(line);
         // Screen rows between the top and the cursor's row: its row in the line, below the removed ones
         let k = if wrap_w.is_some() { crate::wrap::row_of(&here, pos) } else { 0 } + removed_above(doc, line);
@@ -2542,34 +2551,53 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
             top -= 1;
             above += rows(top);
         }
-        let mut new_top = doc.top;
-        if new_top > top {
-            new_top = top;
+        // The latest start that keeps `so` rows above the cursor: `top`, less its rows past those
+        let up = (top, above.saturating_sub(so).min(skippable(top)));
+        // (no more rows of it than the top line has now: wider, unwrapped or edited, it may have fewer — or be
+        // gone, the text shorter)
+        let skip = match doc.top_skip() {
+            n if n > 0 && doc.top < doc.text.len_lines() => n.min(skippable(doc.top)),
+            _ => 0,
+        };
+        let (mut new_top, mut skip) = (doc.top, skip);
+        if (new_top, skip) > up {
+            (new_top, skip) = up;
         } else {
             // Each line is at least a row — a top more than a screen above can't show the cursor
             if line >= new_top + lay.text_rows {
-                new_top = line + 1 - lay.text_rows;
+                (new_top, skip) = (line + 1 - lay.text_rows, 0);
             }
-            // Rows from the top through the cursor's, plus `so` below, must fit
-            let mut used: usize = (new_top..line).map(rows).sum::<usize>() + k + 1;
-            while new_top < line && used + so > lay.text_rows {
-                used -= rows(new_top);
-                new_top += 1;
+            // Rows from the screen's start through the cursor's, plus `so` below, must fit — scrolled by rows,
+            // so a tall line's rows never go by unseen (a whole line at a time jumped past them: #233)
+            let mut used: usize = (new_top..line).map(rows).sum::<usize>() + k + 1 - skip;
+            while used + so > lay.text_rows {
+                let over = used + so - lay.text_rows;
+                if new_top == line {
+                    skip = (skip + over).min(skippable(line).min(k));
+                    break;
+                }
+                if skip + over <= skippable(new_top) {
+                    skip += over;
+                    break;
+                }
+                used -= rows(new_top) - skip;
+                (new_top, skip) = (new_top + 1, 0);
             }
         }
         let wraps_here = here.len() > 1
             || mv::line_end(&doc.text, line) - mv::line_start(&doc.text, line) <= crate::wrap::MAX_LINE;
         let doc = editor.doc_mut();
         doc.top = new_top;
+        doc.top_rows = (skip > 0).then_some((new_top, skip));
         // Wrapped lines never scroll sideways (a line too long to wrap still does)
         if wrap_w.is_some() && wraps_here {
             doc.left = 0;
             return;
         }
     } else if line < doc.top + so {
-        doc.top = line.saturating_sub(so);
+        doc.set_top(line.saturating_sub(so));
     } else if line + so >= doc.top + lay.text_rows {
-        doc.top = line + so + 1 - lay.text_rows;
+        doc.set_top(line + so + 1 - lay.text_rows);
     }
     let doc = editor.doc_mut();
     let col = mv::visual_col(&doc.text, pos, tab);
@@ -3530,7 +3558,10 @@ fn draw_text(
             LineNumber::Relative if line != cur_line => line.abs_diff(cur_line),
             _ => line + 1,
         };
-        if !first {
+        // The screen's first row inside a line it starts past (`top_rows`): the line's sign and number all the
+        // same, `↑` before it — the line goes on above
+        let cut = !first && row == 0;
+        if !first && !cut {
             // Continuation row of a wrapped line: no sign or number
             apply(out, ui.base)?;
             queue!(out, Spaces(lay.gutter - 1))?;
@@ -3558,9 +3589,15 @@ fn draw_text(
                 queue!(out, Print(if sev > 0 { "▎" } else { " " }))?;
             }
         }
-        if first {
+        if first || cut {
             apply(out, if focused && line == cur_line { ui.linenr_selected } else { ui.linenr })?;
-            queue!(out, Print(format!("{num:>w$}", w = lay.gutter - 1 - signs)))?;
+            let w = lay.gutter - 1 - signs;
+            // (`↑` where there's room for it: digits and arrow one cell each)
+            let num = match cut && num.to_string().len() < w {
+                true => format!("↑{num}"),
+                false => num.to_string(),
+            };
+            queue!(out, Print(format!("{num:>w$}")))?;
         }
         // Between line number and text: git bar (added green · modified yellow · deleted red underline) —
         // the bar runs down a wrapped line's rows, the underline goes under its last
@@ -4079,7 +4116,7 @@ pub fn removed_above(doc: &crate::document::Document, line: usize) -> usize {
 fn build_view(
     editor: &Editor,
     doc: &crate::document::Document,
-    top: usize,
+    (top, top_skip): (usize, usize),
     left: usize,
     lay: &Layout,
 ) -> Vec<crate::doccomment::ViewRow> {
@@ -4090,7 +4127,8 @@ fn build_view(
     let cur_line = mv::line_of(text, doc.selection().primary().cursor(text));
     let max_line = last.max(cur_line);
     let lang = doc.lang_name();
-    // Soft wrap: a line → its rows (the top line taller than the screen shows from the cursor's part)
+    // Soft wrap: a line → its rows (the top line from where the screen starts in it — `top_rows`; taller than
+    // the screen, at least from the cursor's part)
     let wrap_w = editor.wraps(doc).then_some(lay.text_cols);
     let tab = editor.config.tab_width;
     let push_line = |view: &mut Vec<ViewRow>, line: usize| {
@@ -4099,12 +4137,15 @@ fn build_view(
         if parts.len() == 1 {
             return view.push(ViewRow::Line(line));
         }
-        let skip = if line == top && line == cur_line {
-            let k = crate::wrap::row_of(&parts, doc.selection().primary().cursor(text));
-            (k + 1).saturating_sub(rows)
-        } else {
-            0
-        };
+        let skip = match line == top {
+            true if line == cur_line => {
+                let k = crate::wrap::row_of(&parts, doc.selection().primary().cursor(text));
+                top_skip.max((k + 1).saturating_sub(rows))
+            }
+            true => top_skip,
+            false => 0,
+        }
+        .min(parts.len() - 1);
         let n = parts.len();
         for (index, row) in parts.into_iter().enumerate().skip(skip) {
             if view.len() == rows {
@@ -12985,6 +13026,162 @@ mod tests {
         assert_eq!(lay(&ed).0, TASK_PANEL_MIN, "another task: from the bottom");
         ed.session.task_run = None;
         assert_eq!(lay(&ed).0, 0, "no panel without a run");
+    }
+
+    /// #233: a report read with `C-d` under a finished task's tall output (the code keeps 19 rows) — every
+    /// word of it is on screen at some point, and so back up with `C-u`. A wrapped line taller than half the
+    /// screen scrolls by rows: a whole line at a time jumped past its middle (the reviewer's "Missing
+    /// coverage" paragraph was never in sight).
+    #[test]
+    fn c_d_and_c_u_show_every_word_above_the_task_panel() {
+        use crate::task::{Run, Task};
+        let mut ed = Editor::new(Config::default());
+        ed.config.soft_wrap = "always".into();
+        let mut r =
+            Run::for_test(Task { name: "t".into(), cmd: "printf ''".into(), cwd: std::env::temp_dir() });
+        r.output = (0..400).map(|i| (false, format!("output {i}"))).collect();
+        ed.session.task_run = Some(r);
+        // Every third line a paragraph of 400 words (~20 rows: taller than half the code's 19), the rest short
+        let words =
+            |i: usize| (0..if i.is_multiple_of(3) { 400 } else { 1 }).map(move |j| format!("{i}.{j}"));
+        let text: String =
+            (0..120).map(|i| format!("{}\n", words(i).collect::<Vec<_>>().join(" "))).collect();
+        ed.docs[0].text = Rope::from_str(&text);
+        let (w, h) = (100, 40);
+        let mut buf = Vec::new();
+        for (key, end) in [("C-d", 119), ("C-u", 0)] {
+            let mut seen = String::new();
+            for _ in 0..200 {
+                buf.clear();
+                render(&mut ed, &mut buf, w, h).unwrap();
+                seen.extend(screen(&buf, w as usize, h as usize).into_iter().map(|l| l + " "));
+                ed.handle_key(key.parse().unwrap());
+            }
+            let line = mv::line_of(&ed.docs[0].text, ed.docs[0].selection().primary().head);
+            assert_eq!(line, end, "{key}: read to the end");
+            let seen: std::collections::HashSet<&str> = seen.split(' ').collect();
+            let missed: Vec<String> =
+                (0..120).flat_map(words).filter(|w| !seen.contains(w.as_str())).collect();
+            assert!(
+                missed.is_empty(),
+                "{key}: {} words never on screen: {:?}…",
+                missed.len(),
+                &missed[..8.min(missed.len())]
+            );
+        }
+    }
+
+    /// The rows of the top line above the screen (`top_rows`) are no more than it has now. Scrolled to the
+    /// cursor six lines under a 37-row line (most of its rows above the screen), then the line has fewer: the screen wider,
+    /// soft wrap off in a review, the line shortened by an edit or a reload — the view starts within what's there,
+    /// the cursor in sight; narrower (more rows) stays sane too. Unclamped, the stale count took the rows counted
+    /// below zero: a panic in debug builds, a wrapped count in release.
+    #[test]
+    fn the_top_lines_hidden_rows_shrink_with_the_line() {
+        let long = "word ".repeat(400);
+        // (how the line gets fewer rows, the width drawn at after)
+        type Shrink = (&'static str, fn(&mut Editor) -> u16);
+        let shrinks: [Shrink; 5] = [
+            ("wider", |_| 200),
+            ("narrower", |_| 40),
+            ("soft wrap off in a review", |ed| {
+                let d = &mut ed.docs[0];
+                (d.wrap, d.review_base) = (Some(false), Some(d.text.clone()));
+                60
+            }),
+            ("an edit", |ed| {
+                ed.docs[0].apply(&crate::transaction::Transaction::new(vec![
+                    crate::transaction::Change::delete(10, 1990),
+                ]));
+                60
+            }),
+            ("a reload", |ed| {
+                let body = ed.docs[0].text.to_string().replacen(&"word ".repeat(390), "", 1);
+                assert!(crate::disk::reload_text(&mut ed.docs[0], &Rope::from_str(&body)));
+                60
+            }),
+        ];
+        for (how, shrink) in shrinks {
+            let mut ed = Editor::new(Config::default());
+            ed.config.soft_wrap = "always".into();
+            let lines: String = (1..40).map(|i| format!("line{i}\n")).collect();
+            ed.docs[0].text = Rope::from_str(&format!("{long}\n{lines}"));
+            // (the cursor six lines down: the long line's last rows on screen above it, scrolloff's five lines
+            // between — its other rows above the screen)
+            let at = ed.docs[0].text.line_to_byte(6);
+            ed.docs[0].set_selection(crate::selection::Selection::point(at));
+            render(&mut ed, &mut Vec::new(), 60, 20).unwrap();
+            assert!(
+                matches!(ed.docs[0].top_rows, Some((0, n)) if n > 20),
+                "{how}: {:?}",
+                ed.docs[0].top_rows
+            );
+            let w = shrink(&mut ed);
+            let mut buf = Vec::new();
+            render(&mut ed, &mut buf, w, 20).unwrap();
+            let rows = screen(&buf, w as usize, 20);
+            let cursor = rows.iter().any(|r| r.split_whitespace().any(|w| w == "line6"));
+            // (the text under the path bar and its rule: the top line's, from a row it has)
+            assert!(cursor && rows[2].contains("word"), "{how}: {rows:#?}");
+        }
+    }
+
+    /// The rows of a top line above a pane are that pane's: two panes on one document, the focused one scrolled
+    /// to the cursor six lines under a long line (most of its rows above it) — the other, its top that same
+    /// line, starts from the line's first row; and focus moving there and back hands the document each pane's
+    /// own (the one it left stayed on: another pane's rows on a pane whose top is the same line).
+    #[test]
+    fn the_top_lines_hidden_rows_are_each_panes_own() {
+        let mut ed = Editor::new(Config::default());
+        ed.config.soft_wrap = "always".into();
+        let lines: String = (1..40).map(|i| format!("line{i}\n")).collect();
+        ed.docs[0].text = Rope::from_str(&format!("{}\n{lines}", "word ".repeat(400)));
+        let frame = |ed: &mut Editor| render(ed, &mut Vec::new(), 100, 30).unwrap();
+        frame(&mut ed);
+        let left = ed.session.focus;
+        ed.split_view(crate::split::Dir::Vertical);
+        let right = ed.session.focus;
+        let at = ed.docs[0].text.line_to_byte(6);
+        ed.docs[0].set_selection(crate::selection::Selection::point(at));
+        frame(&mut ed);
+        let scrolled = ed.docs[0].top_rows;
+        assert!(matches!(scrolled, Some((0, n)) if n > 10), "{scrolled:?}");
+        // (where each pane's first row starts: line, display column)
+        let first = |ed: &Editor, id| {
+            let p = ed.screen.panes.iter().find(|p| p.0 == id).unwrap();
+            p.3.first().map(|r| (r.0, r.1)).unwrap()
+        };
+        assert_eq!(first(&ed, left), (0, 0), "the other pane from the line's first row");
+        assert_eq!(first(&ed, right).0, 0);
+        assert!(first(&ed, right).1 > 0, "the focused one past its first rows");
+        // (focus moving: the document takes the pane's own, before any frame — not the one it left)
+        ed.focus_view(left);
+        assert_eq!(ed.docs[0].top_rows, None, "the other pane's own");
+        ed.focus_view(right);
+        assert_eq!(ed.docs[0].top_rows, scrolled, "back, the scrolled one's own");
+    }
+
+    /// A pane handed another document (the one it showed closed) starts from that document's first row: the rows
+    /// it had hidden of its old top line aren't the new one's (kept, the new line 0 was drawn from its 13th row).
+    #[test]
+    fn a_pane_handed_another_document_starts_from_its_first_row() {
+        let mut ed = Editor::new(Config::default());
+        ed.config.soft_wrap = "always".into();
+        let text = format!("{}\nshort\n", "word ".repeat(400));
+        ed.docs[0].text = Rope::from_str(&text);
+        let other = crate::document::Document::from_str(ed.alloc_id(), &text);
+        let gone = other.id;
+        ed.docs.push(other);
+        ed.session.docs.push(gone);
+        let left = ed.session.focus;
+        ed.split_view(crate::split::Dir::Vertical);
+        // (the left pane on the other document, scrolled into its first line)
+        let v = ed.session.views.iter_mut().find(|v| v.id == left).unwrap();
+        (v.doc, v.top, v.top_rows) = (gone, 0, Some((0, 12)));
+        ed.close_doc(gone);
+        render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        let p = ed.screen.panes.iter().find(|p| p.0 == left).unwrap();
+        assert_eq!(p.3.first().map(|r| (r.0, r.1)), Some((0, 0)), "from the line's first row");
     }
 
     /// #91: the card's count keeps here and elsewhere apart — and shortens before the title is cut.

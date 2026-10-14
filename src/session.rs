@@ -965,7 +965,7 @@ impl Editor {
         let shown = self.docs[self.current].id;
         let docs: std::collections::HashSet<DocId> = self.docs.iter().map(|d| d.id).collect();
         for v in self.session.views.iter_mut().filter(|v| !docs.contains(&v.doc)) {
-            v.doc = shown;
+            v.show(shown);
         }
         self.events.set_session(id);
         // (servers that stopped while it rested: back for its files)
@@ -1663,6 +1663,39 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// A pane of a session behind, its document closed from another meanwhile, shows the next one from its
+    /// first row: the closed one's scroll isn't the next one's (kept, it was drawn from line 3's sixth row). An
+    /// unfocused pane: the focused one takes the document's scroll.
+    #[test]
+    fn a_pane_whose_document_closed_behind_shows_the_next_from_its_top() {
+        let dir = std::env::temp_dir().join(format!("tarae-sessions-closed-behind-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for p in ["front", "back"] {
+            std::fs::create_dir_all(dir.join(p)).unwrap();
+        }
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.session.name) = (dir.join("front"), "front".into());
+        let back = ed.session_open(&dir.join("back")).unwrap();
+        assert_eq!(ed.session.id, back);
+        // (in `back`: two panes, the unfocused one on a document of its own scrolled into its line 3)
+        let doc = crate::document::Document::from_str(ed.alloc_id(), &"word ".repeat(400).repeat(5));
+        let gone = doc.id;
+        ed.docs.push(doc);
+        ed.session.docs.push(gone);
+        let left = ed.session.focus;
+        ed.split_view(crate::split::Dir::Vertical);
+        let v = ed.session.views.iter_mut().find(|v| v.id == left).unwrap();
+        (v.doc, v.top, v.left, v.top_rows) = (gone, 3, 2, Some((3, 5)));
+        assert!(ed.session_switch(0));
+        ed.close_doc(gone);
+        assert!(ed.session_switch(back));
+        let v = ed.session.views.iter().find(|v| v.id == left).unwrap();
+        assert_ne!(v.doc, gone);
+        assert_eq!((v.top, v.left, v.top_rows), (0, 0, None));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Two checkouts, `front` and `back`, each a cargo project with a `main.rs` — and an editor whose rust

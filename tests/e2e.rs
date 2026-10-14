@@ -150,6 +150,77 @@ fn a_subcommand_under_a_low_limit_leaves_no_pin() {
     }
 }
 
+/// `tarae state … | head -3`: the reader closes its end early, and every way `tarae state` prints (the text,
+/// `--json`, `--watch`, `--frame FILE`'s line, `--help`) ends quietly — exit 0, nothing on stderr — where `println!` panicked on the EPIPE
+/// (#229). A stand-in tarae answers on a socket of the test's own (`TARAE_UI`); tarae's stdout is a pipe
+/// whose read end is closed before it starts.
+#[test]
+fn tarae_state_ends_quietly_when_its_reader_is_gone() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::fd::FromRawFd;
+    use std::os::unix::net::UnixListener;
+    let sb = Sandbox::new("epipe");
+    // (short: a socket's path fits `sun_path`)
+    let sock = sb.home().join("u.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().map_while(Result::ok) {
+            let mut req = String::new();
+            BufReader::new(&s).read_line(&mut req).ok();
+            let watching = req.contains("\"watch\"");
+            let answer = match (watching, req.contains(r#""get":"frame""#)) {
+                (true, _) => r#"{"frame":1,"said":"a key"}"#,
+                (false, true) => r#"{"frame":{"cols":2,"rows":1,"frames":1,"bytes":"ab"}}"#,
+                (false, false) => r#"{"text":"one\ntwo\nthree\nfour\n","mode":"NOR"}"#,
+            };
+            // A watcher's lines keep coming until it hangs up; an answer is one line.
+            while writeln!(s, "{answer}").is_ok() && watching {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    });
+    let frame = sb.home().join("frame.txt");
+    let frame_arg = frame.to_str().unwrap();
+    for args in
+        [&[][..], &["--json"], &["--watch"], &["--json", "--watch"], &["--frame", frame_arg], &["--help"]]
+    {
+        let mut fds = [0; 2];
+        // SAFETY: a fresh pipe; each end owned once.
+        let write_end = unsafe {
+            cvt(libc::pipe(fds.as_mut_ptr())).unwrap();
+            libc::close(fds[0]);
+            std::os::fd::OwnedFd::from_raw_fd(fds[1])
+        };
+        let mut child = Command::new(BIN)
+            .arg("state")
+            .args(args)
+            .env_clear()
+            .envs(sb.env())
+            .env("TARAE_UI", &sock)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(write_end))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            if std::time::Instant::now() > end {
+                child.kill().ok();
+                panic!("tarae state {args:?} didn't end with its reader gone");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut said = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut said).unwrap();
+        assert!(status.success() && said.is_empty(), "tarae state {args:?}: {status}: {said}");
+    }
+    // (the frame was written before its line went nowhere)
+    assert_eq!(fs::read_to_string(&frame).unwrap(), "ab");
+}
+
 #[test]
 fn version_and_help_print_without_a_terminal() {
     let out = Command::new(BIN).arg("--version").output().unwrap();

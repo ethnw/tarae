@@ -52,7 +52,7 @@ impl Editor {
             Place::Bottom => rows.saturating_sub(self.rows_of(line) + self.scrolloff()),
         };
         let top = self.top_for(line, above);
-        self.doc_mut().top = top;
+        self.doc_mut().set_top(top);
     }
 
     /// Puts `lines` in sight as a whole (a follow or replay stop — the cursor on its first line): left as
@@ -86,7 +86,7 @@ impl Editor {
         let tall = rows_in(start, end);
         let above = if tall <= rows { ((rows - tall) / 2).max(so) } else { RANGE_CONTEXT.max(so) };
         let top = self.top_for(start, above);
-        self.doc_mut().top = top;
+        self.doc_mut().set_top(top);
     }
 
     /// First and last lines fully on screen, inside the scrolloff margin.
@@ -119,7 +119,7 @@ impl Editor {
     pub fn scroll_view(&mut self, delta: isize, extend: bool) {
         let last = mv::last_line(&self.doc().text);
         let top = (self.doc().top as isize + delta).clamp(0, last as isize) as usize;
-        self.doc_mut().top = top;
+        self.doc_mut().set_top(top);
         let (first, bottom) = self.inner_lines();
         let line = self.cursor_line();
         if line < first {

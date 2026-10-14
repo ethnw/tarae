@@ -210,7 +210,7 @@ impl Editor {
                     self.search_origin = Some(top);
                 }
                 if line < top || line >= top + rows {
-                    self.doc_mut().top = line.saturating_sub(rows / 3);
+                    self.doc_mut().set_top(line.saturating_sub(rows / 3));
                 }
             }
         }

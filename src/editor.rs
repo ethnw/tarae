@@ -367,6 +367,8 @@ pub struct View {
     pub doc: DocId,
     pub top: usize,
     pub left: usize,
+    /// The rows of its top line above it (`Document.top_rows`) — its own, as its `top`.
+    pub top_rows: Option<(usize, usize)>,
     /// Spots to come back to (`C-o`/`C-i`) · the document shown before this one (`ga`).
     pub jumps: crate::jumplist::JumpList,
     pub last_doc: Option<DocId>,
@@ -374,7 +376,13 @@ pub struct View {
 
 impl View {
     pub fn new(id: crate::split::ViewId, doc: DocId) -> Self {
-        Self { id, doc, top: 0, left: 0, jumps: Default::default(), last_doc: None }
+        Self { id, doc, top: 0, left: 0, top_rows: None, jumps: Default::default(), last_doc: None }
+    }
+
+    /// Shows another document in its place (the one it showed went): from its top — the old one's scroll, rows
+    /// of its top line included, aren't the new one's.
+    pub fn show(&mut self, doc: DocId) {
+        (self.doc, self.top, self.left, self.top_rows) = (doc, 0, 0, None);
     }
 }
 
@@ -935,7 +943,7 @@ impl Editor {
         if let Some(i) = slot {
             let old = self.docs[i].id;
             for v in self.session.views.iter_mut().filter(|v| v.doc == old) {
-                (v.doc, v.top, v.left) = (id, 0, 0);
+                v.show(id);
             }
             self.session.docs.retain(|&d| d != old);
             self.docs[i] = doc;
@@ -1201,7 +1209,7 @@ impl Editor {
         let now = self.docs[self.current].id;
         for v in self.session.views.iter_mut() {
             if v.doc == gone {
-                (v.doc, v.top, v.left) = (now, 0, 0);
+                v.show(now);
             }
             v.jumps.remove_doc(gone);
             v.last_doc = v.last_doc.filter(|&d| d != gone);
@@ -1231,14 +1239,14 @@ impl Editor {
     /// another path — opening a file, switching buffers).
     pub fn sync_focus_view(&mut self) {
         self.track_doc_switch();
-        let (doc, top, left) = {
+        let (doc, top, left, top_rows) = {
             let d = self.doc();
-            (d.id, d.top, d.left)
+            (d.id, d.top, d.left, d.top_rows)
         };
         self.session_keeps(doc);
         let focus = self.session.focus;
         if let Some(v) = self.view_mut(focus) {
-            (v.doc, v.top, v.left) = (doc, top, left);
+            (v.doc, v.top, v.left, v.top_rows) = (doc, top, left, top_rows);
         }
     }
 
@@ -1254,7 +1262,7 @@ impl Editor {
         if let Some(i) = self.docs.iter().position(|d| d.id == v.doc) {
             self.current = i;
             let d = &mut self.docs[i];
-            (d.top, d.left) = (v.top, v.left);
+            (d.top, d.left, d.top_rows) = (v.top, v.left, v.top_rows);
         }
         self.completion = None;
         self.popup = None;
@@ -2248,7 +2256,7 @@ impl Editor {
                 };
                 let pos = mv::pos_at_col(&doc.text, line, col, tab);
                 let doc = self.doc_mut();
-                doc.top = top;
+                doc.set_top(top);
                 doc.set_selection(Selection::point(pos));
             }
             K::Down | K::Drag => {
@@ -3794,7 +3802,7 @@ impl Editor {
             self.plugin_prompt_done(token, None);
         }
         if let Some(top) = self.search_origin.take() {
-            self.doc_mut().top = top;
+            self.doc_mut().set_top(top);
         }
     }
 

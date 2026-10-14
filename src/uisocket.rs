@@ -369,7 +369,36 @@ usage: tarae state [--json] [--pid PID] [--after-input N]
   --watch [KINDS]    what changes, a line an event, until interrupted — KINDS: keys,cards,sessions,reviewer,
                      turns,runs,toasts,usage,procs (all when left out)";
 
+/// `tarae state`: a reader that stops early (`| head -3`) ends it quietly — exit 0, nothing said.
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
+    match state(args) {
+        Err(e) if e.is::<ReaderGone>() => Ok(()),
+        r => r,
+    }
+}
+
+/// Stdout's reader is gone (EPIPE): nothing more to print, nothing wrong.
+#[derive(Debug)]
+struct ReaderGone;
+
+impl std::fmt::Display for ReaderGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stdout's reader is gone")
+    }
+}
+
+impl std::error::Error for ReaderGone {}
+
+/// `text` on stdout, flushed — a closed pipe is `ReaderGone` (`println!` would panic on it).
+fn say(text: std::fmt::Arguments) -> anyhow::Result<()> {
+    let mut out = std::io::stdout().lock();
+    out.write_fmt(text).and_then(|()| out.flush()).map_err(|e| match e.kind() {
+        std::io::ErrorKind::BrokenPipe => anyhow::Error::new(ReaderGone),
+        _ => e.into(),
+    })
+}
+
+fn state(args: &[String]) -> anyhow::Result<()> {
     let (mut json, mut pid, mut after, mut watching) = (false, None, 0u64, None::<Vec<String>>);
     let (mut chat, mut review, mut frame) = (None::<String>, None::<String>, None::<PathBuf>);
     let mut features = false;
@@ -396,10 +425,7 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
             "--after-input" => {
                 after = num(it.next()).ok_or_else(|| anyhow::anyhow!("--after-input N\n{USAGE}"))?
             }
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
+            "-h" | "--help" => return say(format_args!("{USAGE}\n")),
             other => anyhow::bail!("unknown: {other}\n{USAGE}"),
         }
     }
@@ -418,8 +444,10 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("{e}");
             }
             match json {
-                true => println!("{line}"),
-                false => println!("{:>6}  {}", v["frame"], v["said"].as_str().unwrap_or_default()),
+                true => say(format_args!("{line}\n"))?,
+                false => {
+                    say(format_args!("{:>6}  {}\n", v["frame"], v["said"].as_str().unwrap_or_default()))?
+                }
             }
         }
         return Ok(());
@@ -447,14 +475,12 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
         let f = &v["frame"];
         std::fs::write(&file, f["bytes"].as_str().unwrap_or_default())
             .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
-        println!("{}: {}×{}, frame {}", file.display(), f["cols"], f["rows"], f["frames"]);
-        return Ok(());
+        return say(format_args!("{}: {}×{}, frame {}\n", file.display(), f["cols"], f["rows"], f["frames"]));
     }
     match v["text"].as_str() {
-        Some(t) if !json => print!("{t}"),
-        _ => println!("{v}"),
+        Some(t) if !json => say(format_args!("{t}")),
+        _ => say(format_args!("{v}\n")),
     }
-    Ok(())
 }
 
 /// One request, its answer.

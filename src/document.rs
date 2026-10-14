@@ -157,6 +157,9 @@ pub struct Document {
     /// View scroll (line, screen column) — kept when switching buffers.
     pub top: usize,
     pub left: usize,
+    /// `(line, n)`: while `top` is that line, its first `n` wrapped rows are above the screen — a wrapped
+    /// line scrolls by rows, so one taller than half the screen isn't jumped past (#233). Another `top`: none.
+    pub top_rows: Option<(usize, usize)>,
     /// Loading a big file in the background — text still empty. No saving (would overwrite with nothing).
     pub loading: bool,
     /// Syntax tree and language (None if the language is unknown).
@@ -231,6 +234,17 @@ pub struct Document {
 }
 
 impl Document {
+    /// The view starts at `line`, from its first row.
+    pub fn set_top(&mut self, line: usize) {
+        self.top = line;
+        self.top_rows = None;
+    }
+
+    /// The rows of the top line above the screen (`top_rows`).
+    pub fn top_skip(&self) -> usize {
+        self.top_rows.filter(|&(l, _)| l == self.top).map_or(0, |(_, n)| n)
+    }
+
     pub fn from_str(id: DocId, text: &str) -> Self {
         Self {
             id,
@@ -238,6 +252,7 @@ impl Document {
             path: None,
             top: 0,
             left: 0,
+            top_rows: None,
             loading: false,
             syntax: None,
             lsp: DocLsp::default(),

@@ -356,6 +356,12 @@ fn socks_refuses_host(s: TcpStream) -> Vec<u8> {
     socks(s, None, true, 2, echo)
 }
 
+/// `socks_refuses_host`, 0.6 s late — an upstream on a loaded machine standing in: later than a 0.4 s limit.
+fn socks_refuses_host_late(s: TcpStream) -> Vec<u8> {
+    std::thread::sleep(Duration::from_millis(600));
+    socks_refuses_host(s)
+}
+
 /// tarae's environment naming a SOCKS5 upstream at `at` (`scheme`: socks5h or socks5) for everything, as a local
 /// client's `ALL_PROXY` does.
 fn via_socks(scheme: &str, at: SocketAddr, creds: Option<(&str, &str)>) -> Upstreams {
@@ -440,17 +446,21 @@ fn plain_http_goes_through_a_socks5_upstream_in_origin_form() {
 /// What failed at a SOCKS5 upstream is said as the upstream's (`network-upstream`), as an http one's: its sign-in
 /// refused, no way of signing in it takes (without credentials, and with), the host refused by its rules (a tunnel
 /// and a plain request), silent, unreachable — the run gets 502, the report names the variable, never where it is,
-/// and `:sandbox-blocked` offers nothing.
+/// and `:sandbox-blocked` offers nothing. Only the silent one is waited on to the proxy's limit (0.4 s, a proxy of
+/// its own); the others answer, and their proxy waits for that up to `WAIT` — under load a 0.4 s limit had one
+/// that answers said as silent (#232).
 #[test]
 fn a_socks5_upstreams_failures_are_said_as_its_own() {
     let closed = TcpListener::bind((LO, 0)).unwrap().local_addr().unwrap();
-    let (refusing, no_way, no_host, quiet) = (
+    let (refusing, no_way, no_host, late, quiet) = (
         outside(socks_refuses_sign_in),
         outside(socks_takes_no_way),
         outside(socks_refuses_host),
+        outside(socks_refuses_host_late),
         outside(silent),
     );
-    let f = start(resolver(Vec::new()).0, Limits { connect: Duration::from_millis(400), ..limits() });
+    let quick = start(resolver(Vec::new()).0, Limits { connect: Duration::from_millis(400), ..limits() });
+    let f = start(resolver(Vec::new()).0, Limits { connect: WAIT, ..limits() });
     let creds = Some(("u", "tarae-fake-token-7"));
     let get = "GET http://example.invalid/ HTTP/1.1\r\n\r\n".to_string();
     let connect = connect_head("example.invalid:443");
@@ -476,11 +486,17 @@ fn a_socks5_upstreams_failures_are_said_as_its_own() {
             &get,
             "it refused it: its rules don't allow it (SOCKS5 reply 2)",
         ),
+        (
+            via_socks("socks5", late.at, creds),
+            &connect,
+            "it refused it: its rules don't allow it (SOCKS5 reply 2)",
+        ),
         (via_socks("socks5h", quiet.at, creds), &connect, "it didn't answer within 0.4 s"),
         (via_socks("socks5h", closed, creds), &connect, "it can't be reached (connection refused)"),
     ];
     for (upstream, request, why) in cases {
-        let (mut c, d) = connection(&f.proxy, 1, 1, rules_via(&["example.invalid"], upstream));
+        let proxy = if why.contains("didn't answer") { &quick.proxy } else { &f.proxy };
+        let (mut c, d) = connection(proxy, 1, 1, rules_via(&["example.invalid"], upstream));
         c.write_all(request.as_bytes()).unwrap();
         let head = head_of(&mut c);
         assert!(head.starts_with("HTTP/1.1 502 "), "{why}: {head}");
