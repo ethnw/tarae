@@ -274,6 +274,203 @@ fn claude_cant_read_a_key() {
     }
 }
 
+/// A stand-in SSH agent at `path`: a unix socket that takes each connection and closes it, counting them — so
+/// `ssh-add -l` fails reading its answer (exit 1), where a refused connect is "Could not open a connection" (2).
+#[cfg(target_os = "macos")]
+struct Agent {
+    path: PathBuf,
+    taken: Arc<std::sync::atomic::AtomicUsize>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Agent {
+    fn at(path: &Path) -> Agent {
+        use std::sync::atomic::Ordering::SeqCst;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (t, s) = (Arc::clone(&taken), Arc::clone(&stop));
+        let thread = std::thread::spawn(move || {
+            for c in listener.incoming() {
+                if s.load(SeqCst) {
+                    return;
+                }
+                t.fetch_add(1, SeqCst);
+                drop(c);
+            }
+        });
+        Agent { path: path.to_path_buf(), taken, stop, thread: Some(thread) }
+    }
+
+    fn taken(&self) -> usize {
+        self.taken.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Agent {
+    fn drop(&mut self) {
+        // (woken by one last connection of the test's own, then gone)
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if std::os::unix::net::UnixStream::connect(&self.path).is_ok() {
+            self.thread.take().map(|t| t.join());
+        }
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// A folder in `/private/tmp` named as launchd names its agent's (`com.apple.launchd.*`) — made new by the test
+/// (a name taken is never reused nor removed), only it removed when dropped: emptied of what the test made first
+/// (its `Agent` is dropped before it).
+#[cfg(target_os = "macos")]
+struct LaunchdLike(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl LaunchdLike {
+    fn made() -> LaunchdLike {
+        use std::os::unix::fs::DirBuilderExt;
+        for n in 0.. {
+            let at = PathBuf::from(format!(
+                "/private/tmp/com.apple.launchd.tarae-test-{}-{n}",
+                std::process::id()
+            ));
+            match std::fs::DirBuilder::new().mode(0o700).create(&at) {
+                Ok(()) => return LaunchdLike(at),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("{}: {e}", at.display()),
+            }
+        }
+        unreachable!()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for LaunchdLike {
+    fn drop(&mut self) {
+        std::fs::remove_dir(&self.0).ok();
+    }
+}
+
+/// Which of the named sockets (each a variable of that name holding its path) `ssh-add -l` reaches under `text`
+/// with `p`'s parameters: name → connected.
+#[cfg(target_os = "macos")]
+fn agents_reached(h: &Home, p: &Profile, text: &str, socks: &[(&str, &Path)]) -> HashMap<String, bool> {
+    let script: String = socks
+        .iter()
+        .map(|(n, _)| {
+            format!(
+                "SSH_AUTH_SOCK=\"${n}\" /usr/bin/ssh-add -l >/dev/null 2>&1; if [ $? = 2 ]; then echo \"{n} \
+                 refused\"; else echo \"{n} ok\"; fi\n"
+            )
+        })
+        .collect();
+    let mut c = Command::new(super::super::SANDBOX_EXEC);
+    c.args(["-p", text]);
+    for (k, v) in p.params() {
+        c.args(["-D".to_string(), format!("{k}={v}")]);
+    }
+    c.args(["/bin/sh", "-c", &script]).current_dir(&h.root).env_remove("SSH_AUTH_SOCK");
+    c.envs(socks.iter().map(|(n, s)| (*n, *s)));
+    outcomes(&c.output().unwrap().stdout)
+}
+
+/// claude can't reach your SSH agent (G20): its profile refuses connecting to the socket `SSH_AUTH_SOCK` led to
+/// when tarae started — by its real path, so through a link too — and to launchd's agent sockets (a stand-in in
+/// `/private/tmp/com.apple.launchd.*/Listeners`, older macOS's place: newer ones' `/private/var/run` is root's —
+/// `launchds_agent_sockets_are_refused_in_both_places`), each a stand-in agent here that counts what reaches it; another
+/// socket stays reachable (the profile is files only). No `SSH_AUTH_SOCK` when tarae started: launchd's still
+/// refused. Seen broken: the rule taken out, every agent is reached.
+#[test]
+#[cfg(target_os = "macos")]
+fn claude_cant_reach_your_ssh_agent() {
+    if crate::sandbox::skipped_inside("sandbox::claude::tests::claude_cant_reach_your_ssh_agent") {
+        return;
+    }
+    let h = Home::new("agent");
+    let agent = Agent::at(&h.base.join("agent/a.sock"));
+    std::os::unix::fs::symlink(h.base.join("agent"), h.base.join("link")).unwrap();
+    let through_link = h.base.join("link/a.sock");
+    let folder = LaunchdLike::made();
+    let launchd = Agent::at(&folder.0.join("Listeners"));
+    let other = Agent::at(&h.base.join("other.sock"));
+    let socks = [
+        ("agent", through_link.as_path()),
+        ("launchd", launchd.path.as_path()),
+        ("other", other.path.as_path()),
+    ];
+    // (a connection is counted once the stand-in's thread took it: waited for, by the last one the probe made)
+    let counted = |want_other: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while other.taken() < want_other && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        (agent.taken(), launchd.taken(), other.taken())
+    };
+    let mut here = h.here();
+    here.env.insert("SSH_AUTH_SOCK".into(), through_link.clone().into());
+    let p = Profile::new(&h.root, &h.home, false, &here, "tarae-claude.test.");
+    assert_eq!(p.agent.as_deref(), Some(profile_path(&agent.path).as_path()), "its real path");
+    // (the probe reaches a socket outside the profile: else "refused" would mean nothing)
+    let seen = agents_reached(&h, &p, "(version 1)\n(allow default)\n", &socks);
+    let all = |ok: bool| socks.iter().map(|(n, _)| (n.to_string(), ok)).collect::<HashMap<_, _>>();
+    assert_eq!(seen, all(true), "unconfined, the probe reaches each");
+    assert_eq!(counted(1), (1, 1, 1), "each stand-in counted its connection");
+    let seen = agents_reached(&h, &p, &p.text(), &socks);
+    let expect = HashMap::from([("agent".into(), false), ("launchd".into(), false), ("other".into(), true)]);
+    assert_eq!(seen, expect);
+    assert_eq!(counted(2), (1, 1, 2), "what the agents saw");
+    // No `SSH_AUTH_SOCK` when tarae started: no parameter, launchd's still refused
+    let unset = Profile::new(&h.root, &h.home, false, &h.here(), "tarae-claude.test.");
+    assert_eq!(unset.agent, None);
+    let seen = agents_reached(&h, &unset, &unset.text(), &socks);
+    assert_eq!(seen.get("launchd"), Some(&false));
+    assert_eq!(seen.get("agent"), Some(&true), "no path given, none refused");
+    // Broken once: the rule taken out — every agent reached
+    let rule = "(deny network-outbound (require-all (remote unix-socket)";
+    let open: String = p.text().lines().filter(|l| !l.starts_with(rule)).map(|l| format!("{l}\n")).collect();
+    assert_ne!(open, p.text(), "the agents' deny is there to take out");
+    assert_eq!(agents_reached(&h, &p, &open, &socks), all(true), "the rule taken out");
+}
+
+/// The regex in the agents' rule (`(regex #"…")` on the profile's `network-outbound` deny).
+fn agents_regex(text: &str) -> String {
+    let rule = text.lines().find(|l| l.starts_with("(deny network-outbound")).expect("the agents' rule");
+    let from = rule.find("(regex #\"").expect("a regex in it") + "(regex #\"".len();
+    rule[from..].split('"').next().unwrap().to_string()
+}
+
+/// The profile's rule refuses launchd's agent sockets where each macOS puts them: `/private/var/run/` (27.0.1, the
+/// live check's) and `/private/tmp/` (older) — and nothing beside them. The rule's own regex, read from the
+/// profile's text, as the `regex` crate reads it — not Seatbelt: root's `/private/var/run` can't hold a test's
+/// stand-in, so Seatbelt's own answer there is only the live check's (`target/sb/v1b-claude-mac.sh`, which probes
+/// launchd's real agent under the profile without `AGENT`). Seen broken: the `/private/tmp`-only form misses
+/// 27.0.1's.
+#[test]
+fn launchds_agent_sockets_are_refused_in_both_places() {
+    let h = Home::new("launchd");
+    let text = h.profile(false).text();
+    let re = regex::Regex::new(&agents_regex(&text)).unwrap();
+    for at in [
+        "/private/var/run/com.apple.launchd.87nSqGsHm3/Listeners",
+        "/private/tmp/com.apple.launchd.AbCdEf1234/Listeners",
+    ] {
+        assert!(re.is_match(at), "refused: {at}");
+    }
+    for at in [
+        "/private/var/run/com.apple.launchd.x/Listeners/y",
+        "/private/var/runner/com.apple.launchd.x/Listeners",
+        "/private/var/run/com.apple.launchdx/Listeners",
+        "/private/var/run/a/com.apple.launchd.x/Listeners",
+        "/var/run/com.apple.launchd.x/Listeners",
+        "/private/tmp/other.sock",
+    ] {
+        assert!(!re.is_match(at), "not launchd's: {at}");
+    }
+}
+
 /// A home where claude never ran (no `~/.claude` — a new user, e2e's home): tarae makes `~/.claude` too, and the
 /// profile is made — claude starts confined on day one, not unconfined with a note. A `~/.claude` that's a link
 /// (dotfiles) is followed where it leads, as before.
@@ -318,7 +515,8 @@ fn this_projects_folder_is_made_through_no_link() {
 /// Not a check: the live one's profile (`target/sb/v1b-claude-mac.sh` with `V1B_ENFORCE=1`, outside tarae's
 /// sandbox) — the chat's own (`for_chat`: your home, as `Here` says it) for the project `V1D_ROOT`, the arm
 /// `V1D_WRITES` ("1": Edit and Write's), tagged `V1D_TAG`, written to `V1D_OUT` as `sandbox-exec`'s arguments in
-/// one `set --` line the script sources. Writes only that file.
+/// one `set --` line the script sources. `V1D_NO_AGENT=1`: without the `AGENT` parameter, so launchd's agent
+/// sockets are refused by the rule's regex alone (G20). Writes only that file.
 #[test]
 #[ignore]
 #[cfg(target_os = "macos")]
@@ -327,7 +525,8 @@ fn the_live_checks_profile() {
     let (root, out, tag) = (var("V1D_ROOT"), var("V1D_OUT"), var("V1D_TAG"));
     let writes = std::env::var("V1D_WRITES").is_ok_and(|w| w == "1");
     let p = for_chat(Path::new(&root), writes).expect("Seatbelt here");
-    let p = Profile { tag, ..p };
+    let agent = if std::env::var("V1D_NO_AGENT").is_ok_and(|w| w == "1") { None } else { p.agent.clone() };
+    let p = Profile { tag, agent, ..p };
     let words: Vec<String> = p.args().iter().map(|a| crate::packs::sh_quote(a)).collect();
     std::fs::write(out, format!("set -- {}\n", words.join(" "))).unwrap();
 }

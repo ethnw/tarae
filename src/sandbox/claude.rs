@@ -1,5 +1,5 @@
 //! The claude process itself under a Seatbelt profile of its own (V1d, decision 17: files only — the network,
-//! the programs it starts and the system's services as they are). `(allow default)` and denies where the harm is
+//! the programs it starts and the system's services as they are, but your SSH agent's socket: G20). `(allow default)` and denies where the harm is
 //! (`target/sb/v1d-plan.md`, from what claude 2.1.296 touched — `target/sb/v1b-mac.log`): it reads no place that
 //! holds keys (but the keychain: `security` reads its login there), no file named like a key in home or the
 //! project, and nothing of tarae's state but the log; it writes only its own (`~/.claude/`, `~/.claude.json` and
@@ -77,6 +77,11 @@ const KEYCHAINS: &str = "Library/Keychains";
 /// The program that says what Seatbelt refused, by the profile's tag.
 const LOG: &str = "/usr/bin/log";
 
+/// launchd's SSH agent sockets (macOS gives every login one, `SSH_AUTH_SOCK` names it) — a fixed form, no one's
+/// path in it. Where depends on the macOS: `/private/tmp/` on the older ones (as widely reported, through 14 at
+/// least), `/private/var/run/` on 27.0.1 (measured, the live check) — when it moved isn't known here, so both.
+const LAUNCHD_AGENTS: &str = r"^/private/(var/run|tmp)/com\.apple\.launchd\.[^/]+/Listeners$";
+
 /// Claude's profile for one process: where it runs, whose home, which arm.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
@@ -94,6 +99,8 @@ pub struct Profile {
     pub kept: Vec<PathBuf>,
     /// tarae's log, in tarae's state but read: Claude reads it unasked (#45).
     pub log: Option<PathBuf>,
+    /// Your SSH agent's socket (real): where `SSH_AUTH_SOCK` led when tarae started — never connected to (G20).
+    pub agent: Option<PathBuf>,
     /// What each deny says (`with message`): the refusals' watch finds them by it (`watch`).
     pub tag: String,
 }
@@ -112,7 +119,8 @@ impl Profile {
         crate::sorting::sort(&mut temps);
         temps.dedup();
         let log = crate::log::path().map(|l| profile_path(&l));
-        Profile { root, home, writes_project, temps, kept, log, tag: tag.to_string() }
+        let agent = here.path("SSH_AUTH_SOCK").filter(|a| a.is_absolute()).map(|a| profile_path(&a));
+        Profile { root, home, writes_project, temps, kept, log, agent, tag: tag.to_string() }
     }
 
     /// Claude's own folders (`OWN_DIRS`, real).
@@ -215,6 +223,12 @@ impl Profile {
         if self.log.is_some() {
             p.push_str("(allow file-read-data file-read-xattr (literal (param \"LOG\")))\n");
         }
+        // Connecting: never to your SSH agent (G20) — it signs with your keys for whoever reaches its socket. The
+        // one `SSH_AUTH_SOCK` led to (claude isn't given the variable, but a path is found elsewhere) and launchd's
+        let agent = if self.agent.is_some() { " (literal (param \"AGENT\"))" } else { "" };
+        p.push_str(&deny(&format!(
+            "network-outbound (require-all (remote unix-socket) (require-any{agent} (regex #\"{LAUNCHD_AGENTS}\")))"
+        )));
         p
     }
 
@@ -228,6 +242,7 @@ impl Profile {
         v.extend(self.temps.iter().enumerate().map(|(i, p)| (format!("W{i}"), s(p))));
         v.extend(self.kept.iter().enumerate().map(|(i, p)| (format!("X{i}"), s(p))));
         v.extend(self.log.iter().map(|l| ("LOG".to_string(), s(l))));
+        v.extend(self.agent.iter().map(|a| ("AGENT".to_string(), s(a))));
         v
     }
 

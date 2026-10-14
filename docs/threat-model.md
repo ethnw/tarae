@@ -551,6 +551,17 @@ Kept:
 - **Its environment**: API keys dropped unless you keep them; a parent Claude Code session's variables dropped.
   test: `llm::tests::what_the_process_itself_holds_never_reaches_claude` ·
   `llm::tests::keys_go_to_claude_only_when_you_keep_them_outside_claude_code`
+- **Your SSH agent**: no claude tarae starts gets `SSH_AUTH_SOCK` (its git only reads status, it never needs the
+  agent), and on macOS its profile refuses connecting to the socket that variable named when tarae started (by
+  its real path: through a link too) and to launchd's agent sockets, `com.apple.launchd.*/Listeners` in
+  `/private/var/run/` (macOS 27) or `/private/tmp/` (older) — measured with `ssh-add -l`, which reached each
+  outside the profile; live on 27.0.1, your agent refused under it (by the socket the variable named). In
+  `/private/var/run/` (root's: no test can put a stand-in there) Seatbelt's own answer to the launchd rule is only
+  the live check's, which probes launchd's agent under the profile without the variable's socket; the test reads
+  the rule's regex with Rust's `regex`, not Seatbelt's.
+  test: `llm::tests::every_claude_tarae_starts_has_no_ssh_agent` ·
+  `sandbox::claude::tests::claude_cant_reach_your_ssh_agent` ·
+  `sandbox::claude::tests::launchds_agent_sockets_are_refused_in_both_places`
 - **Where tarae's AppArmor profile lends user namespaces**, what starts for Claude doesn't get them.
   test: `spawn::tests::only_claudes_and_plugins_processes_are_kept_from_user_namespaces` ·
   `seccomp::tests::what_starts_outside_for_claude_makes_no_user_namespace`
@@ -586,12 +597,14 @@ Not kept:
 - **Your user-scope MCP servers.** `~/.claude.json` holds them — commands your own claude starts — and claude must
   write that file (its state, counters, project entries): a bug could add a server there. tarae's chat runs with
   `--strict-mcp-config` and starts none of them; your own claude, outside tarae, would.
-- **Your SSH agent.** claude inherits `SSH_AUTH_SOCK` from tarae (runs don't get it) and the profile leaves unix
-  sockets open: it can have the agent sign with your keys without reading them. Proposed: leave it out of claude's
-  environment (its git only reads status) and deny that socket in its profile.
-- **Claude Code's own memory folder** (`~/.claude/projects/<project>/memory/`, its auto-memory, shared by every
-  checkout of a repository) is read unasked — it's inside claude's own folder. On macOS the profile keeps claude
-  from writing it (a new project's folder isn't even made); on Linux it's written as everything is.
+- **An SSH agent at another socket.** Without the variable claude has to find a path on its own; on macOS an agent
+  whose socket `SSH_AUTH_SOCK` didn't name when tarae started (one started later, a second agent of another
+  program) is still reachable — the profile refuses only those it knows. On Linux claude has no profile: any agent
+  socket whose path it finds is reachable.
+- **Claude Code's own memory folder** (`~/.claude/projects/<project>/memory/`, shared by every checkout of a
+  repository) is inside claude's own folder: no claude tarae starts loads it (auto memory is off — above), but its
+  own code could still read it. On macOS the profile keeps claude from writing it (a new project's folder isn't
+  even made); on Linux it's written as everything is.
 
 Planned ([roadmap](roadmap.md), sandbox validation): Linux's profile (Landlock), once what claude touches there is
 measured.
@@ -631,7 +644,7 @@ Not Claude's, but a hostile repository reaches them:
 | G17 | claude's own git reads a repository's config (`core.fsmonitor` …) | it's claude's, not tarae's | measured: its git didn't run the fsmonitor that a plain `git status` there runs (2.1.296); on macOS what it would run is confined as claude is; measured again by the live check under the profile |
 | G18 | `llm.sandbox = false` runs Claude's commands unconfined with no card | your choice, said in the title | said; a project needs your trust to set it |
 | G19 | claude writes `~/.claude.json`, which holds your user-scope MCP servers (commands your own claude starts) | claude's state lives in it | said; the chat runs `--strict-mcp-config` |
-| G20 | claude inherits `SSH_AUTH_SOCK`: the agent signs with your keys for it | unix sockets stay open (files-only profile) | proposed: drop it from claude's environment, deny the socket |
+| G20 | claude inherited `SSH_AUTH_SOCK`: the agent signed with your keys for it | unix sockets stay open (files-only profile) | closed: no claude tarae starts gets `SSH_AUTH_SOCK`, and on macOS its profile refuses connecting to the socket it named when tarae started (real path) and to launchd's agent sockets in `/private/var/run/` (macOS 27) and `/private/tmp/` (older) (test: `llm::tests::every_claude_tarae_starts_has_no_ssh_agent` · `sandbox::claude::tests::claude_cant_reach_your_ssh_agent` · `sandbox::claude::tests::launchds_agent_sockets_are_refused_in_both_places`; live: `ssh-add -l` refused under the profile on 27.0.1; `/private/var/run/` is checked under Seatbelt only by the live check — root's folder, no test stand-in); left: on Linux no profile yet (the variable is still removed); on macOS an agent at a socket the variable didn't name at start |
 | G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: on Linux the folder is still readable to claude (no profile there) — nothing reads it now |
 | G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | caught after the run, asked before anything runs it, as G10 (§1.2: new files, ignored folders' names, names past 5,000 new files, links, repositories); left: an ignored folder that was there before, what a leftover makes later, no git checkout, your tests and `:restart`'s build |
 | G22 | A refusal of claude's own work (not a tool's) goes unseen; `~/.claude/` is a denylist | the kernel didn't report claude's refusals (V1d, live) | an allowlist of what claude writes, once its refusals can be seen — and with it a measurement of `shell-snapshots/` (kept closed unmeasured: whether a later claude sources one it didn't make can't be told from here) |

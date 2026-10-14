@@ -3005,6 +3005,7 @@ mod tests {
             temps: Vec::new(),
             kept: Vec::new(),
             log: None,
+            agent: None,
             tag: "tarae-claude.test.".into(),
         };
         let c = ed.session.chat.as_mut().unwrap();

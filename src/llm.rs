@@ -337,6 +337,11 @@ pub fn spawn(
     // Code. The variable outranks the setting `autoMemoryEnabled` (2.1.296), so a project's settings can't turn
     // it back on. Team memory (`CLAUDE_MEMORY_STORES`) is memory too: never passed
     cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1").env_remove("CLAUDE_MEMORY_STORES");
+    // Nor does it reach your SSH agent (threat model G20): through its socket the agent signs with your keys for
+    // whoever asks, no key read. claude's own git only reads status, it never needs one; Claude's runs never got
+    // it (`runenv`). On macOS its profile also refuses the socket (`sandbox::claude`): a child that finds the path
+    // elsewhere still can't connect
+    cmd.env_remove("SSH_AUTH_SOCK");
     // (removed by name, never `env_clear`: the rest of tarae's environment is claude's as it always was. An API
     // session never keeps a key from it: one there outranks its helper — Claude Code's credential order)
     let keep_keys = cfg.keep_env_key && *cred == Credential::Subscription;
@@ -1920,6 +1925,23 @@ pub(crate) mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "1 unset");
     }
 
+    /// Every claude tarae starts is without `SSH_AUTH_SOCK` — whether it would inherit it from tarae's own
+    /// environment or be given it — so it can't have your SSH agent sign with your keys (threat model G20).
+    #[test]
+    fn every_claude_tarae_starts_has_no_ssh_agent() {
+        let cfg = LlmConfig {
+            command: "sh".into(),
+            args: vec!["-c".into(), "printf '%s' \"${SSH_AUTH_SOCK-unset}\"".into()],
+            ..Default::default()
+        };
+        // (given, as `given` passes tarae's environment on; the test binary's own isn't changed — a stand-in path)
+        let given = Env::from([("SSH_AUTH_SOCK".to_string(), "/tarae-test/agent.sock".to_string())]);
+        let sub = Credential::Subscription;
+        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset");
+    }
+
     /// Under claude's own profile `sandbox-exec` starts whatever follows: a missing program is still the spawn's
     /// failure, said as one (`spawn_failed`) — never a process that exits at once with nothing said in the chat.
     #[test]
@@ -1932,6 +1954,7 @@ pub(crate) mod tests {
             temps: Vec::new(),
             kept: Vec::new(),
             log: None,
+            agent: None,
             tag: "tarae-claude.test.".into(),
         };
         let path = Env::from([("PATH".to_string(), "/nowhere".to_string())]);

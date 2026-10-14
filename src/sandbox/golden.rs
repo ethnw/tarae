@@ -959,7 +959,9 @@ fn every_claim_names_a_test_that_exists() {
 /// and its parameters: a deny removed, a place opened, a rule moved shows here.
 #[test]
 fn the_claude_profile_is_pinned() {
-    let f = Fixture::new("claude", Os::Mac, &[]);
+    let mut f = Fixture::new("claude", Os::Mac, &[]);
+    // (an SSH agent's socket, as your environment names one: never connected to — G20)
+    f.here.env.insert("SSH_AUTH_SOCK".into(), f.home.join(".ssh/agent.sock").into());
     let parts = |p: &Path| p.components().filter(|c| matches!(c, Component::Normal(_))).count();
     let mut out = String::new();
     for writes_project in [false, true] {
