@@ -145,12 +145,22 @@ impl ReachOut {
 }
 
 /// What a run's sandbox report said (`Guard::report_with`): its text, whether it said something was
-/// blocked, and the digest of the rules it would say — `known` for the next report.
+/// blocked, and the digests of the rules and the guarantees it would say — `known` for the next report (None: a
+/// run without guarantees).
 #[derive(Debug)]
 pub struct Report {
     pub text: String,
     pub blocked: bool,
     pub rules: u64,
+    pub guarantees: Option<u64>,
+}
+
+/// What Claude was told in its conversation (`Chat.rules_said`, `tools::rules_known`), by digest: the rules (None:
+/// say them) and the guarantees (`Guarantees::told` — None: say them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Told {
+    pub rules: Option<u64>,
+    pub guarantees: Option<u64>,
 }
 
 impl Guard {
@@ -242,28 +252,64 @@ impl Guard {
     /// runs say it through `report_with`.)
     #[cfg(test)]
     pub fn report(&self, output: &[(bool, String)]) -> String {
-        self.report_with(output, None).text
+        self.report_with(output, Told::default()).text
     }
 
-    /// `report`, the rules left out of a quiet one when `known` is their digest — Claude was told them in
+    /// `report`, the rules left out of a quiet one when `known` has their digest — Claude was told them in
     /// this conversation (`tools::rules_known`): ~400 tokens each run, read again by every later request. A
     /// report that says something was blocked, that tarae couldn't watch, or where nothing is watched (a
-    /// refusal shows only in the output) always says them.
-    pub fn report_with(&self, output: &[(bool, String)], known: Option<u64>) -> Report {
-        let rules = self.rules();
-        let digest = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            rules.hash(&mut h);
-            h.finish()
-        };
-        let quiet_rules = if known == Some(digest) { String::new() } else { rules.clone() };
-        let (text, blocked) = self.report_text(output, rules, quiet_rules);
-        Report { text, blocked, rules: digest }
+    /// refusal shows only in the output) always says them. The guarantees (what's kept from other sessions'
+    /// commands and what's shared, `Guarantees::told`) come after the rules once a conversation and again when
+    /// they change (9b, decision 11; N2: their notes too — 124 to 168 tokens, measured, in every report that says
+    /// the rules again), whatever else the report says.
+    pub fn report_with(&self, output: &[(bool, String)], known: Told) -> Report {
+        self.report_as(output, known, self.guarantees())
     }
 
-    fn report_text(&self, output: &[(bool, String)], rules: String, quiet_rules: String) -> (String, bool) {
+    /// `report_with`, its run's guarantees given (tests: each tier's on any machine).
+    fn report_as(
+        &self,
+        output: &[(bool, String)],
+        known: Told,
+        guarantees: Option<guarantees::Guarantees>,
+    ) -> Report {
+        let digest = |s: &String| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        };
+        let rules = self.rules();
+        let rules_digest = digest(&rules);
+        let quiet_rules = if known.rules == Some(rules_digest) { String::new() } else { rules.clone() };
+        let told = guarantees.map(|g| g.told());
+        let guarantees = told.as_ref().map(digest);
+        let apart = told.filter(|_| known.guarantees != guarantees).unwrap_or_default();
+        let (text, blocked) = self.report_text(output, rules, quiet_rules, &apart);
+        Report { text, blocked, rules: rules_digest, guarantees }
+    }
+
+    /// What its runs are kept apart from and share (`Policy::guarantees`) — None: not in the sandbox.
+    fn guarantees(&self) -> Option<guarantees::Guarantees> {
+        match self {
+            Guard::In(p) => p.guarantees(),
+            _ => None,
+        }
+    }
+
+    fn report_text(
+        &self,
+        output: &[(bool, String)],
+        rules: String,
+        quiet_rules: String,
+        apart: &str,
+    ) -> (String, bool) {
         let Guard::In(p) = self else { return (rules, false) };
+        // (the guarantees: a paragraph of their own after the rules' — or where they'd be, left out)
+        let with_apart = |s: String| match apart.is_empty() {
+            true => s.trim_end().to_string(),
+            false => format!("{}\n{apart}", s.trim_end()),
+        };
         let unwatched = match p.denials_from() {
             Some(from) => format!(
                 " What it refused is read {from}: \"Permission denied\" on a file, \"Operation not permitted\" on \
@@ -290,7 +336,7 @@ impl Guard {
         }
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
             // (nothing watched: a refusal shows only in the output — the rules are how Claude reads it)
-            return (format!("{ps}{rules}{unwatched}"), false);
+            return (with_apart(format!("{ps}{rules}{unwatched}")), false);
         }
         if b.total > 0 || o.total > 0 {
             let mut s = match (&b.failed, b.total) {
@@ -354,14 +400,15 @@ impl Guard {
                      (outside_sandbox, with your reason); don't work around it.",
                 );
             }
-            return (s, true);
+            return (with_apart(s), true);
         }
         let quiet = quiet_said(&b).unwrap_or_default();
         let text = match b.failed {
-            None => format!("The sandbox blocked nothing. {quiet}{ps}{quiet_rules}"),
+            None => with_apart(format!("The sandbox blocked nothing. {quiet}{ps}{quiet_rules}")),
             Some(why) => {
                 let mut s =
                     format!("tarae couldn't watch what the sandbox blocked ({why}). {ps}{rules}{unwatched}");
+                // (the lines read by the rules, right after them; the guarantees last)
                 let refused = refused_lines(output);
                 if !refused.is_empty() {
                     s.push_str("\nLines that may be the sandbox:\n");
@@ -369,7 +416,7 @@ impl Guard {
                         s.push_str(&format!("  {l}\n"));
                     }
                 }
-                s
+                with_apart(s)
             }
         };
         (text, false)
@@ -702,10 +749,9 @@ impl Guard {
                     }
                     false => "",
                 };
+                // (what's shared with other sessions' commands isn't here: the guarantees' paragraph, 9b)
                 let (names_where, net, linux) = match linux {
                     Some((said, notes)) => ("where they are now", said.unwrap_or(net), notes),
-                    // (a Seatbelt policy's — made for macOS, `supervised` Linux's: the golden's stand-in too)
-                    None if !p.supervised => ("anywhere in it", net, seatbelt_guarantees(p).shared_said()),
                     None => ("anywhere in it", net, String::new()),
                 };
                 format!(
@@ -6039,9 +6085,10 @@ mod tests {
         let p = Policy::for_project(&env(Path::new("/Users/u/p")));
         let quiet = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("rules-once.")), ..p.clone() }));
         let rules = quiet.rules();
-        let first = quiet.report_with(&[], None);
+        let first = quiet.report_with(&[], Told::default());
         assert!(first.text.contains(&rules) && !first.blocked, "{}", first.text);
-        let again = quiet.report_with(&[], Some(first.rules));
+        let known = |r: &Report| Told { rules: Some(r.rules), guarantees: None };
+        let again = quiet.report_with(&[], known(&first));
         assert!(!again.text.contains(&rules), "{}", again.text);
         assert!(again.text.starts_with("The sandbox blocked nothing."), "{}", again.text);
         let w = Watch::quiet("rules-once-blocked.");
@@ -6051,14 +6098,67 @@ mod tests {
             target: "/Users/u/elsewhere/x".into(),
         });
         let blocked =
-            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(&[], Some(first.rules));
+            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(&[], known(&first));
         assert!(blocked.blocked && blocked.text.contains(&rules), "{}", blocked.text);
         // Nothing watched: a refusal would show only in the output — the rules always come with it
         let unwatched = Guard::In(Box::new(Policy { watch: None, ..p.clone() }));
-        let told = unwatched.report_with(&[], Some(unwatched.report_with(&[], None).rules));
+        let told = unwatched.report_with(&[], known(&unwatched.report_with(&[], Told::default())));
         assert!(!told.blocked && told.text.contains(&unwatched.rules()), "{}", told.text);
         let open = Guard::In(Box::new(Policy { localhost: !p.localhost, ..p }));
-        assert_ne!(open.report_with(&[], None).rules, first.rules);
+        assert_ne!(open.report_with(&[], Told::default()).rules, first.rules);
+    }
+
+    /// 9b: the guarantees' paragraph comes after the rules on every path a report takes — quiet, blocked, nothing
+    /// watched (the rules always said), couldn't watch (after the lines that may be the sandbox, which stay with the
+    /// rules) — and on none once told.
+    #[test]
+    fn the_guarantees_follow_the_rules_on_every_path() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let g = guarantees::Guarantees::seatbelt(true, false);
+        let told = g.told();
+        let blocked = Watch::quiet("apart-blocked.");
+        blocked.record(denial("file-write-create", "/Users/u/elsewhere/x"));
+        let failed = Watch::quiet("apart-failed.");
+        failed.fail("log: Cannot run while sandboxed".into());
+        let out = [(true, "touch: /Users/u/p/x: Operation not permitted".to_string())];
+        let paths = [
+            ("quiet", Some(Watch::quiet("apart-quiet.")), &[][..]),
+            ("blocked", Some(blocked), &[][..]),
+            ("nothing watched", None, &[][..]),
+            ("couldn't watch", Some(failed), &out[..]),
+        ];
+        for (path, watch, output) in paths {
+            let guard = Guard::In(Box::new(Policy { watch, ..p.clone() }));
+            let rules = guard.rules();
+            let first = guard.report_as(output, Told::default(), Some(g.clone()));
+            let (at_rules, at_told) = (first.text.find(&rules), first.text.find(&told));
+            assert!(at_rules.is_some() && at_told > at_rules, "{path}: {}", first.text);
+            if path == "couldn't watch" {
+                let lines = first.text.find("Lines that may be the sandbox");
+                assert!(lines > at_rules && at_told > lines, "{path}: {}", first.text);
+            }
+            let known = Told { rules: None, guarantees: first.guarantees };
+            let again = guard.report_as(output, known, Some(g.clone()));
+            assert!(again.text.contains(&rules) && !again.text.contains(&told), "{path}: {}", again.text);
+        }
+    }
+
+    /// A policy made for Linux whose Landlock rules weren't made — not yet, or they failed (its run never starts) —
+    /// has no guarantees to say, never Seatbelt's; one made for macOS has Seatbelt's, on either system.
+    #[test]
+    fn a_linux_policy_never_says_seatbelts_words() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let mac = Policy { supervised: false, ..p.clone() };
+        let linux = Policy { supervised: true, ..p };
+        assert_eq!(mac.guarantees(), Some(seatbelt_guarantees(&mac)));
+        assert_eq!(linux.guarantees(), None, "its rules not made yet");
+        #[cfg(target_os = "linux")]
+        {
+            let failed = Policy { confine: Some(Err("the sandbox couldn't be made: x".into())), ..linux };
+            assert_eq!(failed.guarantees(), None, "its rules failed");
+            let r = Guard::In(Box::new(failed)).report(&[]);
+            assert!(!r.contains("Seatbelt") && !r.contains("macOS's sandbox"), "{r}");
+        }
     }
 
     /// Files named like keys in the project (7a, names from the data — `secretnames`): the profile denies their

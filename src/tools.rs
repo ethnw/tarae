@@ -2999,12 +2999,16 @@ pub fn run_done(ed: &mut Editor) {
     }
 }
 
-/// The digest of the sandbox's rules when Claude was told them in its conversation now (`Chat.rules_said`) —
-/// a quiet report leaves them out (`Guard::report_with`). None: say them — the conversation's first run, the
-/// first after a compaction or after they changed, and a run that failed (the rules may be why).
-fn rules_known(ed: &Editor, failed: bool) -> Option<u64> {
-    let c = ed.session.chat.as_ref()?;
-    (!failed && c.rules_said.0 == c.conversation).then_some(c.rules_said.1).flatten()
+/// What of the sandbox's Claude was told in its conversation now (`Chat.rules_said`) — a report leaves out what
+/// it would say again (`Guard::report_with`). Nothing known: say it — the conversation's first run, the first
+/// after a compaction or after it changed; and the rules again after a run that failed (they may be why), the
+/// guarantees not (9b: what's kept from other sessions isn't why a run failed).
+fn rules_known(ed: &Editor, failed: bool) -> crate::sandbox::Told {
+    let Some(c) = ed.session.chat.as_ref().filter(|c| c.rules_said.0 == c.conversation) else {
+        return Default::default();
+    };
+    let told = c.rules_said.1;
+    crate::sandbox::Told { rules: told.rules.filter(|_| !failed), ..told }
 }
 
 /// A run's sandbox report went into its result: the rules it would say are told, and a run the sandbox
@@ -3012,7 +3016,10 @@ fn rules_known(ed: &Editor, failed: bool) -> Option<u64> {
 fn rules_told(ed: &mut Editor, said: Option<&crate::sandbox::Report>) {
     let Some(r) = said else { return };
     if let Some(c) = ed.session.chat.as_mut() {
-        c.rules_said = (c.conversation.clone(), Some(r.rules));
+        // (a run without guarantees — outside, or a probe's rules — leaves what was told as it was)
+        let before = if c.rules_said.0 == c.conversation { c.rules_said.1.guarantees } else { None };
+        let told = crate::sandbox::Told { rules: Some(r.rules), guarantees: r.guarantees.or(before) };
+        c.rules_said = (c.conversation.clone(), told);
     }
     if r.blocked {
         ed.session.usage.tally.blocked();
@@ -5655,18 +5662,34 @@ mod tests {
 
     /// The sandbox's rules once a conversation: the first run's report says them, the next quiet one doesn't;
     /// a failed run, a compaction, another conversation say them again; a run the sandbox blocked is counted
-    /// for `:usage` (its report says the rules itself — `Guard::report_with`).
+    /// for `:usage` (its report says the rules itself — `Guard::report_with`). The guarantees likewise, but a
+    /// failed run doesn't say them again, nor does a run that had none (outside the sandbox) forget them.
     #[test]
     fn the_sandbox_rules_are_told_once_a_conversation() {
+        use crate::sandbox::Told;
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         let mut c = crate::chat::Chat::new();
         c.conversation = Some("c1".into());
         ed.session.chat = Some(c);
-        let report = |blocked: bool| crate::sandbox::Report { text: String::new(), blocked, rules: 7 };
-        assert_eq!(super::rules_known(&ed, false), None, "the first run says them");
-        super::rules_told(&mut ed, Some(&report(false)));
-        assert_eq!(super::rules_known(&ed, false), Some(7), "known: a quiet report leaves them out");
-        assert_eq!(super::rules_known(&ed, true), None, "a failed run says them again");
+        let report = |blocked: bool, guarantees: Option<u64>| crate::sandbox::Report {
+            text: String::new(),
+            blocked,
+            rules: 7,
+            guarantees,
+        };
+        let none = Told::default();
+        let known = Told { rules: Some(7), guarantees: Some(9) };
+        assert_eq!(super::rules_known(&ed, false), none, "the first run says them");
+        super::rules_told(&mut ed, Some(&report(false, Some(9))));
+        assert_eq!(super::rules_known(&ed, false), known, "known: a quiet report leaves them out");
+        let failed = Told { rules: None, ..known };
+        assert_eq!(
+            super::rules_known(&ed, true),
+            failed,
+            "a failed run says the rules again, not the guarantees"
+        );
+        super::rules_told(&mut ed, Some(&report(false, None)));
+        assert_eq!(super::rules_known(&ed, false), known, "a run outside leaves the guarantees told");
         let compacted = crate::compaction::Compaction {
             trigger: "auto".into(),
             pre_tokens: None,
@@ -5674,11 +5697,12 @@ mod tests {
             at_ms: 0,
         };
         crate::compaction::on_compacted(&mut ed, compacted);
-        assert_eq!(super::rules_known(&ed, false), None, "a compaction may have dropped them");
-        super::rules_told(&mut ed, Some(&report(true)));
-        assert_eq!(super::rules_known(&ed, false), Some(7));
+        assert_eq!(super::rules_known(&ed, false), none, "a compaction may have dropped them");
+        super::rules_told(&mut ed, Some(&report(true, None)));
+        assert_eq!(super::rules_known(&ed, false), Told { rules: Some(7), guarantees: None });
+        super::rules_told(&mut ed, Some(&report(false, Some(9))));
         ed.session.chat.as_mut().unwrap().conversation = Some("c2".into());
-        assert_eq!(super::rules_known(&ed, false), None, "another conversation hasn't heard them");
+        assert_eq!(super::rules_known(&ed, false), none, "another conversation hasn't heard them");
         let calls = ed.session.usage.tally.end(&[], None, 0);
         assert_eq!(calls.sums.run_refused, 1, "the blocked run");
     }

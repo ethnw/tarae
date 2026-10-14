@@ -6398,13 +6398,16 @@ mod tests {
         let probed = super::super::tier::get();
         let (user_ns, tier) = (mine.ns.user, probed.tier().said());
         let why = probed.short.as_deref().map(|w| format!(" — {w}")).unwrap_or_default();
-        // What the report says a run of this session's can't be kept from (`linux_said`'s notes), its rules made
-        // with its keeper as a project's run's are
+        // What the report says a run of this session's can't be kept from (its guarantees' notes, said with the
+        // conversation's first run), its rules made with its keeper as a project's run's are
         let plain = Err("not served".into());
         let (mut p, c, _root) = project_served("apart", Vec::new(), Some(&mine), &[], plain);
         let g = c.guarantees.clone().expect("a keeper's run has its guarantees");
         p.confine = Some(Ok(c));
-        let (_, notes) = p.linux_said().unwrap();
+        // (judged on the notes alone — the sentence names every part, kept or shared)
+        let notes = g.shared_said();
+        let report = crate::sandbox::Guard::In(Box::new(p)).report(&[]);
+        assert!(report.contains(&notes), "the conversation's first report carries the notes: {report}");
         mine.end();
         theirs.end();
         let got: std::collections::HashMap<&str, &str> =
@@ -6893,10 +6896,14 @@ mod tests {
         let (ns, net, tier) = (mine.keeper.ns, mine.confine.net, mine.confine.tier());
         let ptys = mine.confine.ptys.is_some();
         let g = mine.confine.guarantees.clone().expect("a keeper's run has its guarantees");
-        // What the report says a run of this session's can't be kept from (`linux_said`'s notes)
+        // What the report says a run of this session's can't be kept from (its guarantees' notes, said with the
+        // conversation's first run)
         let mut p = mine.policy.clone();
         p.confine = Some(Ok(mine.confine.clone()));
-        let (_, notes) = p.linux_said().unwrap();
+        // (judged on the notes alone — the sentence names every part, kept or shared)
+        let notes = g.shared_said();
+        let report = crate::sandbox::Guard::In(Box::new(p)).report(&[]);
+        assert!(report.contains(&notes), "the conversation's first report carries the notes: {report}");
         mine.end();
         theirs.end();
         let got: std::collections::HashMap<&str, &str> =

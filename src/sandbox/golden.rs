@@ -371,7 +371,96 @@ fn the_report_is_pinned() {
     out.push_str(&calm.report(&[]));
     let line = panel_line(Some(&calm), false, std::time::Instant::now());
     out.push_str(&format!("\npanel: {line:?}\n"));
+    // 9b: the run's guarantees after the rules — with the conversation's first run; a later quiet run says neither,
+    // a later failed one the rules again but not them. Seatbelt's (the policy's own), then each tier's (its keeper's,
+    // given); the rules said once above
+    use super::guarantees::{Found, Guarantees, Ns};
+    let rules = calm.rules();
+    let none = Some("no user namespaces: kernel.unprivileged_userns_clone is 0".to_string());
+    let no_pid =
+        Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
+    let tiers: [(&str, Option<Found>); 7] = [
+        ("Seatbelt", None),
+        (
+            "A+, ABI 11",
+            Some(Found { abi: 11, network: false, ..tier_found(Ns::session(true, true), true, false, true) }),
+        ),
+        (
+            "A, ABI 6",
+            Some(Found { short: no_pid.clone(), ..tier_found(Ns::session(true, false), true, false, false) }),
+        ),
+        ("B+, ABI 6", Some(tier_found(Ns::session(true, true), false, false, false))),
+        ("C, ABI 4", Some(Found { abi: 4, short: none.clone(), ..tier_found(Ns::NONE, true, false, false) })),
+        (
+            "C by copies, ABI 11",
+            Some(Found { abi: 11, short: none.clone(), ..tier_found(Ns::NONE, true, true, false) }),
+        ),
+        ("D, ABI 3", Some(Found { abi: 3, short: none, ..tier_found(Ns::NONE, false, false, false) })),
+    ];
+    for (label, found) in tiers {
+        let g = found.map(Guarantees::landlock).or_else(|| calm.guarantees());
+        let said = |known: Told| calm.report_as(&[], known, g.clone()).text.replace(&rules, "[the rules]");
+        let first = calm.report_as(&[], Told::default(), g.clone());
+        let later = Told { rules: Some(first.rules), guarantees: first.guarantees };
+        out.push_str(&format!("\n══ {label}: the conversation's first run\n{}", said(Told::default())));
+        out.push_str(&format!("\n── a later run\n{}", said(later)));
+        out.push_str(&format!("\n── a later run that failed\n{}\n", said(Told { rules: None, ..later })));
+    }
     pinned("sandbox_report.txt", &f.named(&out, run.as_deref()));
+}
+
+/// A keeper's `Found` at Landlock ABI 6, `served` or not (Yama's 3), by `copies`, its runs going out by TPROXY or
+/// not (why not: no `nft_tproxy`, or no network namespace of its own), the network open; nothing else short.
+fn tier_found(
+    ns: super::guarantees::Ns,
+    served: bool,
+    copies: bool,
+    tproxy: bool,
+) -> super::guarantees::Found {
+    let net = ns.run_net(served, copies);
+    super::guarantees::Found {
+        ns,
+        served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
+        copies,
+        abi: 6,
+        ptys: ns.serves_ptys(net).then_some(16),
+        tproxy: match (tproxy, ns.netns()) {
+            (true, _) => Ok(()),
+            (false, true) => Err("this kernel has no nft_tproxy".into()),
+            (false, false) => Err("no network namespace of its own".into()),
+        },
+        lo_missing: Vec::new(),
+        short: None,
+        network: true,
+    }
+}
+
+/// 9b, decision 11: Claude's report says the run's tier — what its sandbox keeps from other sessions' commands, what
+/// it shares, and the notes on that (N2) — with the conversation's first run, not with the next, and again once a
+/// policy change gives its runs another keeper: the network opened, the session's keeper has no network namespace of
+/// its own, its loopback this machine's (`tools::rules_told` keeps what was told; a failed run's rules come again).
+#[test]
+fn the_report_says_the_tier_once() {
+    use super::guarantees::{Found, Guarantees, Ns};
+    let f = Fixture::new("tier-once", Os::Mac, &[]);
+    let p = f.policy(&crate::llm::LlmConfig::default());
+    let calm = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("tier-once.")), ..p }));
+    let closed = Found { network: false, ..tier_found(Ns::session(true, true), true, false, true) };
+    let open = tier_found(Ns::session(false, true), true, false, false);
+    let (closed, open) = (Guarantees::landlock(closed), Guarantees::landlock(open));
+    assert_ne!(closed.told(), open.told(), "another keeper's namespaces, other words");
+    let mut known = Told::default();
+    let mut run = |g: &Guarantees, failed: bool| {
+        let asked = Told { rules: known.rules.filter(|_| !failed), ..known };
+        let r = calm.report_as(&[], asked, Some(g.clone()));
+        known = Told { rules: Some(r.rules), guarantees: r.guarantees };
+        r.text.contains(&g.told())
+    };
+    assert!(run(&closed, false), "the conversation's first run says it");
+    assert!(!run(&closed, false), "the next doesn't");
+    assert!(!run(&closed, true), "nor a failed one, which says the rules again");
+    assert!(run(&open, false), "another keeper's: said again");
+    assert!(!run(&open, false), "and then not");
 }
 
 /// 9a: what each tier's runs are kept apart from and share, in every place's words (`guarantees.rs`) — every tier,
@@ -384,24 +473,7 @@ fn the_report_is_pinned() {
 fn the_guarantees_say_each_tier() {
     use super::guarantees::{Found, Guarantees, Ns, Part, Tier};
     use Part::*;
-    let found = |ns: Ns, served: bool, copies: bool, tproxy: bool| {
-        let net = ns.run_net(served, copies);
-        Found {
-            ns,
-            served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
-            copies,
-            abi: 6,
-            ptys: ns.serves_ptys(net).then_some(16),
-            tproxy: match (tproxy, ns.netns()) {
-                (true, _) => Ok(()),
-                (false, true) => Err("this kernel has no nft_tproxy".into()),
-                (false, false) => Err("no network namespace of its own".into()),
-            },
-            lo_missing: Vec::new(),
-            short: None,
-            network: true,
-        }
-    };
+    let found = tier_found;
     let no_pid =
         Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
     let none = Some("no user namespaces: kernel.unprivileged_userns_clone is 0".to_string());

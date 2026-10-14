@@ -376,8 +376,7 @@ impl Policy {
             let notes = format!(
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
                  it before your next run), and the terminal multiplexers' folders in /tmp stay \
-                 writable.{userns}{}{}{}{}{}",
-                c.guarantees.as_ref().map(|g| g.shared_said()).unwrap_or_default(),
+                 writable.{userns}{}{}{}{}",
                 linux::made_said(&c.made, &self.root),
                 linux::kept_said(&c.kept, &self.root),
                 linux::unread_said(&c.unread, &self.root),
@@ -386,6 +385,22 @@ impl Policy {
             return Some((net, notes));
         }
         None
+    }
+
+    /// What its runs are kept apart from and share (9a): Landlock's from the run's keeper (none for a probe's
+    /// rules); Seatbelt's for a policy made for macOS. A policy made for Linux (`supervised`: `policy_computed`,
+    /// `for_project`) whose rules aren't made — `confine` None, or Err: its run never starts (`spawn_as`) — says
+    /// nothing, never Seatbelt's words. On Linux a policy made for macOS is only a test's (`Here.os`: the golden's).
+    pub(super) fn guarantees(&self) -> Option<super::guarantees::Guarantees> {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return c.guarantees.clone();
+        }
+        debug_assert!(
+            cfg!(test) || cfg!(not(target_os = "linux")) || self.supervised,
+            "a policy made for macOS on Linux"
+        );
+        (!self.supervised).then(|| super::seatbelt_guarantees(self))
     }
 
     /// Linux without Landlock's audit log: what a run was refused in files is read from its own error lines

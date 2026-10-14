@@ -348,7 +348,7 @@ impl Guarantees {
 }
 
 /// Its words for the places that show it — Claude's report (9b), `tarae state` (9d), the panel and `:procs` (9e).
-#[cfg_attr(all(target_os = "linux", not(test)), expect(dead_code, reason = "said from 9b on"))]
+#[cfg_attr(all(target_os = "linux", not(test)), expect(dead_code, reason = "the state line: 9d"))]
 impl Guarantees {
     /// The parts it shares, in order.
     pub fn shared(&self) -> Vec<Part> {
@@ -429,7 +429,13 @@ impl Guarantees {
 }
 
 impl Guarantees {
-    /// What its runs share, in the report's words (`Policy::linux_said`'s notes, Seatbelt's `rules`): Landlock below
+    /// What Claude's run report says of it, after the rules, once a conversation and again when it changes (9b,
+    /// decision 11 and N2): the sentence, then what's shared in the report's words.
+    pub fn told(&self) -> String {
+        format!("{}{}", self.sentence(), self.shared_said())
+    }
+
+    /// What its runs share, in the report's words (said after the sentence: `told`): Landlock below
     /// ABI 6, the processes in sight without a PID namespace of the session's own, this system's System V IPC,
     /// `/dev/shm` and terminals without the session's namespaces (served, only the terminals it makes), `/dev/shm`
     /// alone where the session has none of its own; Seatbelt's shared memory and priority, and the ports it opens.

@@ -382,9 +382,9 @@ pub struct Chat {
     /// The variables its runs' reports have said were left out of their environment, in the conversation named
     /// (`sandbox::runenv`): each said once a conversation.
     pub env_said: (Option<String>, Vec<String>),
-    /// The conversation its runs' reports told the sandbox's rules in, and their digest (`tools::rules_known`):
-    /// once a conversation — forgotten at a compaction (`compaction.rs`).
-    pub rules_said: (Option<String>, Option<u64>),
+    /// The conversation its runs' reports told the sandbox's rules and guarantees in, and their digests
+    /// (`tools::rules_known`): once a conversation — forgotten at a compaction (`compaction.rs`).
+    pub rules_said: (Option<String>, crate::sandbox::Told),
     /// The project's Claude settings, read before its claude starts and answered on a card when they run
     /// commands or set its environment (`claudetrust.rs`).
     pub settings: crate::claudetrust::Gate,
@@ -575,7 +575,7 @@ impl Chat {
             cited: Vec::new(),
             pointed: Vec::new(),
             env_said: (None, Vec::new()),
-            rules_said: (None, None),
+            rules_said: (None, Default::default()),
             settings: Default::default(),
             billing: None,
             edit_tools: crate::edittool::Arm::Tarae,
