@@ -35,6 +35,8 @@ pub mod apparmor;
 pub mod cgroup;
 #[cfg(target_os = "linux")]
 pub mod channel;
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub mod claude;
 // (a keeper's scope from the user's manager: the wire built everywhere — its tests run on macOS too —, asked on Linux)
 pub mod dbus;
 #[cfg(test)]
@@ -2554,6 +2556,48 @@ pub(crate) fn key_regexes() -> Vec<String> {
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub(crate) fn key_exception_regexes() -> Vec<String> {
     in_runs(crate::secretnames::exceptions().map(glob_regex))
+}
+
+/// The start of a regex matching below `root` however deep: as many path parts as the root has — no path in it,
+/// so a name in the root's own path (a checkout under `.claude/worktrees`) doesn't close the whole project.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub(crate) fn below(root: &Path) -> String {
+    let depth = root.components().filter(|c| matches!(c, Component::Normal(_))).count();
+    format!("^{}/(.*/)?", "/[^/]+".repeat(depth))
+}
+
+/// The folders of tools' output (`outputs`) as Seatbelt regex alternatives.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn outputs_regex() -> String {
+    outputs().iter().map(|o| as_written(o)).collect::<Vec<_>>().join("|")
+}
+
+/// What's kept from writes in the project at `root` (the profile's `ROOT`), as a Seatbelt filter: the protected
+/// names (`name_regexes`) below it however deep, but below a folder of tools' output — runs' profile's rule and
+/// claude's own (`claude::Profile`), one rule.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub(crate) fn protected_writes(root: &Path) -> String {
+    let (below, outputs) = (below(root), outputs_regex());
+    let (mut named, mut in_output) = (String::new(), String::new());
+    for names in name_regexes() {
+        named.push_str(&format!(" (regex #\"{below}({names})(/|$)\")"));
+        in_output.push_str(&format!(" (regex #\"{below}({outputs})/(.*/)?({names})(/|$)\")"));
+    }
+    format!(
+        "(require-all (subpath (param \"ROOT\")) (require-any{named}) (require-not (require-any{in_output})))"
+    )
+}
+
+/// The files named like keys (`key_regexes`) right after `at` (a regex's start: `below` a project's root, `/`
+/// anywhere) — but templates and public keys (`key_exception_regexes`) and what's below tools' output: two
+/// filters for a `require-all`. Runs' profile's rule and claude's own (`claude::Profile`).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub(crate) fn key_files(at: &str) -> String {
+    let outputs = outputs_regex();
+    let names =
+        |v: Vec<String>| -> String { v.iter().map(|r| format!(" (regex #\"{at}({r})$\")")).collect() };
+    let (named, except) = (names(key_regexes()), names(key_exception_regexes()));
+    format!("(require-any{named}) (require-not (require-any{except} (regex #\"{at}({outputs})/\")))")
 }
 
 /// A file name with one `*` at most as a Seatbelt regex in any case: `[^/]*\.[pP][eE][mM]`.

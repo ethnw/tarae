@@ -19,6 +19,7 @@ mod chats;
 mod checkpoint;
 mod chrome;
 mod claudetrust;
+mod claudeupdate;
 mod clipboard;
 mod cmdline;
 mod codereview;

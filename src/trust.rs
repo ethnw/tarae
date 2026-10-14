@@ -20,7 +20,7 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 21] = [
+pub const RISKY: [&str; 22] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -30,6 +30,8 @@ pub const RISKY: [&str; 21] = [
     // (Claude's edits go in unseen, and the checks run them)
     "llm.review-at-end",
     "llm.chat-settings",
+    // (claude itself unconfined — also only yours: `YOURS_ONLY`)
+    "llm.claude-sandbox",
     "llm.sandbox",
     "llm.sandbox-network",
     // (a project's list takes the user's place — it could name more)
@@ -54,9 +56,16 @@ pub const RISKY: [&str; 21] = [
 
 /// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
 /// trusted or not (said): they decide whose credentials Claude uses and who pays, what Claude's chat edits
-/// with (`llm.edit-tools`), and whether what you use is counted (`features.count`) — a project never does.
-pub const YOURS_ONLY: [&str; 5] =
-    ["llm.environment-key", "llm.billing", "llm.reviewer-billing", "llm.edit-tools", "features.count"];
+/// with (`llm.edit-tools`), whether the claude program itself is confined (`llm.claude-sandbox`), and whether
+/// what you use is counted (`features.count`) — a project never does.
+pub const YOURS_ONLY: [&str; 6] = [
+    "llm.environment-key",
+    "llm.billing",
+    "llm.reviewer-billing",
+    "llm.edit-tools",
+    "llm.claude-sandbox",
+    "features.count",
+];
 
 pub fn yours_only(setting: &str) -> bool {
     YOURS_ONLY.contains(&setting)
@@ -542,6 +551,12 @@ mod tests {
         record(path.clone(), toml(&wt), v(0xa), false).unwrap();
         assert_eq!(Store::read(Some(&path)).state(&toml(&main), v(0xa)), State::Ignored);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Claude itself unconfined (`llm.claude-sandbox` off) loosens a guard: risky — and only yours, trusted or not.
+    #[test]
+    fn claudes_own_sandbox_is_risky_and_only_yours() {
+        assert!(is_risky("llm.claude-sandbox") && yours_only("llm.claude-sandbox"));
     }
 
     /// Every `llm.sandbox*` setting changes what Claude's commands may do unasked — where they write, what they

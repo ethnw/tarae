@@ -169,31 +169,15 @@ impl Policy {
             ));
         }
         // After the allows, so these win. The names a run keeps off, below the project's root however deep
-        // — the regex starts with as many path parts as the root has (no path in it), so a name in the
-        // root's own path (a checkout under `.claude/worktrees`) doesn't close the whole project
-        let depth = self.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
-        let below = format!("^{}/(.*/)?", "/[^/]+".repeat(depth));
-        let outputs = outputs().iter().map(|o| as_written(o)).collect::<Vec<_>>().join("|");
-        let (mut named, mut in_output) = (String::new(), String::new());
-        for names in name_regexes() {
-            named.push_str(&format!(" (regex #\"{below}({names})(/|$)\")"));
-            in_output.push_str(&format!(" (regex #\"{below}({outputs})/(.*/)?({names})(/|$)\")"));
-        }
-        p.push_str(&deny(&format!(
-            "file-write* (require-all (subpath (param \"ROOT\")) (require-any{named}) \
-             (require-not (require-any{in_output})))"
-        )));
+        // (`protected_writes`)
+        p.push_str(&deny(&format!("file-write* {}", protected_writes(&self.root))));
         // …the files named like keys (`secretnames`, data — 7a): not read, below the root however deep, but a
         // template or a public key (its `!` lines), what's below tools' output (a package's test keys), and each
         // file the user opened (`keys`)
         if let Some(keys) = &self.keys {
-            let names = |v: Vec<String>| -> String {
-                v.iter().map(|r| format!(" (regex #\"{below}({r})$\")")).collect()
-            };
-            let (named, except) = (names(key_regexes()), names(key_exception_regexes()));
             p.push_str(&deny(&format!(
-                "file-read-data file-read-xattr (require-all (subpath (param \"ROOT\")) (require-any{named}) \
-                 (require-not (require-any{except} (regex #\"{below}({outputs})/\"))))"
+                "file-read-data file-read-xattr (require-all (subpath (param \"ROOT\")) {})",
+                key_files(&below(&self.root))
             )));
             let open: String = (0..keys.len()).map(|i| format!(" (literal (param \"Y{i}\"))")).collect();
             if !open.is_empty() {

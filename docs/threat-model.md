@@ -14,9 +14,11 @@ thing **not kept** says why, and where it's planned, when.
 Claude never runs a command as you. Its commands run in a sandbox: they write only in the project (minus the
 files that run later), read in your home only what toolchains need, never read keys, and reach no network unless
 you turn it on — then only through tarae, which checks every host. Its edits come to you as a review. Its reads
-outside the project ask you first. What's not kept: the `claude` program itself runs as you, unconfined — it
-reads its login from your keychain, runs git in the project and reaches Anthropic's servers (§2 lists what it
-touched, measured); a command can read what's outside your home folder and the temp folders; with the network on
+outside the project ask you first. The `claude` program itself runs as you, but on macOS in a sandbox of its own:
+it reads no key folders or files named like keys and writes only its own folders and temp — not the project, not
+what runs later (§2). What's not kept: on Linux the `claude` program is unconfined; on macOS it still reads its
+login from your keychain, runs git in the project and reaches Anthropic's servers (§2 lists what it touched,
+measured); a command can read what's outside your home folder and the temp folders; with the network on
 and no host list, it can send what it read to any host; and on macOS it can read your other processes' command
 lines and starting environments.
 
@@ -36,7 +38,7 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 
 ```
  you ──▶ tarae (trusted: your process, not confined)
-          ├─ the claude process  (as you, NOT confined; network open — Anthropic or your proxy)
+          ├─ the claude process  (as you — macOS: files-only sandbox of its own; Linux: NOT confined; network open)
           │     tools: Claude Code's Read (each call asks tarae) · tarae's own tools (in tarae)
           │     starts by itself: git, security (its login), sh (system facts)
           ├─ Claude's runs        (sandboxed: Seatbelt on macOS; keeper + Landlock + seccomp + supervisor on Linux)
@@ -393,6 +395,7 @@ Not kept:
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
 | `y`/`a` on a no-sandbox card | commands as you, unconfined |
 | `llm.sandbox = false` | every command of Claude's as you, unconfined, **unasked** — only the chat's title says `› no sandbox` |
+| `llm.claude-sandbox = false` | the claude program itself as you, unconfined (macOS) — the chat says so; only your own config sets it |
 
 test: `allow::tests::which_folders_a_denied_write_may_open` · `allow::tests::home_above_it_and_key_folders_are_never_kept` ·
 `editor::tests::claude_asks_to_run_outside_the_sandbox_with_a_reason` · `tools::tests::claude_asks_for_one_socket_not_the_sandbox_off`
@@ -415,8 +418,10 @@ test: `editor::tests::the_sandbox_turned_off_is_said` · `trust::tests::every_sa
 
 ## 2. The claude process
 
-`claude -p` runs as you, **not confined**. Its cwd is the session's checkout. What it may *do* through its tools
-is narrowed by its flags and by tarae answering its permission requests; what its own code does isn't.
+`claude -p` runs as you. Its cwd is the session's checkout. What it may *do* through its tools is narrowed by its
+flags and by tarae answering its permission requests; what its own code does, on macOS, by a Seatbelt profile of
+its own (`llm.claude-sandbox`, on unless you turn it off): files only — its network, the programs it starts and
+the system's services as they are. On Linux it's **not confined** yet.
 
 ### What it touches
 
@@ -440,6 +445,45 @@ asked about. A `CLAUDE.md` `@import` of a file outside the project wasn't read: 
 (one run, this version).
 
 Kept:
+- **macOS: its own sandbox, files only.** It reads none of the places that hold keys (§1.4's list, but
+  `~/Library/Keychains` — its login), no file named like a key in home or the project (but its own), nothing of
+  tarae's state but the log. It writes only its own (`~/.claude/`, `~/.claude.json` and the lock, temp copy and
+  backups beside it, `~/.local/state/claude/`), the temp folders and the devices — and in `~/.claude/` not what your
+  own Claude Code runs or obeys later: `settings.json`, `settings.local.json`, `CLAUDE.md`, `commands/`, `agents/`,
+  `skills/`, `hooks/`, `output-styles/`, `local/` (the local installer's claude program), `ide/` (the locks a
+  later claude connects by), `shell-snapshots/`, `plugins/` (but the in-use marks, locks, synced marketplace list
+  and its round's time claude writes there — measured, by name), and in `projects/` every project's conversations
+  but this one's (a resumed conversation is obeyed as history) and this one's auto-memory (`memory/`). Nor
+  `~/.claude`, `projects/` or this project's folder themselves: none is moved aside, removed or made again (a
+  folder renamed whole carries what's in it past the denies on its children — settings, a memory, another
+  project's conversations filled in elsewhere); tarae makes this project's folder before claude starts, through no
+  link. With the default edit tools not
+  the project (tarae's `edit` writes it), with Edit and Write (`llm.edit-tools` "both"/"native") the project but
+  `.git` and the protected names (§1.2) — and a project that holds home (home itself or above) is writable only
+  outside home: home's deny stays over it. So a bug in its permission path can't write `~/.config/tarae`, your
+  shell's startup files, `~/.local/bin` or a hook, nor read `~/.ssh`. The deny lists are the runs' own. A Read the profile
+  would refuse isn't asked on a card: it's answered at once, and you can still send the file yourself (`C-o`).
+  What the profile refuses claude is said in the chat and tarae's log — from the kernel's reports, and from
+  claude's own tool results (`EPERM …`) where the profile's rules refuse that path: the kernel's report didn't come
+  for claude's refused Edit in the live check. The reviewer's claude runs under the same profile, the project
+  read-only; its refusals go to the log. Started inside another sandbox (Seatbelt doesn't nest) or with
+  `llm.claude-sandbox = false` — a setting only your own config sets — it's unconfined and the chat says so.
+  test: `sandbox::claude::tests::claude_cant_read_a_key` · `sandbox::golden::the_claude_profile_is_pinned` ·
+  `sandbox::claude::tests::claudes_own_folder_keeps_what_your_claude_runs_later` ·
+  `sandbox::claude::tests::a_project_holding_home_opens_no_home` ·
+  `chat::tests::a_refusal_claudes_tool_result_says_is_said_in_the_chat` ·
+  `reviewer::tests::the_reviewers_claude_runs_under_its_own_profile` ·
+  `sandbox::claude::tests::a_read_claudes_profile_refuses_is_said_not_asked` ·
+  `sandbox::claude::tests::a_refusal_claudes_tool_says_is_the_profiles_where_its_rules_refuse` ·
+  `chat::tests::a_claude_refusal_is_said_once` · `chat::tests::claude_unconfined_by_the_setting_is_said` ·
+  `trust::tests::claudes_own_sandbox_is_risky_and_only_yours`
+- **It doesn't update itself** from tarae: its updater writes a folder of programs on your `PATH`, closed to it;
+  every claude tarae starts gets `DISABLE_UPDATES`. `:claude-update` runs `claude update` as your own task, outside
+  the sandbox; the chat says once when the claude it runs was installed over two weeks ago (without the network
+  tarae can tell its age, not whether a newer one exists).
+  test: `llm::tests::every_claude_tarae_starts_has_its_updates_off` ·
+  `claudeupdate::tests::an_old_claude_is_said_with_how_to_update_it` ·
+  `claudeupdate::tests::claude_update_runs_as_your_own_task`
 - **Its tools**: Claude Code's `Read` only (plus `Edit`, `Write` with `llm.edit-tools` "both"/"native"), and
   tarae's own tools in-process. No Bash, no WebFetch or WebSearch, no Grep or Glob, no Task.
   test: `chat::tests::each_edit_arm_says_its_own_tools`
@@ -472,26 +516,45 @@ Kept:
   `seccomp::tests::what_starts_outside_for_claude_makes_no_user_namespace`
 
 Not kept:
-- **claude's own code reads and writes as you.** A bug in its permission path (a tool that skips `can_use_tool`,
-  a flag whose meaning changes in an update), or a feature that reads by itself, reaches anything you can — your
-  keys included. Nothing but Claude Code's own correctness stands there.
+- **claude's own code, within its profile.** A bug in its permission path (a tool that skips `can_use_tool`, a flag
+  whose meaning changes in an update), or a feature that reads by itself, reads what the profile leaves open —
+  everything but key folders, files named like keys and tarae's state — and writes its own folders and temp. **On
+  Linux it reaches anything you can**, your keys included: there claude waits on a measurement (its atomic write of
+  `~/.claude.json` would need home itself writable under Landlock).
 - **Your keychain, through `security`.** claude reads its login with `/usr/bin/security`; anything else that tool
   may read without a prompt is within the same reach.
 - **Its own git reads the repository's config.** tarae holds a repository's commands for its own git (§1.7), not
   for the git claude starts. Measured (claude 2.1.296, macOS): a `core.fsmonitor` set in the checkout's
   `.git/config` to a stand-in did **not** run under claude's seven git calls — what claude asks git doesn't reach
   the fsmonitor — while a plain `git status` in the same repository runs it (the control). Another version, or another git command of claude's, could; a clone doesn't bring `.git/config`
-  and Claude's runs can't write `.git`, but a checkout that came whole (an archive with its `.git`) can.
+  and Claude's runs can't write `.git`, but a checkout that came whole (an archive with its `.git`) can. On macOS
+  what such a command does is confined as claude is (it inherits the profile).
 - **Your own Claude settings apply.** `--setting-sources user,…` loads `~/.claude/settings.json`: an `allow` rule
   of yours for Read would let reads go unasked (only a project's are held; not measured), and your plugins load
   (measured: marked in use).
 - **The `env` window**: a variable a `git pull` adds to `.claude/settings.json` can reach claude's next request
   before tarae's watch stops it (at most about half a second).
 - **The network**: claude reaches whatever it reaches. tarae doesn't proxy it: it must reach Anthropic, or your
-  gateway or proxy.
+  gateway or proxy. What it read can leave that way.
+- **The ask prompt's and commit drafts' claudes** run unconfined: they're started with no tools at all
+  (`--tools ""`) — what they could do is claude's own code alone, as for the chat's on Linux.
+- **A refusal claude doesn't put in a tool result goes unseen.** The kernel reported none of claude's own
+  refusals live (only a probe's), so the chat sees a refusal only when a tool's result says it (`EPERM …`); one in
+  claude's own work — its state, its caches — isn't said anywhere. The profile still holds. That's why `~/.claude/`
+  is closed by a list of what runs later rather than opened by a list of what claude writes: an allowlist would
+  refuse a new place a claude update writes, unseen. Planned: the allowlist, once those refusals can be seen.
+- **Your user-scope MCP servers.** `~/.claude.json` holds them — commands your own claude starts — and claude must
+  write that file (its state, counters, project entries): a bug could add a server there. tarae's chat runs with
+  `--strict-mcp-config` and starts none of them; your own claude, outside tarae, would.
+- **Your SSH agent.** claude inherits `SSH_AUTH_SOCK` from tarae (runs don't get it) and the profile leaves unix
+  sockets open: it can have the agent sign with your keys without reading them. Proposed: leave it out of claude's
+  environment (its git only reads status) and deny that socket in its profile.
+- **Claude Code's own memory folder** (`~/.claude/projects/<project>/memory/`, its auto-memory, shared by every
+  checkout of a repository) is read unasked — it's inside claude's own folder. On macOS the profile keeps claude
+  from writing it (a new project's folder isn't even made); on Linux it's written as everything is.
 
-Planned ([roadmap](roadmap.md), sandbox validation): claude under a files-only profile of its own — key folders
-and what runs later denied, writes only to its own folders, tarae's chat folders and temp; the network as it is.
+Planned ([roadmap](roadmap.md), sandbox validation): Linux's profile (Landlock), once what claude touches there is
+measured.
 
 ## 3. What tarae runs as you, outside the sandbox
 
@@ -509,7 +572,7 @@ Not Claude's, but a hostile repository reaches them:
 
 | | Gap | Why | Plan |
 |---|---|---|---|
-| G1 | The `claude` process is unconfined | it needs your login and Anthropic | a files-only profile (§2's lists) |
+| G1 | The `claude` process is unconfined on Linux; on macOS it reads all but keys and tarae's state, and the network is open | it needs your login and Anthropic | macOS: a files-only profile (§2); Linux after its measurement |
 | G2 | Your own Claude `allow` rules and plugins apply in the chat | they're yours; claude reads them itself | said |
 | G3 | Reads outside home are open | programs need `/usr`, `/opt`; no list | said |
 | G4 | Network on + hosts "any" = exfiltration to any host | the default favours builds that fetch | said; a host list is one setting |
@@ -525,8 +588,13 @@ Not Claude's, but a hostile repository reaches them:
 | G14 | The temp folders are shared | D16 | said |
 | G15 | Keychain/Apple Events/LaunchServices denials are pinned, not shown | no behaviour test | the must-be-refused suite |
 | G16 | Landlock rules are shown on the kernels CI and the test machines have | kernels differ | the suite on several kernels |
-| G17 | claude's own git reads a repository's config (`core.fsmonitor` …) | it's claude's, not tarae's | measured: its git didn't run the fsmonitor that a plain `git status` there runs (2.1.296); measured again with claude's profile |
+| G17 | claude's own git reads a repository's config (`core.fsmonitor` …) | it's claude's, not tarae's | measured: its git didn't run the fsmonitor that a plain `git status` there runs (2.1.296); on macOS what it would run is confined as claude is; measured again by the live check under the profile |
 | G18 | `llm.sandbox = false` runs Claude's commands unconfined with no card | your choice, said in the title | said; a project needs your trust to set it |
+| G19 | claude writes `~/.claude.json`, which holds your user-scope MCP servers (commands your own claude starts) | claude's state lives in it | said; the chat runs `--strict-mcp-config` |
+| G20 | claude inherits `SSH_AUTH_SOCK`: the agent signs with your keys for it | unix sockets stay open (files-only profile) | proposed: drop it from claude's environment, deny the socket |
+| G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) is read unasked, shared by every checkout | inside claude's own folder | macOS: read-only under the profile; Linux: open |
+| G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | not measured yet; proposed: after each run, look for protected names that weren't there (the run's tree snapshot, as Linux's G10) and ask before the next |
+| G22 | A refusal of claude's own work (not a tool's) goes unseen; `~/.claude/` is a denylist | the kernel didn't report claude's refusals (V1d, live) | an allowlist of what claude writes, once its refusals can be seen — and with it a measurement of `shell-snapshots/` (kept closed unmeasured: whether a later claude sources one it didn't make can't be told from here) |
 
 ## 5. For a reviewer: where to start
 

@@ -116,6 +116,8 @@ pub struct LlmConfig {
     /// Chat: Claude's commands run in a sandbox (`sandbox.rs`) — writes in the project, temp and the
     /// toolchain's folders; no network but this machine.
     pub sandbox: bool,
+    /// Chat: its claude itself under a files-only profile (`sandbox::claude`, macOS) — your config only.
+    pub claude_sandbox: bool,
     pub sandbox_network: bool,
     /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`) — None: any host (`"any"`);
     /// another is held and asked on a card (`hosts.rs`).
@@ -170,6 +172,7 @@ impl Default for LlmConfig {
             run_allow: Vec::new(),
             review_ask: Vec::new(),
             sandbox: true,
+            claude_sandbox: true,
             sandbox_network: false,
             sandbox_hosts: None,
             sandbox_upstream: Default::default(),
@@ -214,7 +217,7 @@ impl Warm {
         }
         // Spared for another folder or billing, or gone: it goes
         self.drop_spare();
-        let child = spawn(cfg, &[], dir, given, cred).map_err(|e| e.said(&cfg.command, false))?;
+        let child = spawn(cfg, &[], dir, given, cred, None).map_err(|e| e.said(&cfg.command, false))?;
         self.child = Some((child, dir.to_path_buf(), cred.clone()));
         Ok(())
     }
@@ -292,13 +295,15 @@ pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
 /// with tarae's environment less what `claude_env` leaves out, on `cred` (`billing.rs`: an API session's key helper
 /// laid into its `--settings`). `given`: `Editor::claude_env` — a test's stand-in for tarae's environment, laid
 /// over the process's as if inherited (None: the process's own); what's left out is judged on both, all the child
-/// would inherit.
+/// would inherit. `confine`: under claude's own profile (`sandbox::claude`, the chat's — `sandbox-exec` execs
+/// claude, so the pid is claude's); None: as you.
 pub fn spawn(
     cfg: &LlmConfig,
     extra: &[&str],
     dir: &Path,
     given: Option<&Env>,
     cred: &Credential,
+    confine: Option<&crate::sandbox::claude::Profile>,
 ) -> Result<Child, SpawnError> {
     // (tests never start the real claude — a stand-in in `sh` answers for it; card model P2 found a test
     // whose claude read ~/.claude.json and the keychain)
@@ -308,11 +313,24 @@ pub fn spawn(
         "a test started the real claude — give llm.command a stand-in (`sh -c 'cat > /dev/null'`)"
     );
     let args = crate::billing::args(&cfg.args, cred).map_err(SpawnError::Billing)?;
-    let mut cmd = Command::new(&cfg.command);
+    // (under `sandbox-exec` a missing program is its exec failing, not the spawn: said as the spawn's, so a
+    // missing claude still says how to install it — `spawn_failed`)
+    if confine.is_some() && !program_there(&cfg.command, dir, given) {
+        return Err(SpawnError::Start(std::io::ErrorKind::NotFound.into()));
+    }
+    let mut cmd = match confine {
+        Some(p) => crate::sandbox::claude::command(p, &cfg.command),
+        None => Command::new(&cfg.command),
+    };
     cmd.current_dir(dir).args(&args).args(extra);
     if let Some(given) = given {
         cmd.envs(given);
     }
+    // claude doesn't update itself from tarae (decision A): its updater writes a folder of programs on PATH
+    // (`~/.local/bin`), which its profile keeps closed — `DISABLE_UPDATES` stops the background updater and
+    // `claude update`/`install` alike (its env-vars reference); the user updates it (`:claude-update`). And its
+    // `git status` leaves `.git/index` alone (`.git` isn't its to write)
+    cmd.env("DISABLE_UPDATES", "1").env("GIT_OPTIONAL_LOCKS", "0");
     // (removed by name, never `env_clear`: the rest of tarae's environment is claude's as it always was. An API
     // session never keeps a key from it: one there outranks its helper — Claude Code's credential order)
     let keep_keys = cfg.keep_env_key && *cred == Credential::Subscription;
@@ -326,6 +344,17 @@ pub fn spawn(
         cmd.args(["--effort", &cfg.effort]);
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(SpawnError::Start)
+}
+
+/// Whether `command` is a program to start from `dir` — as `Command` finds it: a path (from `dir` when relative),
+/// else on `PATH` (`given`'s, else the process's).
+fn program_there(command: &str, dir: &Path, given: Option<&Env>) -> bool {
+    if command.contains('/') {
+        return dir.join(command).is_file();
+    }
+    let path =
+        given.and_then(|g| g.get("PATH")).map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH"));
+    path.is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(command).is_file()))
 }
 
 /// Why a claude didn't start.
@@ -1828,7 +1857,7 @@ pub(crate) mod tests {
     fn a_test_never_starts_the_real_claude() {
         // (a path that isn't there: without the guard, nothing starts and nothing panics)
         let cfg = LlmConfig { command: "/nonexistent/claude".into(), ..LlmConfig::default() };
-        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None, &Credential::Subscription);
+        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None, &Credential::Subscription, None);
     }
 
     /// No claude: Claude Code isn't installed — how to get it and log in, as its docs say (#163); any other
@@ -1849,6 +1878,45 @@ pub(crate) mod tests {
         assert_eq!(spawn_failed("/x/my-agent", &gone, true), "/x/my-agent isn't there (llm.command)");
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(spawn_failed("claude", &denied, true).starts_with("claude: "), "not a missing one");
+    }
+
+    /// Every claude tarae starts has its own updates off (`DISABLE_UPDATES` — its updater writes a folder of programs
+    /// on PATH, closed to its profile) and its git's optional locks off (`.git` isn't its to write) — over what it
+    /// would inherit, an environment that says otherwise included.
+    #[test]
+    fn every_claude_tarae_starts_has_its_updates_off() {
+        let cfg = LlmConfig {
+            command: "sh".into(),
+            args: vec!["-c".into(), "printf '%s %s' \"$DISABLE_UPDATES\" \"$GIT_OPTIONAL_LOCKS\"".into()],
+            ..Default::default()
+        };
+        let given = Env::from([("DISABLE_UPDATES".to_string(), "0".to_string())]);
+        let sub = Credential::Subscription;
+        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "1 0");
+    }
+
+    /// Under claude's own profile `sandbox-exec` starts whatever follows: a missing program is still the spawn's
+    /// failure, said as one (`spawn_failed`) — never a process that exits at once with nothing said in the chat.
+    #[test]
+    fn a_missing_program_under_claudes_profile_is_a_failed_start() {
+        let dir = std::env::temp_dir();
+        let p = crate::sandbox::claude::Profile {
+            root: dir.clone(),
+            home: dir.clone(),
+            writes_project: false,
+            temps: Vec::new(),
+            kept: Vec::new(),
+            log: None,
+            tag: "tarae-claude.test.".into(),
+        };
+        let path = Env::from([("PATH".to_string(), "/nowhere".to_string())]);
+        let cfg = LlmConfig { command: "tarae-no-such-agent".into(), ..Default::default() };
+        let sub = Credential::Subscription;
+        let e = spawn(&cfg, &[], &dir, Some(&path), &sub, Some(&p)).expect_err("not started");
+        assert_eq!(e.said(&cfg.command, true), "tarae-no-such-agent isn't on PATH (llm.command)");
+        assert!(program_there("sh", &dir, None) && program_there("/bin/sh", &dir, None));
     }
 
     // ── Claude's environment ──
@@ -2106,7 +2174,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = LlmConfig { keep_env_key: how == "keep", ..LlmConfig::default() };
         recording(&mut cfg);
-        let mut child = spawn(&cfg, &[], &dir, Some(&Env::new()), &Credential::Subscription).unwrap();
+        let mut child = spawn(&cfg, &[], &dir, Some(&Env::new()), &Credential::Subscription, None).unwrap();
         drop(child.stdin.take());
         child.wait().unwrap();
         let names = std::fs::read_to_string(dir.join("env.names")).unwrap();

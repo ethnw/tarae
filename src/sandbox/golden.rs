@@ -954,6 +954,47 @@ fn every_claim_names_a_test_that_exists() {
     );
 }
 
+/// The claude process's own profile (`claude::Profile`, V1d), byte for byte, from the stand-in home — the default
+/// arm (the project read-only) and the arms with Edit and Write (writable but `.git` and the protected names) —
+/// and its parameters: a deny removed, a place opened, a rule moved shows here.
+#[test]
+fn the_claude_profile_is_pinned() {
+    let f = Fixture::new("claude", Os::Mac, &[]);
+    let parts = |p: &Path| p.components().filter(|c| matches!(c, Component::Normal(_))).count();
+    let mut out = String::new();
+    for writes_project in [false, true] {
+        let p = claude::Profile::new(&f.root, &f.home, writes_project, &f.here, "$TAG");
+        out.push_str(&format!(
+            "══ the project {}\nprofile:\n",
+            if writes_project { "writable" } else { "read-only" }
+        ));
+        // (the regexes start with as many path parts as home's and the project's paths have: the machine's)
+        let text =
+            p.text().replace(&format!("^{}/(.*/)?", "/[^/]+".repeat(parts(&p.root))), "^$ROOT-PARTS/(.*/)?");
+        let text = text
+            .replace(&format!("^{}/\\.claude", "/[^/]+".repeat(parts(&p.home))), "^$HOME-PARTS/\\.claude");
+        // (and as many as claude's folder has — home's and one)
+        let text =
+            text.replace(&format!("^{}/", "/[^/]+".repeat(parts(&p.home) + 1)), "^$HOME-PARTS/.claude/");
+        out.push_str(&f.named(&text, None));
+        out.push_str("params:\n");
+        let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (k, v) in p.params() {
+            let letter: String = k.chars().take_while(|c| !c.is_ascii_digit()).collect();
+            by.entry(letter).or_default().push(v);
+        }
+        for (letter, mut values) in by {
+            // (this project's conversations: its path made a name — the machine's)
+            if letter == "OP" {
+                let folder = claude::project_folder(&p.root);
+                values = values.into_iter().map(|v| v.replace(&folder, "<$ROOT as a name>")).collect();
+            }
+            out.push_str(&format!("  {letter}:\n{}", lines(&f, None, values)));
+        }
+    }
+    pinned("sandbox_claude.txt", &out);
+}
+
 /// The words Claude's prompt and tools say of the sandbox, the checks and the toolchains.
 #[test]
 fn claudes_words_are_pinned() {

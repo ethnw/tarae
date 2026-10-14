@@ -1695,8 +1695,10 @@ fn follow_shows_each_edit_and_replays_the_turn() {
         "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n{turn}done\n"
     );
     let script = sb.write("fake-claude.sh", &fake);
+    // (its fake writes the file as Claude Code's Edit does — the arm with Edit: claude's own sandbox lets it write
+    // the project only there, macOS)
     sb.write_config(&format!(
-        "{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\nreview-at-end = true\n",
+        "{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\nreview-at-end = true\nedit-tools = \"native\"\n",
         script.display()
     ));
     let mut t = Term::spawn(&sb, &["main.txt"], 120, 40);

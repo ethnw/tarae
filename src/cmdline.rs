@@ -85,6 +85,7 @@ pub const COMMANDS: &[TypedCmd] = &[
         Arg::None,
         "Look again at what this project's Claude settings run in the chat, and trust them or not",
     ),
+    c(&["claude-update"], Arg::None, "Look for a newer claude and install it (claude update, as you)"),
     c(&["sandbox-allowed"], Arg::None, "What Claude may do past the defaults — take one back"),
     c(&["sandbox-disallow"], Arg::None, "Take back what :sandbox-allowed lists"),
     c(&["sandbox-blocked"], Arg::None, "What the sandbox blocked in Claude's last run: open it"),
