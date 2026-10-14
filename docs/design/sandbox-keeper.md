@@ -601,6 +601,13 @@ fallback's reason in a few words faint below — `Guarantees::brief`, from `tier
 `Guarantees::FOLD` when narrow — 9e) and `:procs`' keeper row; `tarae state`'s `sandbox` object (`uistate::V` up, `--watch
 sandbox`); `TARAE_SANDBOX_STATUS` = tier and ABI (`A+:8`, `C:6`) in the run's environment.
 
+Where Ubuntu's restriction is why and no profile is on tarae, the run's `Guarantees.hint` (9f, `tier::hint`) says how
+the tier would go up: the panel, faint under the why, "tarae's AppArmor profile would make this A+" (C → A+, D → B+:
+`Tier::with_namespaces`), and the list's last row copies the step ("copy the step that makes this tier A+" — needs
+sudo, then restart tarae; the system clipboard's one path, `clipboard::copy`); the whole hint with its step in `tarae
+state`'s `hint`. Not in Claude's report: Claude can't take the step (`sudo`, outside
+the sandbox, the machine's own policy), and its `ui` answer carries the state's `hint` when it's asked why.
+
 ## Steps
 
 Each lands on its own. The test that pins it is seen failing once with the change broken.

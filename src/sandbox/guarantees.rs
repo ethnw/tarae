@@ -110,6 +110,17 @@ impl Tier {
         }
     }
 
+    /// The tier a keeper here gets with the session's namespaces, served or not as now — what tarae's AppArmor
+    /// profile makes of C and D where Ubuntu's restriction is why they have none (9f): A+ and B+ (a fresh `/proc`
+    /// mounts there: measured A+ on Ubuntu 24.04 with the profile).
+    pub fn with_namespaces(self) -> Tier {
+        match self {
+            Tier::C => Tier::APlus,
+            Tier::D => Tier::BPlus,
+            t => t,
+        }
+    }
+
     pub fn said(self) -> &'static str {
         match self {
             Tier::APlus => "A+",
@@ -203,6 +214,28 @@ impl Way {
     }
 }
 
+/// How a run's tier would go up (9f; 6h's `tier::hint`): where Ubuntu's restriction kept a keeper's namespaces
+/// from a tarae under no profile — the tier tarae's AppArmor profile would give its runs, and the whole hint: why,
+/// then the step or why there's none (`apparmor::hint`) — and the step alone, the shell line the sandbox panel copies
+/// (None for a tarae no profile should name: `apparmor::step`) — and where that tarae is, so a run's own tier can
+/// have its words (`Guarantees::landlock`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hint {
+    pub to: Tier,
+    pub said: String,
+    pub step: Option<String>,
+    pub place: super::apparmor::Place,
+}
+
+impl Hint {
+    /// The hint for runs in `tier`, for the tarae at `place`.
+    pub fn of(tier: Tier, place: &super::apparmor::Place) -> Hint {
+        let to = tier.with_namespaces();
+        let said = super::apparmor::hint(tier.said(), to.said(), place);
+        Hint { to, said, step: super::apparmor::step(place), place: place.clone() }
+    }
+}
+
 /// What a run's sandbox guarantees (the module's doc).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Guarantees {
@@ -219,6 +252,8 @@ pub struct Guarantees {
     /// The same in a few words, ` · ` between (the sandbox panel, 9e, under the tier): `AppArmor blocks user
     /// namespaces · copies: pidfd_getfd refused` — `why` is the report's and `tarae state`'s.
     pub brief: Option<String>,
+    /// How the tier would go up — the profile's (9f, `Found.hint`); None elsewhere, and on macOS.
+    pub hint: Option<Hint>,
     /// The ptys a run holds at a time where it opens only those it makes (`ptys::POOL`).
     pool: Option<usize>,
 }
@@ -243,6 +278,9 @@ pub struct Found {
     pub short: Option<String>,
     /// The same in a few words (`tier::Probed.brief`).
     pub brief: Option<String>,
+    /// The probe's hint (`tier::Probed.hint`) — said again for this run's own tier: the probe's was its own,
+    /// and a run can be served where the probe wasn't, or not where it was.
+    pub hint: Option<Hint>,
     /// The policy opens the network.
     pub network: bool,
 }
@@ -253,6 +291,9 @@ const THEIRS_REFUSED: &str = "this machine's, other sessions' sockets refused";
 
 /// The same in the sandbox panel's line (`panel_pairs`).
 const THEIRS_SHORT: &str = "this machine's, other sessions' refused";
+
+/// The profile's step in a few words, beside its row in the sandbox panel (9f).
+pub const STEP_SAID: &str = "needs sudo, then restart tarae";
 
 /// The terminals of a run that opens only those it makes (3b).
 const ONLY_MADE: &str = "only those it makes";
@@ -363,6 +404,7 @@ impl Guarantees {
             way,
             why: (!why.is_empty()).then(|| why.join("; ")),
             brief: (!brief.is_empty()).then(|| brief.join(" · ")),
+            hint: f.hint.map(|h| Hint::of(tier, &h.place)),
             pool,
         }
     }
@@ -387,6 +429,7 @@ impl Guarantees {
             way: Way::Proxy,
             why: None,
             brief: None,
+            hint: None,
             pool: None,
         }
     }
@@ -487,8 +530,8 @@ impl Guarantees {
     /// `tarae state`'s `sandbox` object of a session (9d, pinned by `ui_state.json`): what enforces it — the tier
     /// and Landlock's ABI (null on macOS: `by` `seatbelt`), the keeper's namespaces (`netns`: a network namespace
     /// of the session's own — false where it's served by copies, N1) — how the network goes, each part kept apart
-    /// or shared (`Part::key`, `how` where there's more to say), `why` not the top tier, and the state `line`.
-    /// `hint` is 9f's (how the tier would go up — the profile's step): null until then.
+    /// or shared (`Part::key`, `how` where there's more to say), `why` not the top tier, `hint` how it would go up
+    /// (9f: why, and the profile's step — whole; null where none), and the state `line`.
     pub fn json(&self) -> serde_json::Value {
         use serde_json::json;
         let (by, tier, abi) = match self.by {
@@ -510,8 +553,26 @@ impl Guarantees {
             "by": by, "tier": tier, "abi": abi, "partial": abi.is_some_and(|a| a < 3), "namespaces": ns,
             "network": { "open": self.network, "way": self.way.key() },
             "kept": parts(true), "shared": parts(false),
-            "why": self.why, "hint": null, "line": self.line(),
+            "why": self.why, "hint": self.hint.as_ref().map(|h| &h.said), "line": self.line(),
         })
+    }
+
+    /// The hint in a few words, for the sandbox panel under the why (9f): what the profile would make of the tier —
+    /// its step is the list's row to copy (`step_row`); where there's none, the one way to one.
+    pub fn hint_brief(&self) -> Option<String> {
+        let h = self.hint.as_ref()?;
+        let made = format!("tarae's AppArmor profile would make this {}", h.to.said());
+        Some(match h.step {
+            Some(_) => made,
+            None => format!("{made} · for a tarae installed at {}", super::apparmor::PACKAGED),
+        })
+    }
+
+    /// The sandbox panel's row for the profile's step (9f): what Enter does, and what the step is in a few words —
+    /// None where there's no step to copy.
+    pub fn step_row(&self) -> Option<(String, &'static str)> {
+        let h = self.hint.as_ref().filter(|h| h.step.is_some())?;
+        Some((format!("copy the step that makes this tier {}", h.to.said()), STEP_SAID))
     }
 
     /// One sentence for Claude: the tier, what's kept apart from other sessions' commands and what's shared.
@@ -649,6 +710,44 @@ pub fn said_as_found(g: &Guarantees, found: &[(Part, Option<bool>)]) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 9f: a run's hint names the run's own tier and the one the profile would make of it — never the probe's, which
+    /// can differ: a probe served, a run not (D, "would make this B+"), or the other way (C, A+).
+    #[test]
+    fn the_hint_names_the_runs_own_tier() {
+        let place = super::super::apparmor::Place {
+            path: super::super::apparmor::PACKAGED.into(),
+            root_owned: Ok(()),
+            packaged: true,
+        };
+        let run = |served: bool, probed: Tier| {
+            Guarantees::landlock(Found {
+                ns: Ns::NONE,
+                served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
+                copies: false,
+                abi: 4,
+                ptys: None,
+                tproxy: Err("no network namespace of its own".into()),
+                lo_missing: Vec::new(),
+                short: None,
+                brief: None,
+                hint: Some(Hint::of(probed, &place)),
+                network: false,
+            })
+        };
+        for (served, probed, tier, to) in [
+            (false, Tier::C, "D", Tier::BPlus),
+            (true, Tier::D, "C", Tier::APlus),
+            (true, Tier::C, "C", Tier::APlus),
+        ] {
+            let g = run(served, probed);
+            let h = g.hint.as_ref().expect("the hint");
+            assert_eq!(h.to, to, "served {served}, probed in {probed:?}");
+            assert!(h.said.starts_with(&format!("Claude's commands run in tier {tier} here")), "{}", h.said);
+            let line = g.hint_brief().unwrap_or_default();
+            assert!(line.ends_with(&format!("would make this {}", to.said())), "{line}");
+        }
+    }
 
     /// A part tried two ways is reached when either try reached it — one out of sight doesn't hide the other's
     /// reach (the processes: a command line read where a priority couldn't be named) — refused when every named try

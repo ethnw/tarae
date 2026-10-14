@@ -2703,9 +2703,74 @@ fn snapshot_task_panel() {
 #[cfg(target_os = "macos")]
 #[test]
 fn snapshot_sandbox_blocked() {
+    let mut s = Shot::new(100, 30);
+    blocked_npm_run(&mut s);
+    // (the run's sandbox, as `tools::go_now` keeps it: the list's state line — 9e)
+    s.ed.session.sandbox = Some(crate::sandbox::guarantees::Guarantees::seatbelt(false, false));
+    let dump = |s: &mut Shot, name: &str| {
+        if let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(Path::new(&dir).join(format!("{name}.bin")), s.frame()).unwrap();
+        }
+    };
+    s.check("sandbox_blocked_panel");
+    dump(&mut s, "sandbox_blocked_panel");
+    s.keys(" ms");
+    s.check("sandbox_blocked_list");
+    dump(&mut s, "sandbox_blocked_list");
+    s.frames_both("sandbox_blocked_list");
+    s.keys("<ret>");
+    s.check("sandbox_blocked_card");
+    dump(&mut s, "sandbox_blocked_card");
+}
+
+/// 9f: what was blocked, then the AppArmor profile's step — its row last, after running it outside; the header's
+/// hint over them, no note of nothing blocked. Keys: Enter on the step's row copies the whole step and says so; on
+/// a blocked row it still puts up that grant's card. At 120 and 60 columns; with `TARAE_FRAMES_DIR`, both themes.
+#[cfg(target_os = "macos")]
+#[test]
+fn snapshot_sandbox_blocked_with_step() {
+    for (w, h) in [(120, 30), (60, 24)] {
+        let mut s = Shot::new(w, h);
+        blocked_npm_run(&mut s);
+        s.ed.session.sandbox = Some(tier_c_restricted());
+        s.keys(" ms");
+        let p = s.ed.picker.as_ref().unwrap();
+        let labels: Vec<String> = p.items().iter().map(|i| i.label.clone()).collect();
+        assert_eq!(
+            labels[labels.len() - 2..],
+            ["run it outside the sandbox, once", "copy the step that makes this tier A+"],
+            "{labels:?}"
+        );
+        // (something was blocked: "blocked nothing" is never said over its rows)
+        let note = p.head.as_ref().and_then(|h| h.note.clone());
+        assert_eq!(note, None, "no note over what was blocked");
+        let name = format!("sandbox_blocked_step_{w}");
+        s.check(&name);
+        s.frames_both(&name);
+        // (the step's row, last: Enter copies the step — no card)
+        let step = s.ed.session.sandbox.as_ref().and_then(|g| g.hint.as_ref()?.step.clone()).unwrap();
+        s.keys(&"<down>".repeat(labels.len() - 1));
+        let at = s.ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
+        assert_eq!(at.as_deref(), labels.last().map(String::as_str), "on the step's row");
+        s.keys("<ret>");
+        let said = "copied the step that makes this tier A+ — run it in a terminal, then restart tarae";
+        s.until("the copy", |ed| ed.toasts.iter().any(|t| t.text == said));
+        assert!(crate::clipboard::written(&step) && s.ed.offers.is_empty(), "{step}");
+        // (and the blocked rows above it still act: Enter on the first puts its grant's card up)
+        s.keys(" ms");
+        s.keys("<ret>");
+        let titles: Vec<&str> = s.ed.offers.iter().map(|o| o.title.as_str()).collect();
+        assert_eq!(titles, [crate::blocked::GRANT_TITLE], "the first row's card");
+    }
+}
+
+/// A failed `npm test` of Claude's the sandbox blocked a write in npm's cache and a port in, as its panel has it
+/// (macOS: the fixed folder is in `/private/tmp` so the paths read the same every run).
+#[cfg(target_os = "macos")]
+fn blocked_npm_run(s: &mut Shot) {
     let cache = PathBuf::from("/private/tmp/tarae-shot-blocked/npm-cache");
     std::fs::create_dir_all(&cache).unwrap();
-    let mut s = Shot::new(100, 30);
     s.file("src/demo.rs", DEMO_RS);
     let watch = crate::sandbox::Watch::quiet("t.");
     let d = |op: &str, target: &str| crate::sandbox::Denial {
@@ -2727,23 +2792,6 @@ fn snapshot_sandbox_blocked() {
     r.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
     r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
     s.ed.session.task_run = Some(r);
-    // (the run's sandbox, as `tools::go_now` keeps it: the list's state line — 9e)
-    s.ed.session.sandbox = Some(crate::sandbox::guarantees::Guarantees::seatbelt(false, false));
-    let dump = |s: &mut Shot, name: &str| {
-        if let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") {
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(Path::new(&dir).join(format!("{name}.bin")), s.frame()).unwrap();
-        }
-    };
-    s.check("sandbox_blocked_panel");
-    dump(&mut s, "sandbox_blocked_panel");
-    s.keys(" ms");
-    s.check("sandbox_blocked_list");
-    dump(&mut s, "sandbox_blocked_list");
-    s.frames_both("sandbox_blocked_list");
-    s.keys("<ret>");
-    s.check("sandbox_blocked_card");
-    dump(&mut s, "sandbox_blocked_card");
 }
 
 /// Tier C served by copies on colima (no user namespaces, Landlock ABI 4): every part of the state line there, and a
@@ -2763,12 +2811,37 @@ fn tier_c_by_copies() -> crate::sandbox::guarantees::Guarantees {
                 .into(),
         ),
         brief: Some("AppArmor blocks user namespaces".into()),
+        hint: None,
+        network: false,
+    })
+}
+
+/// Tier C on Ubuntu with its restriction on and no profile on tarae (24.04, ABI 4; served): the profile's hint (9f).
+fn tier_c_restricted() -> crate::sandbox::guarantees::Guarantees {
+    use crate::sandbox::guarantees::{Found, Guarantees, Hint, Ns, Tier};
+    let place = crate::sandbox::apparmor::Place {
+        path: crate::sandbox::apparmor::PACKAGED.into(),
+        root_owned: Ok(()),
+        packaged: true,
+    };
+    Guarantees::landlock(Found {
+        ns: Ns::NONE,
+        served: Ok(()),
+        copies: false,
+        abi: 4,
+        ptys: Some(4),
+        tproxy: Err("no network namespace of its own".into()),
+        lo_missing: Vec::new(),
+        short: Some("no user namespaces: Ubuntu's restriction".into()),
+        brief: Some("AppArmor blocks user namespaces".into()),
+        hint: Some(Hint::of(Tier::C, &place)),
         network: false,
     })
 }
 
 /// 9e: the sandbox panel's state line (`space m s`) — the session's last run's sandbox as key hints over the list,
-/// a fallback's why faint under it; at 60 columns the least important parts folded (`Guarantees::FOLD`); before any
+/// a fallback's why faint under it, and (9f) where tarae's AppArmor profile would raise the tier, that and where its
+/// step is, on rows of its own; at 60 columns the least important parts folded (`Guarantees::FOLD`); before any
 /// sandboxed run, said so in its place. Nothing blocked: the list says so where its first row would be. With
 /// `TARAE_FRAMES_DIR` set, each in both themes (`target/sb/shots-9e.sh` draws them).
 #[test]
@@ -2784,11 +2857,17 @@ fn snapshot_sandbox_panel_tier() {
         lo_missing: Vec::new(),
         short: None,
         brief: None,
+        hint: None,
         network: true,
     });
     for (w, h) in [(120, 30), (60, 24)] {
-        for (name, g) in [("fallback", Some(tier_c_by_copies())), ("top", Some(top.clone())), ("empty", None)]
-        {
+        let scenes = [
+            ("fallback", Some(tier_c_by_copies())),
+            ("hint", Some(tier_c_restricted())),
+            ("top", Some(top.clone())),
+            ("empty", None),
+        ];
+        for (name, g) in scenes {
             let mut s = Shot::new(w, h);
             s.file("src/demo.rs", DEMO_RS);
             s.ed.session.sandbox = g;

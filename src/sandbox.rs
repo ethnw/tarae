@@ -2825,7 +2825,7 @@ fn user_temp(tmp: &Path) -> PathBuf {
 /// once a run's policy was made: `policy_from` → `confined`).
 pub fn profile_hint() -> Option<String> {
     #[cfg(target_os = "linux")]
-    return tier::probed().and_then(|p| p.hint.clone());
+    return tier::probed().and_then(|p| p.hint.as_ref()).map(|h| h.said.clone());
     #[cfg(not(target_os = "linux"))]
     None
 }

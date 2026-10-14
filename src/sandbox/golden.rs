@@ -453,6 +453,7 @@ fn tier_found(
         lo_missing: Vec::new(),
         short: None,
         brief: None,
+        hint: None,
         network: true,
     }
 }
@@ -505,14 +506,24 @@ fn the_report_says_the_tier_once() {
 /// 9a: what each tier's runs are kept apart from and share, in every place's words (`guarantees.rs`) — every tier,
 /// Landlock ABI 2 to 11, each network way (TPROXY, tarae's proxy by its variable, by copies — with the session's user
 /// namespace too —, no socket), and Seatbelt's, ports and the network each open or not. Beside the golden, what each
-/// must share whatever the words, written out per scene for ABI 2, 3 to 5 and 6 on — every ABI around a boundary
+/// must share whatever the words, and (9f) the profile's hint where Ubuntu's restriction is why C or D has no
+/// namespaces — its tier up (A+, B+) in the panel's words, then whole —, written out per scene for ABI 2, 3 to 5 and 6 on — every ABI around a boundary
 /// tried (7, 9 and 11 add nothing a run is kept from) — and nothing else: what's shared is said shared everywhere, the
 /// rest kept.
 #[test]
 fn the_guarantees_say_each_tier() {
-    use super::guarantees::{Found, Guarantees, Ns, Part, Tier};
+    use super::guarantees::{Found, Guarantees, Hint, Ns, Part, Tier};
     use Part::*;
     let found = tier_found;
+    // (9f: Ubuntu's restriction and no profile on tarae — the `.deb`'s place, so its step is short)
+    let packaged =
+        super::apparmor::Place { path: super::apparmor::PACKAGED.into(), root_owned: Ok(()), packaged: true };
+    let ubuntu = |served: bool| Found {
+        short: Some("no user namespaces: Ubuntu's restriction".to_string()),
+        brief: Some("AppArmor blocks user namespaces".to_string()),
+        hint: Some(Hint::of(Tier::of(Ns::NONE, served), &packaged)),
+        ..found(Ns::NONE, served, false, false)
+    };
     let no_pid =
         Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
     let none = Some("no user namespaces: kernel.unprivileged_userns_clone is 0".to_string());
@@ -604,9 +615,25 @@ fn the_guarantees_say_each_tier() {
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
+            "C, Ubuntu's restriction, no profile",
+            Some(Tier::C),
+            ubuntu(true),
+            [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
+        ),
+        (
             "D",
             Some(Tier::D),
             Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, false, false, false) },
+            [
+                &[Files, Processes, Signals, Ipc, Shm, Ptys],
+                &[Processes, Signals, Ipc, Shm, Ptys],
+                &[Processes, Ipc, Shm, Ptys],
+            ],
+        ),
+        (
+            "D, Ubuntu's restriction, no profile",
+            Some(Tier::D),
+            ubuntu(false),
             [
                 &[Files, Processes, Signals, Ipc, Shm, Ptys],
                 &[Processes, Signals, Ipc, Shm, Ptys],
@@ -643,9 +670,10 @@ fn the_guarantees_say_each_tier() {
         let (line, sentence, said) = (g.line(), g.sentence(), g.shared_said());
         out += &format!("══ {label}\nline: {line}\nsentence: {sentence}\n");
         out += &format!(
-            "why: {}\nbrief: {}\nreport:{}\n",
+            "why: {}\nbrief: {}\nhint: {}\nreport:{}\n",
             g.why.as_deref().unwrap_or("—"),
             g.brief.as_deref().unwrap_or("—"),
+            g.hint_brief().map_or("—".into(), |b| format!("{b} — {}", g.hint.as_ref().unwrap().said)),
             if said.is_empty() { " —" } else { &said }
         );
         if g.tier() != tier {

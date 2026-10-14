@@ -369,16 +369,29 @@ mod system {
     }
 }
 
+/// Tests: whether `text` was copied (the tests' clipboard is memory, shared by every test).
+#[cfg(test)]
+pub fn written(text: &str) -> bool {
+    system::written(text)
+}
+
 #[cfg(test)]
 mod system {
     use super::{Read, Wrote};
     use std::sync::Mutex;
 
     static CLIP: Mutex<String> = Mutex::new(String::new());
+    /// Every copy since the tests started — a test asks whether its own text went (others copy alongside).
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     pub fn write(text: &str) -> Result<Wrote, String> {
         *CLIP.lock().unwrap() = text.to_string();
+        WRITTEN.lock().unwrap().push(text.to_string());
         Ok(Wrote::Program)
+    }
+
+    pub fn written(text: &str) -> bool {
+        WRITTEN.lock().unwrap().iter().any(|t| t == text)
     }
 
     pub fn read() -> Result<Read, String> {

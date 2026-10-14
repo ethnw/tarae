@@ -1665,6 +1665,7 @@ fn landlock_run(ns: crate::sandbox::guarantees::Ns, copies: bool) -> crate::sand
         lo_missing: Vec::new(),
         short: None,
         brief: None,
+        hint: None,
         network: false,
     })
 }

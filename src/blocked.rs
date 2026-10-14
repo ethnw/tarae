@@ -240,18 +240,42 @@ impl Editor {
                 glyph: Some(("▲", "warning")),
             });
         }
+        // (9f: where tarae's AppArmor profile would raise the tier, its step to copy — after what was blocked)
+        let step = self.session.sandbox.as_ref().and_then(|g| g.step_row());
+        let nothing = run.is_none();
+        items.extend(step.map(|(label, hint)| Item {
+            label,
+            action: Action::Grant(PROFILE_STEP.into()),
+            hint: hint.into(),
+            glyph: Some(("◦", "ui.virtual")),
+        }));
         self.session.blocked = run.map(|run| (run, list));
         let mut p =
             crate::picker::Picker::of("blocked", "what the sandbox blocked", items, false).without_preview();
         // (before any sandboxed run, one thing said: no header, and the list's row one says there's been none)
         p.head = self.session.sandbox.as_ref().map(head);
         let empty = if self.session.sandbox.is_some() { NOTHING_BLOCKED } else { NO_RUN_YET };
-        p.empty = Some(empty.into());
+        // (nothing blocked but a step to copy: said where the list's first row would be, the step's row under it)
+        let listed = !p.items().is_empty();
+        match (&mut p.head, nothing && listed) {
+            (Some(h), true) => h.note = Some(empty.into()),
+            _ => p.empty = Some(empty.into()),
+        }
         self.open_picker(p, None);
     }
 
-    /// A row of the list (`Action::Grant`: a grant's number, or `outside`) — its card.
+    /// A row of the list (`Action::Grant`: a grant's number, or `outside`) — its card; the profile's step
+    /// (`PROFILE_STEP`) copied, and said so (`clipboard::copy`: the system clipboard, as `space y`).
     pub fn sandbox_grant(&mut self, arg: &str) -> Result<(), String> {
+        if arg == PROFILE_STEP {
+            let hint = self.session.sandbox.as_ref().and_then(|g| g.hint.as_ref());
+            let (step, to) =
+                hint.and_then(|h| Some((h.step.clone()?, h.to.said()))).ok_or("no step to copy")?;
+            let what =
+                format!("the step that makes this tier {to} — run it in a terminal, then restart tarae");
+            crate::clipboard::copy(&self.events.jobs(), step, what);
+            return Ok(());
+        }
         let (run, list) =
             self.session.blocked.clone().ok_or("nothing blocked to act on — space m s on a run's panel")?;
         use crate::cards::{Asked, Past, Request, Why};
@@ -335,6 +359,9 @@ fn grant_card(
     }
 }
 
+/// The panel's row for the AppArmor profile's step (`Action::Grant`'s argument).
+const PROFILE_STEP: &str = "profile";
+
 /// The panel's list when the run meant had nothing blocked (or there's none).
 const NOTHING_BLOCKED: &str = "the sandbox blocked nothing in that run";
 
@@ -344,10 +371,16 @@ const NO_RUN_YET: &str = "no sandboxed run yet in this session";
 /// The panel's state line (9e; the user's decision 14: here and `:procs`, never the status line): what the session's
 /// last sandboxed run was kept apart from and shared (`Guarantees::panel_pairs`, folded by `Guarantees::FOLD` when
 /// narrow), why not the top tier in a few words faint under it (`Guarantees::brief`; the whole `why` is the report's
-/// and `tarae state`'s).
+/// and `tarae state`'s), and under that how the tier would go up (9f, `Guarantees::hint_brief`: the profile's).
 fn head(g: &crate::sandbox::guarantees::Guarantees) -> crate::picker::Head {
     use crate::sandbox::guarantees::Guarantees;
-    crate::picker::Head { pairs: g.panel_pairs(), fold: Guarantees::FOLD, faint: g.brief.clone() }
+    crate::picker::Head {
+        pairs: g.panel_pairs(),
+        fold: Guarantees::FOLD,
+        faint: g.brief.clone(),
+        then: g.hint_brief(),
+        note: None,
+    }
 }
 
 pub const GRANT_TITLE: &str = "Open the sandbox a little?";
@@ -394,6 +427,71 @@ pub fn outside_answer(ed: &mut Editor, id: u64, run: BlockedRun, yes: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keys as the main loop takes them (`<ret>` by name).
+    fn feed(ed: &mut Editor, keys: &str) {
+        let mut chars = keys.chars();
+        while let Some(c) = chars.next() {
+            let key: crate::key::Key = match c {
+                '<' => chars.by_ref().take_while(|&c| c != '>').collect::<String>().parse().unwrap(),
+                c => crate::key::Key::plain(crate::key::Code::Char(c)),
+            };
+            ed.handle_key(key);
+        }
+    }
+
+    /// 9f: where tarae's AppArmor profile would raise the tier, its step is a row of the panel — the list's one row
+    /// when the run blocked nothing, which is still said where the first row would be — and Enter on it copies the
+    /// whole step to the system clipboard, said with what to do next. Without a hint (Seatbelt) no such row: the
+    /// list is empty and says why, as before.
+    #[test]
+    fn the_profiles_step_is_a_row_enter_copies() {
+        use crate::sandbox::guarantees::{Found, Guarantees, Hint, Ns, Tier};
+        let place = crate::sandbox::apparmor::Place {
+            path: "/usr/local/bin/tarae".into(),
+            root_owned: Ok(()),
+            packaged: false,
+        };
+        let hint = Hint::of(Tier::C, &place);
+        let step = hint.step.clone().expect("a root-owned plain path: a step");
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.sandbox = Some(Guarantees::landlock(Found {
+            ns: Ns::NONE,
+            served: Ok(()),
+            copies: false,
+            abi: 4,
+            ptys: Some(4),
+            tproxy: Err("no network namespace of its own".into()),
+            lo_missing: Vec::new(),
+            short: None,
+            brief: Some("AppArmor blocks user namespaces".into()),
+            hint: Some(hint),
+            network: false,
+        }));
+        ed.sandbox_blocked(Which::Either);
+        let p = ed.picker.as_ref().expect("the panel");
+        let rows: Vec<(&str, &str)> = p.items().iter().map(|i| (i.label.as_str(), i.hint.as_str())).collect();
+        assert_eq!(rows, [("copy the step that makes this tier A+", "needs sudo, then restart tarae")]);
+        let head = p.head.as_ref().unwrap();
+        assert_eq!(head.then.as_deref(), Some("tarae's AppArmor profile would make this A+"));
+        assert_eq!((head.note.as_deref(), &p.empty), (Some(NOTHING_BLOCKED), &None), "said above the row");
+        feed(&mut ed, "<ret>");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let said = "copied the step that makes this tier A+ — run it in a terminal, then restart tarae";
+        while !ed.toasts.iter().any(|t| t.text == said) {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("{said:?} before the timeout"));
+            ed.handle_event(ev);
+        }
+        assert!(crate::clipboard::written(&step), "the whole step copied: {step}");
+        // (Seatbelt's: no tiers, no step — the list says the run blocked nothing in its first row)
+        ed.picker = None;
+        ed.session.sandbox = Some(Guarantees::seatbelt(false, false));
+        ed.sandbox_blocked(Which::Either);
+        let p = ed.picker.as_ref().expect("the panel");
+        assert!(p.items().is_empty() && p.head.as_ref().is_some_and(|h| h.note.is_none()));
+        assert_eq!(p.empty.as_deref(), Some(NOTHING_BLOCKED));
+    }
 
     /// Review of #212: a run on a commit's tree isn't offered to grant or run again outside — its tree is gone
     /// (or another run's now), so either would run it where it no longer is; said instead.

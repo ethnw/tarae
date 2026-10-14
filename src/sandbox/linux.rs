@@ -997,6 +997,7 @@ pub fn confine(
             lo_missing: lo.into_iter().filter_map(|(m, f)| m.then_some(f)).collect(),
             short: probed.and_then(|p| p.short.clone()),
             brief: probed.and_then(|p| p.brief.clone()),
+            hint: probed.and_then(|p| p.hint.clone()),
             network: p.network,
         })
     });

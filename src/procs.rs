@@ -2283,6 +2283,7 @@ mod tests {
             lo_missing: Vec::new(),
             short: None,
             brief: None,
+            hint: None,
             network: false,
         });
         let root = Path::new("/p");

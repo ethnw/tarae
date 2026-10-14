@@ -5423,6 +5423,7 @@ fn draw_picker(
                     hint_spans(&pairs, dim, faint)
                 }
                 HeadRow::Faint(said) => vec![crate::markdown::Span { text: said.clone(), style: faint }],
+                HeadRow::Air => Vec::new(),
             };
             for s in spans {
                 apply(out, s.style)?;
@@ -10478,13 +10479,17 @@ fn fold_hints(pairs: &[(&'static str, String)], fold: &[&str], width: usize) -> 
 
 /// A list head's rows (`Picker.head`) in `lw` cells (its text from the list's column, `PAD_R` before the edge): the
 /// pairs' row, folded to fit, then the faint words over at most `HEAD_FAINT` rows — broken between their ` · ` parts,
-/// a part too long for a row between its words — `…` at the end of the last when there's more.
+/// a part too long for a row between its words — `…` at the end of the last when there's more; then the way on
+/// (`Head.then`) the same way from a row of its own, over at most `HEAD_THEN`; then the list's state (`Head.note`) a
+/// row of air below, cut to one row.
 enum HeadRow {
     Pairs(Vec<(&'static str, String)>),
     Faint(String),
+    Air,
 }
 
 const HEAD_FAINT: usize = 3;
+const HEAD_THEN: usize = 2;
 
 fn head_rows(h: &crate::picker::Head, lw: usize) -> Vec<HeadRow> {
     let room = lw.saturating_sub(1);
@@ -10500,25 +10505,32 @@ fn head_rows(h: &crate::picker::Head, lw: usize) -> Vec<HeadRow> {
         }
         _ => rows.push(fit_ellipsis(piece, room)),
     };
-    let mut rows: Vec<String> = Vec::new();
-    for part in h.faint.as_deref().unwrap_or_default().split(" · ").filter(|p| !p.is_empty()) {
-        if part.width() <= room {
-            add(&mut rows, part, " · ", true);
-            continue;
+    let broken = |text: Option<&str>, most: usize| {
+        let mut rows: Vec<String> = Vec::new();
+        for part in text.unwrap_or_default().split(" · ").filter(|p| !p.is_empty()) {
+            if part.width() <= room {
+                add(&mut rows, part, " · ", true);
+                continue;
+            }
+            for (i, w) in part.split(' ').filter(|w| !w.is_empty()).enumerate() {
+                add(&mut rows, w, " ", i > 0);
+            }
         }
-        for (i, w) in part.split(' ').filter(|w| !w.is_empty()).enumerate() {
-            add(&mut rows, w, " ", i > 0);
+        if rows.len() > most {
+            rows.truncate(most);
+            let last = rows.last_mut().expect("rows to keep");
+            *last = match last.width() + 2 <= room {
+                true => format!("{last} …"),
+                false => fit_ellipsis(last, last.width() - 1),
+            };
         }
+        rows.into_iter().map(HeadRow::Faint)
+    };
+    out.extend(broken(h.faint.as_deref(), HEAD_FAINT));
+    out.extend(broken(h.then.as_deref(), HEAD_THEN));
+    if let Some(note) = &h.note {
+        out.extend([HeadRow::Air, HeadRow::Faint(fit_ellipsis(note, room))]);
     }
-    if rows.len() > HEAD_FAINT {
-        rows.truncate(HEAD_FAINT);
-        let last = rows.last_mut().expect("HEAD_FAINT rows");
-        *last = match last.width() + 2 <= room {
-            true => format!("{last} …"),
-            false => fit_ellipsis(last, last.width() - 1),
-        };
-    }
-    out.extend(rows.into_iter().map(HeadRow::Faint));
     out
 }
 

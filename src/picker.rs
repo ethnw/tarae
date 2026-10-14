@@ -237,12 +237,16 @@ pub const BUFFERS: &str = "buffers";
 
 /// What a list is about, over its rows: key/meaning pairs drawn as key hints (`term::hint_spans`) — those named in
 /// `fold` left out first to last while they don't fit (`term::fold_hints`) — and faint words under them, broken
-/// between words over a few rows (`term::head_faint`).
+/// between words over a few rows (`term::head_rows`), then a way on in the same words, from a row of its own — and,
+/// a row of air below, the list's own state (`note`) where its rows don't say it: where the list's first row would
+/// be, as an empty list says why (`Picker.empty`), the rows under it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Head {
     pub pairs: Vec<(&'static str, String)>,
     pub fold: &'static [&'static str],
     pub faint: Option<String>,
+    pub then: Option<String>,
+    pub note: Option<String>,
 }
 
 pub struct Picker {

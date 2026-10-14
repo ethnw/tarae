@@ -445,10 +445,11 @@ pub fn brief(s: &Seen) -> String {
 
 /// The hint (6h; a toast once, and the tier's line): where Ubuntu's restriction is why a keeper got no namespaces
 /// and tarae runs under no profile — runs in `tier`, why, and the step that makes them A (`apparmor::hint`, by the
-/// binary's `place`). Under a profile that still didn't let it, none: that profile isn't the one tarae ships.
-pub fn hint(s: &Seen, tier: Tier, place: &super::apparmor::Place) -> Option<String> {
+/// binary's `place`) — and the tier they'd be in (9f, `Hint`). Under a profile that still didn't let it, none: that
+/// profile isn't the one tarae ships.
+pub fn hint(s: &Seen, tier: Tier, place: &super::apparmor::Place) -> Option<super::guarantees::Hint> {
     let ours_missing = cause(s) == Cause::Restriction && !confined(s.apparmor.as_deref());
-    ours_missing.then(|| super::apparmor::hint(tier.said(), place))
+    ours_missing.then(|| super::guarantees::Hint::of(tier, place))
 }
 
 /// What the probe found.
@@ -475,7 +476,7 @@ pub struct Probed {
     /// once (D-b); a keeper whose own scope fails says so with it, its runs in its cgroup.
     pub cgroups: Result<super::cgroup::Source, String>,
     /// Ubuntu's restriction kept the namespaces from a tarae under no profile: why, and the step (`hint`).
-    pub hint: Option<String>,
+    pub hint: Option<super::guarantees::Hint>,
 }
 
 impl Probed {
@@ -527,7 +528,7 @@ pub fn get() -> &'static Probed {
             Some(why) => format!("namespaces: {} ({}) — {why}", p.tier().said(), p.ns.said()),
         };
         let said = match &p.hint {
-            Some(hint) => format!("{said} — {hint}"),
+            Some(hint) => format!("{said} — {}", hint.said),
             None => said,
         };
         // (with the session's namespaces `short` has said served by copies already: only why, then)
@@ -1068,7 +1069,7 @@ mod tests {
             apparmor: label.map(str::to_string),
             ..seen(step, libc::EPERM)
         };
-        let hint = |s: &Seen, tier| super::hint(s, tier, &place);
+        let hint = |s: &Seen, tier| super::hint(s, tier, &place).map(|h| h.said);
         let unconfined = restricted(BirthStep::Map, Some("unconfined"));
         let said = hint(&unconfined, Tier::C).expect("restricted, no profile: the hint");
         assert!(said.contains("tier C") && said.contains("sudo apparmor_parser -r"), "{said}");
@@ -1090,6 +1091,63 @@ mod tests {
         ];
         for (s, what) in none {
             assert_eq!(hint(&s, Tier::C), None, "{what}");
+        }
+    }
+
+    /// 9f: a run's guarantees carry the hint where the probe's would be said — Ubuntu's restriction on and no
+    /// profile on tarae — naming the tier the profile gives (the session's namespaces: C's runs A+, D's B+) in the
+    /// panel's words, the whole hint in `tarae state`'s. A profile attached, or a system without the restriction
+    /// (Debian), none; nor Seatbelt's, which has no tiers.
+    #[test]
+    fn the_profile_hint_says_how_to_raise_the_tier() {
+        use crate::sandbox::guarantees::{Found, Guarantees};
+        let place = crate::sandbox::apparmor::Place {
+            path: "/usr/bin/tarae".into(),
+            root_owned: Ok(()),
+            packaged: true,
+        };
+        let ubuntu = |label: &str| Seen {
+            restrict_userns: Some(1),
+            apparmor: Some(label.to_string()),
+            ..seen(BirthStep::Map, libc::EPERM)
+        };
+        // (as `linux::confine` builds a run's: the probe's hint, a keeper without namespaces, served or not)
+        let run = |s: &Seen, served: bool| {
+            let tier = Tier::of(Ns::NONE, served);
+            Guarantees::landlock(Found {
+                ns: Ns::NONE,
+                served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
+                copies: false,
+                abi: 4,
+                ptys: Some(4),
+                tproxy: Err("no network namespace of its own".into()),
+                lo_missing: Vec::new(),
+                short: Some(why(s)),
+                brief: Some(brief(s)),
+                hint: super::hint(s, tier, &place),
+                network: true,
+            })
+        };
+        let c = run(&ubuntu("unconfined"), true);
+        let said = c.hint_brief().expect("restricted, no profile: the hint");
+        assert_eq!(said, "tarae's AppArmor profile would make this A+");
+        let step = c.step_row().map(|r| r.0);
+        assert_eq!(step.as_deref(), Some("copy the step that makes this tier A+"), "the step's row");
+        let whole = c.json()["hint"].as_str().unwrap_or_default().to_string();
+        assert!(
+            whole.contains("To make them tier A+") && whole.contains("sudo apparmor_parser -r"),
+            "{whole}"
+        );
+        let d = run(&ubuntu("unconfined"), false).hint_brief().unwrap_or_default();
+        assert!(d.contains("would make this B+"), "not served, the profile gives B+: {d}");
+        let debian = Seen { restrict_userns: None, ..ubuntu("unconfined") };
+        let none = [
+            (run(&ubuntu("/usr/bin/tarae (unconfined)"), true), "a profile attached"),
+            (run(&debian, true), "Debian: no restriction"),
+            (Guarantees::seatbelt(true, true), "Seatbelt"),
+        ];
+        for (g, what) in none {
+            assert_eq!((g.hint_brief(), &g.json()["hint"]), (None, &serde_json::Value::Null), "{what}");
         }
     }
 
@@ -1157,7 +1215,7 @@ mod tests {
             "label: {} · runs refuse user namespaces: {} · hint: {}\n",
             label().unwrap_or_default(),
             runs_refuse_userns(),
-            p.hint.as_deref().unwrap_or("none")
+            p.hint.as_ref().map_or("none", |h| h.said.as_str())
         );
         let _ = io::Write::write_all(&mut io::stderr(), profile.as_bytes());
         match std::env::var("TARAE_EXPECT_HINT").as_deref() {
