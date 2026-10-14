@@ -484,6 +484,11 @@ Kept:
   test: `llm::tests::every_claude_tarae_starts_has_its_updates_off` ·
   `claudeupdate::tests::an_old_claude_is_said_with_how_to_update_it` ·
   `claudeupdate::tests::claude_update_runs_as_your_own_task`
+- **It reads no auto memory**: every claude tarae starts gets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, which outranks
+  the setting `autoMemoryEnabled` (a project's settings can't turn it back on), and never `CLAUDE_MEMORY_STORES`
+  (team memory). The memory folder is the repository's, shared by every checkout; what's there is another tool's
+  notes, and memory a tarae claude wrote would be obeyed later by your own Claude Code.
+  test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`
 - **Its tools**: Claude Code's `Read` only (plus `Edit`, `Write` with `llm.edit-tools` "both"/"native"), and
   tarae's own tools in-process. No Bash, no WebFetch or WebSearch, no Grep or Glob, no Task.
   test: `chat::tests::each_edit_arm_says_its_own_tools`
@@ -592,7 +597,7 @@ Not Claude's, but a hostile repository reaches them:
 | G18 | `llm.sandbox = false` runs Claude's commands unconfined with no card | your choice, said in the title | said; a project needs your trust to set it |
 | G19 | claude writes `~/.claude.json`, which holds your user-scope MCP servers (commands your own claude starts) | claude's state lives in it | said; the chat runs `--strict-mcp-config` |
 | G20 | claude inherits `SSH_AUTH_SOCK`: the agent signs with your keys for it | unix sockets stay open (files-only profile) | proposed: drop it from claude's environment, deny the socket |
-| G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) is read unasked, shared by every checkout | inside claude's own folder | macOS: read-only under the profile; Linux: open |
+| G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: on Linux the folder is still readable to claude (no profile there) — nothing reads it now |
 | G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | not measured yet; proposed: after each run, look for protected names that weren't there (the run's tree snapshot, as Linux's G10) and ask before the next |
 | G22 | A refusal of claude's own work (not a tool's) goes unseen; `~/.claude/` is a denylist | the kernel didn't report claude's refusals (V1d, live) | an allowlist of what claude writes, once its refusals can be seen — and with it a measurement of `shell-snapshots/` (kept closed unmeasured: whether a later claude sources one it didn't make can't be told from here) |
 

@@ -331,6 +331,12 @@ pub fn spawn(
     // `claude update`/`install` alike (its env-vars reference); the user updates it (`:claude-update`). And its
     // `git status` leaves `.git/index` alone (`.git` isn't its to write)
     cmd.env("DISABLE_UPDATES", "1").env("GIT_OPTIONAL_LOCKS", "0");
+    // Nor does it read Claude Code's auto memory (threat model G21): its folder is the repository's (every
+    // checkout's), closed to this claude's writes, and what's there is another tool's notes — instructions not
+    // meant for it, paid for in every request; one a tarae claude wrote would later be obeyed by your own Claude
+    // Code. The variable outranks the setting `autoMemoryEnabled` (2.1.296), so a project's settings can't turn
+    // it back on. Team memory (`CLAUDE_MEMORY_STORES`) is memory too: never passed
+    cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1").env_remove("CLAUDE_MEMORY_STORES");
     // (removed by name, never `env_clear`: the rest of tarae's environment is claude's as it always was. An API
     // session never keeps a key from it: one there outranks its helper — Claude Code's credential order)
     let keep_keys = cfg.keep_env_key && *cred == Credential::Subscription;
@@ -1895,6 +1901,23 @@ pub(crate) mod tests {
         let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
         let out = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "1 0");
+    }
+
+    /// Every claude tarae starts has Claude Code's auto memory off and no team memory stores — over what it would
+    /// inherit, an environment that turns memory back on included (threat model G21).
+    #[test]
+    fn every_claude_tarae_starts_has_its_memory_off() {
+        let script = "printf '%s %s' \"$CLAUDE_CODE_DISABLE_AUTO_MEMORY\" \"${CLAUDE_MEMORY_STORES-unset}\"";
+        let cfg =
+            LlmConfig { command: "sh".into(), args: vec!["-c".into(), script.into()], ..Default::default() };
+        let given = Env::from([
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(), "0".to_string()),
+            ("CLAUDE_MEMORY_STORES".to_string(), "team".to_string()),
+        ]);
+        let sub = Credential::Subscription;
+        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "1 unset");
     }
 
     /// Under claude's own profile `sandbox-exec` starts whatever follows: a missing program is still the spawn's
