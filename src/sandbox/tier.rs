@@ -428,6 +428,21 @@ pub fn why(s: &Seen) -> String {
     }
 }
 
+/// `why` in a few words, people's — the sandbox panel's state line (9e); `why`'s whole words stay in the log, the
+/// report and `tarae state`.
+pub fn brief(s: &Seen) -> String {
+    match cause(s) {
+        Cause::Wsl1 => "WSL 1 has no user namespaces".into(),
+        Cause::MaxZero | Cause::CloneOff => "user namespaces are turned off".into(),
+        Cause::Seccomp => "a seccomp filter blocks namespaces".into(),
+        Cause::NotDumpable => "tarae isn't dumpable".into(),
+        Cause::Restriction => "AppArmor blocks user namespaces".into(),
+        Cause::ProfileMounts => "an AppArmor profile blocks mounts".into(),
+        Cause::MaskedProc => "/proc is masked, no PID namespace".into(),
+        Cause::Other => format!("namespaces failed at {}", s.failed.step.said()),
+    }
+}
+
 /// The hint (6h; a toast once, and the tier's line): where Ubuntu's restriction is why a keeper got no namespaces
 /// and tarae runs under no profile — runs in `tier`, why, and the step that makes them A (`apparmor::hint`, by the
 /// binary's `place`). Under a profile that still didn't let it, none: that profile isn't the one tarae ships.
@@ -444,6 +459,9 @@ pub struct Probed {
     pub ns: Ns,
     /// Why not all of them (no `pid`: D12's reason; none: why not) — None: all.
     pub short: Option<String>,
+    /// The same in a few words (`brief`; the sandbox panel's, 9e) — without served by copies, which the guarantees
+    /// say themselves.
+    pub brief: Option<String>,
     /// Whether tarae serves its runs' calls here (`supervisor::unavailable`).
     pub served: Result<(), String>,
     /// Whether a keeper of this tarae is born with the session's transparent proxy (`redirect`): the probe's own
@@ -487,6 +505,7 @@ pub fn get() -> &'static Probed {
             return Probed {
                 ns: Ns::NONE,
                 short: Some("none asked (TARAE_TEST_NO_NS)".into()),
+                brief: Some("none asked".into()),
                 served,
                 redirect: Err("no network namespace".into()),
                 cgroups: Err("no TPROXY network".into()),
@@ -501,6 +520,7 @@ pub fn get() -> &'static Probed {
         if std::env::var_os("TARAE_TEST_NO_PID").is_some() && p.ns.pid {
             p.ns.pid = false;
             p.short = Some("no PID namespace asked (TARAE_TEST_NO_PID)".into());
+            p.brief = Some("no PID namespace asked".into());
         }
         let said = match &p.short {
             None => format!("namespaces: {} ({})", p.tier().said(), p.ns.said()),
@@ -610,14 +630,16 @@ fn probe_with(
             Failed::Birth(b) => hint(&Seen::now(*b), tier, &place()),
             _ => None,
         };
-        (Ns::NONE, Some(e.said()), none(), hint)
+        let short = e.brief();
+        (Ns::NONE, Some(e.said()), Some(short), none(), hint)
     };
-    let (ns, short, redirect, hint) = match with_network(all, &mut tried) {
-        (Ok(()), network) => (all, None, network, None),
+    let (ns, short, brief_said, redirect, hint) = match with_network(all, &mut tried) {
+        (Ok(()), network) => (all, None, None, network, None),
         (Err(Failed::Birth(e)), _) if e.step == BirthStep::Proc => {
-            let no_pid = why(&Seen::now(e));
+            let seen = Seen::now(e);
+            let (no_pid, few) = (why(&seen), brief(&seen));
             match with_network(Ns::session(net, false), &mut tried) {
-                (Ok(()), network) => (Ns::session(net, false), Some(no_pid), network, None),
+                (Ok(()), network) => (Ns::session(net, false), Some(no_pid), Some(few), network, None),
                 (Err(e), _) => without(e),
             }
         }
@@ -633,7 +655,7 @@ fn probe_with(
         Ok(()) => super::cgroup::conditions(&super::cgroup::facts()),
         Err(_) => Err("no TPROXY network".into()),
     };
-    Probed { ns, short, served, redirect, cgroups, hint }
+    Probed { ns, short, brief: brief_said, served, redirect, cgroups, hint }
 }
 
 /// A keeper born with `ns` and, where it has a netns, the session's network: whether the namespaces work, and
@@ -668,6 +690,15 @@ enum Failed {
 }
 
 impl Failed {
+    /// `said` in a few words (`brief`).
+    fn brief(&self) -> String {
+        match self {
+            Failed::Birth(e) => brief(&Seen::now(*e)),
+            Failed::Run(_) => "a run in namespaces failed".into(),
+            Failed::Late => "namespaces didn't answer in time".into(),
+        }
+    }
+
     fn said(self) -> String {
         match self {
             Failed::Birth(e) => why(&Seen::now(e)),
@@ -771,6 +802,7 @@ mod tests {
                 let probed = Probed {
                     ns,
                     short: None,
+                    brief: None,
                     served: ok(served),
                     redirect: ok(redirect),
                     cgroups: Err("not asked".into()),
@@ -901,6 +933,70 @@ mod tests {
         ] {
             assert_eq!(of(apart, true), None, "{apart:?}");
         }
+    }
+
+    /// 9e: the panel's few words for each cause `why` tells apart — the cause named (AppArmor, seccomp, WSL, a masked
+    /// /proc), short enough for a 60-column panel's row with the next reason after it (`… · copies: …`), never its whole
+    /// reason.
+    #[test]
+    fn the_panel_says_why_in_a_few_words() {
+        let cases: Vec<(Seen, &str)> = vec![
+            (
+                Seen { restrict_userns: Some(1), ..seen(BirthStep::Propagation, libc::EPERM) },
+                "AppArmor blocks user namespaces",
+            ),
+            (
+                Seen { seccomp: true, ..seen(BirthStep::Clone, libc::EPERM) },
+                "a seccomp filter blocks namespaces",
+            ),
+            (seen(BirthStep::Clone, libc::ENOSPC), "user namespaces are turned off"),
+            (
+                Seen { userns_clone: Some(0), ..seen(BirthStep::Clone, libc::EPERM) },
+                "user namespaces are turned off",
+            ),
+            (Seen { wsl1: true, ..seen(BirthStep::Clone, libc::EINVAL) }, "WSL 1 has no user namespaces"),
+            (seen(BirthStep::Proc, libc::EPERM), "/proc is masked, no PID namespace"),
+            (
+                Seen {
+                    apparmor: Some("docker-default (enforce)".into()),
+                    ..seen(BirthStep::Propagation, libc::EACCES)
+                },
+                "an AppArmor profile blocks mounts",
+            ),
+            (Seen { dumpable: false, ..seen(BirthStep::Map, libc::EACCES) }, "tarae isn't dumpable"),
+            (seen(BirthStep::Clone, libc::EPERM), "namespaces failed at making its namespaces"),
+        ];
+        for (s, words) in cases {
+            let few = brief(&s);
+            assert_eq!(few, words, "{:?} {} — why: {}", s.failed.step, s.failed.errno, why(&s));
+            assert!(few.len() + " · ".len() <= 51, "a 60-column panel's row: {few}");
+        }
+    }
+
+    /// 9e: the probe's few words go where its whole reason goes, from the same failure — none with every namespace;
+    /// without the PID namespace and without any, `brief` of what was seen beside `why` of it (never the one in the
+    /// other's place); a run that failed or a keeper that didn't answer in their own few words. (Keepers stood in for.)
+    #[test]
+    fn the_probe_says_in_a_few_words_what_it_says_whole() {
+        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(Ok(()), false, |ns, _| fail(ns));
+        let p = probe(&|_| Ok(()));
+        assert_eq!((p.short, p.brief), (None, None), "every namespace: nothing to say");
+        let proc = BirthError { step: BirthStep::Proc, errno: libc::EPERM };
+        let p = probe(&|ns| if ns.pid { Err(Failed::Birth(proc)) } else { Ok(()) });
+        assert_eq!(p.ns, Ns::session(true, false), "no PID namespace");
+        let seen = Seen::now(proc);
+        assert_eq!((p.short, p.brief), (Some(why(&seen)), Some(brief(&seen))));
+        let clone = BirthError { step: BirthStep::Clone, errno: libc::EPERM };
+        let p = probe(&|ns| if ns.user { Err(Failed::Birth(clone)) } else { Ok(()) });
+        assert_eq!(p.ns, Ns::NONE, "no namespaces");
+        let seen = Seen::now(clone);
+        assert_eq!((p.short, p.brief), (Some(why(&seen)), Some(brief(&seen))));
+        let p = probe(&|ns| if ns.user { Err(Failed::Late) } else { Ok(()) });
+        assert!(p.short.as_deref().is_some_and(|w| w.contains("didn't answer within")), "{:?}", p.short);
+        assert_eq!(p.brief.as_deref(), Some("namespaces didn't answer in time"));
+        let p = probe(&|ns| if ns.user { Err(Failed::Run("`true` ended 1".into())) } else { Ok(()) });
+        assert!(p.short.as_deref().is_some_and(|w| w.ends_with("`true` ended 1")), "{:?}", p.short);
+        assert_eq!(p.brief.as_deref(), Some("a run in namespaces failed"));
     }
 
     /// Each of §Tiers' rows from what a stand-in system would show: the probe says why in the words of

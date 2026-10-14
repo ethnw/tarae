@@ -235,6 +235,16 @@ struct TreeMode {
 /// The buffer list's title (`space b`) — its key hints go by it.
 pub const BUFFERS: &str = "buffers";
 
+/// What a list is about, over its rows: key/meaning pairs drawn as key hints (`term::hint_spans`) — those named in
+/// `fold` left out first to last while they don't fit (`term::fold_hints`) — and faint words under them, broken
+/// between words over a few rows (`term::head_faint`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Head {
+    pub pairs: Vec<(&'static str, String)>,
+    pub fold: &'static [&'static str],
+    pub faint: Option<String>,
+}
+
 pub struct Picker {
     /// Number assigned by the editor — so a late list doesn't land in a different (newer) picker.
     pub id: u64,
@@ -268,6 +278,10 @@ pub struct Picker {
     pub live: bool,
     pub searching: bool,
     pub note: Option<String>,
+    /// Rows over the list, under the input (the sandbox panel's state line, 9e) — `term::draw_picker`.
+    pub head: Option<Head>,
+    /// Why the list is empty, said faint where its first row would be — else `nothing here`.
+    pub empty: Option<String>,
     /// The list is still being filled.
     pub loading: bool,
     /// Lines visible this frame (render fills them, draw draws them).
@@ -336,6 +350,8 @@ impl Picker {
             live: false,
             searching: false,
             note: None,
+            head: None,
+            empty: None,
             loading: false,
             view: Vec::new(),
             lines: Vec::new(),

@@ -412,13 +412,13 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         chat_x: (lay.chat_w > 0).then_some(lay.edit_w),
         picker_list: editor.picker.as_ref().map(|p| {
             let b = PickerBox::new(&lay, p);
-            (b.y + 3, b.list_rows)
+            (b.list_y(), b.list_rows)
         }),
         picker_preview_x: editor.picker.as_ref().and_then(|p| PickerBox::new(&lay, p).preview_x()),
         picker_preview: editor.picker.as_ref().and_then(|p| {
             let b = PickerBox::new(&lay, p);
             let x = b.preview_x()?;
-            Some((x, b.y, lay.edit_w.saturating_sub(x), b.list_rows + 4))
+            Some((x, b.y, lay.edit_w.saturating_sub(x), b.list_rows + 4 + b.head))
         }),
         picker_list_cols: editor.picker.as_ref().map(|p| {
             let b = PickerBox::new(&lay, p);
@@ -4844,6 +4844,8 @@ struct PickerBox {
     x: usize,
     y: usize,
     compact: bool,
+    /// The rows of what the list is about, under the input (`Picker.head`) — the list's, taken from it.
+    head: usize,
     list_rows: usize,
     /// Text width of left card (input, list) · right card (preview) (preview 0 when narrow — one card).
     list_w: usize,
@@ -4856,20 +4858,33 @@ impl PickerBox {
         (self.preview_w > 0).then(|| self.x + self.list_w + 2 + crate::chrome::GAP)
     }
 
+    /// The list's first row: under the edge, the input, the head and the divider.
+    fn list_y(&self) -> usize {
+        self.y + 3 + self.head
+    }
+
     /// Floats over the editor area — left of the chat, which stays whole — the same margin all round
     /// (`chrome::PICKER_MX` columns, `PICKER_MY` rows: they look alike), the ground under it so text behind
     /// doesn't leak. When wide enough (≥ 80 cells) left list card / a gutter / right preview card.
-    /// Vertical: half-row edge · input row · divider · list… · half-row edge.
+    /// Vertical: half-row edge · input row · its head (if any) · divider · list… · half-row edge.
     fn new(lay: &Layout, p: &Picker) -> Self {
         use crate::chrome::{GAP, PICKER_MX, PICKER_MY};
+        // (its rows and a blank one before the list)
+        let head_rows = |lw: usize| match p.head.as_ref().map_or(0, |h| head_rows(h, lw).len()) {
+            0 => 0,
+            n => n + 1,
+        };
         if p.compact {
             // Small card at top center: up to 60 cells wide, list as tall as its items (up to 12 rows)
             let w = lay.edit_w.saturating_sub(4).clamp(24, 60);
-            let list_rows = p.counts().0.clamp(3, 12).min(lay.text_rows.saturating_sub(4).max(1));
+            // (a list row kept, however short the screen: the head gives way)
+            let head = head_rows(w - 2).min(lay.text_rows.saturating_sub(5));
+            let list_rows = p.counts().0.clamp(3, 12).min(lay.text_rows.saturating_sub(4 + head).max(1));
             return PickerBox {
                 x: lay.edit_w.saturating_sub(w) / 2,
                 y: lay.text_top as usize,
                 compact: true,
+                head,
                 list_rows,
                 list_w: w - 2,
                 preview_w: 0,
@@ -4886,11 +4901,14 @@ impl PickerBox {
         } else {
             (w, 0)
         };
+        // (a list row kept, however short the screen: the head gives way — `h` is 6 at least)
+        let head = head_rows(left - 2).min(h - 5);
         PickerBox {
             x: mx,
             y: my,
             compact: false,
-            list_rows: h - 4,
+            head,
+            list_rows: (h - 4).saturating_sub(head).max(1),
             list_w: left - 2,
             preview_w: right.saturating_sub(2),
         }
@@ -5308,7 +5326,8 @@ fn draw_picker(
         )
         | None => String::new(),
     };
-    let rows = b.list_rows + 4;
+    let rows = b.list_rows + 4 + b.head;
+    let head = p.head.as_ref().map(|h| head_rows(h, lw)).unwrap_or_default();
     let preview = if b.preview_w > 0 { preview_lines(p, editor, b.list_rows, b.preview_w) } else { None };
     // Diffs scroll by dropping rows from the top (the last page stays); lines wider than the pane
     // continue on the next rows
@@ -5392,20 +5411,44 @@ fn draw_picker(
             queue!(out, Print("─".repeat(lw)))?;
             apply(out, card)?;
             queue!(out, Print(" "))?;
+        } else if let Some(line) = head.get(row - 3).filter(|_| row < 2 + b.head) {
+            // What the list is about (the sandbox panel's state line): its header under the divider, where its
+            // text starts — the pairs as key hints, folded to fit, then the faint words
+            apply(out, card)?;
+            queue!(out, Print("  "))?;
+            let mut used = 0;
+            let spans = match line {
+                HeadRow::Pairs(pairs) => {
+                    let pairs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                    hint_spans(&pairs, dim, faint)
+                }
+                HeadRow::Faint(said) => vec![crate::markdown::Span { text: said.clone(), style: faint }],
+            };
+            for s in spans {
+                apply(out, s.style)?;
+                queue!(out, Print(&s.text))?;
+                used += s.text.width();
+            }
+            apply(out, card)?;
+            queue!(out, Spaces((lw + 2).saturating_sub(2 + used)))?;
+        } else if b.head > 0 && row == 2 + b.head {
+            // (a row of air between the header and the list)
+            apply(out, card)?;
+            queue!(out, Spaces(lw + 2))?;
         } else {
             let mut used = 0;
-            match p.view.get(row - 3) {
+            match p.view.get(row - 3 - b.head) {
                 Some(r) => used = draw_list_row(out, r, lw, editor, ui, card, selected, true)?,
                 None => {
                     apply(out, card)?;
                     queue!(out, Print("  "))?;
                     // Nothing to show: say why, faint, where the first row would be
-                    if row == 3 && p.view.is_empty() {
+                    if row == 3 + b.head && p.view.is_empty() {
                         let why = match () {
                             _ if p.loading => "loading…",
                             _ if p.live && p.query.is_empty() => "type to search the project — a regex",
                             _ if p.live && p.searching => "searching…",
-                            _ if p.query.is_empty() => "nothing here",
+                            _ if p.query.is_empty() => p.empty.as_deref().unwrap_or("nothing here"),
                             _ => "no matches",
                         };
                         let why = fit(why, lw.saturating_sub(1));
@@ -10385,6 +10428,97 @@ fn hint_spans(pairs: &[(&str, &str)], key: Style, faint: Style) -> Vec<crate::ma
             out.push(Span { text: format!(" {v}"), style: faint });
         }
     }
+    out
+}
+
+/// `pairs` as key hints in `width` cells: whole when they fit; else what `fold` doesn't name, then the ones it names
+/// from its end (the most important) to its start, each while it fits — so its first ones go first, and a later one
+/// too long for what's left goes without taking the shorter ones before it along. The first one it tries, a list
+/// (`a, b, c`), keeps its first items and says how many it left (`a +2`) rather than going — never a word cut; what's
+/// never folded and still doesn't fit has its last meaning cut. In `pairs`' order. (The sandbox panel's state line,
+/// 9e: `Guarantees::FOLD`.)
+fn fold_hints(pairs: &[(&'static str, String)], fold: &[&str], width: usize) -> Vec<(&'static str, String)> {
+    // (as `hint_spans` draws them: `key meaning`, two cells between)
+    let one = |k: &str, m: &str| k.width() + if m.is_empty() { 0 } else { 1 + m.width() };
+    let wide = |v: &[(usize, &str, String)]| -> usize {
+        v.iter().map(|(_, k, m)| one(k, m)).sum::<usize>() + 2 * v.len().saturating_sub(1)
+    };
+    // (a list's first `n` items whole, and how many more: `processes, signals +2`)
+    let items = |m: &str, room: usize| -> Option<String> {
+        let all: Vec<&str> = m.split(", ").collect();
+        (1..all.len())
+            .rev()
+            .map(|n| format!("{} +{}", all[..n].join(", "), all.len() - n))
+            .find(|s| s.width() <= room)
+    };
+    let mut v: Vec<(usize, &str, String)> = (pairs.iter().enumerate())
+        .filter(|(_, p)| !fold.contains(&p.0))
+        .map(|(i, (k, m))| (i, *k, m.clone()))
+        .collect();
+    let over = wide(&v).saturating_sub(width);
+    if let Some((_, _, m)) = v.last_mut().filter(|_| over > 0) {
+        *m = fit_ellipsis(m, m.width().saturating_sub(over));
+    }
+    let mut first = true;
+    for k in fold.iter().rev() {
+        let Some(at) = pairs.iter().position(|p| p.0 == *k) else { continue };
+        let m = &pairs[at].1;
+        let used = wide(&v) + if v.is_empty() { 0 } else { 2 };
+        let room = width.saturating_sub(used + k.width() + 1);
+        if used + one(k, m) <= width {
+            v.push((at, pairs[at].0, m.clone()));
+        } else if let Some(some) = items(m, room).filter(|_| first) {
+            v.push((at, pairs[at].0, some));
+        }
+        first = false;
+    }
+    crate::sorting::by_key(&mut v, |p| p.0);
+    v.into_iter().map(|(_, k, m)| (k, m)).collect()
+}
+
+/// A list head's rows (`Picker.head`) in `lw` cells (its text from the list's column, `PAD_R` before the edge): the
+/// pairs' row, folded to fit, then the faint words over at most `HEAD_FAINT` rows — broken between their ` · ` parts,
+/// a part too long for a row between its words — `…` at the end of the last when there's more.
+enum HeadRow {
+    Pairs(Vec<(&'static str, String)>),
+    Faint(String),
+}
+
+const HEAD_FAINT: usize = 3;
+
+fn head_rows(h: &crate::picker::Head, lw: usize) -> Vec<HeadRow> {
+    let room = lw.saturating_sub(1);
+    let mut out = Vec::new();
+    if !h.pairs.is_empty() {
+        out.push(HeadRow::Pairs(fold_hints(&h.pairs, h.fold, room)));
+    }
+    // (`sep` between what's on a row: ` · ` between parts, a space between a long part's words)
+    let add = |rows: &mut Vec<String>, piece: &str, sep: &str, joins: bool| match rows.last_mut() {
+        Some(r) if joins && r.width() + sep.width() + piece.width() <= room => {
+            r.push_str(sep);
+            r.push_str(piece);
+        }
+        _ => rows.push(fit_ellipsis(piece, room)),
+    };
+    let mut rows: Vec<String> = Vec::new();
+    for part in h.faint.as_deref().unwrap_or_default().split(" · ").filter(|p| !p.is_empty()) {
+        if part.width() <= room {
+            add(&mut rows, part, " · ", true);
+            continue;
+        }
+        for (i, w) in part.split(' ').filter(|w| !w.is_empty()).enumerate() {
+            add(&mut rows, w, " ", i > 0);
+        }
+    }
+    if rows.len() > HEAD_FAINT {
+        rows.truncate(HEAD_FAINT);
+        let last = rows.last_mut().expect("HEAD_FAINT rows");
+        *last = match last.width() + 2 <= room {
+            true => format!("{last} …"),
+            false => fit_ellipsis(last, last.width() - 1),
+        };
+    }
+    out.extend(rows.into_iter().map(HeadRow::Faint));
     out
 }
 

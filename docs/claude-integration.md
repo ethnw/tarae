@@ -835,7 +835,13 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   If tarae can't watch (`log stream` refuses to run inside another sandbox), the result says so and quotes
   the output's `Operation not permitted` lines instead
 - **What it blocked is yours to open**, never Claude's: `space m s` on a command's panel (`space x s` on a test
-  run's, or `:sandbox-blocked`) lists what could open. For a write, each folder from the one written in up
+  run's, or `:sandbox-blocked`) lists what could open — over the list, what the session's last sandboxed run
+  was kept from and shared (`tier C  loopback this machine's, other sessions' refused  shared processes, …`, or
+  `sandbox Seatbelt …`), and why it isn't the top tier in a few words, faint under it (`AppArmor blocks user
+  namespaces · copies: pidfd_getfd refused`; the whole reason is in Claude's report and `tarae state`). A narrow
+  panel gives its room by importance — what's shared, the loopback, the network, Landlock's ABI — each part whole
+  where it fits (a long one that doesn't leaves room to shorter ones after it), and what's shared keeps its first
+  items (`processes, signals +2`) before it goes; the tier always shows. Nothing blocked, the list says so. For a write, each folder from the one written in up
   to just below home, so you choose how wide. For a connection, that port on this machine — or that unix
   socket, the one file, offered `y` this run or `a` this conversation, never kept. Docker's (colima's
   `docker.sock`) is only ever `y` this run: its card says, in the warning color, that what connects to it can

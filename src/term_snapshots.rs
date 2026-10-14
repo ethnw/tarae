@@ -2727,6 +2727,8 @@ fn snapshot_sandbox_blocked() {
     r.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
     r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
     s.ed.session.task_run = Some(r);
+    // (the run's sandbox, as `tools::go_now` keeps it: the list's state line — 9e)
+    s.ed.session.sandbox = Some(crate::sandbox::guarantees::Guarantees::seatbelt(false, false));
     let dump = |s: &mut Shot, name: &str| {
         if let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
@@ -2738,9 +2740,103 @@ fn snapshot_sandbox_blocked() {
     s.keys(" ms");
     s.check("sandbox_blocked_list");
     dump(&mut s, "sandbox_blocked_list");
+    s.frames_both("sandbox_blocked_list");
     s.keys("<ret>");
     s.check("sandbox_blocked_card");
     dump(&mut s, "sandbox_blocked_card");
+}
+
+/// Tier C served by copies on colima (no user namespaces, Landlock ABI 4): every part of the state line there, and a
+/// fallback's why.
+fn tier_c_by_copies() -> crate::sandbox::guarantees::Guarantees {
+    use crate::sandbox::guarantees::{Found, Guarantees, Ns};
+    Guarantees::landlock(Found {
+        ns: Ns::NONE,
+        served: Ok(()),
+        copies: true,
+        abi: 4,
+        ptys: Some(4),
+        tproxy: Err("no network namespace of its own".into()),
+        lo_missing: Vec::new(),
+        short: Some(
+            "no user namespaces: AppArmor restricts them (kernel.apparmor_restrict_unprivileged_userns)"
+                .into(),
+        ),
+        brief: Some("AppArmor blocks user namespaces".into()),
+        network: false,
+    })
+}
+
+/// 9e: the sandbox panel's state line (`space m s`) — the session's last run's sandbox as key hints over the list,
+/// a fallback's why faint under it; at 60 columns the least important parts folded (`Guarantees::FOLD`); before any
+/// sandboxed run, said so in its place. Nothing blocked: the list says so where its first row would be. With
+/// `TARAE_FRAMES_DIR` set, each in both themes (`target/sb/shots-9e.sh` draws them).
+#[test]
+fn snapshot_sandbox_panel_tier() {
+    use crate::sandbox::guarantees::{Found, Guarantees, Ns};
+    let top = Guarantees::landlock(Found {
+        ns: Ns::session(true, true),
+        served: Ok(()),
+        copies: false,
+        abi: 8,
+        ptys: None,
+        tproxy: Ok(()),
+        lo_missing: Vec::new(),
+        short: None,
+        brief: None,
+        network: true,
+    });
+    for (w, h) in [(120, 30), (60, 24)] {
+        for (name, g) in [("fallback", Some(tier_c_by_copies())), ("top", Some(top.clone())), ("empty", None)]
+        {
+            let mut s = Shot::new(w, h);
+            s.file("src/demo.rs", DEMO_RS);
+            s.ed.session.sandbox = g;
+            s.keys(" ms");
+            assert!(
+                s.ed.picker.as_ref().is_some_and(|p| p.kind == "blocked"),
+                "nothing blocked opens the panel too"
+            );
+            let name = format!("sandbox_panel_tier_{name}_{w}");
+            s.check(&name);
+            s.frames_both(&name);
+        }
+    }
+}
+
+/// 9e: where the state line doesn't fit, its parts go in `Guarantees::FOLD`'s order — Landlock's ABI, the network, the
+/// loopback, then what's shared, which first keeps fewer items whole (`processes, signals +2`), never a word cut; the
+/// tier always stays.
+#[test]
+fn the_state_line_folds_its_least_important_part_first() {
+    use crate::sandbox::guarantees::Guarantees;
+    let pairs = tier_c_by_copies().panel_pairs();
+    let keys = |w: usize| -> Vec<&str> {
+        super::fold_hints(&pairs, Guarantees::FOLD, w).iter().map(|p| p.0).collect()
+    };
+    assert_eq!(keys(1000), ["tier", "Landlock", "loopback", "network", "shared"]);
+    // (narrower and narrower: the order the parts go in)
+    let mut gone: Vec<&str> = Vec::new();
+    for w in (0..200).rev() {
+        let now = keys(w);
+        let went: Vec<&str> =
+            pairs.iter().map(|p| p.0).filter(|k| !now.contains(k) && !gone.contains(k)).collect();
+        gone.extend(went);
+    }
+    assert_eq!(gone, ["Landlock", "network", "loopback", "shared"]);
+    // (a long part that doesn't fit doesn't take the less important short ones along: the ABI and the network stay
+    // without the loopback)
+    assert_eq!(keys(100), ["tier", "Landlock", "network", "shared"]);
+    // (what's shared keeps fewer items before it goes — each whole — and what's left fits)
+    let at_30 = super::fold_hints(&pairs, Guarantees::FOLD, 30);
+    let shared = &at_30.iter().find(|p| p.0 == "shared").expect("shared, fewer").1;
+    let all = &pairs.iter().find(|p| p.0 == "shared").unwrap().1;
+    let (kept, more) = shared.rsplit_once(" +").expect("how many more");
+    assert!(kept.split(", ").all(|i| all.split(", ").any(|a| a == i)), "{at_30:?}");
+    assert_eq!(kept.split(", ").count() + more.parse::<usize>().unwrap(), all.split(", ").count());
+    let wide: usize =
+        at_30.iter().map(|(k, m)| k.len() + 1 + m.chars().count()).sum::<usize>() + 2 * (at_30.len() - 1);
+    assert!(wide <= 30, "{at_30:?}");
 }
 
 /// Claude's command in the task panel: no `space m m again` — that runs the user's task, not this one.

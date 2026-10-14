@@ -7909,7 +7909,7 @@ mod tests {
             )
             .unwrap();
             let g = c.guarantees.expect("a keeper's run has its guarantees");
-            (g.way, g.line())
+            (g.way, g.line(), g.brief)
         };
         let served = super::super::linux::served_here();
         let ways = [way(served.clone()), way(Err("no supervisor for this run".into())), way(served.clone())];
@@ -7922,6 +7922,17 @@ mod tests {
             assert!(w[0] != Way::NoSocket && w[1] == Way::NoSocket && w[2] == w[0], "{w:?}\n{lines:#?}");
         } else {
             eprintln!("{test}: the network's way not judged — tarae serves no run here");
+        }
+        // (9e: `confine` hands the probe's few words on — each run's brief starts with them, as its why with `short`)
+        match &super::super::tier::get().brief {
+            Some(b) => {
+                let briefs = ways.each_ref().map(|w| w.2.clone());
+                assert!(
+                    briefs.iter().all(|x| x.as_deref().is_some_and(|x| x.starts_with(b.as_str()))),
+                    "{b}: {briefs:?}"
+                );
+            }
+            None => eprintln!("{test}: the probe's brief not judged — every namespace here, nothing to say"),
         }
         match super::super::tier::get().ns.user {
             true => {

@@ -216,6 +216,9 @@ pub struct Guarantees {
     pub way: Way,
     /// Why not the top tier — the probe's, the supervisor's, no TPROXY's, Landlock's — None at the top.
     pub why: Option<String>,
+    /// The same in a few words, ` · ` between (the sandbox panel, 9e, under the tier): `AppArmor blocks user
+    /// namespaces · copies: pidfd_getfd refused` — `why` is the report's and `tarae state`'s.
+    pub brief: Option<String>,
     /// The ptys a run holds at a time where it opens only those it makes (`ptys::POOL`).
     pool: Option<usize>,
 }
@@ -238,6 +241,8 @@ pub struct Found {
     pub lo_missing: Vec<&'static str>,
     /// The probe's why not all namespaces (`tier::Probed.short`).
     pub short: Option<String>,
+    /// The same in a few words (`tier::Probed.brief`).
+    pub brief: Option<String>,
     /// The policy opens the network.
     pub network: bool,
 }
@@ -245,6 +250,9 @@ pub struct Found {
 /// The loopback of a run served without a network namespace of its own (C, by copies): this machine's — another
 /// session's socket on it refused (step 8).
 const THEIRS_REFUSED: &str = "this machine's, other sessions' sockets refused";
+
+/// The same in the sandbox panel's line (`panel_pairs`).
+const THEIRS_SHORT: &str = "this machine's, other sessions' refused";
 
 /// The terminals of a run that opens only those it makes (3b).
 const ONLY_MADE: &str = "only those it makes";
@@ -333,6 +341,20 @@ impl Guarantees {
         if f.abi < 3 {
             why.push(format!("Landlock ABI {}: partial, every run asks", f.abi));
         }
+        // (the same, each in a few words — the probe's own first; the tier is said beside it already)
+        let mut brief: Vec<String> = f.brief.into_iter().collect();
+        if let Err(w) = &f.served {
+            brief.push(format!("not served: {w}"));
+        }
+        if net == RunNet::Copied {
+            brief.push("copies: pidfd_getfd refused".into());
+        }
+        if let (Way::Proxy, Err(_), true) = (way, &f.tproxy, f.network) {
+            brief.push("no TPROXY".into());
+        }
+        if f.abi < 3 {
+            brief.push(format!("Landlock ABI {}: partial", f.abi));
+        }
         Guarantees {
             by: By::Landlock { tier, abi: f.abi, net },
             ns: Some(f.ns),
@@ -340,6 +362,7 @@ impl Guarantees {
             network: f.network,
             way,
             why: (!why.is_empty()).then(|| why.join("; ")),
+            brief: (!brief.is_empty()).then(|| brief.join(" · ")),
             pool,
         }
     }
@@ -363,6 +386,7 @@ impl Guarantees {
             network,
             way: Way::Proxy,
             why: None,
+            brief: None,
             pool: None,
         }
     }
@@ -406,6 +430,16 @@ impl Guarantees {
     /// The state line's parts, key and meaning: the tier and Landlock's ABI (or Seatbelt), the loopback, the
     /// network, and what's shared.
     pub fn pairs(&self) -> Vec<(&'static str, String)> {
+        self.pairs_said(false)
+    }
+
+    /// `pairs` for the sandbox panel (9e), where room is short: the loopback of a run served without a network
+    /// namespace in fewer words (`THEIRS_SHORT`) — `line` keeps them whole: `tarae state`, `--watch sandbox`, `:procs`.
+    pub fn panel_pairs(&self) -> Vec<(&'static str, String)> {
+        self.pairs_said(true)
+    }
+
+    fn pairs_said(&self, short: bool) -> Vec<(&'static str, String)> {
         let mut v = match self.by {
             By::Landlock { tier, abi, .. } => vec![
                 ("tier", format!("{}{}", tier.said(), if abi < 3 { " partial" } else { "" })),
@@ -413,7 +447,11 @@ impl Guarantees {
             ],
             By::Seatbelt => vec![("sandbox", "Seatbelt".to_string())],
         };
-        let loopback = self.rows.iter().find(|r| r.part == Part::Loopback).map(|r| r.how.clone());
+        // (served without a network namespace, in the panel: `THEIRS_REFUSED` in fewer words)
+        let loopback = self.rows.iter().find(|r| r.part == Part::Loopback).map(|r| match self.by {
+            By::Landlock { net: RunNet::Served | RunNet::Copied, .. } if short => THEIRS_SHORT.to_string(),
+            _ => r.how.clone(),
+        });
         v.extend(loopback.map(|l| ("loopback", l)));
         let network = match (self.way, self.network) {
             (Way::NoSocket, _) => "no socket",
@@ -427,6 +465,13 @@ impl Guarantees {
         v.push(("shared", if shared.is_empty() { "nothing".into() } else { shared.join(", ") }));
         v
     }
+
+    /// The state line's keys from the least important to the most, where the sandbox panel is narrow (9e,
+    /// `term::fold_hints`): Landlock's ABI (the tier says a partial one), the network, the loopback (other sessions'
+    /// sockets — step 8's), what's shared. Room goes to the most important first, each part whole where it fits — a
+    /// long one that doesn't leaves its room to shorter, less important ones — and what's shared keeps its first
+    /// items (`processes, signals +2`) before it goes. The tier (or `sandbox Seatbelt`) is never left out.
+    pub const FOLD: &[&str] = &["Landlock", "network", "loopback", "shared"];
 
     /// The state line: `pairs`, a ` · ` between.
     pub fn line(&self) -> String {

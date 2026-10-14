@@ -4,12 +4,12 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                                                                what the sandbox blocked  4/4
 03    ──────────────────────────────────────────────────────────────────────────────────────────────
-04   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache              …/_cacache/index-v5
-05     ◦ allow writing in /private/tmp/tarae-shot-blocked              …/npm-cache/_cacache/index-v5
-06     ◦ allow port 5432 on this machine                                              npm connecting
-07     ▲ run it outside the sandbox, once                                                   npm test
-08
-09
+04     sandbox Seatbelt  shared processes, System V shared memory, POSIX shared memory
+05
+06   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache              …/_cacache/index-v5
+07     ◦ allow writing in /private/tmp/tarae-shot-blocked              …/npm-cache/_cacache/index-v5
+08     ◦ allow port 5432 on this machine                                              npm connecting
+09     ▲ run it outside the sandbox, once                                                   npm test
 10
 11
 12
@@ -35,9 +35,9 @@
 01
 02   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 03   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-04   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+04   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 05   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-06   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+06   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 07   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 08   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 09   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -66,12 +66,12 @@
 01
 02    A                                                                ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT              ddddddddddddddddddd
-05     d                                                               ddddddddddddddddddddddddddddd
-06     d                                                                              ddd dddddddddd
-07     w                                                                                    ddd dddd
-08
-09
+04     DDDDDDD ffffffff  DDDDDD ffffffffff ffffff f ffffff fffffff fffff ffffff ffffff
+05
+06   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT              ddddddddddddddddddd
+07     d                                                               ddddddddddddddddddddddddddddd
+08     d                                                                              ddd dddddddddd
+09     w                                                                                    ddd dddd
 10
 11
 12

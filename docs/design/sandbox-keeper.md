@@ -596,8 +596,9 @@ second: it weakens the whole system). tarae ships no profile.
 
 One value, `sandbox::Guarantees`, said in four places, each true for that run: a sentence in the report Claude reads
 ("its localhost is the session's own — what it leaves listening its later runs reach, nothing of yours"); the state
-line of `:sandbox-blocked`'s panel (`Landlock 8 · files full · network: session + tarae · kernel locks TCP UDP unix ·
-signals scoped`, a fallback's reason faint below); `tarae state`'s `sandbox` object (`uistate::V` up, `--watch
+line of `:sandbox-blocked`'s panel (`tier C  Landlock ABI 4  loopback …  network closed  shared …` as key hints, a
+fallback's reason in a few words faint below — `Guarantees::brief`, from `tier::brief` —, folded by
+`Guarantees::FOLD` when narrow — 9e) and `:procs`' keeper row; `tarae state`'s `sandbox` object (`uistate::V` up, `--watch
 sandbox`); `TARAE_SANDBOX_STATUS` = tier and ABI (`A+:8`, `C:6`) in the run's environment.
 
 ## Steps

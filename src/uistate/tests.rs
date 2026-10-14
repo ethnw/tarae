@@ -1664,6 +1664,7 @@ fn landlock_run(ns: crate::sandbox::guarantees::Ns, copies: bool) -> crate::sand
         tproxy: if ns.netns() { Ok(()) } else { Err("no network namespace of its own".into()) },
         lo_missing: Vec::new(),
         short: None,
+        brief: None,
         network: false,
     })
 }

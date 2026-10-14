@@ -1745,12 +1745,17 @@ impl Editor {
         // (each session's keeper: its sandboxed runs, and what they left, under it — `sandbox::keeper`)
         #[cfg(target_os = "linux")]
         for k in crate::sandbox::keeper::of(None).into_iter().filter(|k| !k.is_gone()) {
+            let of = self.session_of(&k.root);
+            let g = std::iter::once(&self.session)
+                .chain(&self.sessions)
+                .find(|s| of == Some(s.id))
+                .and_then(|s| s.sandbox.as_ref());
             out.push(Known {
                 pid: k.pid,
                 kind: Kind::Helper,
                 title: "sandbox keeper".into(),
-                what: format!("the session's keeper · {} · {}", k.said(), crate::allow::tilde(&k.root)),
-                session: self.session_of(&k.root).filter(|_| sessions),
+                what: keeper_what(g, || k.said(), &k.root),
+                session: of.filter(|_| sessions),
                 at: None,
             });
         }
@@ -2070,6 +2075,18 @@ impl Editor {
     }
 }
 
+/// A sandbox keeper's row: its session's last run's state line (`Guarantees::line` — the sandbox panel's words, 9e), else
+/// its own tier and namespaces (`said`: `Keeper::said`) until that run's are known; then its checkout.
+#[cfg(any(target_os = "linux", test))]
+fn keeper_what(
+    g: Option<&crate::sandbox::guarantees::Guarantees>,
+    said: impl FnOnce() -> String,
+    root: &Path,
+) -> String {
+    let state = g.map_or_else(said, |g| g.line());
+    format!("the session's keeper · {state} · {}", crate::allow::tilde(root))
+}
+
 /// A process tarae started but doesn't know, stopped (`s`): SIGTERM while it's still the one listed (its
 /// `started`) — and, tarae's own child, waited for on a thread of its own: nothing here holds it, so nothing
 /// else would, and it'd stay a zombie until tarae exits (seen: a stray `log stream`, `<defunct>`).
@@ -2250,6 +2267,30 @@ mod tests {
     use super::*;
 
     const MB: u64 = 1 << 20;
+
+    /// 9e: a keeper's row says its session's sandbox in the words the panel's state line has (`Guarantees::line`),
+    /// its own `said` only before the session's first run.
+    #[test]
+    fn a_keepers_row_says_its_sessions_sandbox_as_the_panel_does() {
+        use crate::sandbox::guarantees::{Found, Guarantees, Ns};
+        let g = Guarantees::landlock(Found {
+            ns: Ns::session(true, true),
+            served: Ok(()),
+            copies: false,
+            abi: 8,
+            ptys: None,
+            tproxy: Ok(()),
+            lo_missing: Vec::new(),
+            short: None,
+            brief: None,
+            network: false,
+        });
+        let root = Path::new("/p");
+        let said = || "A+ (user net ipc pid mnt)".to_string();
+        assert_eq!(keeper_what(Some(&g), said, root), format!("the session's keeper · {} · /p", g.line()),);
+        assert!(g.line().starts_with("tier A+ · Landlock ABI 8"), "{}", g.line());
+        assert_eq!(keeper_what(None, said, root), "the session's keeper · A+ (user net ipc pid mnt) · /p");
+    }
 
     fn os(pid: u32, ppid: u32, name: &str) -> Os {
         Os { pid, ppid, name: name.into(), started: 1_000, rss: 10 * MB, ..Default::default() }

@@ -379,6 +379,10 @@ fn the_report_is_pinned() {
     let none = Some("no user namespaces: kernel.unprivileged_userns_clone is 0".to_string());
     let no_pid =
         Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
+    let (none_brief, no_pid_brief) = (
+        Some("user namespaces are turned off".to_string()),
+        Some("/proc is masked, no PID namespace".to_string()),
+    );
     let tiers: [(&str, Option<Found>); 7] = [
         ("Seatbelt", None),
         (
@@ -387,13 +391,30 @@ fn the_report_is_pinned() {
         ),
         (
             "A, ABI 6",
-            Some(Found { short: no_pid.clone(), ..tier_found(Ns::session(true, false), true, false, false) }),
+            Some(Found {
+                short: no_pid.clone(),
+                brief: no_pid_brief.clone(),
+                ..tier_found(Ns::session(true, false), true, false, false)
+            }),
         ),
         ("B+, ABI 6", Some(tier_found(Ns::session(true, true), false, false, false))),
-        ("C, ABI 4", Some(Found { abi: 4, short: none.clone(), ..tier_found(Ns::NONE, true, false, false) })),
+        (
+            "C, ABI 4",
+            Some(Found {
+                abi: 4,
+                short: none.clone(),
+                brief: none_brief.clone(),
+                ..tier_found(Ns::NONE, true, false, false)
+            }),
+        ),
         (
             "C by copies, ABI 11",
-            Some(Found { abi: 11, short: none.clone(), ..tier_found(Ns::NONE, true, true, false) }),
+            Some(Found {
+                abi: 11,
+                short: none.clone(),
+                brief: none_brief.clone(),
+                ..tier_found(Ns::NONE, true, true, false)
+            }),
         ),
         ("D, ABI 3", Some(Found { abi: 3, short: none, ..tier_found(Ns::NONE, false, false, false) })),
     ];
@@ -431,6 +452,7 @@ fn tier_found(
         },
         lo_missing: Vec::new(),
         short: None,
+        brief: None,
         network: true,
     }
 }
@@ -494,9 +516,14 @@ fn the_guarantees_say_each_tier() {
     let no_pid =
         Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
     let none = Some("no user namespaces: kernel.unprivileged_userns_clone is 0".to_string());
+    let (none_brief, no_pid_brief) = (
+        Some("user namespaces are turned off".to_string()),
+        Some("/proc is masked, no PID namespace".to_string()),
+    );
     let a_plus = || found(Ns::session(true, true), true, false, true);
     let a = |copies: bool, tproxy: bool| Found {
         short: no_pid.clone(),
+        brief: no_pid_brief.clone(),
         ..found(Ns::session(!copies, false), true, copies, tproxy)
     };
     // (what each shares at ABI 2 — no truncating rule: files; no signal scope —, at 3 to 5 — still no signal scope:
@@ -557,25 +584,29 @@ fn the_guarantees_say_each_tier() {
         (
             "B",
             Some(Tier::B),
-            Found { short: no_pid.clone(), ..found(Ns::session(true, false), false, false, false) },
+            Found {
+                short: no_pid.clone(),
+                brief: no_pid_brief.clone(),
+                ..found(Ns::session(true, false), false, false, false)
+            },
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
         (
             "C, tarae's proxy",
             Some(Tier::C),
-            Found { short: none.clone(), ..found(Ns::NONE, true, false, false) },
+            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, true, false, false) },
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
             "C by copies",
             Some(Tier::C),
-            Found { short: none.clone(), ..found(Ns::NONE, true, true, false) },
+            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, true, true, false) },
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
             "D",
             Some(Tier::D),
-            Found { short: none.clone(), ..found(Ns::NONE, false, false, false) },
+            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, false, false, false) },
             [
                 &[Files, Processes, Signals, Ipc, Shm, Ptys],
                 &[Processes, Signals, Ipc, Shm, Ptys],
@@ -612,8 +643,9 @@ fn the_guarantees_say_each_tier() {
         let (line, sentence, said) = (g.line(), g.sentence(), g.shared_said());
         out += &format!("══ {label}\nline: {line}\nsentence: {sentence}\n");
         out += &format!(
-            "why: {}\nreport:{}\n",
+            "why: {}\nbrief: {}\nreport:{}\n",
             g.why.as_deref().unwrap_or("—"),
+            g.brief.as_deref().unwrap_or("—"),
             if said.is_empty() { " —" } else { &said }
         );
         if g.tier() != tier {

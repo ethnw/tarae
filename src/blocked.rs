@@ -206,11 +206,13 @@ impl Editor {
                 "that run was on a commit's tree, gone since — nothing of it to open or run again",
             );
         }
-        let Some(run) = self.blocked_run(which) else {
-            return self.set_status("the sandbox blocked nothing in that run — its panel says when it does");
-        };
+        // (nothing blocked: the panel still opens — its state line, and why its list is empty)
+        let run = self.blocked_run(which);
         let home = crate::allow::home().unwrap_or_else(|| PathBuf::from("/"));
-        let list = choices(&run.denials, &home, &self.session.root, &path_dirs());
+        let list = match &run {
+            Some(run) => choices(&run.denials, &home, &self.session.root, &path_dirs()),
+            None => Vec::new(),
+        };
         use crate::picker::{Action, Item};
         let mut items: Vec<Item> = list
             .iter()
@@ -230,15 +232,21 @@ impl Editor {
                 glyph: Some(("◦", "ui.virtual")),
             })
             .collect();
-        items.push(Item {
-            label: "run it outside the sandbox, once".into(),
-            action: Action::Grant("outside".into()),
-            hint: run.label(),
-            glyph: Some(("▲", "warning")),
-        });
-        self.session.blocked = Some((run, list));
-        let p =
+        if let Some(run) = &run {
+            items.push(Item {
+                label: "run it outside the sandbox, once".into(),
+                action: Action::Grant("outside".into()),
+                hint: run.label(),
+                glyph: Some(("▲", "warning")),
+            });
+        }
+        self.session.blocked = run.map(|run| (run, list));
+        let mut p =
             crate::picker::Picker::of("blocked", "what the sandbox blocked", items, false).without_preview();
+        // (before any sandboxed run, one thing said: no header, and the list's row one says there's been none)
+        p.head = self.session.sandbox.as_ref().map(head);
+        let empty = if self.session.sandbox.is_some() { NOTHING_BLOCKED } else { NO_RUN_YET };
+        p.empty = Some(empty.into());
         self.open_picker(p, None);
     }
 
@@ -325,6 +333,21 @@ fn grant_card(
         Some(lines) => o.warning(lines).asked(asked),
         None => o.asked(asked),
     }
+}
+
+/// The panel's list when the run meant had nothing blocked (or there's none).
+const NOTHING_BLOCKED: &str = "the sandbox blocked nothing in that run";
+
+/// The panel's list before the session's first sandboxed run — the one thing it says then (no header).
+const NO_RUN_YET: &str = "no sandboxed run yet in this session";
+
+/// The panel's state line (9e; the user's decision 14: here and `:procs`, never the status line): what the session's
+/// last sandboxed run was kept apart from and shared (`Guarantees::panel_pairs`, folded by `Guarantees::FOLD` when
+/// narrow), why not the top tier in a few words faint under it (`Guarantees::brief`; the whole `why` is the report's
+/// and `tarae state`'s).
+fn head(g: &crate::sandbox::guarantees::Guarantees) -> crate::picker::Head {
+    use crate::sandbox::guarantees::Guarantees;
+    crate::picker::Head { pairs: g.panel_pairs(), fold: Guarantees::FOLD, faint: g.brief.clone() }
 }
 
 pub const GRANT_TITLE: &str = "Open the sandbox a little?";
