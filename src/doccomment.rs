@@ -103,10 +103,12 @@ pub struct Folded {
     pub rows: Vec<(crate::codeview::Spans, bool)>,
 }
 
+pub type FoldsKey = (crate::document::DocId, u64, usize, String, Option<String>);
+
 /// Every doc comment block of a document laid out folded, for `key` = (document, version, width, theme, the
 /// language its grammar parses — example code is coloured by it: a grammar loading lays it out again).
 pub struct Folds {
-    pub key: (crate::document::DocId, u64, usize, String, Option<String>),
+    pub key: FoldsKey,
     /// In order of their lines.
     pub blocks: Vec<Folded>,
 }

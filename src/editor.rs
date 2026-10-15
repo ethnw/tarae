@@ -3664,6 +3664,7 @@ impl Editor {
 
     /// `doc_block_folded` where doc comments are known to render in `doc` — for a pass over many blocks (the
     /// language looked up once, not per block: by path, without a grammar, that's a glob match each time).
+    /// Reading something new here, `closed_key` says it too (a cache of what this decided holds by it).
     pub fn doc_block_closed(
         &self,
         doc: &crate::document::Document,
@@ -3685,6 +3686,18 @@ impl Editor {
                 if r.to() > r.from() { crate::graphemes::prev_boundary(text, r.to()) } else { r.from() };
             (editing || wide) && text.byte_to_line(r.from()) <= b && text.byte_to_line(last) >= a
         })
+    }
+
+    /// Everything `doc_block_closed` reads but the block, for rows folded by it to be kept while it holds (the
+    /// edit review's, `term::review_rows`) — what it reads, this says.
+    pub fn closed_key(&self, doc: &crate::document::Document, editing: bool) -> crate::codeview::ClosedKey {
+        crate::codeview::ClosedKey {
+            doc: (doc.id, doc.version()),
+            editing,
+            selection: doc.selection().ranges().iter().map(|r| (r.from(), r.to())).collect(),
+            changes: crate::codeview::Changes::of(doc).near_key(doc),
+            conflicts: doc.conflicts.iter().map(|c| (c.start, c.end)).collect(),
+        }
     }
 
     pub fn open_prompt(&mut self, kind: PromptKind, text: &str) {

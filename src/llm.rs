@@ -1179,6 +1179,8 @@ pub struct Review {
     /// Its document's doc comments laid out folded, for a version and width (`term::review_folds`) — the review
     /// shows the whole file, and folding all of it each frame took milliseconds on a big one.
     pub folds: Option<crate::doccomment::Folds>,
+    /// Its rows, folded, while what they're built from holds (`term::review_rows`).
+    pub kept: Option<crate::codeview::Kept>,
     pub generation: u64,
     pub doc_id: DocId,
     pub instruction: String,
@@ -1240,6 +1242,7 @@ impl Review {
         Review {
             generation,
             folds: None,
+            kept: None,
             doc_id,
             instruction: instruction.to_string(),
             hunks,

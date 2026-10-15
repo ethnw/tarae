@@ -515,21 +515,22 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     }
     // Reviewing: put the current change's head at the top 1/4 of the screen (follow — off once j/k scroll)
     // (its doc comments' layout kept on it while it holds: taken out, refreshed when stale, put back)
-    let cache = editor.session.review.as_mut().filter(|r| r.ready).and_then(|r| r.folds.take());
+    // (and its rows the same way)
+    let (cache, kept) = match editor.session.review.as_mut().filter(|r| r.ready) {
+        Some(r) => (r.folds.take(), r.kept.take()),
+        None => (None, None),
+    };
     let review_rows = editor.session.review.as_ref().filter(|r| r.ready).and_then(|rev| {
         let doc = editor.docs.iter().find(|d| d.id == rev.doc_id)?;
         let folds = review_folds(editor, doc, review_code_w(doc, &lay), cache);
-        let rows = rev.rows(&doc.text);
-        // (the rule every place keeps — the review's keys aren't the code's: as in a pane without them)
-        let rows = match &folds {
-            Some(f) => crate::codeview::fold(rows, f, |a, b| editor.doc_block_closed(doc, false, (a, b))),
-            None => rows,
-        };
-        Some((rows, folds))
+        let kept = review_rows(editor, doc, rev, folds.as_ref(), kept);
+        Some((kept, folds))
     });
-    let review_rows = review_rows.map(|(rows, folds)| {
+    let review_rows = review_rows.map(|(kept, folds)| {
+        let rows = kept.rows.clone();
         if let Some(rev) = editor.session.review.as_mut() {
             rev.folds = folds;
+            rev.kept = Some(kept);
         }
         rows
     });
@@ -572,7 +573,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         editor.screen.offer_card = offer.as_ref().map(OfferCard::rect);
         editor.screen.offer_cut = offer.as_ref().filter(|c| !c.bar).map(|c| c.cut);
     }
-    draw(editor, &lay, &ui, review_rows.as_deref(), offer.as_ref(), out)
+    draw(editor, &lay, &ui, review_rows.as_deref().map(Vec::as_slice), offer.as_ref(), out)
 }
 
 /// Whether a pane shows document `doc`'s last line (its last non-empty one, past a final newline).
@@ -4490,6 +4491,35 @@ fn review_folds(
         })
         .collect();
     Some(crate::doccomment::Folds { key, blocks })
+}
+
+/// The edit review's rows folded (`Review::rows`, then `codeview::fold` by the one rule) — `kept` while they're
+/// built from the same document, fold inputs, changes and answers, and layout (built afresh each frame: ~200 µs on
+/// a 12k-line file — `perf_review_folded_on_a_big_file`).
+fn review_rows(
+    editor: &Editor,
+    doc: &crate::document::Document,
+    rev: &crate::llm::Review,
+    folds: Option<&crate::doccomment::Folds>,
+    kept: Option<crate::codeview::Kept>,
+) -> crate::codeview::Kept {
+    // (the rule every place keeps — the review's keys aren't the code's: as in a pane without them)
+    let key = crate::codeview::KeptKey {
+        closed: editor.closed_key(doc, false),
+        hunks: rev.hunks.iter().map(|h| (h.from, h.to, h.decision, h.conflict)).collect(),
+        folds: folds.map(|f| f.key.clone()),
+    };
+    match kept {
+        Some(k) if k.key == key => return k,
+        Some(old) => crate::event::drop_later(old.rows),
+        None => {}
+    }
+    let rows = rev.rows(&doc.text);
+    let rows = match folds {
+        Some(f) => crate::codeview::fold(rows, f, |a, b| editor.doc_block_closed(doc, false, (a, b))),
+        None => rows,
+    };
+    crate::codeview::Kept { key, rows: std::sync::Arc::new(rows) }
 }
 
 /// Indent width of a line (None if blank).
@@ -12119,6 +12149,38 @@ mod tests {
     }
 
     #[test]
+    fn the_edit_reviews_kept_rows_follow_what_they_are_built_from() {
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str("/// One.\nfn a() {}\nfn b() {}\n");
+        ed.docs[0].path = Some("/tmp/x.rs".into());
+        let at = ed.docs[0].text.line_to_byte(2);
+        let hunk = crate::llm::Hunk {
+            from: at,
+            to: at + 10,
+            old: "fn b() {}\n".into(),
+            new: "fn c() {}\n".into(),
+            decision: crate::llm::Decision::Undecided,
+            conflict: false,
+        };
+        let mut rev = crate::llm::Review::new(1, ed.docs[0].id, "x", vec![hunk]);
+        let folds = |ed: &Editor| review_folds(ed, &ed.docs[0], 80, None);
+        let doc_rows = |k: &crate::codeview::Kept| {
+            k.rows.iter().filter(|r| matches!(r, crate::codeview::Row::Doc { .. })).count()
+        };
+        let kept = review_rows(&ed, &ed.docs[0], &rev, folds(&ed).as_ref(), None);
+        assert!(doc_rows(&kept) > 0, "the block folded");
+        // A selection wider than a character on the block opens it (the one rule's input, not the text's)
+        ed.docs[0].set_selection(crate::selection::Selection::single(crate::selection::Range::new(4, 7)));
+        let kept = review_rows(&ed, &ed.docs[0], &rev, folds(&ed).as_ref(), Some(kept));
+        assert_eq!(doc_rows(&kept), 0, "a wide selection on it opens it");
+        // An answer: accepted, the line it takes out is no row
+        let before = kept.rows.len();
+        rev.hunks[0].decision = crate::llm::Decision::Accept;
+        let kept = review_rows(&ed, &ed.docs[0], &rev, folds(&ed).as_ref(), Some(kept));
+        assert_eq!(kept.rows.len(), before - 1, "accepted: the old line's row goes");
+    }
+
+    #[test]
     fn doc_comments_render_until_cursor_enters() {
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = Rope::from_str("/// Adds `two` numbers.\nfn add() {}\n");
@@ -12631,27 +12693,32 @@ mod tests {
             v.sort();
             v[v.len() / 2]
         };
-        // Laid out once (the review opening, or the width changing) · each frame after: the cache checked, the
-        // rows folded from it
-        let (mut rows_t, mut cold_t, mut warm_t) = (Vec::new(), Vec::new(), Vec::new());
+        // Laid out once (the review opening, or the width changing) · its rows built and folded (opening, or a
+        // change answered) · each frame after: both kept, their keys checked (the rows' alone, and both)
+        let (mut rows_t, mut cold_t, mut built_t, mut warm_t) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for _ in 0..30 {
-            let t = Instant::now();
-            let rows = rev.rows(&doc.text);
-            rows_t.push(t.elapsed());
             let t = Instant::now();
             let folds = std::hint::black_box(review_folds(&ed, doc, 100, None));
             cold_t.push(t.elapsed());
             let t = Instant::now();
-            let folds = review_folds(&ed, doc, 100, folds).unwrap();
-            let closed = |a, b| ed.doc_block_closed(doc, false, (a, b));
-            let folded = std::hint::black_box(crate::codeview::fold(rows, &folds, closed));
+            let kept = std::hint::black_box(review_rows(&ed, doc, &rev, folds.as_ref(), None));
+            built_t.push(t.elapsed());
+            assert!(kept.rows.iter().any(|r| matches!(r, crate::codeview::Row::Doc { .. })));
+            let t = Instant::now();
+            let kept = std::hint::black_box(review_rows(&ed, doc, &rev, folds.as_ref(), Some(kept)));
+            rows_t.push(t.elapsed());
+            let t = Instant::now();
+            let folds = review_folds(&ed, doc, 100, folds);
+            let kept = std::hint::black_box(review_rows(&ed, doc, &rev, folds.as_ref(), Some(kept)));
             warm_t.push(t.elapsed());
-            assert!(folded.iter().any(|r| matches!(r, crate::codeview::Row::Doc { .. })));
+            drop(kept);
         }
         let us = |d: Duration| d.as_secs_f64() * 1e6;
         let numbers = [
             ("review_rows_12k_us", median(rows_t), 20),
             ("review_folds_laid_out_12k_us", median(cold_t), 500),
+            ("review_rows_built_12k_us", median(built_t), 100),
             ("review_folded_frame_12k_us", median(warm_t), 50),
         ];
         for (name, d, noise) in numbers {

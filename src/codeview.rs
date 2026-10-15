@@ -226,6 +226,15 @@ impl Changes {
         }
     }
 
+    /// What `near` reads: the lines of the changes it looks at (rows folded by it are kept while they're equal).
+    pub fn near_key(self, doc: &Document) -> Vec<Range<usize>> {
+        match (self, &doc.shown) {
+            (Changes::Base, _) => doc.git_hunks.iter().map(|h| h.lines.clone()).collect(),
+            (Changes::Shown, Some(shown)) => shown.iter().map(|h| h.lines.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether a change shown as rows and washes is in or right next to lines `a..=b`: a changed or added line
     /// among them or on either side, or removed rows inside them or right against them.
     pub fn near(self, doc: &Document, a: usize, b: usize) -> bool {
@@ -315,6 +324,36 @@ impl Shows {
             blame: false,
         }
     }
+}
+
+/// Everything `Editor::doc_block_closed` reads but the block (`Editor::closed_key`): rows it folded are kept
+/// while this is equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosedKey {
+    /// The document and its version (its text).
+    pub doc: (crate::document::DocId, u64),
+    pub editing: bool,
+    /// Its selection's ranges, `from..to`.
+    pub selection: Vec<(usize, usize)>,
+    /// The changes shown (`Changes::near_key`) and the merge conflicts' lines.
+    pub changes: Vec<Range<usize>>,
+    pub conflicts: Vec<(usize, usize)>,
+}
+
+/// The edit review's rows, folded (`term::review_rows`), kept on its `Review` while what they're built from holds
+/// — built afresh each frame they took ~200 µs on a 12k-line file (`perf_review_folded_on_a_big_file`).
+pub struct Kept {
+    pub key: KeptKey,
+    pub rows: std::sync::Arc<Vec<Row>>,
+}
+
+/// What the edit review's rows are built from: the fold rule's inputs (the document's version among them), each
+/// change's place and answer, the doc comments' layout.
+#[derive(PartialEq)]
+pub struct KeptKey {
+    pub closed: ClosedKey,
+    pub hunks: Vec<(usize, usize, crate::llm::Decision, bool)>,
+    pub folds: Option<crate::doccomment::FoldsKey>,
 }
 
 /// The edit review's rows (`Review::rows`, the whole file) with each doc comment block laid out in `folds`
