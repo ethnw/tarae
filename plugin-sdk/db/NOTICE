@@ -1,11 +1,14 @@
 The db plugin is under MIT OR Apache-2.0 (../LICENSE-MIT, ../LICENSE-APACHE), except as below.
 
 src/driver/*/captured/*.server.raw are test fixtures: the bytes the test servers sent, recorded once and
-replayed by the tests. What a server wrote there — its messages, and Redis's command table as `COMMAND INFO`
-returns it, notes included — is that server's project's, under its own licence:
+replayed by the tests. What PostgreSQL and MySQL wrote there — their messages — is that server's project's,
+under its own licence:
 
 - PostgreSQL 17 — the PostgreSQL License
 - MySQL 8.4 Community Server — GPL-2.0, with Oracle's exceptions
-- Redis 7.4 — RSALv2 or SSPLv1
+
+The Redis transcripts keep only what the driver reads: each `COMMAND INFO` entry is cut to its six classic
+fields (name, arity, flags, first key, last key, step) by `without_redis_text` in src/driver/redis/wire/tests.rs,
+so none of Redis's own text is in them.
 
 The fixtures are only read by the plugin's tests; nothing of them is built into the plugin.

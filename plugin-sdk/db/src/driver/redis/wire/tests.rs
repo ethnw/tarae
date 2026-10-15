@@ -1,5 +1,6 @@
 //! The session against Redis 7: transcripts captured once from the test server (`captured/`, written by the
-//! `#[ignore]`d `capture_transcripts` after seeding its keys), replayed here with no server; what it can't show (a
+//! `#[ignore]`d `capture_transcripts` after seeding its keys, with Redis's own text cut out — `without_redis_text`),
+//! replayed here with no server; what it can't show (a
 //! renamed command, a keyspace past the cap, a password off this machine) by hand. Live tests (`#[ignore]`) need
 //! `target/sb/db/testdb`'s compose file up: `round11.sh`.
 
@@ -82,6 +83,61 @@ fn commands(client: &[u8]) -> Vec<Vec<String>> {
     out
 }
 
+/// A scenario fed `server` whole: what it said, and the reads it was left with.
+fn replayed(name: &str, server: &[u8]) -> (Vec<Event>, BTreeSet<String>) {
+    let (account, asks) = scenario(name);
+    let (mut s, mut events) = Session::start(params(account), [0; 32]);
+    for a in &asks {
+        events.extend(ask(&mut s, a));
+    }
+    events.extend(s.feed(server));
+    (events, s.reads)
+}
+
+/// What a server sent, each `COMMAND INFO` entry cut to its first six fields — name, arity, flags, first key, last
+/// key, step: the shape a server before 7 sends. The driver reads only the flags; what Redis 7 adds after them (ACL
+/// categories, tips, key specs and their notes, subcommands) is Redis's own text, kept out of the repository
+/// (plugin-sdk/db/NOTICE). Every other frame stays byte for byte; an entry already cut is left as it is.
+fn without_redis_text(server: &[u8]) -> Vec<u8> {
+    let header = |b: &[u8]| b.windows(2).position(|w| w == b"\r\n").expect("a RESP header") + 2;
+    let next = |b: &[u8]| decode(b).ok().flatten().expect("a whole RESP frame").1;
+    let (mut out, mut rest) = (Vec::new(), server);
+    while let Ok(Some((frame, n))) = decode(rest) {
+        let (bytes, after) = rest.split_at(n);
+        rest = after;
+        let entry = |f: &Frame| matches!(f, Frame::Null) || matches!(f, Frame::Array(p) if matches!(p.get(2), Some(Frame::Array(_))));
+        let Frame::Array(entries) = &frame else {
+            out.extend_from_slice(bytes);
+            continue;
+        };
+        if entries.is_empty() || !entries.iter().all(entry) {
+            out.extend_from_slice(bytes);
+            continue;
+        }
+        let h = header(bytes);
+        out.extend_from_slice(&bytes[..h]);
+        let mut at = &bytes[h..];
+        for e in entries {
+            let (this, after) = at.split_at(next(at));
+            at = after;
+            match e {
+                Frame::Array(fields) if fields.len() > 6 => {
+                    out.extend_from_slice(b"*6\r\n");
+                    let mut field = &this[header(this)..];
+                    for _ in 0..6 {
+                        let (f, after) = field.split_at(next(field));
+                        out.extend_from_slice(f);
+                        field = after;
+                    }
+                }
+                _ => out.extend_from_slice(this),
+            }
+        }
+    }
+    out.extend_from_slice(rest);
+    out
+}
+
 /// A session signed in as `ro` from its transcript.
 fn signed_in() -> Session {
     let (mut s, _) = Session::start(params(RO), [0; 32]);
@@ -136,6 +192,21 @@ fn keys_is_never_sent() {
     assert!(matches!(&events[3], Event::Keys { matched: 1, sample: Some((k, _, _)), .. } if k == "tarae:session:7"), "{events:?}");
     let mut s = signed_in();
     assert!(matches!(&s.command(&["KEYS", "*"])[..], [Event::Refused(r)] if r.message.contains("SCAN instead")));
+}
+
+/// The transcripts hold none of Redis's own text — its command table's notes, tips, key specs, categories: each
+/// `COMMAND INFO` entry is its six classic fields, what the driver reads (plugin-sdk/db/NOTICE). And the real
+/// server's flags still reach the driver through them: the default user keeps every one of the plugin's reads, as
+/// Redis 7.4 flags each `readonly`.
+#[test]
+fn the_transcripts_hold_no_text_of_redis() {
+    for name in SCENARIOS {
+        let (_, server) = captured(name);
+        assert_eq!(without_redis_text(&server), server, "{name}: cut it (strip_redis_text)");
+    }
+    let (_, server) = captured("signin-default");
+    let (_, reads) = replayed("signin-default", &server);
+    assert_eq!(reads, commands::READS.iter().map(|r| r.to_string()).collect(), "narrowed by the transcript's flags");
 }
 
 /// Bytes may come in any pieces — one at a time changes nothing.
@@ -262,7 +333,23 @@ fn capture_transcripts() {
         let (client, server, events) = live(LIVE, s, events, answered(1 + asks.len()));
         assert!(!events.iter().any(|e| matches!(e, Event::Failed(_))), "{name}: {events:?}");
         std::fs::write(dir.join(format!("{name}.client.raw")), client).unwrap();
-        std::fs::write(dir.join(format!("{name}.server.raw")), server).unwrap();
+        std::fs::write(dir.join(format!("{name}.server.raw")), without_redis_text(&server)).unwrap();
+    }
+}
+
+/// Cuts Redis's own text out of transcripts captured before `capture_transcripts` did (`without_redis_text`) —
+/// each replayed before and after the cut says the same, sends the same and keeps the same reads.
+#[test]
+#[ignore]
+fn strip_redis_text() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/driver/redis/captured");
+    for name in SCENARIOS {
+        let path = dir.join(format!("{name}.server.raw"));
+        let before = std::fs::read(&path).unwrap();
+        let after = without_redis_text(&before);
+        assert_eq!(replayed(name, &before), replayed(name, &after), "{name}");
+        eprintln!("{name}: {} → {} bytes", before.len(), after.len());
+        std::fs::write(&path, after).unwrap();
     }
 }
 

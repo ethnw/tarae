@@ -12,6 +12,7 @@ and so does [Claude](claude-integration.md).
 - [Syntax highlighting](#syntax-highlighting)
 - [Language servers](#language-servers)
 - [Java](#java)
+- [Sessions, review and the sandbox](#sessions-review-and-the-sandbox)
 - [Updating without losing your place](#updating-without-losing-your-place)
 
 ## First steps
@@ -99,13 +100,14 @@ configs carry over as they are.
 
 ## Look and feel
 
-![tarae in meok (ink): completion card, docs window, path bar, mode pill](screenshots/hero-meok.png)
+![tarae in meok (ink): Claude's change under review in the code, the chat docked on the right with two sessions' tabs, path bar, mode pill](screenshots/hero-meok.png)
 
 - **Themes** — meok (ink) and hanji (paper), plus `meok-transparent` and `hanji-transparent`, which leave the
   background to the terminal so its color and blur show through. The default `theme = "default"` asks the terminal for
   its background color (OSC 11 — it never waits, even on terminals that don't answer) and picks meok on dark, hanji on
   light; force it with `TARAE_BACKGROUND=light|dark`. `space t` (`:theme`) opens a small picker that previews each theme
-  live on your code — `Esc` reverts, `Enter` saves it to your config ([screenshot](screenshots/ux-theme-picker.png)).
+  live on your code — `Esc` reverts, `Enter` saves it to your config ([screenshot](screenshots/ux-theme-picker.png);
+  the screen above [in hanji](screenshots/hero-hanji.png)).
   You can also [write your own](configuration.md#custom-themes)
 - **One accent color** — coral in meok, vermilion in hanji — used boldly and sparingly; syntax colors stay calm
 - **Cards** — completion, docs, hover, and pickers float as cards with half a line of padding above and below and an
@@ -358,6 +360,18 @@ your `PATH`.
   loads it into the running jdtls — no restart ([screenshot](screenshots/java-debug-offer.png)). Copies already
   downloaded by VS Code or Neovim's mason are found too
 - Tests and debugging for Java: see [Tests and debugging](testing-and-debugging.md)
+
+## Sessions, review and the sandbox
+
+- **Sessions** `space W` — several branches of work side by side, each a checkout of its own with its own Claude,
+  chat, terminal and tests; brought back into main, a rebase's conflicts resolved by that session's Claude
+  ([rebasing a session](claude-integration.md#rebasing-a-session))
+- **Review like a pull request** — Claude's edits hunk by hunk, or all at the turn's end
+  ([review at the end](claude-integration.md#review-at-the-end)); any change reviewed over the real buffers, and a
+  second Claude reviewing as notes on the lines, `space v c` ([code review](claude-integration.md#code-review))
+- **Claude's commands in a sandbox** — Seatbelt on macOS; Landlock, seccomp and a session's own namespaces on
+  Linux; the network only through tarae's proxy, a card for anything past it
+  ([the sandbox](claude-integration.md#the-sandbox), [threat model](threat-model.md))
 
 ## Updating without losing your place
 
