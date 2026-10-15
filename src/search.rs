@@ -132,7 +132,7 @@ const COUNT_MAX: usize = 100_000;
 /// for the same doc, version and pattern.
 pub struct SearchHits {
     pub pattern: String,
-    doc: crate::document::DocId,
+    pub(crate) doc: crate::document::DocId,
     version: u64,
     pub matches: Vec<(usize, usize)>,
     pub capped: bool,

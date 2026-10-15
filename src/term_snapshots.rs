@@ -2195,6 +2195,43 @@ fn doc_comments_in_split_panes() {
     s.frames_both("split_doc_comments");
 }
 
+/// Two panes on two files, a.txt without the keys and b.txt with them, then `keys`: the background of each of
+/// a.txt's characters as its pane draws them.
+fn split_on_two_files(keys: &str) -> (Shot, Vec<(char, vt100::Color)>) {
+    const A: &str = "abcdefghijkl";
+    let mut s = Shot::new(100, 12);
+    s.file("a.txt", &format!("{A}\n"));
+    s.keys("<C-w>v:new<ret>");
+    s.file("b.txt", "xxxxxxxx foo\n");
+    s.keys(keys);
+    assert_eq!(s.ed.session.views.len(), 2);
+    let p = cells(&s.frame(), s.w, s.h);
+    let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+    let y = rows.iter().position(|r| r.contains(A)).expect("a.txt's line");
+    let x = rows[y].find(A).unwrap();
+    let row = A.chars().enumerate();
+    let bgs = row.map(|(i, c)| (c, p.screen().cell(y as u16, (x + i) as u16).unwrap().bgcolor())).collect();
+    (s, bgs)
+}
+
+/// A search is the searched document's: a pane on another file shows none of its hits (it did, at the same
+/// offsets).
+#[test]
+fn search_hits_wash_only_the_searched_document() {
+    let (_, bgs) = split_on_two_files("/foo<ret>");
+    // (b.txt's "foo" is at 9..12 — a.txt's "jkl")
+    let (plain, hit) = (bgs[5].1, bgs[9].1);
+    assert_eq!(hit, plain, "a.txt has no hit: {bgs:?}");
+}
+
+/// A pane without the keys paints its primary cursor as it paints the others (it painted none).
+#[test]
+fn a_pane_without_the_keys_shows_its_primary_cursor() {
+    let (s, bgs) = split_on_two_files("");
+    let cursor = vt_color(s.ed.theme.get("ui.cursor").bg).unwrap();
+    assert_eq!((bgs[0].1, bgs[1].1 == cursor), (cursor, false), "the cursor on `a`: {bgs:?}");
+}
+
 /// Scrolled sideways: a folded block is flowed to the width — it stays folded (unshifted), `j` steps over it.
 #[test]
 fn doc_comments_under_sideways_scroll() {

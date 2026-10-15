@@ -3328,7 +3328,7 @@ fn draw_text(
     let hit_style = Style { bg: accent_bg(0.22), ..Style::default() };
     let hit_current = Style { bg: accent_bg(0.5), bold: true, ..Style::default() };
     let visible_hits: &[(usize, usize)] = match &editor.search_hits {
-        Some(h) if hit_style.bg.is_some() => {
+        Some(h) if shows.search && hit_style.bg.is_some() => {
             let m = &h.matches;
             &m[m.partition_point(|x| x.1 <= vis_from)..m.partition_point(|x| x.0 <= vis_to)]
         }
@@ -3793,7 +3793,7 @@ fn draw_text(
             }
             match hit {
                 Some(i) if i == primary_idx && shows.primary => st = st.patch(ui.cursor_primary),
-                Some(i) if i != primary_idx => st = st.patch(ui.cursor),
+                Some(i) if i != primary_idx || !shows.focused => st = st.patch(ui.cursor),
                 _ => {}
             }
             let eol = g == "\n" || g == "\r\n";

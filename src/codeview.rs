@@ -52,8 +52,11 @@ pub struct Shows {
     /// Where the change marks come from.
     pub changes: Changes,
     pub numbers: LineNumber,
-    /// The primary cursor painted as a cell (focused, not INSERT, a block cursor).
+    /// The primary cursor painted as a cell (focused, not INSERT, a block cursor); without the keys it's painted
+    /// as the others are.
     pub primary: bool,
+    /// The search's hits — only on the document searched (`SearchHits` are its offsets).
+    pub search: bool,
     /// The cursor line's band (`editor.cursorline`, focused only).
     pub cursorline: bool,
     /// Line-end diagnostics (`editor.inline-diagnostics`).
@@ -92,6 +95,7 @@ impl Shows {
             },
             numbers: config.line_number,
             primary: focused && not_insert && crate::term::cursor_shape(editor) == CursorShape::Block,
+            search: editor.search_hits.as_ref().is_some_and(|h| h.doc == doc.id),
             cursorline: focused && config.cursorline,
             messages: config.inline_diagnostics,
             inlay: config.inlay_hints && left == 0,
