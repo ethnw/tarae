@@ -226,7 +226,9 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
 2. **Bug hunting**: tests that vary what tests usually hold still — the order state changes in, the screen's
    width, the load — and the property loops widened with real output.
 3. **Less code**: what the card model's P3 replaced goes (its piece 5: the parser's gates, ~2,200 lines), and
-   whatever else the hunt finds unused.
+   whatever else the hunt finds unused. The binary with it: back under the old budgets (12 MB, 17 MB bundled —
+   raised to 13 / 18 on 2026-10-15 at 11.98 / 17.07, from 8.7 / 12.5 on 2026-10-04) or a reason why not.
+   `cargo bloat` first, for where the size is, then what P3 piece 5 removes and what the hunt finds unused.
 4. **Independent reviews of the sandbox** by Claude sessions that didn't build it: each given the threat model's
    claims and the code, not the design's reasoning, trying to show a claim false; their findings fixed like any
    reviewer's. A human security review when one can be had.
@@ -293,8 +295,8 @@ git tab, search, a short Kubernetes one.
 - **Core audit**: a session's own build folders. (Sandbox rules as pack data are done.)
 - **Image viewing** — undecided: an external viewer, a canvas in the core with a WebAssembly decoder plugin, or a
   viewer in the core.
-- **A size pass.** The release binary's budget was raised to 12 MB for now (2026-10-09); `cargo perf` fails a
-  jump of more than 0.3 MB meanwhile. Four helpers LTO had copied into many callers are kept out of line
+- **A size pass.** The release binary's budget was raised to 12 MB (2026-10-09), then to 13 MB (18 bundled,
+  2026-10-15) until stabilization (§9) brings it back; `cargo perf` fails a jump of more than 0.3 MB meanwhile. Four helpers LTO had copied into many callers are kept out of line
   (−66 KB measured). From the size audit (2026-10-09):
   - Per-package `opt-level = "s"` for crates off the hot path, the frame path kept at 3 (tarae, ropey,
     tree-sitter, the grep crates, vt100), decided by a full `cargo perf` A/B. The whole binary at `s` measured

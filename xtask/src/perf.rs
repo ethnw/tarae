@@ -408,9 +408,12 @@ fn report(
 /// dependency's jump is `SIZE_JUMP`'s to catch, not the budget's.
 /// Bundled 17 (2026-10-14, 16.84 then): the user's call — the bundled budget follows the default's 12 plus the
 /// grammars' ~5 MB (it stayed at 15 while the default went 9.5 → 10 → 12).
+/// 13 and bundled 18 (2026-10-15, 11.98 and 17.07 then; 8.7 and 12.5 on 2026-10-04): the user's call — grown with
+/// the Linux sandbox (keeper, supervisor, proxy), the card model and the compatibility suite; the roadmap's
+/// stabilization (§9, "Less code") brings it back under 12 / 17 or says why not.
 const SIZES: [(&str, &[&str], &str, f64); 2] = [
-    ("release_size_mb", &[], "target", 12.0),
-    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 17.0),
+    ("release_size_mb", &[], "target", 13.0),
+    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 18.0),
 ];
 const SIZE_NOISE: f64 = 0.05;
 
