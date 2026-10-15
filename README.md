@@ -41,5 +41,7 @@ everything else works without it.
 
 ## License
 
-[GPL-3.0-or-later](LICENSE). The plugin SDK is MIT OR Apache-2.0; Helix's query files stay MPL-2.0 — see
-[NOTICE](runtime/queries/NOTICE). Contributions need a signed CLA ([Contributing](CONTRIBUTING.md#license-and-the-cla)).
+[GPL-3.0-or-later](LICENSE). The plugin SDK and the plugins under `plugin-sdk/` (demo, db, kubernetes, the template)
+are MIT OR Apache-2.0 ([MIT](plugin-sdk/LICENSE-MIT), [Apache](plugin-sdk/LICENSE-APACHE)) — but the servers' bytes
+in db's test transcripts, which are their projects' ([NOTICE](plugin-sdk/db/NOTICE)); Helix's query files stay
+MPL-2.0 — see [NOTICE](runtime/queries/NOTICE). Contributions need a signed CLA ([Contributing](CONTRIBUTING.md#license-and-the-cla)).

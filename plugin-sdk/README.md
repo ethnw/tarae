@@ -15,4 +15,6 @@ How to write and install a plugin: [docs/plugins.md](../docs/plugins.md).
 
 What a plugin is built from — [`wit/`](wit), [`template/`](template) and [`sdk/`](sdk) — is under
 [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your choice, so a plugin can be under any license, closed ones
-too. tarae itself stays GPL-3.0-or-later.
+too. tarae's own plugins here — [`demo/`](demo), [`db/`](db), [`kubernetes/`](kubernetes) — are under the same
+two; the servers' bytes in `db`'s test transcripts are their projects' ([NOTICE](db/NOTICE)). tarae itself stays
+GPL-3.0-or-later.

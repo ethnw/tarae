@@ -95,9 +95,9 @@ First (decided 2026-10-15), because the Cyber Verification Program's approval un
 that the model's safeguards stopped (the control messages); stabilization (§9) waits.
 
 1. **What's in flight finishes**: the card model's P3 piece 4 and the diagram's P3 layout.
-2. **`SECURITY.md`** at the repository's root — written: where to report (`security@sinabro.io`), what's in scope,
-   how reports are handled. Done once the address is shown to receive mail: the user sends a test mail to
-   `security@sinabro.io` before step 4.
+2. **`SECURITY.md`** at the repository's root — done: where to report (`security@sinabro.io`), what's in scope,
+   how reports are handled. The address receives mail: it's forwarded like the project's other addresses, and the
+   user's test mail arrived (2026-10-15).
 3. **One draft pull request**: CI's checks run locally first, CI dispatched once; merged when green.
 4. **The repository made public** — by the user.
 5. **Anthropic's Cyber Verification Program**, applied for by the user as an individual, on the open-source track
