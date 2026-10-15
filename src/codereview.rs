@@ -154,6 +154,9 @@ pub struct CodeReview {
     /// The definitions of the files with a high-risk change as it opened (`grade_files`): a tall one is cut
     /// at them while its file is closed, so the rail counts its pieces before it's opened (cardburden 2).
     defs: Defs,
+    /// The added lines of the files with a high-risk change that say nothing on their own, as it opened
+    /// (`grade_files`): a closed file's are told by them (`moved_within`).
+    plain: Plain,
     /// Whether a language's grammar failed to load (`Loader::failed_to_load`; tests say so of one that's here).
     failed_to_load: fn(&str) -> bool,
 }
@@ -195,6 +198,7 @@ impl CodeReview {
             frames_due: Default::default(),
             whole: Default::default(),
             defs: Default::default(),
+            plain: Default::default(),
             failed_to_load: grammar_failed,
         }
     }
@@ -286,7 +290,7 @@ impl CodeReview {
         // or where its definitions are known from, moves where it's cut, never a line within it — f22 h: looks
         // per piece, held against pieces cut elsewhere, asked again for ~30 lines nothing had moved)
         let looked = &ed.session.looked;
-        let moved = moved_within(&f.rel, &g, orders, looked, live.map(|d| &d.text));
+        let moved = moved_within(&f.rel, &g, orders, looked, live.map(|d| &d.text), self.plain.get(&f.path));
         if at != CutAt::Whole && g.iter().any(tall) {
             let defs = match (at, tree, known) {
                 (CutAt::Tree, Some(t), _) => live.map(|d| defs_in(t, &d.text)).unwrap_or_default(),
@@ -608,14 +612,17 @@ type OccurrencesAt = (u64, u64, Arc<Occurrences>);
 /// other side of a line that says something (`crossed`): a `}` moved above the lines it closed leaves them in
 /// order, unguarded. Moved only among blank and punctuation lines, or out of step with another piece's look,
 /// it isn't. Blank lines never are. (An `end` says something: the order check takes it; a dedent changes the
-/// line's text, indent and all — a new line.) `text`: its open document's, to name them and tell such a line
-/// (closed: every line is asked).
+/// line's text, indent and all — a new line.) `text`: its open document's, to name them and tell such a line;
+/// closed, `known` tells it by its key (frictions23: closed, every line was asked — a `}` out of an older look's
+/// order asked while the file was closed and gone once it was opened to look at it, never taken: the file not
+/// open asked again in every review).
 fn moved_within(
     rel: &str,
     now: &[crate::risk::Graded],
     orders: &[crate::risk::LookedOrder],
     looked: &std::collections::HashSet<crate::risk::Key>,
     text: Option<&ropey::Rope>,
+    known: Option<&std::collections::HashMap<crate::risk::Key, bool>>,
 ) -> Vec<crate::risk::Graded> {
     let mut out = Vec::new();
     if orders.is_empty() {
@@ -626,8 +633,14 @@ fn moved_within(
         let texts: Vec<Option<String>> = (0..added.len())
             .map(|i| text.filter(|t| g.at + i < t.len_lines()).map(|t| line_at(t, g.at + i)))
             .collect();
-        let plain = |i: usize| texts[i].as_deref().is_some_and(crate::risk::trivial);
-        let bracket = |i: usize| plain(i) && texts[i].as_deref().is_some_and(|t| !t.trim().is_empty());
+        let plain = |i: usize| match texts[i].as_deref() {
+            Some(t) => crate::risk::trivial(t),
+            None => known.is_some_and(|k| k.contains_key(&added[i])),
+        };
+        let bracket = |i: usize| match texts[i].as_deref() {
+            Some(t) => crate::risk::trivial(t) && !t.trim().is_empty(),
+            None => known.and_then(|k| k.get(&added[i])).copied().unwrap_or(false),
+        };
         let (mut moved, mut crossings) = (Vec::new(), Vec::new());
         for then in orders.iter().filter(|o| added.iter().filter(|k| o.keys.contains(k)).nth(1).is_some()) {
             // (the order looked at still there line for line: nothing in it moved — a change grown around it
@@ -916,6 +929,8 @@ pub struct Grading {
     pub counts: Counts,
     /// The files with a high-risk change: their definitions, cut at while they're closed (`Defs`).
     pub defs: Defs,
+    /// Their added lines that say nothing on their own (`Plain`).
+    pub plain: Plain,
 }
 
 /// How many times `text` has each of `asked`.
@@ -967,6 +982,7 @@ fn grade_files(
     let mut out = std::collections::HashMap::new();
     let mut lines: Vec<(PathBuf, Vec<Hunk>)> = Vec::new();
     let mut defs = Defs::new();
+    let mut plain = Plain::new();
     for (i, f) in files.iter().enumerate() {
         let raw = raws.get(&f.rel);
         let (hunks, now) = if by_id.contains(&f.rel) {
@@ -1002,13 +1018,25 @@ fn grade_files(
         if let Some(now) = now.filter(|_| g.iter().any(|g| g.grade == Grade::High && g.added > 1)) {
             defs.insert(f.path.clone(), defs_on_worker(&f.rel, &now));
         }
+        // (and which of its lines say nothing on their own: told by key while it's closed — `moved_within`)
+        let said: std::collections::HashMap<crate::risk::Key, bool> = hunks
+            .iter()
+            .zip(g.iter())
+            .filter(|(_, g)| g.grade == Grade::High && g.added > 1)
+            .flat_map(|(h, g)| h.added.iter().zip(added_keys(g)))
+            .filter(|(t, _)| crate::risk::trivial(t))
+            .map(|(t, k)| (*k, !t.trim().is_empty()))
+            .collect();
+        if !said.is_empty() {
+            plain.insert(f.path.clone(), said);
+        }
         out.insert(f.path.clone(), g);
         if !by_id.contains(&f.rel) {
             lines.push((f.path.clone(), hunks));
         }
     }
     let whole = files.iter().filter(|f| whole.contains(&f.rel)).map(|f| f.path.clone()).collect();
-    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts, defs })
+    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts, defs, plain })
 }
 
 /// What a file graded by id (binary, converted) is graded as — its key's blob (a worker's: git): git's id of
@@ -1184,6 +1212,11 @@ fn defs_on_worker(rel: &str, now: &str) -> Option<Vec<Def>> {
 /// Each file's definitions as the review opened (`defs_on_worker`), by path — of the files with a high-risk
 /// change only.
 pub type Defs = std::collections::HashMap<PathBuf, Option<Vec<Def>>>;
+
+/// Of each file with a high-risk change, the keys of its added lines that say nothing on their own
+/// (`risk::trivial`), each with whether it's a bracket (`}`, `});`) rather than blank — a key is its text's, so
+/// the review's worker, which read the texts, knows them for when the file is closed.
+pub type Plain = std::collections::HashMap<PathBuf, std::collections::HashMap<crate::risk::Key, bool>>;
 
 /// Where a file's tall high-risk changes are cut at (`CodeReview::graded`, its cache stamp).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1972,7 +2005,7 @@ fn open_at(
     root: PathBuf,
     base: Base,
     mut files: Vec<File>,
-    Grading { grades, moved, whole, unread, counts, defs }: Grading,
+    Grading { grades, moved, whole, unread, counts, defs, plain }: Grading,
     start: Option<String>,
     say: bool,
 ) {
@@ -2038,6 +2071,7 @@ fn open_at(
         frames_due: Default::default(),
         whole,
         defs,
+        plain,
         failed_to_load: grammar_failed,
     });
     // (what was looked at that this base has moved past goes)
@@ -6119,6 +6153,116 @@ mod tests {
         );
         assert_eq!(unseen_whys(&ed), Vec::<String>::new());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions23 (the "#flap", fuzz3's `bc1b91e6`): a block moved out of one file into a new one, looked at
+    /// there, then a `}` and the blank line under it swapped (the moved code tidied), the other file marked viewed
+    /// and the review entered again — the new file no longer the one open: nothing asked. (Closed, its lines'
+    /// text unknown, every `}` out of the look's order was asked as "a line moved since your look" — and gone
+    /// once the file was opened to look at it, so never taken: each review entered again asked for the file
+    /// not open.)
+    #[test]
+    fn a_brace_moved_in_a_file_not_open_is_not_asked() {
+        let block = "mod abi {\n    pub unsafe fn a() {}\n}\n\nmod b {\n    pub unsafe fn c() {}\n}\n";
+        let old = format!("fn main() {{}}\n\n{block}");
+        let (mut ed, dir) = reviewing("flap", &[("old.rs", &old, "fn main() {}\n"), ("new.rs", "", block)]);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 20).unwrap();
+        let open = |ed: &mut Editor, rel: &str| open_file(ed, &dir, rel);
+        // (what left the old file: looked at before)
+        open(&mut ed, "old.rs");
+        ed.session.looked.extend(highs(&ed).iter().flat_map(|g| g.keys.clone()));
+        open(&mut ed, "new.rs");
+        ed.goto_line(0);
+        frame(&mut ed);
+        feed(&mut ed, "<space>vH");
+        assert_eq!(left(&ed), 0, "looked at: {:?}", ed.status);
+        // (`}` and the blank line after `mod abi`'s end swapped, saved)
+        let text = &ed.doc().text;
+        assert_eq!((text.line(2).to_string(), text.line(3).to_string()), ("}\n".into(), "\n".into()));
+        let (a, b, after) = (text.line_to_byte(2), text.line_to_byte(3), text.line_to_byte(4));
+        edited(
+            &mut ed,
+            vec![crate::transaction::Change::delete(a, b), crate::transaction::Change::insert(after, "}\n")],
+        );
+        saved(&mut ed, &dir, "new.rs");
+        assert!(
+            std::fs::read_to_string(dir.join("new.rs"))
+                .unwrap()
+                .starts_with("mod abi {\n    pub unsafe fn a() {}\n\n}\n")
+        );
+        assert_eq!(unseen_whys(&ed), Vec::<String>::new(), "open: nothing asked");
+        // The other file viewed, the review entered again on it, the new one closed
+        open(&mut ed, "old.rs");
+        feed(&mut ed, "<space>vm");
+        let asked = asked_closed(&mut ed, &dir, "old.rs", "new.rs");
+        assert_eq!(asked, Vec::<String>::new(), "closed: nothing asked either");
+        assert_eq!(left(&ed), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The safety side of the one above: a `}` moved up across the lines it closed (as in
+    /// `a_brace_moved_across_the_lines_it_closed_is_asked`) is asked while its file is closed too — told a
+    /// bracket by its key, it crosses them all the same.
+    #[test]
+    fn a_brace_moved_across_the_lines_it_closed_is_asked_while_its_file_is_closed() {
+        let base = "fn main() {\n    keep();\n}\n";
+        let now = "fn main() {\n    keep();\n    if authorized() {\n        unsafe { delete_all() }\n        log();\n    }\n    done();\n}\n";
+        let (mut ed, dir) = reviewing(
+            "brace-crossed-closed",
+            &[("a.rs", base, now), ("b.rs", "fn b() {}\n", "fn b() { c() }\n")],
+        );
+        open_file(&mut ed, &dir, "a.rs");
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // `    }` from under `log();` up under `if authorized() {`, saved
+        open_file(&mut ed, &dir, "a.rs");
+        let at = |ed: &Editor, l: usize| ed.doc().text.line_to_byte(l);
+        assert_eq!(ed.doc().text.line(5).to_string(), "    }\n");
+        let (b0, b1, above) = (at(&ed, 5), at(&ed, 6), at(&ed, 3));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(above, "    }\n"),
+                crate::transaction::Change::delete(b0, b1),
+            ],
+        );
+        saved(&mut ed, &dir, "a.rs");
+        assert!(unseen_whys(&ed).iter().any(|w| w == "moved since your look: `}`"), "open: asked");
+        let asked = asked_closed(&mut ed, &dir, "b.rs", "a.rs");
+        assert!(
+            asked.iter().any(|w| w.ends_with("a line moved since your look")),
+            "closed: asked too — {asked:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The review's file `rel`, opened and landed.
+    fn open_file(ed: &mut Editor, dir: &Path, rel: &str) {
+        let i = ed.session.code_review.as_ref().unwrap().files.iter().position(|f| f.rel == rel).unwrap();
+        show(ed, i, false);
+        settle_until(ed, |ed| landed(ed) && ed.doc().path.as_deref() == Some(dir.join(rel).as_path()));
+    }
+
+    /// The document in front (`rel`) written to disk as it is.
+    fn saved(ed: &mut Editor, dir: &Path, rel: &str) {
+        std::fs::write(dir.join(rel), ed.doc().text.to_string()).unwrap();
+        ed.doc_mut().mark_saved();
+    }
+
+    /// The review entered again, on `open`, with `closed` closed: what it asks of `closed` (`line: why`).
+    fn asked_closed(ed: &mut Editor, dir: &Path, open: &str, closed_rel: &str) -> Vec<String> {
+        let before = ed.session.code_review.as_ref().unwrap().started;
+        start_in(ed, dir.to_path_buf(), None);
+        settle_until(ed, |ed| ed.session.code_review.as_ref().is_some_and(|r| r.started != before));
+        open_file(ed, dir, open);
+        closed(ed, dir, closed_rel);
+        let r = ed.session.code_review.as_ref().unwrap();
+        let f = r.files.iter().find(|f| f.rel == closed_rel).unwrap();
+        r.graded(ed, f)
+            .iter()
+            .filter(|g| g.grade == Grade::High && !g.looked_at(&ed.session.looked))
+            .map(|g| format!("{}: {}", g.at + 1, g.why))
+            .collect()
     }
 
     /// A line one piece's look had, moved into the middle of another piece since: asked.

@@ -6226,11 +6226,20 @@ fn draw_statusline(
             left.push(Seg { text: format!("  −{removed}"), style: color("diff.minus"), keep: 85 });
         }
     }
+    // (an error or warning no card has shown yet under a picker outlasts the list's keys: they fit beside it,
+    // it's cut to what the mode, the position and the inbox's count leave — below. Folded for want of a free
+    // corner, with no list up, it stays the first to go: the chip, the count and diagnostics outlast it)
+    let mut waiting_at = None;
     if let Some(toast) = folded {
         let bar = Style { fg: toast_color(editor, ui, toast.kind), ..ui.status };
         let text = toast.text.lines().next().unwrap_or_default();
-        left.push(Seg { text: "   ▎ ".into(), style: bar, keep: 90 });
-        left.push(Seg { text: fit_ellipsis(text, 56), style: ui.status, keep: 90 });
+        let ranked = toast.waiting() && editor.picker.is_some();
+        let keep = if ranked { FOLDED } else { 90 };
+        left.push(Seg { text: "   ▎ ".into(), style: bar, keep });
+        if ranked {
+            waiting_at = Some((left.len(), text));
+        }
+        left.push(Seg { text: fit_ellipsis(text, 56), style: ui.status, keep });
     }
     // Language server work, on the left: it changes with every report, and only here does its length
     // move nothing else
@@ -6365,11 +6374,23 @@ fn draw_statusline(
             keep: 250,
         },
     });
+    if let Some((i, text)) = waiting_at {
+        let others: usize = (left.iter().chain(&right))
+            .filter(|s| s.keep > HINTS || s.keep == INBOX)
+            .map(|s| s.text.width())
+            .sum();
+        let room = lay.width.saturating_sub(others - left[i].text.width() + 2);
+        left[i].text = fit_ellipsis(text, room.min(56));
+    }
     // What a floating list or the docs take as keys (`enter open  esc close`): after the pill, before all but
-    // the pill and the position — whole pairs, as many as fit beside those
+    // the pill, the position, an error waiting and the inbox's `▲N waiting` — whole pairs, as many as fit beside
+    // those (what waits for you is what's left when the room runs out: `INBOX`)
     if let Some(pairs) = key_hints(editor) {
-        let fixed: usize =
-            left.iter().chain(&right).filter(|s| s.keep > HINTS).map(|s| s.text.width()).sum::<usize>() + 2;
+        let fixed: usize = (left.iter().chain(&right))
+            .filter(|s| s.keep > HINTS || s.keep == INBOX)
+            .map(|s| s.text.width())
+            .sum::<usize>()
+            + 2;
         let key = Style { fg: ui.virt.fg, bold: true, ..ui.status };
         let what = Style { fg: ui.linenr.fg, ..ui.status };
         let mut room = lay.width.saturating_sub(fixed);
@@ -6431,9 +6452,16 @@ const CHIP: u8 = 235;
 /// is what's left when the room runs out.
 const INBOX: u8 = 245;
 
-/// The status line's `keep` for a floating list's keys (`key_hints`): only the mode and the position outlast
-/// them — and they're cut to fit beside those, whole pairs, so none is ever dropped half.
+/// The status line's `keep` for a floating list's keys (`key_hints`): only the mode, the position and an error
+/// or warning waiting there (`FOLDED`) outlast them — and they're cut to fit beside those and the inbox's count,
+/// whole pairs, so none is ever dropped half, nor the count for them.
 const HINTS: u8 = 249;
+
+/// The status line's `keep` for an error or warning no card has shown yet under a picker (U7): it outlasts the
+/// list's keys, cut to fit beside the mode, the position and the inbox's `▲N waiting` (frictions23: dropped
+/// first wherever the keys left too little, it was nowhere on screen). Only under a picker: folded for want of a
+/// free corner it keeps its low rank.
+const FOLDED: u8 = 250;
 
 /// Completion list — below the word so the name column lines up with the typed word (above if no room).
 ///
@@ -11621,6 +11649,48 @@ mod tests {
         for (y, line) in s.lines().enumerate() {
             assert!(line.width() <= 50, "row {y} past the edge:\n{s}");
         }
+    }
+
+    /// frictions23 (e2e `an_idle_editor_draws_nothing_and_sleeps` on Linux): an error under a picker is on the
+    /// status line whatever else is there — the list's key hints fit beside it, not it in what they leave (it
+    /// was dropped first wherever their last pair left too little: on Linux, every run). Never at the cost of
+    /// the inbox's `▲1 waiting` (a card behind the picker): wherever the count is there without the error, it's
+    /// there with it; and on a wide screen the list's keys are there beside both.
+    #[test]
+    fn an_error_under_a_picker_is_on_the_status_line_at_any_width() {
+        use crate::offer::{Offer, What};
+        let mut ed = Editor::new(crate::config::Config::default());
+        let what = What::ChangeSet { generation: 7, ops: false };
+        ed.push_offer(Offer::new(
+            "Claude changes 3 files".into(),
+            "One review for the set.",
+            "",
+            String::new(),
+            what,
+        ));
+        for k in ["space", "b"] {
+            ed.handle_key(k.parse().unwrap());
+        }
+        assert!(ed.picker.is_some(), "the buffer picker");
+        let status = |ed: &mut Editor, cols: u16| {
+            let mut bytes = Vec::new();
+            render(ed, &mut bytes, cols, 24).unwrap();
+            let mut p = vt100::Parser::new(24, cols, 0);
+            p.process(&bytes);
+            p.screen().rows(0, cols).nth(23).unwrap_or_default()
+        };
+        let counted: Vec<bool> =
+            (60..=140u16).map(|cols| status(&mut ed, cols).contains("▲1 waiting")).collect();
+        assert!(counted.iter().any(|c| *c), "the card behind the picker is counted somewhere");
+        ed.set_error("config: tab-width: expected integer");
+        for (cols, counted) in (60..=140u16).zip(counted) {
+            let line = status(&mut ed, cols);
+            assert!(line.contains("config: tab-"), "{cols} columns: {line:?}");
+            assert!(!counted || line.contains("▲1 waiting"), "{cols} columns, the count gone: {line:?}");
+            assert!(ed.toasts.iter().all(|t| !t.shown), "no card showed it");
+        }
+        let wide = status(&mut ed, 140);
+        assert!(wide.contains("enter open"), "a key pair beside it: {wide:?}");
     }
 
     /// The prompt's menu on a narrow screen: each row ends inside the card — its hint cut with `…` — never past

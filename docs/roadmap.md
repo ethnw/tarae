@@ -97,13 +97,17 @@ The aim is to state what the sandbox guarantees and show that it holds.
    isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined on both OSes,
    files only (macOS: Seatbelt, V1d; Linux: its own folder and Landlock, V1 parts 1–2). Its unix sockets on
    Linux (G24) wait for V3 and a 7.2+ kernel.
-2. **Fuzzing the parsers that read what a run sends** — paused, the plan kept: the supervisor's reading of
-   system-call arguments, and the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
-   [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12).
+2. **Fuzzing the parsers that read what a run sends** — the supervisor's reading of system-call arguments, and
+   the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
+   [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the
+   supervisor reads of a run's memory is `wire.rs`, built and tested on every OS; `sendmmsg`'s offsets can't
+   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 next. The
+   control messages it forwards wait for Anthropic's Cyber Verification Program (the model's safeguards stopped
+   that work twice).
 3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
    nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
-5. **A speed comparison** against a bubblewrap-style sandbox. An external review some day.
+5. **A speed comparison** against a bubblewrap-style sandbox.
 
 ### 2. Frictions, and lighter cards and reviews
 
@@ -187,14 +191,31 @@ One batch with the forge plugin: regions, cards, tools for Claude, a masked prom
 GitHub, read and write, through `gh`'s login. Pull requests, CI, review comments beside the code; create, comment,
 approve, merge — every write on a card.
 
-### 8. Publishing
+### 8. Stabilization before release
+
+No new features: the release waits on numbers, not a feeling (2026-10-15: every finished piece still held 3–5
+bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four tests failed only under load).
+
+1. **The bar**: no test that fails only under load or only sometimes; every test green three runs in a row on
+   macOS and on every supported kernel (§1's set); a set period of building tarae with tarae with no new serious
+   bug.
+2. **Bug hunting**: tests that vary what tests usually hold still — the order state changes in, the screen's
+   width, the load — and the property loops widened with real output.
+3. **Less code**: what the card model's P3 replaced goes (its piece 5: the parser's gates, ~2,200 lines), and
+   whatever else the hunt finds unused.
+4. **Independent reviews of the sandbox** by Claude sessions that didn't build it: each given the threat model's
+   claims and the code, not the design's reasoning, trying to show a claim false; their findings fixed like any
+   reviewer's. A human security review when one can be had.
+5. **A small beta**: a few people use tarae first; what they hit goes into the suites.
+
+### 9. Publishing
 
 One draft pull request.
 
 - A `SECURITY.md` at the repository's root: where to report a vulnerability (a dedicated security address, e.g.
   `security@` on the homepage's domain, kept current) and how reports are handled.
 
-### 9. The homepage
+### 10. The homepage
 
 tarae.sinabro.io. An animation that feels like several agents working at once, and the README's demo, both from
 one scripted recording: `cargo xtask shot` extended to record frames, Claude's parts played by the tests' fake
