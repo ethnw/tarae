@@ -70,7 +70,7 @@ impl Editor {
     ) {
         let Some(d) = self.docs.iter_mut().find(|d| d.id == id) else { return };
         let n = hunks.len();
-        d.review_base = Some(ropey::Rope::from_str(&base));
+        d.set_review_base(Some(ropey::Rope::from_str(&base)));
         d.git_base = Some(Arc::new(base));
         d.diff_of = Some(label.clone());
         // Edited (or still loading) since: the diff is worked out again from the new text
@@ -80,6 +80,7 @@ impl Editor {
         } else {
             d.git_version = u64::MAX;
         }
+        self.base_parse(id);
         // The cursor goes to the first change only in the buffer diffed, if it's the one showing
         if self.doc().id == id
             && let Some(h) = self.doc().git_hunks.first().cloned()
@@ -102,7 +103,7 @@ impl Editor {
         if d.diff_of.take().is_none() {
             return Err("no diff here".into());
         }
-        d.review_base = None;
+        d.set_review_base(None);
         d.git_base = None;
         d.git_hunks.clear();
         let id = d.id;

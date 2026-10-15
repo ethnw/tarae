@@ -3057,7 +3057,7 @@ fn end(ed: &mut Editor) {
     }
     for id in r.docs {
         if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) {
-            d.review_base = None;
+            d.set_review_base(None);
             d.git_base = None;
             d.git_hunks.clear();
             d.diff_of = None;
@@ -3432,7 +3432,7 @@ fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
         let hunks = version.map(|_| crate::git::hunks(&base, &text.to_string()));
         move |ed: &mut Editor| {
             let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) else { return };
-            d.review_base = Some(ropey::Rope::from_str(&base));
+            d.set_review_base(Some(ropey::Rope::from_str(&base)));
             d.git_base = Some(Arc::new(base));
             d.diff_of = None; // the review's base now, not a `:diff`'s
             if let (Some(version), Some(hunks)) = (version, hunks)
@@ -3443,6 +3443,7 @@ fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
             } else {
                 d.git_version = u64::MAX;
             }
+            ed.base_parse(id);
             land(ed);
             marks_due(ed);
         }

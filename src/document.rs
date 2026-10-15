@@ -231,9 +231,22 @@ pub struct Document {
     /// An edit of Claude's that follow or replay shows here (`follow::sync_shown` — only while the buffer is
     /// the version it was seen in): its lines on the review's wash, the ones they replaced above them.
     pub shown: Option<Vec<crate::replay::Hunk>>,
+    /// `review_base` parsed whole, for its removed rows' colours (`Editor::base_parse`, on a worker) — until it
+    /// lands they're coloured one line at a time. `base_seq` tells a parse of an older base from this one's.
+    pub base_syntax: Option<crate::syntax::Syntax>,
+    pub base_seq: u64,
 }
 
 impl Document {
+    /// The code review's or `:diff`'s base — set or ended here only, so its parse goes with it.
+    pub fn set_review_base(&mut self, base: Option<ropey::Rope>) {
+        self.review_base = base;
+        self.base_seq += 1;
+        if let Some(old) = self.base_syntax.take() {
+            crate::event::drop_later(old);
+        }
+    }
+
     /// The view starts at `line`, from its first row.
     pub fn set_top(&mut self, line: usize) {
         self.top = line;
@@ -270,6 +283,8 @@ impl Document {
             git_base: None,
             git_hunks: Vec::new(),
             review_base: None,
+            base_syntax: None,
+            base_seq: 0,
             indent_unit: std::cell::Cell::new(None),
             diff_of: None,
             conflicts: Vec::new(),

@@ -30,9 +30,21 @@ pub enum Row {
         /// Example code row (background one shade deeper).
         code: bool,
     },
-    /// Text that isn't the document's: a line the code review's base had here and the text no longer does, or
-    /// one a shown edit replaced (shown above line `at`).
-    Other { at: usize, text: String },
+    /// Text that isn't the document's: a line the code review's base had here and the text no longer does
+    /// (`base`: which, for the base's colours), or one a shown edit replaced — shown above line `at`; `part`
+    /// when it soft-wraps, as a line does.
+    Other { at: usize, text: String, base: Option<usize>, part: Option<Part> },
+}
+
+/// The rows of a line that isn't the document's at `width` cells (one, unwrapped, without a width).
+pub fn other_parts(text: &str, width: Option<usize>, tab: usize) -> Vec<Option<Part>> {
+    let Some(w) = width else { return vec![None] };
+    let rows = crate::wrap::rows(&Rope::from_str(text), 0, w, tab);
+    if rows.len() == 1 {
+        return vec![None];
+    }
+    let n = rows.len();
+    rows.into_iter().enumerate().map(|(index, row)| Some(Part { row, index, last: index + 1 == n })).collect()
 }
 
 /// One screen row of a soft-wrapped line (`index` from 0; `last` = the row the line ends on).
@@ -128,8 +140,8 @@ impl Changes {
         self.rows() && hunks.iter().any(|h| h.kind != HunkKind::Deleted && h.lines.contains(&line))
     }
 
-    /// The removed lines that go above lines `from..=to`: (line they go above, text).
-    pub fn removed(self, doc: &Document, from: usize, to: usize) -> Vec<(usize, String)> {
+    /// The removed lines that go above lines `from..=to`: (line they go above, text, the base's line it was).
+    pub fn removed(self, doc: &Document, from: usize, to: usize) -> Vec<(usize, String, Option<usize>)> {
         let starts = |h: &Range<usize>| (from..=to).contains(&h.start);
         match (self, &doc.review_base, &doc.shown) {
             (Changes::Base, Some(base), _) => doc
@@ -137,20 +149,22 @@ impl Changes {
                 .iter()
                 .filter(|h| h.removed > 0 && starts(&h.lines))
                 .flat_map(|h| h.base.clone().filter(|&b| b < base.len_lines()).map(|b| (h.lines.start, b)))
-                .map(|(at, b)| (at, base.line(b).to_string().trim_end_matches(['\n', '\r']).to_string()))
+                .map(|(at, b)| {
+                    (at, base.line(b).to_string().trim_end_matches(['\n', '\r']).to_string(), Some(b))
+                })
                 .collect(),
             (Changes::Shown, _, Some(shown)) => shown
                 .iter()
                 .filter(|h| starts(&h.lines))
-                .flat_map(|h| h.removed.iter().map(|t| (h.lines.start, t.clone())))
+                .flat_map(|h| h.removed.iter().map(|t| (h.lines.start, t.clone(), None)))
                 .collect(),
             _ => Vec::new(),
         }
     }
 
-    /// How many removed rows go above `line`.
-    pub fn rows_above(self, doc: &Document, line: usize) -> usize {
-        match (self, &doc.shown) {
+    /// How many removed rows go above `line` — each soft-wrapped at `width`, as the lines are.
+    pub fn rows_above(self, doc: &Document, line: usize, width: Option<usize>, tab: usize) -> usize {
+        let n = match (self, &doc.shown) {
             (Changes::Base, _) => {
                 doc.git_hunks.iter().filter(|h| h.lines.start == line).map(|h| h.removed).sum()
             }
@@ -158,6 +172,10 @@ impl Changes {
                 shown.iter().filter(|h| h.lines.start == line).map(|h| h.removed.len()).sum()
             }
             _ => 0,
+        };
+        match (n, width) {
+            (0, _) | (_, None) => n,
+            _ => self.removed(doc, line, line).iter().map(|r| other_parts(&r.1, width, tab).len()).sum(),
         }
     }
 
@@ -171,6 +189,37 @@ impl Changes {
             (Changes::Shown, Some(shown)) => shown.iter().any(|h| near(&h.lines)),
             _ => false,
         }
+    }
+}
+
+impl Editor {
+    /// Parses document `id`'s review base whole on a worker (`Document.base_syntax`) — a frame only when its
+    /// removed rows are on screen.
+    pub fn base_parse(&mut self, id: crate::document::DocId) {
+        let Some(d) = self.docs.iter().find(|d| d.id == id) else { return };
+        let (Some(base), Some(lang)) = (d.review_base.clone(), d.syntax.as_ref().map(|s| s.lang.clone()))
+        else {
+            return;
+        };
+        let seq = d.base_seq;
+        self.events.jobs().spawn(move || {
+            let syn = crate::syntax::Syntax::parsed(lang, &base);
+            move |ed: &mut Editor| {
+                let Some(d) = ed.docs.iter_mut().find(|d| d.id == id && d.base_seq == seq) else {
+                    crate::event::drop_later(syn);
+                    ed.unchanged = true;
+                    return;
+                };
+                d.base_syntax = Some(syn);
+                // (the removed rows' lines: in a pane of the last frame?)
+                let gone = |l: usize| d.git_hunks.iter().any(|h| h.removed > 0 && h.lines.start == l);
+                let views = &ed.session.views;
+                let seen = ed.screen.panes.iter().any(|(view, _, _, rows)| {
+                    views.iter().any(|v| v.id == *view && v.doc == id) && rows.iter().any(|r| gone(r.0))
+                });
+                ed.unchanged = !seen;
+            }
+        });
     }
 }
 
@@ -233,7 +282,9 @@ impl Row {
     /// column the row stops before).
     pub fn origin(&self, left: usize) -> (usize, usize, usize, usize) {
         match self {
-            Row::Text { line, part: Some(p) } => (*line, p.row.col, p.row.x0, p.row.end_col),
+            Row::Text { line, part: Some(p) } | Row::Other { at: line, part: Some(p), .. } => {
+                (*line, p.row.col, p.row.x0, p.row.end_col)
+            }
             // (a folded block doesn't scroll sideways)
             Row::Doc { start, .. } => (*start, 0, 0, usize::MAX),
             _ => (self.line(), left, 0, usize::MAX),

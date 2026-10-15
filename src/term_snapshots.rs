@@ -2305,6 +2305,101 @@ fn a_folded_doc_comment_carries_its_lines_signs() {
     assert_eq!((mark.contents(), Some(mark.fgcolor())), ("▎", fg("diff.plus")), "added, not changed");
 }
 
+/// `:diff` of `text` (shown as `rel`) against `base`: the frame once `done` holds of it, or when no event has
+/// come for 10 s (the base's parse is a worker's).
+fn diff_frame(
+    s: &mut Shot,
+    rel: &str,
+    text: &str,
+    base: &str,
+    done: impl Fn(&vt100::Parser) -> bool,
+) -> vt100::Parser {
+    let id = s.file(rel, text);
+    let version = s.ed.doc().version();
+    s.ed.diff_show(id, version, base.into(), "base".into(), crate::git::hunks(base, text));
+    loop {
+        let p = cells(&s.frame(), s.w, s.h);
+        if done(&p) {
+            return p;
+        }
+        match s.ed.events.recv_timeout(Duration::from_secs(10)) {
+            Some(ev) => s.ed.handle_event(ev),
+            None => return p,
+        }
+    }
+}
+
+/// A removed line soft-wraps as the lines do (it was cut at the pane's edge).
+#[test]
+fn a_removed_line_wraps_as_the_lines_do() {
+    let mut s = Shot::new(60, 12);
+    let long = format!("{}END", "word ".repeat(20));
+    let p = diff_frame(&mut s, "a.txt", "keep\nnew\n", &format!("keep\n{long}\n"), |_| true);
+    assert!(s.ed.doc().wrap.is_none() && s.ed.wraps(s.ed.doc()), "a file with no language wraps");
+    let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("END")), "the whole removed line: {rows:#?}");
+    let marks: Vec<bool> = rows.iter().filter(|r| r.contains("word")).map(|r| r.contains('−')).collect();
+    assert_eq!(marks, [true, false], "two rows, `−` on the first: {rows:#?}");
+}
+
+/// The cursor stays in sight below a removed line that wraps: the view counts its rows as drawn.
+#[test]
+fn the_cursor_stays_in_sight_below_a_wrapped_removed_line() {
+    let mut s = Shot::new(60, 9);
+    s.ed.config.scrolloff = 0;
+    let text = "a\nb\nc\nd\ne\nf\n";
+    let base = format!("a\nb\nc\nd\ne\n{}END\nf\n", "word ".repeat(30));
+    diff_frame(&mut s, "a.txt", text, &base, |_| true);
+    // (from the top: the view scrolls down to the cursor, counting the removed rows above its line)
+    s.keys("ggge");
+    s.ed.toasts.clear();
+    let rows: Vec<String> = cells(&s.frame(), s.w, s.h).screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("END")), "the removed line's last row: {rows:#?}");
+    assert!(rows.iter().any(|r| r.trim_end().ends_with(" f")), "the cursor's line: {rows:#?}");
+}
+
+/// A removed line's tabs go to the document's tab stops (each was `tab_width` spaces wherever it stood).
+#[test]
+fn a_removed_lines_tabs_take_the_tab_stops() {
+    let mut s = Shot::new(60, 12);
+    s.ed.config.tab_width = 4;
+    let p = diff_frame(&mut s, "a.txt", "keep\nend\n", "keep\nab\tx\nend\n", |_| true);
+    let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("ab  x")), "x at column 4: {rows:#?}");
+}
+
+/// A removed line is coloured from the base parsed whole — inside a block comment it's a comment (alone it
+/// read as code).
+#[test]
+fn a_removed_line_takes_its_colours_from_the_whole_base() {
+    let mut s = Shot::new(60, 12);
+    let comment = vt_color(s.ed.theme.get("comment").fg);
+    let fg = |p: &vt100::Parser| Some(cell_by(p, 60, "removed inside", 0).fgcolor());
+    let (base, text) = ("/*\nremoved inside\n*/\nfn f() {}\n", "/*\n*/\nfn f() {}\n");
+    let p = diff_frame(&mut s, "src/c.rs", text, base, |p| fg(p) == comment);
+    assert_eq!(fg(&p), comment, "the base's block comment");
+}
+
+/// The base's parse is a frame only when its removed rows are on screen — else nothing's drawn for it.
+#[test]
+fn the_bases_parse_is_a_frame_only_in_sight() {
+    for seen in [true, false] {
+        let mut s = Shot::new(60, 12);
+        let (base, text) = ("/*\nremoved inside\n*/\nfn f() {}\n", "/*\n*/\nfn f() {}\n");
+        let id = s.file("src/c.rs", text);
+        let version = s.ed.doc().version();
+        s.ed.diff_show(id, version, base.into(), "base".into(), crate::git::hunks(base, text));
+        match seen {
+            true => drop(s.frame()),
+            false => s.ed.screen.panes.clear(),
+        }
+        let ev = s.ed.events.recv_timeout(Duration::from_secs(10)).expect("the parse");
+        s.ed.handle_event(ev);
+        assert!(s.ed.doc().base_syntax.is_some(), "parsed");
+        assert_eq!(s.ed.unchanged, !seen, "a frame only when seen ({seen})");
+    }
+}
+
 /// A pane without the keys paints its primary cursor as it paints the others (it painted none).
 #[test]
 fn a_pane_without_the_keys_shows_its_primary_cursor() {

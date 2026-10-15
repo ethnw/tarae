@@ -2552,17 +2552,17 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
             None => vec![crate::wrap::Row { start: 0, col: 0, end_col: usize::MAX, x0: 0 }],
         };
         let changes = Changes::of(doc);
-        let rows = |l: usize| wrapped(l).len() + changes.rows_above(doc, l);
+        let rows = |l: usize| wrapped(l).len() + changes.rows_above(doc, l, wrap_w, tab);
         // The rows of a line that can go above the screen while it's the top line: its wrapped rows but the
         // last (none under removed rows — those are shown whole)
-        let skippable = |l: usize| match changes.rows_above(doc, l) {
+        let skippable = |l: usize| match changes.rows_above(doc, l, wrap_w, tab) {
             0 => wrapped(l).len() - 1,
             _ => 0,
         };
         let here = wrapped(line);
         // Screen rows between the top and the cursor's row: its row in the line, below the removed ones
         let k = if wrap_w.is_some() { crate::wrap::row_of(&here, pos) } else { 0 }
-            + changes.rows_above(doc, line);
+            + changes.rows_above(doc, line, wrap_w, tab);
         let mut above = k;
         let mut top = line;
         while top > 0 && above < so {
@@ -3379,7 +3379,6 @@ fn draw_text(
     let added_here_bg = blend(ui.diff_plus.fg, ui.tint, 0.18).or(ui.base.bg);
     let removed_bg = blend(ui.diff_minus.fg, ui.tint, 0.14).or(ui.base.bg);
     let added = |line: usize| shows.changes.washed(&hunks, line);
-    let code_lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
     // Merge conflicts: ours on the green wash, theirs on the changed one's, the base and markers fainter
     let delta_fg = editor.theme.try_get("diff.delta").and_then(|s| s.fg);
     let conflict_bg = |line: usize| -> Option<Style> {
@@ -3586,34 +3585,37 @@ fn draw_text(
             }
             // A line the review's base had here: `−` where the number goes (the old numbers would read as
             // the new ones — or clash with relative numbers), its text in the language's colors
-            Some(crate::codeview::Row::Other { text: gone, .. }) => {
+            Some(crate::codeview::Row::Other { text: gone, base: from, part, .. }) => {
                 let base = Style { bg: removed_bg, ..ui.base };
                 ground(out, lay, y, base)?;
                 apply(out, base)?;
                 queue!(out, Spaces(lay.gutter - 1))?;
+                // (a wrapped one's `−` on its first row, as a line's number)
                 apply(out, Style { fg: ui.diff_minus.fg, bold: true, ..base })?;
-                queue!(out, Print("−"))?;
-                let gone = gone.replace('\t', &" ".repeat(tab));
-                let (mut skip, mut room) = (shows.left, lay.text_cols);
-                for l in crate::markdown::code_lines(&gone, code_lang.as_deref(), &editor.theme) {
-                    let crate::markdown::Line::Code(spans) = l else { continue };
-                    for sp in spans {
-                        let mut piece = String::new();
-                        for ch in sp.text.chars() {
-                            let cw = ch.width().unwrap_or(0);
-                            if skip > 0 {
-                                skip = skip.saturating_sub(cw);
-                                continue;
-                            }
-                            if cw > room {
-                                room = 0;
-                                break;
-                            }
-                            room -= cw;
-                            piece.push(ch);
-                        }
-                        apply(out, base.patch(Style { bg: None, ..sp.style }))?;
-                        queue!(out, Print(&piece))?;
+                queue!(out, Print(if part.is_none_or(|p| p.index == 0) { "−" } else { " " }))?;
+                let (row_left, row_end, x0) = match part {
+                    Some(p) => (p.row.col, p.row.end_col, p.row.x0),
+                    None => (shows.left, usize::MAX, 0),
+                };
+                let paint = other_paint(doc, gone, *from, &mut qcursor);
+                apply(out, base)?;
+                queue!(out, Spaces(x0))?;
+                let mut room = lay.text_cols.saturating_sub(x0);
+                // Cells at the document's tab stops, as its lines have them
+                for c in graphemes::cells(gone, 0, tab) {
+                    if c.col < row_left {
+                        continue;
+                    }
+                    if c.col >= row_end || c.width > room {
+                        break;
+                    }
+                    room -= c.width;
+                    let cap = paint.get(c.bytes.start).copied().unwrap_or(u32::MAX);
+                    let syn = capture_styles.get(cap as usize).copied().flatten().unwrap_or_default();
+                    apply(out, base.patch(Style { bg: None, ..syn }))?;
+                    match &gone[c.bytes.clone()] {
+                        "\t" => queue!(out, Spaces(c.width))?,
+                        g => queue!(out, Print(g))?,
                     }
                 }
                 continue;
@@ -4149,6 +4151,33 @@ fn draw_text(
     Ok(cursor)
 }
 
+/// Per byte of a line that isn't the document's (`Row::Other`): the capture that paints it — from the review
+/// base's parse once it's there (`base_syntax`: inside a block comment or a string it's coloured as one), else
+/// the line alone in the document's language. A shown edit's old lines stay one at a time: they're pieces of a
+/// text that's gone, nothing whole to parse.
+fn other_paint(
+    doc: &crate::document::Document,
+    text: &str,
+    from: Option<usize>,
+    qcursor: &mut QueryCursor,
+) -> std::sync::Arc<Vec<u32>> {
+    let whole = doc.base_syntax.as_ref().filter(|s| s.tree.is_some());
+    if let (Some(b), Some(syn), Some(base)) = (from, whole, &doc.review_base)
+        && b < base.len_lines()
+    {
+        let start = base.line_to_byte(b);
+        let range = start..(start + text.len()).min(base.len_bytes());
+        return std::sync::Arc::new(paint_spans(
+            &syntax::highlights(syn, base, range.clone(), qcursor),
+            range,
+        ));
+    }
+    match doc.syntax.as_ref() {
+        Some(s) => crate::markdown::painted(s.lang.clone(), text),
+        None => std::sync::Arc::default(),
+    }
+}
+
 /// Screen rows: doc lines in order, but doc-comment blocks without cursor/selection are **folded** (text
 /// rewrapped to width, no blank lines/fences) into fewer rows. Once the cursor enters, it unfolds to raw.
 /// Detection looks up to 200 lines above/below the screen (so a `/** */` block starting off-screen connects).
@@ -4203,11 +4232,14 @@ fn rows_pane(
     // (folded blocks show more lines than rows: removed rows as far as the scan goes, a screen past it)
     let removed = shows.changes.removed(doc, top, w1 + rows);
     let mut next = removed.iter().peekable();
-    type Next<'a> = std::iter::Peekable<std::slice::Iter<'a, (usize, String)>>;
+    type Next<'a> = std::iter::Peekable<std::slice::Iter<'a, (usize, String, Option<usize>)>>;
+    // (wrapped as the lines are: the screen's width, tab stops)
     let removed_before = |view: &mut Vec<Row>, line: usize, next: &mut Next| {
-        while let Some(r) = next.next_if(|r| r.0 <= line) {
-            if view.len() < rows {
-                view.push(Row::Other { at: r.0, text: r.1.clone() });
+        while let Some((at, text, base)) = next.next_if(|r| r.0 <= line) {
+            for part in crate::codeview::other_parts(text, wrap_w, tab) {
+                if view.len() < rows {
+                    view.push(Row::Other { at: *at, text: text.clone(), base: *base, part });
+                }
             }
         }
     };

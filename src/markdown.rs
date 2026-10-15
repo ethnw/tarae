@@ -422,7 +422,7 @@ pub fn code_lines(code: &str, lang: Option<&str>, theme: &Theme) -> Vec<Line> {
 /// Per byte of `code`: the highlight capture painting it (`u32::MAX` none). Remembered for the last few
 /// dozen blocks — a chat answer, a signature or a diagnostic card is drawn every frame, and each block is a
 /// tree-sitter parse of its own. The captures don't depend on the theme, so they never go stale.
-fn painted(data: std::sync::Arc<syntax::LangData>, code: &str) -> std::sync::Arc<Vec<u32>> {
+pub(crate) fn painted(data: std::sync::Arc<syntax::LangData>, code: &str) -> std::sync::Arc<Vec<u32>> {
     type Memo = Vec<(String, String, std::sync::Arc<Vec<u32>>)>;
     static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(Vec::new());
     const KEEP: usize = 64;
