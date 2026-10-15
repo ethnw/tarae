@@ -2551,16 +2551,18 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
             Some(w) => crate::wrap::rows(&doc.text, l, w, tab),
             None => vec![crate::wrap::Row { start: 0, col: 0, end_col: usize::MAX, x0: 0 }],
         };
-        let rows = |l: usize| wrapped(l).len() + removed_above(doc, l);
+        let changes = Changes::of(doc);
+        let rows = |l: usize| wrapped(l).len() + changes.rows_above(doc, l);
         // The rows of a line that can go above the screen while it's the top line: its wrapped rows but the
         // last (none under removed rows — those are shown whole)
-        let skippable = |l: usize| match removed_above(doc, l) {
+        let skippable = |l: usize| match changes.rows_above(doc, l) {
             0 => wrapped(l).len() - 1,
             _ => 0,
         };
         let here = wrapped(line);
         // Screen rows between the top and the cursor's row: its row in the line, below the removed ones
-        let k = if wrap_w.is_some() { crate::wrap::row_of(&here, pos) } else { 0 } + removed_above(doc, line);
+        let k = if wrap_w.is_some() { crate::wrap::row_of(&here, pos) } else { 0 }
+            + changes.rows_above(doc, line);
         let mut above = k;
         let mut top = line;
         while top > 0 && above < so {
@@ -3369,19 +3371,14 @@ fn draw_text(
         .filter(|g| g.path.is_some() && g.path == doc.path && doc.shown.is_none())
         .and_then(|g| g.lines.clone());
     let gaze_bg = blend(ui.accent.fg, ui.tint, 0.09).or(ui.base.bg);
-    // Code review: added and changed lines on a green wash; removed ones are rows of their own (red) — and
-    // so an edit of Claude's that follow or replay shows
-    let reviewing = shows.changes == Changes::Base;
+    // Code review: added and changed lines on a green wash (a step stronger on the cursor line); removed ones
+    // are rows of their own (red) — and so an edit of Claude's that follow or replay shows. One diff a view:
+    // the signs, washes and rows all from `shows.changes`
+    let hunks = shows.changes.hunks(doc);
     let added_bg = blend(ui.diff_plus.fg, ui.tint, 0.10).or(ui.base.bg);
+    let added_here_bg = blend(ui.diff_plus.fg, ui.tint, 0.18).or(ui.base.bg);
     let removed_bg = blend(ui.diff_minus.fg, ui.tint, 0.14).or(ui.base.bg);
-    let added = |line: usize| {
-        (reviewing
-            && doc
-                .git_hunks
-                .iter()
-                .any(|h| h.kind != crate::git::HunkKind::Deleted && h.lines.contains(&line)))
-            || doc.shown.iter().flatten().any(|h| h.lines.contains(&line))
-    };
+    let added = |line: usize| shows.changes.washed(&hunks, line);
     let code_lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
     // Merge conflicts: ours on the green wash, theirs on the changed one's, the base and markers fainter
     let delta_fg = editor.theme.try_get("diff.delta").and_then(|s| s.fg);
@@ -3399,13 +3396,13 @@ fn draw_text(
     // git: sign per visible line (glyph, color)
     let git_color = |k: &str| Style { fg: editor.theme.try_get(k).and_then(|s| s.fg), ..ui.base };
     let mut git_marks: Vec<Option<(&str, Style)>> = vec![None; span];
-    for h in &doc.git_hunks {
+    for h in hunks.iter() {
         let (glyph, st, lines) = match h.kind {
             crate::git::HunkKind::Added => ("▎", git_color("diff.plus"), h.lines.clone()),
             crate::git::HunkKind::Modified => ("▎", git_color("diff.delta"), h.lines.clone()),
-            // Deleted spots get an underline under the preceding line — not in a review (the removed rows
-            // are right there)
-            crate::git::HunkKind::Deleted if reviewing => continue,
+            // Deleted spots get an underline under the preceding line — not where removed lines are rows
+            // (they're right there)
+            crate::git::HunkKind::Deleted if shows.changes.rows() => continue,
             crate::git::HunkKind::Deleted => {
                 let l = h.lines.start.saturating_sub(1);
                 ("▁", git_color("diff.minus"), l..l + 1)
@@ -3484,6 +3481,53 @@ fn draw_text(
     });
     let active_guide_style = Style { fg: ui.virt.fg, ..Style::default() };
     let signs = lay.gutter - num_w(doc);
+    // The sign column's cell for lines `a..=b` (a folded block's: its lines together) — stopped line ▶ >
+    // breakpoint ● > the most severe diagnostic's bar
+    let sign_of = |a: usize, b: usize| -> (&str, Style) {
+        if stop_line.is_some_and(|l| (a..=b).contains(&l)) {
+            return ("▶", Style { fg: stop_color, bold: true, ..ui.base });
+        }
+        if let Some(bp) = doc_bps.and_then(|m| m.range(a..=b).next()).map(|(_, bp)| bp) {
+            // Breakpoint = red · condition = orange · logpoint = accent (the line-end text says which)
+            let fg = if bp.log.is_some() {
+                ui.accent.fg
+            } else if bp.condition.is_some() {
+                stop_color
+            } else {
+                ui.error.fg
+            };
+            return ("●", Style { fg, ..ui.base });
+        }
+        let sev = match a == b {
+            true => line_severity.get(a.wrapping_sub(top)).copied().unwrap_or(0),
+            // (a block can start above the screen, past the visible diagnostics)
+            false => {
+                let (from, to) = (mv::line_start(text, a), mv::line_full_end(text, b));
+                let inside = doc.lsp.diagnostics.iter().filter(|d| from <= d.from && d.from < to);
+                inside.map(|d| d.severity).filter(|&s| s > 0).min().unwrap_or(0)
+            }
+        };
+        match sev {
+            0 => (" ", ui.base),
+            s => ("▎", ui.base.patch(ui.sign[s as usize])),
+        }
+    };
+    // A folded block's git mark: its lines' changes together — their kind when they're all one, else changed
+    let git_block = |a: usize, b: usize| -> Option<(&str, Style)> {
+        use crate::git::HunkKind::*;
+        let mut kinds = hunks.iter().filter_map(|h| match h.kind {
+            // (a removal's `▁` goes under the line before its spot)
+            Deleted if shows.changes.rows() => None,
+            Deleted => (a < h.lines.start && h.lines.start <= b + 1).then_some(Deleted),
+            k => (h.lines.start <= b && h.lines.end > a).then_some(k),
+        });
+        let first = kinds.next()?;
+        Some(match kinds.all(|k| k == first).then_some(first) {
+            Some(Added) => ("▎", git_color("diff.plus")),
+            Some(Deleted) => ("▁", git_color("diff.minus")),
+            _ => ("▎", git_color("diff.delta")),
+        })
+    };
     // (each row takes its ground across the pane first — `ground` — and draws over it)
     for row in 0..lay.text_rows {
         let y = lay.text_top + row as u16;
@@ -3492,11 +3536,17 @@ fn draw_text(
                 ground(out, lay, y, ui.base)?;
                 continue;
             }
-            // Folded doc comment: line number only on the block's first row; git sign if any in the block
+            // Folded doc comment: on the block's first row its line number, and its lines' signs and git mark
+            // folded together
             Some(crate::codeview::Row::Doc { start, end, indent, index, spans, code }) => {
                 ground(out, lay, y, ui.base)?;
                 apply(out, ui.base)?;
-                queue!(out, Spaces(signs))?;
+                if signs > 0 {
+                    queue!(out, Spaces(signs - 1))?;
+                    let (glyph, st) = if *index == 0 { sign_of(*start, *end) } else { (" ", ui.base) };
+                    apply(out, st)?;
+                    queue!(out, Print(glyph))?;
+                }
                 // Cursor inside a folded block (normal mode): current-line number color, accent bar
                 let here = (*start..=*end).contains(&cur_line);
                 apply(out, if shows.focused && here { ui.linenr_selected } else { ui.linenr })?;
@@ -3510,14 +3560,15 @@ fn draw_text(
                 } else {
                     queue!(out, Spaces(w))?;
                 }
-                let touched = *index == 0
-                    && doc.git_hunks.iter().any(|h| h.lines.start <= *end && h.lines.end > *start);
-                if touched {
-                    apply(out, git_color("diff.delta"))?;
-                    queue!(out, Print("▎"))?;
-                } else {
-                    apply(out, ui.base)?;
-                    queue!(out, Print(" "))?;
+                match git_block(*start, *end).filter(|_| *index == 0) {
+                    Some((glyph, st)) => {
+                        apply(out, st)?;
+                        queue!(out, Print(glyph))?;
+                    }
+                    None => {
+                        apply(out, ui.base)?;
+                        queue!(out, Print(" "))?;
+                    }
                 }
                 draw_folded_row(
                     out,
@@ -3589,13 +3640,17 @@ fn draw_text(
         }
         // Current-line highlight: this line's background = ui.cursorline.primary over the default
         let line_message_here = line_message.get(li).copied().flatten();
+        let here = shows.cursorline && line == cur_line;
         let line_base = if stop_line == Some(line) {
             // Stopped line: accent band (takes precedence over the cursor line)
             Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
-        } else if shows.cursorline && line == cur_line {
-            ui.cursorline
         } else if let Some(st) = conflict_bg(line) {
             st
+        } else if added(line) {
+            // A change shown is never hidden by the cursor line: on it, its wash a step stronger
+            Style { bg: if here { added_here_bg } else { added_bg }, ..ui.base }
+        } else if here {
+            ui.cursorline
         } else {
             // Error/warning lines get a very faint wash of that color — so problems stand out when skimming
             match line_message_here {
@@ -3603,7 +3658,6 @@ fn draw_text(
                     Style { bg: blend(ui.sign[sev as usize].fg, ui.tint, 0.07).or(ui.base.bg), ..ui.base }
                 }
                 _ if gaze.as_ref().is_some_and(|g| g.contains(&line)) => Style { bg: gaze_bg, ..ui.base },
-                _ if added(line) => Style { bg: added_bg, ..ui.base },
                 _ => ui.base,
             }
         };
@@ -3623,25 +3677,9 @@ fn draw_text(
             // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
             apply(out, ui.base)?;
             queue!(out, Spaces(signs - 1))?;
-            let sev = line_severity.get(line.wrapping_sub(top)).copied().unwrap_or(0);
-            if stop_line == Some(line) {
-                apply(out, Style { fg: stop_color, bold: true, ..ui.base })?;
-                queue!(out, Print("▶"))?;
-            } else if let Some(bp) = doc_bps.and_then(|b| b.get(&line)) {
-                // Breakpoint = red · condition = orange · logpoint = accent (the line-end text says which)
-                let fg = if bp.log.is_some() {
-                    ui.accent.fg
-                } else if bp.condition.is_some() {
-                    stop_color
-                } else {
-                    ui.error.fg
-                };
-                apply(out, Style { fg, ..ui.base })?;
-                queue!(out, Print("●"))?;
-            } else {
-                apply(out, if sev > 0 { ui.base.patch(ui.sign[sev as usize]) } else { ui.base })?;
-                queue!(out, Print(if sev > 0 { "▎" } else { " " }))?;
-            }
+            let (glyph, st) = sign_of(line, line);
+            apply(out, st)?;
+            queue!(out, Print(glyph))?;
         }
         if first || cut {
             apply(out, if shows.focused && line == cur_line { ui.linenr_selected } else { ui.linenr })?;
@@ -4111,36 +4149,6 @@ fn draw_text(
     Ok(cursor)
 }
 
-/// The review base's removed lines that go above lines `from..=to`: (line they go above, text).
-fn removed_rows(doc: &crate::document::Document, from: usize, to: usize) -> Vec<(usize, String)> {
-    // An edit of Claude's that follow or replay shows: the lines it replaced, above its own
-    if let Some(hunks) = doc.shown.as_ref().filter(|_| doc.review_base.is_none()) {
-        return hunks
-            .iter()
-            .filter(|h| (from..=to).contains(&h.lines.start))
-            .flat_map(|h| h.removed.iter().map(|t| (h.lines.start, t.clone())))
-            .collect();
-    }
-    let Some(base) = &doc.review_base else { return Vec::new() };
-    let mut out = Vec::new();
-    for h in doc.git_hunks.iter().filter(|h| h.removed > 0 && (from..=to).contains(&h.lines.start)) {
-        for b in h.base.clone().filter(|&b| b < base.len_lines()) {
-            let text = base.line(b).to_string();
-            out.push((h.lines.start, text.trim_end_matches(['\n', '\r']).to_string()));
-        }
-    }
-    out
-}
-
-/// How many removed rows a code review puts above `line`.
-pub fn removed_above(doc: &crate::document::Document, line: usize) -> usize {
-    if doc.review_base.is_none() {
-        let shown = doc.shown.iter().flatten();
-        return shown.filter(|h| h.lines.start == line).map(|h| h.removed.len()).sum();
-    }
-    doc.git_hunks.iter().filter(|h| h.lines.start == line).map(|h| h.removed).sum()
-}
-
 /// Screen rows: doc lines in order, but doc-comment blocks without cursor/selection are **folded** (text
 /// rewrapped to width, no blank lines/fences) into fewer rows. Once the cursor enters, it unfolds to raw.
 /// Detection looks up to 200 lines above/below the screen (so a `/** */` block starting off-screen connects).
@@ -4188,13 +4196,12 @@ fn rows_pane(
     };
     // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded (raw
     // text), and the line after the last can have some too
-    let reviewing = shows.changes != Changes::Index;
-    let end = max_line + usize::from(reviewing);
+    let end = max_line + usize::from(shows.changes.rows());
     let folding = editor.doc_comments_render(lang);
     // Find blocks: runs of consecutive doc-comment lines within [w0, w1]
     let (w0, w1) = (top.saturating_sub(200), (top + rows * 3 + 200).min(last));
     // (folded blocks show more lines than rows: removed rows as far as the scan goes, a screen past it)
-    let removed = if reviewing { removed_rows(doc, top, w1 + rows) } else { Vec::new() };
+    let removed = shows.changes.removed(doc, top, w1 + rows);
     let mut next = removed.iter().peekable();
     type Next<'a> = std::iter::Peekable<std::slice::Iter<'a, (usize, String)>>;
     let removed_before = |view: &mut Vec<Row>, line: usize, next: &mut Next| {
@@ -4484,7 +4491,7 @@ fn draw_scrollbar(
     let (a, b) = (top * rows / total, ((top + rows) * rows).div_ceil(total).max(top * rows / total + 1));
     let mut marks = vec![0u8; rows];
     // git changes (only cells without diagnostics): 7 = added/modified, 8 = deleted
-    for h in &doc.git_hunks {
+    for h in Changes::of(doc).hunks(doc).iter() {
         let r = (h.lines.start * rows / total).min(rows - 1);
         let end = ((h.lines.end.max(h.lines.start + 1)) * rows).div_ceil(total).clamp(r + 1, rows);
         for m in &mut marks[r..end] {

@@ -44,7 +44,7 @@
 10 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
 11 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
 12 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-13 ppppppppppppppppppppppppppp     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+13 ppppppppppppppppppppppppppp     A222222222222222222222222222222222222222222222222222222222222222222222222222222
 14 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
 15 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
 16 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
@@ -93,5 +93,5 @@
 28   DDDDD D D aaaa a f f fff   ffg                                                                               g
 29  a BBBBBB a  ggg                                                                        dddd   ddddd dd   TTTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
+bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus  B=bold

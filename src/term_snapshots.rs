@@ -2224,6 +2224,87 @@ fn search_hits_wash_only_the_searched_document() {
     assert_eq!(hit, plain, "a.txt has no hit: {bgs:?}");
 }
 
+/// The cell `dx` cells after where `needle` starts on the frame's first row that holds it (`dx` < 0: before).
+fn cell_by<'p>(p: &'p vt100::Parser, w: u16, needle: &str, dx: isize) -> &'p vt100::Cell {
+    let rows: Vec<String> = p.screen().rows(0, w).collect();
+    let y = rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle:?}: {rows:#?}"));
+    let x = rows[y][..rows[y].find(needle).unwrap()].chars().count() as isize + dx;
+    p.screen().cell(y as u16, x as u16).unwrap()
+}
+
+/// An edit follow shows is the one diff its view shows: the gutter marks its changes, not the index's (it
+/// marked both: the index's bars, the edit's washes and rows).
+#[test]
+fn a_shown_edit_is_the_one_diff_its_view_shows() {
+    let mut s = Shot::new(100, 12);
+    s.file("a.txt", "one\ntwo\nthree\nfour\nfive\n");
+    let d = s.ed.doc_mut();
+    let (added, deleted) = (crate::git::HunkKind::Added, crate::git::HunkKind::Deleted);
+    d.git_hunks = vec![
+        crate::git::Hunk { kind: added, lines: 0..1, removed: 0, base: 0..0 },
+        crate::git::Hunk { kind: deleted, lines: 2..2, removed: 1, base: 1..2 },
+    ];
+    let edit = crate::replay::Hunk { lines: 3..4, removed: vec!["FOUR".into()], added: vec!["four".into()] };
+    d.shown = Some(vec![edit]);
+    let p = cells(&s.frame(), s.w, s.h);
+    let bar = |word: &str| cell_by(&p, s.w, word, -1).contents();
+    assert_eq!([bar("one"), bar("two"), bar("four")], [" ", " ", "▎"], "the edit's bar only");
+}
+
+/// The cursor line doesn't hide a change's wash: on it, the wash a step stronger (it was the plain cursor
+/// line's).
+#[test]
+fn a_change_on_the_cursor_line_keeps_its_wash() {
+    let mut s = Shot::new(100, 12);
+    s.file("a.txt", "one\nadded here\nadded too\nthree\n");
+    let d = s.ed.doc_mut();
+    d.review_base = Some(Rope::from_str("one\nthree\n"));
+    d.git_hunks =
+        vec![crate::git::Hunk { kind: crate::git::HunkKind::Added, lines: 1..3, removed: 0, base: 1..1 }];
+    d.set_selection(crate::selection::Selection::point(4));
+    let p = cells(&s.frame(), s.w, s.h);
+    let bg = |word: &str| cell_by(&p, s.w, word, 6).bgcolor();
+    let cursorline = vt_color(s.ed.theme.get("ui.cursorline.primary").bg).unwrap();
+    let (here, too, plain) = (bg("added here"), bg("added too"), bg("three"));
+    assert!(here != cursorline && here != too && too != plain, "{here:?} {too:?} {plain:?} {cursorline:?}");
+}
+
+/// A folded doc comment's row carries its lines' signs: the most severe diagnostic among them, and the git
+/// mark of their changes' own kind (it had no sign, and its git bar was always "changed").
+#[test]
+fn a_folded_doc_comment_carries_its_lines_signs() {
+    const SRC: &str = "/// Adds two numbers.\n///\n/// Wraps on overflow.\nfn add() {}\n";
+    let mut s = Shot::new(100, 12);
+    s.ed.config.line_number = crate::config::LineNumber::Absolute;
+    s.file("src/add.rs", SRC);
+    let d = s.ed.doc_mut();
+    d.set_selection(crate::selection::Selection::point(SRC.find("fn").unwrap()));
+    let at = SRC.find("overflow").unwrap();
+    let diag = crate::lsp::Diagnostic {
+        from: at,
+        to: at + 8,
+        severity: 1,
+        message: "x".into(),
+        raw: json!({}),
+        source: 0,
+    };
+    d.lsp.diagnostics = vec![diag];
+    d.git_hunks =
+        vec![crate::git::Hunk { kind: crate::git::HunkKind::Added, lines: 2..3, removed: 0, base: 2..2 }];
+    let p = cells(&s.frame(), s.w, s.h);
+    let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+    assert!(!rows.iter().any(|r| r.contains("///")), "folded: {rows:#?}");
+    // (the row: sign, number, git mark, then the block's rendered text)
+    let row = rows.iter().position(|r| r.contains("Adds two")).unwrap();
+    let x = rows[row].chars().position(|c| c == '1').unwrap() as u16;
+    let cell = |x: u16| p.screen().cell(row as u16, x).unwrap();
+    let sign = (0..x).rev().map(cell).find(|c| !c.contents().trim().is_empty()).expect("a sign");
+    let mark = cell(x + 1);
+    let fg = |k: &str| vt_color(s.ed.theme.get(k).fg);
+    assert_eq!((sign.contents(), Some(sign.fgcolor())), ("▎", fg("error")), "the error's bar");
+    assert_eq!((mark.contents(), Some(mark.fgcolor())), ("▎", fg("diff.plus")), "added, not changed");
+}
+
 /// A pane without the keys paints its primary cursor as it paints the others (it painted none).
 #[test]
 fn a_pane_without_the_keys_shows_its_primary_cursor() {

@@ -20,7 +20,7 @@ impl Editor {
     /// Screen rows line `l` takes: wrapped rows, plus the removed rows a code review shows above it.
     fn rows_of(&self, l: usize) -> usize {
         let doc = self.doc();
-        let extra = crate::term::removed_above(doc, l);
+        let extra = crate::codeview::Changes::of(doc).rows_above(doc, l);
         if !self.wraps(doc) {
             return 1 + extra;
         }

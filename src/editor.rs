@@ -12991,6 +12991,24 @@ mod tests {
     }
 
     #[test]
+    fn g_goes_to_the_changes_of_the_edit_shown() {
+        let mut ed = editor("one\ntwo\nthree\nfour\nfive\n");
+        let d = ed.doc_mut();
+        // (the index says line 3 is new; the edit follow shows changed line 4)
+        let kind = crate::git::HunkKind::Added;
+        d.git_hunks = vec![crate::git::Hunk { kind, lines: 2..3, removed: 0, base: 2..2 }];
+        let edit =
+            crate::replay::Hunk { lines: 3..4, removed: vec!["FOUR".into()], added: vec!["four".into()] };
+        d.shown = Some(vec![edit]);
+        feed(&mut ed, "]g");
+        let line =
+            |ed: &Editor| mv::line_of(&ed.doc().text, ed.doc().selection().primary().cursor(&ed.doc().text));
+        assert_eq!(line(&ed), 3, "the shown edit's change, not the index's");
+        feed(&mut ed, "[g");
+        assert_eq!(line(&ed), 3, "no change of the edit before it");
+    }
+
+    #[test]
     fn splits_focus_scroll_and_close() {
         let mut ed = editor(&"x\n".repeat(100));
         ed.handle_event(crate::event::Event::Resize); // first sync

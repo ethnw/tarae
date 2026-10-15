@@ -1744,7 +1744,9 @@ fn goto_change(cx: &mut Context, forward: bool, parts: bool) {
     // (from the selection's end going on, its start going back — a hunk selected isn't landed on again)
     let r = doc.selection().primary();
     let line = crate::movement::line_of(text, if forward { r.cursor(text) } else { r.from() });
-    let mut hunks = if parts { doc.git_hunks.clone() } else { crate::git::regions(&doc.git_hunks) };
+    // (the view's one diff: a shown edit's over the index's — `codeview::Changes`)
+    let shown = crate::codeview::Changes::of(doc).hunks(doc);
+    let mut hunks = if parts { shown.into_owned() } else { crate::git::regions(&shown) };
     if let Some(new) = &new {
         let has = |h: &crate::git::Hunk| {
             new.iter().any(|&l| h.lines.start <= l && l < h.lines.end.max(h.lines.start + 1))

@@ -16,14 +16,8 @@ pub fn applies(lang: Option<&str>) -> bool {
 /// rows inside them or right against them; or a merge conflict's lines. Such a block stays raw, so a diff is
 /// always read against the text it changes.
 pub fn touches_change(doc: &crate::document::Document, a: usize, b: usize) -> bool {
-    // (a removal's `lines` is empty: its rows go above `lines.start`)
-    let near = |l: &std::ops::Range<usize>| l.start <= b + 1 && l.end >= a;
-    let hunks = match (&doc.review_base, &doc.shown) {
-        (Some(_), _) => doc.git_hunks.iter().any(|h| near(&h.lines)),
-        (None, Some(shown)) => shown.iter().any(|h| near(&h.lines)),
-        (None, None) => false,
-    };
-    hunks || doc.conflicts.iter().any(|c| near(&(c.start..c.end + 1)))
+    crate::codeview::Changes::of(doc).near(doc, a, b)
+        || doc.conflicts.iter().any(|c| c.start <= b + 1 && c.end + 1 >= a)
 }
 
 /// One doc comment line, unwrapped.

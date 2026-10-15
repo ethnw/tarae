@@ -2,11 +2,15 @@
 //! document (or one wrapped part of it), a folded doc comment's row, or text that isn't the document's (a
 //! removed line). Screen rows ≠ document lines: drawing, the mouse and the moves go through these.
 
+use std::borrow::Cow;
+use std::ops::Range;
+
 use ropey::Rope;
 
 use crate::config::{CursorShape, LineNumber};
 use crate::document::Document;
 use crate::editor::{Editor, Mode};
+use crate::git::{Hunk, HunkKind};
 use crate::syntax::Syntax;
 
 /// One screen row of a code view.
@@ -68,7 +72,8 @@ pub struct Shows {
     pub blame: bool,
 }
 
-/// Where a code view's change marks come from.
+/// Where a code view's change marks come from — the one source of its signs, washes, removed rows, the
+/// scrollbar's marks and `]g`/`[g`: a view shows one diff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Changes {
     /// The index's (the git gutter).
@@ -77,6 +82,96 @@ pub enum Changes {
     Base,
     /// An edit of Claude's that follow or replay shows: its lines washed, the ones it replaced above them.
     Shown,
+}
+
+impl Changes {
+    /// Where `doc`'s marks come from: a review base over a shown edit over the index.
+    pub fn of(doc: &Document) -> Changes {
+        match (&doc.review_base, &doc.shown) {
+            (Some(_), _) => Changes::Base,
+            (None, Some(_)) => Changes::Shown,
+            (None, None) => Changes::Index,
+        }
+    }
+
+    /// Removed lines are rows of their own (not the index's `▁` under the line before), changed lines washed.
+    pub fn rows(self) -> bool {
+        self != Changes::Index
+    }
+
+    /// The changes, in order: the index's or the base's (`git_hunks` — the document's git base is the review's),
+    /// or the shown edit's (`base` empty there: what it removed is the edit's own text).
+    pub fn hunks(self, doc: &Document) -> Cow<'_, [Hunk]> {
+        match (self, &doc.shown) {
+            (Changes::Shown, Some(shown)) => Cow::Owned(
+                shown
+                    .iter()
+                    .map(|h| Hunk {
+                        kind: match (h.lines.is_empty(), h.removed.is_empty()) {
+                            (true, _) => HunkKind::Deleted,
+                            (false, true) => HunkKind::Added,
+                            (false, false) => HunkKind::Modified,
+                        },
+                        lines: h.lines.clone(),
+                        removed: h.removed.len(),
+                        base: 0..0,
+                    })
+                    .collect(),
+            ),
+            (Changes::Shown, None) => Cow::Borrowed(&[]),
+            _ => Cow::Borrowed(&doc.git_hunks),
+        }
+    }
+
+    /// Whether `line` is on a change's wash (an added or changed line, where removed lines are rows).
+    pub fn washed(self, hunks: &[Hunk], line: usize) -> bool {
+        self.rows() && hunks.iter().any(|h| h.kind != HunkKind::Deleted && h.lines.contains(&line))
+    }
+
+    /// The removed lines that go above lines `from..=to`: (line they go above, text).
+    pub fn removed(self, doc: &Document, from: usize, to: usize) -> Vec<(usize, String)> {
+        let starts = |h: &Range<usize>| (from..=to).contains(&h.start);
+        match (self, &doc.review_base, &doc.shown) {
+            (Changes::Base, Some(base), _) => doc
+                .git_hunks
+                .iter()
+                .filter(|h| h.removed > 0 && starts(&h.lines))
+                .flat_map(|h| h.base.clone().filter(|&b| b < base.len_lines()).map(|b| (h.lines.start, b)))
+                .map(|(at, b)| (at, base.line(b).to_string().trim_end_matches(['\n', '\r']).to_string()))
+                .collect(),
+            (Changes::Shown, _, Some(shown)) => shown
+                .iter()
+                .filter(|h| starts(&h.lines))
+                .flat_map(|h| h.removed.iter().map(|t| (h.lines.start, t.clone())))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// How many removed rows go above `line`.
+    pub fn rows_above(self, doc: &Document, line: usize) -> usize {
+        match (self, &doc.shown) {
+            (Changes::Base, _) => {
+                doc.git_hunks.iter().filter(|h| h.lines.start == line).map(|h| h.removed).sum()
+            }
+            (Changes::Shown, Some(shown)) => {
+                shown.iter().filter(|h| h.lines.start == line).map(|h| h.removed.len()).sum()
+            }
+            _ => 0,
+        }
+    }
+
+    /// Whether a change shown as rows and washes is in or right next to lines `a..=b`: a changed or added line
+    /// among them or on either side, or removed rows inside them or right against them.
+    pub fn near(self, doc: &Document, a: usize, b: usize) -> bool {
+        // (a removal's `lines` is empty: its rows go above `lines.start`)
+        let near = |l: &Range<usize>| l.start <= b + 1 && l.end >= a;
+        match (self, &doc.shown) {
+            (Changes::Base, _) => doc.git_hunks.iter().any(|h| near(&h.lines)),
+            (Changes::Shown, Some(shown)) => shown.iter().any(|h| near(&h.lines)),
+            _ => false,
+        }
+    }
 }
 
 impl Shows {
@@ -88,11 +183,7 @@ impl Shows {
             focused,
             editing: editor.editing_in(focused),
             left,
-            changes: match (&doc.review_base, &doc.shown) {
-                (Some(_), _) => Changes::Base,
-                (None, Some(_)) => Changes::Shown,
-                (None, None) => Changes::Index,
-            },
+            changes: Changes::of(doc),
             numbers: config.line_number,
             primary: focused && not_insert && crate::term::cursor_shape(editor) == CursorShape::Block,
             search: editor.search_hits.as_ref().is_some_and(|h| h.doc == doc.id),
