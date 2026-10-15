@@ -539,7 +539,16 @@ pub(crate) struct Sym {
     pub(crate) lines: (usize, usize),
 }
 
+/// An enum's variant's kind: found by name (`outlines::named` — `read path:Stage::Stopped`, a diagram's anchor),
+/// never listed nor said to hold a line (`Sym::listed`).
+pub(crate) const VARIANT: &str = "variant";
+
 impl Sym {
+    /// A definition, listed in outlines and named as what holds a line — not a variant (`VARIANT`).
+    pub(crate) fn listed(&self) -> bool {
+        self.kind != VARIANT
+    }
+
     /// As an answer names it: `fn run_search (1936–2047)` — lines from 1.
     pub(crate) fn said(&self) -> String {
         let (a, b) = (self.lines.0 + 1, self.lines.1 + 1);
@@ -707,7 +716,7 @@ pub(crate) fn outline_syms(path: &Path, text: Option<ropey::Rope>) -> Result<Vec
     parser.set_language(&lang.language).map_err(|e| e.to_string())?;
     let tree = parser.parse(rope.to_string(), None).ok_or("its parse failed")?;
     let line = |b: usize| rope.byte_to_line(b.min(rope.len_bytes()));
-    Ok(crate::syntax::outline(&tree, &rope)
+    Ok(crate::syntax::outline_members(&tree, &rope)
         .into_iter()
         .map(|d| {
             let kind = match d.kind {
@@ -715,6 +724,7 @@ pub(crate) fn outline_syms(path: &Path, text: Option<ropey::Rope>) -> Result<Vec
                 'f' => "fn",
                 't' => "type",
                 'm' => "mod",
+                'v' => VARIANT,
                 _ => "",
             };
             let lines = (line(d.range.start), line(d.range.end.saturating_sub(1).max(d.range.start)));
@@ -726,6 +736,7 @@ pub(crate) fn outline_syms(path: &Path, text: Option<ropey::Rope>) -> Result<Vec
 /// The answer: the outline, nested — or, with `line`, the symbols holding it, outermost first (by what
 /// spans it, so a flat list nests too). `from`: the server, or why it's tarae's outline.
 fn symbols_text(shown: &str, syms: &[Sym], line: Option<usize>, from: &str) -> String {
+    let syms: Vec<&Sym> = syms.iter().filter(|s| s.listed()).collect();
     let row = |s: &Sym, indent: usize| {
         let (a, b) = (s.lines.0 + 1, s.lines.1 + 1);
         let lines = if a == b { a.to_string() } else { format!("{a}–{b}") };
@@ -734,7 +745,8 @@ fn symbols_text(shown: &str, syms: &[Sym], line: Option<usize>, from: &str) -> S
     };
     let text = match line {
         Some(l) => {
-            let mut holding: Vec<&Sym> = syms.iter().filter(|s| s.lines.0 <= l && l <= s.lines.1).collect();
+            let mut holding: Vec<&Sym> =
+                syms.iter().copied().filter(|s| s.lines.0 <= l && l <= s.lines.1).collect();
             crate::sorting::by_key(&mut holding, |s| (s.lines.0, std::cmp::Reverse(s.lines.1)));
             if holding.is_empty() {
                 return format!("line {} of {shown} is in no symbol — at the top level ({from})", l + 1);

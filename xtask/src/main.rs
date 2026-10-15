@@ -24,6 +24,8 @@
 //!   its wrong yeses with their commands, the stamp rate, runs refused with no card (see [`cards`]).
 //! - `claude-stub serve|drive|summary` — what the `claude` program touches, measured against a fake API: the
 //!   stub, tarae's side of claude's pipes, an strace log by folder (see [`claudestub`]; `target/sb/v1b-linux.sh`).
+//! - `glyphs [chars]` — whether JetBrains Mono, Hack, Menlo and SF Mono each map those characters, from the cmap of
+//!   the fonts installed here (see [`glyphs`]) — the check behind CLAUDE.md's glyph list.
 
 // (clippy.toml's sort rule is for the tarae binary's size: these tasks aren't in it)
 #![allow(clippy::disallowed_methods, reason = "dev tasks: not in the release binary")]
@@ -36,6 +38,7 @@ use std::process::Command;
 mod cards;
 mod claudestub;
 mod deb;
+mod glyphs;
 mod linux;
 mod perf;
 // (tarae's own: a pty close-on-exec from the start)
@@ -62,8 +65,9 @@ fn main() {
         Some("trace") => trace::run(&args[1..]),
         Some("claude-stub") => claudestub::run(&args[1..]),
         Some("cards") => cards::run(&args[1..]),
+        Some("glyphs") => glyphs::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …]"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | glyphs [chars]"
                 .into(),
         ),
     };

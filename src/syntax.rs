@@ -902,6 +902,20 @@ pub struct Def {
 /// Every definition in the file, in order (the same guess as `scope_path`). `impl` blocks read
 /// `impl Trait for Type`. Walks the whole tree — run it on a worker thread.
 pub fn outline(tree: &Tree, text: &Rope) -> Vec<Def> {
+    defs(tree, text, false)
+}
+
+/// `outline` and each enum's variants (kind 'v', one deeper than their enum) — for finding a symbol by name
+/// (`Stage::Stopped`: `outlines::named`). Not for listing: there are about as many variants as definitions,
+/// and the outline tab, search's "in …" and code review's cuts read `outline`.
+pub fn outline_members(tree: &Tree, text: &Rope) -> Vec<Def> {
+    defs(tree, text, true)
+}
+
+/// The node kinds of an enum's variants, in the grammars that have them (named by their `name` field).
+const VARIANTS: [&str; 5] = ["enum_variant", "enum_constant", "enum_entry", "enumerator", "enum_assignment"];
+
+fn defs(tree: &Tree, text: &Rope, members: bool) -> Vec<Def> {
     let mut out = Vec::new();
     let mut cursor = tree.walk();
     let mut depth = 0; // definitions open on the way down
@@ -909,7 +923,7 @@ pub fn outline(tree: &Tree, text: &Rope) -> Vec<Def> {
     let mut level = 0;
     loop {
         let n = cursor.node();
-        if let Some(kind) = def_kind(n)
+        if let Some(kind) = def_kind(n).or_else(|| (members && VARIANTS.contains(&n.kind())).then_some('v'))
             && let Some(name) = def_name(n, text)
         {
             let at = n
@@ -1270,6 +1284,33 @@ mod tests {
             ]
         );
         assert_eq!(&src[defs[2].at..defs[2].at + 3], "fmt", "where its name is");
+    }
+
+    /// An enum's variants are members, one deeper than their enum — only where asked for (`outline_members`):
+    /// the outline tab's `outline` stays definitions only.
+    #[test]
+    fn variants_are_members_only_where_asked() {
+        let Ok(lang) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let src = "enum Stage {\n    Running { generation: u64 },\n    Stopped,\n}\nfn f() {}\n";
+        let text = Rope::from_str(src);
+        let mut syn = Syntax::new(lang);
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        syn.finish_parse(generation, job.run());
+        let tree = syn.tree.as_ref().unwrap();
+        let got = |defs: Vec<Def>| -> Vec<(usize, char, String)> {
+            defs.into_iter().map(|d| (d.depth, d.kind, d.name)).collect()
+        };
+        assert_eq!(got(outline(tree, &text)), [(0, 't', "Stage".into()), (0, 'f', "f".into())]);
+        assert_eq!(
+            got(outline_members(tree, &text)),
+            [
+                (0, 't', "Stage".into()),
+                (1, 'v', "Running".into()),
+                (1, 'v', "Stopped".into()),
+                (0, 'f', "f".into())
+            ]
+        );
     }
 
     /// Only when the real grammar is present (downloaded or built in) — skipped otherwise.

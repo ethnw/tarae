@@ -68,9 +68,11 @@ fn forget(path: &Path) {
     }
 }
 
-/// The innermost symbol holding line `line` (from 0).
+/// The innermost symbol holding line `line` (from 0) — a definition: a variant's line is in its enum.
 pub fn holding(syms: &[Sym], line: usize) -> Option<&Sym> {
-    syms.iter().filter(|s| s.lines.0 <= line && line <= s.lines.1).max_by_key(|s| (s.depth, s.lines.0))
+    syms.iter()
+        .filter(|s| s.listed() && s.lines.0 <= line && line <= s.lines.1)
+        .max_by_key(|s| (s.depth, s.lines.0))
 }
 
 /// The symbols named `name` — `Type::name` (or `a::b::name`): one inside a symbol whose name ends with the
@@ -144,5 +146,21 @@ mod tests {
         assert_eq!(named(&syms, "Editor::drop")[0].lines, (23, 29), "impl Trait for Type");
         assert!(named(&syms, "Other::open").is_empty());
         assert_eq!(syms[2].said(), "fn open (7–11)");
+    }
+
+    /// A variant is found by its enum's name (`read path:Stage::Stopped`, a diagram's anchor), but a line in it
+    /// is in its enum — search's "in …" doesn't change.
+    #[test]
+    fn variants_are_found_by_name_and_hold_no_line() {
+        let syms = [
+            sym(0, "type", "Stage", 0, 4),
+            sym(1, crate::nav::VARIANT, "Running", 1, 2),
+            sym(1, crate::nav::VARIANT, "Stopped", 3, 3),
+            sym(0, "type", "Ended", 6, 8),
+            sym(1, crate::nav::VARIANT, "Stopped", 7, 7),
+        ];
+        assert_eq!(named(&syms, "Stage::Stopped").iter().map(|s| s.lines).collect::<Vec<_>>(), [(3, 3)]);
+        assert_eq!(named(&syms, "Stopped").len(), 2);
+        assert_eq!(holding(&syms, 3).map(|s| s.name.as_str()), Some("Stage"));
     }
 }

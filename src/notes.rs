@@ -174,7 +174,7 @@ pub fn add(ed: &mut Editor, path: &Path, lines: Range<usize>, by: By, text: &str
 
 /// What a note keeps of its lines' text to tell a change (`Note.pinned`): a SHA-256 of them. None past the
 /// end.
-fn lines_digest(text: &ropey::Rope, lines: &Range<usize>) -> Option<[u8; 32]> {
+pub(crate) fn lines_digest(text: &ropey::Rope, lines: &Range<usize>) -> Option<[u8; 32]> {
     let n = text.len_lines();
     if lines.start >= n {
         return None;
@@ -246,7 +246,7 @@ fn attach_in(notes: &mut Notes, docs: &mut [crate::document::Document]) {
 }
 
 /// Offset from `line` to the nearest line (within 500) whose text is `want`, trimmed — 0 if none.
-fn nearest_line(text: &ropey::Rope, line: usize, want: &str) -> isize {
+pub(crate) fn nearest_line(text: &ropey::Rope, line: usize, want: &str) -> isize {
     let is = |l: usize| l < text.len_lines() && text.line(l).to_string().trim() == want;
     if is(line) {
         return 0;

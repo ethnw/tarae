@@ -33,6 +33,7 @@ mod conflict;
 mod containers;
 mod dap;
 mod debugpack;
+mod diagram;
 mod diffview;
 mod disk;
 mod doccomment;

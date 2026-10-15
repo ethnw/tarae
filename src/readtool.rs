@@ -345,6 +345,7 @@ fn outline(
     match syms {
         Ok(syms) if !syms.is_empty() => {
             let mut out = format!("== {shown} — {n} lines, {kb} KB: its outline. {ask}\n");
+            let syms: Vec<&crate::nav::Sym> = syms.iter().filter(|s| s.listed()).collect();
             for s in syms.iter().take(OUTLINE_MAX) {
                 let (a, b) = (s.lines.0 + 1, s.lines.1 + 1);
                 let kind = if s.kind.is_empty() { String::new() } else { format!("{} ", s.kind) };
