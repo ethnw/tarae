@@ -6835,9 +6835,8 @@ mod tests {
     #[test]
     fn a_command_in_the_sandbox_runs_without_a_card() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-p3-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-p3");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         let made = dir.join("made");
         let mut ed = editor("");
         let command = format!("touch {} && echo made", made.display());
@@ -6847,7 +6846,6 @@ mod tests {
         assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
         let answer = tool_answer(&log);
         assert!(made.exists() && answer.contains("exit 0") && !answer.contains("isError"), "{answer}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Past the checks, a command waits for the user: nothing runs until `y`; `n` tells Claude no.

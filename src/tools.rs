@@ -5137,10 +5137,8 @@ mod tests {
     fn the_frictions_commands_run_unasked_in_the_sandbox() {
         use crate::checkpoint::Touched;
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-frictions-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("frictions");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         std::fs::write(dir.join("gen.sh"), "echo marker\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
@@ -5191,7 +5189,6 @@ mod tests {
         assert!(ed.offers.is_empty(), "no card");
         assert_eq!(decided(&mut ed, json!({ "command": "sh long.sh" })), None, "in the sandbox: it runs");
         ed.session.task_run = None;
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// cardauto P3: `also` asks for one thing past the session's capabilities on a grant card — Claude's reason on
@@ -5202,8 +5199,8 @@ mod tests {
     #[test]
     fn also_asks_for_one_thing_on_a_grant_card() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-also-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("also");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
@@ -5283,7 +5280,6 @@ mod tests {
         assert!(send(&mut ed, 11, also(json!({ "port": 47005 }))).unwrap().is_some(), "a new turn");
         ed.offers.clear();
         ed.session.task_run = None;
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Review of piece 4 (4): in the sandbox with the network open (D4: a warning that `asks` could come true), a
@@ -5294,10 +5290,8 @@ mod tests {
     #[test]
     fn in_the_sandbox_a_command_that_reaches_out_asks_where_it_could() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-outward-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("outward");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         std::fs::write(dir.join("deploy.sh"), "exit 0\ngit push origin main\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
@@ -5313,7 +5307,6 @@ mod tests {
         assert!(lines.len() == 2 && lines.iter().all(|l| l.contains(" · why=asks:")), "{lines:?}");
         assert_eq!(decided(&mut ed, json!({ "command": "git status" })), None, "warns of nothing: it runs");
         ed.session.task_run = None;
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Review of piece 4 (5): `also` is no way around what `in_sandbox` looks at. Open already (a read in the
@@ -5324,8 +5317,8 @@ mod tests {
     #[test]
     fn also_open_already_is_looked_at_as_any_run_in_the_sandbox() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-also-open-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("also-open");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("gen.sh"), "echo marker\n").unwrap();
@@ -5360,7 +5353,6 @@ mod tests {
         assert!(q.contains("▲ It reaches beyond this machine"), "{q}");
         ed.offers.clear();
         ed.session.task_run = None;
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Review of piece 4 (3): `ALSO_MAX` holds for calls sent together — each counted as it comes in, not when its
@@ -5369,8 +5361,8 @@ mod tests {
     #[test]
     fn also_cards_sent_together_stay_within_a_turns_three() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-also-max-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("also-max");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
@@ -5419,7 +5411,6 @@ mod tests {
         );
         pump(&mut ed, &|ed| ed.offers.len() == 3);
         ed.offers.clear();
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Review of piece 4 (2): before the first look at the sandbox has landed (`Availability::Unknown`) a run
@@ -5429,10 +5420,8 @@ mod tests {
     #[test]
     fn a_run_before_the_sandbox_is_known_isnt_taken_as_sandboxed() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-unknown-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("unknown");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
@@ -5449,7 +5438,6 @@ mod tests {
         let also = json!({ "command": "true", "also": { "port": 47021 }, "reason": "its test server" });
         let r = super::run(&mut ed, super::Call::test(2), &also);
         assert!(r.as_ref().is_err_and(|e| e.contains("isn't looked at yet")), "{r:?}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Review of piece 4 (1): an `also` card goes with its turn, as the run cards do; an answer that comes for a
@@ -5458,10 +5446,8 @@ mod tests {
     #[test]
     fn an_also_card_goes_with_its_turn() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-also-turn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("also-turn");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
@@ -5497,7 +5483,6 @@ mod tests {
         let c = ed.session.chat.as_ref().unwrap();
         assert!(!c.allowed.ports.contains(&47012) && c.also_refused.is_empty(), "nothing kept");
         assert_eq!(super::ADMITTED.with(|a| a.borrow().len()), before, "nothing ran");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// cardauto §8.4: a report invites `also` only for what can matter — never for a run that passed (a cargo test
@@ -5508,8 +5493,8 @@ mod tests {
     #[test]
     fn the_report_asks_for_also_only_for_what_can_matter() {
         use crate::sandbox::Denial;
-        let home = std::env::temp_dir().join(format!("tarae-also-noise-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let scratch = crate::scratch::Scratch::new("also-noise");
+        let home = scratch.to_path_buf();
         let (root, run) = (home.join("proj"), home.join(".cache/tarae/runs/9172-1/12"));
         for d in [&root, &run, &home.join("data")] {
             std::fs::create_dir_all(d).unwrap();
@@ -5548,7 +5533,6 @@ mod tests {
         let line = super::also_line(&c, &caps, &|n| n == 5432);
         assert!(!line.contains("port"), "open already: {line}");
         assert_eq!(super::also_line(&[], &caps, &|_| false), "", "nothing: no line");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// #119: Claude asks for one unix socket past the sandbox, not the sandbox off: the card names that file,

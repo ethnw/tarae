@@ -391,10 +391,8 @@ mod tests {
     fn a_caps_lands_in_its_own_session_and_the_newer_stays() {
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         let (first, first_root) = (ed.session.id, ed.session.root.clone());
-        let other = std::env::temp_dir().join(format!("tarae-caps-sessions-{}", std::process::id()));
-        std::fs::remove_dir_all(&other).ok();
-        std::fs::create_dir_all(&other).unwrap();
-        let other = std::fs::canonicalize(&other).unwrap();
+        let scratch = crate::scratch::Scratch::new("caps-sessions");
+        let other = std::fs::canonicalize(&scratch).unwrap();
         // (made behind: its own asked as it's made)
         let second = ed.session_add(other.clone());
         ed.caps_sync();
@@ -414,7 +412,6 @@ mod tests {
         caps_landed(&mut ed, first, asked + 2, at("/newer"));
         caps_landed(&mut ed, first, asked + 1, at("/older"));
         assert_eq!(root(&mut ed, first), Path::new("/newer"));
-        std::fs::remove_dir_all(&other).ok();
     }
 
     /// No checkout, nothing read by being in it: an empty path holds every path.
