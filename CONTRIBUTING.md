@@ -10,6 +10,8 @@ Contributor License Agreement once. The agreement lets the project keep its lice
 offer tarae under other terms as well. The CLA is being set up. Until it's published, please open an issue before
 sending a pull request.
 
+A security problem is reported by email, not as an issue: see [SECURITY.md](SECURITY.md).
+
 ## Building and checking
 
 You need [rustup](https://rustup.rs) and a C compiler (grammars are compiled from C). The Rust version is pinned in

@@ -89,7 +89,31 @@ from each other. Daemons such as Gradle's stay warm between runs.
 
 In this order.
 
-### 1. Sandbox validation
+### 1. Publishing
+
+First (decided 2026-10-15), because the Cyber Verification Program's approval unblocks the fuzzing work in §2
+that the model's safeguards stopped (the control messages); stabilization (§9) waits.
+
+1. **What's in flight finishes**: the card model's P3 piece 4 and the diagram's P3 layout.
+2. **`SECURITY.md`** at the repository's root — written: where to report (`security@sinabro.io`), what's in scope,
+   how reports are handled. Done once the address is shown to receive mail: the user sends a test mail to
+   `security@sinabro.io` before step 4.
+3. **One draft pull request**: CI's checks run locally first, CI dispatched once; merged when green.
+4. **The repository made public** — by the user.
+5. **Anthropic's Cyber Verification Program**, applied for by the user as an individual, on the open-source track
+   ("Maintainer of a widely depended-on open-source project"; an individual with maintainer authority can apply).
+   What it needs: maintainer status, shown by the public repository; a one-to-three-sentence scope ("Security
+   engineering for tarae, an open-source code editor I maintain: building and testing the sandbox that confines an
+   AI coding agent's commands, on my own machines and test VMs"); the security contact, `security@sinabro.io`. No
+   homepage needed. The hope: the sandbox's own testing (seccomp, fd passing, namespaces) goes on without the
+   model's cyber safeguards stopping it. The risk: the track names "a widely depended-on project", and a
+   repository made public that week may be turned down. If it is, §2's stopped items stay deferred as they are
+   (`cyber-verification-items.md` keeps them) and the user applies again once tarae has users; nothing else in
+   the order changes.
+
+After it, the rest goes on in this order.
+
+### 2. Sandbox validation
 
 The aim is to state what the sandbox guarantees and show that it holds.
 
@@ -102,14 +126,14 @@ The aim is to state what the sandbox guarantees and show that it holds.
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the
    supervisor reads of a run's memory is `wire.rs`, built and tested on every OS; `sendmmsg`'s offsets can't
    wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 next. The
-   control messages it forwards wait for Anthropic's Cyber Verification Program (the model's safeguards stopped
+   control messages it forwards wait for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped
    that work twice).
 3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
    nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
 5. **A speed comparison** against a bubblewrap-style sandbox.
 
-### 2. Frictions, and lighter cards and reviews
+### 3. Frictions, and lighter cards and reviews
 
 Small fixes found while using tarae every day:
 
@@ -129,14 +153,14 @@ what the session may do rather than by what a command looks like, and **P4**, sc
 ([design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
 evidence panel, "explain this hunk".
 
-**A "must work" compatibility suite for the sandbox** (2026-10-15), ahead of §1's items 3–5 in priority. The sandbox
+**A "must work" compatibility suite for the sandbox** (2026-10-15), ahead of §2's items 3–5 in priority. The sandbox
 must not be too strict for an open editor, and this repository, Rust only, never shows what other stacks hit. So
 popular stacks' everyday commands (install, build, test, lint, format, a dev server) run inside tarae's sandbox
 regularly, exactly as Claude's runs are, on macOS and on Linux's tiers, with a table per stack × command × OS. A
 breakage is found before a user meets it, fixed in pack data or the core, and kept from coming back by an entry the
 suite runs again.
 
-### 3. Shuttle keys
+### 4. Shuttle keys
 
 A **shuttle** is a program that works a running tarae from outside: an AI assistant, a test script. ("Agent" in
 tarae means a session's own Claude.) Today a shuttle reads tarae's state as data (`tarae state`). Shuttle keys
@@ -151,7 +175,7 @@ The person at the keyboard already has the same guards: a card ignores keys type
 after the text was in sight, and no key changes state in silence. This was "guarded keys", phase 4 of
 [design/ui-state.md](design/ui-state.md), dropped there and now back under its new name.
 
-### 4. A remote split
+### 5. A remote split
 
 tarae as a host — sessions, Claude, runs, the sandbox — and its interfaces — the screen and the keys — apart,
 joined by one thin protocol: the screen's changes go out (tarae already draws by cell diff), keys come in. An
@@ -163,7 +187,7 @@ its plan. Two interfaces:
 
 The egress proxy is designed to live with the runs, wherever they are.
 
-### 5. Working together
+### 6. Working together
 
 Two or more at one tarae — a person and a person, a person and a shuttle, two shuttles (pair or mob
 programming). Builds on the remote split — one host, several interfaces, people and shuttles through the same
@@ -181,23 +205,23 @@ protocol — and on shuttle keys.
 - Open, for the plan: how one joins and is let in, two people (and two Claudes) changing the same lines, how
   agents in the room are paced.
 
-### 6. Plugin API 0.3
+### 7. Plugin API 0.3
 
 One batch with the forge plugin: regions, cards, tools for Claude, a masked prompt, notes, the repository
 ([plugins.md](plugins.md)). The database plugin waits for its regions ([queued](#queued-not-scheduled)).
 
-### 7. The forge plugin
+### 8. The forge plugin
 
 GitHub, read and write, through `gh`'s login. Pull requests, CI, review comments beside the code; create, comment,
 approve, merge — every write on a card.
 
-### 8. Stabilization before release
+### 9. Stabilization before release
 
 No new features: the release waits on numbers, not a feeling (2026-10-15: every finished piece still held 3–5
 bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four tests failed only under load).
 
 1. **The bar**: no test that fails only under load or only sometimes; every test green three runs in a row on
-   macOS and on every supported kernel (§1's set); a set period of building tarae with tarae with no new serious
+   macOS and on every supported kernel (§2's set); a set period of building tarae with tarae with no new serious
    bug.
 2. **Bug hunting**: tests that vary what tests usually hold still — the order state changes in, the screen's
    width, the load — and the property loops widened with real output.
@@ -208,13 +232,6 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
    reviewer's. A human security review when one can be had.
 5. **A small beta**: a few people use tarae first; what they hit goes into the suites.
 
-### 9. Publishing
-
-One draft pull request.
-
-- A `SECURITY.md` at the repository's root: where to report a vulnerability (a dedicated security address, e.g.
-  `security@` on the homepage's domain, kept current) and how reports are handled.
-
 ### 10. The homepage
 
 tarae.sinabro.io. An animation that feels like several agents working at once, and the README's demo, both from
@@ -223,15 +240,8 @@ claude, so it can be recorded again when the UI changes. To do: the recording sc
 domain. The scenes are picked with the user: a chat edit and its card, the end-of-turn review, a commit from the
 git tab, search, a short Kubernetes one.
 
-- Programs to apply to once tarae is public and has users (decided 2026-10-09; a Claude Console organization is
-  already made):
-  - Claude's startup program, applied for as the organization (the Claude Console organization).
-  - Anthropic's Cyber Verification Program, applied for as an individual, on the open-source track ("Maintainer
-    of a widely depended-on open-source project"; an individual with maintainer authority can apply). What it
-    needs: a project others depend on, a one-to-three-sentence scope ("Security engineering for tarae, an
-    open-source code editor I maintain: building and testing the sandbox that confines an AI coding agent's
-    commands, on my own machines and test VMs"), and the security contact above. The hope: it lets the sandbox's
-    own testing (seccomp, fd passing, namespaces) go on without the model's cyber safeguards stopping it.
+- Claude's startup program, applied for as the organization (the Claude Console organization, already made) once
+  tarae is public and has users (decided 2026-10-09). The Cyber Verification Program moved to §1.
 
 ## Alongside, not ordered
 

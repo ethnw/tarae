@@ -6,6 +6,7 @@
 [package]
 name = "tarae-fuzz"
 version = "0.0.0"
+license = "GPL-3.0-or-later"
 edition = "2024"
 publish = false
 

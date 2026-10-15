@@ -37,7 +37,7 @@ everything else works without it.
 [Languages](docs/languages.md) ·
 [Tests and debugging](docs/testing-and-debugging.md) · [Configuration](docs/configuration.md) ·
 [Plugins](docs/plugins.md) · [Keymap](docs/reference/keymap.md) · [Architecture](docs/architecture.md) ·
-[Contributing](CONTRIBUTING.md)
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ## License
 
