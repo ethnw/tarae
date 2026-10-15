@@ -687,7 +687,7 @@ fn is_slower(now: f64, was: f64, noise: f64) -> bool {
 }
 
 /// `abc1234`, `+` when the tree has changes (tracked files only; read without taking git's index lock).
-fn commit(root: &Path) -> String {
+pub(crate) fn commit(root: &Path) -> String {
     let git = |args: &[&str]| {
         Command::new("git")
             .args(args)
@@ -704,7 +704,7 @@ fn commit(root: &Path) -> String {
 }
 
 /// Today's date (UTC) as `YYYY-MM-DD`.
-fn today() -> String {
+pub(crate) fn today() -> String {
     let secs =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (y, m, d) = civil(secs as i64 / 86_400);

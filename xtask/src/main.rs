@@ -24,6 +24,8 @@
 //!   its wrong yeses with their commands, the stamp rate, runs refused with no card (see [`cards`]).
 //! - `claude-stub serve|drive|summary` — what the `claude` program touches, measured against a fake API: the
 //!   stub, tarae's side of claude's pipes, an strace log by folder (see [`claudestub`]; `target/sb/v1b-linux.sh`).
+//! - `compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run]` — the "must work" compatibility suite:
+//!   each stack's commands run as Claude's run, here and on Linux tiers, as a table (see [`compat`]).
 //! - `glyphs [chars]` — whether JetBrains Mono, Hack, Menlo and SF Mono each map those characters, from the cmap of
 //!   the fonts installed here (see [`glyphs`]) — the check behind CLAUDE.md's glyph list.
 
@@ -37,6 +39,7 @@ use std::process::Command;
 
 mod cards;
 mod claudestub;
+mod compat;
 mod deb;
 mod glyphs;
 mod linux;
@@ -65,9 +68,10 @@ fn main() {
         Some("trace") => trace::run(&args[1..]),
         Some("claude-stub") => claudestub::run(&args[1..]),
         Some("cards") => cards::run(&args[1..]),
+        Some("compat") => compat::run(&args[1..]),
         Some("glyphs") => glyphs::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | glyphs [chars]"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
                 .into(),
         ),
     };

@@ -1476,7 +1476,7 @@ fn script(tree: Tree, what: &What) -> String {
 const EXE_SED: &str = r"s/^ *Executable unittests src\/main.rs (\(.*\))$/\1/p";
 
 /// `a` as one word for sh, whatever is in it.
-fn quoted(a: &str) -> String {
+pub(crate) fn quoted(a: &str) -> String {
     format!("'{}'", a.replace('\'', r"'\''"))
 }
 

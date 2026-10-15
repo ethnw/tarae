@@ -53,6 +53,8 @@ pub struct Entry {
     /// Whether to time the same command unsandboxed in a copy of the project.
     pub baseline: bool,
     pub timeout: Duration,
+    /// In the quick lane (`cargo xtask compat --lane quick`: build and test) as well as the gate.
+    pub quick: bool,
 }
 
 /// A stack's entries: what it needs on PATH, what's done outside the sandbox first (as the user's own build
@@ -63,7 +65,9 @@ pub struct Entry {
 /// stack = "node-npm"
 /// pack = "javascript"
 /// tools = ["node", "npm"]
+/// fixture = "node-npm"                # compat/node-npm/, copied in as the project
 /// prewarm = ["npm ci"]                # outside the sandbox, as the user's own build
+/// watch = ["~/.npm"]                  # outside the project, checked for what it changes
 /// [[entry]]
 /// name = "test"
 /// run = "npm test"                    # never from the repository under test
@@ -71,7 +75,7 @@ pub struct Entry {
 /// cards = ["run"]
 /// settings = { llm = { sandbox-localhost = true } }
 /// writes = ["~/.npm/_cacache"]        # outside the project, expected to change
-/// # cwd, pending = "manifest-review", baseline = false, timeout = 600
+/// # cwd, pending = "manifest-review", baseline = false, timeout = 600, quick = true
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
@@ -79,14 +83,22 @@ pub struct Manifest {
     /// The language pack whose data the stack leans on.
     pub pack: Option<String>,
     pub tools: Vec<String>,
+    /// A folder in `compat/` copied in as the project — None: an empty one.
+    pub fixture: Option<String>,
     pub prewarm: Vec<String>,
+    /// Places outside the project watched for what the entries change (absolute, or `~/`): the toolchain's homes
+    /// (§2.1) — none: a folder of the harness's own.
+    pub watch: Vec<String>,
     pub entries: Vec<Entry>,
 }
 
-const MANIFEST_KEYS: [&str; 5] = ["stack", "pack", "tools", "prewarm", "entry"];
+/// Where the manifests and their fixtures are, from the checkout's root.
+pub const MANIFESTS: &str = "compat";
+
+const MANIFEST_KEYS: [&str; 7] = ["stack", "pack", "tools", "fixture", "prewarm", "watch", "entry"];
 const ENTRY_KEYS: [&str; 10] =
     ["name", "run", "cwd", "expect", "said", "cards", "settings", "writes", "pending", "baseline"];
-const ENTRY_KEYS_MORE: [&str; 1] = ["timeout"];
+const ENTRY_KEYS_MORE: [&str; 2] = ["timeout", "quick"];
 
 /// An entry's time limit when it names none.
 const TIMEOUT: Duration = Duration::from_secs(600);
@@ -107,11 +119,23 @@ impl Manifest {
         if let Some(e) = entries.iter().find(|e: &&Entry| !names.insert(e.name.clone())) {
             return Err(format!("entry {}: twice", e.name));
         }
+        let fixture = string(&t, "fixture")?;
+        if let Some(f) = fixture.as_deref().filter(|f| {
+            f.is_empty() || Path::new(f).components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+        }) {
+            return Err(format!("fixture: {f} — a folder in {MANIFESTS}/"));
+        }
+        let watch = strings(&t, "watch")?;
+        if let Some(w) = watch.iter().find(|w| !w.starts_with('/') && !w.starts_with("~/")) {
+            return Err(format!("watch: {w} — absolute or ~/"));
+        }
         Ok(Manifest {
             stack,
             pack: string(&t, "pack")?,
             tools: strings(&t, "tools")?,
+            fixture,
             prewarm: strings(&t, "prewarm")?,
+            watch,
             entries,
         })
     }
@@ -161,6 +185,10 @@ fn entry(v: &toml::Value) -> Result<Entry, String> {
             .map(Duration::from_secs)
             .ok_or_else(|| at("timeout: seconds".into()))?,
     };
+    let quick = match t.get("quick") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| at("quick: true or false".into()))?,
+    };
     Ok(Entry {
         cwd: string(t, "cwd").map_err(at)?,
         cards: strings(t, "cards").map_err(at)?,
@@ -172,6 +200,7 @@ fn entry(v: &toml::Value) -> Result<Entry, String> {
         pending,
         baseline,
         timeout,
+        quick,
     })
 }
 
@@ -246,6 +275,28 @@ pub struct Failure {
     pub what: String,
 }
 
+impl Failure {
+    /// Its class (`target/sb/compat-plan.md` §5) as far as the check tells it — the rest `unexplained`, for a
+    /// person (a denial's place would tell `pack-data` from `core-rule`: piece 3's findings first).
+    pub fn class(&self) -> &'static str {
+        match self.check {
+            Check::Report if self.what == NO_CAUSE => "report",
+            Check::Timeout => "hang",
+            Check::Card => "card",
+            Check::Made => "protected-name",
+            Check::Sandbox => "not-sandboxed",
+            Check::Writes => "writes",
+            Check::Exit | Check::Report => "unexplained",
+        }
+    }
+}
+
+/// The classes by rank: a cell names its entry's first. A failure with no cause said ranks first (§5).
+const CLASSES: [&str; 7] =
+    ["report", "hang", "card", "protected-name", "not-sandboxed", "writes", "unexplained"];
+
+const NO_CAUSE: &str = "it failed, and the report names no cause";
+
 /// How an entry went.
 #[derive(Clone, Debug)]
 pub struct Verdict {
@@ -277,6 +328,22 @@ impl Verdict {
 
     fn fail(&mut self, check: Check, what: impl Into<String>) {
         self.failed.push(Failure { check, what: what.into() });
+    }
+
+    /// Its cell in the table (§5): `✓`, `✓ 1.7×` (slow), `⊘` (refused as expected), `✗ class` (the first by
+    /// `CLASSES`).
+    pub fn cell(&self) -> String {
+        let rank = |c: &&str| CLASSES.iter().position(|k| k == c);
+        if let Some(class) = self.failed.iter().map(Failure::class).min_by_key(rank) {
+            return format!("✗ {class}");
+        }
+        if self.ended != Some(crate::task::State::Passed) {
+            return "⊘".into();
+        }
+        match self.took.zip(self.baseline) {
+            Some((t, b)) if self.slow() => format!("✓ {:.1}×", t.as_secs_f64() / b.as_secs_f64().max(0.001)),
+            _ => "✓".into(),
+        }
     }
 }
 
@@ -520,7 +587,7 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
             if report.blocked {
                 v.fail(Check::Report, format!("the sandbox blocked: {}", denials.join("; ")));
             } else if !passed {
-                v.fail(Check::Report, "it failed, and the report names no cause");
+                v.fail(Check::Report, NO_CAUSE);
             }
         }
         Expect::Refused(words) => {
@@ -911,12 +978,15 @@ mod tests {
 stack = "node-npm"
 pack = "javascript"
 tools = ["node", "npm"]
+fixture = "node-npm"
 prewarm = ["npm ci"]
+watch = ["~/.npm"]
 [[entry]]
 name = "test"
 run = "npm test"
 expect = "pass"
 cards = ["run"]
+quick = true
 settings = { llm = { sandbox-localhost = true } }
 [[entry]]
 name = "add"
@@ -935,7 +1005,8 @@ timeout = 60
         let (t, add) = (&m.entries[0], &m.entries[1]);
         assert_eq!(t.expect, Expect::Pass);
         assert_eq!(t.settings, vec![("llm.sandbox-localhost".to_string(), toml::Value::Boolean(true))]);
-        assert!(t.baseline && t.timeout == TIMEOUT);
+        assert!(t.baseline && t.timeout == TIMEOUT && t.quick && !m.entries[1].quick);
+        assert_eq!((m.fixture.as_deref(), &m.watch[..]), (Some("node-npm"), &["~/.npm".to_string()][..]));
         assert_eq!(add.expect, Expect::Refused(vec!["package.json".into()]));
         assert_eq!(add.pending.as_deref(), Some("manifest-review"));
         assert!(!add.baseline && add.timeout == Duration::from_secs(60));
@@ -954,6 +1025,14 @@ timeout = 60
             assert!(r.as_ref().is_err_and(|r| r.contains(why)), "{e}: {r:?}");
         }
         assert!(Manifest::parse("stak = \"s\"").is_err_and(|e| e.contains("no key stak")));
+        for (top, why) in [
+            ("fixture = \"../x\"", "a folder in compat/"),
+            ("fixture = \"/x\"", "a folder in compat/"),
+            ("watch = [\"cache\"]", "absolute or ~/"),
+        ] {
+            let r = Manifest::parse(&format!("stack = \"s\"\n{top}"));
+            assert!(r.as_ref().is_err_and(|r| r.contains(why)), "{top}: {r:?}");
+        }
     }
 
     #[test]
@@ -1091,6 +1170,122 @@ timeout = 60
         let v = run(&entry(&e_text("exit 3")), &s.place);
         assert_eq!(v.ended, Some(crate::task::State::Failed(Some(3))), "{v}");
         assert_eq!(failed(&v, Check::Report), vec!["it failed, and the report names no cause"], "{v}");
+        assert_eq!(v.cell(), "✗ report", "{v}");
+    }
+
+    #[test]
+    fn a_cell_names_the_first_class_or_how_it_passed() {
+        let mut v = Verdict {
+            entry: "e".into(),
+            pending: None,
+            ended: Some(crate::task::State::Passed),
+            ran: None,
+            took: Some(Duration::from_millis(1700)),
+            baseline: Some(Duration::from_millis(1000)),
+            answer: String::new(),
+            cards: Vec::new(),
+            failed: Vec::new(),
+        };
+        assert_eq!(v.cell(), "✓ 1.7×");
+        v.took = Some(Duration::from_millis(1100));
+        assert_eq!(v.cell(), "✓");
+        v.ended = Some(crate::task::State::Failed(Some(1)));
+        assert_eq!(v.cell(), "⊘", "refused, as expected");
+        v.fail(Check::Exit, "it didn't run");
+        v.fail(Check::Writes, "made x");
+        v.fail(Check::Card, "run — nobody listed it");
+        assert_eq!(v.cell(), "✗ card");
+        v.fail(Check::Report, NO_CAUSE);
+        assert_eq!(v.cell(), "✗ report");
+        assert_eq!(line("s", "e\tx", "✗ a\nb"), "COMPAT\ts\te x\t✗ a b");
+    }
+
+    /// The driver `cargo xtask compat` runs (ignored: it needs the stacks' toolchains, and runs their `prewarm`
+    /// outside the sandbox): each stack of `TARAE_COMPAT_STACKS` (comma-separated, `compat/<stack>.toml`), its
+    /// entries in `TARAE_COMPAT_LANE` (`quick`: the quick ones; else all), each verdict on stderr and its cell on
+    /// stdout as a `COMPAT` line (`line`) for the xtask's table. Without the variable it does nothing.
+    #[test]
+    #[ignore]
+    fn driver() {
+        let Some(stacks) = std::env::var_os("TARAE_COMPAT_STACKS") else { return };
+        let quick = std::env::var("TARAE_COMPAT_LANE").is_ok_and(|l| l == "quick");
+        let root = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+        let root = root.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        for stack in stacks.to_string_lossy().split(',').filter(|s| !s.is_empty()) {
+            for (entry, cell) in drive(&root, stack, quick) {
+                println!("{}", line(stack, &entry, &cell));
+            }
+        }
+    }
+
+    /// A cell for the xtask: `COMPAT`, the stack, the entry and the cell, tab-separated, on one line.
+    fn line(stack: &str, entry: &str, cell: &str) -> String {
+        let one = |s: &str| s.replace(['\t', '\n'], " ");
+        format!("COMPAT\t{}\t{}\t{}", one(stack), one(entry), one(cell))
+    }
+
+    /// One stack's entries in the lane, each with its cell (`Verdict::cell`) — or `– why` where none could run:
+    /// a tool not on PATH, no sandbox here, its fixture or a prewarm failed.
+    fn drive(root: &Path, stack: &str, quick: bool) -> Vec<(String, String)> {
+        let text = std::fs::read_to_string(root.join(MANIFESTS).join(format!("{stack}.toml")));
+        let m = match text.map_err(|e| e.to_string()).and_then(|t| Manifest::parse(&t)) {
+            Ok(m) => m,
+            Err(e) => return vec![("(manifest)".into(), format!("✗ manifest: {e}"))],
+        };
+        let entries: Vec<&Entry> = m.entries.iter().filter(|e| !quick || e.quick).collect();
+        let skip = |why: &str| -> Vec<(String, String)> {
+            entries.iter().map(|e| (e.name.clone(), format!("– {why}"))).collect()
+        };
+        if let Some(t) = m.tools.iter().find(|t| !on_path(t)) {
+            return skip(&format!("no {t} on PATH"));
+        }
+        if !sandboxed_here("compat::tests::driver") {
+            return skip("no sandbox here");
+        }
+        let s = Scratch::new(stack);
+        if let Some(f) = &m.fixture
+            && let Err(e) = copy_tree(&root.join(MANIFESTS).join(f), &s.place.project)
+        {
+            return skip(&format!("fixture {f}: {e}"));
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let at = Place {
+            project: s.place.project.clone(),
+            watched: match m.watch.is_empty() {
+                true => s.place.watched.clone(),
+                false => m.watch.iter().filter_map(|w| place(w, home.as_deref())).collect(),
+            },
+            scratch: s.place.scratch.clone(),
+        };
+        for cmd in &m.prewarm {
+            eprintln!("{stack}: prewarm, outside the sandbox: {cmd}");
+            let mut c = crate::nofile::command("sh", Some(&at.project));
+            c.args(["-c", cmd]).stdin(std::process::Stdio::null());
+            match c.output() {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    let last = err.lines().last().unwrap_or_default();
+                    return skip(&format!("prewarm failed ({}): {cmd}: {last}", o.status));
+                }
+                Err(e) => return skip(&format!("prewarm didn't start: {cmd}: {e}")),
+            }
+        }
+        let cells = entries.iter().map(|e| {
+            let v = run(e, &at);
+            eprint!("{stack} {v}");
+            (e.name.clone(), v.cell())
+        });
+        cells.collect()
+    }
+
+    /// Whether `tool` is an executable file in a folder of PATH.
+    fn on_path(tool: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path).any(|d| {
+            std::fs::metadata(d.join(tool)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
     }
 
     /// Where `cfg(test)` is on the run path, found in the source: each `(file, item)` — an attribute's item, or
