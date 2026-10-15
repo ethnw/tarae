@@ -589,7 +589,7 @@ impl Guard {
     }
 
     /// What the sandbox allows (or that there was none).
-    fn rules(&self) -> String {
+    pub(crate) fn rules(&self) -> String {
         match self {
             Guard::In(p) => {
                 let ports = p.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
@@ -2439,7 +2439,6 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
 
 /// The relative names a line of output gives files by — quoted (`'src/x'`, `‘x’`, `"x"`), or `sh`'s `cannot
 /// create x:` — as paths from `root` (where the run is, as a rule), folded. No disk.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // (Landlock's — `landlock_said_in`)
 fn named_in(line: &str, root: &Path) -> Vec<PathBuf> {
     let mut names: Vec<&str> = Vec::new();
     for (open, close) in [('\'', '\''), ('‘', '’'), ('"', '"')] {
@@ -7469,6 +7468,29 @@ mod tests {
         }
         // (Linux: `ps` isn't setuid there and runs — never said)
         assert_eq!(ps_said(&[(true, "sh: /bin/ps: Operation not permitted".into())], Os::Linux), None);
+    }
+
+    /// A protected name refused by its name relative to where the run is — `sh`'s `cannot touch 'Makefile'`, the
+    /// only word of it on Linux without Landlock's audit — is said as what the sandbox blocked, never "names no
+    /// cause" (compat, Linux C); a quoted name the rules let it write isn't.
+    #[test]
+    fn a_protected_name_refused_by_its_relative_name_is_said() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let g = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("t.")), ..p.clone() }));
+        // (each system's words: Landlock's "Permission denied" is a refusal only on Linux)
+        let why = if cfg!(target_os = "linux") { "Permission denied" } else { "Operation not permitted" };
+        for (line, target) in [
+            (format!("touch: cannot touch 'Makefile': {why}"), "/Users/u/p/Makefile"),
+            (format!("sh: 1: cannot create build.rs: {why}"), "/Users/u/p/build.rs"),
+            (format!("cp: cannot create regular file ‘sub/.envrc’: {why}"), "/Users/u/p/sub/.envrc"),
+        ] {
+            let out = [(true, line.clone())];
+            let said: Vec<String> = p.said_in_output(&out, &[]).into_iter().map(|d| d.target).collect();
+            assert_eq!(said, [target], "{line}");
+            assert!(g.report_with(&out, Told::default()).blocked, "{line}");
+        }
+        let allowed = [(true, format!("touch: cannot touch 'src/a.rs': {why}"))];
+        assert!(p.said_in_output(&allowed, &[]).is_empty(), "the rules let it write there");
     }
 
     /// P2 leftovers: Go's telemetry counters (written in home by every go command) are denied but never named —

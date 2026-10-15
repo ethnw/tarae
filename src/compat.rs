@@ -437,6 +437,11 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         cards: Vec::new(),
         failed: Vec::new(),
     };
+    // (no checkout, no snapshot: a protected name Landlock let it make would pass unseen)
+    if !at.project.join(".git").exists() {
+        v.fail(Check::Made, "the project isn't a git checkout (`checkout`): what a run makes can't be seen");
+        return v;
+    }
     let mut ed = Editor::with_root(crate::config::Config::default(), at.project.clone());
     as_shipped(&mut ed);
     // (the card record kept as tarae keeps it, in the harness's folder rather than tarae's state)
@@ -593,8 +598,12 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
         Expect::Refused(words) => {
             if passed {
                 v.fail(Check::Exit, "it succeeded");
+            } else if !report.blocked {
+                v.fail(Check::Report, NO_CAUSE);
             }
-            for w in words.iter().filter(|w| !report.text.contains(w.as_str())) {
+            // (its words where it says what happened — not the rules, which name every protected name)
+            let said = report.text.replace(&g.rules(), "");
+            for w in words.iter().filter(|w| !said.contains(w.as_str())) {
                 v.fail(Check::Report, format!("the report doesn't say {w}"));
             }
         }
@@ -688,6 +697,58 @@ impl Tree {
         }
         out
     }
+}
+
+/// A fixture's project made a git checkout of its own (one there already is kept), what's in it committed — so
+/// the snapshot runs after each run as it does in Claude's checkouts: Landlock can't refuse a protected name
+/// made where none was (G23), only the snapshot finds it (`Session.made_protected`). git with no config but its
+/// own, no hooks. Never a repository under test: its clone's history is its own.
+pub fn checkout(project: &Path) -> Result<(), String> {
+    // (git's repository variables from where the tests run — a hook, a git-driven script — would point it at
+    // another repository, tarae's own included: none, and no climbing past the project)
+    const REPOSITORY_VARIABLES: [&str; 6] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+    ];
+    let above = project.parent().unwrap_or(project);
+    let git = |args: &[&str]| {
+        crate::gitrepo::not_in_this_repository(project, args);
+        let mut c = std::process::Command::new("git");
+        for v in REPOSITORY_VARIABLES {
+            c.env_remove(v);
+        }
+        let out = c
+            .args([
+                "-c",
+                "user.name=compat",
+                "-c",
+                "user.email=compat@localhost",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(["-c", "core.hooksPath=/dev/null"])
+            .args(args)
+            .current_dir(project)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CEILING_DIRECTORIES", above)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        match out.status.success() {
+            true => Ok(()),
+            false => Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim())),
+        }
+    };
+    if !project.join(".git").exists() {
+        git(&["init", "-q"])?;
+    }
+    git(&["add", "-A"])?;
+    git(&["commit", "-q", "--allow-empty", "--no-verify", "-m", "the fixture"])
 }
 
 /// `from`'s tree copied to `to` (made), links as links.
@@ -947,6 +1008,10 @@ mod tests {
                 std::fs::DirBuilder::new().mode(0o700).create(dir.join(d)).unwrap();
             }
             std::fs::write(dir.join("project/README"), "a fixture\n").unwrap();
+            // (a folder holding no protected name: on Linux a run can make one there — the snapshot's case)
+            std::fs::DirBuilder::new().mode(0o700).create(dir.join("project/sub")).unwrap();
+            std::fs::write(dir.join("project/sub/a.txt"), "a file\n").unwrap();
+            checkout(&dir.join("project")).unwrap();
             let place = Place {
                 project: dir.join("project"),
                 watched: vec![dir.join("outside")],
@@ -1136,28 +1201,78 @@ timeout = 60
         format!("name = \"out\"\nrun = \"{cmd}\"\nexpect = \"pass\"\ncards = [\"run\"]\ntimeout = 60")
     }
 
-    /// A denial fails what's expected to pass, named in the verdict; expected refused, it's judged by the
-    /// report's words — a protected name in the project (the sandbox refuses it whatever it is).
+    /// A protected name, judged by what happened: refused, its cause is in the report (a pass expected fails
+    /// naming it; a refusal expected passes only by its words); made — Landlock can't refuse a name made where
+    /// none was (G23) — the snapshot finds it and the entry fails as made, whatever was expected, never ok. Two
+    /// places: the root, which holds `.git` (Landlock grants it entry by entry: refused everywhere), and `sub/`,
+    /// which holds no protected name (made on Linux: the case the snapshot is there for).
     #[test]
-    fn a_denial_fails_a_pass_and_a_refusal_is_judged_by_its_words() {
-        if !sandboxed_here("compat::tests::a_denial_fails_a_pass_and_a_refusal_is_judged_by_its_words") {
+    fn a_protected_name_is_refused_with_its_cause_or_found_made() {
+        if !sandboxed_here("compat::tests::a_protected_name_is_refused_with_its_cause_or_found_made") {
             return;
         }
         let s = Scratch::new("denial");
         let at = &s.place;
-        let v = run(&entry(&e_text("touch Makefile")), at);
-        assert!(!at.project.join("Makefile").exists(), "{v}");
-        assert!(!failed(&v, Check::Exit).is_empty(), "{v}");
-        assert!(failed(&v, Check::Report).iter().any(|f| f.contains("Makefile")), "{v}");
-        assert_eq!(v.baseline, None, "a failed run isn't timed against its baseline: {v}");
-        let refused = "name = \"make\"\nrun = \"touch Makefile\"\nexpect = \"refused\"\nsaid = [\"Makefile\"]\n\
-                       pending = \"manifest-review\"\ncards = [\"run\"]\ntimeout = 60";
-        let v = run(&entry(refused), at);
-        assert!(v.ok(), "{v}");
-        assert!(v.to_string().contains("refused as expected, pending manifest-review"), "{v}");
-        let unsaid = refused.replace("[\"Makefile\"]", "[\"not in any report\"]");
-        let v = run(&entry(&unsaid), at);
-        assert_eq!(failed(&v, Check::Report), vec!["the report doesn't say not in any report"], "{v}");
+        let mut made = Vec::new();
+        for name in ["Makefile", "sub/Makefile"] {
+            let path = at.project.join(name);
+            let refused = format!(
+                "name = \"make\"\nrun = \"touch {name}\"\nexpect = \"refused\"\nsaid = [\"{name}\"]\n\
+                 pending = \"manifest-review\"\ncards = [\"run\"]\ntimeout = 60"
+            );
+            let unsaid = refused.replace(&format!("said = [\"{name}\"]"), "said = [\"not in any report\"]");
+            for (text, expected) in
+                [(e_text(&format!("touch {name}")), "pass"), (refused, "refused"), (unsaid, "")]
+            {
+                let v = run(&entry(&text), at);
+                let at_ = format!("{name}, {expected:?}: {v}");
+                if path.exists() {
+                    assert!(failed(&v, Check::Made).iter().any(|f| f.contains(name)), "made, unsaid: {at_}");
+                    assert_eq!(v.cell(), "✗ protected-name", "never ok: {at_}");
+                    std::fs::remove_file(&path).unwrap();
+                    made.push(name);
+                    continue;
+                }
+                match expected {
+                    "pass" => {
+                        assert!(!failed(&v, Check::Exit).is_empty(), "{at_}");
+                        assert!(
+                            failed(&v, Check::Report).iter().any(|f| f.contains(name)),
+                            "its cause: {at_}"
+                        );
+                        assert_eq!(v.baseline, None, "a failed run isn't timed against its baseline: {at_}");
+                    }
+                    "refused" => {
+                        assert!(v.ok(), "{at_}");
+                        assert!(
+                            v.to_string().contains("refused as expected, pending manifest-review"),
+                            "{at_}"
+                        );
+                    }
+                    _ => assert_eq!(
+                        failed(&v, Check::Report),
+                        vec!["the report doesn't say not in any report"],
+                        "{at_}"
+                    ),
+                }
+            }
+        }
+        // (both outcomes seen where they happen: Seatbelt refuses the name anywhere; Landlock only in a folder
+        // holding a protected name — in `sub/` it's made, and only the snapshot catches it)
+        match cfg!(target_os = "linux") {
+            true => assert_eq!(made, ["sub/Makefile"; 3]),
+            false => assert!(made.is_empty(), "{made:?}"),
+        }
+    }
+
+    /// Without a checkout the snapshot can't see what a run made: the harness refuses to judge it.
+    #[test]
+    fn a_project_that_isnt_a_checkout_isnt_judged() {
+        let s = Scratch::new("nogit");
+        std::fs::remove_dir_all(s.place.project.join(".git")).unwrap();
+        let v = run(&entry(&e_text("true")), &s.place);
+        assert_eq!(v.cell(), "✗ protected-name", "{v}");
+        assert!(failed(&v, Check::Made)[0].contains("isn't a git checkout"), "{v}");
     }
 
     /// A failure the report names no cause of is the worst outcome (Claude would work around it): said so.
@@ -1247,6 +1362,9 @@ timeout = 60
             && let Err(e) = copy_tree(&root.join(MANIFESTS).join(f), &s.place.project)
         {
             return skip(&format!("fixture {f}: {e}"));
+        }
+        if let Err(e) = checkout(&s.place.project) {
+            return skip(&format!("the fixture's checkout: {e}"));
         }
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let at = Place {

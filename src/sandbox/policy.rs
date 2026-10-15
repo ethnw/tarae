@@ -542,6 +542,9 @@ impl Policy {
     /// a line that failed, at or just before a line saying `Operation not permitted` (cargo says the path,
     /// then `Caused by:`, then the error), that this profile doesn't let a run read or write. Those `seen`
     /// already said aren't again. Relative paths are from the project (`paths_in`: no disk).
+    /// A name relative to where the run is counts too — `sh`'s `cannot touch 'Makefile'` (`named_in`): on Linux,
+    /// with no audit log to read, the output is all there is, and a protected name refused by its relative name
+    /// was said nowhere (compat, `touch Makefile`: "the report names no cause").
     pub fn said_in_output(&self, output: &[(bool, String)], seen: &[Denial]) -> Vec<Denial> {
         const BEFORE: usize = 3;
         let refused = |l: &str| l.contains("ermi") && refusal(l);
@@ -571,7 +574,7 @@ impl Policy {
         let mut out: Vec<Denial> = Vec::new();
         let lines = output.iter().zip(near.iter().zip(&denied)).filter(|(_, (n, _))| **n);
         for (l, denied) in lines.map(|((_, l), (_, d))| (l, *d)).filter(|(l, _)| failed(l)) {
-            for real in paths_in(l, &self.root) {
+            for real in paths_in(l, &self.root).into_iter().chain(named_in(l, &self.root)) {
                 let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
                     (true, true) => continue,
                     (true, false) => "file-write*",
