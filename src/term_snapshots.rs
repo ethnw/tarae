@@ -635,7 +635,7 @@ fn snapshot_file_picker() {
     let ready = |ed: &Editor| {
         let Some(p) = ed.picker.as_ref() else { return false };
         let Some((path, _)) = p.current().and_then(|i| i.action.preview_target()) else { return false };
-        matches!(p.previews.get(path), Some(crate::picker::Preview::Ready { .. }))
+        matches!(p.previews.get(path), Some(crate::picker::Preview::Ready(_)))
     };
     s.until("preview", ready);
     s.check("file_picker");
@@ -2487,6 +2487,56 @@ fn doc_comments_in_previews() {
     s.keys("<C-n>");
     let shown = screen_text(&mut s);
     assert!(!shown.contains("/// Counts") && shown.contains("▎ Counts the words in text."), "{shown}");
+}
+
+/// A picker's code preview is the file as the editor draws it (`Shows::preview`): a buffer's diagnostic — its
+/// sign and its line-end message — and numbers as wide as a pane's (`num_w`: a short file's two digits, not
+/// four). So for an item that names the buffer (a jump) and one that names its file (the diagnostics picker's,
+/// a search's — the file is open: its buffer is what enter opens; this one isn't even on disk).
+#[test]
+fn a_code_preview_is_drawn_as_the_editor_draws_the_file() {
+    let mut s = Shot::new(110, 30);
+    let doc = s.file("src/words.rs", DOCS_BASE);
+    let path = s.root.join("src/words.rs");
+    for (k, action) in [
+        crate::picker::Action::Jump { index: 0, doc, line: 4 },
+        crate::picker::Action::Goto { path: path.clone(), line: 4, col: 0 },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        preview_draws_the_buffer(&mut s, doc, action, k);
+    }
+}
+
+fn preview_draws_the_buffer(s: &mut Shot, doc: DocId, action: crate::picker::Action, k: usize) {
+    use crate::picker::{Item, Picker};
+    let at = DOCS_BASE.find("text.split_whitespace().count()").unwrap();
+    let d = s.ed.docs.iter_mut().find(|d| d.id == doc).unwrap();
+    d.lsp.diagnostics = vec![crate::lsp::Diagnostic {
+        from: at,
+        to: at + 4,
+        severity: 1,
+        message: "no such text".into(),
+        raw: json!({}),
+        source: 0,
+    }];
+    let item = Item { label: "count's body".into(), action, hint: String::new(), glyph: None };
+    s.ed.open_picker(Picker::new("places", vec![item], false), None);
+    let p = cells(&s.frame(), s.w, s.h);
+    let shown = p.screen().contents();
+    assert!(shown.contains("no such text"), "item {k}, its line-end message: {shown}");
+    // (the line: its sign, its number in two cells, the change mark's cell, then its four spaces of indent —
+    // from the preview's edge, where its title starts)
+    let line = "text.split_whitespace().count()";
+    assert_eq!(cell_by(&p, s.w, line, -6).contents(), "5", "{shown}");
+    assert_eq!(cell_by(&p, s.w, line, -8).contents(), "▎", "its sign: {shown}");
+    let x_of = |needle: &str| {
+        let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+        let row = rows.iter().find(|r| r.contains(needle)).unwrap();
+        row[..row.find(needle).unwrap()].chars().count()
+    };
+    assert_eq!(x_of(line) - x_of("src/words.rs"), 4 + 4, "a pane's gutter, then the indent: {shown}");
 }
 
 /// Claude's edit under review: an unchanged doc comment renders, the one the edit changes stays raw.

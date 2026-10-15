@@ -1009,7 +1009,8 @@ pub fn browse_tree(root: &Path, items: &[Item]) -> Tree {
 
 pub enum Preview {
     Loading,
-    Ready { text: Rope, syntax: Option<Syntax> },
+    /// What it read, as a document the drawer reads (`Document::previewed`).
+    Ready(Box<crate::document::Document>),
     Unavailable(&'static str),
 }
 
@@ -1069,7 +1070,7 @@ pub fn load_preview(path: &Path) -> Preview {
         let syntax = syntax::spec("markdown")
             .and_then(|spec| syntax::Loader::global().load(spec).ok())
             .map(|lang| Syntax::parsed(lang, &text));
-        return Preview::Ready { text, syntax };
+        return ready(text, syntax);
     }
     let Ok(bytes) = std::fs::read(path) else { return Preview::Unavailable("can't read") };
     if bytes[..bytes.len().min(8192)].contains(&0) {
@@ -1084,7 +1085,11 @@ pub fn load_preview(path: &Path) -> Preview {
     let syntax = syntax::detect(path)
         .and_then(|spec| syntax::Loader::global().load(spec).ok())
         .map(|lang| Syntax::parsed(lang, &text));
-    Preview::Ready { text, syntax }
+    ready(text, syntax)
+}
+
+fn ready(text: Rope, syntax: Option<Syntax>) -> Preview {
+    Preview::Ready(Box::new(crate::document::Document::previewed(text, syntax)))
 }
 
 /// A commit's `git show`, colored as a diff.
@@ -1094,7 +1099,7 @@ fn commit_preview(root: &Path, hash: &str) -> Preview {
     let syntax = syntax::spec("diff")
         .and_then(|spec| syntax::Loader::global().load(spec).ok())
         .map(|lang| Syntax::parsed(lang, &text));
-    Preview::Ready { text, syntax }
+    ready(text, syntax)
 }
 
 // ── Building lists (worker thread) ───────────────────────────────────────────

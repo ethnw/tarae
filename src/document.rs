@@ -129,6 +129,9 @@ impl DocLsp {
 
 pub type DocId = u64;
 
+/// The id of every `Document::previewed` — no buffer's.
+pub const PREVIEWED: DocId = DocId::MAX;
+
 /// File → rope. A missing file gives an empty rope (created on save).
 pub fn read_file(path: &Path) -> Result<Rope> {
     match File::open(path) {
@@ -256,6 +259,13 @@ impl Document {
     /// The rows of the top line above the screen (`top_rows`).
     pub fn top_skip(&self) -> usize {
         self.top_rows.filter(|&(l, _)| l == self.top).map_or(0, |(_, n)| n)
+    }
+
+    /// A file's text read for a picker's preview (`picker::load_preview`) — nobody's buffer: no path, so nothing
+    /// said of a file by its path (diagnostics, breakpoints, notes, a test's failures) is drawn on it; the drawer
+    /// reads it as it reads a buffer.
+    pub fn previewed(text: Rope, syntax: Option<crate::syntax::Syntax>) -> Self {
+        Self { text, syntax, ..Self::from_str(PREVIEWED, "") }
     }
 
     pub fn from_str(id: DocId, text: &str) -> Self {

@@ -118,8 +118,8 @@ pub struct Shows {
     pub primary: bool,
     /// The search's hits — only on the document searched (`SearchHits` are its offsets).
     pub search: bool,
-    /// The cursor line's band (`editor.cursorline`, focused only).
-    pub cursorline: bool,
+    /// The line on the cursor line's band: the cursor's (`editor.cursorline`, focused only), or a preview's item's.
+    pub cursorline: Option<usize>,
     /// Line-end diagnostics (`editor.inline-diagnostics`).
     pub messages: bool,
     /// Inlay hints and indent guides — off while scrolled sideways.
@@ -293,7 +293,10 @@ impl Shows {
             numbers: config.line_number,
             primary: focused && not_insert && crate::term::cursor_shape(editor) == CursorShape::Block,
             search: editor.search_hits.as_ref().is_some_and(|h| h.doc == doc.id),
-            cursorline: focused && config.cursorline,
+            cursorline: (focused && config.cursorline).then(|| {
+                let primary = crate::term::cursor_idx(editor.mode, doc.selection().primary(), &doc.text);
+                crate::movement::line_of(&doc.text, primary)
+            }),
             messages: config.inline_diagnostics,
             inlay: config.inlay_hints && left == 0,
             guides: config.indent_guides && left == 0,
@@ -317,10 +320,36 @@ impl Shows {
             numbers: LineNumber::Absolute,
             primary: false,
             search: false,
-            cursorline: false,
+            cursorline: None,
             messages: config.inline_diagnostics,
             inlay: config.inlay_hints && left == 0,
             guides: config.indent_guides && left == 0,
+            blame: false,
+        }
+    }
+
+    /// A picker's code preview: the file as the editor shows it — diagnostics, their line-end messages, signs,
+    /// indent guides, its change marks as the index's are drawn (never removed lines as rows: the preview is
+    /// laid out by lines from where the item opens). Kept apart from a pane: absolute numbers and no selection
+    /// (no cursor there to count from); a band on `item`, the line the item opens at, even with
+    /// `editor.cursorline` off — it marks where enter goes, not a cursor; no inlay hints — they're asked for
+    /// the lines a pane shows, so a preview elsewhere in the file would have them on some lines and not others.
+    /// Its lines always wrap (`term::rows_preview`): a preview is narrow and doesn't scroll sideways.
+    pub fn preview(editor: &Editor, item: Option<usize>) -> Shows {
+        let config = &editor.config;
+        Shows {
+            focused: true,
+            cursor: false,
+            editing: false,
+            left: 0,
+            changes: Changes::Index,
+            numbers: LineNumber::Absolute,
+            primary: false,
+            search: false,
+            cursorline: item,
+            messages: config.inline_diagnostics,
+            inlay: false,
+            guides: config.indent_guides,
             blame: false,
         }
     }

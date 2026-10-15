@@ -2540,7 +2540,7 @@ fn num_w(doc: &crate::document::Document) -> usize {
 }
 
 /// Cursor char to draw: in insert mode the head (between chars), otherwise the block cursor char.
-fn cursor_idx(mode: Mode, r: Range, text: &ropey::Rope) -> usize {
+pub(crate) fn cursor_idx(mode: Mode, r: Range, text: &ropey::Rope) -> usize {
     if mode == Mode::Insert { r.head } else { r.cursor(text) }
 }
 
@@ -2730,6 +2730,28 @@ impl Ui {
             selection,
             cursor,
             status,
+        }
+    }
+
+    /// The same colours on another ground (a card's — a picker's preview): what sat on the code's background
+    /// sits on `ground`'s, and faint colours blend toward it.
+    fn on(&self, ground: Style) -> Ui {
+        let re = |s: Style| if s.bg == self.base.bg { Style { bg: ground.bg, ..s } } else { s };
+        Ui {
+            base: ground,
+            tint: ground.bg.or(self.tint),
+            selection: re(self.selection),
+            selection_primary: re(self.selection_primary),
+            cursor: re(self.cursor),
+            cursor_primary: re(self.cursor_primary),
+            cursorline: re(self.cursorline),
+            linenr: re(self.linenr),
+            linenr_selected: re(self.linenr_selected),
+            virt: re(self.virt),
+            error: re(self.error),
+            diff_plus: re(self.diff_plus),
+            diff_minus: re(self.diff_minus),
+            ..self.clone()
         }
     }
 }
@@ -3582,18 +3604,7 @@ fn draw_text(
                         queue!(out, Print(" "))?;
                     }
                 }
-                draw_folded_row(
-                    out,
-                    editor,
-                    ui,
-                    lay.text_cols,
-                    *indent,
-                    spans,
-                    *code,
-                    here,
-                    labels_on,
-                    None,
-                )?;
+                draw_folded_row(out, editor, ui, lay.text_cols, *indent, spans, *code, here, labels_on)?;
                 continue;
             }
             // The edit review's change head: the review draws it over this row (`draw_review`)
@@ -3682,7 +3693,7 @@ fn draw_text(
         }
         // Current-line highlight: this line's background = ui.cursorline.primary over the default
         let line_message_here = line_message.get(li).copied().flatten();
-        let here = shows.cursorline && line == cur_line;
+        let here = shows.cursorline == Some(line);
         let line_base = if stop_line == Some(line) {
             // Stopped line: accent band (takes precedence over the cursor line)
             Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
@@ -3892,8 +3903,9 @@ fn draw_text(
                 col = c.col;
                 continue;
             }
-            // A space inside indentation at a guide position becomes │ (only without selection/cursor)
-            if g == " "
+            // A space or a tab inside indentation at a guide position starts with │ (only without
+            // selection/cursor) — a tab's cells after it stay blank
+            if (g == " " || g == "\t")
                 && c.col > 0
                 && c.col < depth
                 && c.col % unit == 0
@@ -3903,7 +3915,7 @@ fn draw_text(
                 let gs = line_base.patch(guide_at(c.col));
                 apply(out, gs)?;
                 current = Some(gs);
-                queue!(out, Print("│"))?;
+                queue!(out, Print("│"), Spaces(c.width.saturating_sub(1)))?;
                 continue;
             }
             if labels_on {
@@ -4401,7 +4413,8 @@ fn fold_rows(
 
 /// One screen row of a folded doc comment: indent · bar · text on a faint panel. Body a tone lower — reads
 /// smaller, quieter than code (terminals can't resize fonts: contrast); example code = a well of editor bg.
-/// `width` cells, the row's end left as it is.
+/// `width` cells, the row's end left as it is. (On a card — a picker's preview — `ui` is the card's, `Ui::on`:
+/// the panel a tone off it, as off the code's ground.)
 #[allow(clippy::too_many_arguments)]
 fn draw_folded_row(
     out: &mut impl Write,
@@ -4413,11 +4426,8 @@ fn draw_folded_row(
     code: bool,
     current: bool,
     dim: bool,
-    on: Option<Style>,
 ) -> io::Result<()> {
-    // (`on`: a card's style — a picker's preview — the panel a tone off it, as off the code's ground)
-    let ground = on.unwrap_or(ui.base);
-    let tint = if on.is_some() { ground.bg.or(ui.tint) } else { ui.tint };
+    let (ground, tint) = (ui.base, ui.tint);
     let comment_fg = editor.theme.try_get("comment").and_then(|s| s.fg).or(ui.virt.fg);
     let panel_bg = blend(comment_fg, tint, if current { 0.16 } else { 0.09 }).or(ground.bg);
     let panel = Style { bg: panel_bg, fg: blend(ground.fg, comment_fg, 0.55).or(ground.fg), ..ground };
@@ -5001,61 +5011,6 @@ fn request_preview(p: &mut Picker, jobs: &crate::event::Jobs) {
     });
 }
 
-/// One line of code within `width` cells (applying syntax colors `spans`). Returns the number of cells used.
-#[allow(clippy::too_many_arguments)]
-fn draw_code_line(
-    out: &mut impl Write,
-    text: &ropey::Rope,
-    line: usize,
-    width: usize,
-    tab: usize,
-    spans: &[(usize, usize, u32)],
-    capture_styles: &[Option<Style>],
-    base: Style,
-    (from, to): (usize, usize),
-) -> io::Result<usize> {
-    let start = mv::line_start(text, line);
-    let (sc, ec) = (text.byte_to_char(start), text.byte_to_char(mv::line_end(text, line)));
-    let end = text.char_to_byte(ec.min(sc + to.min(from + width) + 64));
-    let s = text.byte_slice(start..end).to_string();
-    let mut paint = vec![u32::MAX; s.len()];
-    for &(a, b, c) in spans {
-        let (a, b) = (a.max(start), b.min(end));
-        if a < b {
-            paint[a - start..b - start].fill(c);
-        }
-    }
-    let mut current: Option<Style> = None;
-    let mut used = 0;
-    // Display columns [from, to) of the line (a wrapped row), drawn from the current cell
-    for c in graphemes::cells(&s, start, tab) {
-        if c.col < from {
-            continue;
-        }
-        if c.col >= to || c.col - from + c.width > width {
-            break;
-        }
-        let g = &s[c.bytes.clone()];
-        let mut st = base;
-        if let Some(Some(hs)) = paint.get(c.bytes.start).and_then(|&cap| capture_styles.get(cap as usize)) {
-            st = st.patch(*hs);
-        }
-        if current != Some(st) {
-            apply(out, st)?;
-            current = Some(st);
-        }
-        if g == "\t" {
-            queue!(out, Spaces(c.width))?;
-        } else if g.chars().next().is_some_and(char::is_control) {
-            queue!(out, Print('\u{fffd}'))?;
-        } else {
-            queue!(out, Print(g))?;
-        }
-        used = c.col + c.width - from;
-    }
-    Ok(used)
-}
-
 /// One list row (pickers, the side panel): accent bar when selected (`highlight` = on the selected
 /// background too), tree indentation and guides, the fold mark or kind glyph, the label with its matched
 /// letters, the hint at the right. Draws `2 + lw` cells but for the right padding; returns the cells used
@@ -5527,6 +5482,23 @@ fn draw_picker(
             }
         }
     }
+    // A file's code: the drawer fills the preview's rect, on the card (its rows above left it blank)
+    if let Some(PreviewView::Code { doc, rows, focus }) = &preview {
+        let (x0, gutter) = (b.x + left_w + 2, crate::chrome::SIGNS + num_w(doc));
+        let pl = Layout {
+            x0,
+            edit_w: x0 + b.preview_w,
+            scrollbar: false,
+            text_top: (b.y + 3) as u16,
+            text_rows: b.list_rows,
+            gutter,
+            text_cols: b.preview_w.saturating_sub(gutter),
+            ..lay.clone()
+        };
+        let top = rows.iter().map(crate::codeview::Row::line).min().unwrap_or(0);
+        let shows = Shows::preview(editor, *focus);
+        draw_text(editor, &Source::of(doc), top, &shows, rows, &ui.on(card), &pl, out)?;
+    }
     let (q, _) = picker_input(p, lw, &count);
     Ok(((b.x + 3 + q.width()) as u16, (b.y + 1) as u16))
 }
@@ -5557,13 +5529,12 @@ fn picker_input(p: &Picker, lw: usize, count: &str) -> (String, String) {
 type DiffRow = (usize, Option<usize>, Option<crate::wrap::Row>);
 
 enum PreviewView<'a> {
+    /// A file's code, for the drawer to fill the preview's rect with (`Shows::preview`): its document (a buffer,
+    /// or what was read from disk — `Document::previewed`), its rows (`rows_preview`), the line the item opens at.
     Code {
-        text: &'a ropey::Rope,
-        /// Screen rows: a line's parts (`Row::Text`, always with its `part` — long lines wrap), a folded doc
-        /// comment's rows (`Row::Doc`).
+        doc: &'a crate::document::Document,
         rows: Vec<crate::codeview::Row>,
         focus: Option<usize>,
-        spans: Vec<(usize, usize, u32)>,
     },
     /// Changes the code action would make — per screen row (file index, line number | None = file header,
     /// the part of a wrapped line). Blank row between files = usize::MAX.
@@ -5582,13 +5553,10 @@ fn preview_lines<'a>(
     width: usize,
 ) -> Option<PreviewView<'a>> {
     let action = &p.current()?.action;
-    let mut doc = None;
-    let (text, syntax, focus) = match action {
+    let (doc, focus) = match action {
         Action::Buffer(id) => {
             let d = editor.docs.iter().find(|d| d.id == *id)?;
-            let cur = mv::line_of(&d.text, d.selection().primary().head);
-            doc = Some(d);
-            (&d.text, d.syntax.as_ref(), Some(cur))
+            (d, Some(mv::line_of(&d.text, d.selection().primary().head)))
         }
         Action::Dir(_) => {
             let n = p.current().map_or("", |i| i.hint.as_str());
@@ -5609,11 +5577,7 @@ fn preview_lines<'a>(
             let styles = editor.theme.capture_styles();
             return Some(PreviewView::Diff { files: f.diff.clone(), rows, styles });
         }
-        Action::Jump { doc: id, line, .. } => {
-            let d = editor.docs.iter().find(|d| d.id == *id)?;
-            doc = Some(d);
-            (&d.text, d.syntax.as_ref(), Some(*line))
-        }
+        Action::Jump { doc: id, line, .. } => (editor.docs.iter().find(|d| d.id == *id)?, Some(*line)),
         Action::Code(i) => {
             use crate::lsp_editor::ActionPreview;
             return Some(match editor.action_preview(*i)? {
@@ -5645,47 +5609,68 @@ fn preview_lines<'a>(
                 }
             });
         }
+        // A file open in a buffer: the buffer — what enter opens (`open_at` goes to the line there), with its
+        // diagnostics, change marks and unsaved edits (paths of buffers are kept as `open` made them: real ones)
+        _ if let Some((path, focus)) = action.preview_target()
+            && let path = editor.path_of(path)
+            && let Some(d) =
+                editor.docs.iter().find(|d| !d.loading && d.path.as_deref() == Some(path.as_path())) =>
+        {
+            (d, focus)
+        }
         _ => {
             let focus = action.preview_target().and_then(|(_, f)| f);
             match p.previews.get(&action.preview_key()?)? {
                 crate::picker::Preview::Loading => return Some(PreviewView::Note("loading…".into())),
                 crate::picker::Preview::Unavailable(why) => return Some(PreviewView::Note(why.to_string())),
-                crate::picker::Preview::Ready { text, syntax } => (text, syntax.as_ref(), focus),
+                crate::picker::Preview::Ready(d) => (&**d, focus),
             }
         }
     };
-    let last = mv::last_line(text);
-    // Scrolled (wheel / C-f C-b) from where it opens, but not past the last page
-    let first = (focus.map_or(0, |f| f.saturating_sub(rows / 3)) + p.preview_scroll)
-        .min(last.saturating_sub(rows.saturating_sub(1)).max(focus.unwrap_or(0).min(last)));
-    // Doc comments as the editor shows the file in normal mode (`Editor::doc_block_folded`; an open buffer's
-    // selection and changes count) — but the place a hit or a jump opens at is read raw: going there selects it
-    use crate::codeview::{Part, Row};
-    let lang = match doc {
-        Some(d) => d.lang_name(),
-        None => syntax.map(|s| s.lang.name.as_str()).or_else(|| {
-            action.preview_target().and_then(|(path, _)| crate::syntax::detect(path)).map(|l| l.name.as_str())
-        }),
-    };
+    // (a file read from disk whose grammar isn't there: its language by its path)
+    let lang = doc.lang_name().or_else(|| {
+        action.preview_target().and_then(|(path, _)| crate::syntax::detect(path)).map(|l| l.name.as_str())
+    });
     let opens_at = focus.filter(|_| !matches!(action, Action::Buffer(_)));
+    let code_w = width.saturating_sub(crate::chrome::SIGNS + num_w(doc));
+    let at = (focus, opens_at, p.preview_scroll);
+    Some(PreviewView::Code { doc, rows: rows_preview(editor, doc, lang, at, rows, code_w), focus })
+}
+
+/// A picker's code preview's rows: `rows` of them from where the item opens (`focus`, a third down) — scrolled
+/// by `scroll` (the wheel, `C-f`/`C-b`) but not past the last page — each line wrapped at `width` (the code's
+/// columns; a line wider continues on the next rows, no number there), and doc comments in `lang` as the editor
+/// shows the file in normal mode (`Editor::doc_block_closed`: an open buffer's selection and changes count) —
+/// but the block the item opens in (`opens_at`) is read raw: going there selects it.
+fn rows_preview(
+    editor: &Editor,
+    doc: &crate::document::Document,
+    lang: Option<&str>,
+    (focus, opens_at, scroll): (Option<usize>, Option<usize>, usize),
+    rows: usize,
+    width: usize,
+) -> Vec<crate::codeview::Row> {
+    use crate::codeview::{Part, Row};
+    let text = &doc.text;
+    let last = mv::last_line(text);
+    let first = (focus.map_or(0, |f| f.saturating_sub(rows / 3)) + scroll)
+        .min(last.saturating_sub(rows.saturating_sub(1)).max(focus.unwrap_or(0).min(last)));
     let blocks: Vec<_> = match editor.doc_comments_render(lang) {
         true => {
             crate::doccomment::blocks(text, first.saturating_sub(200)..=(first + rows * 3 + 200).min(last))
                 .into_iter()
                 .filter(|b| !opens_at.is_some_and(|f| (b.start..=b.end).contains(&f)))
-                .filter(|b| doc.is_none_or(|d| editor.doc_block_closed(d, false, (b.start, b.end))))
+                .filter(|b| editor.doc_block_closed(doc, false, (b.start, b.end)))
                 .collect()
         }
         false => Vec::new(),
     };
-    // Screen rows from `first` — a line wider than the pane continues on the next rows (no number there)
     let tab = editor.config.tab_width;
-    let room = width.saturating_sub(6); // "{:>4}  "
     let mut vis = Vec::with_capacity(rows);
     let mut line = first;
     while vis.len() < rows && line <= last {
         if let Some(b) = blocks.iter().find(|b| b.start <= line && line <= b.end) {
-            let w = room.saturating_sub(b.indent + 3).max(8);
+            let w = width.saturating_sub(b.indent + 3).max(8);
             let folded = fold_rows(editor, &crate::doccomment::parts(&b.bodies), w, lang);
             // (opened mid-block: from as far into it)
             let skip = (line - b.start).min(folded.len().saturating_sub(1));
@@ -5698,7 +5683,7 @@ fn preview_lines<'a>(
             line = b.end + 1;
             continue;
         }
-        let parts = crate::wrap::rows(text, line, room, tab);
+        let parts = crate::wrap::rows(text, line, width, tab);
         let n = parts.len();
         for (index, row) in parts.into_iter().enumerate() {
             if vis.len() == rows {
@@ -5708,17 +5693,7 @@ fn preview_lines<'a>(
         }
         line += 1;
     }
-    let end_line = line.saturating_sub(1).max(first);
-    let spans = match syntax.filter(|s| s.tree.is_some()) {
-        Some(syn) => crate::syntax::highlights(
-            syn,
-            text,
-            mv::line_start(text, first)..mv::line_full_end(text, end_line),
-            &mut QueryCursor::new(),
-        ),
-        None => Vec::new(),
-    };
-    Some(PreviewView::Code { text, rows: vis, focus, spans })
+    vis
 }
 
 fn draw_preview_row(
@@ -5743,49 +5718,8 @@ fn draw_preview_row(
             queue!(out, Print(&msg))?;
             Ok(msg.width())
         }
-        PreviewView::Code { text, rows, focus, spans } => {
-            use crate::codeview::Row;
-            let (line, part, first_row) = match rows.get(row) {
-                Some(&Row::Text { line, part: Some(p), .. }) => (line, p.row, p.index == 0),
-                // A folded doc comment: its number on its first row, the panel on the card
-                Some(Row::Doc { start, indent, index, spans, code, .. }) => {
-                    let num = if *index == 0 { format!("{:>4}  ", start + 1) } else { " ".repeat(6) };
-                    apply(out, Style { fg: ui.linenr.fg, ..popup })?;
-                    queue!(out, Print(&num))?;
-                    let w = width.saturating_sub(num.len());
-                    draw_folded_row(out, editor, ui, w, *indent, spans, *code, false, false, Some(popup))?;
-                    return Ok(width);
-                }
-                _ => return Ok(0),
-            };
-            let base = if *focus == Some(line) {
-                popup.patch(Style { bg: ui.cursorline.bg, ..Style::default() })
-            } else {
-                popup
-            };
-            // A wrapped line's later rows: no number, indented like the line
-            let num = if first_row { format!("{:>4}  ", line + 1) } else { " ".repeat(6 + part.x0) };
-            apply(out, Style { fg: ui.linenr.fg, ..base })?;
-            queue!(out, Print(&num))?;
-            let styles = editor.theme.capture_styles();
-            let used = draw_code_line(
-                out,
-                text,
-                line,
-                width.saturating_sub(num.len()),
-                editor.config.tab_width,
-                spans,
-                &styles,
-                base,
-                (part.col, part.end_col),
-            )?;
-            if *focus == Some(line) {
-                apply(out, base)?;
-                queue!(out, Spaces(width.saturating_sub(num.len() + used)))?;
-                return Ok(width);
-            }
-            Ok(num.len() + used)
-        }
+        // (the drawer fills its rect once the rows are drawn — `draw_picker`)
+        PreviewView::Code { .. } => Ok(0),
     }
 }
 
@@ -12181,6 +12115,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_indented_line_has_the_guides_a_space_indented_one_has() {
+        let tabs = "fn a() {\n\tif x {\n\t\ty();\n\t}\n}\n";
+        for text in [tabs, &tabs.replace('\t', "    ")] {
+            let mut ed = Editor::new(Config::default());
+            ed.config.indent_guides = true;
+            ed.config.tab_width = 4;
+            ed.docs[0].text = Rope::from_str(text);
+            let mut buf = Vec::new();
+            render(&mut ed, &mut buf, 60, 10).unwrap();
+            let mut vt = vt100::Parser::new(10, 60, 0);
+            vt.process(&buf);
+            let row = vt.screen().rows(0, 60).find(|r| r.contains("y();")).unwrap();
+            assert!(row.contains("│   y();"), "{text:?}: {row:?}");
+        }
+    }
+
+    #[test]
     fn doc_comments_render_until_cursor_enters() {
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = Rope::from_str("/// Adds `two` numbers.\nfn add() {}\n");
@@ -12951,6 +12902,56 @@ mod tests {
         all.sort_unstable();
         let us = all[all.len() / 2].as_secs_f64() * 1e6;
         let line = format!("PERF frame_with_an_edit_review_us {us:.1} budget=16000 noise=50\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    }
+
+    /// A picker's code preview, frame by frame: places in a 5k-line file with doc comments, tabs and a grammar,
+    /// the selection moving one place a frame (each frame a new page of the preview) — the median of 300.
+    #[test]
+    fn perf_frames_with_a_code_preview() {
+        if crate::test_results::unoptimized("term::tests::perf_frames_with_a_code_preview") {
+            return;
+        }
+        let block = "/// Adds `x` to the total, **once**.\n///\n/// - an item\n";
+        let body: String = (0..20).map(|i| format!("\tlet x{i} = total + {i}; // {i}\n")).collect();
+        let text: String =
+            (0..200).map(|i| format!("{block}pub fn f{i}(total: u32) {{\n{body}}}\n")).collect();
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str(&text);
+        ed.docs[0].path = Some("/tmp/preview.rs".into());
+        if let Ok(lang) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) {
+            ed.docs[0].syntax = Some(crate::syntax::Syntax::parsed(lang, &ed.docs[0].text));
+        }
+        assert!(ed.docs[0].text.len_lines() > 5_000);
+        let doc = ed.docs[0].id;
+        let items = (0..50)
+            .map(|k| crate::picker::Item {
+                label: format!("place {k}"),
+                action: crate::picker::Action::Jump { index: k, doc, line: k * 100 + 5 },
+                hint: String::new(),
+                glyph: None,
+            })
+            .collect();
+        ed.open_picker(crate::picker::Picker::new("places", items, false), None);
+        let mut buf = Vec::with_capacity(1 << 16);
+        render(&mut ed, &mut buf, 180, 50).unwrap();
+        let mut vt = vt100::Parser::new(50, 180, 0);
+        vt.process(&buf);
+        assert!(vt.screen().contents().contains("let x"), "the preview shows code");
+        let mut all: Vec<Duration> = (0..300)
+            .map(|_| {
+                if let Some(p) = ed.picker.as_mut() {
+                    p.move_by(1);
+                }
+                buf.clear();
+                let t = Instant::now();
+                render(&mut ed, &mut buf, 180, 50).unwrap();
+                t.elapsed()
+            })
+            .collect();
+        all.sort_unstable();
+        let us = all[all.len() / 2].as_secs_f64() * 1e6;
+        let line = format!("PERF frame_with_a_code_preview_us {us:.1} budget=16000 noise=50\n");
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 
