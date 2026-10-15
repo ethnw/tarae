@@ -18,6 +18,7 @@ mod chat;
 mod chats;
 mod checkpoint;
 mod chrome;
+mod claudehome;
 mod claudetrust;
 mod claudeupdate;
 mod clipboard;

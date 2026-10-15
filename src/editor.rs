@@ -618,6 +618,9 @@ pub struct Editor {
     pub claude_env: Option<crate::llm::Env>,
     /// What claude's environment leaves out has been said (`llm::env_told`): once since tarae started.
     pub claude_env_told: bool,
+    /// That tarae's claudes keep a login of their own (Linux, `claudehome::login_hint`) has been said: once since
+    /// tarae started.
+    pub claude_login_told: bool,
     /// An API session's key helper, a test's stand-in (`billing::Editor::credential`) — None: the Keychain's.
     pub api_key_helper: Option<String>,
     /// How `billing::Editor::api_check` looks for the key, a test's stand-in (in tests one that finds nothing,
@@ -830,9 +833,13 @@ impl Editor {
             claude_settings_gate: !cfg!(test),
             claude_confine: !cfg!(test),
             claude_update: if cfg!(test) { Default::default() } else { crate::claudeupdate::Told::new() },
-            claude_user_settings: if cfg!(test) { None } else { crate::claudetrust::user_settings() },
+            claude_user_settings: match cfg!(test) {
+                true => None,
+                false => crate::claudetrust::user_settings(crate::sandbox::Os::HOST),
+            },
             claude_env: if cfg!(test) { Some(Default::default()) } else { None },
             claude_env_told: false,
+            claude_login_told: false,
             api_key_helper: None,
             api_key_query: cfg!(test).then(|| ["sh", "-c", "exit 44"].map(String::from).to_vec()),
             api_ready: None,
@@ -8739,23 +8746,39 @@ mod tests {
         }
         assert!(!started().contains("--no-session-persistence"), "claude keeps the chat's conversations");
         drop(ed);
-        // claude no longer has it: a new conversation, the rows still there
+        // claude no longer has it (Linux's first start with tarae's own claude folder): a new conversation, the rows
+        // still there, said once and not as an error — and a message sent to the process that couldn't resume, before
+        // it said so, answered in the new one, not lost with it
         let mut ed = editor("");
         fake(&mut ed, true);
         feed(&mut ed, "<space>l");
         settle_until(&mut ed, |ed| {
-            ed.session
-                .chat
-                .as_ref()
-                .unwrap()
-                .msgs
-                .iter()
-                .any(|m| m.text.contains("no longer has this conversation"))
+            ed.session.chat.as_ref().unwrap().msgs.iter().any(|m| m.text == "Hello back.")
         });
+        feed(&mut ed, "again<ret>");
+        let answered = |ed: &Editor| {
+            let c = ed.session.chat.as_ref().unwrap();
+            c.msgs.iter().filter(|m| m.text == "Hello back.").count() == 2 && !c.busy()
+        };
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !answered(&ed) {
+            let c = ed.session.chat.as_ref().unwrap();
+            let rows: Vec<_> = c.msgs.iter().map(|m| &m.text).collect();
+            assert!(std::time::Instant::now() < end, "{rows:?} queued {:?}", c.queued);
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
         let c = ed.session.chat.as_ref().unwrap();
-        assert!(c.msgs.iter().any(|m| m.text == "Hello back."));
-        assert_eq!(c.conversation, None);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().running());
+        let said = |t: &str| c.msgs.iter().filter(|m| m.text.contains(t)).count();
+        assert_eq!(said("no longer has this conversation"), 1);
+        assert_eq!((said("claude exited"), said("No conversation found")), (0, 0), "not an error");
+        assert_eq!(
+            c.msgs.iter().filter(|m| m.role == crate::chat::Role::User && m.text == "again").count(),
+            1
+        );
+        assert!(!ed.status.as_ref().is_some_and(|s| s.1 == Severity::Error), "{:?}", ed.status);
+        assert!(!started().lines().last().unwrap_or_default().contains("--resume"), "fresh: {}", started());
         drop(ed);
         // #51: `:chat-new` at a fresh start — a new conversation, said, not the recent one continued once
         // the project's conversations are read

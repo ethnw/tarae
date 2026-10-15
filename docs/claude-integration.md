@@ -8,6 +8,13 @@ Claude Code login as it is. You need [Claude Code](https://claude.com/claude-cod
 logged in — where `claude` isn't found, the chat says how to install it and log in, as Claude Code's own setup
 docs do.
 
+**On Linux, tarae's claude has a login of its own.** Every claude tarae starts keeps its state in a folder of
+tarae's (`~/.local/state/tarae/claude`, as `CLAUDE_CONFIG_DIR`), not your `~/.claude` — so a sandbox can close
+your own Claude Code's settings, hooks and login to it. Log in once with `:claude-login` (Claude Code's own
+`claude auth login`, in the terminal panel); the chat says so when claude isn't logged in. Its conversations are
+apart from your own `claude`'s, and your user settings and `~/.claude/CLAUDE.md` don't apply to it (a project's
+`CLAUDE.md` and `.claude/settings.json` still do). macOS uses your Claude Code login as it is.
+
 - [Select → instruct → diff](#select--instruct--diff)
 - [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [running commands](#running-commands), [notes](#notes)
 - [Commit messages](#commit-messages)

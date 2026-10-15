@@ -313,6 +313,9 @@ pub fn spawn(
         "a test started the real claude — give llm.command a stand-in (`sh -c 'cat > /dev/null'`)"
     );
     let args = crate::billing::args(&cfg.args, cred).map_err(SpawnError::Billing)?;
+    // On Linux claude's folder is tarae's (`claudehome.rs`): made through no link, the user source off
+    let (args, folder) =
+        crate::claudehome::for_claude(crate::sandbox::Os::HOST, given, &args).map_err(SpawnError::Folder)?;
     // (under `sandbox-exec` a missing program is its exec failing, not the spawn: said as the spawn's, so a
     // missing claude still says how to install it — `spawn_failed`)
     if confine.is_some() && !program_there(&cfg.command, dir, given) {
@@ -348,6 +351,9 @@ pub fn spawn(
     for name in ClaudeEnv::of(given, keep_keys).removed {
         cmd.env_remove(name);
     }
+    if let Some(f) = &folder {
+        cmd.env(crate::claudehome::VAR, f);
+    }
     if let Some(m) = &cfg.model {
         cmd.args(["--model", m]);
     }
@@ -375,6 +381,8 @@ pub enum SpawnError {
     Start(std::io::Error),
     /// Its billing can't be laid into its arguments (`billing::args`).
     Billing(String),
+    /// Its folder (Linux, `claudehome.rs`) can't be made through no link, or has no place.
+    Folder(String),
 }
 
 impl SpawnError {
@@ -382,7 +390,7 @@ impl SpawnError {
     pub fn said(&self, command: &str, whole: bool) -> String {
         match self {
             SpawnError::Start(e) => spawn_failed(command, e, whole),
-            SpawnError::Billing(why) => why.clone(),
+            SpawnError::Billing(why) | SpawnError::Folder(why) => why.clone(),
         }
     }
 }
@@ -581,24 +589,29 @@ pub fn env_told(ed: &mut Editor) -> Option<String> {
     Some(said)
 }
 
-/// What a claude that failed with `error` for want of a login is told, when tarae left a key out — None: not a
-/// login failure, or no key was left out. Claude Code's words under `-p` (its errors reference): "Not logged in ·
-/// Please run /login", "Failed to authenticate…", "Please run /login · API Error: 401…".
-pub fn login_hint(ed: &Editor, error: &str) -> Option<String> {
-    let login = ["Not logged in", "Please run /login", "Failed to authenticate"];
-    if !login.iter().any(|l| error.contains(l)) {
+/// What a claude that failed with `error` for want of a login is told, when tarae left a key out, or where tarae's
+/// claudes keep a login of their own (Linux: `:claude-login`, once) — None: not a login failure, or neither.
+pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
+    if !crate::claudehome::NOT_LOGGED_IN.iter().any(|l| error.contains(l)) {
         return None;
     }
+    let var = crate::claudehome::var_in(ed.claude_env.as_ref());
+    let place = crate::claudehome::Place::of(crate::sandbox::Os::HOST, &var).ok().flatten();
+    let own = crate::claudehome::login_hint(error, place.as_ref(), &mut ed.claude_login_told);
     let env = ClaudeEnv::as_read(ed.claude_env.as_ref(), ed.config.llm.keep_env_key);
     let keys = env.keys();
-    (!keys.is_empty()).then(|| {
-        format!(
-            "Claude has no login of its own, and tarae didn't pass on {} from its environment ({}). Or log in: \
-             run `claude` in a terminal, then /login.",
-            keys.join(" and "),
-            env.keys_why(&keys)
-        )
-    })
+    if keys.is_empty() {
+        return own;
+    }
+    let how = match place {
+        Some(_) => "Or log in for tarae: :claude-login.",
+        None => "Or log in: run `claude` in a terminal, then /login.",
+    };
+    Some(format!(
+        "Claude has no login of its own, and tarae didn't pass on {} from its environment ({}). {how}",
+        keys.join(" and "),
+        env.keys_why(&keys)
+    ))
 }
 
 /// One user message line (stream-json input).
@@ -1299,6 +1312,13 @@ impl Review {
 
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
+    // (on Linux once claude's own folder is made, on a worker — `claudehome.rs`)
+    if crate::claudehome::after_made(ed, |ed| {
+        prewarm(ed);
+        Ok(())
+    }) {
+        return;
+    }
     let cfg = ed.config.llm.clone();
     let warmed = ed
         .credential(ed.session.billing, crate::billing::Role::Ask)
@@ -1315,6 +1335,11 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
     }
     if ed.session.review.is_some() {
         return Err("an ask is already in progress (:ask-cancel)".into());
+    }
+    // (on Linux once claude's own folder is made, on a worker — `claudehome.rs`)
+    let again = instruction.to_string();
+    if crate::claudehome::after_made(ed, move |ed| ask(ed, &again)) {
+        return Ok(());
     }
     let cfg = ed.config.llm.clone();
     let doc = ed.doc();
@@ -1357,7 +1382,16 @@ pub fn draft(
     if ed.session.review.is_some() {
         return Err("Claude is already answering (:ask-cancel)".into());
     }
+    // (on Linux once claude's own folder is made, on a worker — `claudehome.rs`)
+    let (label_, prompt_) = (label.to_string(), prompt.to_string());
+    if crate::claudehome::after_made(ed, move |ed| draft(ed, doc_id, &label_, &prompt_, from, to)) {
+        return Ok(());
+    }
     let doc = ed.docs.iter().find(|d| d.id == doc_id).ok_or("the buffer is gone")?;
+    // (it may have changed while the folder was made)
+    if from > to || to > doc.text.len_bytes() {
+        return Err("the buffer changed — draft again".into());
+    }
     let old = doc.text.byte_slice(from..to).to_string();
     let hunk = Hunk { from, to, old, new: String::new(), decision: Decision::Undecided, conflict: false };
     start(ed, doc_id, label, prompt, vec![hunk])?;
@@ -2288,10 +2322,10 @@ pub(crate) mod tests {
             "{hint}"
         );
         assert!(!hint.contains("zq7"), "names only: {hint}");
-        assert_eq!(login_hint(&ed, "Overloaded"), None, "not a login failure");
+        assert_eq!(login_hint(&mut ed, "Overloaded"), None, "not a login failure");
         ed.config.llm.keep_env_key = true;
         assert_eq!(
-            login_hint(&ed, "Not logged in · Please run /login"),
+            login_hint(&mut ed, "Not logged in · Please run /login"),
             None,
             "the key went on: nothing to add"
         );

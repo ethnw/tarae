@@ -240,6 +240,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "project-untrust" => editor.project_untrust(),
         "claude-settings" => editor.claude_settings_ask(),
         "claude-update" => crate::claudeupdate::update(editor),
+        "claude-login" => crate::claudehome::login(editor),
         "sandbox-allowed" => {
             editor.sandbox_allowed();
             Ok(())

@@ -163,7 +163,10 @@ pub fn start(ed: &mut Editor) {
     // Its claude under its own profile, the project read-only (it reads, it never writes) — as the chat's, made
     // here on the worker (`sandbox::claude::for_chat`)
     let confine = ed.claude_confine && cfg!(target_os = "macos") && ed.config.llm.claude_sandbox;
+    let given = ed.claude_env.clone();
     let work = move || {
+        // (on Linux claude's own folder, here too — `claudehome.rs`; a failure is the spawn's to say)
+        let _ = crate::claudehome::make(crate::sandbox::Os::HOST, given.as_ref());
         let head = crate::gitrepo::git(&at, &["rev-parse", "HEAD"], None).unwrap_or_default();
         let profile = confine.then(|| crate::sandbox::claude::for_chat(&at, false));
         (diff(), head.trim().to_string(), profile)

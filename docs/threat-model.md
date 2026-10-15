@@ -456,14 +456,16 @@ test: `editor::tests::the_sandbox_turned_off_is_said` · `trust::tests::every_sa
 `claude -p` runs as you. Its cwd is the session's checkout. What it may *do* through its tools is narrowed by its
 flags and by tarae answering its permission requests; what its own code does, on macOS, by a Seatbelt profile of
 its own (`llm.claude-sandbox`, on unless you turn it off): files only — its network, the programs it starts and
-the system's services as they are. On Linux it's **not confined** yet.
+the system's services as they are. On Linux it's **not confined** yet, but its folder is tarae's own, apart from
+your `~/.claude` (below).
 
 ### What it touches
 
 Measured on macOS (claude 2.1.296, macOS 27, 2026-10-14): one short chat with tarae's flags — a Read in the
 project, an edit, a Read outside it after a `y` — under a Seatbelt profile that refuses nothing and reports
-everything. macOS throttles repeated reports, so a path missing below isn't proof it wasn't touched. Not yet
-measured on Linux.
+everything. macOS throttles repeated reports, so a path missing below isn't proof it wasn't touched. On Linux
+(claude 2.1.296 under `strace`, in a container, against a stand-in for Anthropic's API and with no login) it touched
+the same kinds of places; there its login is a file in its folder, not the keychain.
 
 | | What it touched |
 |---|---|
@@ -512,6 +514,23 @@ Kept:
   `sandbox::claude::tests::a_refusal_claudes_tool_says_is_the_profiles_where_its_rules_refuse` ·
   `chat::tests::a_claude_refusal_is_said_once` · `chat::tests::claude_unconfined_by_the_setting_is_said` ·
   `trust::tests::claudes_own_sandbox_is_risky_and_only_yours`
+- **Linux: its folder is tarae's own.** Every claude tarae starts (the chat, the reviewer, an ask, a commit draft)
+  gets `CLAUDE_CONFIG_DIR` = `~/.local/state/tarae/claude` (`$XDG_STATE_HOME/tarae/claude`). tarae makes it 0700
+  through no link: a link planted there is refused and claude doesn't start. Measured: with the variable,
+  `.claude.json`, its lock and backups, the conversations and the login all live there; outside it claude writes
+  only `~/.local/state/claude/locks/` (also made by tarae first) and temp. It loads no user settings
+  (`--setting-sources project,local`): its user settings would be that folder, which it writes itself. What changes
+  for you: **one login for tarae** (`:claude-login` runs Claude Code's own `claude auth login` with the variable, in
+  the terminal panel; the chat says so once when claude answers "Not logged in"). **Its conversations are apart
+  from yours**: your `claude --resume` doesn't list tarae's, nor tarae yours, and a chat started before the switch
+  continues as a new conversation, said once (a message you'd sent goes to the new one). **Your user settings,
+  `CLAUDE.md`, plugins and user-scope MCP servers don't apply** in tarae's claude. Runs never read the folder (it's
+  in tarae's state, kept from them), so its login is kept from Claude's commands. Planned (the Linux profile):
+  your `~/.claude` and `~/.claude.json` closed to tarae's claude. macOS is unchanged.
+  test: `claudehome::tests::claudes_folder_is_made_through_no_link` ·
+  `claudehome::tests::every_claude_on_linux_has_taraes_folder_and_no_user_settings` ·
+  `claudehome::tests::claude_login_is_claudes_own_login_in_taraes_folder` ·
+  `claudehome::tests::no_login_says_claude_login_once` · `editor::tests::a_conversation_continues_after_a_restart`
 - **It doesn't update itself** from tarae: its updater writes a folder of programs on your `PATH`, closed to it;
   every claude tarae starts gets `DISABLE_UPDATES`. `:claude-update` runs `claude update` as your own task, outside
   the sandbox; the chat says once when the claude it runs was installed over two weeks ago (without the network
@@ -580,9 +599,15 @@ Not kept:
   the fsmonitor — while a plain `git status` in the same repository runs it (the control). Another version, or another git command of claude's, could; a clone doesn't bring `.git/config`
   and Claude's runs can't write `.git`, but a checkout that came whole (an archive with its `.git`) can. On macOS
   what such a command does is confined as claude is (it inherits the profile).
-- **Your own Claude settings apply.** `--setting-sources user,…` loads `~/.claude/settings.json`: an `allow` rule
-  of yours for Read would let reads go unasked (only a project's are held; not measured), and your plugins load
-  (measured: marked in use).
+- **Your own Claude settings apply** (macOS). `--setting-sources user,…` loads `~/.claude/settings.json`: an
+  `allow` rule of yours for Read would let reads go unasked (only a project's are held; not measured), and your
+  plugins load (measured: marked in use). On Linux they don't: the user source is off.
+- **A settings file in claude's temp folder.** claude 2.1.296 looks up `/tmp/claude-<uid>/claude-settings-<hash>.json`
+  as it starts (on Linux it stats and resolves it — `openat O_PATH`, `readlink` — but never reads it). Measured
+  (Linux, two runs; macOS, one turn): one planted there — `"permissions": {"allow": ["Edit", "Write"]}` and a model
+  of its own — wasn't applied: Edit and Write still asked, and the API was asked for tarae's model. On macOS the
+  lookup itself isn't confirmed (Seatbelt doesn't report claude's lookups). What's left: another version could
+  read it, and Claude's runs can write that folder (temp is theirs).
 - **The `env` window**: a variable a `git pull` adds to `.claude/settings.json` can reach claude's next request
   before tarae's watch stops it (at most about half a second).
 - **The network**: claude reaches whatever it reaches. tarae doesn't proxy it: it must reach Anthropic, or your

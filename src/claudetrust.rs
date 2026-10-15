@@ -527,8 +527,12 @@ impl Places {
 }
 
 /// Your own Claude settings file — `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json` (Claude
-/// Code's settings docs). Only its command keys and `env` are read, for `Baseline`.
-pub fn user_settings() -> Option<PathBuf> {
+/// Code's settings docs). Only its command keys and `env` are read, for `Baseline`. None on Linux: tarae's claudes
+/// load no user settings there (`claudehome::sources`), so yours set nothing a hold-back may leave to them.
+pub fn user_settings(os: crate::sandbox::Os) -> Option<PathBuf> {
+    if os == crate::sandbox::Os::Linux {
+        return None;
+    }
     match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
         Some(d) => Some(PathBuf::from(d).join("settings.json")),
         None => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude/settings.json")),

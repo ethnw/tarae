@@ -3777,12 +3777,12 @@ fn cache_marked(dir: &Unlinked, marks: &crate::builds::Marks) -> Result<(), Stri
 }
 
 /// `name` as C wants it.
-fn c_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString, String> {
+pub(crate) fn c_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString, String> {
     std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| format!("{name:?}: a NUL in it"))
 }
 
 /// Folder `c` in `fd` (or `AT_FDCWD`) opened — Err when it's a link (`O_NOFOLLOW`) or no folder.
-fn open_dir_at(fd: libc::c_int, c: &std::ffi::CStr) -> io::Result<std::os::fd::OwnedFd> {
+pub(crate) fn open_dir_at(fd: libc::c_int, c: &std::ffi::CStr) -> io::Result<std::os::fd::OwnedFd> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: a folder descriptor of ours (or the cwd's) and a name, live for the call.
     let got = unsafe { libc::openat(fd, c.as_ptr(), flags) };

@@ -1156,6 +1156,26 @@ fn ensure_proc(ed: &mut Editor) {
 /// unconfined (`llm.claude-sandbox` off, tests, not macOS, no Seatbelt here: said once a chat); None while it's
 /// made on a worker — the chat starts once it is (`gate_opened`). Each process gets a tag of its own.
 fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox::claude::Profile>> {
+    // On Linux claude's own folder first (`claudehome.rs`), made on a worker — it starts once it is
+    let os = crate::sandbox::Os::HOST;
+    if !crate::claudehome::ready(os, ed.claude_env.as_ref()) {
+        let given = ed.claude_env.clone();
+        let c = ed.session.chat.as_mut()?;
+        if !c.confine.making {
+            c.confine.making = true;
+            ed.events.jobs().spawn(move || {
+                // (a failure is the spawn's to say)
+                let _ = crate::claudehome::make(os, given.as_ref());
+                move |ed: &mut Editor| {
+                    if let Some(c) = ed.session.chat.as_mut() {
+                        c.confine.making = false;
+                    }
+                    gate_opened(ed);
+                }
+            });
+        }
+        return None;
+    }
     let wanted = ed.claude_confine && cfg!(target_os = "macos");
     let off = !ed.config.llm.claude_sandbox;
     let root = ed.session.root.clone();
@@ -1565,17 +1585,30 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             c.calls.clear();
             // (a refusal for money read in the turn this exit cut off is that turn's alone)
             c.money = None;
-            // The conversation is gone from claude: a fresh one, the rows still shown
+            // The conversation is gone from claude (on Linux, one from before tarae's claudes had a folder of their
+            // own — `claudehome.rs`): a fresh one, the rows still shown, said once — and a message sent to the
+            // process that couldn't resume goes again, to the new one
             if err.contains("No conversation found") && c.resume.is_some() {
                 c.resume = None;
                 c.conversation = None;
-                c.state = State::Idle;
+                let unanswered = match std::mem::replace(&mut c.state, State::Idle) {
+                    State::Idle => None,
+                    _ => c.msgs.iter().rposition(|m| m.role == Role::User),
+                };
+                if let Some(at) = unanswered {
+                    let q = c.msgs.remove(at).text;
+                    c.queued = Some(match c.queued.take() {
+                        Some(later) => format!("{q}\n\n{later}"),
+                        None => q,
+                    });
+                }
                 c.msgs.push(Msg::new(
                     Role::Note,
                     "Claude no longer has this conversation — a new one starts",
                     "",
                 ));
-                return ensure_proc(ed);
+                ensure_proc(ed);
+                return send_queued(ed);
             }
             // An older claude without the flag: quietly again without it
             if err.contains("thinking-display") && !c.no_thought_flag {

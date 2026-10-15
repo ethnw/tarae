@@ -20,6 +20,8 @@
 //! - `trace [offcpu|syscalls|pty] [scenario …]`, `trace test` — tarae measured with eBPF on Linux, in a
 //!   container: off-CPU time by stack, the syscall mix, terminal write latency, over perf scenarios (see
 //!   [`trace`]).
+//! - `claude-stub serve|drive|summary` — what the `claude` program touches, measured against a fake API: the
+//!   stub, tarae's side of claude's pipes, an strace log by folder (see [`claudestub`]; `target/sb/v1b-linux.sh`).
 
 // (clippy.toml's sort rule is for the tarae binary's size: these tasks aren't in it)
 #![allow(clippy::disallowed_methods, reason = "dev tasks: not in the release binary")]
@@ -29,6 +31,7 @@ use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod claudestub;
 mod deb;
 mod linux;
 mod perf;
@@ -54,8 +57,9 @@ fn main() {
         Some("deb") => deb::run(&args[1..]),
         Some("stream") => stream::run(&args[1..]),
         Some("trace") => trace::run(&args[1..]),
+        Some("claude-stub") => claudestub::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary"
                 .into(),
         ),
     };
