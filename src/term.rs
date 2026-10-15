@@ -23,6 +23,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::cut::{fit, fit_ellipsis};
 
 use crate::chrome::Keys;
+use crate::codeview::{Changes, Shows, Source};
 use crate::config::{CursorShape, LineNumber};
 use crate::editor::{Editor, Mode};
 use crate::event::Event;
@@ -539,7 +540,8 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     // Per pane, screen row → doc line (for the mouse); the focused pane's also goes into editor.view
     let (mut screen_panes, mut pane_docs) = (Vec::new(), Vec::new());
     for (id, r, pl, idx, top, left, focused) in panes(editor, &lay) {
-        let view = build_view(editor, &editor.docs[idx], top, focused, &pl);
+        let doc = &editor.docs[idx];
+        let view = rows_pane(editor, doc, top, &Shows::pane(editor, doc, focused, left), &pl);
         screen_panes.push((id, r, pl.gutter, view.iter().map(|v| v.origin(left)).collect()));
         pane_docs.push(editor.docs[idx].id);
         if focused {
@@ -754,8 +756,8 @@ impl Layout {
     }
 }
 
-/// Panes: (view, rect, pane layout, doc index, (top line, its rows above the pane), h-scroll, focused?). Left first (clearing to line
-/// end wipes the pane to its right, so left goes first). One window = one pane as before (no title row).
+/// Panes: (view, rect, pane layout, doc index, (top line, its rows above the pane), h-scroll, focused?), left
+/// first. One window = one pane as before (no title row).
 #[allow(clippy::type_complexity)]
 fn panes(
     editor: &Editor,
@@ -2457,22 +2459,23 @@ fn draw_panes(
     for (_, r, pl, idx, top, left, focused) in &ps {
         let _fade = Fade::unless(keys.code() && *focused, ui);
         let doc = &editor.docs[*idx];
+        let shows = Shows::pane(editor, doc, *focused, *left);
         let own;
         let view = if *focused {
             &editor.view
         } else {
-            own = build_view(editor, doc, *top, false, pl);
+            own = rows_pane(editor, doc, *top, &shows, pl);
             &own
         };
         if many {
             draw_pane_title(editor, doc, *r, *focused, ui, out)?;
         }
-        let c = draw_text(editor, doc, top.0, *left, *focused, view, ui, pl, out)?;
+        let c = draw_text(editor, &Source::of(doc), top.0, &shows, view, ui, pl, out)?;
         if *focused {
             cursor = c;
         }
     }
-    // Dividers between side-by-side panes (plain line at title-row height, no ┬) — last (after left clears)
+    // Dividers between side-by-side panes (plain line at title-row height, no ┬) — last
     // In the theme's `ui.window` (Helix's key for them), else faint
     let window = editor.theme.try_get("ui.window").and_then(|s| s.fg).or(ui.linenr.fg);
     let faint = Style { fg: window, ..ui.base };
@@ -2924,13 +2927,21 @@ fn undercurl_supported() -> bool {
     })
 }
 
+/// A code row's ground: the pane's width from its left edge in `st`'s background (blank cells, as an erase leaves
+/// them), the cursor back at the edge — the row draws over it and leaves what's beside the pane alone.
+fn ground(out: &mut impl Write, lay: &Layout, y: u16, st: Style) -> io::Result<()> {
+    apply(out, Style { bg: st.bg, ..Style::default() })?;
+    let x = lay.x0 as u16;
+    queue!(out, MoveTo(x, y), Spaces(lay.edit_w.saturating_sub(lay.x0)), MoveTo(x, y))
+}
+
 /// Clear the rest of the line with the default style (background).
 fn clear_rest(out: &mut impl Write, base: Style) -> io::Result<()> {
     apply(out, base)?;
     queue!(out, Clear(ClearType::UntilNewLine))
 }
 
-fn cursor_shape(editor: &Editor) -> CursorShape {
+pub(crate) fn cursor_shape(editor: &Editor) -> CursorShape {
     let (n, i, s) = editor.config.cursor_shape;
     match editor.mode {
         Mode::Normal => n,
@@ -3123,10 +3134,9 @@ fn draw(
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     editor: &Editor,
-    doc: &crate::document::Document,
+    src: &Source,
     top: usize,
-    left: usize,
-    focused: bool,
+    shows: &Shows,
     view: &[crate::codeview::Row],
     ui: &Ui,
     lay: &Layout,
@@ -3136,11 +3146,11 @@ fn draw_text(
     let cursor_diags_shown = &ui.cursor_diags_shown;
     // Unfocused panes are toned down a step (dim attribute — set on the line bg, all text inherits it)
     let ui = &Ui {
-        base: Style { dim: !focused, ..ui.base },
-        linenr: Style { dim: !focused, ..ui.linenr },
+        base: Style { dim: !shows.focused, ..ui.base },
+        linenr: Style { dim: !shows.focused, ..ui.linenr },
         ..ui.clone()
     };
-    let text = &doc.text;
+    let (doc, text) = (src.doc, src.text);
     let len = text.len_bytes();
     let tab = editor.config.tab_width;
     let sel = doc.selection();
@@ -3150,9 +3160,8 @@ fn draw_text(
     let max_line = mv::last_line(text).max(cur_line);
     // Screen row → doc line (not 1:1: folded doc-comment blocks). Per-line tables index by "Nth row from top"
     let span = view.iter().map(|v| v.last_line()).max().map_or(1, |m| m + 1 - top.min(m)).max(1);
-    let paint_primary = focused && editor.mode != Mode::Insert && cursor_shape(editor) == CursorShape::Block;
     // Syntax highlight: capture name → theme style once per frame (hundreds of lookups, µs).
-    let syntax = doc.syntax.as_ref().filter(|s| s.tree.is_some());
+    let syntax = src.syntax;
     let capture_styles = editor.theme.capture_styles();
     let mut qcursor = QueryCursor::new();
     let mut cursor = None;
@@ -3175,7 +3184,7 @@ fn draw_text(
     // End-of-line message (Error Lens): 1st line of the most severe diagnostic starting on that line + N more
     // + whether that line is all of its message
     let mut line_message: Vec<Option<(u8, &str, usize, bool)>> = vec![None; span];
-    if editor.config.inline_diagnostics {
+    if shows.messages {
         for d in &visible_diags {
             let Some(slot) = mv::line_of(text, d.from).checked_sub(top).and_then(|r| line_message.get_mut(r))
             else {
@@ -3295,7 +3304,7 @@ fn draw_text(
         editor.theme.try_get("ui.virtual.inlay-hint").unwrap_or(Style { fg: ui.virt.fg, ..Style::default() }),
     );
     let wrapping = editor.wraps(doc);
-    let hints: &[crate::lsp::InlayHint] = if editor.config.inlay_hints && left == 0 {
+    let hints: &[crate::lsp::InlayHint] = if shows.inlay {
         let h = &doc.lsp.inlay;
         &h[h.partition_point(|x| x.pos < vis_from)..h.partition_point(|x| x.pos <= vis_to)]
     } else {
@@ -3329,7 +3338,7 @@ fn draw_text(
     // `gw` labels: label char per position (after the first key, only the matching labels' second char);
     // the rest of the text steps back so they stand out
     let mut label_cells: std::collections::HashMap<usize, char> = std::collections::HashMap::new();
-    let labels_on = match editor.jump_labels.as_ref().filter(|l| focused && l.doc == doc.id) {
+    let labels_on = match editor.jump_labels.as_ref().filter(|l| shows.focused && l.doc == doc.id) {
         Some(l) => {
             for (i, &(s, _)) in l.targets.iter().enumerate() {
                 let (a, b) = crate::labels::Labels::label(i);
@@ -3362,7 +3371,7 @@ fn draw_text(
     let gaze_bg = blend(ui.accent.fg, ui.tint, 0.09).or(ui.base.bg);
     // Code review: added and changed lines on a green wash; removed ones are rows of their own (red) — and
     // so an edit of Claude's that follow or replay shows
-    let reviewing = doc.review_base.is_some();
+    let reviewing = shows.changes == Changes::Base;
     let added_bg = blend(ui.diff_plus.fg, ui.tint, 0.10).or(ui.base.bg);
     let removed_bg = blend(ui.diff_minus.fg, ui.tint, 0.14).or(ui.base.bg);
     let added = |line: usize| {
@@ -3416,7 +3425,7 @@ fn draw_text(
         .try_get("ui.virtual.indent-guide")
         .map(|s| Style { bg: None, ..s })
         .unwrap_or(Style { fg: ui.linenr.fg, ..Style::default() });
-    let depths: Vec<usize> = if editor.config.indent_guides && left == 0 {
+    let depths: Vec<usize> = if shows.guides {
         let first = top.saturating_sub(40);
         let last = (top + span + 40).min(max_line);
         let raw: Vec<Option<usize>> = (first..=last).map(|l| line_indent(text, l, tab)).collect();
@@ -3475,24 +3484,25 @@ fn draw_text(
     });
     let active_guide_style = Style { fg: ui.virt.fg, ..Style::default() };
     let signs = lay.gutter - num_w(doc);
+    // (each row takes its ground across the pane first — `ground` — and draws over it)
     for row in 0..lay.text_rows {
         let y = lay.text_top + row as u16;
-        queue!(out, MoveTo(lay.x0 as u16, y))?;
         let line = match view.get(row) {
             None => {
-                clear_rest(out, ui.base)?;
+                ground(out, lay, y, ui.base)?;
                 continue;
             }
             // Folded doc comment: line number only on the block's first row; git sign if any in the block
             Some(crate::codeview::Row::Doc { start, end, indent, index, spans, code }) => {
+                ground(out, lay, y, ui.base)?;
                 apply(out, ui.base)?;
                 queue!(out, Spaces(signs))?;
                 // Cursor inside a folded block (normal mode): current-line number color, accent bar
                 let here = (*start..=*end).contains(&cur_line);
-                apply(out, if focused && here { ui.linenr_selected } else { ui.linenr })?;
+                apply(out, if shows.focused && here { ui.linenr_selected } else { ui.linenr })?;
                 let w = lay.gutter - 1 - signs;
                 if *index == 0 {
-                    let num = match editor.config.line_number {
+                    let num = match shows.numbers {
                         LineNumber::Relative if !here => start.abs_diff(cur_line),
                         _ => start + 1,
                     };
@@ -3517,23 +3527,23 @@ fn draw_text(
                     *indent,
                     spans,
                     *code,
-                    focused && here,
+                    shows.focused && here,
                     labels_on,
                     None,
                 )?;
-                clear_rest(out, ui.base)?;
                 continue;
             }
             // A line the review's base had here: `−` where the number goes (the old numbers would read as
             // the new ones — or clash with relative numbers), its text in the language's colors
             Some(crate::codeview::Row::Other { text: gone, .. }) => {
                 let base = Style { bg: removed_bg, ..ui.base };
+                ground(out, lay, y, base)?;
                 apply(out, base)?;
                 queue!(out, Spaces(lay.gutter - 1))?;
                 apply(out, Style { fg: ui.diff_minus.fg, bold: true, ..base })?;
                 queue!(out, Print("−"))?;
                 let gone = gone.replace('\t', &" ".repeat(tab));
-                let (mut skip, mut room) = (left, lay.text_cols);
+                let (mut skip, mut room) = (shows.left, lay.text_cols);
                 for l in crate::markdown::code_lines(&gone, code_lang.as_deref(), &editor.theme) {
                     let crate::markdown::Line::Code(spans) = l else { continue };
                     for sp in spans {
@@ -3555,7 +3565,6 @@ fn draw_text(
                         queue!(out, Print(&piece))?;
                     }
                 }
-                clear_rest(out, base)?;
                 continue;
             }
             Some(crate::codeview::Row::Text { line, part }) => {
@@ -3566,7 +3575,7 @@ fn draw_text(
         // This row's slice of the line: display columns [row_left, row_end), drawn from screen x `x0`
         let (row_left, row_end, x0, first, last) = match part {
             Some((r, index, last)) => (r.col, r.end_col, r.x0, index == 0, last),
-            None => (left, usize::MAX, 0, true, true),
+            None => (shows.left, usize::MAX, 0, true, true),
         };
         let li = line - top;
         let depth = depths.get(li).copied().unwrap_or(0);
@@ -3575,10 +3584,31 @@ fn draw_text(
             if active { active_guide_style } else { guide_style }
         };
         if line > max_line {
-            clear_rest(out, ui.base)?;
+            ground(out, lay, y, ui.base)?;
             continue;
         }
-        let num = match editor.config.line_number {
+        // Current-line highlight: this line's background = ui.cursorline.primary over the default
+        let line_message_here = line_message.get(li).copied().flatten();
+        let line_base = if stop_line == Some(line) {
+            // Stopped line: accent band (takes precedence over the cursor line)
+            Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
+        } else if shows.cursorline && line == cur_line {
+            ui.cursorline
+        } else if let Some(st) = conflict_bg(line) {
+            st
+        } else {
+            // Error/warning lines get a very faint wash of that color — so problems stand out when skimming
+            match line_message_here {
+                Some((sev @ 1..=2, ..)) => {
+                    Style { bg: blend(ui.sign[sev as usize].fg, ui.tint, 0.07).or(ui.base.bg), ..ui.base }
+                }
+                _ if gaze.as_ref().is_some_and(|g| g.contains(&line)) => Style { bg: gaze_bg, ..ui.base },
+                _ if added(line) => Style { bg: added_bg, ..ui.base },
+                _ => ui.base,
+            }
+        };
+        ground(out, lay, y, line_base)?;
+        let num = match shows.numbers {
             LineNumber::Relative if line != cur_line => line.abs_diff(cur_line),
             _ => line + 1,
         };
@@ -3614,7 +3644,7 @@ fn draw_text(
             }
         }
         if first || cut {
-            apply(out, if focused && line == cur_line { ui.linenr_selected } else { ui.linenr })?;
+            apply(out, if shows.focused && line == cur_line { ui.linenr_selected } else { ui.linenr })?;
             let w = lay.gutter - 1 - signs;
             // (`↑` where there's room for it: digits and arrow one cell each)
             let num = match cut && num.to_string().len() < w {
@@ -3632,27 +3662,6 @@ fn draw_text(
             }
             None => queue!(out, Print(" "))?,
         }
-
-        // Current-line highlight: this line's background = ui.cursorline.primary over the default
-        let line_message_here = line_message.get(li).copied().flatten();
-        let line_base = if stop_line == Some(line) {
-            // Stopped line: accent band (takes precedence over the cursor line)
-            Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
-        } else if focused && editor.config.cursorline && line == cur_line {
-            ui.cursorline
-        } else if let Some(st) = conflict_bg(line) {
-            st
-        } else {
-            // Error/warning lines get a very faint wash of that color — so problems stand out when skimming
-            match line_message_here {
-                Some((sev @ 1..=2, ..)) => {
-                    Style { bg: blend(ui.sign[sev as usize].fg, ui.tint, 0.07).or(ui.base.bg), ..ui.base }
-                }
-                _ if gaze.as_ref().is_some_and(|g| g.contains(&line)) => Style { bg: gaze_bg, ..ui.base },
-                _ if added(line) => Style { bg: added_bg, ..ui.base },
-                _ => ui.base,
-            }
-        };
         // A wrapped line's row is read from its own start (a long paragraph isn't re-read from its head for
         // each of its rows); the rest from the line's
         let (start, col0) = match part {
@@ -3783,7 +3792,7 @@ fn draw_text(
                 st = st.patch(if i == primary_idx { ui.selection_primary } else { ui.selection });
             }
             match hit {
-                Some(i) if i == primary_idx && paint_primary => st = st.patch(ui.cursor_primary),
+                Some(i) if i == primary_idx && shows.primary => st = st.patch(ui.cursor_primary),
                 Some(i) if i != primary_idx => st = st.patch(ui.cursor),
                 _ => {}
             }
@@ -4021,7 +4030,7 @@ fn draw_text(
                 };
                 let more = if more > 0 { format!("  +{more}") } else { String::new() };
                 let body = fit_ellipsis(msg, room.saturating_sub(2 + more.width()));
-                if focused && line == cur_line && whole && more.is_empty() && body == msg {
+                if shows.focused && line == cur_line && whole && more.is_empty() && body == msg {
                     cursor_diags_shown.set(true);
                 }
                 apply(out, line_base)?;
@@ -4077,8 +4086,7 @@ fn draw_text(
         }
         // Blame (`b` in the git tab): who changed the cursor line, when, and why — faint, only where the line end is
         // free (a diagnostic or debugger values take it first), and not while typing
-        if focused
-            && editor.mode != Mode::Insert
+        if shows.blame
             && line == cur_line
             && last
             && !clipped
@@ -4096,7 +4104,6 @@ fn draw_text(
                 queue!(out, Print("   "), Print(fit_ellipsis(&b, room)))?;
             }
         }
-        clear_rest(out, line_base)?;
     }
     if lay.scrollbar {
         draw_scrollbar(doc, top, ui, lay, out)?;
@@ -4137,11 +4144,11 @@ pub fn removed_above(doc: &crate::document::Document, line: usize) -> usize {
 /// Screen rows: doc lines in order, but doc-comment blocks without cursor/selection are **folded** (text
 /// rewrapped to width, no blank lines/fences) into fewer rows. Once the cursor enters, it unfolds to raw.
 /// Detection looks up to 200 lines above/below the screen (so a `/** */` block starting off-screen connects).
-fn build_view(
+fn rows_pane(
     editor: &Editor,
     doc: &crate::document::Document,
     (top, top_skip): (usize, usize),
-    focused: bool,
+    shows: &Shows,
     lay: &Layout,
 ) -> Vec<crate::codeview::Row> {
     use crate::codeview::{Part, Row};
@@ -4181,7 +4188,7 @@ fn build_view(
     };
     // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded (raw
     // text), and the line after the last can have some too
-    let reviewing = doc.review_base.is_some() || doc.shown.is_some();
+    let reviewing = shows.changes != Changes::Index;
     let end = max_line + usize::from(reviewing);
     let folding = editor.doc_comments_render(lang);
     // Find blocks: runs of consecutive doc-comment lines within [w0, w1]
@@ -4212,10 +4219,9 @@ fn build_view(
     // The blocks that show folded here (`Editor::doc_block_folded`: the one rule — a block being edited or
     // selected, or with a change shown in or beside it, stays raw). Horizontal scroll leaves them be: a folded
     // block is flowed to the width, so it has nothing to scroll — only the code lines move
-    let editing = editor.editing_in(focused);
     let blocks: Vec<_> = crate::doccomment::blocks(text, w0..=w1)
         .into_iter()
-        .filter(|b| editor.doc_block_closed(doc, editing, (b.start, b.end)))
+        .filter(|b| editor.doc_block_closed(doc, shows.editing, (b.start, b.end)))
         .collect();
     let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
     let mut view = Vec::with_capacity(rows);
