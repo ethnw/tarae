@@ -2515,6 +2515,137 @@ fn snapshot_edit_review_doc_comments() {
     s.frames_both("edit_review_doc_comments");
 }
 
+/// Claude's edit under review shows the file as the editor does (#9): a breakpoint in the sign column, a
+/// diagnostic at its line's end, indent guides on its document's rows — and a proposed line's tab at the
+/// document's tab stops (#5: it was four spaces wherever it stood). With `TARAE_FRAMES_DIR` set, the frame in
+/// both themes (`target/sb/shots-step6.sh` draws them).
+#[test]
+fn the_edit_review_shows_the_file_as_the_editor_does() {
+    let mut s = Shot::new(100, 24);
+    let text = "/// Runs it, **once**: `go` then `done`.\nfn main() {\n    if ready {\n        go();\n    }\n    let a = 1;\n    \
+                done();\n}\n";
+    let id = s.file("src/demo.rs", text);
+    let path = s.root.join("src/demo.rs");
+    s.ed.breakpoints.entry(path).or_default().insert(2, Default::default());
+    let rope = Rope::from_str(text);
+    let at = |line: usize| rope.line_to_byte(line);
+    s.ed.doc_mut().lsp.diagnostics.push(crate::lsp::Diagnostic {
+        from: at(6) + 4,
+        to: at(6) + 10,
+        severity: 2,
+        message: "never read".into(),
+        raw: serde_json::Value::Null,
+        source: Default::default(),
+    });
+    let hunk = crate::llm::Hunk {
+        from: at(5),
+        to: at(6),
+        old: "    let a = 1;\n".into(),
+        new: "    let a\t= 1;\n".into(),
+        decision: crate::llm::Decision::Undecided,
+        conflict: false,
+    };
+    let mut rev = crate::llm::Review::new(1, id, "tab it", vec![hunk]);
+    (rev.ready, rev.follow) = (true, false);
+    s.ed.session.review = Some(rev);
+    let shown = screen_text(&mut s);
+    let row = |has: &str| shown.lines().find(|l| l.contains(has)).unwrap_or_default().to_string();
+    let mut missing = Vec::new();
+    if !row("if ready").starts_with("● 3") {
+        missing.push("the breakpoint's ● before line 3's number");
+    }
+    if !row("done();").contains("▲ never read") {
+        missing.push("the diagnostic at its line's end");
+    }
+    if !row("go();").contains("│   go();") {
+        missing.push("the indent guide");
+    }
+    if !shown.contains("let a   = 1;") || shown.contains("let a    = 1;") {
+        missing.push("the proposed line's tab at the tab stop");
+    }
+    assert!(missing.is_empty(), "missing: {missing:?}\n{shown}");
+    s.frames_both("edit_review_file");
+}
+
+/// The edit review has no cursor: a selection and several cursors on the rows it shows paint nothing, and no
+/// line's number is marked as the cursor's — the frame is the one drawn with the cursor off screen.
+#[test]
+fn the_edit_review_shows_none_of_the_documents_selection() {
+    use crate::selection::{Range, Selection};
+    let text: String = (0..30).map(|i| format!("line {i}\n")).collect();
+    let frame = |sel: Selection| {
+        let mut s = Shot::new(100, 24);
+        let id = s.file("a.txt", &text);
+        let rope = Rope::from_str(&text);
+        let (from, to) = (rope.line_to_byte(10), rope.line_to_byte(11));
+        let hunk = crate::llm::Hunk {
+            from,
+            to,
+            old: "line 10\n".into(),
+            new: "line ten\n".into(),
+            decision: crate::llm::Decision::Undecided,
+            conflict: false,
+        };
+        let mut rev = crate::llm::Review::new(1, id, "spell it", vec![hunk]);
+        (rev.ready, rev.follow) = (true, false);
+        s.ed.session.review = Some(rev);
+        s.ed.doc_mut().set_selection(sel);
+        let p = cells(&s.frame(), s.w, s.h);
+        // (the status line says where the cursor is: left out)
+        let mut all = Vec::new();
+        for y in 0..s.h - 1 {
+            for x in 0..s.w {
+                let c = p.screen().cell(y, x).unwrap();
+                all.push((y, x, c.contents().to_string(), c.fgcolor(), c.bgcolor(), c.bold(), c.inverse()));
+            }
+        }
+        (all, p.screen().contents())
+    };
+    // Lines 2–5: a range, a wider one (the primary), a character, a cursor — against one cursor on line 29
+    let at = |line: usize, col: usize| line * 7 + col;
+    let ranges =
+        vec![Range::new(at(2, 0), at(2, 4)), Range::new(at(3, 1), at(4, 3)), Range::new(at(5, 2), at(5, 3))];
+    let many = Selection::new([ranges, vec![Range::point(at(5, 5))]].concat(), 1);
+    let (with, shown) = frame(many);
+    let (without, _) = frame(Selection::point(text.len() - 3));
+    assert!(shown.contains("line 3") && shown.contains("line ten"), "{shown}");
+    let differ: Vec<_> = with.iter().zip(&without).filter(|(a, b)| a != b).map(|(a, _)| (a.0, a.1)).collect();
+    assert!(differ.is_empty(), "cells differ at {differ:?}\n{shown}");
+}
+
+/// A control character in a row that isn't the document's is shown as `�`, as in a line of the document — a code
+/// review's removed row and an edit review's proposed one (they went to the screen as is, and it blanked them).
+#[test]
+fn a_control_character_in_a_row_not_the_documents_shows_as_a_replacement() {
+    let mut s = Shot::new(100, 12);
+    s.file("a.txt", "one\nthree\n");
+    let d = s.ed.doc_mut();
+    d.review_base = Some(Rope::from_str("one\nt\u{7}wo\nthree\n"));
+    d.git_hunks =
+        vec![crate::git::Hunk { kind: crate::git::HunkKind::Deleted, lines: 1..1, removed: 1, base: 1..2 }];
+    // (read from the frame's bytes: vt100 drops a `�` it's given)
+    let has = |frame: &[u8], s: &str| frame.windows(s.len()).any(|w| w == s.as_bytes());
+    let removed = s.frame();
+
+    let mut s = Shot::new(100, 12);
+    let id = s.file("b.txt", "one\ntwo\n");
+    let hunk = crate::llm::Hunk {
+        from: 4,
+        to: 8,
+        old: "two\n".into(),
+        new: "t\u{7}wo!\n".into(),
+        decision: crate::llm::Decision::Undecided,
+        conflict: false,
+    };
+    let mut rev = crate::llm::Review::new(1, id, "bell it", vec![hunk]);
+    (rev.ready, rev.follow) = (true, false);
+    s.ed.session.review = Some(rev);
+    let proposed = s.frame();
+    let text = |f: &[u8]| String::from_utf8_lossy(f).into_owned();
+    assert!(has(&removed, "t\u{fffd}wo"), "the removed row: {}", text(&removed));
+    assert!(has(&proposed, "t\u{fffd}wo!"), "the proposed row: {}", text(&proposed));
+}
+
 /// Frictions 13, #1: a turn's review says it's the last turn, and under its question what it leaves out —
 /// `9 more differ from HEAD · space v v` on one row where the rail is wide enough, the key on its own row
 /// where it isn't; the files and the key hints still in sight under it.

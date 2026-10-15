@@ -1201,7 +1201,7 @@ fn show_labels(cx: &mut Context, extend: bool) {
         .iter()
         .filter_map(|v| match v {
             Row::Text { line, .. } => Some(*line),
-            Row::Doc { .. } | Row::Other { .. } => None, // not the text's own words
+            Row::Doc { .. } | Row::Other { .. } | Row::Header { .. } => None, // not the text's own words
         })
         .collect();
     lines.dedup();

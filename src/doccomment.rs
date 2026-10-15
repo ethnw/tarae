@@ -100,7 +100,7 @@ pub struct Folded {
     pub start: usize,
     pub end: usize,
     pub indent: usize,
-    pub rows: Vec<(Vec<crate::markdown::Span>, bool)>,
+    pub rows: Vec<(crate::codeview::Spans, bool)>,
 }
 
 /// Every doc comment block of a document laid out folded, for `key` = (document, version, width, theme, the
@@ -109,14 +109,6 @@ pub struct Folds {
     pub key: (crate::document::DocId, u64, usize, String, Option<String>),
     /// In order of their lines.
     pub blocks: Vec<Folded>,
-}
-
-impl Folds {
-    /// The block holding `line`.
-    pub fn at(&self, line: usize) -> Option<&Folded> {
-        let b = self.blocks.get(self.blocks.partition_point(|b| b.end < line))?;
-        (b.start <= line).then_some(b)
-    }
 }
 
 /// The doc comment blocks among `lines` (`scan` over them: start it far enough above to join a `/** */`).

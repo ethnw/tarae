@@ -3,17 +3,17 @@
 00  tarae  ›  src  ›  demo.rs  ›  ƒ main
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02  ▎ Claude  src/demo.rs   “show the text too”                                         0 of 1 decided
-03  11       counts
-04  12   }
+03  11     counts
+04  12 }
 05  13
-06  14   fn main() {
-07  15       let text = "the quick brown fox jumps over the lazy dog";
-08  16       let counts = word_counts(text);
-09     ▎ Change 1 of 1 · line 17   y accept   n reject   esc back, unanswered
-10  17 −     println!("{} distinct words", counts.len()); // 타래
-11     ▎     println!("{} distinct words in {:?}", counts.len(), text);
-12  18   }
-13  19
+06  14 fn main() {
+07  15     let text = "the quick brown fox jumps over the lazy dog";
+08  16     let counts = word_counts(text);
+09    ▎ Change 1 of 1 · line 17   y accept   n reject   esc back, unanswered
+10  17−    println!("{} distinct words", counts.len()); // 타래
+11    ▎    println!("{} distinct words in {:?}", counts.len(), text);
+12  18 }
+13
 14
 15
 16
@@ -69,13 +69,13 @@
 04  ff
 05  ff
 06  ff
-07  ff                  gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+07  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
 08  ff
-09     a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd   AAA ddddd dddddddddd
-10  ff E              ggg gggggggg gggggg
-11     g              ggg gggggggg ggggg gg ggggg
+09    a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd   AAA ddddd dddddddddd
+10  ffE             ggg gggggggg gggggg
+11    g             ggg gggggggg ggggg gg ggggg
 12  ff
-13  ff
+13
 14
 15
 16

@@ -519,7 +519,13 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     let review_rows = editor.session.review.as_ref().filter(|r| r.ready).and_then(|rev| {
         let doc = editor.docs.iter().find(|d| d.id == rev.doc_id)?;
         let folds = review_folds(editor, doc, review_code_w(doc, &lay), cache);
-        Some((review_folded(editor, doc, rev.rows(&doc.text), folds.as_ref()), folds))
+        let rows = rev.rows(&doc.text);
+        // (the rule every place keeps — the review's keys aren't the code's: as in a pane without them)
+        let rows = match &folds {
+            Some(f) => crate::codeview::fold(rows, f, |a, b| editor.doc_block_closed(doc, false, (a, b))),
+            None => rows,
+        };
+        Some((rows, folds))
     });
     let review_rows = review_rows.map(|(rows, folds)| {
         if let Some(rev) = editor.session.review.as_mut() {
@@ -531,7 +537,9 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         && let Some(rev) = editor.session.review.as_mut()
     {
         if rev.follow
-            && let Some(h) = rows.iter().position(|r| *r == crate::llm::RRow::Header(rev.current))
+            && let Some(h) = rows
+                .iter()
+                .position(|r| matches!(r, crate::codeview::Row::Header { hunk, .. } if *hunk == rev.current))
         {
             rev.scroll = h.saturating_sub(lay.text_rows.saturating_sub(1) / 4);
         }
@@ -2957,7 +2965,7 @@ fn draw(
     editor: &Editor,
     lay: &Layout,
     ui: &Ui,
-    review_rows: Option<&[crate::llm::RRow]>,
+    review_rows: Option<&[crate::codeview::Row]>,
     offer: Option<&OfferCard>,
     out: &mut Vec<u8>,
 ) -> io::Result<()> {
@@ -3146,6 +3154,8 @@ fn draw_text(
 ) -> io::Result<Option<(u16, u16)>> {
     // The frame's flag, not the copy's below
     let cursor_diags_shown = &ui.cursor_diags_shown;
+    // (the cursor line's number, its diagnostic, a folded block it's in, jump labels: where it has the keys)
+    let cur_shown = shows.focused && shows.cursor;
     // Unfocused panes are toned down a step (dim attribute — set on the line bg, all text inherits it)
     let ui = &Ui {
         base: Style { dim: !shows.focused, ..ui.base },
@@ -3173,7 +3183,8 @@ fn draw_text(
         (mv::line_start(text, top.min(max_line)), mv::line_full_end(text, last_row_line.max(1) - 1));
     // The ranges on screen — sorted and apart, so both their ends climb and a cell finds its range and cursor
     // by halving (with 20k cursors, looking through all of them per cell took a frame 20 ms)
-    let all = sel.ranges();
+    // (the edit review shows none: it has no cursor)
+    let all = if shows.cursor { sel.ranges() } else { &[] };
     let lo = all.partition_point(|r| r.to() < vis_from);
     let ranges = &all[lo..lo + all[lo..].partition_point(|r| r.from() <= vis_to)];
     // Cursor position once per frame (per cell, grapheme math would run cells × ranges times).
@@ -3340,7 +3351,7 @@ fn draw_text(
     // `gw` labels: label char per position (after the first key, only the matching labels' second char);
     // the rest of the text steps back so they stand out
     let mut label_cells: std::collections::HashMap<usize, char> = std::collections::HashMap::new();
-    let labels_on = match editor.jump_labels.as_ref().filter(|l| shows.focused && l.doc == doc.id) {
+    let labels_on = match editor.jump_labels.as_ref().filter(|l| cur_shown && l.doc == doc.id) {
         Some(l) => {
             for (i, &(s, _)) in l.targets.iter().enumerate() {
                 let (a, b) = crate::labels::Labels::label(i);
@@ -3455,7 +3466,8 @@ fn draw_text(
         vec![0; span]
     };
     // Guides of the block holding the cursor are a step brighter (that column, that line range)
-    let active_guide: Option<(usize, std::ops::Range<usize>)> = cur_line.checked_sub(top).and_then(|r| {
+    let active_guide = cur_line.checked_sub(top).filter(|_| shows.cursor);
+    let active_guide: Option<(usize, std::ops::Range<usize>)> = active_guide.and_then(|r| {
         let d = *depths.get(r)?;
         let next_deeper = (cur_line < max_line)
             .then(|| line_indent(text, cur_line + 1, tab))
@@ -3547,8 +3559,8 @@ fn draw_text(
                     queue!(out, Print(glyph))?;
                 }
                 // Cursor inside a folded block (normal mode): current-line number color, accent bar
-                let here = (*start..=*end).contains(&cur_line);
-                apply(out, if shows.focused && here { ui.linenr_selected } else { ui.linenr })?;
+                let here = cur_shown && (*start..=*end).contains(&cur_line);
+                apply(out, if here { ui.linenr_selected } else { ui.linenr })?;
                 let w = lay.gutter - 1 - signs;
                 if *index == 0 {
                     let num = match shows.numbers {
@@ -3577,27 +3589,50 @@ fn draw_text(
                     *indent,
                     spans,
                     *code,
-                    shows.focused && here,
+                    here,
                     labels_on,
                     None,
                 )?;
                 continue;
             }
-            // A line the review's base had here: `−` where the number goes (the old numbers would read as
-            // the new ones — or clash with relative numbers), its text in the language's colors
-            Some(crate::codeview::Row::Other { text: gone, base: from, part, .. }) => {
-                let base = Style { bg: removed_bg, ..ui.base };
+            // The edit review's change head: the review draws it over this row (`draw_review`)
+            Some(crate::codeview::Row::Header { .. }) => continue,
+            // A line that isn't the document's — one the review's base had here or a shown edit replaced, or one
+            // the edit under review proposes (or takes out or keeps, from the text it was asked on): its mark
+            // where the git bar goes, no number (the old numbers would read as the new ones — or clash with
+            // relative numbers), its text in the language's colors
+            Some(crate::codeview::Row::Other { text: gone, kind, part, .. }) => {
+                use crate::codeview::{Mark, OtherKind};
+                let (mark, from) = match kind {
+                    OtherKind::Gone { base } => (Mark::Taken, *base),
+                    OtherKind::Edit(e) => (e.mark, None),
+                };
+                let bg = match mark {
+                    Mark::Taken => removed_bg,
+                    // (decided, a proposed line keeps its bar and loses its wash)
+                    Mark::Added { washed: true } => added_bg,
+                    _ => ui.base.bg,
+                };
+                let base = Style { bg, ..ui.base };
                 ground(out, lay, y, base)?;
                 apply(out, base)?;
                 queue!(out, Spaces(lay.gutter - 1))?;
-                // (a wrapped one's `−` on its first row, as a line's number)
-                apply(out, Style { fg: ui.diff_minus.fg, bold: true, ..base })?;
-                queue!(out, Print(if part.is_none_or(|p| p.index == 0) { "−" } else { " " }))?;
+                // (a wrapped one's `−` on its first row, as a line's number; a proposed line's bar down all of
+                // its rows, as a line's git bar)
+                let (glyph, st) = match mark {
+                    Mark::Taken if part.is_none_or(|p| p.index == 0) => {
+                        ("−", Style { fg: ui.diff_minus.fg, bold: true, ..base })
+                    }
+                    Mark::Added { .. } => ("▎", Style { fg: ui.diff_plus.fg, ..base }),
+                    _ => (" ", base),
+                };
+                apply(out, st)?;
+                queue!(out, Print(glyph))?;
                 let (row_left, row_end, x0) = match part {
                     Some(p) => (p.row.col, p.row.end_col, p.row.x0),
                     None => (shows.left, usize::MAX, 0),
                 };
-                let paint = other_paint(doc, gone, *from, &mut qcursor);
+                let paint = other_paint(doc, gone, from, &mut qcursor);
                 apply(out, base)?;
                 queue!(out, Spaces(x0))?;
                 let mut room = lay.text_cols.saturating_sub(x0);
@@ -3615,16 +3650,20 @@ fn draw_text(
                     apply(out, base.patch(Style { bg: None, ..syn }))?;
                     match &gone[c.bytes.clone()] {
                         "\t" => queue!(out, Spaces(c.width))?,
+                        g if g.chars().next().is_some_and(char::is_control) => {
+                            queue!(out, Print('\u{fffd}'))?
+                        }
                         g => queue!(out, Print(g))?,
                     }
                 }
                 continue;
             }
-            Some(crate::codeview::Row::Text { line, part }) => {
-                (*line, part.map(|p| (p.row, p.index, p.last)))
+            Some(crate::codeview::Row::Text { line, part, edit }) => {
+                (*line, part.map(|p| (p.row, p.index, p.last)), *edit)
             }
         };
-        let (line, part) = line;
+        let (line, part, edit) = line;
+        let taken = edit.is_some_and(|e| e.mark == crate::codeview::Mark::Taken);
         // This row's slice of the line: display columns [row_left, row_end), drawn from screen x `x0`
         let (row_left, row_end, x0, first, last) = match part {
             Some((r, index, last)) => (r.col, r.end_col, r.x0, index == 0, last),
@@ -3648,6 +3687,9 @@ fn draw_text(
             Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
         } else if let Some(st) = conflict_bg(line) {
             st
+        } else if taken {
+            // A line the edit under review takes out
+            Style { bg: removed_bg, ..ui.base }
         } else if added(line) {
             // A change shown is never hidden by the cursor line: on it, its wash a step stronger
             Style { bg: if here { added_here_bg } else { added_bg }, ..ui.base }
@@ -3671,20 +3713,22 @@ fn draw_text(
         // The screen's first row inside a line it starts past (`top_rows`): the line's sign and number all the
         // same, `↑` before it — the line goes on above
         let cut = !first && row == 0;
+        // (a line the edit under review takes out is washed across its gutter too, as the lines it proposes are)
+        let gut = |st: Style| if taken { Style { bg: line_base.bg, ..st } } else { st };
         if !first && !cut {
             // Continuation row of a wrapped line: no sign or number
-            apply(out, ui.base)?;
+            apply(out, gut(ui.base))?;
             queue!(out, Spaces(lay.gutter - 1))?;
         } else if signs > 0 {
             // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
-            apply(out, ui.base)?;
+            apply(out, gut(ui.base))?;
             queue!(out, Spaces(signs - 1))?;
             let (glyph, st) = sign_of(line, line);
-            apply(out, st)?;
+            apply(out, gut(st))?;
             queue!(out, Print(glyph))?;
         }
         if first || cut {
-            apply(out, if shows.focused && line == cur_line { ui.linenr_selected } else { ui.linenr })?;
+            apply(out, gut(if cur_shown && line == cur_line { ui.linenr_selected } else { ui.linenr }))?;
             let w = lay.gutter - 1 - signs;
             // (`↑` where there's room for it: digits and arrow one cell each)
             let num = match cut && num.to_string().len() < w {
@@ -3694,8 +3738,14 @@ fn draw_text(
             queue!(out, Print(format!("{num:>w$}")))?;
         }
         // Between line number and text: git bar (added green · modified yellow · deleted red underline) —
-        // the bar runs down a wrapped line's rows, the underline goes under its last
-        match git_marks.get(li).copied().flatten().filter(|(g, _)| last || *g != "▁") {
+        // the bar runs down a wrapped line's rows, the underline goes under its last; in the edit review its
+        // own `−` on a line it takes out (its first row), nothing on one it keeps
+        let mark = match edit {
+            Some(_) => (taken && (first || cut))
+                .then_some(("−", Style { fg: ui.diff_minus.fg, bold: true, ..line_base })),
+            None => git_marks.get(li).copied().flatten().filter(|(g, _)| last || *g != "▁"),
+        };
+        match mark {
             Some((glyph, st)) => {
                 apply(out, st)?;
                 queue!(out, Print(glyph))?;
@@ -3799,7 +3849,7 @@ fn draw_text(
                 clipped = true;
                 break;
             }
-            if (c.pos..c.pos + c.len).contains(&primary) {
+            if shows.cursor && (c.pos..c.pos + c.len).contains(&primary) {
                 cursor = Some(((lay.x0 + lay.gutter + x) as u16, y));
             }
             // Style = default (cursorline if current line) → syntax → selection → cursor
@@ -3907,7 +3957,7 @@ fn draw_text(
             }
         }
         // Cursor at end of doc (EOF) — there's no corresponding char.
-        if primary == len && line == cur_line && cursor.is_none() && col >= row_left && last {
+        if shows.cursor && primary == len && line == cur_line && cursor.is_none() && col >= row_left && last {
             let x = x0 + col - row_left + shift;
             if x < lay.text_cols {
                 cursor = Some(((lay.x0 + lay.gutter + x) as u16, y));
@@ -4070,7 +4120,7 @@ fn draw_text(
                 };
                 let more = if more > 0 { format!("  +{more}") } else { String::new() };
                 let body = fit_ellipsis(msg, room.saturating_sub(2 + more.width()));
-                if shows.focused && line == cur_line && whole && more.is_empty() && body == msg {
+                if cur_shown && line == cur_line && whole && more.is_empty() && body == msg {
                     cursor_diags_shown.set(true);
                 }
                 apply(out, line_base)?;
@@ -4201,10 +4251,10 @@ fn rows_pane(
     let wrap_w = editor.wraps(doc).then_some(lay.text_cols);
     let tab = editor.config.tab_width;
     let push_line = |view: &mut Vec<Row>, line: usize| {
-        let Some(w) = wrap_w else { return view.push(Row::Text { line, part: None }) };
+        let Some(w) = wrap_w else { return view.push(Row::Text { line, part: None, edit: None }) };
         let parts = crate::wrap::rows(text, line, w, tab);
         if parts.len() == 1 {
-            return view.push(Row::Text { line, part: None });
+            return view.push(Row::Text { line, part: None, edit: None });
         }
         let skip = match line == top {
             true if line == cur_line => {
@@ -4220,7 +4270,7 @@ fn rows_pane(
             if view.len() == rows {
                 break;
             }
-            view.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }) });
+            view.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }), edit: None });
         }
     };
     // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded (raw
@@ -4238,7 +4288,8 @@ fn rows_pane(
         while let Some((at, text, base)) = next.next_if(|r| r.0 <= line) {
             for part in crate::codeview::other_parts(text, wrap_w, tab) {
                 if view.len() < rows {
-                    view.push(Row::Other { at: *at, text: text.clone(), base: *base, part });
+                    let kind = crate::codeview::OtherKind::Gone { base: *base };
+                    view.push(Row::Other { at: *at, text: text.clone(), kind, part });
                 }
             }
         }
@@ -4299,22 +4350,23 @@ fn fold_rows(
     parts: &[crate::doccomment::Part],
     width: usize,
     lang: Option<&str>,
-) -> Vec<(Vec<crate::markdown::Span>, bool)> {
+) -> Vec<(crate::codeview::Spans, bool)> {
+    use crate::codeview::Spans;
     use crate::doccomment::{Chunk, chunks};
     use crate::markdown::{self as md, Line, Span};
     let t = &editor.theme;
     let accent = accent_color(t);
     let plain = |text: String, style: Style| Span { text, style };
     let mut out = Vec::new();
-    let wrap = |spans: Vec<Span>, indent: usize, out: &mut Vec<(Vec<Span>, bool)>| {
+    let wrap = |spans: Vec<Span>, indent: usize, out: &mut Vec<(Spans, bool)>| {
         for row in md::wrap(&[Line::Text { spans, indent }], width, Style::default()) {
-            out.push((row, false));
+            out.push((row.into(), false));
         }
     };
     for c in chunks(parts) {
         match c {
             Chunk::Heading(h) => {
-                out.push((vec![plain(h, Style { fg: accent, bold: true, ..Style::default() })], false))
+                out.push((vec![plain(h, Style { fg: accent, bold: true, ..Style::default() })].into(), false))
             }
             Chunk::Para(p) => wrap(md::inline_spans(&p, t), 0, &mut out),
             Chunk::Item(p) => {
@@ -4330,18 +4382,18 @@ fn fold_rows(
                 wrap(v, 2, &mut out);
             }
             // Blank line between paragraphs — the panel continues, only the text is empty
-            Chunk::Gap => out.push((Vec::new(), false)),
+            Chunk::Gap => out.push((Vec::new().into(), false)),
             Chunk::Code(line) => {
                 let spans = match md::code_lines(&line, lang, t).into_iter().next() {
                     Some(Line::Code(s)) => s,
                     _ => Vec::new(),
                 };
-                out.push((spans, true));
+                out.push((spans.into(), true));
             }
         }
     }
     if out.is_empty() {
-        out.push((Vec::new(), false));
+        out.push((Vec::new().into(), false));
     }
     out
 }
@@ -4405,60 +4457,10 @@ fn draw_folded_row(
     Ok(())
 }
 
-/// The edit review's code column: its width less the line numbers and the sign.
+/// The edit review's code column: its width less the gutter — a pane's (the sign column, the numbers, the
+/// change marks).
 fn review_code_w(doc: &crate::document::Document, lay: &Layout) -> usize {
-    lay.edit_w.saturating_sub(num_w(doc).max(3) + 3)
-}
-
-/// The edit review's rows with each doc comment block drawn rendered, as outside a review (`build_view`): the
-/// `Doc` rows of its lines become the block's folded rows. A block with a change's row (its header, a line of
-/// the diff) inside it or right next to it stays raw, line for line — a diff is read against the text it changes.
-fn review_folded(
-    editor: &Editor,
-    doc: &crate::document::Document,
-    rows: Vec<crate::llm::RRow>,
-    folds: Option<&crate::doccomment::Folds>,
-) -> Vec<crate::llm::RRow> {
-    use crate::llm::RRow;
-    // (sideways scroll leaves folded blocks be, as in a pane)
-    let Some(folds) = folds.filter(|_| editor.doc_comments_render(doc.lang_name())) else { return rows };
-    let mut out = Vec::with_capacity(rows.len());
-    // (rows' lines climb: the blocks are walked beside them, not looked up for each row)
-    let mut next = folds.blocks.iter().peekable();
-    let mut i = 0;
-    while i < rows.len() {
-        let block = match rows[i] {
-            RRow::Doc(a) => {
-                while next.next_if(|b| b.start < a).is_some() {}
-                next.peek().copied().filter(|b| b.start == a)
-            }
-            _ => None,
-        };
-        let Some(&crate::doccomment::Folded { start: a, end: b, rows: ref laid, .. }) = block else {
-            out.push(rows[i].clone());
-            i += 1;
-            continue;
-        };
-        // The block's lines, as long as they're rows of their own one after another (a change breaks them)
-        let mut j = i + 1;
-        while j < rows.len() && a + j - i <= b && rows[j] == RRow::Doc(a + j - i) {
-            j += 1;
-        }
-        let whole = a + j - i - 1 == b;
-        let plain = |k: Option<&RRow>| k.is_none_or(|r| matches!(r, RRow::Doc(_)));
-        // (and the rule every place keeps — the review's keys aren't the code's: as in a pane without them)
-        if !whole
-            || !(plain(i.checked_sub(1).and_then(|k| rows.get(k))) && plain(rows.get(j)))
-            || !editor.doc_block_closed(doc, false, (a, b))
-        {
-            out.extend_from_slice(&rows[i..j]);
-            i = j;
-            continue;
-        }
-        out.extend((0..laid.len()).map(|index| RRow::Folded { start: a, end: b, index }));
-        i = j;
-    }
-    out
+    lay.edit_w.saturating_sub(crate::chrome::SIGNS + num_w(doc))
 }
 
 /// Every doc comment block of the edit review's document laid out folded for its code column — `cache` while it's
@@ -4620,31 +4622,23 @@ fn review_file(editor: &Editor, doc: &crate::document::Document) -> String {
 
 fn draw_review(
     rev: &Review,
-    rows: &[crate::llm::RRow],
+    rows: &[crate::codeview::Row],
     editor: &Editor,
     ui: &Ui,
     lay: &Layout,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    use crate::llm::{Decision, RRow};
+    use crate::codeview::Row;
+    use crate::llm::Decision;
     let t = &editor.theme;
     let Some(doc) = editor.docs.iter().find(|d| d.id == rev.doc_id) else { return Ok(()) };
     let text = &doc.text;
-    let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
-    let syntax = doc.syntax.as_ref().filter(|s| s.tree.is_some());
-    let capture_styles = t.capture_styles();
     let dim = Style { fg: ui.virt.fg, ..ui.base };
     let faint = Style { fg: ui.linenr.fg, ..ui.base };
     let strong =
         ui.base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let accent = Style { fg: ui.accent.fg, ..ui.base };
-    let (minus_fg, plus_fg) = (ui.diff_minus.fg, ui.diff_plus.fg);
-    let minus_bg = blend(minus_fg, ui.tint, 0.16);
-    let plus_bg = blend(plus_fg, ui.tint, 0.16);
-    // Head band is neutral card color — an accent tint (hanji's vermilion) would look like deleted-line red
-    let band = card_style(ui, editor, "ui.popup").bg;
     let width = lay.edit_w;
-    let num_w = num_w(doc).max(3);
     let code_w = review_code_w(doc, lay);
     // Why, under the title: the end of what Claude thought before asking (its conclusion), two rows at most
     let reason: Vec<Vec<crate::markdown::Span>> = if rev.reason.is_empty() {
@@ -4669,20 +4663,6 @@ fn draw_review(
         .collect();
     let title_h = 1 + warned.len() + reason.len();
     let body = lay.text_rows.saturating_sub(title_h);
-    let shown: &[RRow] = &rows[rev.scroll.min(rows.len())..];
-    let shown = &shown[..shown.len().min(body)];
-    // Syntax highlight for all visible doc lines at once
-    let doc_lines: Vec<usize> =
-        shown.iter().filter_map(|r| if let RRow::Doc(l) = r { Some(*l) } else { None }).collect();
-    let spans = match (syntax, doc_lines.first(), doc_lines.last()) {
-        (Some(syn), Some(&a), Some(&b)) => syntax::highlights(
-            syn,
-            text,
-            mv::line_start(text, a)..mv::line_full_end(text, b),
-            &mut QueryCursor::new(),
-        ),
-        _ => Vec::new(),
-    };
     // Fixed title
     let n = rev.hunks.len();
     let decided = rev.hunks.iter().filter(|h| h.decision != Decision::Undecided).count();
@@ -4731,258 +4711,163 @@ fn draw_review(
         apply(out, ui.base)?;
         queue!(out, Spaces(width.saturating_sub(3 + used)))?;
     }
-    // Soft wrap (#156): a row wider than the code column takes the screen rows it needs, its number on the
-    // first — a script's long line read before its run doesn't run off the edge (scrolling stays by rows)
-    let wrapping = editor.wraps(doc);
+    // The code, as a pane draws it (`Shows::edit_review`): a screen of the rows from `rev.scroll` on (scrolling
+    // stays by rows), each soft-wrapped (#156) — a row wider than the code column takes the screen rows it
+    // needs, its number on the first: a script's long line read before its run doesn't run off the edge; not
+    // wrapped, from the column it's scrolled to sideways (`h`/`l`)
+    let wrap_w = editor.wraps(doc).then_some(code_w);
     let tab = editor.config.tab_width;
-    let parts = |row: &RRow| -> Vec<crate::wrap::Row> {
-        match row {
-            RRow::Doc(l) if wrapping => crate::wrap::rows(text, *l, code_w, tab),
-            RRow::Diff { text: line, .. } if wrapping => {
-                crate::wrap::rows(&ropey::Rope::from_str(line), 0, code_w, tab)
-            }
-            // (not wrapped: from the column it's scrolled to sideways — `h`/`l`)
-            RRow::Doc(_) | RRow::Diff { .. } => {
-                vec![crate::wrap::Row { col: rev.left, ..crate::wrap::Row::whole(0) }]
-            }
-            RRow::Header(_) | RRow::Folded { .. } => vec![crate::wrap::Row::whole(0)],
-        }
-    };
-    // Each row shown: where it starts below the title, and its parts that fit
-    let mut placed: Vec<(&RRow, usize, Vec<crate::wrap::Row>)> = Vec::with_capacity(shown.len());
-    let mut filled = 0;
-    for row in shown {
-        if filled >= body {
+    let mut view: Vec<Row> = Vec::with_capacity(body);
+    for row in &rows[rev.scroll.min(rows.len())..] {
+        if view.len() >= body {
             break;
         }
-        let p: Vec<_> = parts(row).into_iter().take(body - filled).collect();
-        let n = p.len();
-        placed.push((row, filled, p));
-        filled += n;
-    }
-    // The change in hand: its rows on screen (a notification keeps off them — U9)
-    let mine = |r: &RRow| match r {
-        RRow::Header(h) => *h == rev.current,
-        RRow::Diff { hunk, .. } => *hunk == rev.current,
-        RRow::Doc(_) | RRow::Folded { .. } => false,
-    };
-    let top = lay.text_top as usize + title_h;
-    let first = placed.iter().find(|p| mine(p.0)).map(|p| top + p.1);
-    let last = placed.iter().rev().find(|p| mine(p.0)).map(|p| top + p.1 + p.2.len() - 1);
-    editor.screen.review_change.set(first.zip(last));
-    // Every change's rows — the follow card keeps off them
-    *editor.screen.review_rows.borrow_mut() = placed
-        .iter()
-        .filter(|p| !matches!(p.0, RRow::Doc(_) | RRow::Folded { .. }))
-        .flat_map(|p| (0..p.2.len()).map(move |i| top + p.1 + i))
-        .collect();
-    for (row, at, ps) in &placed {
-        for (pi, part) in ps.iter().enumerate() {
-            let y = lay.text_top + (title_h + at + pi) as u16;
-            queue!(out, MoveTo(0, y))?;
-            let mut used;
-            match row {
-                RRow::Doc(l) => {
-                    apply(out, faint)?;
-                    let no = if pi == 0 { format!("{:>num_w$}   ", l + 1) } else { " ".repeat(num_w + 3) };
-                    queue!(out, Print(no), Spaces(part.x0))?;
-                    used = num_w + 3 + part.x0;
-                    used += draw_code_line(
-                        out,
-                        text,
-                        *l,
-                        code_w.saturating_sub(part.x0),
-                        tab,
-                        &spans,
-                        &capture_styles,
-                        ui.base,
-                        (part.col, part.end_col),
-                    )?;
-                }
-                // A doc comment no change is in or beside: rendered, its number on the block's first row
-                // (its laid-out rows are the review's, made with these rows — `review_folds`)
-                RRow::Folded { start, index, .. } => {
-                    let laid = rev.folds.as_ref().and_then(|f| f.at(*start));
-                    let laid = laid.and_then(|b| Some((b.indent, b.rows.get(*index)?)));
-                    apply(out, faint)?;
-                    let no =
-                        if *index == 0 { format!("{:>num_w$}   ", start + 1) } else { " ".repeat(num_w + 3) };
-                    queue!(out, Print(no))?;
-                    used = num_w + 3;
-                    if let Some((indent, (spans, code))) = laid {
-                        draw_folded_row(out, editor, ui, code_w, indent, spans, *code, false, false, None)?;
-                        used += code_w;
-                    }
-                }
-                RRow::Header(i) => {
-                    let h = &rev.hunks[*i];
-                    let current = *i == rev.current && h.decision == Decision::Undecided && !h.conflict;
-                    let bg = if current { band.or(ui.base.bg) } else { ui.base.bg };
-                    let base = Style { bg, ..ui.base };
-                    let line = text.byte_to_line(h.from.min(text.len_bytes())) + 1;
-                    apply(out, base)?;
-                    queue!(out, Spaces(num_w + 1))?;
-                    apply(
-                        out,
-                        if current {
-                            Style { fg: ui.accent.fg, ..base }
-                        } else {
-                            Style { fg: ui.linenr.fg, ..base }
-                        },
-                    )?;
-                    queue!(out, Print("▎ "))?;
-                    let label = format!("Change {} of {n} · line {line}", i + 1);
-                    apply(
-                        out,
-                        if current {
-                            Style { bold: true, ..base.patch(Style { fg: ui.accent.fg, ..Style::default() }) }
-                        } else {
-                            Style { fg: ui.virt.fg, ..base }
-                        },
-                    )?;
-                    queue!(out, Print(&label))?;
-                    used = num_w + 3 + label.width();
-                    // What each key takes, said plainly: `y` this change, `a` every one still undecided (it
-                    // was "a all" — one `y` left the rest waiting, easy to miss)
-                    let left =
-                        rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
-                    let (all, all_short) = (format!("accept all {left}"), format!("all {left}"));
-                    // Esc goes back where the keys were — the chat or the code — unanswered (#70, #118); from
-                    // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
-                    // (beside the chat it cut esc's off)
-                    let chat = editor.session.chat.as_ref().map(|c| c.focused);
-                    let esc: &[(&str, &str)] = &[("esc", "back, unanswered")];
-                    let esc_short: &[(&str, &str)] = &[("esc", "back")];
-                    type Hints<'a> = Vec<(&'a str, &'a str)>;
-                    let (full, short, st): (Hints, Hints, Style) = match (h.conflict, h.decision) {
-                        (true, _) => {
-                            let v = vec![("", "text changed while waiting — skipped")];
-                            (v.clone(), v, base.patch(ui.error))
-                        }
-                        (_, Decision::Accept) => {
-                            (vec![("", "accepted")], vec![("", "accepted")], Style { fg: plus_fg, ..base })
-                        }
-                        (_, Decision::Reject) => {
-                            (vec![("", "rejected")], vec![("", "rejected")], Style { fg: minus_fg, ..base })
-                        }
-                        _ if current && chat == Some(true) => (
-                            vec![("C-q", "answer it — the chat has the keys")],
-                            vec![("C-q", "answer it")],
-                            base,
-                        ),
-                        _ if current && rev.away => (
-                            vec![("C-q", "answer it — the code has the keys")],
-                            vec![("C-q", "answer it")],
-                            base,
-                        ),
-                        _ if current && left > 1 => (
-                            [
-                                &[("y", "accept this one"), ("a", all.as_str()), ("n", "reject")][..],
-                                esc,
-                                &[("tab", "next")],
-                            ]
-                            .concat(),
-                            [
-                                &[("y", "this one"), ("a", all_short.as_str()), ("n", "no")][..],
-                                esc_short,
-                                &[("tab", "next")],
-                            ]
-                            .concat(),
-                            base,
-                        ),
-                        _ if current => (
-                            [&[("y", "accept"), ("n", "reject")][..], esc].concat(),
-                            [&[("y", "yes"), ("n", "no")][..], esc_short].concat(),
-                            base,
-                        ),
-                        _ => {
-                            (vec![("", "pending")], vec![("", "pending")], Style { fg: ui.linenr.fg, ..base })
-                        }
-                    };
-                    let room = |v: &Hints, gap: usize| -> usize {
-                        v.iter()
-                            .map(|(k, d)| gap + if k.is_empty() { 0 } else { k.width() + 1 } + d.width())
-                            .sum()
-                    };
-                    let (status, gap) = if used + room(&full, 3) <= width { (full, 3) } else { (short, 2) };
-                    for (key, desc) in status {
-                        let lead = " ".repeat(gap);
-                        let piece = if key.is_empty() {
-                            format!("{lead}{desc}")
-                        } else {
-                            format!("{lead}{key} {desc}")
-                        };
-                        if used + piece.width() > width {
-                            break;
-                        }
-                        if key.is_empty() {
-                            apply(out, st)?;
-                            queue!(out, Print(&piece))?;
-                        } else {
-                            apply(out, Style { fg: ui.accent.fg, bold: true, ..base })?;
-                            queue!(out, Print(format!("{lead}{key}")))?;
-                            apply(out, Style { fg: ui.virt.fg, ..base })?;
-                            queue!(out, Print(format!(" {desc}")))?;
-                        }
-                        used += piece.width();
-                    }
-                    apply(out, base)?;
-                    queue!(out, Spaces(width.saturating_sub(used)))?;
-                    used = width;
-                }
-                RRow::Diff { kind, text: line, old_no, hunk } => {
-                    let decided = rev.hunks[*hunk].decision != Decision::Undecided;
-                    let bg = match kind {
-                        '-' => minus_bg,
-                        '+' if !decided => plus_bg,
-                        _ => None,
-                    }
-                    .or(ui.base.bg);
-                    let base = Style { bg, ..ui.base };
-                    apply(out, Style { fg: ui.linenr.fg, ..base })?;
-                    queue!(
-                        out,
-                        Print(match old_no {
-                            Some(no) if pi == 0 => format!("{no:>num_w$} "),
-                            _ => " ".repeat(num_w + 1),
-                        })
-                    )?;
-                    // (an added line's bar runs down its wrapped rows; a removed line's sign is on its first)
-                    let (sign, sign_st) = match kind {
-                        '-' if pi == 0 => ("−", Style { fg: minus_fg, bold: true, ..base }),
-                        '+' => ("▎", Style { fg: plus_fg, ..base }),
-                        _ => (" ", base),
-                    };
-                    apply(out, sign_st)?;
-                    queue!(out, Print(sign))?;
-                    apply(out, base)?;
-                    queue!(out, Print(" "), Spaces(part.x0))?;
-                    used = num_w + 3 + part.x0;
-                    let pieces: Vec<(String, Style)> = crate::markdown::code_lines(line, lang.as_deref(), t)
-                        .into_iter()
-                        .filter_map(|l| match l {
-                            crate::markdown::Line::Code(sp) => Some(sp),
-                            _ => None,
-                        })
-                        .flatten()
-                        .map(|s| (s.text, base.patch(Style { bg: None, ..s.style })))
-                        .collect();
-                    let room = width.saturating_sub(used);
-                    used += print_columns(out, &pieces, (part.col, part.end_col), room, tab)?;
-                    apply(out, base)?;
-                    queue!(out, Spaces(width.saturating_sub(used)))?;
-                    used = width;
-                }
-            }
-            apply(out, ui.base)?;
-            queue!(out, Spaces(width.saturating_sub(used)))?;
+        let parts = match row {
+            Row::Text { line, .. } => crate::codeview::text_parts(text, *line, wrap_w, tab),
+            Row::Other { text, .. } => crate::codeview::other_parts(text, wrap_w, tab),
+            Row::Doc { .. } | Row::Header { .. } => vec![None],
+        };
+        for p in parts.into_iter().take(body - view.len()) {
+            view.push(row.with_part(p));
         }
     }
-    for k in filled..body {
-        queue!(out, MoveTo(0, lay.text_top + title_h as u16 + k as u16))?;
-        apply(out, ui.base)?;
-        queue!(out, Spaces(width))?;
+    // The change in hand: its rows on screen (a notification keeps off them — U9); every change's rows (the
+    // follow card keeps off them)
+    let top = lay.text_top as usize + title_h;
+    let rows_of = |hunk: Option<usize>| -> Vec<usize> {
+        let of = |r: &Row| r.hunk().is_some() && (hunk.is_none() || r.hunk() == hunk);
+        view.iter().enumerate().filter(|(_, r)| of(r)).map(|(k, _)| top + k).collect()
+    };
+    let mine = rows_of(Some(rev.current));
+    editor.screen.review_change.set(mine.first().copied().zip(mine.last().copied()));
+    *editor.screen.review_rows.borrow_mut() = rows_of(None);
+    let gutter = crate::chrome::SIGNS + num_w(doc);
+    let body_lay = Layout {
+        x0: 0,
+        text_top: top as u16,
+        text_rows: body,
+        gutter,
+        text_cols: code_w.max(1),
+        ..lay.clone()
+    };
+    let body_lay = Layout { scrollbar: false, ..body_lay };
+    let first = view.iter().map(Row::line).min().unwrap_or(0);
+    let shows = Shows::edit_review(editor, rev.left);
+    draw_text(editor, &Source::of(doc), first, &shows, &view, ui, &body_lay, out)?;
+    // Each change's head, over the row the drawer leaves it
+    for (k, row) in view.iter().enumerate() {
+        if let Row::Header { hunk, at } = row {
+            queue!(out, MoveTo(0, (top + k) as u16))?;
+            draw_review_header(rev, (*hunk, *at), editor, ui, (gutter, width), out)?;
+        }
     }
+    Ok(())
+}
+
+/// The edit review's head of change `i` (its first line `at`): `▎ Change 2 of 3 · line 8`, its bar where the
+/// change marks go and its words where the code starts, then what each key does to it (the change in hand, on
+/// a band) or what was decided. `gutter` = the code's columns before its text, `width` = the row's.
+fn draw_review_header(
+    rev: &Review,
+    (i, at): (usize, usize),
+    editor: &Editor,
+    ui: &Ui,
+    (gutter, width): (usize, usize),
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crate::llm::Decision;
+    let n = rev.hunks.len();
+    let (minus_fg, plus_fg) = (ui.diff_minus.fg, ui.diff_plus.fg);
+    // Head band is neutral card color — an accent tint (hanji's vermilion) would look like deleted-line red
+    let band = card_style(ui, editor, "ui.popup").bg;
+    let h = &rev.hunks[i];
+    let current = i == rev.current && h.decision == Decision::Undecided && !h.conflict;
+    let bg = if current { band.or(ui.base.bg) } else { ui.base.bg };
+    let base = Style { bg, ..ui.base };
+    let line = at + 1;
+    apply(out, base)?;
+    queue!(out, Spaces(gutter - 1))?;
+    apply(
+        out,
+        if current { Style { fg: ui.accent.fg, ..base } } else { Style { fg: ui.linenr.fg, ..base } },
+    )?;
+    queue!(out, Print("▎ "))?;
+    let label = format!("Change {} of {n} · line {line}", i + 1);
+    apply(
+        out,
+        if current {
+            Style { bold: true, ..base.patch(Style { fg: ui.accent.fg, ..Style::default() }) }
+        } else {
+            Style { fg: ui.virt.fg, ..base }
+        },
+    )?;
+    queue!(out, Print(&label))?;
+    let mut used = gutter + 1 + label.width();
+    // What each key takes, said plainly: `y` this change, `a` every one still undecided (it
+    // was "a all" — one `y` left the rest waiting, easy to miss)
+    let left = rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
+    let (all, all_short) = (format!("accept all {left}"), format!("all {left}"));
+    // Esc goes back where the keys were — the chat or the code — unanswered (#70, #118); from
+    // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
+    // (beside the chat it cut esc's off)
+    let chat = editor.session.chat.as_ref().map(|c| c.focused);
+    let esc: &[(&str, &str)] = &[("esc", "back, unanswered")];
+    let esc_short: &[(&str, &str)] = &[("esc", "back")];
+    type Hints<'a> = Vec<(&'a str, &'a str)>;
+    let (full, short, st): (Hints, Hints, Style) = match (h.conflict, h.decision) {
+        (true, _) => {
+            let v = vec![("", "text changed while waiting — skipped")];
+            (v.clone(), v, base.patch(ui.error))
+        }
+        (_, Decision::Accept) => {
+            (vec![("", "accepted")], vec![("", "accepted")], Style { fg: plus_fg, ..base })
+        }
+        (_, Decision::Reject) => {
+            (vec![("", "rejected")], vec![("", "rejected")], Style { fg: minus_fg, ..base })
+        }
+        _ if current && chat == Some(true) => {
+            (vec![("C-q", "answer it — the chat has the keys")], vec![("C-q", "answer it")], base)
+        }
+        _ if current && rev.away => {
+            (vec![("C-q", "answer it — the code has the keys")], vec![("C-q", "answer it")], base)
+        }
+        _ if current && left > 1 => (
+            [&[("y", "accept this one"), ("a", all.as_str()), ("n", "reject")][..], esc, &[("tab", "next")]]
+                .concat(),
+            [&[("y", "this one"), ("a", all_short.as_str()), ("n", "no")][..], esc_short, &[("tab", "next")]]
+                .concat(),
+            base,
+        ),
+        _ if current => (
+            [&[("y", "accept"), ("n", "reject")][..], esc].concat(),
+            [&[("y", "yes"), ("n", "no")][..], esc_short].concat(),
+            base,
+        ),
+        _ => (vec![("", "pending")], vec![("", "pending")], Style { fg: ui.linenr.fg, ..base }),
+    };
+    let room = |v: &Hints, gap: usize| -> usize {
+        v.iter().map(|(k, d)| gap + if k.is_empty() { 0 } else { k.width() + 1 } + d.width()).sum()
+    };
+    let (status, gap) = if used + room(&full, 3) <= width { (full, 3) } else { (short, 2) };
+    for (key, desc) in status {
+        let lead = " ".repeat(gap);
+        let piece = if key.is_empty() { format!("{lead}{desc}") } else { format!("{lead}{key} {desc}") };
+        if used + piece.width() > width {
+            break;
+        }
+        if key.is_empty() {
+            apply(out, st)?;
+            queue!(out, Print(&piece))?;
+        } else {
+            apply(out, Style { fg: ui.accent.fg, bold: true, ..base })?;
+            queue!(out, Print(format!("{lead}{key}")))?;
+            apply(out, Style { fg: ui.virt.fg, ..base })?;
+            queue!(out, Print(format!(" {desc}")))?;
+        }
+        used += piece.width();
+    }
+    apply(out, base)?;
+    queue!(out, Spaces(width.saturating_sub(used)))?;
     Ok(())
 }
 
@@ -5084,50 +4969,6 @@ fn request_preview(p: &mut Picker, jobs: &crate::event::Jobs) {
             }
         }
     });
-}
-
-/// A line given as styled pieces, its display columns `[from, to)` (a wrapped row) within `width` cells —
-/// tabs as spaces, control characters as `�`, as `draw_code_line` draws a document's. Returns the cells used.
-fn print_columns(
-    out: &mut impl Write,
-    pieces: &[(String, Style)],
-    (from, to): (usize, usize),
-    width: usize,
-    tab: usize,
-) -> io::Result<usize> {
-    let line: String = pieces.iter().map(|p| p.0.as_str()).collect();
-    let ends: Vec<usize> = pieces
-        .iter()
-        .scan(0, |at, p| {
-            *at += p.0.len();
-            Some(*at)
-        })
-        .collect();
-    let mut current: Option<Style> = None;
-    let mut used = 0;
-    for c in graphemes::cells(&line, 0, tab) {
-        if c.col < from {
-            continue;
-        }
-        if c.col >= to || c.col - from + c.width > width {
-            break;
-        }
-        let st = pieces[ends.partition_point(|&e| e <= c.bytes.start)].1;
-        if current != Some(st) {
-            apply(out, st)?;
-            current = Some(st);
-        }
-        let g = &line[c.bytes.clone()];
-        if g == "\t" {
-            queue!(out, Spaces(c.width))?;
-        } else if g.chars().next().is_some_and(char::is_control) {
-            queue!(out, Print('\u{fffd}'))?;
-        } else {
-            queue!(out, Print(g))?;
-        }
-        used = c.col + c.width - from;
-    }
-    Ok(used)
 }
 
 /// One line of code within `width` cells (applying syntax colors `spans`). Returns the number of cells used.
@@ -5833,7 +5674,7 @@ fn preview_lines<'a>(
             if vis.len() == rows {
                 break;
             }
-            vis.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }) });
+            vis.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }), edit: None });
         }
         line += 1;
     }
@@ -5875,7 +5716,7 @@ fn draw_preview_row(
         PreviewView::Code { text, rows, focus, spans } => {
             use crate::codeview::Row;
             let (line, part, first_row) = match rows.get(row) {
-                Some(&Row::Text { line, part: Some(p) }) => (line, p.row, p.index == 0),
+                Some(&Row::Text { line, part: Some(p), .. }) => (line, p.row, p.index == 0),
                 // A folded doc comment: its number on its first row, the panel on the card
                 Some(Row::Doc { start, indent, index, spans, code, .. }) => {
                     let num = if *index == 0 { format!("{:>4}  ", start + 1) } else { " ".repeat(6) };
@@ -12801,10 +12642,11 @@ mod tests {
             let folds = std::hint::black_box(review_folds(&ed, doc, 100, None));
             cold_t.push(t.elapsed());
             let t = Instant::now();
-            let folds = review_folds(&ed, doc, 100, folds);
-            let folded = std::hint::black_box(review_folded(&ed, doc, rows, folds.as_ref()));
+            let folds = review_folds(&ed, doc, 100, folds).unwrap();
+            let closed = |a, b| ed.doc_block_closed(doc, false, (a, b));
+            let folded = std::hint::black_box(crate::codeview::fold(rows, &folds, closed));
             warm_t.push(t.elapsed());
-            assert!(folded.iter().any(|r| matches!(r, crate::llm::RRow::Folded { .. })));
+            assert!(folded.iter().any(|r| matches!(r, crate::codeview::Row::Doc { .. })));
         }
         let us = |d: Duration| d.as_secs_f64() * 1e6;
         let numbers = [
@@ -12988,6 +12830,61 @@ mod tests {
             graded <= plain.mul_f64(1.5) + Duration::from_micros(20),
             "graded {graded:?} against {plain:?} ungraded"
         );
+    }
+
+    /// Claude's edit review costs a frame what a pane does: a 5k-line Rust file (a doc comment every 25 lines,
+    /// tabs in its code), 20 changes of three lines into four, the review following each change in turn —
+    /// its rows, the folds and a screen of them drawn. Median of 300 frames, said for `cargo perf`.
+    #[test]
+    fn perf_frames_with_an_edit_review() {
+        if crate::test_results::unoptimized("term::tests::perf_frames_with_an_edit_review") {
+            return;
+        }
+        let block = "/// Adds `x` to the total, **once**.\n///\n/// - an item\n";
+        let body: String = (0..20).map(|i| format!("\tlet x{i} = total + {i}; // {i}\n")).collect();
+        let text: String =
+            (0..200).map(|i| format!("{block}pub fn f{i}(total: u32) {{\n{body}}}\n")).collect();
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str(&text);
+        ed.docs[0].path = Some("/tmp/review.rs".into());
+        if let Ok(lang) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) {
+            ed.docs[0].syntax = Some(crate::syntax::Syntax::parsed(lang, &ed.docs[0].text));
+        }
+        let doc = &ed.docs[0];
+        assert!(doc.text.len_lines() > 5_000);
+        let hunks = (0..20)
+            .map(|k| {
+                let (from, to) = (doc.text.line_to_byte(k * 250 + 10), doc.text.line_to_byte(k * 250 + 13));
+                crate::llm::Hunk {
+                    from,
+                    to,
+                    old: doc.text.byte_slice(from..to).to_string(),
+                    new: "\tlet a = 1;\n\tlet b = a + 2;\n\tlet c = b * 3;\n\tlet d = c - 4;\n".into(),
+                    decision: crate::llm::Decision::Undecided,
+                    conflict: false,
+                }
+            })
+            .collect();
+        let mut rev = crate::llm::Review::new(1, doc.id, "name them better", hunks);
+        rev.ready = true;
+        ed.session.review = Some(rev);
+        let mut buf = Vec::with_capacity(1 << 16);
+        render(&mut ed, &mut buf, 180, 50).unwrap();
+        let mut all: Vec<Duration> = (0..300)
+            .map(|k| {
+                if let Some(r) = ed.session.review.as_mut() {
+                    r.current = k % 20;
+                }
+                buf.clear();
+                let t = Instant::now();
+                render(&mut ed, &mut buf, 180, 50).unwrap();
+                t.elapsed()
+            })
+            .collect();
+        all.sort_unstable();
+        let us = all[all.len() / 2].as_secs_f64() * 1e6;
+        let line = format!("PERF frame_with_an_edit_review_us {us:.1} budget=16000 noise=50\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 
     /// Sessions cost a frame nothing: key → frame with the chat open, one session against three (the tab row,

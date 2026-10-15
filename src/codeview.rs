@@ -1,6 +1,7 @@
 //! A code view's rows: what a place that draws a file's code shows, screen row by screen row — a line of the
-//! document (or one wrapped part of it), a folded doc comment's row, or text that isn't the document's (a
-//! removed line). Screen rows ≠ document lines: drawing, the mouse and the moves go through these.
+//! document (or one wrapped part of it), a folded doc comment's row, text that isn't the document's (a removed
+//! line, a line Claude proposes), or the edit review's change header. Screen rows ≠ document lines: drawing,
+//! the mouse and the moves go through these.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -13,11 +14,15 @@ use crate::editor::{Editor, Mode};
 use crate::git::{Hunk, HunkKind};
 use crate::syntax::Syntax;
 
+/// A folded doc comment row's text — shared: the edit review folds the whole file each frame from its cache.
+pub type Spans = std::sync::Arc<[crate::markdown::Span]>;
+
 /// One screen row of a code view.
 #[derive(Clone, Debug)]
 pub enum Row {
-    /// A line of the document — `part` when it soft-wraps: which of its rows this is.
-    Text { line: usize, part: Option<Part> },
+    /// A line of the document — `part` when it soft-wraps: which of its rows this is; `edit` when it's one of the
+    /// lines a change of the edit review takes out or keeps.
+    Text { line: usize, part: Option<Part>, edit: Option<Edit> },
     /// One row of a folded doc comment block (a rendered piece; `Editor::doc_block_folded` decides it).
     Doc {
         /// Document line range of the block [start, end].
@@ -26,20 +31,57 @@ pub enum Row {
         indent: usize,
         /// Which row within the block.
         index: usize,
-        spans: Vec<crate::markdown::Span>,
+        spans: Spans,
         /// Example code row (background one shade deeper).
         code: bool,
     },
-    /// Text that isn't the document's: a line the code review's base had here and the text no longer does
-    /// (`base`: which, for the base's colours), or one a shown edit replaced — shown above line `at`; `part`
-    /// when it soft-wraps, as a line does.
-    Other { at: usize, text: String, base: Option<usize>, part: Option<Part> },
+    /// Text that isn't the document's, shown above line `at` (`part` when it soft-wraps, as a line does).
+    Other { at: usize, text: String, kind: OtherKind, part: Option<Part> },
+    /// The edit review's head of change `hunk` (its first line `at`) — drawn by the review (`draw_review`).
+    Header { hunk: usize, at: usize },
+}
+
+/// What a row of text that isn't the document's is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OtherKind {
+    /// A line the code review's base had here and the text no longer does (`base`: which, for the base's
+    /// colours), or one a shown edit replaced.
+    Gone { base: Option<usize> },
+    /// A line of a change of the edit review: one it proposes — or, when the document no longer holds what the
+    /// change replaces (edited while the review waits), one it takes out or keeps, from the text it was asked on.
+    Edit(Edit),
+}
+
+/// A row of change `hunk` of the edit review, and what the change does to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub hunk: usize,
+    pub mark: Mark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// A line it proposes — on the added wash while it's undecided.
+    Added { washed: bool },
+    /// A line it takes out.
+    Taken,
+    /// A line inside it that stays.
+    Kept,
 }
 
 /// The rows of a line that isn't the document's at `width` cells (one, unwrapped, without a width).
 pub fn other_parts(text: &str, width: Option<usize>, tab: usize) -> Vec<Option<Part>> {
     let Some(w) = width else { return vec![None] };
-    let rows = crate::wrap::rows(&Rope::from_str(text), 0, w, tab);
+    parts(crate::wrap::rows(&Rope::from_str(text), 0, w, tab))
+}
+
+/// The rows of document line `line` at `width` cells (one, unwrapped, without a width).
+pub fn text_parts(text: &Rope, line: usize, width: Option<usize>, tab: usize) -> Vec<Option<Part>> {
+    let Some(w) = width else { return vec![None] };
+    parts(crate::wrap::rows(text, line, w, tab))
+}
+
+fn parts(rows: Vec<crate::wrap::Row>) -> Vec<Option<Part>> {
     if rows.len() == 1 {
         return vec![None];
     }
@@ -61,6 +103,9 @@ pub struct Shows {
     /// Has the code's keys: the cursor line's number, jump labels, the line-end diagnostic counted as shown; a
     /// pane without them is toned down.
     pub focused: bool,
+    /// The document's selection is shown: its ranges and cursors, the cursor line's number and guides marked,
+    /// jump labels — not in the edit review, which has no cursor.
+    pub cursor: bool,
     /// `Editor::editing_in(focused)` — the fold rule's input.
     pub editing: bool,
     /// Sideways scroll (display columns).
@@ -94,6 +139,8 @@ pub enum Changes {
     Base,
     /// An edit of Claude's that follow or replay shows: its lines washed, the ones it replaced above them.
     Shown,
+    /// The edit review's: its rows carry their own marks (`Edit`) — nothing from the document's diffs.
+    Edit,
 }
 
 impl Changes {
@@ -130,7 +177,7 @@ impl Changes {
                     })
                     .collect(),
             ),
-            (Changes::Shown, None) => Cow::Borrowed(&[]),
+            (Changes::Shown, None) | (Changes::Edit, _) => Cow::Borrowed(&[]),
             _ => Cow::Borrowed(&doc.git_hunks),
         }
     }
@@ -230,6 +277,7 @@ impl Shows {
         let config = &editor.config;
         Shows {
             focused,
+            cursor: true,
             editing: editor.editing_in(focused),
             left,
             changes: Changes::of(doc),
@@ -243,6 +291,86 @@ impl Shows {
             blame: focused && not_insert,
         }
     }
+
+    /// Claude's edit review: the whole file as in the editor — diagnostics, indent guides, inlay hints,
+    /// breakpoints on its document's rows — its change marks the edit's own (`Changes::Edit`), scrolled sideways
+    /// by `left` when it doesn't wrap. Kept apart from a pane: absolute numbers and no cursor line, no selection,
+    /// no search's hits, no blame — the review has no cursor (its keys answer changes, `j`/`k` scroll), and a
+    /// number relative to a cursor that isn't there would read as distances from nothing.
+    pub fn edit_review(editor: &Editor, left: usize) -> Shows {
+        let config = &editor.config;
+        Shows {
+            focused: true,
+            cursor: false,
+            editing: false,
+            left,
+            changes: Changes::Edit,
+            numbers: LineNumber::Absolute,
+            primary: false,
+            search: false,
+            cursorline: false,
+            messages: config.inline_diagnostics,
+            inlay: config.inlay_hints && left == 0,
+            guides: config.indent_guides && left == 0,
+            blame: false,
+        }
+    }
+}
+
+/// The edit review's rows (`Review::rows`, the whole file) with each doc comment block laid out in `folds`
+/// shown folded — the block's lines one after another as plain rows of their own, the rows on either side
+/// plain too (a change's head or line inside it or right next to it keeps it raw: a diff is read against the
+/// text it changes), and `closed` (the one rule, `Editor::doc_block_closed`) saying so.
+pub fn fold(
+    rows: Vec<Row>,
+    folds: &crate::doccomment::Folds,
+    closed: impl Fn(usize, usize) -> bool,
+) -> Vec<Row> {
+    let plain = |r: Option<&Row>| r.is_none_or(|r| matches!(r, Row::Text { edit: None, .. }));
+    let line = |r: &Row| match r {
+        Row::Text { line, edit: None, part: None } => Some(*line),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    // (rows' lines climb: the blocks are walked beside them, not looked up for each row)
+    let mut next = folds.blocks.iter().peekable();
+    let mut i = 0;
+    while i < rows.len() {
+        let block = line(&rows[i]).and_then(|a| {
+            while next.next_if(|b| b.start < a).is_some() {}
+            next.peek().copied().filter(|b| b.start == a)
+        });
+        let Some(&crate::doccomment::Folded { start: a, end: b, indent, rows: ref laid }) = block else {
+            out.push(rows[i].clone());
+            i += 1;
+            continue;
+        };
+        // The block's lines, as long as they're rows of their own one after another (a change breaks them)
+        let mut j = i + 1;
+        while j < rows.len() && a + j - i <= b && line(&rows[j]) == Some(a + j - i) {
+            j += 1;
+        }
+        let whole = a + j - i - 1 == b;
+        if !whole
+            || !plain(i.checked_sub(1).and_then(|k| rows.get(k)))
+            || !plain(rows.get(j))
+            || !closed(a, b)
+        {
+            out.extend_from_slice(&rows[i..j]);
+            i = j;
+            continue;
+        }
+        out.extend(laid.iter().enumerate().map(|(index, (spans, code))| Row::Doc {
+            start: a,
+            end: b,
+            indent,
+            index,
+            spans: spans.clone(),
+            code: *code,
+        }));
+        i = j;
+    }
+    out
 }
 
 /// What the drawer reads text and colours from.
@@ -265,7 +393,25 @@ impl Row {
         match self {
             Row::Text { line, .. } => *line,
             Row::Doc { start, .. } => *start,
-            Row::Other { at, .. } => *at,
+            Row::Other { at, .. } | Row::Header { at, .. } => *at,
+        }
+    }
+
+    /// This row as its soft-wrapped part `p` (a line's or a text's that isn't the document's).
+    pub fn with_part(&self, p: Option<Part>) -> Row {
+        let mut row = self.clone();
+        if let Row::Text { part, .. } | Row::Other { part, .. } = &mut row {
+            *part = p;
+        }
+        row
+    }
+
+    /// The edit review's change this row is part of.
+    pub fn hunk(&self) -> Option<usize> {
+        match self {
+            Row::Header { hunk, .. } => Some(*hunk),
+            Row::Text { edit: Some(e), .. } | Row::Other { kind: OtherKind::Edit(e), .. } => Some(e.hunk),
+            _ => None,
         }
     }
 
@@ -274,7 +420,7 @@ impl Row {
             Row::Text { line, .. } => *line,
             Row::Doc { end, .. } => *end,
             // Not a line of the text: it doesn't widen the per-line tables
-            Row::Other { at, .. } => at.saturating_sub(1),
+            Row::Other { at, .. } | Row::Header { at, .. } => at.saturating_sub(1),
         }
     }
 
@@ -282,7 +428,7 @@ impl Row {
     /// column the row stops before).
     pub fn origin(&self, left: usize) -> (usize, usize, usize, usize) {
         match self {
-            Row::Text { line, part: Some(p) } | Row::Other { at: line, part: Some(p), .. } => {
+            Row::Text { line, part: Some(p), .. } | Row::Other { at: line, part: Some(p), .. } => {
                 (*line, p.row.col, p.row.x0, p.row.end_col)
             }
             // (a folded block doesn't scroll sideways)

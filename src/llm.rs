@@ -1175,20 +1175,6 @@ pub struct Hunk {
     pub conflict: bool,
 }
 
-/// One row of the in-buffer review view.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RRow {
-    /// This document line as is.
-    Doc(usize),
-    /// Row `index` of a doc comment block (lines `start..=end`) no change is in or beside, drawn rendered as
-    /// outside a review (`term::review_folded` makes them from its `Doc` rows; their text is in `Review.folds`).
-    Folded { start: usize, end: usize, index: usize },
-    /// Change header (change number).
-    Header(usize),
-    /// Line inside a change: ' ' kept · '-' removed · '+' added, old line number (none for added lines).
-    Diff { kind: char, text: String, old_no: Option<usize>, hunk: usize },
-}
-
 pub struct Review {
     /// Its document's doc comments laid out folded, for a version and width (`term::review_folds`) — the review
     /// shows the whole file, and folding all of it each frame took milliseconds on a big one.
@@ -1283,11 +1269,15 @@ impl Review {
             .find(|&i| self.hunks[i].decision == Decision::Undecided && !self.hunks[i].conflict)
     }
 
-    /// Rows of the in-buffer review (like Cursor): shows the whole document, expanding only the changes.
+    /// Rows of the in-buffer review (like Cursor): shows the whole document, expanding only the changes —
+    /// unwrapped, unfolded (`term::render_frame` folds them, `draw_review` wraps the ones on screen).
     /// Undecided = both removed and added lines, accepted = new text only, rejected = original only.
-    pub fn rows(&self, text: &Rope) -> Vec<RRow> {
-        let last = text.len_lines().saturating_sub(1);
+    pub fn rows(&self, text: &Rope) -> Vec<crate::codeview::Row> {
+        use crate::codeview::{Edit, Mark, OtherKind, Row};
+        // (the empty line after a final newline isn't one: the drawer shows it only with the cursor there)
+        let last = crate::movement::last_line(text);
         let line_of = |b: usize| text.byte_to_line(b.min(text.len_bytes()));
+        let doc_row = |line| Row::Text { line, part: None, edit: None };
         let mut order: Vec<usize> = (0..self.hunks.len()).collect();
         crate::sorting::by_key(&mut order, |&i| self.hunks[i].from);
         let mut out = Vec::new();
@@ -1296,13 +1286,16 @@ impl Review {
             let h = &self.hunks[i];
             let lf = line_of(h.from);
             let lt = if h.to > h.from { line_of(h.to - 1) } else { lf };
-            out.extend((next..lf.max(next)).map(RRow::Doc));
-            out.push(RRow::Header(i));
+            out.extend((next..lf.max(next)).map(doc_row));
+            out.push(Row::Header { hunk: i, at: lf });
             next = next.max(lt + 1);
             if h.conflict {
-                out.extend((lf..=lt).map(RRow::Doc));
+                out.extend((lf..=lt).map(doc_row));
                 continue;
             }
+            // The lines it takes out or keeps are the document's own rows while it holds what the change replaces;
+            // edited since (the editor's keys work while the review waits — #61), the text it was asked on
+            let holds = text.get_byte_slice(h.from..h.to).is_some_and(|s| s == h.old.as_str());
             // Changes line-wise: attach same-line pieces around the selection so whole lines are compared
             let ls = text.line_to_byte(lf);
             let le = text.line_to_byte((lt + 1).min(last + 1)).max(h.to);
@@ -1310,26 +1303,33 @@ impl Review {
                 (text.byte_slice(ls..h.from.max(ls)).to_string(), text.byte_slice(h.to..le).to_string());
             let old = format!("{pre}{}{post}", h.old);
             let new = format!("{pre}{}{post}", h.new);
-            let mut old_no = lf + 1;
+            // (the document line the next old line is)
+            let mut old_no = lf;
             for (kind, line) in line_diff(&old, &new) {
-                let kind = match (h.decision, kind) {
-                    (Decision::Accept, '-') | (Decision::Reject, '+') => {
-                        if kind == '-' {
-                            old_no += 1;
-                        }
+                let mark = match (h.decision, kind) {
+                    (Decision::Accept, '-') => {
+                        old_no += 1;
                         continue;
                     }
-                    (Decision::Reject, '-') => ' ',
-                    _ => kind,
+                    (Decision::Reject, '+') => continue,
+                    (_, '+') => Mark::Added { washed: h.decision == Decision::Undecided },
+                    (Decision::Reject, '-') | (_, ' ') => Mark::Kept,
+                    _ => Mark::Taken,
                 };
-                let no = (kind != '+').then_some(old_no);
-                if kind != '+' {
+                let edit = Edit { hunk: i, mark };
+                let other =
+                    |at| Row::Other { at, text: line.to_string(), kind: OtherKind::Edit(edit), part: None };
+                out.push(match mark {
+                    Mark::Added { .. } => other(old_no),
+                    _ if holds => Row::Text { line: old_no, part: None, edit: Some(edit) },
+                    _ => other(old_no),
+                });
+                if !matches!(mark, Mark::Added { .. }) {
                     old_no += 1;
                 }
-                out.push(RRow::Diff { kind, text: line.to_string(), old_no: no, hunk: i });
             }
         }
-        out.extend((next..=last).map(RRow::Doc));
+        out.extend((next..=last).map(doc_row));
         out
     }
 }
@@ -2464,29 +2464,45 @@ pub(crate) mod tests {
             conflict: false,
         };
         let rev = |h| Review::new(0, 0, "", vec![h]);
-        let diff = |kind, t: &str, no| RRow::Diff { kind, text: t.into(), old_no: no, hunk: 0 };
-        let rows = rev(hunk(Decision::Undecided)).rows(&text);
+        let rows = |h, text: &Rope| rev(h).rows(text).iter().map(shape).collect::<Vec<_>>();
+        // (a line the change takes out or keeps is the document's own: its number)
         assert_eq!(
-            rows,
-            [
-                RRow::Doc(0),
-                RRow::Header(0),
-                diff('-', "b", Some(2)),
-                diff('+', "B", None),
-                diff('+', "B2", None),
-                RRow::Doc(2),
-                RRow::Doc(3)
-            ]
+            rows(hunk(Decision::Undecided), &text),
+            ["doc 1", "head 0", "- 2", "+ B (washed)", "+ B2 (washed)", "doc 3"]
         );
         // Accept = new text only, reject = original only
-        let acc = rev(hunk(Decision::Accept)).rows(&text);
-        assert!(
-            acc.contains(&diff('+', "B", None))
-                && !acc.iter().any(|r| matches!(r, RRow::Diff { kind: '-', .. }))
+        assert_eq!(rows(hunk(Decision::Accept), &text), ["doc 1", "head 0", "+ B", "+ B2", "doc 3"]);
+        assert_eq!(rows(hunk(Decision::Reject), &text), ["doc 1", "head 0", "  2", "doc 3"]);
+        // Edited while the review waits: what it takes out comes from the text it was asked on
+        let moved = Rope::from_str("a\nx\nc\n");
+        assert_eq!(
+            rows(hunk(Decision::Undecided), &moved),
+            ["doc 1", "head 0", "- b (asked)", "+ B (washed)", "+ B2 (washed)", "doc 3"]
         );
-        let rej = rev(hunk(Decision::Reject)).rows(&text);
-        assert_eq!(rej[2], diff(' ', "b", Some(2)));
-        assert_eq!(rej.len(), 5);
+    }
+
+    /// A review row in words: `doc N` a line as is, `head K` change K's head, `- N`/`  N` a line it takes out or
+    /// keeps, `+ text` one it proposes; `(asked)` from the text it was asked on.
+    fn shape(r: &crate::codeview::Row) -> String {
+        use crate::codeview::{Edit, Mark, OtherKind, Row};
+        let sign = |m: Mark| match m {
+            Mark::Added { .. } => "+",
+            Mark::Taken => "-",
+            Mark::Kept => " ",
+        };
+        match r {
+            Row::Text { line, edit: None, .. } => format!("doc {}", line + 1),
+            Row::Text { line, edit: Some(e), .. } => format!("{} {}", sign(e.mark), line + 1),
+            Row::Header { hunk, .. } => format!("head {hunk}"),
+            Row::Other {
+                text, kind: OtherKind::Edit(Edit { mark: m @ Mark::Added { washed }, .. }), ..
+            } => {
+                format!("{} {text}{}", sign(*m), if *washed { " (washed)" } else { "" })
+            }
+            Row::Other { text, kind: OtherKind::Edit(e), .. } => format!("{} {text} (asked)", sign(e.mark)),
+            Row::Other { text, .. } => format!("gone {text}"),
+            Row::Doc { start, index, .. } => format!("folded {} {index}", start + 1),
+        }
     }
 
     #[test]
