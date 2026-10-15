@@ -524,7 +524,7 @@ fn the_live_checks_profile() {
     let var = |n: &str| std::env::var(n).unwrap_or_else(|_| panic!("{n} unset"));
     let (root, out, tag) = (var("V1D_ROOT"), var("V1D_OUT"), var("V1D_TAG"));
     let writes = std::env::var("V1D_WRITES").is_ok_and(|w| w == "1");
-    let p = for_chat(Path::new(&root), writes).expect("Seatbelt here");
+    let p = for_chat(Path::new(&root), writes, "claude").expect("Seatbelt here");
     let agent = if std::env::var("V1D_NO_AGENT").is_ok_and(|w| w == "1") { None } else { p.agent.clone() };
     let p = Profile { tag, agent, ..p };
     let words: Vec<String> = p.args().iter().map(|a| crate::packs::sh_quote(a)).collect();

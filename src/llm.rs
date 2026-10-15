@@ -296,7 +296,7 @@ pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
 /// laid into its `--settings`). `given`: `Editor::claude_env` — a test's stand-in for tarae's environment, laid
 /// over the process's as if inherited (None: the process's own); what's left out is judged on both, all the child
 /// would inherit. `confine`: under claude's own profile (`sandbox::claude`, the chat's — `sandbox-exec` execs
-/// claude, so the pid is claude's); None: as you.
+/// claude, so the pid is claude's; Linux: started from a thread confined to its rules); None: as you.
 pub fn spawn(
     cfg: &LlmConfig,
     extra: &[&str],
@@ -305,6 +305,21 @@ pub fn spawn(
     cred: &Credential,
     confine: Option<&crate::sandbox::claude::Profile>,
 ) -> Result<Child, SpawnError> {
+    let mut cmd = command(cfg, extra, dir, given, cred, confine)?;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::sandbox::claude::spawn(confine, &mut cmd).map_err(SpawnError::Start)
+}
+
+/// `spawn`'s command, not started: its program (under `confine`'s), arguments and environment — also what
+/// `tarae --claude-confined` execs (`sandbox::claude::linux::main`, the live check).
+pub fn command(
+    cfg: &LlmConfig,
+    extra: &[&str],
+    dir: &Path,
+    given: Option<&Env>,
+    cred: &Credential,
+    confine: Option<&crate::sandbox::claude::Profile>,
+) -> Result<Command, SpawnError> {
     // (tests never start the real claude — a stand-in in `sh` answers for it; card model P2 found a test
     // whose claude read ~/.claude.json and the keychain)
     #[cfg(test)]
@@ -360,7 +375,7 @@ pub fn spawn(
     if !cfg.effort.is_empty() {
         cmd.args(["--effort", &cfg.effort]);
     }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(SpawnError::Start)
+    Ok(cmd)
 }
 
 /// Whether `command` is a program to start from `dir` — as `Command` finds it: a path (from `dir` when relative),
@@ -1990,6 +2005,8 @@ pub(crate) mod tests {
             log: None,
             agent: None,
             tag: "tarae-claude.test.".into(),
+            place: None,
+            rules: None,
         };
         let path = Env::from([("PATH".to_string(), "/nowhere".to_string())]);
         let cfg = LlmConfig { command: "tarae-no-such-agent".into(), ..Default::default() };

@@ -8,16 +8,16 @@
 //! later). So a bug in its permission path, or a feature acting by itself, can't write what runs later or loosens
 //! tarae (`~/.config/tarae`, `~/.zshrc`, `~/.local/bin` — its own updater's link too: decision A), nor read
 //! `~/.ssh`. The deny lists are the runs' (`kept_reads`, `key_files`, `protected_writes`), never a copy; paths
-//! only as `-D` parameters. macOS only: Linux waits on its own measurement (`~/.claude.json`'s atomic write needs
-//! home itself writable under Landlock — the threat model's G1).
+//! only as `-D` parameters. Linux: the same pieces as Landlock rules, claude's folder tarae's (`linux`,
+//! `claudehome.rs` — `~/.claude.json`'s atomic write would need home itself writable: the threat model's G1).
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
 use super::{
-    CLAUDES, Denial, Here, TMP, Watch, devices_rule, kept_reads, key_files, parse_denial, profile_path,
-    protected_writes, user_temp, vars_in,
+    CLAUDES, Denial, Here, TMP, Watch, devices_rule, kept_reads, key_files, profile_path, protected_writes,
+    user_temp, vars_in,
 };
 
 /// Claude's own folders in home, written (V1b): its settings, conversations, sessions and plugins' marks, and its
@@ -95,14 +95,21 @@ pub struct Profile {
     /// The temp folders (real): `/private/tmp` (V1b: `/tmp/claude-<uid>/`, its socket in `/tmp/cc-socks/`) and
     /// `$TMPDIR`'s parent, as runs'.
     pub temps: Vec<PathBuf>,
-    /// Never read (real): the runs' `kept_reads` less claude's own (`CLAUDES`) and the keychain (`KEYCHAINS`).
+    /// Never read (real): the runs' `kept_reads` less claude's own (`CLAUDES`) and the keychain (`KEYCHAINS`) —
+    /// where claude's folder is tarae's (`place`), with them, and with tarae's state that folder is in.
     pub kept: Vec<PathBuf>,
     /// tarae's log, in tarae's state but read: Claude reads it unasked (#45).
     pub log: Option<PathBuf>,
     /// Your SSH agent's socket (real): where `SSH_AUTH_SOCK` led when tarae started — never connected to (G20).
     pub agent: Option<PathBuf>,
-    /// What each deny says (`with message`): the refusals' watch finds them by it (`watch`).
+    /// What each deny says (`with message`): the refusals' watch finds them by it (`watch`). Linux: the name of
+    /// the thread that confines claude (`landlock::thread_name`), which Landlock's audit names.
     pub tag: String,
+    /// Linux: claude's folder, tarae's (`claudehome::Place`) — written whole, your `~/.claude` kept (`linux`).
+    /// None: macOS, claude's own in home (`OWN_DIRS`).
+    pub place: Option<crate::claudehome::Place>,
+    /// Linux: its Landlock rules, made on a worker (`linux::for_chat`). None: macOS, or a stand-in's.
+    pub rules: Option<Arc<linux::Rules>>,
 }
 
 impl Profile {
@@ -111,16 +118,25 @@ impl Profile {
     pub fn new(root: &Path, home: &Path, writes_project: bool, here: &Here, tag: &str) -> Profile {
         let (root, home) = (profile_path(root), profile_path(home));
         let vars = vars_in(&home, here);
-        let own: Vec<PathBuf> =
-            CLAUDES.iter().chain(&[KEYCHAINS]).map(|c| profile_path(&home.join(c))).collect();
-        let kept = kept_reads(&home, &vars).into_iter().filter(|k| !own.contains(k)).collect();
+        let place = crate::claudehome::Place::of(here.os, &|n| here.var(n)).ok().flatten();
+        let own: Vec<PathBuf> = match place {
+            Some(_) => Vec::new(),
+            None => CLAUDES.iter().chain(&[KEYCHAINS]).map(|c| profile_path(&home.join(c))).collect(),
+        };
+        let mut kept: Vec<PathBuf> =
+            kept_reads(&home, &vars).into_iter().filter(|k| !own.contains(k)).collect();
+        // (claude's folder is in tarae's state, kept but by its own rule — `linux`)
+        kept.extend(place.as_ref().map(|p| profile_path(&p.state)));
+        crate::sorting::sort(&mut kept);
+        kept.dedup();
         let mut temps = vec![profile_path(Path::new(TMP))];
         temps.extend(here.tmp.as_deref().map(|t| user_temp(&profile_path(t))));
         crate::sorting::sort(&mut temps);
         temps.dedup();
         let log = crate::log::path().map(|l| profile_path(&l));
         let agent = here.path("SSH_AUTH_SOCK").filter(|a| a.is_absolute()).map(|a| profile_path(&a));
-        Profile { root, home, writes_project, temps, kept, log, agent, tag: tag.to_string() }
+        let tag = tag.to_string();
+        Profile { root, home, writes_project, temps, kept, log, agent, tag, place, rules: None }
     }
 
     /// Claude's own folders (`OWN_DIRS`, real).
@@ -259,6 +275,9 @@ impl Profile {
     /// Whether the profile lets claude read `real` — its read rules, in Rust: what a Read the user would allow
     /// still can't open (`reads.rs` says so instead of asking).
     pub fn reads_allow(&self, real: &Path) -> bool {
+        if let Some(place) = &self.place {
+            return self.reads_allow_in(place, real);
+        }
         if self.log.as_deref() == Some(real) {
             return true;
         }
@@ -275,26 +294,32 @@ impl Profile {
         !kept && !key
     }
 
-    /// A refusal claude's tool result says — Node's words, `EPERM: operation not permitted, open '<path>'` (claude's
-    /// Edit, V1d's live check) — where the profile's rules refuse that path; its operation as they say (reading,
-    /// writing, or either when both are refused). The kernel's own report didn't come for it (only the probes'
-    /// did), so the chat says it from here too. A few `stat`s (the path made real).
+    /// A refusal claude's tool result says — Node's words: `EPERM: operation not permitted, open '<path>'` (Seatbelt,
+    /// claude's Edit, V1d's live check), `EACCES: permission denied, …` (Landlock), `EXDEV: cross-device link not
+    /// permitted, rename '<from>' -> '<to>'` (Landlock's move across folders) — where the profile's rules refuse
+    /// that path (the first of a move's two they refuse); its operation as they say (reading, writing, or either
+    /// when both are refused). The kernel's own report didn't come for it (only the probes' did; Landlock's only
+    /// from ABI 7), so the chat says it from here too. A few `stat`s (the path made real).
     pub fn said_in_result(&self, text: &str) -> Option<Denial> {
-        const EPERM: &str = "EPERM: operation not permitted, ";
-        let rest = &text[text.find(EPERM)? + EPERM.len()..];
-        let path = rest.split_once('\'')?.1.split_once('\'')?.0;
-        let real = profile_path(Path::new(path));
-        let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
-            (true, true) => return None,
-            (false, false) => super::EITHER,
-            (false, true) => "file-read-data",
-            (true, false) => "file-write*",
-        };
-        Some(Denial { process: "claude".into(), op: op.into(), target: real.display().to_string() })
+        let rest = REFUSED.iter().find_map(|r| Some(&text[text.find(r)? + r.len()..]))?;
+        let line = rest.lines().next().unwrap_or_default();
+        line.split('\'').skip(1).step_by(2).take(2).find_map(|path| {
+            let real = profile_path(Path::new(path));
+            let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
+                (true, true) => return None,
+                (false, false) => super::EITHER,
+                (false, true) => "file-read-data",
+                (true, false) => "file-write*",
+            };
+            Some(Denial { process: "claude".into(), op: op.into(), target: real.display().to_string() })
+        })
     }
 
     /// Whether the profile lets claude write `real` — its write rules, in Rust.
     pub fn writes_allow(&self, real: &Path) -> bool {
+        if let Some(place) = &self.place {
+            return self.writes_allow_in(place, real);
+        }
         // (the profile's order: the later rule on a path wins)
         let in_home = real.starts_with(&self.home);
         let mut ok = !in_home
@@ -389,14 +414,38 @@ impl Profile {
     }
 }
 
+/// How a refusal starts in Node's words (`said_in_result`): Seatbelt's, Landlock's, Landlock's move across folders.
+pub const REFUSED: [&str; 3] = [
+    "EPERM: operation not permitted, ",
+    "EACCES: permission denied, ",
+    "EXDEV: cross-device link not permitted, ",
+];
+
 /// How many named parts a path has (`/a/b`: 2) — a regex's depth, no path in it.
 fn parts_of(p: &Path) -> usize {
     p.components().filter(|c| matches!(c, Component::Normal(_))).count()
 }
 
 /// The chat's claude's profile in `root` (`writes_project`: the arm) — or why it runs unconfined: no Seatbelt
-/// here (tarae itself in a sandbox: they don't nest), no home. Blocks the first time (`probe`): a worker's.
-pub fn for_chat(root: &Path, writes_project: bool) -> Result<Profile, String> {
+/// here (tarae itself in a sandbox: they don't nest), no home; Linux: `linux::for_chat`'s. Blocks the first time
+/// (`probe`; Linux: the project walked, the audit probed): a worker's. `command`: claude's program (`llm.command`)
+/// — on Linux one in a place the rules keep can't run under them (`linux::for_chat`).
+pub fn for_chat(root: &Path, writes_project: bool, command: &str) -> Result<Profile, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let here = Here::now();
+        let home = here.path("HOME").ok_or("no HOME to keep it to")?;
+        linux::for_chat(root, &home, writes_project, command, &here)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = command;
+        for_chat_seatbelt(root, writes_project)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn for_chat_seatbelt(root: &Path, writes_project: bool) -> Result<Profile, String> {
     if super::inside() {
         return Err(super::INSIDE.into());
     }
@@ -421,37 +470,80 @@ fn own_file(path: &Path) -> bool {
 }
 
 /// A new tag for a claude process's profile — one no other process's contains (`log stream` matches by
-/// `CONTAINS`: the dot after the number keeps `….1.` out of `….10.`).
+/// `CONTAINS`: the dot after the number keeps `….1.` out of `….10.`). Linux: its confining thread's name, which
+/// Landlock's audit names (`landlock::thread_name`, this tarae's alone).
 pub fn tag() -> String {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("tarae-claude.{}.{n}.", std::process::id())
+    #[cfg(target_os = "linux")]
+    {
+        crate::landlock::thread_name()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("tarae-claude.{}.{n}.", std::process::id())
+    }
 }
 
 /// `claude`'s command under `profile`: `sandbox-exec`, which execs claude — the pid is claude's
-/// (`Editor::claude_pids`).
+/// (`Editor::claude_pids`). Linux: claude's own, confined as it starts (`spawn`).
 pub fn command(profile: &Profile, program: &str) -> Command {
-    let mut c = Command::new(super::SANDBOX_EXEC);
-    c.args(profile.args()).arg(program);
-    c
+    #[cfg(target_os = "linux")]
+    {
+        let _ = profile;
+        Command::new(program)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut c = Command::new(super::SANDBOX_EXEC);
+        c.args(profile.args()).arg(program);
+        c
+    }
+}
+
+/// `cmd` (`command`'s) started under `profile` — Linux: from a thread confined to its rules (`linux::spawn`);
+/// macOS: `sandbox-exec` is in it already. None: as you.
+pub fn spawn(profile: Option<&Profile>, cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    match profile {
+        #[cfg(target_os = "linux")]
+        Some(p) => linux::spawn(p, cmd),
+        _ => cmd.spawn(),
+    }
 }
 
 /// What the profile refuses claude, watched by its tag (`log stream`, as runs' `Watch::start`) from now until
 /// claude's process `pid` is gone — each refusal handed to `tell` as it comes. Started before claude is, but not
 /// waited for (`WATCH_READY`): a refusal in claude's first moments may go unseen (the live check lists them all).
-pub fn watch(tag: &str, tell: impl Fn(&Denial) + Send + 'static) -> Arc<Watch> {
-    let w = Watch::quiet(tag);
-    let predicate = format!("sender == \"Sandbox\" AND eventMessage CONTAINS \"{tag}\"");
-    let mut c = Command::new(LOG);
-    c.args(["stream", "--style", "ndjson", "--predicate", &predicate]);
-    let tag = tag.to_string();
-    w.read(c, move |line| {
-        let d: Vec<Denial> = parse_denial(line, &tag).into_iter().collect();
-        d.iter().for_each(&tell);
-        d
-    });
+/// Linux: Landlock's audit records of the domain its confining thread made (named by the tag), where they're
+/// readable (ABI 7, `linux::audit_readable`) — else nothing comes, and the tool results say what they say.
+pub fn watch(profile: &Profile, tell: impl Fn(&Denial) + Send + 'static) -> Arc<Watch> {
+    let w = Watch::quiet(&profile.tag);
+    #[cfg(target_os = "linux")]
+    {
+        let Some(source) = profile.rules.as_ref().and_then(|r| r.audit.as_ref().ok()) else { return w };
+        let mut audit = linux::audit_of(profile);
+        w.read(source.stream(), move |line| {
+            let d = audit.line(line);
+            d.iter().for_each(&tell);
+            d
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let tag = profile.tag.clone();
+        let predicate = format!("sender == \"Sandbox\" AND eventMessage CONTAINS \"{tag}\"");
+        let mut c = Command::new(LOG);
+        c.args(["stream", "--style", "ndjson", "--predicate", &predicate]);
+        w.read(c, move |line| {
+            let d: Vec<Denial> = super::parse_denial(line, &tag).into_iter().collect();
+            d.iter().for_each(&tell);
+            d
+        });
+    }
     w
 }
+
+pub mod linux;
 
 #[cfg(test)]
 mod tests;

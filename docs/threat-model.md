@@ -14,11 +14,12 @@ thing **not kept** says why, and where it's planned, when.
 Claude never runs a command as you. Its commands run in a sandbox: they write only in the project (minus the
 files that run later), read in your home only what toolchains need, never read keys, and reach no network unless
 you turn it on — then only through tarae, which checks every host. Its edits come to you as a review. Its reads
-outside the project ask you first. The `claude` program itself runs as you, but on macOS in a sandbox of its own:
-it reads no key folders or files named like keys and writes only its own folders and temp — not the project, not
-what runs later (§2). What's not kept: on Linux the `claude` program is unconfined; on macOS it still reads its
-login from your keychain, runs git in the project and reaches Anthropic's servers (§2 lists what it touched,
-measured); a command can read what's outside your home folder and the temp folders; with the network on
+outside the project ask you first. The `claude` program itself runs as you, but in a sandbox of its own (macOS:
+Seatbelt; Linux: Landlock): it reads no key folders or files named like keys and writes only its own folders and
+temp — not the project, not what runs later (§2). What's not kept: the `claude` program still runs git in the
+project and reaches Anthropic's servers, on macOS reads its login from your keychain, and on Linux below Landlock
+ABI 3 runs unconfined (§2 lists what it touched, measured); a command can read what's outside your home folder and
+the temp folders; with the network on
 and no host list, it can send what it read to any host; and on macOS it can read your other processes' command
 lines and starting environments.
 
@@ -38,7 +39,7 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 
 ```
  you ──▶ tarae (trusted: your process, not confined)
-          ├─ the claude process  (as you — macOS: files-only sandbox of its own; Linux: NOT confined; network open)
+          ├─ the claude process  (as you — a files-only sandbox of its own: Seatbelt / Landlock; network open)
           │     tools: Claude Code's Read (each call asks tarae) · tarae's own tools (in tarae)
           │     starts by itself: git, security (its login), sh (system facts)
           ├─ Claude's runs        (sandboxed: Seatbelt on macOS; keeper + Landlock + seccomp + supervisor on Linux)
@@ -430,7 +431,7 @@ Not kept:
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
 | `y`/`a` on a no-sandbox card | commands as you, unconfined |
 | `llm.sandbox = false` | every command of Claude's as you, unconfined, **unasked** — only the chat's title says `› no sandbox` |
-| `llm.claude-sandbox = false` | the claude program itself as you, unconfined (macOS) — the chat says so; only your own config sets it |
+| `llm.claude-sandbox = false` | the claude program itself as you, unconfined — the chat says so; only your own config sets it |
 
 test: `allow::tests::which_folders_a_denied_write_may_open` · `allow::tests::home_above_it_and_key_folders_are_never_kept` ·
 `editor::tests::claude_asks_to_run_outside_the_sandbox_with_a_reason` · `tools::tests::claude_asks_for_one_socket_not_the_sandbox_off`
@@ -454,10 +455,10 @@ test: `editor::tests::the_sandbox_turned_off_is_said` · `trust::tests::every_sa
 ## 2. The claude process
 
 `claude -p` runs as you. Its cwd is the session's checkout. What it may *do* through its tools is narrowed by its
-flags and by tarae answering its permission requests; what its own code does, on macOS, by a Seatbelt profile of
-its own (`llm.claude-sandbox`, on unless you turn it off): files only — its network, the programs it starts and
-the system's services as they are. On Linux it's **not confined** yet, but its folder is tarae's own, apart from
-your `~/.claude` (below).
+flags and by tarae answering its permission requests; what its own code does, by a sandbox of its own
+(`llm.claude-sandbox`, on unless you turn it off) — macOS: a Seatbelt profile; Linux: Landlock rules from the same
+pieces, its folder tarae's own, apart from your `~/.claude` (below): files only — its network, the programs it
+starts and the system's services as they are.
 
 ### What it touches
 
@@ -525,12 +526,49 @@ Kept:
   from yours**: your `claude --resume` doesn't list tarae's, nor tarae yours, and a chat started before the switch
   continues as a new conversation, said once (a message you'd sent goes to the new one). **Your user settings,
   `CLAUDE.md`, plugins and user-scope MCP servers don't apply** in tarae's claude. Runs never read the folder (it's
-  in tarae's state, kept from them), so its login is kept from Claude's commands. Planned (the Linux profile):
-  your `~/.claude` and `~/.claude.json` closed to tarae's claude. macOS is unchanged.
+  in tarae's state, kept from them), so its login is kept from Claude's commands. Your `~/.claude` and
+  `~/.claude.json` are closed to it by its profile (next). macOS is unchanged.
   test: `claudehome::tests::claudes_folder_is_made_through_no_link` ·
   `claudehome::tests::every_claude_on_linux_has_taraes_folder_and_no_user_settings` ·
   `claudehome::tests::claude_login_is_claudes_own_login_in_taraes_folder` ·
   `claudehome::tests::no_login_says_claude_login_once` · `editor::tests::a_conversation_continues_after_a_restart`
+- **Linux: its own sandbox, Landlock, files only.** The macOS profile's pieces (the runs' kept places, the
+  protected names, the files named like keys, the temp folders, the devices) made into Landlock rules as the
+  runs' are, on a worker; applied on a thread of tarae's named for it, which then starts claude (`no_new_privs`
+  with it; nothing else of tarae's confined). Reads: everything but home's kept places — §1.4's key folders, your
+  `~/.claude` and `~/.claude.json`, tarae's state (but claude's folder, which is in it, and the log) — the
+  terminals, kept places outside home (a moved state or toolchain home), the files named like keys at home's top
+  and anywhere in the project. Home-wide, not the runs' narrow home: rules can't be added to a running process, so
+  a Read you allow on a card must already reach the file; one the rules close is answered at once. Writes: its
+  folder and `~/.local/state/claude/locks/` whole, the temp folders and the devices but the terminals — claude isn't
+  setsid, so `/dev/tty` is tarae's own terminal (a write lands on your screen, `TIOCSTI` types keys into tarae).
+  The project: none with the default edit tools; with Edit and Write as runs have it (§1.2), entry by entry around
+  the protected names — a folder holding one takes no new entry, the project's top included (`.git`): a new file
+  there is refused, and so is the temp file claude's Edit and Write make beside the one they change, after which
+  claude 2.1.296 writes a file already there in place (measured, run C: the edit landed, the new file wasn't
+  made); the chat says so once, tarae's `edit` makes new files there. Files only (decision 17): no network rights and no unix-socket rules, so
+  **claude reaches any unix socket whose path it can find** — your session's D-Bus (where `systemd-run --user`
+  runs anything unconfined), tmux's sockets, the SSH and GPG agents under `$XDG_RUNTIME_DIR`. Against a hostile
+  claude program the Linux confinement is no wall; it holds against claude's file bugs. The chat's claude has no
+  Bash tool, so only claude's own code could go that way (G24). Signals and abstract sockets outside its domain
+  closed from ABI 6. Each claude's rules are made on a worker as it starts, from what's there then. Below Landlock ABI 3, or with a claude program in a place the rules keep (the old
+  local install in `~/.claude/local`), claude runs unconfined and the chat says why. Its refusals: claude's tool
+  results in Landlock's words (`EACCES …`, `EXDEV …` for a move), and from ABI 7 Landlock's audit records of its
+  own domain. Measured live (claude 2.1.296 through `tarae --claude-confined`, `target/sb/v1b-linux.sh` run C,
+  against a stand-in API; kernel 6.8, Landlock ABI 4, 2026-10-15): the conversation finished as unconfined; a
+  planted key's Read came back `EACCES`; a Write over `~/.bashrc` was refused (its temp file and the in-place
+  fallback both `EACCES`) and the file stayed as it was; a new file in the project's top wasn't made, an edit of
+  one there landed in place; a marker in a `CLAUDE.md` in its folder reached none of the 8 requests (the
+  project's, the control, all 8); claude sent no signal.
+  test: `sandbox::claude::linux::tests::claudes_grants_read_all_but_whats_kept_and_write_its_own` ·
+  `sandbox::claude::linux::tests::claudes_rules_in_rust_are_its_grants` ·
+  `sandbox::golden::claudes_linux_grants_are_pinned` ·
+  `sandbox::claude::linux::tests::claudes_landlock_rules_reach_nothing_kept` ·
+  `sandbox::claude::linux::tests::a_stand_in_claude_does_what_claude_does_and_no_more` ·
+  `sandbox::claude::linux::tests::claude_is_started_confined_by_its_tagged_thread` ·
+  `sandbox::claude::linux::tests::claudes_watch_hears_its_own_domain` ·
+  `sandbox::claude::linux::tests::a_refusal_in_landlocks_words_is_said` ·
+  `sandbox::claude::linux::tests::a_claude_program_its_rules_keep_is_told`
 - **It doesn't update itself** from tarae: its updater writes a folder of programs on your `PATH`, closed to it;
   every claude tarae starts gets `DISABLE_UPDATES`. `:claude-update` runs `claude update` as your own task, outside
   the sandbox; the chat says once when the claude it runs was installed over two weeks ago (without the network
@@ -588,9 +626,19 @@ Kept:
 Not kept:
 - **claude's own code, within its profile.** A bug in its permission path (a tool that skips `can_use_tool`, a flag
   whose meaning changes in an update), or a feature that reads by itself, reads what the profile leaves open —
-  everything but key folders, files named like keys and tarae's state — and writes its own folders and temp. **On
-  Linux it reaches anything you can**, your keys included: there claude waits on a measurement (its atomic write of
-  `~/.claude.json` would need home itself writable under Landlock).
+  everything but key folders, files named like keys and tarae's state — and writes its own folders and temp.
+- **What Landlock can't say** (Linux, said once in the chat): a file named like a key deeper in home than its top
+  (macOS's profile refuses them anywhere in home; claude's Read still asks tarae); a name inside a granted folder
+  (claude's folder is all or nothing — why its user settings source is off); a unix socket's connect (next); what's
+  made after claude started — in home closed to it, a key or protected name in the project open to it — until its
+  next start, whose rules are made then; home's own listing. Below ABI 3, or a claude program the rules keep:
+  unconfined, said.
+- **Unix sockets: no wall against a hostile claude program** (G24). Both profiles are files only (decision 17).
+  On Linux claude reaches any unix socket whose path it can find: your session's D-Bus (`systemd-run --user`
+  runs anything unconfined), tmux's sockets (a tmux server runs commands as you), the SSH and GPG agents under
+  `$XDG_RUNTIME_DIR` (they sign and decrypt for it). Through the first two its own code gets out of the rules
+  whole. On macOS the same holds but for the agent sockets its profile knows (below). The chat's claude has no
+  Bash tool: this is claude's own code, not the model's reach. Said once in the chat on Linux.
 - **Your keychain, through `security`.** claude reads its login with `/usr/bin/security`; anything else that tool
   may read without a prompt is within the same reach.
 - **Its own git reads the repository's config.** tarae holds a repository's commands for its own git (§1.7), not
@@ -613,7 +661,7 @@ Not kept:
 - **The network**: claude reaches whatever it reaches. tarae doesn't proxy it: it must reach Anthropic, or your
   gateway or proxy. What it read can leave that way.
 - **The ask prompt's and commit drafts' claudes** run unconfined: they're started with no tools at all
-  (`--tools ""`) — what they could do is claude's own code alone, as for the chat's on Linux.
+  (`--tools ""`) — what they could do is claude's own code alone.
 - **A refusal claude doesn't put in a tool result goes unseen.** The kernel reported none of claude's own
   refusals live (only a probe's), so the chat sees a refusal only when a tool's result says it (`EPERM …`); one in
   claude's own work — its state, its caches — isn't said anywhere. The profile still holds. That's why `~/.claude/`
@@ -624,15 +672,16 @@ Not kept:
   `--strict-mcp-config` and starts none of them; your own claude, outside tarae, would.
 - **An SSH agent at another socket.** Without the variable claude has to find a path on its own; on macOS an agent
   whose socket `SSH_AUTH_SOCK` didn't name when tarae started (one started later, a second agent of another
-  program) is still reachable — the profile refuses only those it knows. On Linux claude has no profile: any agent
-  socket whose path it finds is reachable.
+  program) is still reachable — the profile refuses only those it knows. **On Linux claude isn't given
+  `SSH_AUTH_SOCK`, but nothing stops it reaching the agent**: its rules refuse no socket, and an agent's it finds
+  (`$XDG_RUNTIME_DIR/ssh-agent.socket`, gnome-keyring's, gpg-agent's) is reached (G24).
 - **Claude Code's own memory folder** (`~/.claude/projects/<project>/memory/`, shared by every checkout of a
   repository) is inside claude's own folder: no claude tarae starts loads it (auto memory is off — above), but its
   own code could still read it. On macOS the profile keeps claude from writing it (a new project's folder isn't
-  even made); on Linux it's written as everything is.
+  even made); on Linux it's in claude's folder, tarae's, written whole — your own Claude Code never reads it.
 
-Planned ([roadmap](roadmap.md), sandbox validation): Linux's profile (Landlock), once what claude touches there is
-measured.
+Planned: on Linux, the scopes (ABI 6) and the audit (ABI 7) checked live on a 6.12+ kernel — colima's, where the
+live check runs, is ABI 4.
 
 ## 3. What tarae runs as you, outside the sandbox
 
@@ -650,7 +699,7 @@ Not Claude's, but a hostile repository reaches them:
 
 | | Gap | Why | Plan |
 |---|---|---|---|
-| G1 | The `claude` process is unconfined on Linux; on macOS it reads all but keys and tarae's state, and the network is open | it needs your login and Anthropic | macOS: a files-only profile (§2); Linux after its measurement |
+| G1 | The `claude` process reads all but keys and tarae's state, and the network is open; on Linux it reaches any unix socket whose path it can find — the session D-Bus (`systemd-run --user`: anything unconfined), tmux's, the agents under `$XDG_RUNTIME_DIR` — so its confinement is no wall against a hostile claude program, only against its file bugs (G24); on Linux a file named like a key deeper in home than its top too, and below Landlock ABI 3 it's unconfined | it needs your login and Anthropic; Landlock only grants, by folder | a files-only profile on both (§2): Seatbelt; Landlock with claude's folder tarae's (its `~/.claude.json` write needed home writable) |
 | G2 | Your own Claude `allow` rules and plugins apply in the chat | they're yours; claude reads them itself | said |
 | G3 | Reads outside home are open | programs need `/usr`, `/opt`; no list | said |
 | G4 | Network on + hosts "any" = exfiltration to any host | the default favours builds that fetch | said; a host list is one setting |
@@ -669,10 +718,11 @@ Not Claude's, but a hostile repository reaches them:
 | G17 | claude's own git reads a repository's config (`core.fsmonitor` …) | it's claude's, not tarae's | measured: its git didn't run the fsmonitor that a plain `git status` there runs (2.1.296); on macOS what it would run is confined as claude is; measured again by the live check under the profile |
 | G18 | `llm.sandbox = false` runs Claude's commands unconfined with no card | your choice, said in the title | said; a project needs your trust to set it |
 | G19 | claude writes `~/.claude.json`, which holds your user-scope MCP servers (commands your own claude starts) | claude's state lives in it | said; the chat runs `--strict-mcp-config` |
-| G20 | claude inherited `SSH_AUTH_SOCK`: the agent signed with your keys for it | unix sockets stay open (files-only profile) | closed: no claude tarae starts gets `SSH_AUTH_SOCK`, and on macOS its profile refuses connecting to the socket it named when tarae started (real path) and to launchd's agent sockets in `/private/var/run/` (macOS 27) and `/private/tmp/` (older) (test: `llm::tests::every_claude_tarae_starts_has_no_ssh_agent` · `sandbox::claude::tests::claude_cant_reach_your_ssh_agent` · `sandbox::claude::tests::launchds_agent_sockets_are_refused_in_both_places`; live: `ssh-add -l` refused under the profile on 27.0.1; `/private/var/run/` is checked under Seatbelt only by the live check — root's folder, no test stand-in); left: on Linux no profile yet (the variable is still removed); on macOS an agent at a socket the variable didn't name at start |
-| G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: on Linux the folder is still readable to claude (no profile there) — nothing reads it now |
+| G20 | claude inherited `SSH_AUTH_SOCK`: the agent signed with your keys for it | unix sockets stay open (files-only profile) | narrowed (on Linux an agent socket claude finds is still reached — G1): no claude tarae starts gets `SSH_AUTH_SOCK`, and on macOS its profile refuses connecting to the socket it named when tarae started (real path) and to launchd's agent sockets in `/private/var/run/` (macOS 27) and `/private/tmp/` (older) (test: `llm::tests::every_claude_tarae_starts_has_no_ssh_agent` · `sandbox::claude::tests::claude_cant_reach_your_ssh_agent` · `sandbox::claude::tests::launchds_agent_sockets_are_refused_in_both_places`; live: `ssh-add -l` refused under the profile on 27.0.1; `/private/var/run/` is checked under Seatbelt only by the live check — root's folder, no test stand-in); left: on Linux no profile yet (the variable is still removed); on macOS an agent at a socket the variable didn't name at start |
+| G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: on Linux claude's folder is tarae's, and the memory folder in it is claude's to read (your `~/.claude` closed to it) — nothing reads it now |
 | G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | caught after the run, asked before anything runs it, as G10 (§1.2: new files, ignored folders' names, names past 5,000 new files, links, repositories); left: an ignored folder that was there before, what a leftover makes later, no git checkout, your tests and `:restart`'s build |
 | G22 | A refusal of claude's own work (not a tool's) goes unseen; `~/.claude/` is a denylist | the kernel didn't report claude's refusals (V1d, live) | an allowlist of what claude writes, once its refusals can be seen — and with it a measurement of `shell-snapshots/` (kept closed unmeasured: whether a later claude sources one it didn't make can't be told from here) |
+| G24 | Linux: claude reaches any unix socket whose path it can find — the session D-Bus (`systemd-run --user` runs anything unconfined), tmux's sockets, the SSH and GPG agents under `$XDG_RUNTIME_DIR` (G20 there: the variable left out, the agent still reached). Against a hostile claude program its confinement is no wall; it holds against claude's file bugs. The chat's claude has no Bash tool: only claude's own code could | its rules are files only (decision 17) | said (the chat, once); closing it is the user's call, not built. Options: Landlock's right to connect to a unix socket by its path (`RESOLVE_UNIX`, ABI 9 — `landlock.rs` reads it from Linux 7.2's uapi header), granted beneath `/tmp/cc-socks/` only, where claude binds its own (measured) — below ABI 9 nothing; seccomp: a plain filter can't see a connect's path (a pointer), and denying `socket(AF_UNIX)` outright refuses that bind too — it needs the runs' supervisor deciding each address (user notification) instead; a mount and user namespace showing claude an empty `$XDG_RUNTIME_DIR` and a `/tmp` of its own (its `cc-socks` inside) — needs user namespaces (tiers A+/A), and abstract sockets stay to the ABI 6 scope |
 
 ## 5. For a reviewer: where to start
 

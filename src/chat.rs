@@ -1130,7 +1130,7 @@ fn ensure_proc(ed: &mut Editor) {
     // What its profile refuses it: said in the chat and the log as it comes
     let confined = profile.map(|p| {
         let tx = tx.clone();
-        let watch = crate::sandbox::claude::watch(&p.tag, move |d| {
+        let watch = crate::sandbox::claude::watch(&p, move |d| {
             let d = d.clone();
             let _ = tx
                 .send(crate::event::Event::Job(Box::new(move |ed: &mut Editor| refused(ed, generation, d))));
@@ -1138,6 +1138,15 @@ fn ensure_proc(ed: &mut Editor) {
         watch.run_started(child.id());
         (std::sync::Arc::new(p), watch)
     });
+    // On Linux what its rules can't hold, once since tarae started — and their Edit and Write part to the first chat
+    // that has them (`sandbox::claude::linux`)
+    #[cfg(target_os = "linux")]
+    if confined.is_some() {
+        static SAID: std::sync::Mutex<(bool, bool)> = std::sync::Mutex::new((false, false));
+        if let Some(note) = limits_note(arm, &mut SAID.lock().unwrap_or_else(|e| e.into_inner())) {
+            c.note(&note);
+        }
+    }
     c.proc = Some(Proc { stdin, pid: child.id(), confined, refused: Vec::new() });
     llm::pump(child, false, tx, move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
@@ -1152,9 +1161,27 @@ fn ensure_proc(ed: &mut Editor) {
     crate::limits::ask_chat(ed);
 }
 
+/// What the chat says of claude's Landlock rules as a confined claude starts in `arm` (Linux), given what's been said
+/// since tarae started (`said`: the limits; their Edit and Write part): the limits once, and the Edit and Write part
+/// once, to the first chat in an arm with Claude Code's Edit and Write — whichever chat came first. None: all said.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn limits_note(arm: crate::edittool::Arm, said: &mut (bool, bool)) -> Option<String> {
+    use crate::sandbox::claude::linux::{LIMITS, LIMITS_EDIT};
+    let edit = arm != crate::edittool::Arm::Tarae && !said.1;
+    let note = match (said.0, edit) {
+        (false, _) => format!("{LIMITS}{}.", if edit { LIMITS_EDIT } else { "" }),
+        (true, true) => format!("claude itself runs under Landlock{LIMITS_EDIT}."),
+        (true, false) => return None,
+    };
+    *said = (true, said.1 || edit);
+    Some(note)
+}
+
 /// The profile the chat's next claude runs under, for a project it `writes` or not (the arm): Some(None) —
-/// unconfined (`llm.claude-sandbox` off, tests, not macOS, no Seatbelt here: said once a chat); None while it's
-/// made on a worker — the chat starts once it is (`gate_opened`). Each process gets a tag of its own.
+/// unconfined (`llm.claude-sandbox` off, tests, neither macOS nor Linux, no Seatbelt here, Landlock below
+/// `claude::linux::MIN_ABI`: said once a chat); None while it's
+/// made on a worker — the chat starts once it is (`gate_opened`). Each process gets a tag of its own, and on Linux
+/// rules of its own, made for its start.
 fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox::claude::Profile>> {
     // On Linux claude's own folder first (`claudehome.rs`), made on a worker — it starts once it is
     let os = crate::sandbox::Os::HOST;
@@ -1176,9 +1203,10 @@ fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox:
         }
         return None;
     }
-    let wanted = ed.claude_confine && cfg!(target_os = "macos");
+    let wanted = ed.claude_confine && (cfg!(target_os = "macos") || cfg!(target_os = "linux"));
     let off = !ed.config.llm.claude_sandbox;
     let root = ed.session.root.clone();
+    let command = ed.config.llm.command.clone();
     let c = ed.session.chat.as_mut()?;
     if !wanted || off {
         if wanted && !c.confine.said {
@@ -1190,10 +1218,14 @@ fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox:
     let key = (root.clone(), writes);
     match &c.confine.made {
         Some((k, Ok(p))) if *k == key => {
-            return Some(Some(crate::sandbox::claude::Profile {
-                tag: crate::sandbox::claude::tag(),
-                ..p.clone()
-            }));
+            let p = crate::sandbox::claude::Profile { tag: crate::sandbox::claude::tag(), ..p.clone() };
+            // (Linux's — claude's folder tarae's — holds rules made from what was there: home's entries, the
+            // project's protected names and keys. Each claude gets its own, made on a worker as it starts, never the
+            // last one's; macOS's regexes serve every claude of the chat)
+            if p.place.is_some() && crate::sandbox::claude::linux::broken() != "cache" {
+                c.confine.made = None;
+            }
+            return Some(Some(p));
         }
         Some((k, Err(why))) if *k == key => {
             if !c.confine.said {
@@ -1210,7 +1242,7 @@ fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox:
     }
     c.confine.making = true;
     ed.events.jobs().spawn(move || {
-        let made = crate::sandbox::claude::for_chat(&root, writes);
+        let made = crate::sandbox::claude::for_chat(&root, writes, &command);
         move |ed: &mut Editor| {
             let Some(c) = ed.session.chat.as_mut() else { return };
             (c.confine.made, c.confine.making) = (Some((key, made)), false);
@@ -1400,7 +1432,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             // always come (V1d's live check: the Edit's refused write never reached `log stream`); said as one
             // (on a worker: the path is made real — a few `stat`s)
             if error
-                && text.contains("EPERM")
+                && crate::sandbox::claude::REFUSED.iter().any(|r| text.contains(r))
                 && let Some(p) = c.confined()
             {
                 let text = text.clone();
@@ -3040,6 +3072,8 @@ mod tests {
             log: None,
             agent: None,
             tag: "tarae-claude.test.".into(),
+            place: None,
+            rules: None,
         };
         let c = ed.session.chat.as_mut().unwrap();
         let watch = crate::sandbox::Watch::quiet(&p.tag);
@@ -3059,10 +3093,17 @@ mod tests {
         let msgs = &ed.session.chat.as_ref().unwrap().msgs;
         let note = msgs.iter().rev().find(|m| m.role == Role::Note).unwrap();
         assert!(note.text.contains("writing") && note.text.contains("a.rs.tmp.1"), "{}", note.text);
+        // (Landlock's words too: run C's refused Write)
+        let write = format!("EACCES: permission denied, open '{}/proj/b.rs.tmp.2'", dir.display());
+        on_event(&mut ed, generation, result(write));
+        settle_until(&mut ed, |ed| said(ed) == 2);
+        let msgs = &ed.session.chat.as_ref().unwrap().msgs;
+        let note = msgs.iter().rev().find(|m| m.role == Role::Note).unwrap();
+        assert!(note.text.contains("b.rs.tmp.2"), "{}", note.text);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The chat's claude unconfined by your setting says so, once a chat (macOS: elsewhere it never is).
+    /// The chat's claude unconfined by your setting says so, once a chat (macOS and Linux: elsewhere it never is).
     #[test]
     fn claude_unconfined_by_the_setting_is_said() {
         let mut ed = editor("");
@@ -3074,8 +3115,112 @@ mod tests {
         let c = ed.session.chat.as_ref().unwrap();
         let said =
             c.msgs.iter().filter(|m| m.role == Role::Note && m.text.contains("llm.claude-sandbox is off"));
-        assert_eq!(said.count(), usize::from(cfg!(target_os = "macos")));
+        assert_eq!(said.count(), usize::from(cfg!(any(target_os = "macos", target_os = "linux"))));
         assert!(c.confined().is_none());
+    }
+
+    /// Linux's profile (claude's folder tarae's) holds rules made from what was there — home's entries, the
+    /// project's protected names and keys — so each claude of a chat gets one made as it starts, never the last
+    /// one's; macOS's (regexes) serves them all.
+    #[test]
+    fn claudes_linux_rules_are_made_again_for_each_claude() {
+        let mut ed = editor("");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        ed.claude_confine = true;
+        open(&mut ed);
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
+        let root = ed.session.root.clone();
+        let home = |n: &str| (n == "HOME").then(|| "/home/stand-in".to_string());
+        let linux = crate::claudehome::Place::of(crate::sandbox::Os::Linux, &home).unwrap();
+        assert!(linux.is_some());
+        for (place, kept) in [(linux, false), (None, true)] {
+            let p = crate::sandbox::claude::Profile {
+                root: root.clone(),
+                home: "/home/stand-in".into(),
+                writes_project: false,
+                temps: Vec::new(),
+                kept: Vec::new(),
+                log: None,
+                agent: None,
+                tag: "tarae-claude.test.".into(),
+                place,
+                rules: None,
+            };
+            ed.session.chat.as_mut().unwrap().confine.made = Some(((root.clone(), false), Ok(p)));
+            assert!(matches!(confine_ready(&mut ed, false), Some(Some(_))));
+            let made = ed.session.chat.as_ref().unwrap().confine.made.is_some();
+            assert_eq!(made, kept, "kept for the next claude: {kept}");
+        }
+    }
+
+    /// A protected name made in the project after a claude started is in the next claude's rules: each start's are
+    /// made for it, on a worker (Linux; break-once `TARAE_TEST_CLAUDE_BREAK=cache` keeps the first's).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_protected_name_made_after_a_start_is_in_the_next_starts_rules() {
+        let min = crate::sandbox::claude::linux::MIN_ABI;
+        if crate::landlock::abi().map_or(true, |a| a < min) {
+            return;
+        }
+        // (a folder made new for the test, 0700, never one that was there — a name taken goes to the next)
+        use std::os::unix::fs::DirBuilderExt;
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = (0..)
+            .map(|n| tmp.join(format!("tarae-chat-rules-{}-{n}", std::process::id())))
+            .find(|at| match std::fs::DirBuilder::new().mode(0o700).create(at) {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(e) => panic!("{}: {e}", at.display()),
+            })
+            .unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let mut ed = editor("");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        ed.claude_confine = true;
+        ed.session.root = dir.clone();
+        open(&mut ed);
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
+        assert!(ed.session.chat.as_ref().unwrap().confined().is_some(), "the first claude confined");
+        // (the next start: made on a worker for it, not the first's kept)
+        let next = |ed: &mut Editor| {
+            assert!(confine_ready(ed, false).is_none(), "made again, not the last claude's");
+            settle_until(ed, |ed| ed.session.chat.as_ref().is_some_and(|c| c.confine.made.is_some()));
+            match confine_ready(ed, false) {
+                Some(Some(p)) => p,
+                _ => panic!("no profile for the next claude"),
+            }
+        };
+        let protected = |p: &crate::sandbox::claude::Profile| p.rules.as_ref().unwrap().protected.clone();
+        let makefile = dir.join("sub/Makefile");
+        let first = next(&mut ed);
+        assert!(!protected(&first).contains(&makefile), "{:?}", protected(&first));
+        std::fs::write(&makefile, "").unwrap();
+        let second = next(&mut ed);
+        assert!(protected(&second).contains(&makefile), "{:?}", protected(&second));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What Landlock can't hold is said once since tarae started, and its Edit and Write part reaches the first chat
+    /// that has them, whichever arm the first confined chat was in.
+    #[test]
+    fn the_landlock_note_reaches_the_first_chat_with_edit_and_write_too() {
+        use crate::edittool::Arm;
+        use crate::sandbox::claude::linux::{LIMITS, LIMITS_EDIT};
+        let mut said = (false, false);
+        let first = limits_note(Arm::Tarae, &mut said).unwrap();
+        assert!(first.starts_with(LIMITS) && !first.contains(LIMITS_EDIT), "{first}");
+        assert_eq!(limits_note(Arm::Tarae, &mut said), None);
+        let edit = limits_note(Arm::Native, &mut said).unwrap();
+        assert!(edit.contains(LIMITS_EDIT) && !edit.contains(LIMITS), "{edit}");
+        assert_eq!(limits_note(Arm::Both, &mut said), None);
+        // (an Edit and Write chat first: both at once, then nothing)
+        let mut said = (false, false);
+        let both = limits_note(Arm::Both, &mut said).unwrap();
+        assert!(both.starts_with(LIMITS) && both.contains(LIMITS_EDIT), "{both}");
+        assert_eq!(limits_note(Arm::Tarae, &mut said), None);
+        assert_eq!(limits_note(Arm::Native, &mut said), None);
     }
 
     /// The messages the fake claude was sent, one a line.

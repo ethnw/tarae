@@ -13,7 +13,8 @@ tarae's (`~/.local/state/tarae/claude`, as `CLAUDE_CONFIG_DIR`), not your `~/.cl
 your own Claude Code's settings, hooks and login to it. Log in once with `:claude-login` (Claude Code's own
 `claude auth login`, in the terminal panel); the chat says so when claude isn't logged in. Its conversations are
 apart from your own `claude`'s, and your user settings and `~/.claude/CLAUDE.md` don't apply to it (a project's
-`CLAUDE.md` and `.claude/settings.json` still do). macOS uses your Claude Code login as it is.
+`CLAUDE.md` and `.claude/settings.json` still do). macOS uses your Claude Code login as it is. The claude
+program itself runs in a sandbox of its own on both: [what it keeps](#the-claude-program-itself).
 
 - [Select → instruct → diff](#select--instruct--diff)
 - [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [running commands](#running-commands), [notes](#notes)
@@ -1193,6 +1194,45 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   that built nothing leaves nothing behind; Claude's result says what was made. Nothing made is, or could
   hold, a protected name (`gradle/`, which would hold `gradle/wrapper`, never is). Other tools that build
   beside their manifest — `make` writing objects next to its `Makefile` — still can't there.
+
+### The claude program itself
+
+The `claude` program the chat talks to (and the reviewer's) runs in a sandbox of its own too — files only: its
+network, the programs it starts and the system's services are as they are, since it needs your login and
+Anthropic. It reads none of the places that hold keys (the list in [the sandbox](#the-sandbox)), no file named
+like a key, and nothing of tarae's state but the log; it writes only its own folders, the temp folders and the
+devices — the project only with `llm.edit-tools` "both" or "native" (Claude Code's Edit and Write), never `.git`
+nor a protected name there. So a bug in claude's own code can't write what runs later or read `~/.ssh`. What it's
+refused is said in the chat. `llm.claude-sandbox = false` (your own config only) runs it unconfined, said in the
+chat. macOS keeps it with Seatbelt; on Linux:
+
+- **One login for tarae.** claude's folder is tarae's (`~/.local/state/tarae/claude`, above): `:claude-login`
+  once, its conversations apart from yours, your user settings and `~/.claude/CLAUDE.md` not loaded — its own
+  folder is written whole by it, so nothing there is loaded as settings either.
+- **What's kept from it.** Landlock (the kernel's, as for Claude's commands) closes your `~/.claude` and
+  `~/.claude.json`, tarae's state (but claude's own folder and the log), the places that hold keys, and the files
+  named like keys at your home's top and anywhere in the project. It writes its folder,
+  `~/.local/state/claude/locks`, the temp folders and the devices — not the terminals: `/dev/tty` is tarae's own
+  screen and keyboard. A Read you allow on a card reaches a file elsewhere in home, as before; one the rules close
+  is answered at once, not asked.
+- **Edit and Write in the project** ("both" or "native") write as Claude's commands do: a folder holding a
+  protected name takes no new file — so Write can't make a new one in the project's top (it holds `.git`); the
+  chat says so once. A file already there is still changed: Claude Code makes a temp file beside it, which is
+  refused, and claude 2.1.296 then writes the file in place (measured; another version may not). tarae's own
+  `edit`, the default, makes new files there too.
+- **What Landlock can't say**, told once in the chat: a file named like a key deeper in home than its top (claude's
+  Read still asks you for it), and what's made after claude started — in home closed to it, a key or protected
+  name in the project open to it — until its next start (each claude's rules are made as it starts). Inside its
+  own folder it may write anything (Landlock grants folders whole).
+- **Unix sockets: no wall against a hostile claude program.** The rules are files only: claude reaches any unix
+  socket whose path it can find — your session's D-Bus (where `systemd-run --user` runs anything unconfined),
+  tmux's sockets, the SSH and GPG agents under `$XDG_RUNTIME_DIR` (claude isn't given `SSH_AUTH_SOCK`, but nothing
+  stops it reaching the agent). The confinement holds against claude's file bugs, not against claude's own code
+  turned hostile; the chat's claude has no Bash tool, so only that code could. The chat says so once.
+- **Where it can't.** Landlock older than ABI 3 (Linux 6.2), or a claude program kept by the rules (the old
+  local install in `~/.claude/local`): claude runs unconfined and the chat says why. Its refusals come from
+  claude's tool results (`EACCES …`), and from ABI 7 also from the kernel's audit; signals and abstract sockets
+  outside its own processes are closed from ABI 6.
 
 ### Reading outside the project
 

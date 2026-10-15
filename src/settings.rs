@@ -439,7 +439,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.claude-sandbox",
         kind: Kind::Bool,
-        doc: "Chat, macOS: the claude program itself runs in a sandbox of its own — it reads no keys (but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. A new chat process starts with it. Only your own config sets it",
+        doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. A new chat process starts with it. Only your own config sets it",
         get: |c| Value::from(c.llm.claude_sandbox),
         set: |c, v| c.llm.claude_sandbox = b(v),
     },

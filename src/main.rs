@@ -200,6 +200,11 @@ fn main() -> Result<()> {
     if std::env::args_os().nth(1).is_some_and(|a| a == sandbox::keeper::FLAG) {
         sandbox::keeper::main();
     }
+    // claude started confined as tarae starts it, then exec'd (the live check — `sandbox::claude::linux::FLAG`)
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).is_some_and(|a| a == sandbox::claude::linux::FLAG) {
+        sandbox::claude::linux::main();
+    }
     // (what tarae was handed open goes no further than tarae)
     spawn::close_on_exec();
     restart::remember_exe();

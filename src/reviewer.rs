@@ -162,13 +162,16 @@ pub fn start(ed: &mut Editor) {
     let at = root.clone();
     // Its claude under its own profile, the project read-only (it reads, it never writes) — as the chat's, made
     // here on the worker (`sandbox::claude::for_chat`)
-    let confine = ed.claude_confine && cfg!(target_os = "macos") && ed.config.llm.claude_sandbox;
+    let confine = ed.claude_confine
+        && (cfg!(target_os = "macos") || cfg!(target_os = "linux"))
+        && ed.config.llm.claude_sandbox;
     let given = ed.claude_env.clone();
+    let command = ed.config.llm.command.clone();
     let work = move || {
         // (on Linux claude's own folder, here too — `claudehome.rs`; a failure is the spawn's to say)
         let _ = crate::claudehome::make(crate::sandbox::Os::HOST, given.as_ref());
         let head = crate::gitrepo::git(&at, &["rev-parse", "HEAD"], None).unwrap_or_default();
-        let profile = confine.then(|| crate::sandbox::claude::for_chat(&at, false));
+        let profile = confine.then(|| crate::sandbox::claude::for_chat(&at, false, &command));
         (diff(), head.trim().to_string(), profile)
     };
     ed.step(
@@ -195,7 +198,7 @@ struct Gathered {
     head: String,
     diff: String,
     /// Its claude's own profile (`sandbox::claude`), or why it's unconfined — None: not asked for (the setting,
-    /// tests, not macOS).
+    /// tests, neither macOS nor Linux).
     profile: Option<Result<crate::sandbox::claude::Profile, String>>,
 }
 
@@ -289,7 +292,7 @@ fn spawn(ed: &mut Editor, g: Gathered) {
     let generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // What its profile refuses it: tarae's log (it has no chat to say it in)
     let watch = g.profile.as_ref().and_then(|p| p.as_ref().ok()).map(|p| {
-        let w = crate::sandbox::claude::watch(&p.tag, |d| {
+        let w = crate::sandbox::claude::watch(p, |d| {
             let said =
                 format!("the reviewer's claude was refused {} by its own sandbox ({})", d.plain(), d.shown());
             crate::log::line("claude", "warn", &said);

@@ -7,6 +7,10 @@
 //!   Read one outside DIR (a permission prompt), then the turn's end; claude's side requests get a short text.
 //!   Every request is a line in the log: what was asked, the last tool result, what it got. The port it bound is
 //!   printed first (port 0: any).
+//!   `--script enforce --home H --absent TEXT --present TEXT` (run C: claude under its Landlock rules) adds a Read
+//!   of a fake `H/.ssh/id_ed25519`, a Read of `H/.bashrc` and a Write over it, and judges each step's result —
+//!   done, refused with `EACCES`, or failed — and every chat request: `--absent` (a marker in claude's folder's
+//!   `CLAUDE.md`) not in it, `--present` (one in the project's) in it. Each judgement a `check … PASS|FAIL` line.
 //! - `drive --transcript FILE --prompt TEXT [--cwd DIR] [--timeout S] -- COMMAND…` — tarae's side of the chat's
 //!   pipes, as `chat::ensure_proc` speaks it: `initialize` registering tarae's MCP server, then the prompt; every
 //!   `can_use_tool` allowed with its input (a `y` on the review), the MCP messages answered with no tools, claude's
@@ -33,7 +37,7 @@ use serde_json::{Value, json};
 
 use crate::Result;
 
-const USAGE: &str = "usage: cargo xtask claude-stub serve --project DIR [--port N] [--log FILE] | drive --transcript FILE --prompt TEXT [--cwd DIR] [--timeout S] -- COMMAND… | summary --label L --strace FILE --project DIR --home DIR";
+const USAGE: &str = "usage: cargo xtask claude-stub serve --project DIR [--port N] [--log FILE] [--script enforce --home DIR --absent TEXT --present TEXT] | drive --transcript FILE --prompt TEXT [--cwd DIR] [--timeout S] -- COMMAND… | summary --label L --strace FILE --project DIR --home DIR";
 
 pub fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
@@ -60,18 +64,105 @@ fn need<'a>(args: &'a [String], name: &str) -> Result<&'a str> {
 /// Debian, and no key.
 const OUTSIDE: &str = "/etc/os-release";
 
-/// The chat's conversation: claude's request after `n` assistant messages gets step `n`, then the turn's end.
-fn steps(project: &str) -> Vec<(&'static str, Value)> {
+/// One step of the chat's conversation: the tool claude is told to call, with what, what its result must be (judged
+/// only in the `enforce` script), and why that.
+struct Step {
+    name: &'static str,
+    input: Value,
+    expect: Expect,
+    why: &'static str,
+}
+
+/// The chat's conversation: claude's request after `n` assistant messages gets step `n`, then the turn's end —
+/// with `enforce`, its steps after the rest, and the project's as its rules have them (N1).
+fn steps(project: &str, enforce: Option<&Enforce>) -> Vec<Step> {
     let p = |f: &str| format!("{}/{f}", project.trim_end_matches('/'));
-    vec![
-        ("Read", json!({ "file_path": p("hello.txt") })),
-        (
+    let step = |name, input, expect, why| Step { name, input, expect, why };
+    let confined = enforce.is_some();
+    let mut s = vec![
+        step("Read", json!({ "file_path": p("hello.txt") }), Expect::Done, "the project is read"),
+        step(
             "Edit",
             json!({ "file_path": p("hello.txt"), "old_string": "hello", "new_string": "hello, edited" }),
+            Expect::Done,
+            match confined {
+                // (measured, run C: its temp file beside it refused, then written in place)
+                true => "a file there, in the project's top: claude 2.1.296 falls back to writing in place",
+                false => "the project is written",
+            },
         ),
-        ("Write", json!({ "file_path": p("written.txt"), "content": "written by claude\n" })),
-        ("Read", json!({ "file_path": OUTSIDE })),
-    ]
+        step(
+            "Write",
+            json!({ "file_path": p("written.txt"), "content": "written by claude\n" }),
+            if confined { Expect::Fails } else { Expect::Done },
+            match confined {
+                true => {
+                    "a new file in the project's top: N1, a folder holding a protected name (.git) takes no new entry"
+                }
+                false => "the project is written",
+            },
+        ),
+        step("Read", json!({ "file_path": OUTSIDE }), Expect::Done, "outside home is read"),
+    ];
+    if let Some(e) = enforce {
+        let h = |f: &str| format!("{}/{f}", e.home.trim_end_matches('/'));
+        s.extend([
+            step(
+                "Read",
+                json!({ "file_path": h(".ssh/id_ed25519") }),
+                Expect::Eacces,
+                "a key folder is kept",
+            ),
+            step(
+                "Read",
+                json!({ "file_path": h(".bashrc") }),
+                Expect::Done,
+                "home is read around what's kept",
+            ),
+            step(
+                "Write",
+                json!({ "file_path": h(".bashrc"), "content": "echo written by claude\n" }),
+                Expect::Fails,
+                "home isn't written",
+            ),
+        ]);
+    }
+    s
+}
+
+/// The `enforce` script's places and markers (`serve --script enforce`).
+struct Enforce {
+    /// claude's home: the fake key and `.bashrc` are there.
+    home: String,
+    /// Never in a chat request: the marker in claude's folder's `CLAUDE.md` (user sources off).
+    absent: String,
+    /// Always in a chat request: the marker in the project's `CLAUDE.md` — the check above can fail.
+    present: String,
+}
+
+/// What a step's tool result must be (judged only in the `enforce` script).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Expect {
+    /// Done, as in runs A and B: no error.
+    Done,
+    /// Refused by the kernel: Node's `EACCES` in it (Landlock's word).
+    Eacces,
+    /// Not done: an error, whatever its words.
+    Fails,
+}
+
+impl Expect {
+    /// Whether a result (is it an error, its text) is what this step wanted.
+    fn met(self, result: Option<&(bool, String)>) -> bool {
+        match (self, result) {
+            (_, None) => false,
+            (Expect::Done, Some((error, _))) => !error,
+            (Expect::Eacces, Some((_, text))) => text.contains("EACCES"),
+            (Expect::Fails, Some((error, text))) => {
+                *error || text.contains("EACCES") || text.contains("EPERM")
+            }
+        }
+    }
 }
 
 const DONE: &str = "Done: read, edited, wrote, and read outside the project.";
@@ -80,6 +171,7 @@ struct Stub {
     project: String,
     log: Mutex<Box<dyn Write + Send>>,
     seq: AtomicU64,
+    enforce: Option<Enforce>,
 }
 
 struct Request {
@@ -114,17 +206,26 @@ fn serve(args: &[String]) -> Result<()> {
         Some(p) => Box::new(std::fs::File::create(p).map_err(|e| format!("{p}: {e}"))?),
         None => Box::new(std::io::stderr()),
     };
+    let enforce = match opt(args, "--script") {
+        None => None,
+        Some("enforce") => Some(Enforce {
+            home: need(args, "--home")?.to_string(),
+            absent: need(args, "--absent")?.to_string(),
+            present: need(args, "--present")?.to_string(),
+        }),
+        Some(s) => return Err(format!("--script {s}: only `enforce` — {USAGE}")),
+    };
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     println!("{port}");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
-    Arc::new(Stub::new(project, log)).serve_on(listener);
+    Arc::new(Stub { enforce, ..Stub::new(project, log) }).serve_on(listener);
     Ok(())
 }
 
 impl Stub {
     fn new(project: String, log: Box<dyn Write + Send>) -> Stub {
-        Stub { project, log: Mutex::new(log), seq: AtomicU64::new(1) }
+        Stub { project, log: Mutex::new(log), seq: AtomicU64::new(1), enforce: None }
     }
 
     fn say(&self, line: &str) {
@@ -213,15 +314,53 @@ impl Stub {
             return (vec![text("ok")], "end_turn", format!("side request ({} tools)", tools.len()));
         }
         let turn = messages.iter().filter(|m| m["role"] == "assistant").count();
-        let what = format!("chat, turn {turn}, tools {}{}", tools.join(","), last_result(messages));
-        match steps(&self.project).into_iter().nth(turn) {
-            Some((name, input)) => {
+        let what = format!(
+            "chat, turn {turn}, tools {} · ends {}{}",
+            tools.join(","),
+            shape(messages),
+            last_result(messages, turn)
+        );
+        let steps = steps(&self.project, self.enforce.as_ref());
+        if let Some(e) = &self.enforce {
+            self.judge(e, turn, &steps, body, messages);
+        }
+        match steps.into_iter().nth(turn) {
+            Some(Step { name, input, .. }) => {
                 let said = format!("{what} → {name} {input}");
-                let block = json!({ "type": "tool_use", "id": format!("toolu_stub_{turn}"), "name": name, "input": input });
+                let block = json!({ "type": "tool_use", "id": tool_id(turn), "name": name, "input": input });
                 (vec![block], "tool_use", said)
             }
             None => (vec![text(DONE)], "end_turn", format!("{what} → the turn's end")),
         }
+    }
+
+    /// The `enforce` script's checks on the chat's request at `turn`: the last step's result as it wanted, and the
+    /// markers — one `check` line each.
+    fn judge(&self, e: &Enforce, turn: usize, steps: &[Step], body: &Value, messages: &[Value]) {
+        let verdict = |ok: bool| if ok { "PASS" } else { "FAIL" };
+        if let Some(Step { name, input, expect, why }) = turn.checked_sub(1).and_then(|t| steps.get(t)) {
+            let result = result_for(messages, &tool_id(turn - 1));
+            let said = match &result {
+                Some((error, text)) => {
+                    let text: String = text.replace('\n', "⏎").chars().take(200).collect();
+                    format!("{}{text}", if *error { "(error) " } else { "" })
+                }
+                None => "no tool result".into(),
+            };
+            let path = input["file_path"].as_str().unwrap_or_default();
+            let ok = expect.met(result.as_ref());
+            self.say(&format!(
+                "check step {turn} {name} {path} ({why}): {expect:?} {} — {said}",
+                verdict(ok)
+            ));
+        }
+        let whole = body.to_string();
+        let (absent, present) = (!whole.contains(&e.absent), whole.contains(&e.present));
+        self.say(&format!(
+            "check turn {turn} claude's folder's CLAUDE.md not in the request: {}",
+            verdict(absent)
+        ));
+        self.say(&format!("check turn {turn} the project's CLAUDE.md in the request: {}", verdict(present)));
     }
 }
 
@@ -229,24 +368,47 @@ fn text(s: &str) -> Value {
     json!({ "type": "text", "text": s })
 }
 
-/// The last message's tool result, cut short: whether claude's tool did what the script asked.
-fn last_result(messages: &[Value]) -> String {
-    let Some(last) = messages.last() else { return String::new() };
-    let results = last["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result");
-    results
-        .map(|r| {
-            let content = match &r["content"] {
-                Value::String(s) => s.clone(),
-                Value::Array(parts) => {
-                    parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" ")
-                }
-                _ => String::new(),
-            };
-            let content: String = content.replace('\n', "⏎").chars().take(160).collect();
-            let error = if r["is_error"] == true { " (error)" } else { "" };
-            format!(" · last tool result{error}: {content}")
-        })
-        .collect()
+/// The id of the tool use the stub answers at `turn` with.
+fn tool_id(turn: usize) -> String {
+    format!("toolu_stub_{turn}")
+}
+
+/// The result of tool use `id`, wherever in the conversation it is (the last one if twice): whether it's an error,
+/// and its text. Not only in the last message — claude 2.1.296 puts more after the one that holds it (run C).
+fn result_for(messages: &[Value], id: &str) -> Option<(bool, String)> {
+    let blocks = messages.iter().rev().flat_map(|m| m["content"].as_array().into_iter().flatten());
+    let r = blocks.filter(|b| b["type"] == "tool_result").find(|b| b["tool_use_id"] == id)?;
+    let content = match &r["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    };
+    Some((r["is_error"] == true, content))
+}
+
+/// The result of the tool use the stub answered at the turn before `turn`, cut short: whether claude's tool did
+/// what the script asked.
+fn last_result(messages: &[Value], turn: usize) -> String {
+    let Some((error, content)) = turn.checked_sub(1).and_then(|t| result_for(messages, &tool_id(t))) else {
+        return String::new();
+    };
+    let content: String = content.replace('\n', "⏎").chars().take(160).collect();
+    let error = if error { " (error)" } else { "" };
+    format!(" · last tool result{error}: {content}")
+}
+
+/// How the conversation ends: its last three messages, each as its role and its blocks' types
+/// (`user[tool_result,text]`) — what claude sends after a result, seen in the log.
+fn shape(messages: &[Value]) -> String {
+    let one = |m: &Value| {
+        let blocks: Vec<&str> = match &m["content"] {
+            Value::String(_) => vec!["string"],
+            c => c.as_array().into_iter().flatten().map(|b| b["type"].as_str().unwrap_or("?")).collect(),
+        };
+        format!("{}[{}]", m["role"].as_str().unwrap_or("?"), blocks.join(","))
+    };
+    let from = messages.len().saturating_sub(3);
+    messages[from..].iter().map(one).collect::<Vec<_>>().join(" ")
 }
 
 fn usage() -> Value {
@@ -1286,9 +1448,94 @@ mod tests {
         assert_eq!(post(port, "/api/somewhere", b"{}", false).0, 404);
 
         let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
-        assert!(log.contains("turn 1, tools Read,Edit,Write · last tool result: result 0 → Edit"), "{log}");
+        assert!(
+            log.contains(
+                "turn 1, tools Read,Edit,Write · ends user[string] assistant[tool_use] user[tool_result] · last tool \
+                 result: result 0 → Edit"
+            ),
+            "{log}"
+        );
         assert!(log.contains("side request (0 tools)"), "{log}");
         assert!(log.contains("POST /api/somewhere") && log.contains("→ 404"), "{log}");
+    }
+
+    /// The `enforce` script: its steps after A's and B's, each result judged, and the markers in every chat request.
+    #[test]
+    fn the_enforce_script_judges_each_result_and_the_markers() {
+        let (mut stub, log) = stub("/work/proj");
+        let enforce =
+            Enforce { home: "/home/m".into(), absent: "cfg-marker".into(), present: "proj-marker".into() };
+        stub.enforce = Some(enforce);
+        // (results as claude's tools would give them: the new file and the key refused, the Write over .bashrc
+        // "ok" — the profile failing — each with something after it, as claude 2.1.296 sends: a later message, or a
+        // text in the same one)
+        let results = [
+            ("ok", false),
+            ("ok", false),
+            ("EACCES: permission denied, open '/work/proj/written.txt.tmp.1'", true),
+            ("ok", false),
+            ("EACCES: permission denied, open '/home/m/.ssh/id_ed25519'", true),
+            ("# rc", false),
+            ("ok", false),
+        ];
+        let mut messages = vec![json!({ "role": "user", "content": "go proj-marker" })];
+        let mut names = Vec::new();
+        let reminder = json!({ "type": "text", "text": "<system-reminder>a note</system-reminder>" });
+        for (turn, (said, error)) in results.iter().enumerate() {
+            let body = json!({ "tools": [{ "name": "Read" }], "messages": messages.clone() });
+            let (blocks, stop, _) = stub.turn(&body);
+            assert_eq!(stop, "tool_use", "turn {turn}");
+            names.push(format!(
+                "{} {}",
+                blocks[0]["name"].as_str().unwrap(),
+                blocks[0]["input"]["file_path"]
+            ));
+            let id = blocks[0]["id"].clone();
+            messages.push(json!({ "role": "assistant", "content": blocks }));
+            let result =
+                json!({ "type": "tool_result", "tool_use_id": id, "content": said, "is_error": error });
+            match turn % 2 {
+                0 => messages.extend([
+                    json!({ "role": "user", "content": [result] }),
+                    json!({ "role": "user", "content": [reminder.clone()] }),
+                ]),
+                _ => messages.push(json!({ "role": "user", "content": [result, reminder.clone()] })),
+            }
+        }
+        // (the last turn: the marker of claude's folder shows up — judged a failure)
+        let mut last = messages.clone();
+        last[0] = json!({ "role": "user", "content": "go proj-marker cfg-marker" });
+        let (_, stop, what) = stub.turn(&json!({ "tools": [{ "name": "Read" }], "messages": last }));
+        assert_eq!((stop, what.ends_with("the turn's end")), ("end_turn", true), "{what}");
+        assert!(
+            what.contains("· ends assistant[tool_use] user[tool_result] user[text] · last tool result: ok"),
+            "{what}"
+        );
+        // (a request at turn 3 whose step-3 result is gone: never judged by what else is there)
+        let gone: Vec<Value> = messages[..7]
+            .iter()
+            .chain([&json!({ "role": "user", "content": [reminder] })])
+            .cloned()
+            .collect();
+        stub.turn(&json!({ "tools": [{ "name": "Read" }], "messages": gone }));
+        assert_eq!(
+            &names[4..],
+            ["Read \"/home/m/.ssh/id_ed25519\"", "Read \"/home/m/.bashrc\"", "Write \"/home/m/.bashrc\""]
+        );
+        let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        let checks: Vec<&str> = log.lines().filter(|l| l.starts_with("check step")).collect();
+        let verdicts: Vec<bool> = checks.iter().map(|l| l.contains(" PASS — ")).collect();
+        assert_eq!(verdicts, [true, true, true, true, true, true, false, false], "{log}");
+        assert!(checks[1].contains("Edit /work/proj/hello.txt (a file there, in the project's top: claude 2.1.296 falls back to writing in place): Done PASS"), "{log}");
+        assert!(checks[2].contains("(a new file in the project's top: N1"), "{log}");
+        assert!(checks[6].contains("Write /home/m/.bashrc (home isn't written): Fails FAIL — ok"), "{log}");
+        assert!(
+            checks[7].starts_with("check step 3 Write") && checks[7].ends_with("FAIL — no tool result"),
+            "{log}"
+        );
+        assert_eq!(log.matches("the project's CLAUDE.md in the request: PASS").count(), 9, "{log}");
+        assert_eq!(log.matches("claude's folder's CLAUDE.md not in the request: PASS").count(), 8, "{log}");
+        assert!(log.contains("check turn 7 claude's folder's CLAUDE.md not in the request: FAIL"), "{log}");
     }
 
     #[test]

@@ -997,6 +997,47 @@ fn the_claude_profile_is_pinned() {
     pinned("sandbox_claude.txt", &out);
 }
 
+/// The claude process's own rules on Linux (`claude::linux`, V1 Linux part 2) as grants, from the stand-in home —
+/// the default arm (the project read-only) and the arms with Edit and Write (N1) — a set (Landlock's rules are
+/// one; the temp folders sort by the machine's paths): what each gives beneath where, around which holes and keys. Data on every system; Landlock's rules are made from them as runs'
+/// are (`grant_around`): a hole closed, a place opened, a right widened shows here.
+#[test]
+fn claudes_linux_grants_are_pinned() {
+    let f = Fixture::new("claude-linux", Os::Linux, &[]);
+    for k in [".git/hooks/pre-commit", ".env"] {
+        std::fs::create_dir_all(f.root.join(k).parent().unwrap()).unwrap();
+        std::fs::write(f.root.join(k), "tarae-fake-token").unwrap();
+    }
+    // (as `linux::there` finds them — the fixture's project holds no more)
+    let protected: Vec<PathBuf> = [".git", "Cargo.toml", "go.mod"]
+        .iter()
+        .map(|n| f.root.join(n))
+        .filter(|p| protected_in(&f.root, p))
+        .collect();
+    let keys = vec![f.root.join(".env")];
+    let mut out = String::new();
+    for writes_project in [false, true] {
+        let p = claude::Profile::new(&f.root, &f.home, writes_project, &f.here, "$TAG");
+        out += &format!("══ the project {}\n", if writes_project { "writable" } else { "read-only" });
+        let mut grants: Vec<String> = Vec::new();
+        for g in p.grants(&protected, &keys) {
+            let mut out = format!("{} {}\n", f.named(&shown(&g.path), None), g.right.said());
+            // (a set each: kept places outside the fixture sort by the machine's paths)
+            let mut around: Vec<String> =
+                g.holes.iter().map(|h| format!("    hole {}\n", f.named(&shown(h), None))).collect();
+            around.sort();
+            let mut keys: Vec<String> =
+                g.keys.iter().map(|k| format!("    key {}\n", f.named(&shown(k), None))).collect();
+            keys.sort();
+            out.extend(around.into_iter().chain(keys));
+            grants.push(out);
+        }
+        grants.sort();
+        out.extend(grants);
+    }
+    pinned("sandbox_claude_linux.txt", &out);
+}
+
 /// The words Claude's prompt and tools say of the sandbox, the checks and the toolchains.
 #[test]
 fn claudes_words_are_pinned() {

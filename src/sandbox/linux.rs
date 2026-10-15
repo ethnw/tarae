@@ -497,7 +497,7 @@ const READS_FILES: u64 = landlock::READ_FILE | landlock::EXECUTE;
 /// entries get theirs one by one. Landlock grants only, so that folder's own rule is what a file made in it
 /// later gets: written, not read until the next run's rules (`unread` records each such folder that takes new
 /// files, for the report — `unread_said`).
-fn grant_around(
+pub(super) fn grant_around(
     r: &mut Ruleset,
     path: &Path,
     access: u64,
