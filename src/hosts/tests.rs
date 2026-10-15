@@ -340,7 +340,7 @@ fn a_registry_is_named_on_the_hosts_card() {
     assert_eq!(registry_of(&own, "r.example.invalid", 443), None);
     let decided = |o: &Offer| {
         let a = o.asked.clone().unwrap();
-        (a.why, crate::cards::decide(&a.request), o.answers(false))
+        (a.why, crate::cards::decide(&a.request, &Default::default()), o.answers(false))
     };
     assert_eq!(decided(&named), decided(&plain));
 }

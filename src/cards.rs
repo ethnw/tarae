@@ -65,12 +65,6 @@ impl Class {
             Class::Unknown => "unknown",
         }
     }
-
-    /// Whether the capability model reads it without asking: outside home too, as runs read it (D3) — but
-    /// others' homes and mounted volumes.
-    fn by_default(self) -> bool {
-        matches!(self, Class::OtherCheckout | Class::Temp | Class::Toolchain | Class::Elsewhere)
-    }
 }
 
 /// Where the systems mount other volumes (macOS `/Volumes` — a real path there is never the boot volume's
@@ -81,15 +75,17 @@ const VOLUMES: [&str; 5] = ["/Volumes", "/Network", "/media", "/mnt", "/run/medi
 /// everyone's, isn't).
 const HOMES: [&str; 2] = ["/Users", "/home"];
 
-/// Where `at` (a real path; None: can't be told) is, for a project whose unasked places are `d`. A folder
-/// holding a place reads it too: `/` holds home, `/run` the volumes in `/run/media`.
-pub fn class(at: Option<&Path>, d: &crate::allow::Defaults, home: Option<&Path>) -> Class {
+/// Where `at` (a real path; None: can't be told) is, for a session that may do `caps` (its defaults, home, what
+/// runs never read). A folder holding a place reads it too: `/` holds home, `/run` the volumes in `/run/media`.
+pub fn class(at: Option<&Path>, caps: &crate::caps::Caps) -> Class {
+    use crate::caps::Why;
     let Some(at) = at else { return Class::Unknown };
-    let within = |v: &[std::path::PathBuf]| v.iter().any(|p| at.starts_with(p));
+    let home = caps.home.as_deref();
+    let within = |why: Why| caps.defaults(why).any(|p| at.starts_with(p));
     // (what runs never read is never a default, outside home too: a moved state home, CARGO_HOME, GOPATH —
     // a folder holding one reads it, but home's class says that already)
-    let kept = within(&d.kept)
-        || d.kept.iter().any(|k| k.starts_with(at) && !home.is_some_and(|h| k.starts_with(h)));
+    let kept = caps.kept.iter().any(|k| at.starts_with(k))
+        || caps.kept.iter().any(|k| k.starts_with(at) && !home.is_some_and(|h| k.starts_with(h)));
     let holds_or_in = |p: &Path| at.starts_with(p) || p.starts_with(at);
     let other_home = HOMES.iter().map(Path::new).any(|h| {
         let first = at.strip_prefix(h).ok().and_then(|r| r.iter().next());
@@ -97,11 +93,11 @@ pub fn class(at: Option<&Path>, d: &crate::allow::Defaults, home: Option<&Path>)
     });
     if crate::allow::secret(at, home) || kept {
         Class::Secret
-    } else if within(&d.checkouts) {
+    } else if within(Why::OtherCheckout) {
         Class::OtherCheckout
-    } else if within(&d.temp) {
+    } else if within(Why::Temp) {
         Class::Temp
-    } else if within(&d.code) {
+    } else if within(Why::Toolchain) {
         Class::Toolchain
     } else if home.is_some_and(holds_or_in) {
         Class::Home
@@ -115,9 +111,8 @@ pub fn class(at: Option<&Path>, d: &crate::allow::Defaults, home: Option<&Path>)
 }
 
 /// The classes of `places`, each once, in `Class`'s order.
-pub fn classes(places: &[std::path::PathBuf], d: &crate::allow::Defaults) -> Vec<Class> {
-    let home = crate::allow::home();
-    let mut v: Vec<Class> = places.iter().map(|p| class(Some(p), d, home.as_deref())).collect();
+pub fn classes(places: &[std::path::PathBuf], caps: &crate::caps::Caps) -> Vec<Class> {
+    let mut v: Vec<Class> = places.iter().map(|p| class(Some(p), caps)).collect();
     crate::sorting::sort(&mut v);
     v.dedup();
     v
@@ -353,10 +348,10 @@ impl Decision {
 /// with no sandbox to keep it there (a partial one too), it asks; past the sandbox, it asks; one that would
 /// publish or reach beyond this machine asks where it could (D4) — with the network closed it runs, and fails
 /// in the sandbox; a read outside the places read by default asks for that read (a command's, once the
-/// sandbox confines reads, from its denial) — outside home is read by default (D3), others' homes and
-/// volumes aren't.
-pub fn decide(r: &Request) -> Decision {
-    let reads = |c: &[Class]| match c.iter().all(|c| c.by_default()) {
+/// sandbox confines reads, from its denial) — outside home is read by default where the session reads it so
+/// (`caps`: D3), others' homes and volumes aren't.
+pub fn decide(r: &Request, caps: &crate::caps::Caps) -> Decision {
+    let reads = |c: &[Class]| match c.iter().all(|c| caps.by_default(*c)) {
         true => Decision::None,
         false => Decision::Grant(Verb::Read),
     };
@@ -381,6 +376,18 @@ pub fn decide(r: &Request) -> Decision {
         Request::Lookup { .. } => Decision::Lookup,
         Request::Own => Decision::Own,
     }
+}
+
+/// The shadow of `r` — `decide`'s word — by the session's `caps`; with none made yet, `unbuilt` where a made one
+/// could decide it otherwise (a read's class read by default or not — the only thing `decide` asks of it), never a
+/// guess: the shadow is the number auto mode is weighed by (D1).
+pub fn shadow(r: &Request, caps: Option<&crate::caps::Caps>) -> &'static str {
+    use crate::caps::Caps;
+    if let Some(c) = caps {
+        return decide(r, c).word();
+    }
+    let (off, on) = (decide(r, &Caps::default()), decide(r, &Caps { outside: true, ..Caps::default() }));
+    if off == on { off.word() } else { "unbuilt" }
 }
 
 /// What a card of Claude's (or about Claude's commands) asked: why, and the request.
@@ -441,8 +448,15 @@ fn read_classes(r: &Request) -> Vec<Class> {
 /// <answer> · <drawn → answered> · up <asked → answered>` (`run#` only for a card about a run — its trace's id,
 /// as its `timing` line names it; the kind as `tarae state` names it, `Offer::kind`; `class` only for reads;
 /// `same` only for a run card the same as one answered before — that card's id, `same=#41:changed` when
-/// something changed since; `warn` the warnings it said, by id). Its session is the log's column.
-pub fn line(o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
+/// something changed since; `warn` the warnings it said, by id). Its session is the log's column; the shadow
+/// is decided by its `caps` (`shadow`).
+pub fn line(
+    o: &Offer,
+    asked: &Asked,
+    answer: &str,
+    now: Instant,
+    caps: Option<&crate::caps::Caps>,
+) -> String {
     let classes = read_classes(&asked.request);
     let class = match classes.is_empty() {
         true => String::new(),
@@ -467,7 +481,7 @@ pub fn line(o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
         o.id,
         o.kind(),
         asked.why.word(),
-        decide(&asked.request).word(),
+        shadow(&asked.request, caps),
         took(o.since)
     )
 }
@@ -475,12 +489,17 @@ pub fn line(o: &Offer, asked: &Asked, answer: &str, now: Instant) -> String {
 /// Card `o` was answered (`y` `a` `A` `n`, or a letter of its own) or dropped unanswered: its line — what it
 /// asked, or `why=own · shadow=own` for tarae's own questions (cardburden 5: a preflight's, a stuck run's, a
 /// review's end were never measured). Its entry for the record is handed back (`Editor::cards_record`).
-pub fn said(session: &crate::log::Session, o: &Offer, answer: &str) -> Value {
+pub fn said(
+    session: &crate::log::Session,
+    o: &Offer,
+    answer: &str,
+    caps: Option<&crate::caps::Caps>,
+) -> Value {
     let own = Asked::new(Why::Own, Request::Own);
     let asked = o.asked.as_ref().unwrap_or(&own);
     let now = Instant::now();
-    logged(session, "card", &line(o, asked, answer, now));
-    record(o, asked, answer, now, session.name(), SystemTime::now())
+    logged(session, "card", &line(o, asked, answer, now, caps));
+    record(o, asked, answer, (now, SystemTime::now()), session.name(), caps)
 }
 
 // ── The record ─────────────────────────────────────────────────────────────────────────────
@@ -497,12 +516,12 @@ pub fn record(
     o: &Offer,
     asked: &Asked,
     answer: &str,
-    now: Instant,
+    (now, at): (Instant, SystemTime),
     session: Option<&str>,
-    at: SystemTime,
+    caps: Option<&crate::caps::Caps>,
 ) -> Value {
     let ms = |t: Instant| now.saturating_duration_since(t).as_millis() as u64;
-    let mut v = entry(asked, answer, session, at);
+    let mut v = entry(asked, answer, (session, at), caps);
     v["card"] = json!(o.id);
     v["kind"] = json!(o.kind());
     v["drawn_ms"] = json!(o.drawn.get().map(ms));
@@ -513,14 +532,24 @@ pub fn record(
 /// A run of Claude's refused before any card was up (`tools::showable`: a file it names was written this turn
 /// unseen, and the card can't show it): its entry — kind `run`, answer `refused`, no card, and what Claude was
 /// told (`said`). The card log never saw these (cardauto §8.3).
-pub fn refused(asked: &Asked, said: &str, session: Option<&str>, at: SystemTime) -> Value {
-    let mut v = entry(asked, "refused", session, at);
+pub fn refused(
+    asked: &Asked,
+    said: &str,
+    (session, at): (Option<&str>, SystemTime),
+    caps: Option<&crate::caps::Caps>,
+) -> Value {
+    let mut v = entry(asked, "refused", (session, at), caps);
     v["kind"] = json!("run");
     v["said"] = json!(crate::tokens::redacted(said));
     pruned(v)
 }
 
-fn entry(asked: &Asked, answer: &str, session: Option<&str>, at: SystemTime) -> Value {
+fn entry(
+    asked: &Asked,
+    answer: &str,
+    (session, at): (Option<&str>, SystemTime),
+    caps: Option<&crate::caps::Caps>,
+) -> Value {
     let class: Vec<&str> = read_classes(&asked.request).into_iter().map(Class::word).collect();
     json!({
         "v": RECORD_V,
@@ -529,7 +558,7 @@ fn entry(asked: &Asked, answer: &str, session: Option<&str>, at: SystemTime) -> 
         "run": asked.run,
         "why": asked.why.word(),
         "class": class,
-        "shadow": decide(&asked.request).word(),
+        "shadow": shadow(&asked.request, caps),
         "same": asked.same.map(|(c, _)| c),
         "changed": asked.same.and_then(|(_, unchanged)| (!unchanged).then_some(true)),
         "warn": asked.warn,
@@ -761,6 +790,9 @@ mod tests {
     /// (publishing, reaching out) asks only where the run could reach out (D4).
     #[test]
     fn the_capability_model_asks_for_places_not_commands() {
+        // (a session reading outside home, as tarae does)
+        let on = crate::caps::Caps { outside: true, ..Default::default() };
+        let decide = |r: &Request| decide(r, &on);
         let run = |past, sandboxed, reads: &[Class]| {
             decide(&Request::Run { past, sandboxed, reads: reads.to_vec(), outward: false })
         };
@@ -772,7 +804,12 @@ mod tests {
             assert_eq!(decide(&Request::Read(apart)), Decision::Grant(Verb::Read), "{apart:?}");
             assert_eq!(run(Past::No, true, &[Class::Elsewhere, apart]), Decision::Grant(Verb::Read));
         }
-        assert!(crate::reads::by_default(Class::Elsewhere) && !crate::reads::by_default(Class::Volume));
+        assert!(
+            crate::reads::by_default(Class::Elsewhere, &on) && !crate::reads::by_default(Class::Volume, &on)
+        );
+        // (where it doesn't — tests' sessions: asked)
+        let off = crate::caps::Caps::default();
+        assert_eq!(super::decide(&Request::Read(Class::Elsewhere), &off), Decision::Grant(Verb::Read));
         // (Linux ABI 2: "every run asks" — as no sandbox; the setting off likewise)
         use crate::sandbox::Availability;
         let abi2 =
@@ -818,7 +855,8 @@ mod tests {
             code: vec![PathBuf::from("/Users/u/.cargo/registry/src")],
             ..Default::default()
         };
-        let at = |p: &str| class(Some(Path::new(p)), &d, Some(home));
+        let caps = crate::caps::Caps::of_defaults(d.clone(), Some(home));
+        let at = |p: &str| class(Some(Path::new(p)), &caps);
         assert_eq!(at("/Users/u/src/repo/target/x"), Class::OtherCheckout);
         assert_eq!(at("/Users/u/src/repository/x"), Class::Home, "by path parts");
         assert_eq!(at("/private/tmp/shot/a.png"), Class::Temp);
@@ -826,7 +864,7 @@ mod tests {
         assert_eq!(at("/Users/u/.cargo/credentials.toml"), Class::Home);
         assert_eq!(at("/Users/u/.ssh/id_ed25519"), Class::Secret);
         assert_eq!(at("/opt/x"), Class::Elsewhere);
-        assert_eq!(class(None, &d, Some(home)), Class::Unknown);
+        assert_eq!(class(None, &caps), Class::Unknown);
         // (cardauto piece 2: a folder holding home is home's; others' homes and volumes apart — §8.6)
         assert_eq!((at("/"), at("/Users")), (Class::Home, Class::Home), "they hold home");
         assert_eq!(at("/Users/other/src/.env"), Class::OtherHome);
@@ -838,7 +876,8 @@ mod tests {
             (Class::Volume, Class::Volume, Class::Volume)
         );
         assert_eq!(at("/run/user/501"), Class::Elsewhere);
-        let root_home = |p: &str| class(Some(Path::new(p)), &d, Some(Path::new("/root")));
+        let root = crate::caps::Caps::of_defaults(d, Some(Path::new("/root")));
+        let root_home = |p: &str| class(Some(Path::new(p)), &root);
         assert_eq!(
             (root_home("/home/u/x"), root_home("/home"), root_home("/")),
             (Class::OtherHome, Class::OtherHome, Class::Home)
@@ -853,7 +892,8 @@ mod tests {
     fn other_drives_and_other_users_homes_still_ask_before_piece_3() {
         let d = crate::allow::Defaults::default();
         for home in ["/Users/u", "/home/u"] {
-            let at = |p: &str| class(Some(Path::new(p)), &d, Some(Path::new(home)));
+            let caps = crate::caps::Caps::of_defaults(d.clone(), Some(Path::new(home)));
+            let at = |p: &str| class(Some(Path::new(p)), &caps);
             for (p, c) in [
                 ("/Volumes/x", Class::Volume),
                 ("/mnt/x", Class::Volume),
@@ -861,9 +901,9 @@ mod tests {
                 ("/home/other/x", Class::OtherHome),
             ] {
                 assert_eq!(at(p), c, "{p} with home {home}");
-                assert!(!crate::reads::by_default(at(p)), "{p} asks");
+                assert!(!crate::reads::by_default(at(p), &caps), "{p} asks");
             }
-            assert!(crate::reads::by_default(at("/opt/x")), "the rest outside home doesn't");
+            assert!(crate::reads::by_default(at("/opt/x"), &caps), "the rest outside home doesn't");
         }
     }
 
@@ -880,10 +920,11 @@ mod tests {
         }
         let d =
             crate::allow::Defaults { kept: crate::sandbox::kept_places(home, &here), ..Default::default() };
-        let at = |p: &str| class(Some(Path::new(p)), &d, Some(home));
+        let caps = crate::caps::Caps::of_defaults(d, Some(home));
+        let at = |p: &str| class(Some(Path::new(p)), &caps);
         for p in ["/data/state/tarae/sandbox.json", "/data/state/tarae", "/opt/cargo/credentials.toml"] {
             assert_eq!(at(p), Class::Secret, "{p}");
-            assert!(!crate::reads::by_default(at(p)), "{p}");
+            assert!(!crate::reads::by_default(at(p), &caps), "{p}");
         }
         assert_eq!((at("/opt"), at("/data")), (Class::Secret, Class::Secret), "a folder holding one");
         assert_eq!(at("/opt/cargo/registry/src/x/lib.rs"), Class::Elsewhere, "the rest of it");
@@ -911,6 +952,7 @@ mod tests {
         let t0 = Instant::now();
         o.since = t0;
         let at = |s: u64| t0 + std::time::Duration::from_millis(s);
+        let line = |o: &Offer, a: &Asked, answer: &str, now: Instant| line(o, a, answer, now, None);
         assert_eq!(
             line(&o, &asked, "n", at(4200)),
             "card#12 · screen · why=reads-outside · class=temp,home · shadow=grant:read · n · not drawn · \
@@ -943,6 +985,61 @@ mod tests {
     /// ran from, its run — and so does a run refused with no card, as `refused`. Each start adds to the
     /// month's file, never over it: a tarae started again (`:restart`) finds what the last one kept, and its
     /// way out waits for the writes under way. 0700 the folder, 0600 the file; `llm.card-record` off, nothing.
+    /// Review of piece 3: the shadow is the session's `Caps` as made on a worker. With none made yet (a session's
+    /// first moments) it says `unbuilt` where a made one could decide otherwise, never a guess — the rest as
+    /// ever. Made as the session is (`session_kept_back`: at start, and after `:restart` before its chat is
+    /// restored), a read outside home where tarae reads it is `none` — on a card (`offer_said`) and on a run
+    /// refused with no card (`refused` with the session's `caps()`, as `tools::card` gives it).
+    #[test]
+    fn the_shadow_is_the_sessions_caps_or_says_unbuilt() {
+        let tmp = std::env::temp_dir().join(format!("tarae-card-shadow-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let dir = tmp.join(DIR);
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        (ed.cards_dir, ed.read_outside) = (Some(dir.clone()), true);
+        // (each named: the record's batches land in any order)
+        let card = |ed: &mut crate::editor::Editor, request: Request, what: &str| {
+            let o = Offer::new("t".into(), "q", "", String::new(), What::NotesStale { ids: Vec::new() });
+            ed.push_offer(o.asked(Asked::new(Why::Read, request).about(what)));
+            ed.offer_dismiss();
+        };
+        let run = |reads: Vec<Class>| Request::Run { past: Past::No, sandboxed: true, reads, outward: false };
+        assert!(ed.session.caps.is_none(), "none made yet");
+        card(&mut ed, Request::Read(Class::Elsewhere), "read, none made");
+        card(&mut ed, run(Vec::new()), "run, none made");
+        ed.session_kept_back(ed.session.id);
+        let end = Instant::now() + std::time::Duration::from_secs(10);
+        while ed.session.caps.is_none() {
+            let ev =
+                ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("caps made");
+            ed.handle_event(ev);
+        }
+        card(&mut ed, Request::Read(Class::Elsewhere), "read, made");
+        let asked = Asked::new(Why::ReadsOutside(vec![Class::Elsewhere]), run(vec![Class::Elsewhere]))
+            .about("refused, made");
+        let e = refused(&asked, "not run", (None, SystemTime::now()), ed.session.caps());
+        ed.cards_record(vec![e]);
+        ed.cards_flush();
+        let mut shadows: Vec<(String, String)> = read_record(&dir)
+            .iter()
+            .map(|e| {
+                (
+                    e["what"].as_str().unwrap_or_default().into(),
+                    e["shadow"].as_str().unwrap_or_default().into(),
+                )
+            })
+            .collect();
+        shadows.sort();
+        let want = [
+            ("read, made", "none"),
+            ("read, none made", "unbuilt"),
+            ("refused, made", "none"),
+            ("run, none made", "none"),
+        ];
+        assert_eq!(shadows, want.map(|(w, s)| (w.to_string(), s.to_string())));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn the_record_keeps_every_card_with_its_command_across_starts() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -973,7 +1070,7 @@ mod tests {
         let mut ed = started();
         let asked = Asked::new(Why::Script, run).ran(Some(8), "sh -n x.sh", &root, &root);
         let said = "x.sh was written this turn without the user seeing it, and it has 200 lines";
-        ed.cards_record(vec![refused(&asked, said, Some("s"), SystemTime::now())]);
+        ed.cards_record(vec![refused(&asked, said, (Some("s"), SystemTime::now()), None)]);
         ed.cards_flush();
         let all = read_record(&dir);
         assert_eq!(all.len(), 2, "{all:?}");
@@ -1038,7 +1135,7 @@ mod tests {
         let root = Path::new("/p");
         let run = Request::Run { past: Past::No, sandboxed: true, reads: Vec::new(), outward: false };
         let asked = Asked::new(Why::Script, run).ran(Some(1), "FOO_TOKEN=s3cr3tvalue sh x.sh", root, root);
-        let e = refused(&asked, "not run", None, SystemTime::now());
+        let e = refused(&asked, "not run", (None, SystemTime::now()), None);
         assert_eq!(e["what"], json!("FOO_TOKEN=… sh x.sh"));
         assert!(!e.to_string().contains("s3cr3t"), "{e}");
         // A year kept, this month included; the rest gone — only the record's own names

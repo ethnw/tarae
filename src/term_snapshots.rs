@@ -2716,6 +2716,7 @@ fn snapshot_sandbox_blocked() {
     s.check("sandbox_blocked_panel");
     dump(&mut s, "sandbox_blocked_panel");
     s.keys(" ms");
+    s.until("the list", |ed| ed.picker.is_some());
     s.check("sandbox_blocked_list");
     dump(&mut s, "sandbox_blocked_list");
     s.frames_both("sandbox_blocked_list");
@@ -2735,6 +2736,7 @@ fn snapshot_sandbox_blocked_with_step() {
         blocked_npm_run(&mut s);
         s.ed.session.sandbox = Some(tier_c_restricted());
         s.keys(" ms");
+        s.until("the list", |ed| ed.picker.is_some());
         let p = s.ed.picker.as_ref().unwrap();
         let labels: Vec<String> = p.items().iter().map(|i| i.label.clone()).collect();
         assert_eq!(
@@ -2759,6 +2761,7 @@ fn snapshot_sandbox_blocked_with_step() {
         assert!(crate::clipboard::written(&step) && s.ed.offers.is_empty(), "{step}");
         // (and the blocked rows above it still act: Enter on the first puts its grant's card up)
         s.keys(" ms");
+        s.until("the list", |ed| ed.picker.is_some());
         s.keys("<ret>");
         let titles: Vec<&str> = s.ed.offers.iter().map(|o| o.title.as_str()).collect();
         assert_eq!(titles, [crate::blocked::GRANT_TITLE], "the first row's card");

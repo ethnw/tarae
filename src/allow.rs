@@ -497,7 +497,7 @@ pub struct Defaults {
     /// The repository's other checkouts (`checkouts` — 8 of a day's 14 reads allowed for a chat were
     /// these: the main checkout's `target/`, a sibling session's design doc).
     pub checkouts: Vec<PathBuf>,
-    /// The temp folders (`temp_folders` — what Claude's own shots and scripts left there in an earlier turn
+    /// The temp folders (`temp_folders_in` — what Claude's own shots and scripts left there in an earlier turn
     /// were the other 6).
     pub temp: Vec<PathBuf>,
     /// The code folders (`code_trees`) and the project's own build folders outside it, as far as the
@@ -509,32 +509,31 @@ pub struct Defaults {
     pub kept: Vec<PathBuf>,
 }
 
-impl Defaults {
-    pub fn all(&self) -> Vec<PathBuf> {
-        self.checkouts.iter().chain(&self.temp).chain(&self.code).cloned().collect()
-    }
+/// (Tests: `defaults_in` for home and the variables as the process has them.)
+#[cfg(test)]
+pub fn defaults(root: &Path, temp: bool) -> Defaults {
+    defaults_in(root, temp, home().as_deref(), &crate::sandbox::Here::now())
 }
 
-/// The places Claude reads unasked for the project at `root` (`Defaults`); the temp folders only with
-/// `temp` (`Editor.read_temp` — tests' projects are in the temp folder, and theirs off). On a worker.
-pub fn defaults(root: &Path, temp: bool) -> Defaults {
-    let h = home();
-    let here = crate::sandbox::Here::now();
-    let mut code = h.as_deref().map(|h| code_trees(&crate::sandbox::vars_in(h, &here))).unwrap_or_default();
+/// The places Claude reads unasked for the project at `root` (`Defaults`; `caps::Basis::build_in` makes them
+/// the session's), for home `h` and what `here` says of the variables and the temp folder; the temp folders
+/// only with `temp` (`Editor.read_temp` — tests' projects are in the temp folder, and theirs off). On a worker.
+pub fn defaults_in(root: &Path, temp: bool, h: Option<&Path>, here: &crate::sandbox::Here) -> Defaults {
+    let mut code = h.map(|h| code_trees(&crate::sandbox::vars_in(h, here))).unwrap_or_default();
     // (a cargo config can point them anywhere — and a checkout can be anywhere: never home or above it,
     // nor where keys are)
-    code.extend(crate::sandbox::build_dirs(root).into_iter().filter(|d| keepable(d, h.as_deref())));
-    let checkouts = checkouts(root).into_iter().filter(|d| keepable(d, h.as_deref())).collect();
-    let temp = if temp { temp_folders() } else { Vec::new() };
-    let kept = h.as_deref().map(|h| crate::sandbox::kept_places(h, &here)).unwrap_or_default();
+    code.extend(crate::sandbox::build_dirs(root, here).into_iter().filter(|d| keepable(d, h)));
+    let checkouts = checkouts(root).into_iter().filter(|d| keepable(d, h)).collect();
+    let temp = if temp { temp_folders_in(here) } else { Vec::new() };
+    let kept = h.map(|h| crate::sandbox::kept_places(h, here)).unwrap_or_default();
     Defaults { checkouts, temp, code, kept }
 }
 
-/// `/tmp` (macOS's `/private/tmp`) and the user's temp folder (`$TMPDIR` itself — not its parent, which holds
-/// apps' caches), real paths.
-pub fn temp_folders() -> Vec<PathBuf> {
+/// `/tmp` (macOS's `/private/tmp`) and the user's temp folder as `here` says it (`$TMPDIR` itself — not its
+/// parent, which holds apps' caches), real paths.
+fn temp_folders_in(here: &crate::sandbox::Here) -> Vec<PathBuf> {
+    let t = here.tmp.clone().unwrap_or_else(|| crate::sandbox::profile_path(&std::env::temp_dir()));
     let mut v = vec![crate::sandbox::profile_path(Path::new("/tmp"))];
-    let t = crate::sandbox::profile_path(&std::env::temp_dir());
     if !v.contains(&t) {
         v.push(t);
     }
@@ -664,7 +663,10 @@ pub fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allow
         move |ed: &mut crate::editor::Editor| match r {
             Err(e) => ed.set_error(format!("couldn't keep it: {e}")),
             // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
-            Ok(_) => crate::reads::kept_keys_load(ed),
+            Ok(_) => {
+                crate::reads::kept_keys_load(ed);
+                ed.caps_sync();
+            }
         }
     });
 }
@@ -680,6 +682,7 @@ pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Sc
             c.allowed.add_read(p.clone());
         }
     }
+    ed.caps_sync();
     let shown = places.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
     if scope == Scope::ThisChat {
         return ed.set_success(format!("Claude may read {shown} in this conversation"));
@@ -700,6 +703,7 @@ pub fn grant_keys(ed: &mut crate::editor::Editor, keys: &[PathBuf], scope: Scope
     if let Some(c) = ed.session.chat.as_mut() {
         grants.iter().for_each(|g| c.allowed.add(g));
     }
+    ed.caps_sync();
     let shown = keys.iter().map(|k| tilde(k)).collect::<Vec<_>>().join(", ");
     let when = match scope {
         Scope::Always => "in this project, until they take it back",
@@ -729,6 +733,7 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
     if let Some(c) = ed.session.chat.as_mut() {
         c.allowed.add(g);
     }
+    ed.caps_sync();
     let (when, toast) = match scope {
         Scope::Always => {
             ("in this project, until they take it back", " in this project — :sandbox-allowed lists it")
@@ -825,6 +830,7 @@ impl crate::editor::Editor {
         if let Some(c) = self.session.chat.as_mut() {
             c.allowed.remove(&what);
         }
+        self.caps_sync();
         if let Some((kind, h, p)) = host {
             self.session.hosts.retain(|(sk, sh, sp)| (*sk, sh, *sp) != (kind, &h, p));
             crate::hosts::taken(&self.session, kind, &h, p);
@@ -898,7 +904,11 @@ pub(crate) mod tests {
         let kept = Store::read(Some(&path)).get(&root);
         assert_eq!(kept.hosts, [("static.example.invalid".to_string(), 443)], "once");
         let once = Grant::Host("once.example.invalid".into(), 8443);
-        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], Some(&once));
+        let w = crate::tools::with_allowed(
+            &crate::llm::LlmConfig::default(),
+            &crate::caps::Caps::answered(&[&kept]),
+            Some(&once),
+        );
         assert!(w.granted.contains(&"reach static.example.invalid:443 through tarae's proxy".to_string()));
         let mut p = crate::sandbox::Policy::for_project(&crate::sandbox::Env {
             root: root.clone(),

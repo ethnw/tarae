@@ -1,0 +1,124 @@
+══ Mac
+outside home read: yes
+read
+    $BASE/tmp · default: temp
+    $HOME/.cargo/build/ab/cdef0123 · default: toolchain
+    $HOME/.cargo/registry/src · default: toolchain
+    $HOME/.rustup/toolchains/stable-x/lib/rustlib/src · default: toolchain
+    $HOME/go/pkg/mod · default: toolchain
+    $HOME/work/other · this chat
+    $ROOT · default: checkout
+    $TMP · default: temp
+write
+    $HOME/elsewhere · always
+ports
+    9 · always
+sockets
+    $BASE/tmp/s.sock · this chat
+hosts
+    example.invalid:443 · always
+terminals
+    this chat
+keys
+    $ROOT/.env · always
+never read
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
+    $HOME/.kube
+    $HOME/.local/state/tarae
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $STATE
+never written: programs
+    $HOME/.cargo/bin
+    $HOME/.local/bin
+    $HOME/go/bin
+never written: shared caches
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+never written: toolchains' homes
+    $HOME/.cargo
+    $HOME/.gradle
+    $HOME/.npm
+    $HOME/.rustup
+    $HOME/go
+    $HOME/go/bin
+══ Linux
+outside home read: yes
+read
+    $BASE/tmp · default: temp
+    $HOME/.cargo/build/ab/cdef0123 · default: toolchain
+    $HOME/.cargo/registry/src · default: toolchain
+    $HOME/.rustup/toolchains/stable-x/lib/rustlib/src · default: toolchain
+    $HOME/go/pkg/mod · default: toolchain
+    $HOME/work/other · this chat
+    $ROOT · default: checkout
+    $TMP · default: temp
+write
+    $HOME/elsewhere · always
+ports
+    9 · always
+sockets
+    $BASE/tmp/s.sock · this chat
+hosts
+    example.invalid:443 · always
+terminals
+    this chat
+keys
+    $ROOT/.env · always
+never read
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
+    $HOME/.kube
+    $HOME/.local/state/tarae
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $STATE
+never written: programs
+    $HOME/.cargo/bin
+    $HOME/.local/bin
+    $HOME/go/bin
+never written: shared caches
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+never written: toolchains' homes
+    $HOME/.cargo
+    $HOME/.gradle
+    $HOME/.npm
+    $HOME/.rustup
+    $HOME/go
+    $HOME/go/bin

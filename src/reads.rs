@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
-use crate::allow::{Allowed, Scope};
+use crate::allow::Scope;
 use crate::editor::Editor;
 
 /// The tools whose asks come here.
@@ -77,13 +77,10 @@ pub struct Then {
 /// What tarae's own tools that read go by — Read's rules (`decide`): gathered on the main thread, judged on a
 /// worker.
 pub struct Gate {
-    root: PathBuf,
-    chat: Allowed,
+    /// What the session's `Caps` is made from (outside home read unasked where the capability model reads it:
+    /// `Editor.read_outside`).
+    basis: crate::caps::Basis,
     made: Made,
-    store: Option<PathBuf>,
-    temp: bool,
-    /// Outside home read unasked where the capability model reads it (`by_default`; `Editor.read_outside`).
-    outside: bool,
     granted: Vec<PathBuf>,
 }
 
@@ -108,21 +105,14 @@ impl Gate {
     #[cfg(test)]
     pub fn for_test(root: &Path) -> Gate {
         let root = crate::paths::real(root).unwrap_or_else(|| root.to_path_buf());
-        Gate {
-            root,
-            chat: Allowed::default(),
-            made: Made::default(),
-            store: None,
-            temp: false,
-            outside: false,
-            granted: Vec::new(),
-        }
+        let basis = crate::caps::Basis { root, ..Default::default() };
+        Gate { basis, made: Made::default(), granted: Vec::new() }
     }
 
     /// (Tests: reading outside home where the capability model does, as tarae does.)
     #[cfg(test)]
     pub fn reading_outside(mut self) -> Gate {
-        self.outside = true;
+        self.basis.outside = true;
         self
     }
 
@@ -135,16 +125,8 @@ impl Gate {
 
     /// For session `ed.session`'s chat, with what the user already let this call read.
     pub fn of(ed: &Editor, granted: Vec<PathBuf>) -> Gate {
-        let c = ed.session.chat.as_ref();
-        Gate {
-            root: ed.session.root.clone(),
-            chat: c.map(|c| c.allowed.clone()).unwrap_or_default(),
-            made: c.map(|c| Made::of(&c.ran)).unwrap_or_default(),
-            store: ed.allow_path.clone(),
-            temp: ed.read_temp,
-            outside: ed.read_outside,
-            granted,
-        }
+        let made = ed.session.chat.as_ref().map(|c| Made::of(&c.ran)).unwrap_or_default();
+        Gate { basis: ed.caps_basis(), made, granted }
     }
 
     /// Whether reading `at` (real, outside the project or named like a key in it) goes without asking —
@@ -158,9 +140,9 @@ impl Gate {
             true => ("Read", json!({ "file_path": at })),
             false => ("Grep", json!({ "path": at })),
         };
-        let (look, covered, class) =
-            decide(tool, &input, &self.root, self.store.as_deref(), self.temp, &self.chat, &self.made);
-        if covered || (self.outside && by_default(class)) {
+        let caps = self.basis.build();
+        let (look, covered, class) = decide(tool, &input, &caps, &self.made);
+        if covered || by_default(class, &caps) {
             return Ok(());
         }
         let found = look.at.as_deref().map(crate::tokens::found_in).unwrap_or_default();
@@ -823,17 +805,14 @@ pub fn pointing_asks(ed: &Editor) -> bool {
     ed.session_cards().any(|o| own_card(&o.what, |o| matches!(o, Own::Chip(_))))
 }
 
-/// Whether the call may go without asking: inside the project, in a place allowed, tarae's own log
-/// (the file itself — `log::is_log_real`), or made by one of Claude's runs this turn (`Made`) — and every
-/// file named like a key it opens opened (`Grant::Key`, the same grant a run's reads go by).
-pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed, made: &Made) -> bool {
-    look.keys.iter().all(|k| chat.keys.contains(k) || kept.keys.contains(k))
+/// Whether the call may go without asking: inside the project, in a place read by default or allowed
+/// (`caps`), tarae's own log (the file itself — `log::is_log_real`), or made by one of Claude's runs this turn
+/// (`Made`) — and every file named like a key it opens opened (`Grant::Key`, the same grant a run's reads go
+/// by).
+pub fn covered(look: &Look, caps: &crate::caps::Caps, made: &Made) -> bool {
+    look.keys.iter().all(|k| caps.opens_key(k))
         && look.at.as_ref().is_some_and(|at| {
-            at.starts_with(root)
-                || chat.reads(at)
-                || kept.reads(at)
-                || crate::log::is_log_real(at)
-                || made.covers(at, SystemTime::now())
+            caps.reads(at) || crate::log::is_log_real(at) || made.covers(at, SystemTime::now())
         })
 }
 
@@ -879,17 +858,17 @@ pub fn run_ended(ed: &mut Editor) {
 pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> {
     let tool = req["tool_name"].as_str().unwrap_or_default().to_string();
     let c = ed.session.chat.as_ref()?;
-    let (generation, chat, made) = (c.generation(), c.allowed.clone(), Made::of(&c.ran));
+    let (generation, made) = (c.generation(), Made::of(&c.ran));
     let input = req["input"].clone();
     let request_id = request_id.to_string();
-    let (store, temp, outside) = (ed.allow_path.clone(), ed.read_temp, ed.read_outside);
     // (what claude's own profile keeps from it, a yes can't open — `kept_from_claude`)
     let confined = c.confined();
     // (the root, a real path, is where claude runs — its relative paths are from there)
-    let root = ed.session.root.clone();
+    let basis = ed.caps_basis();
     ed.events.jobs().spawn(move || {
-        let (look, covered, class) = decide(&tool, &input, &root, store.as_deref(), temp, &chat, &made);
-        let ok = covered || (outside && by_default(class));
+        let caps = basis.build();
+        let (look, covered, class) = decide(&tool, &input, &caps, &made);
+        let ok = covered || by_default(class, &caps);
         if let Some(said) = confined.and_then(|p| kept_from_claude(&p, &look)) {
             return Box::new(move |ed: &mut Editor| {
                 if ed.session.chat.as_ref().is_some_and(|c| c.generation() == generation) {
@@ -941,47 +920,40 @@ pub(crate) fn kept_from_claude(p: &crate::sandbox::claude::Profile, look: &Look)
     ))
 }
 
-/// What `tool` reading `input` (from `root`, where claude runs) reads, and whether it may go without asking:
-/// inside `root` (a file named like a key there only once opened — `Look.keys`), a place this conversation
-/// (`chat`) or the user (`store`, kept for always) allowed, the places
-/// read unasked (`allow::defaults` — the repository's other checkouts, and the temp folders when `temp`), or
-/// made by a run of this turn (`made`) — its class too (the card's line says it): the chat's reads go
-/// without asking where the capability model reads by default as well (`by_default`). A worker's: it
-/// resolves paths and reads the kept answers. The chat asks the rest on a card; the reviewer refuses it
+/// What `tool` reading `input` (from `caps.root`, where claude runs) reads, and whether it may go without
+/// asking: inside the checkout (a file named like a key there only once opened — `Look.keys`), a place read by
+/// default or allowed — this conversation's, kept for always (`caps`) —, or made by a run of this turn (`made`)
+/// — its class too (the card's line says it): the chat's reads go without asking where the capability model
+/// reads by default as well (`by_default`). The chat asks the rest on a card; the reviewer refuses it
 /// (`reviewer.rs`: the checkout only).
 pub fn decide(
     tool: &str,
     input: &Value,
-    root: &Path,
-    store: Option<&Path>,
-    temp: bool,
-    chat: &Allowed,
+    caps: &crate::caps::Caps,
     made: &Made,
 ) -> (Look, bool, crate::cards::Class) {
-    let mut look = look(tool, input, root);
-    let mut kept = crate::allow::Store::read(store).get(root);
-    let defaults = crate::allow::defaults(root, temp);
-    kept.read.extend(defaults.all());
-    let covered = covered(&look, root, chat, &kept, made);
+    let mut look = look(tool, input, &caps.root);
+    let covered = covered(&look, caps, made);
     // (the card names those still closed)
-    look.keys.retain(|k| !chat.keys.contains(k) && !kept.keys.contains(k));
-    let class = class_of(&look, &defaults);
+    look.keys.retain(|k| !caps.opens_key(k));
+    let class = class_of(&look, caps);
     (look, covered, class)
 }
 
-/// Whether the capability model reads a place of `class` without asking (`cards::decide` — the one rule):
-/// outside home too, as runs read it (D3) — but others' homes, volumes, and a file named like a key.
-pub fn by_default(class: crate::cards::Class) -> bool {
-    crate::cards::decide(&crate::cards::Request::Read(class)) == crate::cards::Decision::None
+/// Whether the capability model reads a place of `class` without asking (`cards::decide` — the one rule, by
+/// the session's `caps`): outside home too where it reads it, as runs do (D3) — but others' homes, volumes, and
+/// a file named like a key.
+pub fn by_default(class: crate::cards::Class, caps: &crate::caps::Caps) -> bool {
+    crate::cards::decide(&crate::cards::Request::Read(class), caps) == crate::cards::Decision::None
 }
 
 /// Where a read goes, as the capability model sorts places: what's named like a key — in the project, still
 /// closed (`Look.keys`), or the place itself, wherever (there or not) — is `Secret`; else its place's class
 /// (`cards::class`).
-fn class_of(look: &Look, defaults: &crate::allow::Defaults) -> crate::cards::Class {
+fn class_of(look: &Look, caps: &crate::caps::Caps) -> crate::cards::Class {
     let named_key = look.at.as_deref().is_some_and(crate::secretnames::named_secret);
     match look.keys.is_empty() && !named_key {
-        true => crate::cards::class(look.at.as_deref(), defaults, crate::allow::home().as_deref()),
+        true => caps.class(look.at.as_deref()),
         false => crate::cards::Class::Secret,
     }
 }
@@ -1282,6 +1254,7 @@ pub fn turn_over(ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allow::Allowed;
 
     /// Where each tool reads: Read its file, Grep its folder (the project when none), Glob its folder with
     /// the pattern's fixed folders — and none when a `..` comes after a wildcard.
@@ -1398,12 +1371,15 @@ mod tests {
         };
         let none = Allowed::default();
         let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };
-        assert!(covered(&l(Some("/r/p/src/a.rs")), root, &none, &none, &Made::default()));
-        assert!(!covered(&l(Some("/r/pq/a.rs")), root, &none, &none, &Made::default()), "by path parts");
-        assert!(!covered(&l(Some("/t/x/m.txt")), root, &none, &none, &Made::default()));
-        assert!(covered(&l(Some("/t/x/m.txt")), root, &some, &none, &Made::default()), "this chat");
-        assert!(covered(&l(Some("/t/x/m.txt")), root, &none, &some, &Made::default()), "kept");
-        assert!(!covered(&l(None), root, &some, &some, &Made::default()), "can't be told: asks");
+        let covered = |l: &Look, kept: &Allowed, chat: &Allowed| {
+            covered(l, &crate::caps::Caps::granted(root, kept, chat), &Made::default())
+        };
+        assert!(covered(&l(Some("/r/p/src/a.rs")), &none, &none));
+        assert!(!covered(&l(Some("/r/pq/a.rs")), &none, &none), "by path parts");
+        assert!(!covered(&l(Some("/t/x/m.txt")), &none, &none));
+        assert!(covered(&l(Some("/t/x/m.txt")), &none, &some), "this chat");
+        assert!(covered(&l(Some("/t/x/m.txt")), &some, &none), "kept");
+        assert!(!covered(&l(None), &some, &some), "can't be told: asks");
     }
 
     /// P0 of docs/design/cards.md: Claude reads the repository's other checkouts and the temp folders
@@ -1419,13 +1395,10 @@ mod tests {
         std::fs::write(main.join("notes.md"), "marker\n").unwrap();
         std::fs::create_dir_all(base.join("shot")).unwrap();
         std::fs::write(base.join("shot/a.png"), "marker\n").unwrap();
-        let none = Allowed::default();
         let reads = |file: &Path, temp: bool| {
-            let d = crate::allow::defaults(&wt, temp);
-            let kept = Allowed { read: d.all(), ..Default::default() };
+            let caps = crate::caps::Basis { root: wt.clone(), temp, ..Default::default() }.build();
             let l = look("Read", &json!({ "file_path": file }), &wt);
-            let class = crate::cards::class(l.at.as_deref(), &d, crate::allow::home().as_deref());
-            (covered(&l, &wt, &none, &kept, &Made::default()), class)
+            (covered(&l, &caps, &Made::default()), caps.class(l.at.as_deref()))
         };
         use crate::cards::Class;
         assert_eq!(reads(&main.join("notes.md"), false), (true, Class::OtherCheckout), "the main checkout");
@@ -1547,9 +1520,8 @@ mod tests {
         let Some(log) = crate::log::path() else { return };
         let root = Path::new("/r/p");
         let none = Allowed::default();
-        let at = |tool: &str, input: Value| {
-            covered(&look(tool, &input, root), root, &none, &none, &Made::default())
-        };
+        let caps = crate::caps::Caps::granted(root, &none, &none);
+        let at = |tool: &str, input: Value| covered(&look(tool, &input, root), &caps, &Made::default());
         assert!(at("Read", json!({ "file_path": log })));
         assert!(at("Grep", json!({ "pattern": "ready", "path": log })));
         let dir = log.parent().unwrap();

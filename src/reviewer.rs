@@ -491,12 +491,13 @@ fn control(ed: &mut Editor, generation: u64, request_id: &str, req: &Value) -> O
 /// user allowed for always, the repository's other checkouts…), else refused — the reviewer never asks.
 fn read(ed: &mut Editor, generation: u64, request_id: &str, tool: &str, input: &Value) {
     let Some(r) = ed.session.reviewer.as_ref() else { return };
-    let (root, store, temp) = (r.root.clone(), ed.allow_path.clone(), ed.read_temp);
+    // (no conversation's answers, nor outside home: only what's covered)
+    let (store, temp) = (ed.allow_path.clone(), ed.read_temp);
+    let basis = crate::caps::Basis { root: r.root.clone(), store, temp, ..Default::default() };
+    let root = r.root.clone();
     let (tool, input, request_id) = (tool.to_string(), input.clone(), request_id.to_string());
     ed.events.jobs().spawn(move || {
-        let none = (Default::default(), Default::default());
-        let (look, ok, _) =
-            crate::reads::decide(&tool, &input, &root, store.as_deref(), temp, &none.0, &none.1);
+        let (look, ok, _) = crate::reads::decide(&tool, &input, &basis.build(), &Default::default());
         move |ed: &mut Editor| {
             let answer = match ok {
                 true => json!({ "behavior": "allow", "updatedInput": input }),

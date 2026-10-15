@@ -1452,8 +1452,8 @@ fn card(
                     let asked =
                         crate::cards::Asked::new(why, request).ran(c.run_id(), &cmd, &cwd, &ed.session.root);
                     let session = ed.session.log();
-                    let entry =
-                        crate::cards::refused(&asked, &e, session.name(), std::time::SystemTime::now());
+                    let at = (session.name(), std::time::SystemTime::now());
+                    let entry = crate::cards::refused(&asked, &e, at, ed.session.caps());
                     ed.cards_record(vec![entry]);
                     answer(ed, c, Err(e));
                     return;
@@ -1692,16 +1692,18 @@ fn read_only(
     pins: Option<Vec<(PathBuf, u64)>>,
     (judge, beyond): (String, Option<Beyond>),
 ) -> Result<(), String> {
-    let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let (store, root, temp) = (ed.allow_path.clone(), ed.session.root.clone(), ed.read_temp);
+    let (basis, root) = (ed.caps_basis(), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
-        let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
-        let defaults = crate::allow::defaults(&root, temp);
-        kept.read.extend(defaults.all());
+        let caps = basis.build();
+        // (what's read unasked, as the line's reads are judged until the gate goes by `caps` itself — piece 4)
+        let unasked = crate::allow::Allowed {
+            read: caps.read.iter().map(|e| e.what.clone()).collect(),
+            ..Default::default()
+        };
         let expanded = crate::allow::expanded(&judge, &cwd);
-        let reads = crate::readonly::outside(&judge, &cwd, &root, &chat, &kept, &expanded);
+        let reads = crate::readonly::outside(&judge, &cwd, &root, &basis.chat, &unasked, &expanded);
         // (where they are, for the card's line)
-        let classes = reads.as_ref().map(|r| crate::cards::classes(r, &defaults)).unwrap_or_default();
+        let classes = reads.as_ref().map(|r| crate::cards::classes(r, &caps)).unwrap_or_default();
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
         let runs_outside = crate::readonly::runs_outside(&judge, &cwd, &root, &expanded);
         // (its scripts and the packs' entry files it runs — `cargo xtask`'s `xtask/` — #210)
@@ -2317,30 +2319,16 @@ impl Widened {
     }
 }
 
-/// The settings a run's policy is made from with what's allowed added — kept for the project, for this
-/// conversation, and `once` — and what no setting has: the sockets, the places to read.
+/// The settings a run's policy is made from with the session's answers added (`caps`: kept for the project,
+/// this conversation's) and `once` — and what no setting has: the sockets, the places to read.
 pub fn with_allowed(
     llm: &crate::llm::LlmConfig,
-    scopes: &[&crate::allow::Allowed],
+    caps: &crate::caps::Caps,
     once: Option<&crate::allow::Grant>,
 ) -> Widened {
     use crate::allow::Grant;
     let mut w = Widened { llm: llm.clone(), ..Widened::default() };
-    let grants = scopes
-        .iter()
-        .flat_map(|a| {
-            a.read
-                .iter()
-                .map(|p| Grant::Read(p.clone()))
-                .chain(a.write.iter().map(|p| Grant::Write(p.clone())))
-                .chain(a.ports.iter().map(|n| Grant::Port(*n)))
-                .chain(a.sockets.iter().map(|s| Grant::Socket(s.clone())))
-                .chain(a.hosts.iter().map(|(h, p)| Grant::Host(h.clone(), *p)))
-                .chain(a.terminals.then_some(Grant::Terminals))
-                .chain(a.keys.iter().map(|k| Grant::Key(k.clone())))
-        })
-        .chain(once.cloned());
-    for g in grants {
+    for g in caps.grants().into_iter().chain(once.cloned()) {
         match &g {
             Grant::Read(p) if !w.reads.contains(p) => w.reads.push(p.clone()),
             Grant::Write(p) => w.llm.sandbox_write.push(p.display().to_string()),
@@ -2659,10 +2647,9 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         return go(ed, who, job, None, ride);
     }
     let llm = ed.config.llm.clone();
-    let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     // (on a commit's tree: that tree is the run's project — it writes there only, its build folder its own)
     let root = ride.extra.base.as_ref().map_or_else(|| ed.session.root.clone(), |b| b.tree.clone());
-    let store = ed.allow_path.clone();
+    let basis = crate::caps::Basis { root: root.clone(), ..ed.caps_basis() };
     let grant = ride.extra.grant.clone();
     let said = ed.tokens_said.clone();
     let here = ed.sandbox_here.clone();
@@ -2673,8 +2660,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         };
         let mut told = (Vec::new(), None);
         let policy = matches!(found, Availability::Ready | Availability::Partial(_)).then(|| {
-            let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
-            let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
+            let w = with_allowed(&llm, &basis.granted(), grant.as_ref());
             let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
             let mut p = crate::sandbox::policy_from(&root, w, &here)?;
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
@@ -4062,7 +4048,11 @@ mod tests {
         };
         let chat = Allowed { write: vec!["/w/chat".into()], ports: vec![5432], ..Default::default() };
         let base = crate::llm::LlmConfig::default();
-        let w = super::with_allowed(&base, &[&kept, &chat], Some(&Grant::Port(3000)));
+        let w = super::with_allowed(
+            &base,
+            &crate::caps::Caps::answered(&[&kept, &chat]),
+            Some(&Grant::Port(3000)),
+        );
         assert_eq!(w.llm.sandbox_write, ["/w/kept", "/w/chat"]);
         assert_eq!(w.llm.sandbox_ports, [5432, 5432, 3000], "(the policy keeps each port once)");
         assert_eq!(
@@ -4077,17 +4067,25 @@ mod tests {
         );
         assert!(w.sockets.is_empty());
         assert_eq!(w.reads, [std::path::PathBuf::from("/r/kept")]);
-        let none = super::with_allowed(&base, &[], None);
+        let none = super::with_allowed(&base, &crate::caps::Caps::answered(&[]), None);
         assert!(none.llm.sandbox_write.is_empty() && none.llm.sandbox_ports.is_empty());
         assert!(none.granted.is_empty() && none.sockets.is_empty() && none.reads.is_empty());
         // #119: a socket — this chat's, or this run's — as itself, nothing wider; a read for this run alone
         let chat =
             Allowed { sockets: vec!["/s/a.sock".into()], read: vec!["/r/x".into()], ..Default::default() };
-        let w = super::with_allowed(&base, &[&chat], Some(&Grant::Socket("/s/b.sock".into())));
+        let w = super::with_allowed(
+            &base,
+            &crate::caps::Caps::answered(&[&chat]),
+            Some(&Grant::Socket("/s/b.sock".into())),
+        );
         assert_eq!(w.sockets, [std::path::PathBuf::from("/s/a.sock"), "/s/b.sock".into()]);
         assert!(w.llm.sandbox_write.is_empty() && w.llm.sandbox_ports.is_empty());
         assert_eq!(w.granted[2], "connect to the socket /s/b.sock — that one file");
-        let once = super::with_allowed(&base, &[], Some(&Grant::Read("/r/once".into())));
+        let once = super::with_allowed(
+            &base,
+            &crate::caps::Caps::answered(&[]),
+            Some(&Grant::Read("/r/once".into())),
+        );
         assert_eq!(once.reads, [std::path::PathBuf::from("/r/once")]);
     }
 
@@ -4194,8 +4192,9 @@ mod tests {
     /// runs, and fails in the sandbox. The card's request says the same (`outward`), so its shadow is the gate.
     #[test]
     fn a_warning_that_asks_asks_only_where_the_run_could_reach_out() {
-        use crate::cards::{Decision, Why, decide};
+        use crate::cards::{Decision, Why};
         use crate::sandbox::Availability;
+        let decide = |r: &crate::cards::Request| crate::cards::decide(r, &Default::default());
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         (ed.config.llm.sandbox, ed.sandbox, ed.config.llm.sandbox_network) =
             (true, Availability::Ready, false);

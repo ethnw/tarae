@@ -8016,6 +8016,7 @@ mod tests {
         // The list: the folders, widest last, then running it outside
         ed.session.chat.as_mut().unwrap().focused = false;
         feed(&mut ed, " ms");
+        settle_for(&mut ed, |ed| ed.picker.is_some());
         let rows: Vec<String> = ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect();
         assert_eq!(rows[0], format!("allow writing in {}", crate::allow::tilde(&deep)), "{rows:?}");
         assert_eq!(rows[1], format!("allow writing in {}", crate::allow::tilde(&cache)), "{rows:?}");
@@ -8469,10 +8470,11 @@ mod tests {
         assert!(!kept(&env), "`a` was this chat's");
         assert!(told(&ed, &pem));
         // (a later conversation: the project's grant alone lets it through)
-        let none = (crate::allow::Allowed::default(), crate::reads::Made::default());
+        let basis =
+            crate::caps::Basis { root: project.clone(), store: Some(store.clone()), ..Default::default() };
         let later = |f: &Path| {
             let input = json!({"file_path": f});
-            crate::reads::decide("Read", &input, &project, Some(&store), false, &none.0, &none.1).1
+            crate::reads::decide("Read", &input, &basis.build(), &Default::default()).1
         };
         assert!(later(&pem) && !later(&env));
         assert_eq!(answered(&mut ed, "p9")["behavior"], "allow", "every key it'd read opened");

@@ -227,7 +227,11 @@ fn the_upstreams_failures_are_said_as_its_own() {
             assert!(!said.contains(ITS_WORDS) && !said.contains("127.0.0.1"), "{why}: {said}");
         }
         let home = Path::new("/nonexistent-home");
-        assert_eq!(crate::blocked::choices(&[denial], home, Path::new("/w/p"), &[]), [], "{why}");
+        assert_eq!(
+            crate::blocked::choices(&[denial], &crate::caps::Caps::at(home, Path::new("/w/p"))),
+            [],
+            "{why}"
+        );
     }
 }
 
@@ -505,7 +509,11 @@ fn a_socks5_upstreams_failures_are_said_as_its_own() {
         assert!(denial.target.contains(why), "{why}: {}", denial.target);
         assert!(!denial.target.contains("127.0.0.1"), "{}", denial.target);
         let home = Path::new("/nonexistent-home");
-        assert_eq!(crate::blocked::choices(&[denial], home, Path::new("/w/p"), &[]), [], "{why}");
+        assert_eq!(
+            crate::blocked::choices(&[denial], &crate::caps::Caps::at(home, Path::new("/w/p"))),
+            [],
+            "{why}"
+        );
     }
 }
 

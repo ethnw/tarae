@@ -797,6 +797,7 @@ pub fn open(ed: &mut Editor) {
                 });
             }
             ed.session.chat = Some(c);
+            ed.caps_sync();
             crate::edits::at_end_new_chat(ed);
             crate::reads::kept_keys_load(ed);
         }

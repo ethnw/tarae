@@ -3171,7 +3171,11 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Re
 #[cfg(test)]
 pub fn policy_opening(root: &Path, llm: &crate::llm::LlmConfig, keys: &[PathBuf]) -> Result<Policy, String> {
     let open = crate::allow::Allowed { keys: keys.to_vec(), ..Default::default() };
-    policy_from(root, crate::tools::with_allowed(llm, &[&open], None), &Here::now())
+    policy_from(
+        root,
+        crate::tools::with_allowed(llm, &crate::caps::Caps::answered(&[&open]), None),
+        &Here::now(),
+    )
 }
 
 /// The policy for the run about to start with the settings and grants `w` (`tools::with_allowed`) and what
@@ -3884,23 +3888,22 @@ type Seen = HashMap<PathBuf, (Vec<Option<SystemTime>>, ToolDirs)>;
 static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
 
 /// The project's toolchain folders outside it as last found for a run of Claude's (`toolchain_dirs`) — only
-/// those its runs may write (`asked_dir_verdict`, `ask_dir_verdict`; a shared cache too, which they read);
-/// nothing looked up: none before its first run.
-pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
+/// those its runs may write (`asked_dir_verdict`, `ask_dir_verdict`; a shared cache too, which they read), judged
+/// for the home and temp folder `here` says (`allow::defaults_in`'s); nothing looked up: none before its first run.
+pub fn build_dirs(root: &Path, here: &Here) -> Vec<PathBuf> {
     let root = profile_path(root);
     let Some(found) =
         SEEN.get().and_then(|s| s.lock().ok().and_then(|m| m.get(&root).map(|(_, d)| d.clone())))
     else {
         return Vec::new();
     };
-    let here = Here::now();
     let home = here.path("HOME");
-    let tool = asks_for(&root, home.as_deref(), &here).builder;
+    let tool = asks_for(&root, home.as_deref(), here).builder;
     let (own, tmp) = (found.own_build.as_deref(), here.tmp.as_deref());
     let open = |d: &Path| asked_dir_verdict(d, &root, home.as_deref(), &tool, own, tmp).is_ok();
     let named = found.named.iter().map(|(d, _)| d).filter(|d| open(d));
     let real_home = home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
-    let later = real_home.as_deref().map(|h| RunsLater::new(h, &vars_in(h, &here), &path_dirs_in(&here)));
+    let later = real_home.as_deref().map(|h| RunsLater::new(h, &vars_in(h, here), &path_dirs_in(here)));
     let later = later.unwrap_or_default();
     let open = |d: &&PathBuf, later: &RunsLater| ask_dir_verdict(d, &root, home.as_deref(), later).is_ok();
     let written = found.other.iter().map(|(d, _)| d).filter(|d| open(d, &later));
@@ -8033,7 +8036,11 @@ mod tests {
         let kept = crate::allow::Store::read(Some(&store)).get(&root);
         let none = crate::allow::Allowed::default();
         for (scope, open) in [(&none, false), (&kept, true)] {
-            let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[scope], None);
+            let w = crate::tools::with_allowed(
+                &crate::llm::LlmConfig::default(),
+                &crate::caps::Caps::answered(&[scope]),
+                None,
+            );
             let mut p = Policy::for_project(&Env { root: root.clone(), ..Env::default() });
             w.onto(&mut p);
             assert_eq!(p.terminals, open);
@@ -8253,7 +8260,11 @@ mod tests {
         let g = crate::allow::Grant::Key(root.join("deep/er/Server.PEM"));
         crate::allow::keep(&store, &root, |a| a.add(&g)).unwrap();
         let kept = crate::allow::Store::read(Some(&store)).get(&root);
-        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
+        let w = crate::tools::with_allowed(
+            &crate::llm::LlmConfig::default(),
+            &crate::caps::Caps::answered(&[&kept]),
+            None,
+        );
         let mut p = key_policy(&root);
         w.onto(&mut p);
         assert_eq!(p.keys, Some(vec![root.join("deep/er/Server.PEM")]));
@@ -9240,8 +9251,11 @@ mod tests {
         let mut this_chat = Allowed::default();
         this_chat.add(&Grant::Write(chat.clone()));
         this_chat.add(&Grant::Socket(socks.join("granted.sock")));
-        let w =
-            crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&from_store, &this_chat], None);
+        let w = crate::tools::with_allowed(
+            &crate::llm::LlmConfig::default(),
+            &crate::caps::Caps::answered(&[&from_store, &this_chat]),
+            None,
+        );
         assert_eq!(w.granted.len(), 5, "{:?}", w.granted);
         let env = Env {
             root: root.clone(),

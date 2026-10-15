@@ -200,6 +200,12 @@ pub struct Session {
     /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:sandbox-allowed` lists and
     /// takes back; the proxy holds the answers itself (`hosts.rs`).
     pub hosts: Vec<(crate::sandbox::proxy::Kind, String, u16)>,
+    /// What its Claude may do, as last made (`Editor::caps_sync_of`) with the generation it was asked as — for
+    /// what reads it on the main thread (the card line's shadow); None until the first lands. The gates make
+    /// theirs on their workers, from what's answered at that moment.
+    pub caps: Option<(u64, std::sync::Arc<crate::caps::Caps>)>,
+    /// The last generation of its `caps` asked for: one landing older than what's there is dropped.
+    pub caps_asked: u64,
     /// What its last sandboxed run's sandbox keeps apart and shares (9d) — its keeper's, or its Seatbelt policy's —
     /// as the run's policy has it (`Guard::guarantees`: made on the worker that made the policy, `linux::confine`),
     /// kept on the main loop once the run started (`tools::go_now` → `watch::sandbox`; one that didn't spawn
@@ -325,6 +331,8 @@ impl Session {
             limit_asked: None,
             compacted: Default::default(),
             hosts: Vec::new(),
+            caps: None,
+            caps_asked: 0,
             sandbox: None,
             proxy_id,
         }
@@ -912,6 +920,8 @@ impl Editor {
     /// the others' as they're made.
     pub fn session_kept_back(&mut self, id: SessionId) {
         crate::notes::restore_in(self, id);
+        // (what its Claude may do: built as it's made — a chat restored after `:restart` finds it there)
+        self.caps_sync_of(id);
         let root = std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).map(|l| &l.root);
         if let (Some(root), Some(dir)) = (root.cloned(), self.turns_dir.clone()) {
             if let Some(l) = std::iter::once(&mut self.session).chain(&mut self.sessions).find(|l| l.id == id)

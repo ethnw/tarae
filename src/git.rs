@@ -228,7 +228,8 @@ impl Editor {
             let mut all = Vec::new();
             for (root, chat) in &chats {
                 let project = kept.get(&crate::sandbox::profile_path(root));
-                let w = crate::tools::with_allowed(&llm, &[&project, chat], None);
+                let caps = crate::caps::Caps::granted(root, &project, chat);
+                let w = crate::tools::with_allowed(&llm, &caps, None);
                 all.extend(crate::sandbox::write_places(root, &w.llm));
             }
             Some(all)

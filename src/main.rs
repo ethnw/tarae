@@ -12,6 +12,7 @@ mod billing;
 mod blocked;
 mod builds;
 mod calls;
+mod caps;
 mod cards;
 mod cardwarn;
 mod chat;

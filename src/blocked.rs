@@ -51,14 +51,14 @@ pub struct Choice {
     pub why: String,
 }
 
-/// What could open for `denials`: the places in home a read may open (`allow::read_choices` — never what's
-/// kept from every run), the folders a write may open (`allow::write_choices`), a port on this machine (not a
-/// risky one) — each once. Home, the project and the folders on PATH passed in.
-pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -> Vec<Choice> {
+/// What could open for `denials` in a session that may do `caps`: the places in home a read may open
+/// (`allow::read_choices` — never what's kept from every run, `Caps.kept`), the folders a write may open
+/// (`allow::write_choices` — never where a write runs something later, `Caps.later`), a port on this machine
+/// (not a risky one) — each once.
+pub fn choices(denials: &[Denial], caps: &crate::caps::Caps) -> Vec<Choice> {
     let mut out: Vec<Choice> = Vec::new();
-    let vars = crate::sandbox::vars_in(home, &crate::sandbox::Here::now());
-    let kept = crate::sandbox::kept_reads(home, &vars);
-    let later = crate::sandbox::RunsLater::new(home, &vars, path);
+    let home = caps.home.as_deref().unwrap_or(Path::new("/"));
+    let (root, kept, later) = (caps.root.as_path(), &caps.kept, &caps.later);
     for d in denials {
         let target = crate::sandbox::profile_path(Path::new(&d.target));
         let below = |dir: &Path| {
@@ -100,13 +100,13 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
                 why: format!("{} was reading {}, named like a key", d.process, crate::allow::tilde(&target)),
             });
         } else if file && !d.terminal() && read {
-            found.extend(crate::allow::read_choices(&target, home, &kept).into_iter().map(|place| {
+            found.extend(crate::allow::read_choices(&target, home, kept).into_iter().map(|place| {
                 let why = format!("{} was reading {} in it", d.process, below(&place));
                 Choice { hint: below(&place), grant: Grant::Read(place), why }
             }));
         }
         if file && !d.terminal() && (d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER) {
-            found.extend(crate::allow::write_choices(&target, home, root, &later).into_iter().map(|dir| {
+            found.extend(crate::allow::write_choices(&target, home, root, later).into_iter().map(|dir| {
                 let why = format!("{} was writing {} in it", d.process, below(&dir));
                 Choice { hint: below(&dir), grant: Grant::Write(dir), why }
             }));
@@ -207,12 +207,18 @@ impl Editor {
             );
         }
         // (nothing blocked: the panel still opens — its state line, and why its list is empty)
-        let run = self.blocked_run(which);
-        let home = crate::allow::home().unwrap_or_else(|| PathBuf::from("/"));
-        let list = match &run {
-            Some(run) => choices(&run.denials, &home, &self.session.root, &path_dirs()),
-            None => Vec::new(),
-        };
+        let Some(run) = self.blocked_run(which) else { return self.blocked_open(None, Vec::new()) };
+        // (what could open, by what the session may do — made on a worker: it reads the kept answers, and the
+        // places never opened are looked for)
+        let basis = self.caps_basis();
+        self.events.jobs().spawn(move || {
+            let list = choices(&run.denials, &basis.build());
+            move |ed: &mut Editor| ed.blocked_open(Some(run), list)
+        });
+    }
+
+    /// The list of what the sandbox blocked in `run`, `list` what could open.
+    fn blocked_open(&mut self, run: Option<BlockedRun>, list: Vec<Choice>) {
         use crate::picker::{Action, Item};
         let mut items: Vec<Item> = list
             .iter()
@@ -539,7 +545,7 @@ mod tests {
             d("network-outbound", "remote:[::1]:8080".into()),
             d("network-outbound", "remote:192.0.2.1:9".into()),
         ];
-        let all = choices(&denials, &home, &root, &[]);
+        let all = choices(&denials, &crate::caps::Caps::at(&home, &root));
         assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/x", "…/cache/x"), "below the folder");
         assert_eq!(all[2].why, "npm was connecting to it");
         let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
@@ -576,7 +582,7 @@ mod tests {
             d("file-write-unlink", "/dev/ttys005"),
             d("file-write-mode", "/dev/ttys005"),
         ];
-        let all = choices(&denials, Path::new("/Users/u"), Path::new("/Users/u/p"), &[]);
+        let all = choices(&denials, &crate::caps::Caps::at(Path::new("/Users/u"), Path::new("/Users/u/p")));
         let got: Vec<(&Grant, &str)> = all.iter().map(|c| (&c.grant, c.why.as_str())).collect();
         assert_eq!(got, [(&Grant::Terminals, "script was opening /dev/ttys012")]);
         let g = Grant::Terminals;
@@ -587,7 +593,11 @@ mod tests {
         crate::allow::keep(&store, Path::new("/p"), |a| a.add(&g)).unwrap();
         let kept = crate::allow::Store::read(Some(&store)).get(Path::new("/p"));
         assert!(kept.terminals && !kept.is_empty());
-        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
+        let w = crate::tools::with_allowed(
+            &crate::llm::LlmConfig::default(),
+            &crate::caps::Caps::answered(&[&kept]),
+            None,
+        );
         assert!(w.terminals && w.granted == [g.shown()], "{:?}", w.granted);
         crate::allow::keep(&store, Path::new("/p"), |a| a.remove(crate::allow::TERMINALS_LISTED)).unwrap();
         assert_eq!(crate::allow::Store::read(Some(&store)).get(Path::new("/p")), Default::default());
@@ -606,13 +616,16 @@ mod tests {
         };
         let (home, root) = (Path::new("/Users/u"), Path::new("/Users/u/p"));
         let env = root.join("app/.env");
-        let all = choices(&[d("/Users/u/p/app/.env"), d("/Users/u/p/app/.env")], home, root, &[]);
+        let all = choices(
+            &[d("/Users/u/p/app/.env"), d("/Users/u/p/app/.env")],
+            &crate::caps::Caps::at(home, root),
+        );
         let got: Vec<(&Grant, &str, &str)> =
             all.iter().map(|c| (&c.grant, c.hint.as_str(), c.why.as_str())).collect();
         let g = Grant::Key(env.clone());
         let why = format!("node was reading {}, named like a key", crate::allow::tilde(&env));
         assert_eq!(got, [(&g, "node reading …/app/.env", why.as_str())]);
-        let outside = choices(&[d("/Users/u/q/.env")], home, root, &[]);
+        let outside = choices(&[d("/Users/u/q/.env")], &crate::caps::Caps::at(home, root));
         assert!(outside.iter().all(|c| matches!(c.grant, Grant::Read(_))), "{outside:?}");
         assert!(g.keepable() && !g.as_outside() && g.risk().is_some_and(|r| r.contains("reaches Claude")));
         let base = std::env::temp_dir().join(format!("tarae-blocked-key-{}", std::process::id()));
@@ -620,7 +633,11 @@ mod tests {
         crate::allow::keep(&store, root, |a| a.add(&g)).unwrap();
         let kept = crate::allow::Store::read(Some(&store)).get(root);
         assert_eq!(kept.keys, std::slice::from_ref(&env));
-        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], None);
+        let w = crate::tools::with_allowed(
+            &crate::llm::LlmConfig::default(),
+            &crate::caps::Caps::answered(&[&kept]),
+            None,
+        );
         assert!(w.keys == [env.clone()] && w.granted == [g.shown()] && w.reads.is_empty(), "{:?}", w.granted);
         crate::allow::keep(&store, root, |a| a.remove(&env.display().to_string())).unwrap();
         assert_eq!(crate::allow::Store::read(Some(&store)).get(root), Default::default());
@@ -651,7 +668,7 @@ mod tests {
                 "sni.example.invalid:443: its ClientHello names other.example.invalid — the tunnel closed",
             ),
         ];
-        let all = choices(&denials, Path::new("/Users/u"), Path::new("/Users/u/p"), &[]);
+        let all = choices(&denials, &crate::caps::Caps::at(Path::new("/Users/u"), Path::new("/Users/u/p")));
         assert_eq!((all[0].hint.as_str(), all[0].why.as_str()), ("curl reaching", "curl was reaching it"));
         let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
         assert_eq!(
@@ -700,7 +717,8 @@ mod tests {
             d(home.join(".npm/_npx/0a1b/x.js")),
             d(home.join("data/cache/x")),
         ];
-        let got: Vec<Grant> = choices(&denials, &home, &root, &[]).into_iter().map(|c| c.grant).collect();
+        let got: Vec<Grant> =
+            choices(&denials, &crate::caps::Caps::at(&home, &root)).into_iter().map(|c| c.grant).collect();
         assert_eq!(
             got,
             [Grant::Write(home.join("data/cache")), Grant::Write(home.join("data"))],
@@ -746,7 +764,7 @@ mod tests {
             d("file-read-data", home.join(".ssh/id_ed25519")),
             d(crate::sandbox::EITHER, home.join("notes/x")),
         ];
-        let all = choices(&denials, &home, &home.join("proj"), &[]);
+        let all = choices(&denials, &crate::caps::Caps::at(&home, &home.join("proj")));
         assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/a.rs", "…/lib/a.rs"));
         assert_eq!(all[0].why, "cat was reading …/a.rs in it");
         let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
@@ -841,7 +859,8 @@ mod tests {
             d(root.join("own.sock")),
             d(home.join("gone.sock")),
         ];
-        let got: Vec<Grant> = choices(&denials, &home, &root, &[]).into_iter().map(|c| c.grant).collect();
+        let got: Vec<Grant> =
+            choices(&denials, &crate::caps::Caps::at(&home, &root)).into_iter().map(|c| c.grant).collect();
         assert_eq!(got, [Grant::Socket(sock.clone())], "the link's socket, once — nothing else");
         let g = Grant::Socket(sock);
         assert!(!g.keepable() && g.warning().is_some_and(|w| w.contains("mounts any folder")));
