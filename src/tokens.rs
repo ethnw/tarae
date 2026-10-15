@@ -136,6 +136,101 @@ fn prefixed(s: &str) -> bool {
     })
 }
 
+/// Headers whose value is a secret, lowercased (`header_secret`'s).
+const HEADERS: [&str; 3] = ["authorization:", "private-token:", "x-api-key:"];
+
+/// What a token's place says once it's taken out.
+const GONE: &str = "…";
+
+/// `text` with what looks like a token (`token_like`'s rules) taken out, a word at a time: the value given to a
+/// key named for a secret (`FOO_TOKEN=…`, `--api-key=…`, `-Dsigning.password=…`), a URL's user part
+/// (`https://…@host`), a token by its prefix, a header's value (`Authorization: Bearer …'`) to its quote's
+/// end or the line's. A line `token_like` holds a token in that no word did (`password: hunter22`) is left out
+/// whole. As good as `token_like` and no better: a heuristic — the card record's (`cards.rs`).
+pub fn redacted(text: &str) -> String {
+    let lines: Vec<String> = text.split('\n').map(redacted_line).collect();
+    lines.join("\n")
+}
+
+fn redacted_line(line: &str) -> String {
+    let mut changed = false;
+    // (in a header's value: until a word that closes its quote)
+    let mut header: Option<char> = None;
+    let mut words = Vec::new();
+    for word in line.split(' ') {
+        let lower = word.to_ascii_lowercase();
+        if let Some(q) = header {
+            let scheme = matches!(lower.as_str(), "bearer" | "basic" | "token");
+            let closes = q != ' ' && word.ends_with(q);
+            if !scheme && !word.is_empty() {
+                words.push(format!("{GONE}{}", if closes { q.to_string() } else { String::new() }));
+                changed = true;
+            } else {
+                words.push(word.to_string());
+            }
+            if closes {
+                header = None;
+            }
+            continue;
+        }
+        let bare = lower.trim_start_matches(['"', '\'']);
+        if HEADERS.iter().any(|h| bare.starts_with(h)) {
+            let q = word.chars().next().filter(|c| matches!(c, '"' | '\'')).unwrap_or(' ');
+            // (`'Authorization:Bearer…'` in one word: its value goes with it)
+            match bare.split_once(':').map(|(_, v)| v.trim_end_matches(['"', '\''])).filter(|v| !v.is_empty())
+            {
+                Some(_) => {
+                    let name = &word[..word.find(':').map_or(word.len(), |i| i + 1)];
+                    words.push(format!("{name}{GONE}"));
+                    changed = true;
+                }
+                None => {
+                    words.push(word.to_string());
+                    header = Some(q);
+                }
+            }
+            continue;
+        }
+        if !token_like(word) {
+            words.push(word.to_string());
+            continue;
+        }
+        changed = true;
+        words.push(redacted_word(word));
+    }
+    let out = words.join(" ");
+    // (what no word gave away — a key and its value apart, a header with nothing after it: the line goes)
+    let header_name = |w: &str| {
+        let lower = w.to_ascii_lowercase();
+        HEADERS.iter().any(|h| lower.trim_start_matches(['"', '\'']).starts_with(h))
+    };
+    let left = out.split(' ').any(|w| token_like(w) && !header_name(w)) || (!changed && token_like(line));
+    match left {
+        true => format!("{GONE} (a line holding a token, left out)"),
+        false => out,
+    }
+}
+
+/// One word `token_like` holds a token in, without it: a URL's user part, a key's or an option's value, or
+/// the word (a token by its prefix, or what can't be split) — its quotes kept.
+fn redacted_word(word: &str) -> String {
+    let quote = |s: &str| s.chars().rev().take_while(|c| matches!(c, '"' | '\'')).collect::<String>();
+    if url_secret(word)
+        && let Some(i) = word.find("://")
+        && let Some(at) = word[i + 3..].find('@')
+    {
+        return format!("{}{GONE}{}", &word[..i + 3], &word[i + 3 + at..]);
+    }
+    match word.find('=') {
+        Some(i) if !prefixed(&word[..i]) => format!("{}{GONE}{}", &word[..=i], quote(word)),
+        _ => format!(
+            "{}{GONE}{}",
+            word.chars().take_while(|c| matches!(c, '"' | '\'')).collect::<String>(),
+            quote(word)
+        ),
+    }
+}
+
 // ── Copies without them ─────────────────────────────────────────────────────
 
 /// How a settings file is read, for leaving lines out.

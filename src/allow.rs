@@ -504,6 +504,9 @@ pub struct Defaults {
     /// sandbox has found them (`sandbox::build_dirs` — its target and build dirs: Claude's runs write
     /// there already).
     pub code: Vec<PathBuf>,
+    /// What runs never read (`sandbox::kept_places`: keys, tokens, Claude's and tarae's state, the toolchains'
+    /// credentials) wherever the variables put it — outside home too: never a default, whatever its class.
+    pub kept: Vec<PathBuf>,
 }
 
 impl Defaults {
@@ -523,7 +526,8 @@ pub fn defaults(root: &Path, temp: bool) -> Defaults {
     code.extend(crate::sandbox::build_dirs(root).into_iter().filter(|d| keepable(d, h.as_deref())));
     let checkouts = checkouts(root).into_iter().filter(|d| keepable(d, h.as_deref())).collect();
     let temp = if temp { temp_folders() } else { Vec::new() };
-    Defaults { checkouts, temp, code }
+    let kept = h.as_deref().map(|h| crate::sandbox::kept_places(h, &here)).unwrap_or_default();
+    Defaults { checkouts, temp, code, kept }
 }
 
 /// `/tmp` (macOS's `/private/tmp`) and the user's temp folder (`$TMPDIR` itself — not its parent, which holds

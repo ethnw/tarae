@@ -56,9 +56,11 @@ pub const RISKY: [&str; 22] = [
 
 /// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
 /// trusted or not (said): they decide whose credentials Claude uses and who pays, what Claude's chat edits
-/// with (`llm.edit-tools`), whether the claude program itself is confined (`llm.claude-sandbox`), and whether
-/// what you use is counted (`features.count`) — a project never does.
-pub const YOURS_ONLY: [&str; 6] = [
+/// with (`llm.edit-tools`), whether the claude program itself is confined (`llm.claude-sandbox`), whether
+/// what you use is counted (`features.count`) and whether your cards are kept (`llm.card-record`) — a project
+/// never does.
+pub const YOURS_ONLY: [&str; 7] = [
+    "llm.card-record",
     "llm.environment-key",
     "llm.billing",
     "llm.reviewer-billing",

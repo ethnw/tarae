@@ -203,6 +203,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
     // (quitting waited for them already — this covers any other way out)
     editor.flush_saves();
     editor.features_flush();
+    editor.cards_flush();
     Ok(())
 }
 

@@ -343,6 +343,16 @@ fn main() -> Result<()> {
     editor.events.jobs().background(sandbox::prune_runs);
     // (and the pins of tarae's binary such a tarae left — macOS's shim, `nofile::pin`)
     editor.events.jobs().background(nofile::prune_pins);
+    // The card record's months past `cards::KEEP_MONTHS` (a worker's)
+    if let Some(dir) = editor.cards_dir.clone() {
+        editor.events.jobs().background(move || match cards::prune(&dir, std::time::SystemTime::now()) {
+            Ok(gone) if !gone.is_empty() => {
+                log::line("cards", "info", &format!("record pruned: {}", gone.join(", ")))
+            }
+            Err(e) => log::line("cards", "warn", &format!("{}: pruning the record: {e}", dir.display())),
+            _ => {}
+        });
+    }
     if !files.is_empty() {
         editor.current = 0;
     }

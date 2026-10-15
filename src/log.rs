@@ -190,7 +190,6 @@ impl Session {
     }
 
     /// Its name — None: tarae's own.
-    #[cfg(test)]
     pub fn name(&self) -> Option<&str> {
         self.0.as_deref()
     }
@@ -322,6 +321,12 @@ fn now() -> (i32, i32, i32, i32, i32, i32) {
 pub fn clock(at: std::time::SystemTime) -> String {
     let (.., h, m, _) = local(at);
     format!("{h:02}:{m:02}")
+}
+
+/// `2026-10-15 14:02:09` — when `at` was, local time, to the second.
+pub fn stamp(at: std::time::SystemTime) -> String {
+    let (y, mo, d, h, m, s) = local(at);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
 /// `Tue 10:00` — the local weekday and time of `at` (a plan window's reset: within a week).

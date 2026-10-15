@@ -20,6 +20,8 @@
 //! - `trace [offcpu|syscalls|pty] [scenario …]`, `trace test` — tarae measured with eBPF on Linux, in a
 //!   container: off-CPU time by stack, the syscall mix, terminal write latency, over perf scenarios (see
 //!   [`trace`]).
+//! - `cards [PATH …]` — the card record (`$state/cards/`) as cardauto's tables: the P3 table, what P3 removes,
+//!   its wrong yeses with their commands, the stamp rate, runs refused with no card (see [`cards`]).
 //! - `claude-stub serve|drive|summary` — what the `claude` program touches, measured against a fake API: the
 //!   stub, tarae's side of claude's pipes, an strace log by folder (see [`claudestub`]; `target/sb/v1b-linux.sh`).
 
@@ -31,6 +33,7 @@ use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod cards;
 mod claudestub;
 mod deb;
 mod linux;
@@ -58,8 +61,9 @@ fn main() {
         Some("stream") => stream::run(&args[1..]),
         Some("trace") => trace::run(&args[1..]),
         Some("claude-stub") => claudestub::run(&args[1..]),
+        Some("cards") => cards::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …]"
                 .into(),
         ),
     };

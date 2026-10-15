@@ -292,10 +292,18 @@ impl Editor {
                 String::new(),
                 crate::offer::What::Outside { run },
             )
-            .asked(Asked::new(
-                Why::Blocked,
-                Request::Run { past: Past::Outside, sandboxed: true, reads: Vec::new() },
-            )),
+            .asked(
+                Asked::new(
+                    Why::Blocked,
+                    Request::Run {
+                        past: Past::Outside,
+                        sandboxed: crate::cards::sandboxed(self.config.llm.sandbox, &self.sandbox),
+                        reads: Vec::new(),
+                        outward: false,
+                    },
+                )
+                .about(&cmd),
+            ),
             n => {
                 let Choice { grant, why, .. } =
                     n.parse::<usize>().ok().and_then(|i| list.get(i).cloned()).ok_or("no such row")?;
@@ -350,7 +358,7 @@ fn grant_card(
         question.push_str(&warn.join("\n"));
         at..at + warn.len()
     });
-    let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone()));
+    let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone())).about(cmd);
     let what = crate::offer::What::Grant { grant, run };
     let o = crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what);
     match warning {

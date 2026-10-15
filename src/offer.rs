@@ -515,9 +515,9 @@ impl Offer {
         self
     }
 
-    /// Its `card` line: answered (`y` `a` `A` `n`) or dropped — in `session`.
-    fn said(&self, session: &crate::log::Session, answer: &str) {
-        crate::cards::said(session, self, answer);
+    /// Its `card` line: answered (`y` `a` `A` `n`) or dropped — in `session`; its entry for the record back.
+    fn said(&self, session: &crate::log::Session, answer: &str) -> serde_json::Value {
+        crate::cards::said(session, self, answer)
     }
 
     /// What's being decided is these lines of the question, not its first paragraph.
@@ -1038,13 +1038,14 @@ impl crate::editor::Editor {
     pub fn drop_cards_for(&mut self, gone: impl Fn(&What) -> bool, why: &str) {
         let front = !self.background();
         let session = self.session.log();
-        let mut dropped = Vec::new();
+        let (mut dropped, mut kept) = (Vec::new(), Vec::new());
         for o in self.session.parked.iter().chain(self.offers.iter().filter(|_| front)) {
             if gone(&o.what) {
-                o.said(&session, "dropped");
+                kept.push(o.said(&session, "dropped"));
                 dropped.push(o.id);
             }
         }
+        self.cards_record(kept);
         for id in dropped {
             self.card_how(id, why);
         }
@@ -1889,7 +1890,8 @@ impl crate::editor::Editor {
     /// Card `o` answered by key `key`: its `card` line, how it went for the gone ring, its answer counted
     /// (`features.rs`) — every answer goes through here.
     fn offer_said(&mut self, o: &Offer, key: char) {
-        o.said(&self.session.log(), &key.to_string());
+        let entry = o.said(&self.session.log(), &key.to_string());
+        self.cards_record(vec![entry]);
         self.card_how(o.id, format!("answered {key}"));
         if self.counting() {
             self.features.answer(o.kind(), key);

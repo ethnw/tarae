@@ -597,6 +597,9 @@ pub struct Editor {
     /// Claude reads the temp folders unasked (`allow::defaults`) — off in tests: their projects, and what
     /// they read "outside" them, are in the temp folder.
     pub read_temp: bool,
+    /// Claude reads outside home unasked where the capability model does (`reads::by_default`, D3) — off in
+    /// tests, for the same reason.
+    pub read_outside: bool,
     /// Where commit trees for `run`'s `base` go (`basetree::folder_for`): None — tarae's cache's; tests' a temp
     /// folder, never the user's cache.
     pub base_trees: Option<PathBuf>,
@@ -651,6 +654,8 @@ pub struct Editor {
     pub sizes_seq: u64,
     /// What's counted of the features used and not saved yet (`features.rs`; its path None in tests).
     pub features: crate::features::Counts,
+    /// The card record's folder (`cards.rs`, `$state/cards`) — None in tests: nothing written.
+    pub cards_dir: Option<PathBuf>,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
@@ -829,6 +834,7 @@ impl Editor {
             tokens_said: if cfg!(test) { None } else { crate::tokens::said_path() },
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
+            read_outside: !cfg!(test),
             base_trees: cfg!(test).then(|| std::env::temp_dir().join("tarae-test-base")),
             claude_settings_gate: !cfg!(test),
             claude_confine: !cfg!(test),
@@ -864,6 +870,11 @@ impl Editor {
             },
             sizes_path: if cfg!(test) { None } else { crate::sizes::Sizes::path() },
             sizes_seq: 0,
+            cards_dir: if cfg!(test) {
+                None
+            } else {
+                crate::config::state_dir().map(|d| d.join(crate::cards::DIR))
+            },
             features: crate::features::Counts::new(if cfg!(test) {
                 None
             } else {
@@ -7426,6 +7437,7 @@ mod tests {
             std::fs::write(&script, body).unwrap();
             std::fs::remove_file(dir.join("stdin.log")).ok();
             let mut ed = editor("");
+            ed.cards_dir = Some(dir.join("cards"));
             ed.session.checkpoints.turn.push(crate::checkpoint::Touched {
                 path: script.clone(),
                 before: None,
@@ -7457,6 +7469,15 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(made.exists(), "{}", tool_answer(&log));
         std::fs::remove_file(&made).ok();
+        // (the record has its card, with the command and its run — cardauto 1)
+        ed.cards_flush();
+        let kept = crate::cards::read_record(&dir.join("cards"));
+        let last = kept.last().expect("its card kept");
+        assert_eq!(
+            (&last["kind"], &last["answer"], &last["what"]),
+            (&json!("run"), &json!("y"), &json!(command))
+        );
+        assert!(last["run"].is_u64(), "{last}");
         // Changed after it was shown: not run, Claude hears why
         let (mut ed, log) = start(&body);
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
@@ -7475,6 +7496,12 @@ mod tests {
             answer.contains("it has 200 lines — a card shows at most 16") && answer.contains("isError"),
             "{answer}"
         );
+        // (refused with no card: the record has it all the same — cardauto §8.3)
+        ed.cards_flush();
+        let kept = crate::cards::read_record(&dir.join("cards"));
+        let last = kept.last().expect("the refusal kept");
+        assert_eq!((&last["answer"], &last["what"]), (&json!("refused"), &json!(command)), "{last}");
+        assert!(last["said"].as_str().is_some_and(|s| s.contains("200 lines")) && last.get("card").is_none());
         assert!(ed.offers.is_empty() && ed.session.task_run.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }

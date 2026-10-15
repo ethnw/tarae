@@ -1374,7 +1374,12 @@ fn a_cards_text_is_whole_in_the_state_each_line_with_its_part() {
     (o.decided, o.diff) = (Some(0..1), Some(4..6));
     o.warnings.push(3..4);
     let why = crate::cards::Why::NotACheck("cargo".into());
-    let run = crate::cards::Request::Run { past: crate::cards::Past::No, sandboxed: true, reads: Vec::new() };
+    let run = crate::cards::Request::Run {
+        past: crate::cards::Past::No,
+        sandboxed: true,
+        reads: Vec::new(),
+        outward: false,
+    };
     o.asked = Some(crate::cards::Asked::new(why, run).warned(vec!["outward".into()]));
     ed.push_offer(o);
     frame(&mut ed);

@@ -63,6 +63,11 @@ impl Call {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// Its run's id (`run#<id>`), if it's a run's.
+    pub(crate) fn run_id(&self) -> Option<u64> {
+        self.trace.as_ref().map(crate::trace::RunTrace::id)
+    }
 }
 
 /// The tools whose calls wait on the editor's own work (servers, searches, a change set) — a run, tests and
@@ -1258,8 +1263,9 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let allowed_again =
         !whole && chat.is_some_and(|c| c.run_again.iter().any(|r| r.covers(&cwd, socket.as_deref(), cmd)));
     // (D2: a warning doesn't take `a` back — but one whose data says `asks`, it does: reaching beyond this
-    // machine, publishing — its card comes, each time)
-    let asks: Vec<String> = match allowed_again {
+    // machine, publishing — its card comes, each time; where it could, as `cards::decide` has it (cardauto D4):
+    // with the network closed it runs, and fails in the sandbox)
+    let asks: Vec<String> = match allowed_again && could_reach_out(ed, outside.is_some()) {
         true => {
             let on =
                 WarnOn { cmd, cwd: &cwd, scripts: &[], reads: &[], script_changed: false, outside: false };
@@ -1428,9 +1434,33 @@ fn card(
                 }
             }
             let c = call.clone();
-            let asked =
-                |shown| ask_with(ed, cmd, cwd, call, (shown, scripts, since), (Vec::new(), why), outside);
-            if let Err(e) = shown.and_then(asked) {
+            // (refused with no card: the record keeps it — the card log never saw these, cardauto §8.3)
+            let shown = match shown {
+                Ok(shown) => shown,
+                Err(e) => {
+                    let whole = outside.as_ref().is_some_and(|b| b.socket.is_none());
+                    let on = WarnOn {
+                        cmd: &cmd,
+                        cwd: &cwd,
+                        scripts: &[],
+                        reads: &[],
+                        script_changed: false,
+                        outside: whole,
+                    };
+                    let asks = warned(ed, on).iter().any(|w| w.asks);
+                    let request = run_request(ed, outside.as_ref(), &why, asks);
+                    let asked =
+                        crate::cards::Asked::new(why, request).ran(c.run_id(), &cmd, &cwd, &ed.session.root);
+                    let session = ed.session.log();
+                    let entry =
+                        crate::cards::refused(&asked, &e, session.name(), std::time::SystemTime::now());
+                    ed.cards_record(vec![entry]);
+                    answer(ed, c, Err(e));
+                    return;
+                }
+            };
+            if let Err(e) = ask_with(ed, cmd, cwd, call, (shown, scripts, since), (Vec::new(), why), outside)
+            {
                 answer(ed, c, Err(e));
             }
         }
@@ -1978,18 +2008,8 @@ fn ask_with(
         (Some(_), None) => OUTSIDE_RUN_TITLE.to_string(),
         (None, None) => "Claude wants to run".to_string(),
     };
-    let past = match (&outside, &socket) {
-        (_, Some(_)) => crate::cards::Past::Socket,
-        (Some(_), None) => crate::cards::Past::Outside,
-        (None, None) => crate::cards::Past::No,
-    };
-    let at = match &why {
-        crate::cards::Why::ReadsOutside(c) => c.clone(),
-        _ => Vec::new(),
-    };
-    let sandboxed =
-        ed.config.llm.sandbox && !matches!(ed.sandbox, Availability::Missing(_) | Availability::Partial(_));
-    let asked = crate::cards::Asked::new(why, crate::cards::Request::Run { past, sandboxed, reads: at });
+    let request = run_request(ed, outside.as_ref(), &why, warned.iter().any(|w| w.asks));
+    let asked = crate::cards::Asked::new(why, request).ran(call.run_id(), &cmd, &cwd, &ed.session.root);
     let same = since.as_ref().map(crate::sinceyes::Since::same_as);
     let asked = match &same {
         Some(s) => asked.same_as(s.card, s.unchanged),
@@ -2022,6 +2042,38 @@ fn ask_with(
         None => o,
     });
     Ok(())
+}
+
+/// What a run card for a command asks, in the capability model's terms: how far past the sandbox (`outside`),
+/// whether there's one here, the classes of what it reads outside the project (`why`'s), and whether a warning
+/// of it that asks (`asks`) could come true here (D4: `cards::reaches_out`).
+fn run_request(
+    ed: &Editor,
+    outside: Option<&Beyond>,
+    why: &crate::cards::Why,
+    asks: bool,
+) -> crate::cards::Request {
+    use crate::cards::{Past, Why};
+    let past = match outside {
+        Some(Beyond { socket: Some(_), .. }) => Past::Socket,
+        Some(_) => Past::Outside,
+        None => Past::No,
+    };
+    let reads = match why {
+        Why::ReadsOutside(c) => c.clone(),
+        _ => Vec::new(),
+    };
+    let sandboxed = crate::cards::sandboxed(ed.config.llm.sandbox, &ed.sandbox);
+    let outward = asks && could_reach_out(ed, past != Past::No);
+    crate::cards::Request::Run { past, sandboxed, reads, outward }
+}
+
+/// Whether a run of Claude's could reach beyond this machine (cardauto D4): with no sandbox here (a partial
+/// one included), past it (`past`: outside, a socket), or the network open (`cards::reaches_out`) — what a
+/// warning that `asks` asks about. Else it runs, and fails in the sandbox.
+fn could_reach_out(ed: &Editor, past: bool) -> bool {
+    past || !crate::cards::sandboxed(ed.config.llm.sandbox, &ed.sandbox)
+        || crate::cards::reaches_out(&ed.config.llm)
 }
 
 /// A file Claude wrote unseen is shown on the card whole — at most this many lines, each at most this many
@@ -2801,18 +2853,22 @@ fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, kind: Unsandboxed, rid
                  network."
             ),
             Why::NoSandbox,
-            Request::Run { past: Past::No, sandboxed: false, reads: Vec::new() },
+            Request::Run { past: Past::No, sandboxed: false, reads: Vec::new(), outward: false },
         ),
         Unsandboxed::Partial(why) => (
             PARTIAL_SANDBOX_TITLE,
             format!("{label}\n\nThe sandbox here goes only so far: {why}. It runs in it as far as it goes."),
             Why::NoSandbox,
-            Request::Run { past: Past::No, sandboxed: false, reads: Vec::new() },
+            Request::Run { past: Past::No, sandboxed: false, reads: Vec::new(), outward: false },
         ),
     };
     call.step("no-sandbox card up");
+    let (cmd, cwd) = match &job {
+        Job::Command(cmd, cwd) => (cmd.clone(), cwd.clone()),
+        _ => (label.clone(), ed.session.root.clone()),
+    };
+    let asked = crate::cards::Asked::new(why, request).ran(call.run_id(), &cmd, &cwd, &ed.session.root);
     let what = crate::offer::What::NoSandbox { job, call, ride: Box::new(ride), kind };
-    let asked = crate::cards::Asked::new(why, request);
     let o = crate::offer::Offer::new(title.into(), &question, "", String::new(), what);
     ed.push_offer(o.asked(asked));
 }
@@ -2953,12 +3009,15 @@ pub(crate) fn ask_made(ed: &mut Editor, then: MadeThen) {
     if let Some(call) = then.call() {
         call.step("protected-made card up");
     }
-    let sandboxed = then.call().is_some();
-    let what = crate::offer::What::ProtectedMade { then: Box::new(then), made };
+    // (your own task or preflight runs outside the sandbox; Claude's in it — as far as one holds here)
+    let sandboxed = then.call().is_some() && crate::cards::sandboxed(ed.config.llm.sandbox, &ed.sandbox);
+    let run = then.call().and_then(Call::run_id);
     let asked = crate::cards::Asked::new(
         Why::ProtectedMade,
-        Request::Run { past: Past::No, sandboxed, reads: Vec::new() },
+        Request::Run { past: Past::No, sandboxed, reads: Vec::new(), outward: false },
     );
+    let asked = crate::cards::Asked { run, ..asked.about(&label) };
+    let what = crate::offer::What::ProtectedMade { then: Box::new(then), made };
     let o = crate::offer::Offer::new(title.into(), &question, "", String::new(), what);
     ed.push_offer(o.asked(asked).warning(at..at + 1));
 }
@@ -4130,6 +4189,36 @@ mod tests {
         ed.offers.first().map(|o| o.question.clone()).unwrap_or_else(|| panic!("a card for {cmd}"))
     }
 
+    /// cardauto D4: a warning that asks (`git push`, `cargo publish`) asks where the run could reach beyond
+    /// this machine — no sandbox (a partial one too), past it, or the network open; with the network closed it
+    /// runs, and fails in the sandbox. The card's request says the same (`outward`), so its shadow is the gate.
+    #[test]
+    fn a_warning_that_asks_asks_only_where_the_run_could_reach_out() {
+        use crate::cards::{Decision, Why, decide};
+        use crate::sandbox::Availability;
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        (ed.config.llm.sandbox, ed.sandbox, ed.config.llm.sandbox_network) =
+            (true, Availability::Ready, false);
+        assert!(!super::could_reach_out(&ed, false), "closed: it runs, and fails in the sandbox");
+        assert!(super::could_reach_out(&ed, true), "past the sandbox");
+        let why = Why::NotACheck("git".into());
+        assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::None);
+        ed.config.llm.sandbox_network = true;
+        assert!(super::could_reach_out(&ed, false), "the network open");
+        assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::Outward);
+        assert_eq!(
+            decide(&super::run_request(&ed, None, &why, false)),
+            Decision::None,
+            "no warning that asks"
+        );
+        ed.config.llm.sandbox_network = false;
+        ed.sandbox = Availability::Partial("this kernel's Landlock (ABI 2)".into());
+        assert!(super::could_reach_out(&ed, false), "a partial sandbox is none");
+        assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::NoSandbox);
+        (ed.sandbox, ed.config.llm.sandbox) = (Availability::Ready, false);
+        assert!(super::could_reach_out(&ed, false), "the sandbox off");
+    }
+
     /// P0 of docs/design/cards.md: each answer on a card of Claude's is one `card` line — the session, why
     /// today's rules asked, what the capability model would do instead (`cards::decide`), the answer, and
     /// the time since it was first drawn (or that it never was); one a turn took away is `dropped`.
@@ -4171,10 +4260,11 @@ mod tests {
         ed.offer_dismiss();
         let l = lines();
         assert_eq!(l.len(), 1, "{l:?}");
+        // (its run named by id, as the run's `timing` line — cardauto 1)
         assert!(
-            l[0].starts_with(&format!(
-                "card cardlines · card#{id} · run · why=not-a-check:python3 · shadow=none · n · "
-            )) && !l[0].contains("not drawn")
+            l[0].starts_with(&format!("card cardlines · card#{id} · run#"))
+                && l[0].contains(" · run · why=not-a-check:python3 · shadow=none · n · ")
+                && !l[0].contains("not drawn")
                 && l[0].contains(" · up "),
             "{}",
             l[0]
@@ -4289,7 +4379,11 @@ mod tests {
         let lines = crate::cards::logged_lines("card group · ");
         for id in [ids[0], ids[2], late] {
             assert!(
-                lines.iter().any(|l| l.contains(&format!("card#{id} · run · ")) && l.contains(" · Y · ")),
+                lines.iter().any(|l| {
+                    l.contains(&format!("card#{id} · run#"))
+                        && l.contains(" · run · ")
+                        && l.contains(" · Y · ")
+                }),
                 "{lines:?}"
             );
         }

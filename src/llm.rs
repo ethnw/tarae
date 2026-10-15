@@ -99,6 +99,9 @@ pub struct LlmConfig {
     pub edit_tools: crate::edittool::Arm,
     /// Chat: load CLAUDE.md files and Claude Code settings like `claude` does (hooks off, edits always ask).
     pub chat_settings: bool,
+    /// Keep every card asked about Claude's work, and every run of its refused with no card, in the record
+    /// (`cards.rs`: `$state/cards/`). Only your own config sets it (`trust::YOURS_ONLY`).
+    pub card_record: bool,
     /// An `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in tarae's environment goes on to claude (`llm.environment-key
     /// = "keep"`) — but inside a Claude Code session, where it's the host's (`claude_env`).
     pub keep_env_key: bool,
@@ -166,6 +169,7 @@ impl Default for LlmConfig {
             review_at_end: false,
             edit_tools: crate::edittool::Arm::Tarae,
             chat_settings: true,
+            card_record: true,
             keep_env_key: false,
             billing: Default::default(),
             reviewer_billing: None,

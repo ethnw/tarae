@@ -437,6 +437,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.chat_settings = b(v),
     },
     Setting {
+        path: "llm.card-record",
+        kind: Kind::Bool,
+        doc: "Keep every card and its answer — with the command it was about — and every run of Claude's refused with no card in cards/<month>.jsonl in tarae's state folder, on this machine only, read by no run (cargo xtask cards sums them up). Only your own config changes it",
+        get: |c| Value::from(c.llm.card_record),
+        set: |c, v| c.llm.card_record = b(v),
+    },
+    Setting {
         path: "llm.claude-sandbox",
         kind: Kind::Bool,
         doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. A new chat process starts with it. Only your own config sets it",

@@ -1039,6 +1039,19 @@ pub fn kept_reads(home: &Path, vars: &crate::sandboxpack::Vars) -> Vec<PathBuf> 
     kept_in(home, vars, &crate::sandboxpack::get().kept)
 }
 
+/// `kept_reads` for `home` as `here` says the variables — tarae's state too where `here`'s `XDG_STATE_HOME` puts
+/// it (`config::state_dir`'s rule): what Claude's Read never gets unasked either, wherever it is (cardauto D3:
+/// it reads what runs read, and only that). Real paths. On a worker.
+pub fn kept_places(home: &Path, here: &Here) -> Vec<PathBuf> {
+    let mut v = kept_reads(home, &vars_in(home, here));
+    let state =
+        here.path("XDG_STATE_HOME").filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/state"));
+    v.push(profile_path(&state.join("tarae")));
+    crate::sorting::sort(&mut v);
+    v.dedup();
+    v
+}
+
 /// `kept_reads` with the packs' `kept` given.
 fn kept_in(home: &Path, vars: &crate::sandboxpack::Vars, packs: &[String]) -> Vec<PathBuf> {
     let at = |p: PathBuf| profile_path(&p);

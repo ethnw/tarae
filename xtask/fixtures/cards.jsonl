@@ -1,0 +1,10 @@
+{"v":1,"at":"2026-10-15 09:01:02","session":"cardauto","card":3,"run":11,"kind":"run","why":"unreadable:$","shadow":"none","answer":"y","drawn_ms":11700,"up_ms":12400,"what":"echo $HOME"}
+{"v":1,"at":"2026-10-15 09:05:40","session":"cardauto","card":4,"run":12,"kind":"run","why":"not-a-check:awk","shadow":"none","answer":"y","drawn_ms":900,"up_ms":4200,"what":"awk 'NR<3' x","cwd":"src"}
+{"v":1,"at":"2026-10-15 09:07:00","session":"cardauto","card":5,"run":13,"kind":"run","why":"not-a-check:rm","shadow":"none","answer":"n","drawn_ms":6000,"up_ms":6100,"what":"rm -rf target/sb"}
+{"v":1,"at":"2026-10-15 09:20:11","session":"linux7","card":9,"run":20,"kind":"run","why":"reads-outside","class":["home"],"shadow":"grant:read","answer":"y","drawn_ms":1700,"up_ms":2000,"what":"cat ~/notes/x.md"}
+{"v":1,"at":"2026-10-15 09:31:00","session":"linux7","card":10,"kind":"read","why":"read","class":["home"],"shadow":"grant:read","answer":"n","drawn_ms":394300,"up_ms":394900,"what":"~/other/.env"}
+{"v":1,"at":"2026-10-15 09:40:00","session":"linux7","card":12,"run":25,"kind":"run","why":"not-a-check:mkdir","shadow":"none","answer":"dropped","up_ms":3000,"what":"mkdir out"}
+{"v":1,"at":"2026-10-15 10:02:00","session":"cardauto","card":14,"kind":"session-new","why":"own","shadow":"own","answer":"y","drawn_ms":8100,"up_ms":8200}
+{"v":1,"at":"2026-10-15 10:03:00","session":"cardauto","card":15,"kind":"rebased","why":"own","shadow":"own","answer":"p","drawn_ms":1200,"up_ms":1300}
+{"v":1,"at":"2026-10-15 10:10:00","session":"cardauto","run":31,"kind":"run","why":"script","shadow":"none","answer":"refused","what":"sh -n x.sh","said":"x.sh was written this turn without the user seeing it, and it has 200 lines — a card shows at most 16"}
+not json — a line cut short by a crash

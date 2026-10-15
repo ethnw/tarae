@@ -486,6 +486,31 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// cardauto D3: outside home is read unasked, as runs read it — the system's files here — but not a
+    /// mounted volume, nor a file named like a key there, nor anything with the switch off (tests' own:
+    /// `Editor.read_outside`).
+    #[test]
+    fn outside_home_reads_unasked_but_volumes_and_keys() {
+        let (dir, _, base) = places("outside-home");
+        let gate = crate::reads::Gate::for_test(&dir).reading_outside();
+        let hosts = std::fs::canonicalize("/etc/hosts").unwrap();
+        let t = text(read(&dir, &items(&[hosts.to_str().unwrap()]), &gate, &[]));
+        assert!(t.starts_with(&format!("== {}", hosts.display())), "read: {t}");
+        let asks = |spec: &str, gate: &crate::reads::Gate| match read(&dir, &items(&[spec]), gate, &[]) {
+            Ok(Err(ask)) => ask.at_said(),
+            other => panic!("{spec}: {:?}", other.map(|r| r.map_err(|a| a.at_said()))),
+        };
+        // (named like a key: asked wherever it is — not there, so nothing's read either way)
+        let key = hosts.with_file_name(".env");
+        assert_eq!(asks(key.to_str().unwrap(), &gate), key.display().to_string());
+        if let Some(v) = ["/Volumes", "/mnt", "/media"].iter().find(|v| Path::new(v).is_dir()) {
+            assert_eq!(asks(v, &gate), *v, "a volume");
+        }
+        let off = crate::reads::Gate::for_test(&dir);
+        assert_eq!(asks(hosts.to_str().unwrap(), &off), hosts.display().to_string(), "off: asks");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// What was judged is what's read: a folder on the path swapped for a link to a place outside after the
     /// judging (a run writing the project can) doesn't send the read there — it reads from the descriptor
     /// that was judged.
