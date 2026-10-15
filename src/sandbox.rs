@@ -69,6 +69,10 @@ pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
+// (V2: what the supervisor reads of a run's memory, as the kernel reads it — built and tested everywhere, its loops on
+// macOS too —, read on Linux)
+#[path = "sandbox/supervisor/wire.rs"]
+pub mod wire;
 // (6f′: tarae's own copies of a run's sockets, where it can't take them — built and tested everywhere, used on Linux)
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod copies;

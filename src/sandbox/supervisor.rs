@@ -32,12 +32,12 @@
 //! socket the run has is tarae's to make — its unix and netlink ones, a `socketpair`'s, an `accept`'s too — and a
 //! copy of each kept (`copies.rs`), found by the inode the run's descriptor names.
 
-use std::ffi::OsStr;
 use std::io;
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr};
+#[cfg(test)]
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,22 +46,14 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use super::route::{Reach, Refusal, Route};
 use super::tier::RunNet;
+use super::wire::{
+    Addr, MSG_LEN_AT, Mem, Msg, SEND_MAX, address, mmsg_at, named_in, netlink_address, netlink_reads, parse,
+    read_msg, unix_address,
+};
 use super::{Denial, Policy};
 
 /// A call's answer: what it returns, or the errno it fails with.
 type Answer = Result<i64, i32>;
-
-/// The longest address a call names (`struct sockaddr_storage`).
-const ADDR_MAX: usize = 128;
-/// The most of a message tarae copies: a datagram longer fails as the kernel's own limit would
-/// (`EMSGSIZE`); a stream's is sent in part, as a send may be.
-const SEND_MAX: usize = 1 << 20;
-/// The most control data (`SCM_RIGHTS` …) a message carries.
-const CONTROL_MAX: usize = 1 << 16;
-/// `struct msghdr` and `struct mmsghdr` on the 64-bit architectures, and where `msg_len` sits in the latter.
-const MSGHDR: usize = 56;
-const MMSGHDR: usize = 64;
-const MSG_LEN_AT: u64 = 56;
 
 /// How tarae serves its runs' calls here (6f′).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -790,50 +782,11 @@ impl Caller {
     }
 }
 
-/// An address a call named, as tarae read it.
-#[derive(Debug, PartialEq)]
-enum Addr {
-    /// `AF_UNSPEC`: a datagram socket's disconnect, or where it's connected.
-    Unspec,
-    Ip(SocketAddr),
-    /// A unix socket by its path, as named (relative: from the caller's folder).
-    Path(PathBuf),
-    /// An abstract unix name (none: an unbound socket's own made up).
-    Abstract(Vec<u8>),
-    /// A unix address with no name at all.
-    Unnamed,
-    Netlink,
-    Other,
-}
-
-/// `bytes` (a `struct sockaddr`) read as the kernel reads them; too short for its family: `EINVAL`.
-fn parse(bytes: &[u8]) -> Result<Addr, i32> {
-    if bytes.len() < 2 {
-        return Err(libc::EINVAL);
+/// What `wire` reads of a run's memory: the caller's own (`Caller::read`).
+impl Mem for Caller {
+    fn read(&self, at: u64, len: usize) -> Result<Vec<u8>, i32> {
+        Caller::read(self, at, len)
     }
-    let b = |at: usize, len: usize| bytes.get(at..at + len).ok_or(libc::EINVAL);
-    let port = |at| b(at, 2).map(|p| u16::from_be_bytes([p[0], p[1]]));
-    Ok(match i32::from(u16::from_ne_bytes([bytes[0], bytes[1]])) {
-        libc::AF_UNSPEC => Addr::Unspec,
-        libc::AF_INET => {
-            let ip: [u8; 4] = b(4, 4)?.try_into().map_err(|_| libc::EINVAL)?;
-            Addr::Ip(SocketAddr::new(IpAddr::from(ip), port(2)?))
-        }
-        libc::AF_INET6 => {
-            let ip: [u8; 16] = b(8, 16)?.try_into().map_err(|_| libc::EINVAL)?;
-            Addr::Ip(SocketAddr::new(IpAddr::from(ip), port(2)?))
-        }
-        libc::AF_UNIX => match &bytes[2..] {
-            [] => Addr::Unnamed,
-            [0, name @ ..] => Addr::Abstract(name.to_vec()),
-            path => {
-                let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
-                Addr::Path(PathBuf::from(OsStr::from_bytes(&path[..end])))
-            }
-        },
-        libc::AF_NETLINK => Addr::Netlink,
-        _ => Addr::Other,
-    })
 }
 
 /// A refusal: `Refused` out (tarae says it in the run's report — its watch, once the run is gone its session's
@@ -1864,25 +1817,6 @@ fn accept(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     l.add_fd(n.id, &fd, None, flags & libc::SOCK_CLOEXEC != 0).map_err(|e| errno(&e))
 }
 
-/// The address a call names (`at`, `len` bytes), read once.
-fn address(c: &Caller, at: u64, len: u64) -> Result<Vec<u8>, i32> {
-    match usize::try_from(len) {
-        Ok(len) if len <= ADDR_MAX => c.read(at, len),
-        _ => Err(libc::EINVAL),
-    }
-}
-
-/// A unix socket's path as an address (`/proc/self/fd/N`, tarae's own descriptor of it).
-fn unix_address(path: &str) -> Result<Vec<u8>, i32> {
-    if path.len() >= 108 {
-        return Err(libc::ENAMETOOLONG);
-    }
-    let mut a = (libc::AF_UNIX as u16).to_ne_bytes().to_vec();
-    a.extend_from_slice(path.as_bytes());
-    a.push(0);
-    Ok(a)
-}
-
 /// `path` (absolute, real) opened without following any link on the way (`landlock::open_unlinked`) —
 /// `O_PATH`, a folder only if `folder`. A link put there since `canonicalize` saw it: `ELOOP`, nothing reached.
 fn open_real(path: &Path, folder: bool) -> Result<OwnedFd, i32> {
@@ -1919,7 +1853,7 @@ fn unix_target(p: &Served, c: &Caller, named: &Path) -> Result<(OwnedFd, Vec<u8>
     if unsafe { st.assume_init() }.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return Err(libc::ECONNREFUSED); // (what the kernel says of a file that isn't a socket)
     }
-    let a = unix_address(&format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
+    let a = unix_address(format!("/proc/self/fd/{}", fd.as_raw_fd()).as_bytes())?;
     Ok((fd, a))
 }
 
@@ -1982,7 +1916,7 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
                 return refuse(p, &c, "network-bind", real.display().to_string());
             }
             let dir = open_real(&parent, true)?;
-            let a = unix_address(&format!("/proc/self/fd/{}/{}", dir.as_raw_fd(), name.to_string_lossy()))?;
+            let a = named_in(dir.as_raw_fd(), &name)?;
             (a, Some(dir))
         }
         // (D-f: in the session's netns an abstract name is the session's)
@@ -2145,52 +2079,6 @@ fn netlink_route(p: &Served, c: &Caller, sock: &OwnedFd) -> Result<(), i32> {
     }
 }
 
-/// A netlink address (`struct sockaddr_nl`: family, padding, port, groups) as (port, groups); too short:
-/// `EINVAL`, as the kernel says it.
-fn netlink_address(addr: &[u8]) -> Result<(u32, u32), i32> {
-    let word = |at: usize| addr.get(at..at + 4).map(|w| u32::from_ne_bytes(w.try_into().unwrap_or_default()));
-    match (word(4), word(8)) {
-        (Some(port), Some(groups)) => Ok((port, groups)),
-        _ => Err(libc::EINVAL),
-    }
-}
-
-/// rtnetlink's message types come in fours from here — new, delete, get, set (`include/uapi/linux/rtnetlink.h`:
-/// every `RTM_GET…` is the third of its four, nothing else is) — and the kernel lets a sender without
-/// `CAP_NET_ADMIN` only the gets (`rtnetlink_rcv_msg`: `kind != RTNL_KIND_GET` needs it).
-const RTM_BASE: u16 = 16;
-
-/// The flags a read carries: a request, a dump, an ack — what a name lookup sends.
-const NETLINK_READ_FLAGS: u16 = (libc::NLM_F_REQUEST | libc::NLM_F_DUMP | libc::NLM_F_ACK) as u16;
-
-/// Whether `data`, a batch of rtnetlink messages, only reads: each `struct nlmsghdr` whole (its length at least
-/// its own and within what's left, the next at the 4-byte alignment, nothing left over), its type a get, its
-/// flags within `NETLINK_READ_FLAGS` — else what's refused, in words.
-fn netlink_reads(data: &[u8]) -> Result<(), String> {
-    let mut rest = data;
-    loop {
-        if rest.len() < 16 {
-            return Err("a message cut short".into());
-        }
-        let len = u32::from_ne_bytes(rest[..4].try_into().unwrap_or_default()) as usize;
-        let kind = u16::from_ne_bytes([rest[4], rest[5]]);
-        let flags = u16::from_ne_bytes([rest[6], rest[7]]);
-        if len < 16 || len > rest.len() {
-            return Err("a message cut short".into());
-        }
-        if kind < RTM_BASE || (kind - RTM_BASE) % 4 != 2 {
-            return Err(format!("message type {kind}"));
-        }
-        if flags & !NETLINK_READ_FLAGS != 0 {
-            return Err(format!("message flags {flags:#x}"));
-        }
-        rest = &rest[len.next_multiple_of(4).min(rest.len())..];
-        if rest.is_empty() {
-            return Ok(());
-        }
-    }
-}
-
 /// A send tarae makes for the run on `sock` carrying `data`: on a netlink socket only reads go
 /// (`netlink_reads`) — anything else refused, said, `EPERM` to the run (where the kernel would ack a sender
 /// without the capability with `-EPERM`: tarae can't put an ack in the run's socket, so its send fails).
@@ -2243,78 +2131,6 @@ fn sendto(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     c.sigpipe(flags, result(r))
 }
 
-/// One `struct msghdr` of the caller's, read once: where it goes (if it names it), what it carries, and its
-/// control data with the descriptors it passes (`SCM_RIGHTS`) taken as tarae's own (`Served::passed`) — passing on
-/// what the run holds. Credentials (`SCM_CREDENTIALS`) are refused: tarae can't speak for the run's process.
-struct Msg {
-    name: Option<Vec<u8>>,
-    data: Vec<u8>,
-    control: Vec<u8>,
-    fds: Vec<OwnedFd>,
-}
-
-fn read_msg(p: &Served, c: &Caller, at: u64, datagram: bool) -> Result<Msg, i32> {
-    let h = c.read(at, MSGHDR)?;
-    let word = |o: usize| u64::from_ne_bytes(h[o..o + 8].try_into().unwrap_or_default());
-    let (name_at, name_len) =
-        (word(0), u64::from(u32::from_ne_bytes(h[8..12].try_into().unwrap_or_default())));
-    let (iov_at, iov_len, control_at, control_len) = (word(16), word(24), word(32), word(40));
-    let name = match (name_at, name_len) {
-        (0, _) | (_, 0) => None,
-        (a, len) => Some(address(c, a, len)?),
-    };
-    if iov_len > libc::UIO_MAXIOV as u64 {
-        return Err(libc::EMSGSIZE);
-    }
-    let iov = c.read(iov_at, iov_len as usize * 16)?;
-    let mut data = Vec::new();
-    // (`struct iovec`: where, how long)
-    for v in iov.as_chunks::<16>().0 {
-        let (base, len) = v.split_at(8);
-        let base = u64::from_ne_bytes(base.try_into().unwrap_or_default());
-        let len = u64::from_ne_bytes(len.try_into().unwrap_or_default());
-        let room = (SEND_MAX - data.len()) as u64;
-        if len > room && datagram {
-            return Err(libc::EMSGSIZE);
-        }
-        data.extend(c.read(base, len.min(room) as usize)?);
-        if data.len() == SEND_MAX {
-            break;
-        }
-    }
-    let control_len = usize::try_from(control_len).unwrap_or(usize::MAX);
-    if control_len > CONTROL_MAX {
-        return Err(libc::ENOBUFS);
-    }
-    let mut control = if control_at == 0 { Vec::new() } else { c.read(control_at, control_len)? };
-    let mut fds = Vec::new();
-    // `struct cmsghdr`: its length (with itself), level, type, then the data — each aligned to 8
-    let mut o = 0;
-    while o + 16 <= control.len() {
-        let len = usize::try_from(u64::from_ne_bytes(control[o..o + 8].try_into().unwrap_or_default()))
-            .unwrap_or(usize::MAX);
-        if len < 16 || len > control.len() - o {
-            return Err(libc::EINVAL);
-        }
-        let level = i32::from_ne_bytes(control[o + 8..o + 12].try_into().unwrap_or_default());
-        let kind = i32::from_ne_bytes(control[o + 12..o + 16].try_into().unwrap_or_default());
-        match (level, kind) {
-            (libc::SOL_SOCKET, libc::SCM_RIGHTS) => {
-                for at in (o + 16..o + len).step_by(4).filter(|at| at + 4 <= o + len) {
-                    let theirs = i32::from_ne_bytes(control[at..at + 4].try_into().unwrap_or_default());
-                    let ours = p.passed(c, theirs as u64)?;
-                    control[at..at + 4].copy_from_slice(&ours.as_raw_fd().to_ne_bytes());
-                    fds.push(ours);
-                }
-            }
-            (libc::SOL_SOCKET, libc::SCM_CREDENTIALS) => return Err(libc::EPERM),
-            _ => {}
-        }
-        o += len.div_ceil(8) * 8;
-    }
-    Ok(Msg { name, data, control, fds })
-}
-
 /// One message sent on the caller's descriptor `fd` (`sock`) as it asked — where it names going as a `sendto`
 /// there would (`sock` then the socket it went on: one of tarae's put in the run's place, for the next).
 fn send_one(
@@ -2362,13 +2178,13 @@ fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let mut sock = p.sock(&c, args[0])?;
-    let m = read_msg(p, &c, args[1], whole(sockopt(&sock, libc::SO_TYPE)?))?;
+    let m = read_msg(&c, |fd| p.passed(&c, fd as u64), args[1], whole(sockopt(&sock, libc::SO_TYPE)?))?;
     send_one((l, n), p, &c, (args[0], &mut sock), m, args[2] as i32)
 }
 
 /// `sendmmsg(fd, msgs, n, flags)`: each message as `sendmsg`, its length written back where the caller
 /// reads it (`msg_len` — glibc's resolver checks it); the first that fails ends it (failing the call when
-/// it's the first).
+/// it's the first; one past the end of the address space is `EFAULT` — `mmsg_at`).
 fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
@@ -2377,11 +2193,12 @@ fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let count = args[2].min(libc::UIO_MAXIOV as u64);
     let mut sent = 0;
     for i in 0..count {
-        let at = args[1] + i * MMSGHDR as u64;
-        let r = read_msg(p, &c, at, datagram)
-            .and_then(|m| send_one((l, n), p, &c, (args[0], &mut sock), m, args[3] as i32));
+        let r = mmsg_at(args[1], i).ok_or(libc::EFAULT).and_then(|at| {
+            let m = read_msg(&c, |fd| p.passed(&c, fd as u64), at, datagram)?;
+            Ok((at, send_one((l, n), p, &c, (args[0], &mut sock), m, args[3] as i32)?))
+        });
         match r {
-            Ok(len) => {
+            Ok((at, len)) => {
                 c.write(at + MSG_LEN_AT, &(len as u32).to_ne_bytes())?;
                 sent += 1;
             }
@@ -3286,10 +3103,28 @@ mod tests {
                 },
                 ["sendto", a] => said(UdpSocket::bind("0.0.0.0:0").and_then(|s| s.send_to(b"x", a))),
                 ["sendmsg", a] => said(sendmsg_to(a.parse().unwrap())),
+                // (an array of two messages where none fits below the end of the address space)
+                ["sendmmsg-top"] => said(std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| {
+                    let top = std::ptr::without_provenance_mut::<libc::mmsghdr>(usize::MAX - 63);
+                    // SAFETY: an address nothing is read from or written to — the call fails `EFAULT`.
+                    match unsafe { libc::sendmmsg(s.as_raw_fd(), top, 2, 0) } {
+                        r if r < 0 => Err(io::Error::last_os_error()),
+                        r => Ok(r),
+                    }
+                })),
                 ["unix", path] => {
                     said(UnixStream::connect(path).and_then(|mut s| io::Write::write_all(&mut s, b"hi")))
                 }
                 ["unixbind", path] => said(UnixListener::bind(path)),
+                // (a name given in hex: one that isn't UTF-8)
+                ["unixbind-hex", hex] => {
+                    use std::os::unix::ffi::OsStrExt;
+                    let name: Vec<u8> = (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                        .collect();
+                    said(UnixListener::bind(std::ffi::OsStr::from_bytes(&name)))
+                }
                 ["unixbind-tmp", name] => {
                     said(UnixListener::bind(PathBuf::from(std::env::var_os("TMPDIR").unwrap()).join(name)))
                 }
@@ -4092,6 +3927,50 @@ mod tests {
         let out = super::super::home_shown(&out.display().to_string());
         assert!(plain.contains(&format!("connecting to socket {out}")), "{plain:?}");
         drop(listeners);
+    }
+
+    /// F1: a `sendmmsg` whose array starts where no message fits below the end of the address space is `EFAULT` to
+    /// the run, as the kernel answers it (`wire::mmsg_at`), and the supervisor goes on serving: the next send arrives.
+    #[test]
+    fn a_sendmmsg_past_the_address_space_is_efault() {
+        if !served("a_sendmmsg_past_the_address_space_is_efault") {
+            return;
+        }
+        let s = Scratch::new("mmsg-top");
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let at = udp.local_addr().unwrap();
+        let p = s.policy(vec![at.port()], false, Vec::new());
+        let got = probe_in(&p, &["sendmmsg-top".to_string(), format!("sendto {at}")]);
+        assert_eq!(got, [format!("err {}", libc::EFAULT), "ok".to_string()]);
+        let mut buf = [0u8; 8];
+        assert_eq!(udp.recv(&mut buf).map(|n| buf[..n].to_vec()).unwrap(), b"x");
+    }
+
+    /// F2: a unix socket bound in the project by a name that isn't UTF-8 is made by that name, byte for byte —
+    /// the name checked is the name bound (it was made with U+FFFD in its place).
+    #[test]
+    fn a_unix_socket_is_bound_by_the_bytes_it_was_named() {
+        use std::os::unix::ffi::OsStrExt;
+        if !served("a_unix_socket_is_bound_by_the_bytes_it_was_named") {
+            return;
+        }
+        let s = Scratch::new("unix-bytes");
+        let p = s.policy(Vec::new(), false, Vec::new());
+        let name = b"s\xff.sock";
+        let hex: String = name.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(probe_in(&p, &[format!("unixbind-hex {hex}")]), ["ok"]);
+        let made: Vec<Vec<u8>> = std::fs::read_dir(&s.root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().as_bytes().to_vec())
+            .filter(|n| n.ends_with(b".sock"))
+            .collect();
+        assert_eq!(
+            made,
+            [name.to_vec()],
+            "{:?}",
+            made.iter().map(|n| String::from_utf8_lossy(n)).collect::<Vec<_>>()
+        );
     }
 
     /// For real: a Gradle build of a small project (no dependencies, so offline) in the sandbox — its client
