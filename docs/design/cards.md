@@ -2,7 +2,7 @@
 
 Design, 2026-10-04. Status: **approved** with the five recommendations of §8 (2026-10-04). P0, P1, P2 and
 P5 are built (`src/cards.rs`, `allow::defaults`; `sandbox.rs`' write rules; its read rules; `snapshot.rs` —
-§9 "P2, as built", "P5, as built"); P3 and P4 aren't yet.
+§9 "P2, as built", "P5, as built"); P3's gate switch too (§9 "P3, as built"); P4 isn't yet.
 
 ## Headline
 
@@ -626,6 +626,29 @@ beside them:
   (`sandbox::protected_names`): the profile, the report and Edit's ask all use it, and `llm.review-ask` only
   adds (its default is now empty). The names go into the profile as several regexes, because Seatbelt refuses
   a string literal past about 1 KB ("Error reading string": 1032 characters refused, every run failing).
+
+**P3, as built (2026-10-15, cardauto piece 4)** — plan in `target/sb/cardauto-plan.md` §1.2–§1.3:
+
+- **The gate** (`tools::run` → `in_sandbox`): sandboxed here (`cards::sandboxed`: not off, not missing, not
+  partial) and nothing past it asked (no `outside_sandbox`, `unix_socket` or `also`) → `cards::decide` on a
+  `Run { past: No, reads: [] }` → it runs. Where no `Caps` could change that (`cards::decide_now`, also the
+  shadow's `unbuilt` rule) it's decided at once, so a run is admitted as a check was (the queue's tests hold);
+  when a warning that `asks` could come true (D4: the network open) or the line moves a file Claude wrote unseen,
+  a worker builds `Caps` (`Basis::build`), reads the scripts for the warnings, and carries the unseen mark
+  (`carry`) first. `Outward` → today's run card. Not sandboxed: today's gate, unchanged, until piece 5.
+- **`also`** (`also_of`, `also_ask`, `also_grant`): one of `{read}`, `{write}`, `{port}` with a reason. Resolved on
+  a worker against `Caps` as a grant card for a blocked run offers it (`blocked::choices`): open already → runs;
+  no card opens it (home, keys, what runs later, a risky port, a protected name in the project) → said, no card;
+  else the Grant card (`blocked::also_card`, `Why::Also`, Claude's call waits on it — `BlockedRun.claude`).
+  `y`/`a`/`A` run Claude's command with it; `n` is said to Claude and sticks for the chat (`Chat.also_refused`);
+  `ALSO_MAX` (3) cards a turn (`Chat.also_asked`, new each turn).
+- **The report** (`also_candidates`, `also_line`): only a run that *failed* gets the `also` line (§8.4: a
+  passing cargo test of this repository reports taplo walking up from its folder, mDNSResponder and the test
+  binary's own probes); and only for a read or write of a place, or a port the settings don't open — never a
+  look at a folder above the project or the run's own folder, a socket, a host, the terminals.
+- **Kept for the cards P3 keeps** (outside, socket, and no sandbox): `named`, `showable`, `read_scripts`,
+  `carry`/`moved` — `tools::the_frictions_commands_run_unasked_in_the_sandbox` checks the outside card still
+  shows a script written unseen this turn, and refuses one too long to show.
 
 ---
 

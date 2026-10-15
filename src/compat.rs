@@ -1132,12 +1132,15 @@ timeout = 60
     }
 
     /// A card nobody listed fails the entry, answered `n` — what it asked never runs. (No sandbox needed: the
-    /// card comes before the run's guard.)
+    /// card comes before the run's guard — with `llm.sandbox` off, where a command has today's run card; in the
+    /// sandbox it would run, P3.)
     #[test]
     fn a_card_nobody_listed_fails_the_entry_and_its_command_never_runs() {
         let s = Scratch::new("card");
         let at = &s.place;
-        let e = entry("name = \"made\"\nrun = \"touch made-here\"\nexpect = \"pass\"\ntimeout = 20");
+        let e = entry(
+            "name = \"made\"\nrun = \"touch made-here\"\nexpect = \"pass\"\ntimeout = 20\nsettings = { llm = { sandbox = false } }",
+        );
         let v = run(&e, at);
         assert_eq!(
             failed(&v, Check::Card),

@@ -1344,6 +1344,8 @@ mod tests {
     #[test]
     fn a_pending_calls_card_stays_when_another_session_ends_its_turn() {
         let (mut ed, front, back) = two_projects("pending-card");
+        // (today's gate, for the run's card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let made = front.join("made");
         let log = front.join("claude-heard.log");
         // Front's Claude: a run that asks, and with it a Read outside the project (back's file)
@@ -1439,6 +1441,8 @@ mod tests {
     #[test]
     fn c_q_on_a_card_with_the_keys_never_drops_it() {
         let (mut ed, front, back) = two_projects("c-q-twice");
+        // (today's gate, for the runs' cards: in the sandbox they run — P3)
+        ed.config.llm.sandbox = false;
         let (front_log, back_log) = (front.join("claude-heard.log"), back.join("claude-heard.log"));
         let pump = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool, what: &str| {
             let end = Instant::now() + Duration::from_secs(10);
@@ -1503,6 +1507,8 @@ mod tests {
     #[test]
     fn no_call_waits_on_a_card_nobody_can_see() {
         let (mut ed, front, back) = two_projects("phantom");
+        // (today's gate, for the run's card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let (front_log, back_log) = (front.join("claude-heard.log"), back.join("claude-heard.log"));
         let run = |dir: &Path| json!({ "command": format!("touch {}", dir.join("made").display()) });
         claude_calls(&mut ed, &front_log, &[("run", run(&front))]);

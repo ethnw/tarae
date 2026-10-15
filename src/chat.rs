@@ -44,12 +44,12 @@ another way. After you change code, check your work: diagnostics with wait says 
 compiles as the language servers see it (before any build), then the run_tests tool runs the tests that cover \
 the change (a test file, and a line for a single test) — when they fail, read why and fix it; the user \
 watches the run in their editor. To build, lint, format, run a whole test suite or use git, use the run \
-tool: one command per call, its output comes back; checks start at once, other commands wait for the user's \
-yes. Both run in a sandbox: they can write only in the project (not .git, nor build scripts, manifests and tool \
+tool: one command per call, it starts at once and its output comes back. Both run in a sandbox: they can write only in the project (not .git, nor build scripts, manifests and tool \
 settings — {protect}, .github, .tarae*.toml…: change those with Edit), \
 temp folders and the toolchain's own, and connect to nothing over the network, this machine included, but the ports the user \
-opened (each result says which) — when it blocks something a command needs, tell the user (the settings \
-llm.sandbox-ports, llm.sandbox-localhost and llm.sandbox-network open more); never work around it. Tests of dangerous behavior (deleting, overwriting, killing \
+opened (each result says which) — when it blocks something a command needs, run it again with also (that place or \
+port, and your reason: the user decides on a card), else tell the user (the settings llm.sandbox-ports, \
+llm.sandbox-localhost and llm.sandbox-network open more); never work around it. Tests of dangerous behavior (deleting, overwriting, killing \
 processes, the network) use a harmless stand-in — a marker file made in the test's own temp dir, then checked — \
 never the real command or a real path outside that dir, not even in code meant never to run. When the work takes several steps, lay them out first with the plan tool \
 and keep it current as you go (the step you're on doing, finished ones done). Each user message starts with <editor-context>: the file the user is looking at, \
@@ -397,6 +397,10 @@ pub struct Chat {
     /// `xtask/`), as they were (real path, hash of what's in it — `readonly::run_pins`, #93, #210): one changed
     /// since, and the command asks again.
     pub run_scripts: Vec<(PathBuf, u64)>,
+    /// What the user said no to on a card `also` raised (cardauto P3): asked again in this chat, refused with no
+    /// card · how many such cards this turn put up (`tools::ALSO_MAX` at most).
+    pub also_refused: Vec<crate::allow::Grant>,
+    pub also_asked: usize,
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
     pub queued: Option<String>,
@@ -606,6 +610,8 @@ impl Chat {
             ran: Vec::new(),
             sees: false,
             run_again: Vec::new(),
+            also_refused: Vec::new(),
+            also_asked: 0,
             run_scripts: Vec::new(),
             queued: None,
             screen: None,

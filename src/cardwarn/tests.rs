@@ -435,6 +435,8 @@ fn chat_in(name: &str, project: &str) -> (crate::editor::Editor, u64, PathBuf) {
     let (config, warnings) = crate::config::parse(project);
     assert!(warnings.is_empty(), "{warnings:?}");
     let mut ed = crate::editor::Editor::new(config);
+    // (today's gate, where every command here has a card: in the sandbox they'd run — P3)
+    ed.config.llm.sandbox = false;
     ed.session.root = dir.clone();
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -667,7 +669,7 @@ fn only_a_warning_that_asks_takes_a_back() {
                 let q = ed.offers.first().map(|o| o.question.clone()).expect("asked again");
                 assert!(
                     q.contains("▲ It touches a file. (config.toml)")
-                        && q.contains("`a` let this command run"),
+                        && q.contains("is asked each time, whatever this chat allowed"),
                     "{q}"
                 );
                 ed.offer_dismiss();

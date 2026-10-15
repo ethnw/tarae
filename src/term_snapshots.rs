@@ -880,7 +880,8 @@ fn snapshot_card_says_who_waits_behind_it() {
     s.frames_both("card_says_who_waits_behind");
 }
 
-/// A command Claude wants to run — shown whole (a commit message past four lines too), `y Run` · `n No`.
+/// A command Claude wants to run outside the sandbox — the run card P3 keeps — shown whole (a commit message past
+/// four lines too), its reason under it, `y Run` · `n No`.
 #[test]
 fn snapshot_offer_run() {
     let mut s = Shot::new(100, 30);
@@ -889,16 +890,19 @@ fn snapshot_offer_run() {
     let command = "git commit -m 'Count words: the words in the text, counted\n\nSplits on whitespace, so \
                    \"a  b\" is two words, and keeps the counts in a map from word to how many times it came, \
                    printed after the text.\n\nThe tests cover the empty text and repeated words.'";
+    let reason = "git commit runs the hooks, which sign with the key in your agent";
     let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "run", "arguments": {"command": command}}});
+        "params": {"name": "run", "arguments": {"command": command, "outside_sandbox": true, "reason": reason}}});
     assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none(), "it waits for the user");
     s.check("offer_run");
 }
 
-/// A command with a pattern for the rest of the chat (#27): the card names it, `a This chat` beside `y`/`n`.
+/// A command with a pattern for the rest of the chat (#27): the card names it, `a This chat` beside `y`/`n` — with
+/// no sandbox, today's gate (in the sandbox it runs, P3; piece 5 takes the patterns out).
 #[test]
 fn snapshot_offer_run_pattern() {
     let mut s = Shot::new(100, 30);
+    s.ed.config.llm.sandbox = false;
     s.ed.offer_popups = true;
     s.file("src/demo.rs", DEMO_RS);
     let command = "cargo xtask shot /tmp/words.png ' l' '@?distinct words'";
@@ -1049,8 +1053,8 @@ fn chat_minimizes_while_following() {
     assert_eq!(s.ed.screen.chat_x, docked, "not following = docked");
 }
 
-/// A command Claude wants to run, asked while it works in follow mode: the minimized chat moves to the top
-/// right, out of the card's way, the card's buttons in sight.
+/// A command Claude wants to run outside the sandbox, asked while it works in follow mode: the minimized chat
+/// moves to the top right, out of the card's way, the card's buttons in sight.
 #[test]
 fn snapshot_follow_offer_run() {
     let mut s = Shot::new(100, 30);
@@ -1059,7 +1063,8 @@ fn snapshot_follow_offer_run() {
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" lcommit it<ret>");
     let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "run", "arguments": {"command": "git commit -am 'Count words'"}}});
+        "params": {"name": "run", "arguments": {"command": "git commit -am 'Count words'",
+            "outside_sandbox": true, "reason": "the hooks sign with the key in your agent"}}});
     assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none());
     s.frame();
     let mini = s.ed.screen.chat_mini.get().expect("the minimized chat shows");

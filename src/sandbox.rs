@@ -160,6 +160,9 @@ impl ReachOut {
 pub struct Report {
     pub text: String,
     pub blocked: bool,
+    /// What it said was blocked that a grant could open — none kept on purpose, nor another session's port or one
+    /// whose can't be told (`tools::also_said` reads it for Claude's `also`).
+    pub open: Vec<Denial>,
     pub rules: u64,
     pub guarantees: Option<u64>,
 }
@@ -294,8 +297,8 @@ impl Guard {
         let told = guarantees.map(|g| g.told());
         let guarantees = told.as_ref().map(digest);
         let apart = told.filter(|_| known.guarantees != guarantees).unwrap_or_default();
-        let (text, blocked) = self.report_text(output, rules, quiet_rules, &apart);
-        Report { text, blocked, rules: rules_digest, guarantees }
+        let (text, blocked, open) = self.report_text(output, rules, quiet_rules, &apart);
+        Report { text, blocked, open, rules: rules_digest, guarantees }
     }
 
     /// What its runs are kept apart from and share (`Policy::guarantees`) — None: not in the sandbox.
@@ -312,8 +315,8 @@ impl Guard {
         rules: String,
         quiet_rules: String,
         apart: &str,
-    ) -> (String, bool) {
-        let Guard::In(p) = self else { return (rules, false) };
+    ) -> (String, bool, Vec<Denial>) {
+        let Guard::In(p) = self else { return (rules, false, Vec::new()) };
         // (the guarantees: a paragraph of their own after the rules' — or where they'd be, left out)
         let with_apart = |s: String| match apart.is_empty() {
             true => s.trim_end().to_string(),
@@ -345,7 +348,7 @@ impl Guard {
         }
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
             // (nothing watched: a refusal shows only in the output — the rules are how Claude reads it)
-            return (with_apart(format!("{ps}{rules}{unwatched}")), false);
+            return (with_apart(format!("{ps}{rules}{unwatched}")), false, Vec::new());
         }
         if b.total > 0 || o.total > 0 {
             let mut s = match (&b.failed, b.total) {
@@ -400,7 +403,9 @@ impl Guard {
             }
             // (step 8: another session's port, or one whose can't be told — no grant opens it, so nothing to
             // point at)
-            let openable = all_seen.iter().any(|d| d.op != SESSION_OP && d.op != UNTOLD_OP);
+            let openable = |d: &&Denial| d.op != SESSION_OP && d.op != UNTOLD_OP;
+            let open: Vec<Denial> = all_seen.iter().filter(openable).filter(|_| !all).cloned().collect();
+            let openable = all_seen.iter().any(|d| openable(&d));
             if (!all && openable) || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
                 s.push_str(
                     "\nIf the command needs one of these, tell the user — they can open it from the run's \
@@ -409,7 +414,7 @@ impl Guard {
                      (outside_sandbox, with your reason); don't work around it.",
                 );
             }
-            return (with_apart(s), true);
+            return (with_apart(s), true, open);
         }
         let quiet = quiet_said(&b).unwrap_or_default();
         let text = match b.failed {
@@ -428,7 +433,7 @@ impl Guard {
                 with_apart(s)
             }
         };
-        (text, false)
+        (text, false, Vec::new())
     }
 
     /// What among `seen` the profile keeps on purpose, each said with why and what to do instead — and

@@ -164,8 +164,10 @@ pub enum Why {
     HostRaw,
     /// A name's SRV/TXT records, for a name the rules don't allow — the run's question held (6e+, Q3).
     Lookup,
-    /// `a` allowed it before, but a warning of it asks each time (`cardwarn.rs`, `asks` — D2): its ids.
+    /// A warning of it asks each time, whatever was allowed before (`cardwarn.rs`, `asks` — D2, D4): its ids.
     Asks(String),
+    /// Claude's `also`: one thing past the session's capabilities its command asks for (cardauto P3).
+    Also,
     /// tarae's own question, not about what Claude does (a preflight, a stuck run, notes gone stale, a review's
     /// end …) — logged all the same (cardburden 5), so every card's answer and time are measured.
     Own,
@@ -198,6 +200,7 @@ impl Why {
             Why::HostRaw => "host-raw".into(),
             Why::Lookup => "lookup".into(),
             Why::Asks(ids) => format!("asks:{ids}"),
+            Why::Also => "also".into(),
             Why::Own => "own".into(),
             Why::Spend => "spend".into(),
         }
@@ -223,10 +226,7 @@ impl Why {
             Why::RunsOutside => {
                 "It runs a check or git outside the project — that folder's code runs.".into()
             }
-            Why::Asks(_) => {
-                "`a` let this command run unasked in this chat — but what it warns of, above, is asked each time."
-                    .into()
-            }
+            Why::Asks(_) => "What it warns of, above, is asked each time, whatever this chat allowed.".into(),
             Why::ReadsOutside(_)
             | Why::Socket
             | Why::Outside
@@ -235,6 +235,7 @@ impl Why {
             | Why::Read
             | Why::Screen
             | Why::Blocked
+            | Why::Also
             | Why::Host
             | Why::HostRaw
             | Why::Lookup
@@ -382,12 +383,18 @@ pub fn decide(r: &Request, caps: &crate::caps::Caps) -> Decision {
 /// could decide it otherwise (a read's class read by default or not — the only thing `decide` asks of it), never a
 /// guess: the shadow is the number auto mode is weighed by (D1).
 pub fn shadow(r: &Request, caps: Option<&crate::caps::Caps>) -> &'static str {
-    use crate::caps::Caps;
-    if let Some(c) = caps {
-        return decide(r, c).word();
+    match caps {
+        Some(c) => decide(r, c).word(),
+        None => decide_now(r).map_or("unbuilt", Decision::word),
     }
+}
+
+/// `decide` with no `Caps` made: the decision where none could change it (a run asking for no read past the
+/// project — what it may read is the only thing `decide` asks of the session) — None where one could.
+pub fn decide_now(r: &Request) -> Option<Decision> {
+    use crate::caps::Caps;
     let (off, on) = (decide(r, &Caps::default()), decide(r, &Caps { outside: true, ..Caps::default() }));
-    if off == on { off.word() } else { "unbuilt" }
+    (off == on).then_some(off)
 }
 
 /// What a card of Claude's (or about Claude's commands) asked: why, and the request.

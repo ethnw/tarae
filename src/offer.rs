@@ -394,6 +394,8 @@ impl Offer {
         match &self.what {
             What::Run(r) => Some(Asker::Tool(r.call.clone())),
             What::NoSandbox { call, .. } | What::Screen { call } => Some(Asker::Tool(call.clone())),
+            // (one `also` raised: Claude's call waits on it — `tools::also_ask`)
+            What::Grant { run, .. } if run.claude.is_some() => run.claude.clone().map(Asker::Tool),
             What::ProtectedMade { then, .. } => then.call().map(|c| Asker::Tool(c.clone())),
             // (one the user's pointing raised holds no call — `reads::point`; one of tarae's tools holds its call)
             What::Read { pending, .. } if pending.then.is_some() => {
@@ -483,10 +485,11 @@ impl Offer {
         match &self.what {
             What::Grammars { then, .. } => then.is_some(),
             What::Fetch { then, .. } | What::Install { then, .. } => matches!(then, Then::Resume(_)),
+            // (one `also` raised is Claude's)
+            What::Grant { run, .. } => run.claude.is_none(),
             w => matches!(
                 w,
-                What::Grant { .. }
-                    | What::Outside { .. }
+                What::Outside { .. }
                     | What::Preflight { .. }
                     | What::BranchDelete { .. }
                     | What::ForcePush(_)

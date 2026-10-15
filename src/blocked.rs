@@ -22,6 +22,9 @@ pub struct BlockedRun {
     pub denials: Vec<Denial>,
     /// Linux: where the denials were told from (`Policy::denials_from`) — the cards say it.
     pub from: Option<String>,
+    /// Claude's call waiting on the card, when Claude asked for it (`also` — `tools::also_ask`): the run is its,
+    /// not the user's run again, and a no is said to it.
+    pub claude: Option<crate::tools::Call>,
 }
 
 impl BlockedRun {
@@ -168,6 +171,7 @@ impl Editor {
             Some((
                 r.started,
                 BlockedRun {
+                    claude: None,
                     job: Job::Command(r.task.cmd.clone(), r.task.cwd.clone()),
                     denials: denials(r.guard.as_ref(), &r.output)?,
                     from: from(r.guard.as_ref()),
@@ -177,7 +181,8 @@ impl Editor {
         let test = self.session.test_run.as_ref().and_then(|r| {
             let job = Job::Tests(Box::new(r.target.clone()));
             let from = from(r.guard.as_ref());
-            Some((r.started, BlockedRun { job, denials: denials(r.guard.as_ref(), &r.output)?, from }))
+            let denials = denials(r.guard.as_ref(), &r.output)?;
+            Some((r.started, BlockedRun { job, denials, from, claude: None }))
         });
         match which {
             Which::Task => task.map(|t| t.1),
@@ -341,6 +346,40 @@ fn grant_card(
     tokens: Option<String>,
 ) -> crate::offer::Offer {
     use crate::cards::{Asked, Request, Why};
+    let said = format!("{why}, in `{cmd}` — which runs again now with it open, whichever you choose.");
+    let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone())).about(cmd);
+    grant_offer(grant, said, asked, run, tokens, Vec::new())
+}
+
+/// The card for what Claude's `also` asks (cardauto P3): `grant` for `cmd`, Claude's `reason` — its call waits on
+/// it (`run.claude`); `y` runs the command with it open. `asks`: the command's warnings that ask where the run
+/// could reach out (D4) — on this card, since any answer but `n` runs it, as the run card's `y` would.
+pub fn also_card(
+    grant: Grant,
+    reason: &str,
+    cmd: &str,
+    run: Box<BlockedRun>,
+    tokens: Option<String>,
+    asks: Vec<crate::cardwarn::Warned>,
+) -> crate::offer::Offer {
+    use crate::cards::{Asked, Request, Why};
+    let said = format!("Claude asks, for `{cmd}`: {reason}\n\nIt runs with it open, whichever you choose.");
+    let ids = asks.iter().map(|w| w.id.clone()).collect();
+    let asked = Asked::new(Why::Also, Request::Grant(grant.clone())).about(cmd).warned(ids);
+    let lines = asks.iter().map(|w| format!("▲ {}", w.line())).collect();
+    grant_offer(grant, said, asked, run, tokens, lines)
+}
+
+/// A grant's card: what it lets, `said` (why, and what runs), how long it lasts, what it warns of (the grant's
+/// risk, `tokens`, then the command's own: `warned`).
+fn grant_offer(
+    grant: Grant,
+    said: String,
+    asked: crate::cards::Asked,
+    run: Box<BlockedRun>,
+    tokens: Option<String>,
+    warned: Vec<String>,
+) -> crate::offer::Offer {
     // (a socket: this run, or this conversation — everything else stays in the sandbox)
     let lasts = match (&grant, grant.keepable()) {
         (Grant::Host(..), _) => {
@@ -349,22 +388,17 @@ fn grant_card(
         (_, true) => "Always lasts until :sandbox-allowed takes it back.",
         (_, false) => "Everything else stays in the sandbox; it's never kept past this conversation.",
     };
-    let mut question = format!(
-        "Let Claude's commands {}\n\n{why}, in `{cmd}` — which runs again now with it open, whichever you \
-         choose. {lasts}",
-        grant.shown()
-    );
+    let mut question = format!("Let Claude's commands {}\n\n{said} {lasts}", grant.shown());
     if let Some(from) = &run.from {
         question.push_str(&format!("\n\nWhat it refused was read {from}."));
     }
-    let warn: Vec<String> = grant.risk().map(String::from).into_iter().chain(tokens).collect();
+    let warn: Vec<String> = grant.risk().map(String::from).into_iter().chain(tokens).chain(warned).collect();
     let warning = (!warn.is_empty()).then(|| {
         question.push_str("\n\n");
         let at = question.split('\n').count() - 1;
         question.push_str(&warn.join("\n"));
         at..at + warn.len()
     });
-    let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone())).about(cmd);
     let what = crate::offer::What::Grant { grant, run };
     let o = crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what);
     match warning {
@@ -402,8 +436,30 @@ pub const OUTSIDE_TITLE: &str = "Run it outside the sandbox?";
 
 /// The answer on a grant's card: None = no; else `grant` is allowed for `scope` and the run goes again now
 /// with it — the user's run, its end told to Claude.
-pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, run: BlockedRun, scope: Option<Scope>) {
+pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun, scope: Option<Scope>) {
     ed.offer_finished(id, Ok(()));
+    // Claude's `also`: its call runs with it open — or hears no, which sticks for the chat
+    if let Some(call) = run.claude.take() {
+        // (its turn over: nobody waits — nothing kept, no refusal recorded, nothing runs)
+        let waits = |c: &crate::chat::Chat| c.generation() == call.generation() && c.busy();
+        if !ed.session.chat.as_ref().is_some_and(waits) {
+            return;
+        }
+        let Some(scope) = scope else {
+            if let Some(c) = ed.session.chat.as_mut() {
+                c.also_refused.push(grant.clone());
+            }
+            let no = format!(
+                "The user said no to letting your commands {} — for the rest of this chat: don't ask for it \
+                 again. If the command can't work without it, tell the user what it needs.",
+                grant.shown()
+            );
+            return crate::tools::answer(ed, call, Err(no));
+        };
+        crate::allow::grant(ed, &grant, scope);
+        let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
+        return crate::tools::guard_and_go(ed, For::Claude(call), run.job, false, extra);
+    }
     let Some(scope) = scope else {
         return ed.set_status("nothing opened — the sandbox stays as it was");
     };
@@ -786,8 +842,12 @@ mod tests {
             std::fs::write(base.join(f), text).unwrap();
         }
         let mut ed = Editor::new(crate::config::Config::default());
-        let run =
-            BlockedRun { job: Job::Command("cat x".into(), base.clone()), denials: Vec::new(), from: None };
+        let run = BlockedRun {
+            job: Job::Command("cat x".into(), base.clone()),
+            denials: Vec::new(),
+            from: None,
+            claude: None,
+        };
         let choice = |dir: &str| Choice {
             grant: Grant::Read(base.join(dir)),
             hint: String::new(),

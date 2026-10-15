@@ -338,6 +338,8 @@ fn the_same_run_in_the_sandbox_says_what_changed_in_what_it_runs() {
     std::fs::write(root.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    // (today's gate, for the cards: in the sandbox they run — P3; piece 5 keeps `sinceyes` for runs past it)
+    ed.config.llm.sandbox = false;
     ed.session.root = root.clone();
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -450,6 +452,8 @@ fn the_same_run_in_the_sandbox_says_what_changed_in_what_it_runs() {
 fn what_a_run_made_is_a_change_since_its_answer() {
     let (dir, root) = repo("ranmade");
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    // (today's gate, for its card: in the sandbox it runs — P3)
+    ed.config.llm.sandbox = false;
     ed.session.root = root.clone();
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -493,6 +497,8 @@ fn what_a_run_made_is_a_change_since_its_answer() {
 /// chat's generation, what a call is Claude's by.
 fn chat_in(root: &Path) -> (crate::editor::Editor, u64) {
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    // (today's gate, where a run card comes for each command here: in the sandbox they run — P3)
+    ed.config.llm.sandbox = false;
     ed.session.root = root.to_path_buf();
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];

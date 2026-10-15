@@ -604,6 +604,8 @@ pub fn turn_over(ed: &mut Editor) {
         use crate::offer::What;
         matches!(w, What::Run(_) | What::NoSandbox { .. })
             || matches!(w, What::ProtectedMade { then, .. } if then.call().is_some())
+            // (one `also` raised: Claude's call waited on it)
+            || matches!(w, What::Grant { run, .. } if run.claude.is_some())
     });
     crate::seeing::turn_over(ed);
     crate::refactor::turn_over(ed);
@@ -635,8 +637,7 @@ pub fn tests_dropped(ed: &mut Editor, why: &str) {
 // ── run ─────────────────────────────────────────────────────────────────────
 
 pub(crate) fn run_schema() -> Value {
-    // (the packs' checks and code folders, by rank: cargo's, go's · Rust's sources and crates)
-    let checks = packs_said(|s| s.run.as_deref());
+    // (the packs' code folders, by rank: Rust's sources and crates)
     let code: String = packs_said(|s| s.code.as_deref());
     let code = if code.is_empty() { code } else { format!(", {code}") };
     json!({
@@ -645,19 +646,17 @@ pub(crate) fn run_schema() -> Value {
     its output — build, lint, format, test suites, git. Not for reading or searching files: read and search do \
     that in the editor, with no process and no card. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
-    that. For git's reads the git tool is better (no card, no process). Checks ({checks}, git status/diff/log/show) \
-    start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq. So do \
-    read-only ones (ls find tree stat file du diff wc pwd echo nm otool strings size, git \
-    blame/rev-parse/ls-files/branch/show, git diff --no-index; git -C <dir> too) whose paths stay in the \
-    project, the repository's other checkouts, the temp folders{code} — and lines of checks and reads joined \
-    by ; && || |, with cd, for/while-read loops of reads, or the same in sh -c '…' (no other $, no backticks or \
-    redirects to files). To run somewhere other than the project root, give cwd rather than a cd. Any other command \
-    waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing \
-    interactive. For one test file or test, run_tests is better (it reads each failure). Commands run in a \
-    sandbox; when one needs one unix socket outside it (a server's — colima's docker.sock), ask for that: \
-    unix_socket with your reason; when it can't work in it otherwise (the network, writing where the sandbox \
-    doesn't let it), you may ask to run it outside: outside_sandbox with your reason — the user decides on a \
-    card, this once."),
+    that. For git's reads the git tool is better (no card, no process). Any command runs at once in a sandbox: \
+    it reads the project, the repository's other checkouts, the temp folders{code} and outside home; writes the \
+    project (but its build files and .git: change those with edit), temp and the toolchain's own folders; \
+    reaches no network but this machine's open ports. Its report says what the sandbox blocked. To run \
+    somewhere other than the project root, give cwd rather than a cd. No stdin and no terminal: nothing \
+    interactive. For one test file or test, run_tests is better (it reads each failure). When the report says \
+    the command needs a place or port it blocked, run it again with also (that one thing) and your reason — \
+    the user decides on a card; a no holds for the chat, don't work around it. When it needs one unix socket \
+    outside the sandbox (a server's — colima's docker.sock), ask for that: unix_socket with your reason; when \
+    it can't work in it otherwise, you may ask to run it outside: outside_sandbox with your reason — the user \
+    decides on a card, this once."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -665,7 +664,8 @@ pub(crate) fn run_schema() -> Value {
                 "cwd": { "type": "string", "description": "The folder it runs in, inside the project (relative to its root); the root if left out" },
                 "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
                 "unix_socket": { "type": "string", "description": "Ask the user to let it connect to this one unix socket (its path; with reason) — the rest stays sandboxed" },
-                "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with outside_sandbox or unix_socket; the user reads it" },
+                "also": { "type": "object", "description": "One thing past the sandbox it needs, that its report said was blocked (with reason) — {\"read\": path} · {\"write\": folder} · {\"port\": n} on this machine" },
+                "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with also, outside_sandbox or unix_socket; the user reads it" },
                 "base": { "type": "string", "description": "A commit (HEAD, a branch, a sha): run this check on its tree instead — a copy apart from the project, removed after; to tell a failure already there from yours. Checks only, one command" }
             },
             "required": ["command"]
@@ -675,6 +675,229 @@ pub(crate) fn run_schema() -> Value {
 
 /// A reason to run outside the sandbox, at most (the card shows it whole).
 const REASON_MAX: usize = 300;
+
+/// Cards `also` puts up in a turn, at most (cardauto P3) — past them, Claude tells the user what's needed.
+pub const ALSO_MAX: usize = 3;
+
+/// What `also` asks for, as Claude gave it: a place to read, a folder to write in, a port on this machine.
+#[derive(Clone, Debug)]
+enum AlsoAsk {
+    Read(String),
+    Write(String),
+    Port(u16),
+}
+
+/// The run's `also` and its reason — None when it has none; Err says what's wrong with it (to Claude).
+fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
+    let Some(also) = args.get("also").filter(|v| !v.is_null()) else { return Ok(None) };
+    let one = "also names one thing: {\"read\": path} · {\"write\": folder} · {\"port\": n}";
+    let o = also.as_object().filter(|o| o.len() == 1).ok_or(one)?;
+    let path = |v: &Value| v.as_str().map(str::trim).filter(|p| !p.is_empty()).map(String::from).ok_or(one);
+    let ask = match o.iter().next() {
+        Some((k, v)) if k == "read" => AlsoAsk::Read(path(v)?),
+        Some((k, v)) if k == "write" => AlsoAsk::Write(path(v)?),
+        Some((k, v)) if k == "port" => {
+            AlsoAsk::Port(v.as_u64().and_then(|n| u16::try_from(n).ok()).filter(|n| *n > 0).ok_or(one)?)
+        }
+        _ => return Err(one.into()),
+    };
+    if args["outside_sandbox"].as_bool() == Some(true)
+        || args["unix_socket"].is_string()
+        || args["base"].is_string()
+    {
+        return Err(
+            "also opens one thing in the sandbox — not with outside_sandbox, unix_socket or base".into()
+        );
+    }
+    let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty());
+    let reason =
+        reason.ok_or("also needs a reason: what the command needs it for — the user reads it on the card")?;
+    if reason.chars().count() > REASON_MAX {
+        return Err(format!("keep the reason to {REASON_MAX} characters — the card shows it whole"));
+    }
+    Ok(Some((ask, reason.to_string())))
+}
+
+/// What `ask` would open for a run from `cwd` in a session that may do `caps` — as a grant card for what the
+/// sandbox blocked offers it (`blocked::choices`: never home or above, keys, what runs later …): None when it's
+/// open already (`open_port`: the settings' ports), Err when no card opens it (said to Claude).
+fn also_grant(
+    ask: &AlsoAsk,
+    cwd: &Path,
+    caps: &crate::caps::Caps,
+    open_port: &dyn Fn(u16) -> bool,
+) -> Result<Option<crate::allow::Grant>, String> {
+    use crate::allow::Grant;
+    let real = |p: &str| {
+        let path = match (p.strip_prefix("~/"), crate::allow::home()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => cwd.join(p),
+        };
+        std::fs::canonicalize(&path).map_err(|e| format!("also {p}: {e}"))
+    };
+    let never = |p: &Path| {
+        format!(
+            "{} is a place no card opens to your commands — home or above, keys and tokens, tarae's and Claude's \
+             state, what runs later (build files, folders of programs, shared caches, a toolchain's home). If the \
+             command needs it, tell the user",
+            crate::allow::tilde(p)
+        )
+    };
+    let (op, target) = match ask {
+        AlsoAsk::Port(n) => {
+            if let Some((_, why)) = crate::sandbox::RISKY_PORTS.iter().find(|(p, _)| p == n) {
+                return Err(format!(
+                    "port {n} is one no card opens ({why}) — if the command needs it, tell the user"
+                ));
+            }
+            let open = open_port(*n) || caps.ports.iter().any(|e| e.what == *n);
+            return Ok((!open).then_some(Grant::Port(*n)));
+        }
+        AlsoAsk::Read(p) => ("file-read-data", real(p)?),
+        AlsoAsk::Write(p) => {
+            let r = real(p)?;
+            // (the temp folders are written already; in the project only the protected names aren't — an edit's)
+            if caps.defaults(crate::caps::Why::Temp).any(|t| r.starts_with(t))
+                || caps.write.iter().any(|e| r.starts_with(&e.what))
+            {
+                return Ok(None);
+            }
+            if r.starts_with(&caps.root) {
+                return Err(format!(
+                    "{} is in the project: the sandbox keeps only its protected names there (build files, .git …) — \
+                     change those with your edit tool",
+                    crate::chat::shown(&caps.root, &r)
+                ));
+            }
+            ("file-write-create", r)
+        }
+    };
+    let d = crate::sandbox::Denial {
+        process: "the command".into(),
+        op: op.into(),
+        target: target.display().to_string(),
+    };
+    let grants: Vec<Grant> = crate::blocked::choices(&[d], caps).into_iter().map(|c| c.grant).collect();
+    // (read already — the project but a file named like a key, a place read by default, one answered: it runs)
+    let key = grants.iter().find(|g| matches!(g, Grant::Key(_))).cloned();
+    let read = matches!(ask, AlsoAsk::Read(_));
+    if read && key.is_none() && (caps.reads(&target) || caps.by_default(caps.class(Some(&target)))) {
+        return Ok(None);
+    }
+    let found = match read {
+        true => key.or_else(|| grants.into_iter().find(|g| matches!(g, Grant::Read(_)))),
+        false => grants.into_iter().find(|g| matches!(g, Grant::Write(_))),
+    };
+    found.map(Some).ok_or_else(|| never(&target))
+}
+
+/// Claude's `also` (cardauto P3): the one thing past the session's capabilities its command asks for — after a
+/// report named it blocked — on a grant card, where the user decides; any answer but no runs the command with it
+/// open. Open already, it just runs; what no card opens is said, no card. A no sticks for the chat
+/// (`Chat.also_refused`), and a turn puts up `ALSO_MAX` such cards at most.
+fn also_ask(
+    ed: &mut Editor,
+    call: Call,
+    (cmd, cwd): (String, PathBuf),
+    (ask, reason): (AlsoAsk, String),
+) -> Result<(), String> {
+    if ed.sandbox == Availability::Unknown {
+        return Err(
+            "the sandbox here isn't looked at yet — run it without also first; its report says what \
+                    it blocked"
+                .into(),
+        );
+    }
+    if !sandboxed_here(ed) {
+        return Err(
+            "there's no sandbox here to open — run it without also: its card says what it may do".into()
+        );
+    }
+    if ed.session.chat.as_ref().is_some_and(|c| c.also_asked >= ALSO_MAX) {
+        return Err(format!(
+            "{ALSO_MAX} cards for also this turn already — tell the user what the command needs instead"
+        ));
+    }
+    // (its place among the turn's cards taken now — calls sent together each count — given back if no card comes)
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.also_asked += 1;
+    }
+    let give_back = |ed: &mut Editor| {
+        if let Some(c) = ed.session.chat.as_mut() {
+            c.also_asked = c.also_asked.saturating_sub(1);
+        }
+    };
+    let basis = ed.caps_basis();
+    let (localhost, ports) = (ed.config.llm.sandbox_localhost, ed.config.llm.sandbox_ports.clone());
+    // (its card runs the command on any answer but `n`: what `in_sandbox` looks at for a run is looked at for it —
+    // D4's warnings that ask, and where a move takes an unseen file)
+    let (unseen, reach, root) = (unseen_now(ed), could_reach_out(ed, false), ed.session.root.clone());
+    ed.events.jobs().spawn(move || {
+        let caps = basis.build();
+        let open = |n: u16| localhost || ports.contains(&n);
+        let grant = also_grant(&ask, &cwd, &caps, &open);
+        // (a place to read: its card says first what looks like a token there)
+        let tokens = match &grant {
+            Ok(Some(crate::allow::Grant::Read(p))) => crate::tokens::found_in(p).said(p),
+            _ => None,
+        };
+        // (open already: `in_sandbox` reads these itself)
+        let card = matches!(grant, Ok(Some(_)));
+        let scripts = match card && reach {
+            true => read_scripts(&root, &cwd, &scripts_run(&cmd), &[]),
+            false => Vec::new(),
+        };
+        let carried = if card { carried_of(&cmd, &cwd, &unseen) } else { Vec::new() };
+        move |ed: &mut Editor| {
+            call.step("what also asks for looked at");
+            // (the turn ended meanwhile: nobody waits for it — and its count went with the turn)
+            if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+                return;
+            }
+            let g = match grant {
+                Err(e) => {
+                    give_back(ed);
+                    return answer(ed, call, Err(e));
+                }
+                // (open already: a run in the sandbox as any other — D4's card, `carry`)
+                Ok(None) => {
+                    give_back(ed);
+                    let c = call.clone();
+                    if let Err(e) = in_sandbox(ed, call, cmd, cwd) {
+                        answer(ed, c, Err(e));
+                    }
+                    return;
+                }
+                Ok(Some(g)) => g,
+            };
+            if ed.session.chat.as_ref().is_some_and(|c| c.also_refused.contains(&g)) {
+                give_back(ed);
+                let no = format!(
+                    "The user said no to letting your commands {} in this chat — don't ask for it again. If the \
+                     command can't work without it, tell the user what it needs.",
+                    g.shown()
+                );
+                return answer(ed, call, Err(no));
+            }
+            carry(ed, carried);
+            let texts: Vec<(String, String)> = scripts
+                .iter()
+                .filter_map(|s| s.text.as_ref().ok().map(|t| (crate::chat::shown(&root, &s.path), t.clone())))
+                .collect();
+            let on =
+                WarnOn { cmd: &cmd, cwd: &cwd, scripts: &texts, reads: &[], script_changed: false, outside: false };
+            let asks: Vec<crate::cardwarn::Warned> = match reach {
+                true => warned(ed, on).into_iter().filter(|w| w.asks).collect(),
+                false => Vec::new(),
+            };
+            call.step("grant card up");
+            let job = Job::Command(cmd.clone(), cwd);
+            let run = crate::blocked::BlockedRun { job, denials: Vec::new(), from: None, claude: Some(call) };
+            ed.push_offer(crate::blocked::also_card(g, &reason, &cmd, Box::new(run), tokens, asks));
+        }
+    });
+    Ok(())
+}
 
 /// Git's read-only commands, which run without asking (git is tarae's own).
 const GIT_READS: [&str; 4] = ["git status", "git diff", "git log", "git show"];
@@ -1201,9 +1424,14 @@ pub(crate) fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Strin
         })
     };
     let outside = outside.filter(|b| !allowed_socket(b));
+    let also = also_of(args)?;
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
     let mut call = call;
     call.trace = Some(crate::trace::RunTrace::new(format!("claude's run: {}", crate::task::traced(cmd))));
+    // One thing past the session's capabilities: its grant card (P3)
+    if let Some(also) = also {
+        return also_ask(ed, call, (cmd.to_string(), cwd), also);
+    }
     // On a commit's tree (#212): a check only, in the sandbox — written there when its turn comes (`basetree.rs`)
     if let Some(rev) = args["base"].as_str().map(str::trim).filter(|r| !r.is_empty()) {
         if args["outside_sandbox"].as_bool() == Some(true) || args["unix_socket"].as_str().is_some() {
@@ -1254,6 +1482,11 @@ pub(crate) fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Strin
             }
         }
     };
+    // In the sandbox, asking for nothing past it: it runs (cardauto P3). No sandbox here, a partial one too:
+    // today's gate, then its card — the parser's rules go in piece 5
+    if outside.is_none() && sandboxed_here(ed) {
+        return in_sandbox(ed, call, cmd.to_string(), cwd);
+    }
     // This exact command, allowed for the chat on its card (`a` — #193): its filters may differ, Docker's
     // socket rides with it when that was its card's. Where it reads, and whether a script it runs is as it
     // was allowed, are looked at as for any read — anything off and it's the card.
@@ -1377,14 +1610,7 @@ fn card(
     outside: Option<Beyond>,
     why: crate::cards::Why,
 ) -> Result<(), String> {
-    let checkpoints = &ed.session.checkpoints;
-    let unseen: Vec<PathBuf> = checkpoints
-        .turn
-        .iter()
-        .filter(|t| t.unseen)
-        .map(|t| t.path.clone())
-        .chain(checkpoints.carried.iter().cloned())
-        .collect();
+    let unseen = unseen_now(ed);
     let scripts = scripts_run(&cmd);
     // (the same run: what runs, not the filters after it — `sinceyes::key`)
     let yes = answered_before(ed, &cmd, &cwd, outside.as_ref());
@@ -1402,37 +1628,14 @@ fn card(
             false => named(&root, &cmd, &cwd, &unseen),
         };
         let scripts = read_scripts(&root, &cwd, &scripts, shown.as_deref().unwrap_or_default());
-        // A move or copy of an unseen file: where it goes is unseen too, from now on — before it runs, so no
-        // later call reads it as a file the user saw (what's there now kept, when it's text or nothing)
-        let carried: Vec<(PathBuf, Result<Option<ropey::Rope>, ()>)> = match crate::readonly::only_moves(&cmd)
-        {
-            true => moved(&cmd, &cwd, &unseen)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|p| {
-                    let before = match std::fs::read(&p) {
-                        Err(_) => Ok(None),
-                        Ok(b) => {
-                            String::from_utf8(b).map(|s| Some(ropey::Rope::from_str(&s))).map_err(|_| ())
-                        }
-                    };
-                    (p, before)
-                })
-                .collect(),
-            false => Vec::new(),
-        };
+        let carried = carried_of(&cmd, &cwd, &unseen);
         move |ed: &mut Editor| {
             call.step("files it names read");
             // (the turn ended meanwhile: nobody waits for a card)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
             }
-            for (path, before) in carried {
-                match before {
-                    Ok(before) => crate::checkpoint::record_unseen(ed, path, before, |_: &mut Editor| {}),
-                    Err(()) => ed.session.checkpoints.carried.push(path),
-                }
-            }
+            carry(ed, carried);
             let c = call.clone();
             // (refused with no card: the record keeps it — the card log never saw these, cardauto §8.3)
             let shown = match shown {
@@ -1466,6 +1669,140 @@ fn card(
         }
     });
     Ok(())
+}
+
+/// The files Claude wrote unseen this turn, and those its moves carried that weren't text (real paths).
+fn unseen_now(ed: &Editor) -> Vec<PathBuf> {
+    let checkpoints = &ed.session.checkpoints;
+    let turn = checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone());
+    turn.chain(checkpoints.carried.iter().cloned()).collect()
+}
+
+/// What a line that only moves files (`readonly::only_moves`) does with what Claude wrote unseen: where each
+/// goes (`moved`), with what's there now (its text, nothing, or Err: not text) — on a worker.
+type Carried = Vec<(PathBuf, Result<Option<ropey::Rope>, ()>)>;
+
+fn carried_of(cmd: &str, cwd: &Path, unseen: &[PathBuf]) -> Carried {
+    if unseen.is_empty() || !crate::readonly::only_moves(cmd) {
+        return Vec::new();
+    }
+    let before = |p: &Path| match std::fs::read(p) {
+        Err(_) => Ok(None),
+        Ok(b) => String::from_utf8(b).map(|s| Some(ropey::Rope::from_str(&s))).map_err(|_| ()),
+    };
+    let moved = moved(cmd, cwd, unseen).unwrap_or_default();
+    moved
+        .into_iter()
+        .map(|p| {
+            let b = before(&p);
+            (p, b)
+        })
+        .collect()
+}
+
+/// A move or copy of an unseen file: where it goes is unseen too, from now on — before it runs, so no later
+/// call (a card past the sandbox) reads it as a file the user saw (what's there now kept, when it's text or
+/// nothing; else named like the unseen ones — `Checkpoints.carried`).
+fn carry(ed: &mut Editor, carried: Carried) {
+    for (path, before) in carried {
+        match before {
+            Ok(before) => crate::checkpoint::record_unseen(ed, path, before, |_: &mut Editor| {}),
+            Err(()) => ed.session.checkpoints.carried.push(path),
+        }
+    }
+}
+
+/// Whether Claude's commands are taken as sandboxed at the gate (P3): `cards::sandboxed`, and the look at this
+/// system landed — before it has (`Availability::Unknown`, `sandbox_look` under way) a machine with none, or a
+/// partial one, mustn't skip today's gate; that run's `guard_then_go` looks, on its worker.
+fn sandboxed_here(ed: &Editor) -> bool {
+    ed.sandbox != Availability::Unknown && crate::cards::sandboxed(ed.config.llm.sandbox, &ed.sandbox)
+}
+
+/// A command of Claude's in the sandbox that asks for nothing past it (cardauto P3): any command runs — what it
+/// may do is the session's `Caps`, the kernel holds it there, and what it changes in the checkout joins the
+/// turn (`snapshot.rs`). `Caps` is made on a worker and `cards::decide` is the one rule: a warning of it that
+/// `asks` (publishing, reaching beyond this machine) where the run could reach out (D4) is its card — the
+/// scripts it runs read for that first. A line that only moves a file Claude wrote unseen marks where it goes
+/// unseen before it runs (`carry`): a card past the sandbox later still shows it.
+fn in_sandbox(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(), String> {
+    use crate::cards::{Past, Request};
+    let unseen = unseen_now(ed);
+    let reach = could_reach_out(ed, false);
+    // (nothing to read first — no warning that asks could come true, no unseen file it moves: decided now, where
+    // no session's capabilities could decide it otherwise)
+    let moves = !unseen.is_empty() && crate::readonly::only_moves(&cmd);
+    let request = Request::Run { past: Past::No, sandboxed: true, reads: Vec::new(), outward: false };
+    if let Some(d) = crate::cards::decide_now(&request).filter(|_| !reach && !moves) {
+        return in_sandbox_decided(ed, call, (cmd, cwd), d, Vec::new());
+    }
+    let (basis, root) = (ed.caps_basis(), ed.session.root.clone());
+    ed.events.jobs().spawn(move || {
+        let caps = basis.build();
+        let scripts = match reach {
+            true => read_scripts(&root, &cwd, &scripts_run(&cmd), &[]),
+            false => Vec::new(),
+        };
+        let carried = carried_of(&cmd, &cwd, &unseen);
+        move |ed: &mut Editor| {
+            call.step("what the session may do looked at");
+            // (the turn ended meanwhile: nobody waits for it)
+            if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+                return;
+            }
+            carry(ed, carried);
+            let texts: Vec<(String, String)> = scripts
+                .iter()
+                .filter_map(|s| s.text.as_ref().ok().map(|t| (crate::chat::shown(&root, &s.path), t.clone())))
+                .collect();
+            let on = WarnOn {
+                cmd: &cmd,
+                cwd: &cwd,
+                scripts: &texts,
+                reads: &[],
+                script_changed: false,
+                outside: false,
+            };
+            let asks: Vec<String> = match reach {
+                true => warned(ed, on).into_iter().filter(|w| w.asks).map(|w| w.id).collect(),
+                false => Vec::new(),
+            };
+            let request = Request::Run {
+                past: Past::No,
+                sandboxed: true,
+                reads: Vec::new(),
+                outward: !asks.is_empty(),
+            };
+            let c = call.clone();
+            if let Err(e) =
+                in_sandbox_decided(ed, call, (cmd, cwd), crate::cards::decide(&request, &caps), asks)
+            {
+                answer(ed, c, Err(e));
+            }
+        }
+    });
+    Ok(())
+}
+
+/// What `cards::decide` said of a run in the sandbox: it runs (the same command under way or waiting joined —
+/// `queued::admit`), or its card — a warning that asks (`asks`, its ids).
+fn in_sandbox_decided(
+    ed: &mut Editor,
+    call: Call,
+    (cmd, cwd): (String, PathBuf),
+    d: crate::cards::Decision,
+    asks: Vec<String>,
+) -> Result<(), String> {
+    use crate::cards::{Decision, Why};
+    match d {
+        Decision::None => {
+            guarded(ed, call, Job::Command(cmd, cwd), false);
+            Ok(())
+        }
+        Decision::Outward => card(ed, call, cmd, cwd, None, Why::Asks(asks.join(","))),
+        // (none other for a run in the sandbox asking nothing past it — were there one, its card)
+        _ => card(ed, call, cmd, cwd, None, Why::Unreadable("no rule reads the line whole")),
+    }
 }
 
 /// The last answer since tarae started to a card for `cmd`'s run (`sinceyes::key`: what runs, not the
@@ -1902,8 +2239,8 @@ fn ask_with(
                     ),
                     (true, None) => "Nothing longer than this run can be allowed for it.".into(),
                     (false, _) => {
-                        "a for the rest of this chat, whatever command asks — each command is still \
-                                   asked as usual."
+                        "a for the rest of this chat, whatever command asks — everything else stays in \
+                                   the sandbox."
                             .into()
                     }
                 };
@@ -3150,6 +3487,13 @@ pub fn run_done(ed: &mut Editor) {
     let Some(r) = ed.session.task_run.as_mut() else { return };
     let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known));
     let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
+    // (what blocked a failed run that `also` could open — not a walk up from the project or the run's folder)
+    let run_dir = match r.guard.as_ref() {
+        Some(Guard::In(p)) => p.run.as_ref().map(|d| d.path().to_path_buf()),
+        _ => None,
+    };
+    let below: Vec<&Path> = std::iter::once(ed.session.root.as_path()).chain(run_dir.as_deref()).collect();
+    let candidates = said.as_ref().map(|s| also_candidates(failed, &s.open, &below)).unwrap_or_default();
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
         let r = &*r;
@@ -3212,11 +3556,85 @@ pub fn run_done(ed: &mut Editor) {
             crate::follow::point(ed, "failed", label, &it.path, it.line..it.line + 1, Some(it.message));
         }
     };
+    // (what `also` could open of it: said on a worker — a grant's choices look at the disk — by `Caps` made there)
+    let told = move |ed: &mut Editor, changed: String| {
+        if candidates.is_empty() {
+            return told(ed, changed);
+        }
+        let basis = ed.caps_basis();
+        let (localhost, ports) = (ed.config.llm.sandbox_localhost, ed.config.llm.sandbox_ports.clone());
+        ed.events.jobs().spawn(move || {
+            let line = also_line(&candidates, &basis.build(), &|n| localhost || ports.contains(&n));
+            move |ed: &mut Editor| told(ed, format!("{line}{changed}"))
+        });
+    };
     match snap {
         Some(snap) => run_changes(ed, snap, generation, cmd, told),
         None => told(ed, String::new()),
     }
 }
+
+/// The denials of Claude's run that `also` could open (cardauto P3, §8.4) — only when it failed: one that
+/// passed needed none of them (a test binary's own probes, a formatter's look at `~`). A read or write of a place,
+/// a port on this machine; never a read of a folder above where it works (`below`: the project, the run's own
+/// folder — a tool walking up for its settings: taplo's `~`, `~/.cache`), a unix socket (`unix_socket`'s:
+/// mDNSResponder), a host (the proxy's own card), the terminals. Pure: what it opens is `also_line`'s.
+fn also_candidates(
+    failed: bool,
+    open: &[crate::sandbox::Denial],
+    below: &[&Path],
+) -> Vec<crate::sandbox::Denial> {
+    if !failed {
+        return Vec::new();
+    }
+    let place = |d: &&crate::sandbox::Denial| {
+        let read = d.op.starts_with("file-read") || d.op == crate::sandbox::EITHER;
+        let write = d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER;
+        let walk = read && !write && below.iter().any(|b| b.starts_with(&d.target));
+        d.target.starts_with('/') && (read || write) && !walk && !d.terminal()
+    };
+    open.iter()
+        .filter(|d| place(d) || (!d.target.starts_with('/') && d.port_here().is_some()))
+        .cloned()
+        .collect()
+}
+
+/// What `also` could ask for of `candidates` (`also_candidates`) in a session that may do `caps`, said under the
+/// report — a grant card's choices (`blocked::choices`: never what no card opens), at most `ALSO_SAID`, but a port
+/// open already (`open_port`; Seatbelt names no address: that refusal was a host beyond this machine). Empty:
+/// nothing to ask. On a worker (the choices look at the disk).
+fn also_line(
+    candidates: &[crate::sandbox::Denial],
+    caps: &crate::caps::Caps,
+    open_port: &dyn Fn(u16) -> bool,
+) -> String {
+    use crate::allow::Grant;
+    let mut said: Vec<String> = Vec::new();
+    for g in crate::blocked::choices(candidates, caps).into_iter().map(|c| c.grant) {
+        let one = match &g {
+            Grant::Read(p) | Grant::Key(p) => format!("{{\"read\": \"{}\"}}", crate::allow::tilde(p)),
+            Grant::Write(p) => format!("{{\"write\": \"{}\"}}", crate::allow::tilde(p)),
+            Grant::Port(n) if !open_port(*n) && !caps.ports.iter().any(|e| e.what == *n) => {
+                format!("{{\"port\": {n}}}")
+            }
+            _ => continue,
+        };
+        if !said.contains(&one) && said.len() < ALSO_SAID {
+            said.push(one);
+        }
+    }
+    if said.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nWhat also could open of it, nearest first: {} — if the command needs one, run it again with that also \
+         and your reason; the user decides on a card.\n",
+        said.join(" · ")
+    )
+}
+
+/// What `also_line` names at most.
+const ALSO_SAID: usize = 4;
 
 /// What of the sandbox's Claude was told in its conversation now (`Chat.rules_said`) — a report leaves out what
 /// it would say again (`Guard::report_with`). Nothing known: say it — the conversation's first run, the first
@@ -4175,6 +4593,37 @@ mod tests {
         assert!(!super::allowed("npm testx", &extra), "word for word");
     }
 
+    /// Claude's commands with no sandbox here: today's gate of words (`allowed`, `read_only`, scripts) still asks
+    /// before its card — what its tests check, until piece 5 leaves the no-sandbox card alone. In the sandbox any
+    /// command runs (P3).
+    fn no_sandbox(ed: &mut crate::editor::Editor) {
+        ed.config.llm.sandbox = false;
+    }
+
+    /// What `run` decided for Claude's call `args` (through the worker it may ask on, as `run_card`): the card's
+    /// text, or None — it went to run (`ADMITTED`).
+    fn decided(ed: &mut crate::editor::Editor, args: serde_json::Value) -> Option<String> {
+        ed.offers.clear();
+        // (a free slot: the same command again would join the last one's run — `queued::join`)
+        ed.session.task_run = None;
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        // (the open chat's call, or its worker's answer is dropped as a turn's that ended)
+        let call = match ed.session.chat.as_ref() {
+            Some(c) => super::Call::of(c.generation(), "d1", serde_json::json!(1)),
+            None => super::Call::test(1),
+        };
+        super::run(ed, call, &args).unwrap();
+        let ran = || super::ADMITTED.with(|a| a.borrow().len()) > before;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ed.offers.is_empty() && !ran() {
+            assert!(std::time::Instant::now() < end, "{args}: neither a card nor a run");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        ed.offers.first().map(|o| o.question.clone())
+    }
+
     /// The card `run` puts up for `cmd` (through the worker it asks on, as Claude's call does) — its text.
     fn run_card(ed: &mut crate::editor::Editor, cmd: &str) -> String {
         ed.offers.clear();
@@ -4228,6 +4677,7 @@ mod tests {
         let scratch = crate::scratch::Scratch::new("card-lines");
         let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = dir.clone();
         ed.session.name = "cardlines".into();
         ed.config.llm.command = "sh".into();
@@ -4261,7 +4711,7 @@ mod tests {
         // (its run named by id, as the run's `timing` line — cardauto 1)
         assert!(
             l[0].starts_with(&format!("card cardlines · card#{id} · run#"))
-                && l[0].contains(" · run · why=not-a-check:python3 · shadow=none · n · ")
+                && l[0].contains(" · run · why=not-a-check:python3 · shadow=no-sandbox · n · ")
                 && !l[0].contains("not drawn")
                 && l[0].contains(" · up "),
             "{}",
@@ -4272,13 +4722,13 @@ mod tests {
         super::run(&mut ed, super::Call::of(generation, "r2", json!(2)), &outside).unwrap();
         ed.offer_dismiss();
         let l = lines();
-        assert!(l[1].contains("· run · why=outside · shadow=outside · n · not drawn · up "), "{}", l[1]);
+        assert!(l[1].contains("· run · why=outside · shadow=no-sandbox · n · not drawn · up "), "{}", l[1]);
         // A turn that ends takes its card away: dropped
         card(&mut ed, 3, "awk -f x.awk");
         ed.drop_cards(|w| matches!(w, crate::offer::What::Run(_)));
         let l = lines();
         assert_eq!(l.len(), 3, "{l:?}");
-        assert!(l[2].contains("· run · why=script · shadow=none · dropped · "), "{}", l[2]);
+        assert!(l[2].contains("· run · why=script · shadow=no-sandbox · dropped · "), "{}", l[2]);
         // A card of tarae's own, asking nothing of Claude's: its line all the same (cardburden 5)
         ed.push_offer(crate::offer::Offer::new(
             "x".into(),
@@ -4294,21 +4744,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// cardburden 6: parallel calls of one command stacked a card each, every one read and answered. The front
-    /// run card lists the stacked cards asking for the very same run — `+1 more like it: card#3 — same command,
-    /// unchanged` — and `Y` (only once the card's been drawn whole and settled) runs each, a `card` line each;
-    /// another command's card stays to be answered; one more like it coming after the card settled makes it a
-    /// card to read again, its list replaced. Cards that warn of something don't group, nor do those past the
-    /// sandbox or with none around them (`Offer::groupable`), nor commands the same but for spaces in quotes.
-    /// (The runs are `touch` in the test's own folder.)
+    /// cardburden 6 after P3: parallel calls of one command stacked a card each, every one read and answered —
+    /// in the sandbox none comes now. The same command sent while its run is under way joins it (`queued`): one
+    /// run, each caller answered; another command is a run of its own. (The run cards `Offer::groupable` takes —
+    /// in the sandbox, warning of nothing — are gone with P3: piece 5 deletes the grouping. The runs are `touch`
+    /// in the test's own folder.)
     #[test]
-    fn stacked_cards_for_the_same_run_are_answered_as_one_group() {
+    fn parallel_calls_of_one_command_in_the_sandbox_are_one_run() {
         use serde_json::json;
-        let scratch = crate::scratch::Scratch::new("run-group");
+        let scratch = crate::scratch::Scratch::new("run-one");
         let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
-        ed.session.name = "group".into();
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut ed);
@@ -4316,110 +4763,37 @@ mod tests {
         c.state = crate::chat::State::Thinking;
         c.focused = false;
         let generation = c.generation();
-        let ask = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
-            super::run(
-                ed,
-                super::Call::of(generation, &format!("r{n}"), json!(n)),
-                &json!({ "command": cmd }),
-            )
-            .unwrap();
+        // (the same command holds the slot a second: the others come while it runs, as parallel calls do)
+        let same = "sleep 1; touch same.txt";
+        let send = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
+            let call = super::Call::of(generation, &format!("r{n}"), json!(n));
+            super::run(ed, call, &json!({ "command": cmd })).unwrap();
         };
-        let (same, other) = ("touch same.txt", "touch other.txt");
-        ask(&mut ed, 1, same);
-        ask(&mut ed, 2, other);
-        ask(&mut ed, 3, same);
-        ed.handle_event(crate::event::Event::Resize);
-        let ids: Vec<u64> = ed.offers.iter().map(|o| o.id).collect();
-        let front = &ed.offers[0];
-        assert_eq!(front.like, [ids[2]], "the same run, not the other command");
-        let said = format!("+1 more like it: card#{} — same command, unchanged", ids[2]);
-        assert!(front.question.ends_with(&said), "{}", front.question);
-        assert!(front.answers(false).contains(&('Y', "All listed")));
-        assert!(ed.offers[1..].iter().all(|o| o.like.is_empty()), "the front's list only");
-        // Not drawn yet: `Y` isn't an answer
-        ed.handle_key("Y".parse().unwrap());
-        assert_eq!(ed.offers.len(), 3);
-        // Drawn, not settled: not yet either (a key as it comes isn't an answer)
-        crate::term::render(&mut ed, &mut Vec::new(), 140, 40).unwrap();
-        ed.handle_key("Y".parse().unwrap());
-        assert_eq!(ed.offers.iter().filter(|o| !o.installing()).count(), 3, "not settled");
-        // Drawn whole and settled — then another like it comes (the review of 6): the list grows, the card is
-        // to be read again (`rev`), its paragraph replaced, not added to; `Y` waits for that
-        let settle = |ed: &mut crate::editor::Editor| {
-            crate::term::render(ed, &mut Vec::new(), 140, 40).unwrap();
-            let o = (ed.offers[0].id, ed.offers[0].rev);
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-            o.1
-        };
-        let rev = settle(&mut ed);
-        ask(&mut ed, 4, same);
-        ed.handle_event(crate::event::Event::Resize);
-        let late = ed.offers.last().unwrap().id;
-        let front = &ed.offers[0];
-        assert_eq!(front.like, [ids[2], late]);
-        assert!(front.rev > rev, "to be read again");
-        assert_eq!(front.question.matches("more like it").count(), 1, "{}", front.question);
-        let said = format!("+2 more like it: card#{}, card#{late} — same command, unchanged", ids[2]);
-        assert!(front.question.ends_with(&said), "{}", front.question);
-        ed.handle_key("Y".parse().unwrap());
-        assert_eq!(
-            ed.offers.iter().filter(|o| !o.installing()).count(),
-            4,
-            "not before its new list was seen"
-        );
-        // Seen as it is: `Y` runs the three, the other stays
-        settle(&mut ed);
-        ed.handle_key("Y".parse().unwrap());
-        let up: Vec<u64> = ed.offers.iter().filter(|o| !o.installing()).map(|o| o.id).collect();
-        assert_eq!(up, [ids[1]], "the other command's card stays");
-        let lines = crate::cards::logged_lines("card group · ");
-        for id in [ids[0], ids[2], late] {
-            assert!(
-                lines.iter().any(|l| {
-                    l.contains(&format!("card#{id} · run#"))
-                        && l.contains(" · run · ")
-                        && l.contains(" · Y · ")
-                }),
-                "{lines:?}"
-            );
-        }
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !dir.join("same.txt").exists() {
-            assert!(std::time::Instant::now() < end, "it ran");
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
-                ed.handle_event(ev);
-            }
-        }
-        assert!(!dir.join("other.txt").exists(), "not answered");
-        // Cards that warn of something (reaching beyond this machine) never group
-        ed.offers.clear();
-        ask(&mut ed, 5, "curl -s http://localhost:9");
-        ask(&mut ed, 6, "curl -s http://localhost:9");
-        ed.handle_event(crate::event::Event::Resize);
-        assert_eq!(ed.offers.len(), 2);
-        let warns =
-            |o: &crate::offer::Offer| matches!(&o.what, crate::offer::What::Run(r) if !r.warned.is_empty());
-        assert!(ed.offers.iter().all(warns), "both warn");
-        assert!(ed.offers[0].like.is_empty(), "a warning on it: answered one by one");
-        // The same words but for the spaces inside quotes: another command (`queued`'s key would collapse
-        // them — the review of 6)
-        ed.offers.clear();
-        ask(&mut ed, 7, "touch 'a  b'");
-        ask(&mut ed, 8, "touch 'a b'");
-        ed.handle_event(crate::event::Event::Resize);
-        assert_eq!(ed.offers.len(), 2);
-        assert!(ed.offers[0].like.is_empty(), "not the same command");
-        // No sandbox around them (`llm.sandbox` off: "it runs with all your permissions"): one by one
-        ed.offers.clear();
-        ed.config.llm.sandbox = false;
-        // (a command of its own: one sent again while its run still waits joins that run, no card — `queued`)
-        ask(&mut ed, 9, "touch bare.txt");
-        ask(&mut ed, 10, "touch bare.txt");
-        ed.handle_event(crate::event::Event::Resize);
-        let bare = |o: &crate::offer::Offer| matches!(&o.what, crate::offer::What::Run(r) if r.unprotected);
-        assert!(ed.offers.len() == 2 && ed.offers.iter().all(bare), "both unprotected");
-        assert!(ed.offers[0].like.is_empty(), "no sandbox: answered one by one");
-        ed.offers.clear();
+        let pump =
+            |ed: &mut crate::editor::Editor, what: &str, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+                let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !done(ed) {
+                    assert!(std::time::Instant::now() < end, "{what}");
+                    assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
+                    if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                        ed.handle_event(ev);
+                    }
+                }
+            };
+        send(&mut ed, 1, same);
+        let running =
+            |ed: &crate::editor::Editor| ed.session.task_run.as_ref().is_some_and(|r| r.task.cmd == same);
+        pump(&mut ed, "the first under way", &running);
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        send(&mut ed, 2, "touch other.txt");
+        send(&mut ed, 3, same);
+        // (the other admitted; the same one joined the run under way, before any worker — `run`'s first look)
+        pump(&mut ed, "the other admitted", &|_| super::ADMITTED.with(|a| a.borrow().len()) == before + 1);
+        let r = ed.session.task_run.as_ref().unwrap();
+        assert!(r.task.cmd == same && r.joined.len() == 1, "the same command one run");
+        let answered = |n: u64| super::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(n)));
+        pump(&mut ed, "each caller answered", &|_| [1, 2, 3].iter().all(|n| answered(*n)));
+        assert!(dir.join("same.txt").exists() && dir.join("other.txt").exists());
         ed.session.task_run = None;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4434,6 +4808,7 @@ mod tests {
         let scratch = crate::scratch::Scratch::new("run-queue");
         let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -4518,6 +4893,7 @@ mod tests {
         let scratch = crate::scratch::Scratch::new("run-waits");
         let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -4705,6 +5081,7 @@ mod tests {
     #[test]
     fn a_copy_of_an_unseen_file_is_unseen_too() {
         use crate::checkpoint::Touched;
+        use serde_json::json;
         let scratch = crate::scratch::Scratch::new("carried");
         let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("bin")).unwrap();
@@ -4720,27 +5097,458 @@ mod tests {
             ..Default::default()
         });
         let shown = |q: &str, f: &str| q.contains(&format!("{f} — written this turn, unseen:\necho evil"));
-        // The copy: nothing on its own card (copying runs nothing) — then, run in a second call, flagged
-        let q = run_card(&mut ed, "cp evil.sh ok.sh");
-        assert!(!q.contains("written this turn"), "{q}");
+        let (plain, outside) = (
+            |cmd: &str| json!({ "command": cmd }),
+            |cmd: &str| json!({ "command": cmd, "outside_sandbox": true, "reason": "stand-in" }),
+        );
+        // The copy runs unasked in the sandbox (P3), where it goes marked unseen before it runs — then, run
+        // outside the sandbox in a second call, it's on that card. (The copies are the test's own as well: the
+        // runs go in their turn.)
+        assert_eq!(decided(&mut ed, plain("cp evil.sh ok.sh")), None, "in the sandbox: it runs");
         std::fs::copy(dir.join("evil.sh"), dir.join("ok.sh")).unwrap();
-        let q = run_card(&mut ed, "sh ok.sh");
+        let q = decided(&mut ed, outside("sh ok.sh")).expect("its card");
         assert!(shown(&q, "ok.sh"), "the copy still unseen: {q}");
         // Moved into a folder, then run from there
-        run_card(&mut ed, "mv ok.sh bin");
-        std::fs::rename(dir.join("ok.sh"), dir.join("bin/ok.sh")).unwrap();
-        let q = run_card(&mut ed, "./bin/ok.sh");
+        assert_eq!(decided(&mut ed, plain("mv ok.sh bin")), None);
+        let _ = std::fs::rename(dir.join("ok.sh"), dir.join("bin/ok.sh"));
+        let q = decided(&mut ed, outside("./bin/ok.sh")).expect("its card");
         assert!(shown(&q, "bin/ok.sh"), "{q}");
         // Over a file that wasn't text (nothing kept of it for `space u` — still unseen for the guard)
-        run_card(&mut ed, "cp evil.sh blob.bin");
+        assert_eq!(decided(&mut ed, plain("cp evil.sh blob.bin")), None);
         std::fs::copy(dir.join("evil.sh"), dir.join("blob.bin")).unwrap();
-        assert!(shown(&run_card(&mut ed, "sh blob.bin"), "blob.bin"));
-        // A target it can't tell: the unseen source is named on the card itself
+        assert!(shown(&decided(&mut ed, outside("sh blob.bin")).expect("its card"), "blob.bin"));
+        // With no sandbox, a target it can't tell: the unseen source is named on the card itself (in the
+        // sandbox it runs, and what it made in the checkout joins the turn unseen — `snapshot.rs`)
+        no_sandbox(&mut ed);
         let q = run_card(&mut ed, "cp -t bin evil.sh");
         assert!(shown(&q, "evil.sh"), "{q}");
         // The copy is in the turn's files: its review shows it, `space u` takes it back
         assert!(ed.session.checkpoints.turn.iter().any(|t| t.unseen && t.path == dir.join("ok.sh")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardauto P3: the frictions' commands run unasked in the sandbox — #102 reads beside each other, #110 `git
+    /// diff --no-index`, #112 `$(rustc --print sysroot)`, #113 a loop of reads, #114 names set in front, #116 a
+    /// binary's tables, #117 a script run. Past the sandbox what shows what will run stays: a script Claude wrote
+    /// this turn unseen is on the run-outside card whole, one too long for a card is refused there with no card
+    /// (`showable`) — in the sandbox it just runs. (Stand-ins: the only file is the script, which echoes; every
+    /// other command fails in the test's own folder.)
+    #[test]
+    fn the_frictions_commands_run_unasked_in_the_sandbox() {
+        use crate::checkpoint::Touched;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-frictions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("gen.sh"), "echo marker\n").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        for cmd in [
+            "cat ../a/x.txt ../a/y.txt",
+            "git diff --no-index --stat a.txt b.txt",
+            "ls $(rustc --print sysroot)/lib/rustlib/src/rust/library",
+            "for f in a.rs b.rs; do wc -l \"$f\"; done | sort",
+            "LC_ALL=C sort list.txt",
+            "nm -gU target/debug/x | head",
+            "awk -f gen.awk data.txt",
+            "python3 tools/gen.py --fast",
+            "sh gen.sh",
+        ] {
+            assert_eq!(decided(&mut ed, json!({ "command": cmd })), None, "{cmd}: a card");
+        }
+        // Written unseen this turn: run outside, it's on the card whole; in the sandbox it runs
+        let unseen = |ed: &mut crate::editor::Editor, f: &str| {
+            let after = ropey::Rope::from_str(&std::fs::read_to_string(dir.join(f)).unwrap());
+            let t = Touched { path: dir.join(f), before: None, after, unseen: true, ..Default::default() };
+            ed.session.checkpoints.turn.push(t);
+        };
+        unseen(&mut ed, "gen.sh");
+        let outside = |cmd: &str| json!({ "command": cmd, "outside_sandbox": true, "reason": "stand-in" });
+        let q = decided(&mut ed, outside("sh gen.sh")).expect("the run-outside card");
+        assert!(q.contains("gen.sh — written this turn, unseen:\necho marker"), "{q}");
+        assert_eq!(decided(&mut ed, json!({ "command": "sh gen.sh" })), None, "in the sandbox: it runs");
+        // Too long to show: refused past the sandbox, no card — and in the sandbox it runs
+        std::fs::write(dir.join("long.sh"), "echo marker\n".repeat(super::SHOWN_LINES_MAX + 1)).unwrap();
+        unseen(&mut ed, "long.sh");
+        ed.offers.clear();
+        ed.session.task_run = None;
+        super::run(&mut ed, super::Call::test(9), &outside("sh long.sh")).unwrap();
+        let refused = || {
+            super::ANSWERED.with(|a| {
+                a.borrow().iter().any(|(id, r)| {
+                    *id == json!(9) && r.as_ref().is_err_and(|e| e.contains("without the user seeing it"))
+                })
+            })
+        };
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !refused() {
+            assert!(std::time::Instant::now() < end, "refused");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(ed.offers.is_empty(), "no card");
+        assert_eq!(decided(&mut ed, json!({ "command": "sh long.sh" })), None, "in the sandbox: it runs");
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardauto P3: `also` asks for one thing past the session's capabilities on a grant card — Claude's reason on
+    /// it, its call waiting; `y` runs the command with it open (this run's grant), `n` is said to Claude and sticks
+    /// for the chat (asked again: refused, no card). A port no card opens, a place in the project, `also` beside
+    /// `outside_sandbox` or with no reason: refused, no card; what's open already just runs. At most `ALSO_MAX`
+    /// cards a turn, the count new each turn. (Stand-ins: `true`; ports nothing listens on.)
+    #[test]
+    fn also_asks_for_one_thing_on_a_grant_card() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-also-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        let also =
+            |also: serde_json::Value| json!({ "command": "true", "also": also, "reason": "its test server" });
+        // A card (its question), a run (None), or refused (Err) — what `run` decided for call `n`
+        let send = |ed: &mut crate::editor::Editor, n: u64, args: serde_json::Value| {
+            ed.offers.clear();
+            ed.session.task_run = None;
+            let before = super::ADMITTED.with(|a| a.borrow().len());
+            let answered = || {
+                super::ANSWERED
+                    .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+            };
+            super::run(ed, super::Call::of(generation, &format!("a{n}"), json!(n)), &args)?;
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(o) = ed.offers.first() {
+                    return Ok(Some(o.question.clone()));
+                }
+                if super::ADMITTED.with(|a| a.borrow().len()) > before {
+                    return Ok(None);
+                }
+                if let Some(Err(e)) = answered() {
+                    return Err(e);
+                }
+                assert!(std::time::Instant::now() < end, "{args}: nothing decided");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        // The card: what it lets, Claude's reason, the answers a port's grant has
+        let q = send(&mut ed, 1, also(json!({ "port": 47001 }))).unwrap().expect("its card");
+        assert!(q.contains("Claude asks, for `true`: its test server"), "{q}");
+        let o = &ed.offers[0];
+        assert_eq!(o.title, crate::blocked::GRANT_TITLE);
+        assert_eq!(o.answers(false), [('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]);
+        // `n`: said to Claude, and it sticks — asked again, no card
+        ed.offer_dismiss();
+        let no = super::ANSWERED
+            .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(1)).map(|(_, r)| r.clone()));
+        assert!(no.is_some_and(|r| r.is_err_and(|e| e.contains("said no"))), "told no");
+        let again = send(&mut ed, 2, also(json!({ "port": 47001 })));
+        assert!(again.as_ref().is_err_and(|e| e.contains("don't ask for it again")), "{again:?}");
+        // `y`: the command runs with it open, this run
+        assert!(send(&mut ed, 3, also(json!({ "port": 47002 }))).unwrap().is_some());
+        ed.offer_accept();
+        let extra = super::ADMITTED.with(|a| a.borrow().last().map(|(_, e)| e.grant.clone()));
+        assert_eq!(extra, Some(Some(crate::allow::Grant::Port(47002))), "this run's grant");
+        // Refused with no card: a risky port, a place in the project, beside outside_sandbox, no reason
+        let risky = crate::sandbox::RISKY_PORTS[0].0;
+        let r = send(&mut ed, 4, also(json!({ "port": risky })));
+        assert!(r.as_ref().is_err_and(|e| e.contains("no card opens")), "{r:?}");
+        let r = send(&mut ed, 5, also(json!({ "write": "src" })));
+        assert!(r.as_ref().is_err_and(|e| e.contains("edit tool")), "{r:?}");
+        let mut both = also(json!({ "port": 47003 }));
+        both["outside_sandbox"] = json!(true);
+        assert!(send(&mut ed, 6, both).is_err_and(|e| e.contains("not with outside_sandbox")));
+        let r = send(&mut ed, 7, json!({ "command": "true", "also": { "port": 47003 } }));
+        assert!(r.is_err_and(|e| e.contains("also needs a reason")));
+        // Open already — the project is read: it runs, no card
+        assert_eq!(send(&mut ed, 8, also(json!({ "read": "src" }))), Ok(None));
+        // Three cards a turn at most (two so far): one more, then refused — a new turn counts again
+        assert!(send(&mut ed, 9, also(json!({ "port": 47004 }))).unwrap().is_some());
+        ed.offers.clear();
+        let r = send(&mut ed, 10, also(json!({ "port": 47005 })));
+        assert!(r.as_ref().is_err_and(|e| e.contains("3 cards for also this turn")), "{r:?}");
+        crate::reads::turn_over(&mut ed);
+        assert!(send(&mut ed, 11, also(json!({ "port": 47005 }))).unwrap().is_some(), "a new turn");
+        ed.offers.clear();
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of piece 4 (4): in the sandbox with the network open (D4: a warning that `asks` could come true), a
+    /// command that publishes comes to its card — `git push` by its line, `sh deploy.sh` by what the script says,
+    /// read on `in_sandbox`'s worker — its warning on it and `Why::Asks` in its card line; one that warns of nothing
+    /// runs. (Every card answered `n`; and were one to run, nothing pushes: the line stops at `false`, the script —
+    /// a fixture in the test's own folder — at `exit 0`.)
+    #[test]
+    fn in_the_sandbox_a_command_that_reaches_out_asks_where_it_could() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-outward-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("deploy.sh"), "exit 0\ngit push origin main\n").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.name = "outward".into();
+        ed.config.llm.sandbox_network = true;
+        for cmd in ["false && git push origin main", "sh deploy.sh"] {
+            let q = decided(&mut ed, json!({ "command": cmd })).unwrap_or_else(|| panic!("{cmd}: it ran"));
+            assert!(q.contains("▲ It reaches beyond this machine"), "{cmd}: {q}");
+            assert!(q.contains("is asked each time"), "{cmd}: {q}");
+            ed.offer_dismiss();
+        }
+        let lines = crate::cards::logged_lines("card outward · ");
+        assert!(lines.len() == 2 && lines.iter().all(|l| l.contains(" · why=asks:")), "{lines:?}");
+        assert_eq!(decided(&mut ed, json!({ "command": "git status" })), None, "warns of nothing: it runs");
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of piece 4 (5): `also` is no way around what `in_sandbox` looks at. Open already (a read in the
+    /// project), the run goes through it: with the network open `git push` comes to its `Why::Asks` card, never
+    /// runs; a move of a file Claude wrote unseen marks where it goes. A grant's card says the warning that asks
+    /// — any answer but `n` runs it. (Every card answered `n`; were one to run, the line stops at `false`; the move
+    /// is of a stand-in in the test's own folder.)
+    #[test]
+    fn also_open_already_is_looked_at_as_any_run_in_the_sandbox() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-also-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("gen.sh"), "echo marker\n").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.name = "also-open".into();
+        let also = |cmd: &str, also: serde_json::Value| json!({ "command": cmd, "also": also, "reason": "stand-in" });
+        // An unseen file moved, the read open already: where it goes is unseen before it runs
+        let after = ropey::Rope::from_str("echo marker\n");
+        let t = crate::checkpoint::Touched {
+            path: dir.join("gen.sh"),
+            after,
+            unseen: true,
+            ..Default::default()
+        };
+        ed.session.checkpoints.turn.push(t);
+        assert_eq!(decided(&mut ed, also("mv gen.sh moved.sh", json!({ "read": "src" }))), None, "it runs");
+        let carried = |ed: &crate::editor::Editor| {
+            ed.session.checkpoints.turn.iter().any(|t| t.unseen && t.path == dir.join("moved.sh"))
+        };
+        assert!(carried(&ed), "where it goes is unseen");
+        // The network open: `git push` with an `also` open already comes to its card, as without `also`
+        ed.config.llm.sandbox_network = true;
+        let push = "false && git push origin main";
+        let q = decided(&mut ed, also(push, json!({ "read": "src" }))).expect("its card, never run");
+        assert!(q.contains("▲ It reaches beyond this machine") && q.contains("is asked each time"), "{q}");
+        ed.offer_dismiss();
+        let lines = crate::cards::logged_lines("card also-open · ");
+        assert!(lines.iter().any(|l| l.contains(" · why=asks:")), "{lines:?}");
+        // A grant's card for it says the warning too
+        let q = decided(&mut ed, also(push, json!({ "port": 47021 }))).expect("the grant's card");
+        assert!(q.contains("▲ It reaches beyond this machine"), "{q}");
+        ed.offers.clear();
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of piece 4 (3): `ALSO_MAX` holds for calls sent together — each counted as it comes in, not when its
+    /// worker's answer lands — and one that ends with no card (open already, refused) gives its place back.
+    /// (Stand-ins: `true`; ports nothing listens on.)
+    #[test]
+    fn also_cards_sent_together_stay_within_a_turns_three() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-also-max-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        let send = |ed: &mut crate::editor::Editor, n: u64, also: serde_json::Value| {
+            let args = json!({ "command": "true", "also": also, "reason": "its test server" });
+            super::run(ed, super::Call::of(generation, &format!("m{n}"), json!(n)), &args)
+        };
+        let answered = |n: u64| super::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(n)));
+        let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(ed) {
+                assert!(std::time::Instant::now() < end, "waited too long");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        // Open already (the project is read) and refused (a place in the project): no card, the place given back
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        for n in 1..=3 {
+            send(&mut ed, n, json!({ "read": "src" })).unwrap();
+        }
+        // (three in flight: their places are taken until their answers land)
+        assert_eq!(ed.session.chat.as_ref().unwrap().also_asked, 3);
+        pump(&mut ed, &|_| super::ADMITTED.with(|a| a.borrow().len()) == before + 3);
+        send(&mut ed, 4, json!({ "write": "src" })).unwrap();
+        pump(&mut ed, &|_| answered(4));
+        assert_eq!(ed.session.chat.as_ref().unwrap().also_asked, 0, "no card, no place taken");
+        // Four sent together: three cards, the fourth refused when it comes in
+        let mut refused = Vec::new();
+        for n in 5..=8 {
+            if let Err(e) = send(&mut ed, n, json!({ "port": 47030 + n })) {
+                refused.push((n, e));
+            }
+        }
+        assert!(
+            refused.len() == 1 && refused[0].0 == 8 && refused[0].1.contains("3 cards for also this turn"),
+            "{refused:?}"
+        );
+        pump(&mut ed, &|ed| ed.offers.len() == 3);
+        ed.offers.clear();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of piece 4 (2): before the first look at the sandbox has landed (`Availability::Unknown`) a run
+    /// isn't taken as sandboxed — a machine with none, or a partial one, would skip today's gate: it gets its card
+    /// ("unprotected for this chat" agreed too), and `also` has nothing to open yet. (Stand-in: `touch` in the
+    /// test's own folder — never run: answered no.)
+    #[test]
+    fn a_run_before_the_sandbox_is_known_isnt_taken_as_sandboxed() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-unknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.unprotected = true;
+        ed.sandbox = crate::sandbox::Availability::Unknown;
+        let q = decided(&mut ed, json!({ "command": format!("touch {}", dir.join("made").display()) }));
+        assert!(q.is_some(), "today's gate: its card");
+        ed.offer_dismiss();
+        assert!(!dir.join("made").exists());
+        let also = json!({ "command": "true", "also": { "port": 47021 }, "reason": "its test server" });
+        let r = super::run(&mut ed, super::Call::test(2), &also);
+        assert!(r.as_ref().is_err_and(|e| e.contains("isn't looked at yet")), "{r:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review of piece 4 (1): an `also` card goes with its turn, as the run cards do; an answer that comes for a
+    /// call nobody waits on any more (its turn over) stores no grant and records no refusal — nothing runs.
+    /// (Stand-ins: `true`; ports nothing listens on.)
+    #[test]
+    fn an_also_card_goes_with_its_turn() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-also-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        let args = json!({ "command": "true", "also": { "port": 47011 }, "reason": "its test server" });
+        super::run(&mut ed, super::Call::of(generation, "t1", json!(1)), &args).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ed.offers.is_empty() {
+            assert!(std::time::Instant::now() < end, "its card");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        // The turn ends: the card goes with it
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        super::turn_over(&mut ed);
+        assert!(ed.offers.is_empty(), "still up: {:?}", ed.offers.first().map(|o| &o.question));
+        // An answer for a call whose turn is over: no grant kept, no refusal, nothing run
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        let run = |n: u64| crate::blocked::BlockedRun {
+            job: super::Job::Command("true".into(), dir.clone()),
+            denials: Vec::new(),
+            from: None,
+            claude: Some(super::Call::of(generation, &format!("t{n}"), json!(n))),
+        };
+        let port = crate::allow::Grant::Port(47012);
+        crate::blocked::grant_answer(&mut ed, 0, port.clone(), run(2), Some(crate::allow::Scope::ThisChat));
+        crate::blocked::grant_answer(&mut ed, 0, port.clone(), run(3), None);
+        let c = ed.session.chat.as_ref().unwrap();
+        assert!(!c.allowed.ports.contains(&47012) && c.also_refused.is_empty(), "nothing kept");
+        assert_eq!(super::ADMITTED.with(|a| a.borrow().len()), before, "nothing ran");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// cardauto §8.4: a report invites `also` only for what can matter — never for a run that passed (a cargo test
+    /// run of this repository: taplo walking up from its folder, mDNSResponder, the test binary's own probes),
+    /// nor for a look at a folder above the project or the run's own, a unix socket, a refusal with no address;
+    /// a failed run's read of a place, and a port the settings don't open, it names. (A stand-in home; nothing
+    /// read or run.)
+    #[test]
+    fn the_report_asks_for_also_only_for_what_can_matter() {
+        use crate::sandbox::Denial;
+        let home = std::env::temp_dir().join(format!("tarae-also-noise-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let (root, run) = (home.join("proj"), home.join(".cache/tarae/runs/9172-1/12"));
+        for d in [&root, &run, &home.join("data")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let home = std::fs::canonicalize(&home).unwrap();
+        let (root, run) = (home.join("proj"), home.join(".cache/tarae/runs/9172-1/12"));
+        let at = |p: &std::path::Path| p.display().to_string();
+        let d = |process: &str, op: &str, target: String| Denial {
+            process: process.into(),
+            op: op.into(),
+            target,
+        };
+        let mut noise: Vec<Denial> =
+            ["", ".cache", ".cache/tarae", ".cache/tarae/runs", ".cache/tarae/runs/9172-1"]
+                .iter()
+                .map(|r| d("taplo", "file-read-data", at(&home.join(r))))
+                .collect();
+        noise.push(d("taplo", "network-outbound", "/private/var/run/mDNSResponder".into()));
+        noise.push(d("tarae-test", "network-outbound", String::new()));
+        noise.push(d("tarae-test", "process-info-pidinfo", String::new()));
+        let probes = [d("tarae-test", "file-read-data", at(&home.join(".vscode/extensions")))];
+        let below = [root.as_path(), run.as_path()];
+        let all: Vec<Denial> = noise.iter().chain(&probes).cloned().collect();
+        assert!(super::also_candidates(false, &all, &below).is_empty(), "a run that passed: none");
+        assert!(super::also_candidates(true, &noise, &below).is_empty(), "noise, failed or not: none");
+        // A failed run's read of a place in home, and a port: named — a port the settings open isn't
+        let data = d("node", "file-read-data", at(&home.join("data/x.csv")));
+        let port = d("node", "network-outbound", "remote:*:5432".into());
+        let mut failed = noise.clone();
+        failed.extend([data, port]);
+        let c = super::also_candidates(true, &failed, &below);
+        assert_eq!(c.len(), 2, "{c:?}");
+        let caps = crate::caps::Caps::at(&home, &root);
+        let line = super::also_line(&c, &caps, &|_| false);
+        assert!(line.contains("/data\"}") && line.contains("{\"port\": 5432}"), "{line}");
+        let line = super::also_line(&c, &caps, &|n| n == 5432);
+        assert!(!line.contains("port"), "open already: {line}");
+        assert_eq!(super::also_line(&[], &caps, &|_| false), "", "nothing: no line");
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// #119: Claude asks for one unix socket past the sandbox, not the sandbox off: the card names that file,
@@ -4901,6 +5709,7 @@ mod tests {
                     job: super::Job::Command(first.into(), dir.clone()),
                     denials: Vec::new(),
                     from: None,
+                    claude: None,
                 }),
             },
         );
@@ -4911,8 +5720,8 @@ mod tests {
 
     /// #182: `a` on a socket's card is that socket for the rest of the chat, for any command — and the card
     /// says so (a socket that isn't Docker's: Docker's is the command's — #193). Asked again for it (the very
-    /// same call, right after): no socket card; the command goes as any command does — one that runs unasked
-    /// runs, another gets its own card, without the socket in it.
+    /// same call, right after): no socket card; the command goes as any command does — in the sandbox it runs
+    /// (P3), another command with it too.
     #[test]
     fn a_socket_allowed_for_the_chat_isnt_asked_again() {
         use serde_json::json;
@@ -4926,12 +5735,14 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut ed);
+        // (a turn under way: what runs is its call's)
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
         let ask = |ed: &mut crate::editor::Editor, n: u64, command: &str| {
             let args =
                 json!({ "command": command, "unix_socket": sock.to_str().unwrap(), "reason": "docker" });
             super::run(ed, super::Call::test(n), &args)
         };
-        // (stand-ins: `true` reads nothing and runs unasked; `make demo` — not a check — asks)
+        // (stand-ins: `true` and `echo` touch nothing)
         ask(&mut ed, 1, "true").unwrap();
         let o = ed.offers.first().expect("its card");
         assert_eq!(o.title, super::SOCKET_RUN_TITLE);
@@ -4939,21 +5750,18 @@ mod tests {
         let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             q.contains(
-                "y lets it connect for this run only; a for the rest of this chat, whatever command asks — each \
-                 command is still asked as usual."
+                "y lets it connect for this run only; a for the rest of this chat, whatever command asks — \
+                 everything else stays in the sandbox."
             ),
             "{q}"
         );
         ed.offer_for_chat();
-        // The very same call again: no card — it runs
-        ed.offers.clear();
-        ask(&mut ed, 2, "true").unwrap();
-        assert!(ed.offers.is_empty(), "asked again: {:?}", ed.offers.first().map(|o| &o.question));
-        // Another command with it: its own card, as any — the socket not asked again
-        ask(&mut ed, 3, "make demo").unwrap();
-        let o = ed.offers.first().expect("the command's card");
-        assert_eq!(o.title, "Claude wants to run");
-        assert!(!o.question.contains("It may connect"), "{}", o.question);
+        // The very same call again: no card — it runs; another command with it too, as any in the sandbox (P3)
+        let with = |command: &str| json!({ "command": command, "unix_socket": sock.to_str().unwrap(), "reason": "docker" });
+        for command in ["true", "echo stand-in"] {
+            let q = decided(&mut ed, with(command));
+            assert_eq!(q, None, "{command}: asked again");
+        }
         ed.session.task_run = None;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4983,6 +5791,7 @@ mod tests {
         std::fs::write(dir.join("long.py"), "# marker\n".repeat(super::SCRIPT_LINES_MAX + 1)).unwrap();
         std::fs::write(dir.join("tool"), b"\xcf\xfa\xed\xfe\x00\x00binary").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = dir.clone();
         for (cmd, file, marker) in [
             ("awk -f x.awk data.txt", "x.awk", "marker-awk"),
@@ -5044,6 +5853,7 @@ mod tests {
         let dir = std::fs::canonicalize(&dir).unwrap();
         let (proj, other) = (dir.join("proj"), dir.join("other"));
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = proj.clone();
         // A card, or the run started at once — what `run` decided
         let decided = |ed: &mut crate::editor::Editor, cmd: &str| -> Option<String> {
@@ -5496,6 +6306,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("target/x")).unwrap();
         std::fs::write(dir.join("target/x/setup.sh"), "touch set-up\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -5668,6 +6479,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("xtask/src")).unwrap();
         std::fs::write(dir.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        no_sandbox(&mut ed);
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -5963,6 +6775,7 @@ mod tests {
         let report = |blocked: bool, guarantees: Option<u64>| crate::sandbox::Report {
             text: String::new(),
             blocked,
+            open: Vec::new(),
             rules: 7,
             guarantees,
         };

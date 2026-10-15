@@ -6352,7 +6352,9 @@ mod tests {
             let r = call(&mut ed, json!({ "command": "ls", "cwd": cwd })).expect("refused now");
             assert!(r["result"]["isError"] == true && r.to_string().contains(why), "{r}");
         }
-        // A cd into nothing: the shell would stay put and read `../../x` from the root — the card, not a run
+        // A cd into nothing: the shell would stay put and read `../../x` from the root — with no sandbox, the
+        // card, not a run (in the sandbox it runs: what it reads is the sandbox's to hold — P3)
+        ed.config.llm.sandbox = false;
         let cmd = "cd no-such-folder; cat ../../tarae-not-there";
         assert!(call(&mut ed, json!({ "command": cmd })).is_none());
         settle_for(&mut ed, |ed| {
@@ -6415,6 +6417,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         let mut ed = editor("");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "basename one two" }));
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
@@ -6451,6 +6455,7 @@ mod tests {
         let piped = "basename one two 2>&1 | grep -E \"one|x\" | head -n 1";
         // Allowed: no card, it ran
         let mut ed = editor("");
+        ed.config.llm.sandbox = false;
         ed.config.llm.run_allow = vec!["basename one".into()];
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": piped }));
         feed(&mut ed, "<space>lsay it<ret>");
@@ -6461,6 +6466,8 @@ mod tests {
         // Not allowed yet: the card offers the command again, its filters aside (#193)
         std::fs::remove_file(&log).ok();
         let mut ed = editor("");
+        // (today's gate: in the sandbox any command runs — P3)
+        ed.config.llm.sandbox = false;
         claude_calls(&mut ed, &dir, "run", &json!({ "command": piped }));
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
@@ -6469,6 +6476,7 @@ mod tests {
         // A pipe into a writer isn't a filter
         std::fs::remove_file(&log).ok();
         let mut ed = editor("");
+        ed.config.llm.sandbox = false;
         ed.config.llm.run_allow = vec!["basename one".into()];
         let tee = format!("basename one two | tee {}", dir.join("out").display());
         claude_calls(&mut ed, &dir, "run", &json!({ "command": tee }));
@@ -6577,6 +6585,8 @@ mod tests {
         std::fs::remove_file(&log).ok();
         let command = format!("cat {}", marker.display());
         let mut ed = editor("");
+        // (today's gate: in the sandbox any command runs — P3)
+        ed.config.llm.sandbox = false;
         ed.session.root = this_repo();
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>lread it<ret>");
@@ -6657,6 +6667,8 @@ mod tests {
             ("make -s", "It runs make — not a check, a read, or a command allowed in this chat."),
         ] {
             let mut ed = editor("");
+            // (today's gate: in the sandbox any command runs — P3)
+            ed.config.llm.sandbox = false;
             ed.session.root = this_repo();
             let _log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
             feed(&mut ed, "<space>lgo<ret>");
@@ -6818,6 +6830,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// cardauto P3: in the sandbox, a command that isn't a check runs at once — no card — and Claude hears how it
+    /// ended. (The run: `touch` in the test's own temp folder.)
+    #[test]
+    fn a_command_in_the_sandbox_runs_without_a_card() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-p3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let made = dir.join("made");
+        let mut ed = editor("");
+        let command = format!("touch {} && echo made", made.display());
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltouch it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy());
+        assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
+        let answer = tool_answer(&log);
+        assert!(made.exists() && answer.contains("exit 0") && !answer.contains("isError"), "{answer}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Past the checks, a command waits for the user: nothing runs until `y`; `n` tells Claude no.
     #[test]
     fn a_command_past_the_checks_asks_first() {
@@ -6829,6 +6861,8 @@ mod tests {
         let command = format!("touch {}", made.display());
         // No: Claude is told, nothing ran
         let mut ed = editor("");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>ltouch it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
@@ -6838,9 +6872,10 @@ mod tests {
         let why = "It runs touch — not a check, a read, or a command allowed in this chat.";
         // (#193: `a` is this exact command — one word and a path makes one)
         let a = "a — this exact command again unasked, this chat";
+        let off = "The sandbox is off (llm.sandbox) — it runs with all your permissions.";
         assert_eq!(
             (o.title.as_str(), o.question.as_str()),
-            ("Claude wants to run", format!("{command}\n\n{why}\n\n{a}").as_str())
+            ("Claude wants to run", format!("{command}\n\n{why}\n\n{a}\n\n{off}").as_str())
         );
         assert!(o.weighty(), "y must have been in sight a moment to count");
         // Another command while that one is asked about waits on a card of its own, under it (#5: refused,
@@ -6858,6 +6893,8 @@ mod tests {
         // Yes: it runs, and Claude hears how it ended
         std::fs::remove_file(&log).ok();
         let mut ed = editor("");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>ltouch it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
@@ -6886,6 +6923,8 @@ mod tests {
             parser.screen().contents()
         };
         let mut ed = editor("fn main() {}\n");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let command = format!("sleep 1; touch {}", dir.join("made").display());
         claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>lmake it<ret>");
@@ -6920,6 +6959,8 @@ mod tests {
             parser.screen().contents()
         };
         let mut ed = editor("");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         ed.offer_popups = true;
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>ltouch it<ret>");
@@ -7361,6 +7402,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         let asked = dir.join("asked");
         let mut ed = editor("");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let line = "DOCKER_HOST=tcp://tarae-test.invalid:2375 sleep 30";
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": line }));
         feed(&mut ed, "<space>lwait<ret>");
@@ -7414,6 +7457,8 @@ mod tests {
     fn run_waits_its_turn() {
         use serde_json::json;
         let mut ed = editor("");
+        // (today's gate, for `git push`'s card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         let call = |ed: &mut Editor, command: &str| {
             let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "run", "arguments": {"command": command}}});
@@ -7469,6 +7514,9 @@ mod tests {
             std::fs::write(&script, body).unwrap();
             std::fs::remove_file(dir.join("stdin.log")).ok();
             let mut ed = editor("");
+            // (today's gate, for its card: in the sandbox it runs — P3; past it the card's the same —
+            // `tools::the_frictions_commands_run_unasked_in_the_sandbox`)
+            ed.config.llm.sandbox = false;
             ed.cards_dir = Some(dir.join("cards"));
             ed.session.checkpoints.turn.push(crate::checkpoint::Touched {
                 path: script.clone(),
@@ -13057,6 +13105,8 @@ mod tests {
     #[test]
     fn a_command_of_several_lines_waits_on_its_first() {
         let mut ed = editor("text\n");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         ed.offer_popups = true;
         crate::chat::open(&mut ed);
         let generation = ed.session.chat.as_ref().unwrap().generation();
@@ -13105,6 +13155,8 @@ mod tests {
             p.screen().cell(row as u16, col as u16).unwrap().fgcolor()
         };
         let mut ed = editor("text\n");
+        // (today's gate, for its card: in the sandbox it runs — P3)
+        ed.config.llm.sandbox = false;
         ed.offer_popups = true;
         crate::chat::open(&mut ed);
         let generation = ed.session.chat.as_ref().unwrap().generation();

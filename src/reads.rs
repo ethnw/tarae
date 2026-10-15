@@ -1243,6 +1243,7 @@ pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         waiting.extend(c.reads.drain(..).filter_map(|p| p.then));
         c.ran.clear();
+        c.also_asked = 0;
     }
     // (a call of tarae's tools is always answered — its card's going answers the one up: `asking_sync`)
     for t in waiting {
