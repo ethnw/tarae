@@ -513,23 +513,33 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         }
     }
     // Reviewing: put the current change's head at the top 1/4 of the screen (follow — off once j/k scroll)
-    let mut review_rows = None;
-    if let Some(rev) = editor.session.review.as_mut().filter(|r| r.ready)
-        && let Some(doc) = editor.docs.iter().find(|d| d.id == rev.doc_id)
+    // (its doc comments' layout kept on it while it holds: taken out, refreshed when stale, put back)
+    let cache = editor.session.review.as_mut().filter(|r| r.ready).and_then(|r| r.folds.take());
+    let review_rows = editor.session.review.as_ref().filter(|r| r.ready).and_then(|rev| {
+        let doc = editor.docs.iter().find(|d| d.id == rev.doc_id)?;
+        let folds = review_folds(editor, doc, review_code_w(doc, &lay), cache);
+        Some((review_folded(editor, doc, rev.rows(&doc.text), folds.as_ref()), folds))
+    });
+    let review_rows = review_rows.map(|(rows, folds)| {
+        if let Some(rev) = editor.session.review.as_mut() {
+            rev.folds = folds;
+        }
+        rows
+    });
+    if let Some(rows) = &review_rows
+        && let Some(rev) = editor.session.review.as_mut()
     {
-        let rows = rev.rows(&doc.text);
         if rev.follow
             && let Some(h) = rows.iter().position(|r| *r == crate::llm::RRow::Header(rev.current))
         {
             rev.scroll = h.saturating_sub(lay.text_rows.saturating_sub(1) / 4);
         }
         rev.scroll = rev.scroll.min(rows.len().saturating_sub(1));
-        review_rows = Some(rows);
     }
     // Per pane, screen row → doc line (for the mouse); the focused pane's also goes into editor.view
     let (mut screen_panes, mut pane_docs) = (Vec::new(), Vec::new());
     for (id, r, pl, idx, top, left, focused) in panes(editor, &lay) {
-        let view = build_view(editor, &editor.docs[idx], top, left, &pl);
+        let view = build_view(editor, &editor.docs[idx], top, focused, &pl);
         screen_panes.push((id, r, pl.gutter, view.iter().map(|v| v.origin(left)).collect()));
         pane_docs.push(editor.docs[idx].id);
         if focused {
@@ -2451,7 +2461,7 @@ fn draw_panes(
         let view = if *focused {
             &editor.view
         } else {
-            own = build_view(editor, doc, *top, *left, pl);
+            own = build_view(editor, doc, *top, false, pl);
             &own
         };
         if many {
@@ -3499,7 +3509,19 @@ fn draw_text(
                     apply(out, ui.base)?;
                     queue!(out, Print(" "))?;
                 }
-                draw_folded_row(out, editor, ui, lay, *indent, spans, *code, focused && here, labels_on)?;
+                draw_folded_row(
+                    out,
+                    editor,
+                    ui,
+                    lay.text_cols,
+                    *indent,
+                    spans,
+                    *code,
+                    focused && here,
+                    labels_on,
+                    None,
+                )?;
+                clear_rest(out, ui.base)?;
                 continue;
             }
             // A line the review's base had here: `−` where the number goes (the old numbers would read as
@@ -4120,7 +4142,7 @@ fn build_view(
     editor: &Editor,
     doc: &crate::document::Document,
     (top, top_skip): (usize, usize),
-    left: usize,
+    focused: bool,
     lay: &Layout,
 ) -> Vec<crate::doccomment::ViewRow> {
     use crate::doccomment::{ViewRow, parts};
@@ -4157,19 +4179,29 @@ fn build_view(
             view.push(ViewRow::Part { line, row, index, last: index + 1 == n });
         }
     };
-    // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded
-    // (raw text — no folding)
-    if doc.review_base.is_some() || doc.shown.is_some() {
-        let removed = removed_rows(doc, top, top + rows);
-        let mut next = removed.iter().peekable();
+    // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded (raw
+    // text), and the line after the last can have some too
+    let reviewing = doc.review_base.is_some() || doc.shown.is_some();
+    let end = max_line + usize::from(reviewing);
+    let folding = editor.doc_comments_render(lang);
+    // Find blocks: runs of consecutive doc-comment lines within [w0, w1]
+    let (w0, w1) = (top.saturating_sub(200), (top + rows * 3 + 200).min(last));
+    // (folded blocks show more lines than rows: removed rows as far as the scan goes, a screen past it)
+    let removed = if reviewing { removed_rows(doc, top, w1 + rows) } else { Vec::new() };
+    let mut next = removed.iter().peekable();
+    type Next<'a> = std::iter::Peekable<std::slice::Iter<'a, (usize, String)>>;
+    let removed_before = |view: &mut Vec<ViewRow>, line: usize, next: &mut Next| {
+        while let Some(r) = next.next_if(|r| r.0 <= line) {
+            if view.len() < rows {
+                view.push(ViewRow::Removed { before: r.0, text: r.1.clone() });
+            }
+        }
+    };
+    if !folding {
         let mut view = Vec::with_capacity(rows);
         let mut line = top;
-        while view.len() < rows && line <= max_line + 1 {
-            while let Some(r) = next.next_if(|r| r.0 <= line) {
-                if view.len() < rows {
-                    view.push(ViewRow::Removed { before: r.0, text: r.1.clone() });
-                }
-            }
+        while view.len() < rows && line <= end {
+            removed_before(&mut view, line, &mut next);
             if line <= max_line {
                 push_line(&mut view, line);
             }
@@ -4177,60 +4209,24 @@ fn build_view(
         }
         return view;
     }
-    if !editor.config.render_doc_comments
-        || left > 0
-        || editor.session.review.is_some()
-        || !crate::doccomment::applies(lang)
-    {
-        let mut view = Vec::with_capacity(rows);
-        let mut line = top;
-        while view.len() < rows && line <= max_line {
-            push_line(&mut view, line);
-            line += 1;
-        }
-        return view;
-    }
-    // Find blocks: runs of consecutive doc-comment lines within [w0, w1]
-    let (w0, w1) = (top.saturating_sub(200), (top + rows * 3 + 200).min(last));
-    let info: Vec<Option<(usize, String)>> = crate::doccomment::scan(text, w0..=w1).collect();
-    // Unfold only when editing/selecting: INSERT/SELECT mode, or a selection wider than one char touching it.
-    // In normal mode a passing cursor leaves it folded (j/k skip the block like one line — commands.rs)
-    let opening = matches!(editor.mode, Mode::Insert | Mode::Select);
-    // (only the ranges within the scanned lines — sorted, so found by halving)
-    let all = doc.selection().ranges();
-    let (b0, b1) = (mv::line_start(text, w0), mv::line_full_end(text, w1));
-    let lo = all.partition_point(|r| r.to() < b0);
-    let sel_lines: Vec<(usize, usize)> = all[lo..lo + all[lo..].partition_point(|r| r.from() <= b1)]
-        .iter()
-        .filter(|r| opening || r.to() > crate::graphemes::next_boundary(text, r.from()))
-        .map(|r| (text.byte_to_line(r.from()), text.byte_to_line(r.to().max(r.from()))))
+    // The blocks that show folded here (`Editor::doc_block_folded`: the one rule — a block being edited or
+    // selected, or with a change shown in or beside it, stays raw). Horizontal scroll leaves them be: a folded
+    // block is flowed to the width, so it has nothing to scroll — only the code lines move
+    let editing = editor.editing_in(focused);
+    let blocks: Vec<_> = crate::doccomment::blocks(text, w0..=w1)
+        .into_iter()
+        .filter(|b| editor.doc_block_closed(doc, editing, (b.start, b.end)))
         .collect();
-    // (start, end, indent, texts) — blocks being edited or selected are left out (raw)
-    let mut blocks: Vec<(usize, usize, usize, Vec<String>)> = Vec::new();
-    let mut i = 0;
-    while i < info.len() {
-        if info[i].is_none() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < info.len() && info[i].is_some() {
-            i += 1;
-        }
-        let (a, b) = (w0 + start, w0 + i - 1);
-        if sel_lines.iter().any(|&(x, y)| x <= b && y >= a) {
-            continue;
-        }
-        let bodies =
-            info[start..i].iter().map(|x| x.as_ref().map(|v| v.1.clone()).unwrap_or_default()).collect();
-        blocks.push((a, b, info[start].as_ref().map_or(0, |v| v.0), bodies));
-    }
     let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
     let mut view = Vec::with_capacity(rows);
     let mut line = top;
-    while view.len() < rows && line <= max_line {
-        match blocks.iter().find(|b| b.0 <= line && line <= b.1) {
-            Some((a, b, indent, bodies)) => {
+    while view.len() < rows && line <= end {
+        removed_before(&mut view, line, &mut next);
+        if line > max_line {
+            break;
+        }
+        match blocks.iter().find(|b| b.start <= line && line <= b.end) {
+            Some(&crate::doccomment::Block { start: a, end: b, indent, ref bodies }) => {
                 let width = lay.text_cols.saturating_sub(indent + 3).max(8);
                 let folded = fold_rows(editor, &parts(bodies), width, lang.as_deref());
                 // If the top of the screen is mid-block, skip that proportion
@@ -4239,7 +4235,7 @@ fn build_view(
                     if view.len() == rows {
                         break;
                     }
-                    view.push(ViewRow::Doc { start: *a, end: *b, indent: *indent, index: k, spans, code });
+                    view.push(ViewRow::Doc { start: a, end: b, indent, index: k, spans, code });
                 }
                 line = b + 1;
             }
@@ -4307,25 +4303,29 @@ fn fold_rows(
 
 /// One screen row of a folded doc comment: indent · bar · text on a faint panel. Body a tone lower — reads
 /// smaller, quieter than code (terminals can't resize fonts: contrast); example code = a well of editor bg.
+/// `width` cells, the row's end left as it is.
 #[allow(clippy::too_many_arguments)]
 fn draw_folded_row(
     out: &mut impl Write,
     editor: &Editor,
     ui: &Ui,
-    lay: &Layout,
+    width: usize,
     indent: usize,
     spans: &[crate::markdown::Span],
     code: bool,
     current: bool,
     dim: bool,
+    on: Option<Style>,
 ) -> io::Result<()> {
+    // (`on`: a card's style — a picker's preview — the panel a tone off it, as off the code's ground)
+    let ground = on.unwrap_or(ui.base);
+    let tint = if on.is_some() { ground.bg.or(ui.tint) } else { ui.tint };
     let comment_fg = editor.theme.try_get("comment").and_then(|s| s.fg).or(ui.virt.fg);
-    let panel_bg = blend(comment_fg, ui.tint, if current { 0.16 } else { 0.09 }).or(ui.base.bg);
-    let panel = Style { bg: panel_bg, fg: blend(ui.base.fg, comment_fg, 0.55).or(ui.base.fg), ..ui.base };
-    let well = Style { bg: ui.base.bg, ..panel };
-    let width = lay.text_cols;
+    let panel_bg = blend(comment_fg, tint, if current { 0.16 } else { 0.09 }).or(ground.bg);
+    let panel = Style { bg: panel_bg, fg: blend(ground.fg, comment_fg, 0.55).or(ground.fg), ..ground };
+    let well = Style { bg: ground.bg, ..panel };
     let indent = indent.min(width.saturating_sub(4));
-    apply(out, ui.base)?;
+    apply(out, ground)?;
     queue!(out, Spaces(indent))?;
     apply(out, Style { fg: if current { ui.accent.fg.or(comment_fg) } else { comment_fg }, ..panel })?;
     queue!(out, Print("▎ "))?;
@@ -4357,7 +4357,92 @@ fn draw_folded_row(
         apply(out, panel)?;
         queue!(out, Print(" "))?;
     }
-    clear_rest(out, ui.base)
+    Ok(())
+}
+
+/// The edit review's code column: its width less the line numbers and the sign.
+fn review_code_w(doc: &crate::document::Document, lay: &Layout) -> usize {
+    lay.edit_w.saturating_sub(num_w(doc).max(3) + 3)
+}
+
+/// The edit review's rows with each doc comment block drawn rendered, as outside a review (`build_view`): the
+/// `Doc` rows of its lines become the block's folded rows. A block with a change's row (its header, a line of
+/// the diff) inside it or right next to it stays raw, line for line — a diff is read against the text it changes.
+fn review_folded(
+    editor: &Editor,
+    doc: &crate::document::Document,
+    rows: Vec<crate::llm::RRow>,
+    folds: Option<&crate::doccomment::Folds>,
+) -> Vec<crate::llm::RRow> {
+    use crate::llm::RRow;
+    // (sideways scroll leaves folded blocks be, as in a pane)
+    let Some(folds) = folds.filter(|_| editor.doc_comments_render(doc.lang_name())) else { return rows };
+    let mut out = Vec::with_capacity(rows.len());
+    // (rows' lines climb: the blocks are walked beside them, not looked up for each row)
+    let mut next = folds.blocks.iter().peekable();
+    let mut i = 0;
+    while i < rows.len() {
+        let block = match rows[i] {
+            RRow::Doc(a) => {
+                while next.next_if(|b| b.start < a).is_some() {}
+                next.peek().copied().filter(|b| b.start == a)
+            }
+            _ => None,
+        };
+        let Some(&crate::doccomment::Folded { start: a, end: b, rows: ref laid, .. }) = block else {
+            out.push(rows[i].clone());
+            i += 1;
+            continue;
+        };
+        // The block's lines, as long as they're rows of their own one after another (a change breaks them)
+        let mut j = i + 1;
+        while j < rows.len() && a + j - i <= b && rows[j] == RRow::Doc(a + j - i) {
+            j += 1;
+        }
+        let whole = a + j - i - 1 == b;
+        let plain = |k: Option<&RRow>| k.is_none_or(|r| matches!(r, RRow::Doc(_)));
+        // (and the rule every place keeps — the review's keys aren't the code's: as in a pane without them)
+        if !whole
+            || !(plain(i.checked_sub(1).and_then(|k| rows.get(k))) && plain(rows.get(j)))
+            || !editor.doc_block_closed(doc, false, (a, b))
+        {
+            out.extend_from_slice(&rows[i..j]);
+            i = j;
+            continue;
+        }
+        out.extend((0..laid.len()).map(|index| RRow::Folded { start: a, end: b, index }));
+        i = j;
+    }
+    out
+}
+
+/// Every doc comment block of the edit review's document laid out folded for its code column — `cache` while it's
+/// for this version, width and theme (the review shows the whole file: laying all of it out each frame took 4.5 ms
+/// on a 12k-line file — `perf_review_folded_on_a_big_file`; once, the same, when the review opens or the width
+/// changes). None when doc comments don't render there.
+fn review_folds(
+    editor: &Editor,
+    doc: &crate::document::Document,
+    code_w: usize,
+    cache: Option<crate::doccomment::Folds>,
+) -> Option<crate::doccomment::Folds> {
+    if !editor.doc_comments_render(doc.lang_name()) {
+        return None;
+    }
+    let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
+    let key = (doc.id, doc.version(), code_w, editor.theme.name.clone(), lang.clone());
+    if let Some(c) = cache.filter(|c| c.key == key) {
+        return Some(c);
+    }
+    let blocks = crate::doccomment::blocks(&doc.text, 0..=mv::last_line(&doc.text))
+        .into_iter()
+        .map(|b| {
+            let width = code_w.saturating_sub(b.indent + 3).max(8);
+            let rows = fold_rows(editor, &crate::doccomment::parts(&b.bodies), width, lang.as_deref());
+            crate::doccomment::Folded { start: b.start, end: b.end, indent: b.indent, rows }
+        })
+        .collect();
+    Some(crate::doccomment::Folds { key, blocks })
 }
 
 /// Indent width of a line (None if blank).
@@ -4515,7 +4600,7 @@ fn draw_review(
     let band = card_style(ui, editor, "ui.popup").bg;
     let width = lay.edit_w;
     let num_w = num_w(doc).max(3);
-    let code_w = width.saturating_sub(num_w + 3);
+    let code_w = review_code_w(doc, lay);
     // Why, under the title: the end of what Claude thought before asking (its conclusion), two rows at most
     let reason: Vec<Vec<crate::markdown::Span>> = if rev.reason.is_empty() {
         Vec::new()
@@ -4615,7 +4700,7 @@ fn draw_review(
             RRow::Doc(_) | RRow::Diff { .. } => {
                 vec![crate::wrap::Row { col: rev.left, ..crate::wrap::Row::whole(0) }]
             }
-            RRow::Header(_) => vec![crate::wrap::Row::whole(0)],
+            RRow::Header(_) | RRow::Folded { .. } => vec![crate::wrap::Row::whole(0)],
         }
     };
     // Each row shown: where it starts below the title, and its parts that fit
@@ -4634,7 +4719,7 @@ fn draw_review(
     let mine = |r: &RRow| match r {
         RRow::Header(h) => *h == rev.current,
         RRow::Diff { hunk, .. } => *hunk == rev.current,
-        RRow::Doc(_) => false,
+        RRow::Doc(_) | RRow::Folded { .. } => false,
     };
     let top = lay.text_top as usize + title_h;
     let first = placed.iter().find(|p| mine(p.0)).map(|p| top + p.1);
@@ -4643,7 +4728,7 @@ fn draw_review(
     // Every change's rows — the follow card keeps off them
     *editor.screen.review_rows.borrow_mut() = placed
         .iter()
-        .filter(|p| !matches!(p.0, RRow::Doc(_)))
+        .filter(|p| !matches!(p.0, RRow::Doc(_) | RRow::Folded { .. }))
         .flat_map(|p| (0..p.2.len()).map(move |i| top + p.1 + i))
         .collect();
     for (row, at, ps) in &placed {
@@ -4668,6 +4753,21 @@ fn draw_review(
                         ui.base,
                         (part.col, part.end_col),
                     )?;
+                }
+                // A doc comment no change is in or beside: rendered, its number on the block's first row
+                // (its laid-out rows are the review's, made with these rows — `review_folds`)
+                RRow::Folded { start, index, .. } => {
+                    let laid = rev.folds.as_ref().and_then(|f| f.at(*start));
+                    let laid = laid.and_then(|b| Some((b.indent, b.rows.get(*index)?)));
+                    apply(out, faint)?;
+                    let no =
+                        if *index == 0 { format!("{:>num_w$}   ", start + 1) } else { " ".repeat(num_w + 3) };
+                    queue!(out, Print(no))?;
+                    used = num_w + 3;
+                    if let Some((indent, (spans, code))) = laid {
+                        draw_folded_row(out, editor, ui, code_w, indent, spans, *code, false, false, None)?;
+                        used += code_w;
+                    }
                 }
                 RRow::Header(i) => {
                     let h = &rev.hunks[*i];
@@ -5543,8 +5643,9 @@ type DiffRow = (usize, Option<usize>, Option<crate::wrap::Row>);
 enum PreviewView<'a> {
     Code {
         text: &'a ropey::Rope,
-        /// Screen rows: (line, the part of it this row shows, is its first row) — long lines wrap.
-        rows: Vec<(usize, crate::wrap::Row, bool)>,
+        /// Screen rows: a line's parts (`ViewRow::Part` — long lines wrap), a folded doc comment's rows
+        /// (`ViewRow::Doc`).
+        rows: Vec<crate::doccomment::ViewRow>,
         focus: Option<usize>,
         spans: Vec<(usize, usize, u32)>,
     },
@@ -5565,10 +5666,12 @@ fn preview_lines<'a>(
     width: usize,
 ) -> Option<PreviewView<'a>> {
     let action = &p.current()?.action;
+    let mut doc = None;
     let (text, syntax, focus) = match action {
         Action::Buffer(id) => {
             let d = editor.docs.iter().find(|d| d.id == *id)?;
             let cur = mv::line_of(&d.text, d.selection().primary().head);
+            doc = Some(d);
             (&d.text, d.syntax.as_ref(), Some(cur))
         }
         Action::Dir(_) => {
@@ -5590,8 +5693,9 @@ fn preview_lines<'a>(
             let styles = editor.theme.capture_styles();
             return Some(PreviewView::Diff { files: f.diff.clone(), rows, styles });
         }
-        Action::Jump { doc, line, .. } => {
-            let d = editor.docs.iter().find(|d| d.id == *doc)?;
+        Action::Jump { doc: id, line, .. } => {
+            let d = editor.docs.iter().find(|d| d.id == *id)?;
+            doc = Some(d);
             (&d.text, d.syntax.as_ref(), Some(*line))
         }
         Action::Code(i) => {
@@ -5638,17 +5742,53 @@ fn preview_lines<'a>(
     // Scrolled (wheel / C-f C-b) from where it opens, but not past the last page
     let first = (focus.map_or(0, |f| f.saturating_sub(rows / 3)) + p.preview_scroll)
         .min(last.saturating_sub(rows.saturating_sub(1)).max(focus.unwrap_or(0).min(last)));
+    // Doc comments as the editor shows the file in normal mode (`Editor::doc_block_folded`; an open buffer's
+    // selection and changes count) — but the place a hit or a jump opens at is read raw: going there selects it
+    use crate::doccomment::ViewRow;
+    let lang = match doc {
+        Some(d) => d.lang_name(),
+        None => syntax.map(|s| s.lang.name.as_str()).or_else(|| {
+            action.preview_target().and_then(|(path, _)| crate::syntax::detect(path)).map(|l| l.name.as_str())
+        }),
+    };
+    let opens_at = focus.filter(|_| !matches!(action, Action::Buffer(_)));
+    let blocks: Vec<_> = match editor.doc_comments_render(lang) {
+        true => {
+            crate::doccomment::blocks(text, first.saturating_sub(200)..=(first + rows * 3 + 200).min(last))
+                .into_iter()
+                .filter(|b| !opens_at.is_some_and(|f| (b.start..=b.end).contains(&f)))
+                .filter(|b| doc.is_none_or(|d| editor.doc_block_closed(d, false, (b.start, b.end))))
+                .collect()
+        }
+        false => Vec::new(),
+    };
     // Screen rows from `first` — a line wider than the pane continues on the next rows (no number there)
     let tab = editor.config.tab_width;
     let room = width.saturating_sub(6); // "{:>4}  "
     let mut vis = Vec::with_capacity(rows);
     let mut line = first;
     while vis.len() < rows && line <= last {
-        for (k, part) in crate::wrap::rows(text, line, room, tab).into_iter().enumerate() {
+        if let Some(b) = blocks.iter().find(|b| b.start <= line && line <= b.end) {
+            let w = room.saturating_sub(b.indent + 3).max(8);
+            let folded = fold_rows(editor, &crate::doccomment::parts(&b.bodies), w, lang);
+            // (opened mid-block: from as far into it)
+            let skip = (line - b.start).min(folded.len().saturating_sub(1));
+            for (index, (spans, code)) in folded.into_iter().enumerate().skip(skip) {
+                if vis.len() == rows {
+                    break;
+                }
+                vis.push(ViewRow::Doc { start: b.start, end: b.end, indent: b.indent, index, spans, code });
+            }
+            line = b.end + 1;
+            continue;
+        }
+        let parts = crate::wrap::rows(text, line, room, tab);
+        let n = parts.len();
+        for (index, row) in parts.into_iter().enumerate() {
             if vis.len() == rows {
                 break;
             }
-            vis.push((line, part, k == 0));
+            vis.push(ViewRow::Part { line, row, index, last: index + 1 == n });
         }
         line += 1;
     }
@@ -5688,7 +5828,20 @@ fn draw_preview_row(
             Ok(msg.width())
         }
         PreviewView::Code { text, rows, focus, spans } => {
-            let Some(&(line, part, first_row)) = rows.get(row) else { return Ok(0) };
+            use crate::doccomment::ViewRow;
+            let (line, part, first_row) = match rows.get(row) {
+                Some(&ViewRow::Part { line, row, index, .. }) => (line, row, index == 0),
+                // A folded doc comment: its number on its first row, the panel on the card
+                Some(ViewRow::Doc { start, indent, index, spans, code, .. }) => {
+                    let num = if *index == 0 { format!("{:>4}  ", start + 1) } else { " ".repeat(6) };
+                    apply(out, Style { fg: ui.linenr.fg, ..popup })?;
+                    queue!(out, Print(&num))?;
+                    let w = width.saturating_sub(num.len());
+                    draw_folded_row(out, editor, ui, w, *indent, spans, *code, false, false, Some(popup))?;
+                    return Ok(width);
+                }
+                _ => return Ok(0),
+            };
             let base = if *focus == Some(line) {
                 popup.patch(Style { bg: ui.cursorline.bg, ..Style::default() })
             } else {
@@ -12062,6 +12215,26 @@ mod tests {
     }
     use crate::config::Config;
 
+    /// The edit review's laid-out doc comments are kept only for the grammar they were coloured with: one that
+    /// loads mid-review (or goes) lays them out again.
+    #[test]
+    fn review_folds_are_laid_out_again_for_another_grammar() {
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str("/// One.\n///\n/// ```\n/// let x = 1;\n/// ```\nfn a() {}\n");
+        ed.docs[0].path = Some("/tmp/x.rs".into());
+        let doc = &ed.docs[0];
+        let fresh = review_folds(&ed, doc, 80, None).expect("doc comments render in Rust");
+        assert_eq!((fresh.blocks.len(), &fresh.key.4), (1, &None), "no grammar yet");
+        let kept = review_folds(&ed, doc, 80, Some(fresh)).unwrap();
+        assert_eq!(kept.blocks.len(), 1, "the same key: kept");
+        // Laid out with a grammar this document no longer has (or not yet): not kept
+        let (id, v, w, theme, _) = kept.key.clone();
+        let other =
+            crate::doccomment::Folds { key: (id, v, w, theme, Some("rust".into())), blocks: Vec::new() };
+        let again = review_folds(&ed, doc, 80, Some(other)).unwrap();
+        assert_eq!((again.blocks.len(), &again.key.4), (1, &None), "laid out again");
+    }
+
     #[test]
     fn doc_comments_render_until_cursor_enters() {
         let mut ed = Editor::new(Config::default());
@@ -12541,6 +12714,66 @@ mod tests {
         let want = crate::chrome::fade([1, 2, 3], [20, 20, 24], crate::chrome::FADE);
         let got = faded(style(0x010203), ground).fg;
         assert_eq!(got, Some(Color::Rgb { r: want[0], g: want[1], b: want[2] }));
+    }
+
+    /// The edit review's doc comments on a big file: its rows (`Review::rows`), every block laid out folded once
+    /// (`review_folds` — the review opening, the width changing) and each frame after (the cache checked, the
+    /// rows folded from it). Said for `cargo perf`; each frame's part was 4.5 ms before the cache, now ~150 µs.
+    #[test]
+    fn perf_review_folded_on_a_big_file() {
+        if crate::test_results::unoptimized("term::tests::perf_review_folded_on_a_big_file") {
+            return;
+        }
+        // 12k lines, 600 doc blocks of four lines (a heading, a paragraph, `code`, a list item) — term.rs's size
+        let block = "/// # Heading\n/// A paragraph with `code` and **bold**, long enough to wrap once or twice at the review's width.\n///\n/// - an item\n";
+        let body: String = (0..15).map(|i| format!("    let x{i} = {i};\n")).collect();
+        let text: String = (0..600).map(|i| format!("{block}pub fn f{i}() {{\n{body}}}\n")).collect();
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str(&text);
+        ed.docs[0].path = Some("/tmp/big.rs".into());
+        let doc = &ed.docs[0];
+        assert!(doc.text.len_lines() > 12_000);
+        let at = doc.text.line_to_byte(6_000);
+        let to = doc.text.line_to_byte(6_001);
+        let hunk = crate::llm::Hunk {
+            from: at,
+            to,
+            old: doc.text.byte_slice(at..to).to_string(),
+            new: "    let changed = 1;\n".into(),
+            decision: crate::llm::Decision::Undecided,
+            conflict: false,
+        };
+        let rev = crate::llm::Review::new(1, doc.id, "x", vec![hunk]);
+        let median = |mut v: Vec<Duration>| {
+            v.sort();
+            v[v.len() / 2]
+        };
+        // Laid out once (the review opening, or the width changing) · each frame after: the cache checked, the
+        // rows folded from it
+        let (mut rows_t, mut cold_t, mut warm_t) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..30 {
+            let t = Instant::now();
+            let rows = rev.rows(&doc.text);
+            rows_t.push(t.elapsed());
+            let t = Instant::now();
+            let folds = std::hint::black_box(review_folds(&ed, doc, 100, None));
+            cold_t.push(t.elapsed());
+            let t = Instant::now();
+            let folds = review_folds(&ed, doc, 100, folds);
+            let folded = std::hint::black_box(review_folded(&ed, doc, rows, folds.as_ref()));
+            warm_t.push(t.elapsed());
+            assert!(folded.iter().any(|r| matches!(r, crate::llm::RRow::Folded { .. })));
+        }
+        let us = |d: Duration| d.as_secs_f64() * 1e6;
+        let numbers = [
+            ("review_rows_12k_us", median(rows_t), 20),
+            ("review_folds_laid_out_12k_us", median(cold_t), 500),
+            ("review_folded_frame_12k_us", median(warm_t), 50),
+        ];
+        for (name, d, noise) in numbers {
+            let line = format!("PERF {name} {:.1} noise={noise}\n", us(d));
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        }
     }
 
     /// Cards cost a frame little: with the note card and the follow card up (Claude at work, ~10 frames a

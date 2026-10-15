@@ -4,9 +4,9 @@
 01   ──────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────────
 02   3 files  +45 −4          ▌  1 use std::collections::HashMap;
 03   1 of 3 viewed            ▌  1
-04                            ▌  2 /// Counts how often each word appears.
-05     src/                   ▌  3 ///
-06 ▎ │ ● demo.rs   • +3 −3 ¶1 ▌  4 /// Words are split on whitespace; case is kept.
+04                            ▌  2 ▎ Counts how often each word appears.
+05     src/                   ▌    ▎
+06 ▎ │ ● demo.rs   • +3 −3 ¶1 ▌    ▎ Words are split on whitespace; case is kept.
 07   │ ◦ lib.rs       +40 new ▌  5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08   ◦ README.md        +2 −1 ▌   −    let mut counts = HashMap::new();
 09                            ▌  6▎    let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -35,16 +35,16 @@
 01 ppppppppppppppppppppppppppp
 02 ppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03 ppppppppppppppppppppppppppp
-04 ppppppppppppppppppppppppppp
-05 ppppppppppppppppppppppppppp
-06 PPPPPPPPPPPPPPPPPPPPPPPPPPp
+04 ppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111111
+05 ppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111111
+06 PPPPPPPPPPPPPPPPPPPPPPPPPPp     11111111111111111111111111111111111111111111111111111111111111111111111111111111
 07 ppppppppppppppppppppppppppp
-08 ppppppppppppppppppppppppppp 111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-09 ppppppppppppppppppppppppppp     22222222222222222222222222222222222222222222222222222222222222222222222222222222
+08 ppppppppppppppppppppppppppp 222222222222222222222222222222222222222222222222222222222222222222222222222222222222
+09 ppppppppppppppppppppppppppp     33333333333333333333333333333333333333333333333333333333333333333333333333333333
 10 ppppppppppppppppppppppppppp
-11 ppppppppppppppppppppppppppp 111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-12 ppppppppppppppppppppppppppp     22222222222222222222222222222222222222222222222222222222222222222222222222222222
-13 ppppppppppppppppppppppppppp     22222222222222222222222222222222222222222222222222222222222222222222222222222222
+11 ppppppppppppppppppppppppppp 222222222222222222222222222222222222222222222222222222222222222222222222222222222222
+12 ppppppppppppppppppppppppppp     33333333333333333333333333333333333333333333333333333333333333333333333333333333
+13 ppppppppppppppppppppppppppp     33333333333333333333333333333333333333333333333333333333333333333333333333333333
 14 ppppppppppppppppppppppppppp
 15 ppppppppppppppppppppppppppp
 16 ppppppppppppppppppppppppppp
@@ -52,7 +52,7 @@
 18 ppppppppppppppppppppppppppp
 19 ppppppppppppppppppppppppppp
 20 ppppppppppppppppppppppppppp
-21 ppppppppppppppppppppppppppp 111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+21 ppppppppppppppppppppppppppp 222222222222222222222222222222222222222222222222222222222222222222222222222222222222
 22 ppppppppppppppppppppppppppp
 23 ppppppppppppppppppppppppppp
 24 ppppppppppppppppppppppppppp
@@ -67,8 +67,8 @@
 02   d ddddd  ggg ee             A
 03   f ff f ffffff               f
 04                               f
-05     dddf                      f
-06 a f g ddddddd   w gg ee aa    f
+05     dddf
+06 a f g ddddddd   w gg ee aa
 07   f f              ggg fff    f
 08   f                  gg ee     E
 09                               fw
@@ -93,5 +93,5 @@
 28   DDDDD D D aaaa a f f fff
 29  a BBBBBB a  gg  ee                                                                      dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

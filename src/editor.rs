@@ -3626,20 +3626,65 @@ impl Editor {
         doc.text.byte_to_line(doc.selection().primary().cursor(&doc.text).min(doc.text.len_bytes()))
     }
 
-    /// Doc-comment block shown folded on screen (normal mode, rendering on, language uses that marker,
-    /// no horizontal scroll) — `j`/`k` step over it as one line.
+    /// The focused pane's doc-comment block holding `line` when it shows folded (`doc_block_folded`) — `j`/`k`
+    /// step over it as one line.
     pub fn folded_doc_block_at(&self, line: usize) -> Option<(usize, usize)> {
         let doc = self.doc();
-        let lang = doc.lang_name();
-        if !self.config.render_doc_comments
-            || self.mode != Mode::Normal
-            || self.session.review.is_some()
-            || doc.left > 0
-            || !crate::doccomment::applies(lang)
-        {
+        if !self.doc_comments_render(doc.lang_name()) {
             return None;
         }
         crate::doccomment::block_at(&doc.text, line)
+            .filter(|&block| self.doc_block_folded(doc, self.editing_in(true), block))
+    }
+
+    /// Whether doc comments render in this language at all: the setting on, and the language has them.
+    pub fn doc_comments_render(&self, lang: Option<&str>) -> bool {
+        self.config.render_doc_comments && crate::doccomment::applies(lang)
+    }
+
+    /// Whether a pane is where its document is being edited: the focused one, in INSERT or SELECT (the mode is
+    /// the editor's, but only the focused pane's selection is the one it moves).
+    pub fn editing_in(&self, focused: bool) -> bool {
+        focused && matches!(self.mode, Mode::Insert | Mode::Select)
+    }
+
+    /// **The one rule** for whether doc-comment block `a..=b` of `doc` shows rendered (folded) — every place a
+    /// file's code is drawn and every move over it (`j`/`k`, the mouse, labels) asks it: doc comments render
+    /// here (`doc_comments_render`); it isn't being edited or selected — where it's being edited (`editing`)
+    /// any selection on it opens it, elsewhere one wider than a character; and no change shown on screen is in
+    /// or beside it (`doccomment::touches_change`).
+    pub fn doc_block_folded(
+        &self,
+        doc: &crate::document::Document,
+        editing: bool,
+        block: (usize, usize),
+    ) -> bool {
+        self.doc_comments_render(doc.lang_name()) && self.doc_block_closed(doc, editing, block)
+    }
+
+    /// `doc_block_folded` where doc comments are known to render in `doc` — for a pass over many blocks (the
+    /// language looked up once, not per block: by path, without a grammar, that's a glob match each time).
+    pub fn doc_block_closed(
+        &self,
+        doc: &crate::document::Document,
+        editing: bool,
+        (a, b): (usize, usize),
+    ) -> bool {
+        if crate::doccomment::touches_change(doc, a, b) {
+            return false;
+        }
+        let text = &doc.text;
+        let (start, end) = (mv::line_start(text, a), mv::line_full_end(text, b));
+        // (sorted: from the first that ends at its start on, until one starts past its end)
+        let all = doc.selection().ranges();
+        let lo = all.partition_point(|r| r.to() < start);
+        !all[lo..].iter().take_while(|r| r.from() <= end).any(|r| {
+            let wide = r.to() > crate::graphemes::next_boundary(text, r.from());
+            // (its lines are those of its first and last characters: a line selected above isn't this one)
+            let last =
+                if r.to() > r.from() { crate::graphemes::prev_boundary(text, r.to()) } else { r.from() };
+            (editing || wide) && text.byte_to_line(r.from()) <= b && text.byte_to_line(last) >= a
+        })
     }
 
     pub fn open_prompt(&mut self, kind: PromptKind, text: &str) {

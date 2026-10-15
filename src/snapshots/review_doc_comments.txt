@@ -1,0 +1,79 @@
+# review_doc_comments · 100x24 · theme meok · cursor 16:32
+## text
+00   review       uncommitted ▌ tarae  ›  src  ›  demo.rs  ›  ƒ main
+01   ──────────────────────── ▌ ──────────────────────────────────────────────────────────────────────
+02   1 file  +1               ▌ 13 ▎ Counts the words in text.
+03   0 of 1 viewed            ▌    ▎
+04                            ▌    ▎ Splits on whitespace, so a  b is two words.
+05     src/                   ▌ 10 pub fn count(text: &str) -> usize {
+06 ▎ │ ◦ demo.rs         • +1 ▌  9     text.split_whitespace().count()
+07                            ▌  8 }
+08                            ▌  7
+09                            ▌   −/// The longest word.
+10                            ▌  6▎/// The longest word, if there is one.
+11                            ▌  5▎/// Ties go to the first of them.
+12                            ▌  4 pub fn longest(text: &str) -> Option<&str> {
+13                            ▌  3     text.split_whitespace().max_by_key(|w| w.len())
+14                            ▌  2 }
+15                            ▌  1
+16                            ▌ 14 fn main() {
+17                            ▌  1     let text = "to be or not to be";
+18                            ▌  2     println!("{} words, the longest {:?}", count(text),
+19   ]g hunk  ]F file         ▌        longest(text));
+20   space e files            ▌  3 }
+21   space n comment          ▌
+22   space v m viewed · q end ▌
+23  ▐ NORMAL ▌  +2  −1                                                         rust   utf-8 LF   14:1
+## bg · surface per cell, blank = ui.background
+00 ppppppppppppppppppppppppppp
+01 ppppppppppppppppppppppppppp
+02 ppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111
+03 ppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111
+04 ppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111
+05 ppppppppppppppppppppppppppp
+06 PPPPPPPPPPPPPPPPPPPPPPPPPPp
+07 ppppppppppppppppppppppppppp
+08 ppppppppppppppppppppppppppp
+09 ppppppppppppppppppppppppppp 222222222222222222222222222222222222222222222222222222222222222222222222
+10 ppppppppppppppppppppppppppp     33333333333333333333333333333333333333333333333333333333333333333333
+11 ppppppppppppppppppppppppppp     33333333333333333333333333333333333333333333333333333333333333333333
+12 ppppppppppppppppppppppppppp
+13 ppppppppppppppppppppppppppp
+14 ppppppppppppppppppppppppppp
+15 ppppppppppppppppppppppppppp
+16 ppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+17 ppppppppppppppppppppppppppp
+18 ppppppppppppppppppppppppppp
+19 ppppppppppppppppppppppppppp
+20 ppppppppppppppppppppppppppp
+21 ppppppppppppppppppppppppppp
+22 ppppppppppppppppppppppppppp
+23   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00   TTTTTT       fffffffffff   ddddd  f  ddd  f  TTTTTTT  f    dddd
+01   ffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   d dddd  gg                 ff
+03   f ff f ffffff
+04                                             BBBBBBBBBB
+05     dddf                     ff
+06 a f f ttttttt         w gg    f
+07                               f
+08                               f
+09                                E
+10                               fw
+11                               fw
+12                               f
+13                               f
+14                               f
+15                               f
+16                              AA
+17                               f                ggg gg gg ggg gg ggg
+18                               f              ggg gggggg ggg ggggggg ggggg
+19   DD ffff  DD ffff
+20   DDDDD D fffff               f
+21   DDDDD D fffffff
+22   DDDDD D f ffffff f f fff
+23  a BBBBBB a  gg  ee                                                         dddd   ddddd dd   TTTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

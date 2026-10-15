@@ -4,9 +4,9 @@
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02  10 use std::collections::HashMap;
 03   9
-04   8 /// Counts how often each word appears.
-05   7 ///
-06   6 /// Words are split on whitespace; case is kept.
+04   8 ▎ Counts how often each word appears.
+05     ▎
+06     ▎ Words are split on whitespace; case is kept.
 07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08   4     let mut counts = HashMap::new();
 09   3     for word in text.split_whitespace() {
@@ -29,9 +29,9 @@
 01
 02
 03
-04
-05
-06
+04     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 07
 08
 09
@@ -44,7 +44,7 @@
 16
 17
 18
-19 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+19 2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222
 20
 21
 22
@@ -55,8 +55,8 @@
 02  ff
 03   f
 04   f
-05   f
-06   f
+05
+06
 07   f
 08   f
 09   f
@@ -75,5 +75,5 @@
 22
 23  a BBBBBB a  gg  ee                                                         dddd   ddddd dd   TTTTT
 ## legend
-bg: c=ui.cursorline.primary  V=ui.selection.primary  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  V=ui.selection.primary  A=ui.cursor.primary  1=other  2=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold

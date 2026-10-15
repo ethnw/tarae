@@ -1,0 +1,97 @@
+# preview_doc_comments · 110x30 · theme meok · cursor 2:5
+## text
+00
+01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+02    ›                            places  2/2   src/words.rs
+03    ────────────────────────────────────────   ─────────────────────────────────────────────────────────────
+04   ▎ in the first doc comment                     1  /// Counts the words in `text`.
+05     at count                                     2  ///
+06                                                  3  /// Splits on **whitespace**, so `a  b` is two words.
+07                                                  4  pub fn count(text: &str) -> usize {
+08                                                  5      text.split_whitespace().count()
+09                                                  6  }
+10                                                  7
+11                                                  8  ▎ The longest word.
+12                                                  9  pub fn longest(text: &str) -> Option<&str> {
+13                                                 10      text.split_whitespace().max_by_key(|w| w.len())
+14                                                 11  }
+15                                                 12
+16                                                 13  fn main() {
+17                                                 14      let text = "to be or not to be";
+18                                                 15      println!("{} words, the longest {:?}",
+19                                                         count(text), longest(text));
+20                                                 16  }
+21
+22
+23
+24
+25
+26
+27   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+28
+29  ▐ PICKER ▌                                                                           rust   utf-8 LF   14:1
+## bg · surface per cell, blank = ui.background
+00
+01
+02   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+03   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+04   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+05   pppppppppppppppppppppppppppppppppppppppppp pcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccp
+06   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+07   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+08   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+09   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+10   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+11   pppppppppppppppppppppppppppppppppppppppppp ppppppp1111111111111111111111111111111111111111111111111111111p
+12   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+13   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27
+28
+29   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00
+01
+02    A                            ffffff  fff   ddddTTTTTTTT
+03    ffffffffffffffffffffffffffffffffffffffff   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+04   a TT TTT TTTTT TTT TTTTTTT                     f
+05                                                  f
+06                                                  f
+07                                                  f
+08                                                  f
+09                                                  f
+10                                                  f
+11                                                  f
+12                                                  f
+13                                                 ff
+14                                                 ff
+15                                                 ff
+16                                                 ff
+17                                                 ff                 ggg gg gg ggg gg ggg
+18                                                 ff               ggg gggggg ggg ggggggg ggggg
+19
+20                                                 ff
+21
+22
+23
+24
+25
+26
+27
+28
+29  a BBBBBB a                                                                           dddd   ddddd dd   TTTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

@@ -6,8 +6,8 @@
 03    ──────────────────────────────────────   ─────────────────────────────────────────────────────
 04       src/                                     1  mod parse;
 05   ▎ │   main.rs                                2
-06                                                3  /// Reads `host:port` pairs and prints the
-07                                                   ones that parse.
+06                                                3  ▎ Reads host:port pairs and prints the ones
+07                                                   ▎ that parse.
 08                                                4  fn main() {
 09                                                5      let lines = ["127.0.0.1:8080", "nope",
 10                                                       "[::1]:443"];
@@ -37,8 +37,8 @@
 03   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 04   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 05   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-06   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-07   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+06   pppppppppppppppppppppppppppppppppppppppp ppppppp11111111111111111111111111111111111111111111111p
+07   pppppppppppppppppppppppppppppppppppppppp ppppppp11111111111111111111111111111111111111111111111p
 08   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 09   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 10   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -93,5 +93,5 @@
 28
 29  a BBBBBB a                                                                         ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary
+bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

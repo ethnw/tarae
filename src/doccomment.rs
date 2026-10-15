@@ -11,6 +11,21 @@ pub fn applies(lang: Option<&str>) -> bool {
     lang.and_then(crate::syntax::spec).is_some_and(|s| s.doc_comments)
 }
 
+/// Whether a change shown on screen is in or right next to lines `a..=b` — a code review's or `:diff`'s hunk
+/// (or an edit of Claude's that follow shows): a changed or added line among them or on either side, or removed
+/// rows inside them or right against them; or a merge conflict's lines. Such a block stays raw, so a diff is
+/// always read against the text it changes.
+pub fn touches_change(doc: &crate::document::Document, a: usize, b: usize) -> bool {
+    // (a removal's `lines` is empty: its rows go above `lines.start`)
+    let near = |l: &std::ops::Range<usize>| l.start <= b + 1 && l.end >= a;
+    let hunks = match (&doc.review_base, &doc.shown) {
+        (Some(_), _) => doc.git_hunks.iter().any(|h| near(&h.lines)),
+        (None, Some(shown)) => shown.iter().any(|h| near(&h.lines)),
+        (None, None) => false,
+    };
+    hunks || doc.conflicts.iter().any(|c| near(&(c.start..c.end + 1)))
+}
+
 /// One doc comment line, unwrapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -76,6 +91,60 @@ pub fn scan(
         in_block = next;
         c
     })
+}
+
+/// A run of doc comment lines: lines `start..=end`, the first one's indent, each line's text after its marker.
+pub struct Block {
+    pub start: usize,
+    pub end: usize,
+    pub indent: usize,
+    pub bodies: Vec<String>,
+}
+
+/// A block laid out folded: its lines, its first line's indent, its rows (spans, is example code).
+pub struct Folded {
+    pub start: usize,
+    pub end: usize,
+    pub indent: usize,
+    pub rows: Vec<(Vec<crate::markdown::Span>, bool)>,
+}
+
+/// Every doc comment block of a document laid out folded, for `key` = (document, version, width, theme, the
+/// language its grammar parses — example code is coloured by it: a grammar loading lays it out again).
+pub struct Folds {
+    pub key: (crate::document::DocId, u64, usize, String, Option<String>),
+    /// In order of their lines.
+    pub blocks: Vec<Folded>,
+}
+
+impl Folds {
+    /// The block holding `line`.
+    pub fn at(&self, line: usize) -> Option<&Folded> {
+        let b = self.blocks.get(self.blocks.partition_point(|b| b.end < line))?;
+        (b.start <= line).then_some(b)
+    }
+}
+
+/// The doc comment blocks among `lines` (`scan` over them: start it far enough above to join a `/** */`).
+pub fn blocks(text: &ropey::Rope, lines: std::ops::RangeInclusive<usize>) -> Vec<Block> {
+    let w0 = *lines.start();
+    let info: Vec<Option<(usize, String)>> = scan(text, lines).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < info.len() {
+        let Some((indent, _)) = info[i] else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        while i < info.len() && info[i].is_some() {
+            i += 1;
+        }
+        let bodies =
+            info[start..i].iter().map(|x| x.as_ref().map(|v| v.1.clone()).unwrap_or_default()).collect();
+        out.push(Block { start: w0 + start, end: w0 + i - 1, indent, bodies });
+    }
+    out
 }
 
 /// Line range [start, end] of the doc comment block containing `line` (within 200 lines up/down — joins
@@ -168,6 +237,8 @@ impl ViewRow {
     pub fn origin(&self, left: usize) -> (usize, usize, usize, usize) {
         match self {
             ViewRow::Part { line, row, .. } => (*line, row.col, row.x0, row.end_col),
+            // (a folded block doesn't scroll sideways)
+            ViewRow::Doc { start, .. } => (*start, 0, 0, usize::MAX),
             _ => (self.line(), left, 0, usize::MAX),
         }
     }
@@ -304,6 +375,33 @@ mod tests {
                 Chunk::Code("let a = 1;".into()),
             ]
         );
+    }
+
+    /// "Right beside" is a change on the line just above or just below the block (added, or removed rows going
+    /// there); with a line between them the block is apart from it.
+    #[test]
+    fn a_change_right_beside_a_block_touches_it() {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let doc = &mut ed.docs[0];
+        let block = "/// One.\n/// Two.\n";
+        // `now` under review against `base`: does the block (its lines found in `now`) touch the change?
+        let mut touches = |base: &str, now: &str| {
+            doc.text = ropey::Rope::from_str(now);
+            doc.review_base = Some(ropey::Rope::from_str(base));
+            doc.git_hunks = crate::git::hunks(base, now);
+            let a = now.lines().position(|l| l == "/// One.").unwrap();
+            touches_change(doc, a, a + 1)
+        };
+        // Added just above / just below — and with a line between
+        assert!(touches(&format!("a\n{block}b\n"), &format!("a\nnew\n{block}b\n")), "added above");
+        assert!(touches(&format!("a\n{block}b\n"), &format!("a\n{block}new\nb\n")), "added below");
+        assert!(!touches(&format!("a\n{block}b\n"), &format!("new\na\n{block}b\n")), "added a line above");
+        assert!(!touches(&format!("a\n{block}b\n"), &format!("a\n{block}b\nnew\n")), "added a line below");
+        // Removed just above / just below (its rows go right against the block) — and with a line between
+        assert!(touches(&format!("a\ngone\n{block}b\n"), &format!("a\n{block}b\n")), "removed above");
+        assert!(touches(&format!("a\n{block}gone\nb\n"), &format!("a\n{block}b\n")), "removed below");
+        assert!(!touches(&format!("gone\na\n{block}b\n"), &format!("a\n{block}b\n")), "removed a line above");
+        assert!(!touches(&format!("a\n{block}b\ngone\n"), &format!("a\n{block}b\n")), "removed a line below");
     }
 
     #[test]

@@ -2041,6 +2041,267 @@ fn review_keeps_the_cursor_on_screen_below_a_big_deletion() {
     }
 }
 
+/// Two doc comments; the second one's first line changes and a line joins it (`DOCS_NOW`).
+const DOCS_BASE: &str = r#"/// Counts the words in `text`.
+///
+/// Splits on **whitespace**, so `a  b` is two words.
+pub fn count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// The longest word.
+pub fn longest(text: &str) -> Option<&str> {
+    text.split_whitespace().max_by_key(|w| w.len())
+}
+
+fn main() {
+    let text = "to be or not to be";
+    println!("{} words, the longest {:?}", count(text), longest(text));
+}
+"#;
+
+fn docs_now() -> String {
+    DOCS_BASE.replace(
+        "/// The longest word.\n",
+        "/// The longest word, if there is one.\n/// Ties go to the first of them.\n",
+    )
+}
+
+/// The screen as text, rows only (for asserting on what's drawn).
+fn screen_text(s: &mut Shot) -> String {
+    let bytes = s.frame();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&bytes);
+    parser.screen().contents()
+}
+
+/// Under a code review an unchanged doc comment renders as it does outside one; one holding a change stays
+/// raw, line for line, its removed row above the line that replaced it. A click on the rendered block lands on
+/// its first line, `j` steps over it, `]g` lands in the change.
+#[test]
+fn snapshot_review_doc_comments() {
+    let mut s = review_of(100, 24, DOCS_BASE, &docs_now());
+    s.ed.goto_line(13);
+    s.frame();
+    let shown = screen_text(&mut s);
+    assert!(!shown.contains("/// Counts") && shown.contains("Counts the words in text."), "{shown}");
+    assert!(shown.contains("/// The longest word, if there is one."), "the changed block stays raw: {shown}");
+    assert!(shown.contains("/// The longest word."), "its removed row: {shown}");
+    let folded = |s: &Shot| {
+        s.ed.view.iter().filter(|r| matches!(r, crate::doccomment::ViewRow::Doc { start: 0, .. })).count()
+    };
+    assert!(folded(&s) > 0, "{:?}", s.ed.view);
+    assert!(
+        s.ed.view.iter().any(|r| matches!(r, crate::doccomment::ViewRow::Removed { before: 7, .. })),
+        "both kinds of rows in one view: {:?}",
+        s.ed.view
+    );
+    s.check("review_doc_comments");
+    s.frames_both("review_doc_comments");
+    // A click on the rendered block's last row: its first line
+    let (_, rect, gutter, rows) = s.ed.screen.panes[0].clone();
+    let row = rows.iter().rposition(|r| r.0 == 0).expect("the block's rows");
+    assert_eq!(rows[row + 1].0, 3, "the line after the block right below it: {rows:?}");
+    let click = |s: &mut Shot, kind, y: usize| {
+        let x = rect.x + gutter + 4;
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false }));
+        s.frame();
+    };
+    click(&mut s, crate::event::MouseKind::Down, rect.y + row);
+    click(&mut s, crate::event::MouseKind::Up, rect.y + row);
+    assert_eq!(s.ed.cursor_line(), 0, "on the block");
+    // `j` past it, `k` back onto it
+    s.keys("j");
+    assert_eq!(s.ed.cursor_line(), 3, "stepped over the block");
+    s.keys("k");
+    assert_eq!(s.ed.cursor_line(), 0);
+    // Into the raw block line by line, and `]g` lands on the change's line
+    s.ed.goto_line(6);
+    s.keys("j");
+    assert_eq!(s.ed.cursor_line(), 7, "a raw block takes j line by line");
+    s.keys("j");
+    assert_eq!(s.ed.cursor_line(), 8);
+    s.ed.goto_line(0);
+    s.keys("]g");
+    let doc = s.ed.doc();
+    assert_eq!(doc.text.byte_to_line(doc.selection().primary().from()), 7, "the change selected");
+    assert!(s.ed.screen.panes[0].3.iter().any(|r| r.0 == 7), "on screen");
+}
+
+/// The first lines of the focused pane's folded doc comments (its view, as drawn).
+fn folded(s: &Shot) -> Vec<usize> {
+    let starts = s.ed.view.iter().filter_map(|r| match r {
+        crate::doccomment::ViewRow::Doc { start, index: 0, .. } => Some(*start),
+        _ => None,
+    });
+    starts.collect()
+}
+
+/// The mode rule, key by key: in NORMAL a block opens only under a selection wider than a character (a line
+/// selected above it isn't on it) and `j`/`k` step over it; in INSERT and SELECT any selection on it opens it,
+/// and a block away from the cursor stays folded; a prompt or a picker taking the keys changes nothing.
+#[test]
+fn doc_comments_follow_the_mode() {
+    use crate::editor::Mode;
+    let mut s = Shot::new(100, 24);
+    s.file("src/x.rs", "fn a() {}\n/// One.\n/// Two.\nfn b() {}\n/// Three.\nfn c() {}\n");
+    assert_eq!(folded(&s), [1, 4], "NORMAL, the cursor above");
+    s.keys("x");
+    assert_eq!(folded(&s), [1, 4], "NORMAL: the line above selected isn't the block's");
+    s.keys(";j");
+    assert_eq!((s.ed.cursor_line(), folded(&s)), (1, vec![1, 4]), "NORMAL: a cursor on it leaves it folded");
+    s.keys("j");
+    assert_eq!(s.ed.cursor_line(), 3, "NORMAL: j steps over it");
+    s.keys("k");
+    assert_eq!(s.ed.cursor_line(), 1, "NORMAL: k lands on its first line");
+    s.keys("x");
+    assert_eq!(folded(&s), [4], "NORMAL: a selection wider than a character opens it");
+    s.keys(";i");
+    assert_eq!((s.ed.mode, folded(&s)), (Mode::Insert, vec![4]), "INSERT: the cursor on it opens it");
+    s.keys("<esc>gg");
+    s.keys("i");
+    assert_eq!(folded(&s), [1, 4], "INSERT elsewhere: the others stay folded");
+    s.keys("<esc>jv");
+    assert_eq!((s.ed.mode, folded(&s)), (Mode::Select, vec![4]), "SELECT: on it opens it");
+    s.keys("j");
+    assert_eq!(s.ed.cursor_line(), 2, "SELECT: j goes line by line through it (raw)");
+    s.keys(":");
+    assert!(s.ed.prompt.is_some());
+    assert_eq!(folded(&s), [4], "a prompt with the keys: as the mode under it");
+    s.keys("<esc> ?");
+    assert!(s.ed.picker.is_some());
+    assert_eq!(folded(&s), [4], "a picker with the keys: as the mode under it");
+    s.keys("<esc><esc>");
+    assert_eq!((s.ed.mode, folded(&s)), (Mode::Normal, vec![4]), "NORMAL: what SELECT selected stays, wide");
+    s.keys(";");
+    assert_eq!(folded(&s), [1, 4]);
+}
+
+/// Two panes on one file: the one being edited (focused, INSERT) shows the block raw; the other keeps
+/// NORMAL's rule and shows it folded.
+#[test]
+fn doc_comments_in_split_panes() {
+    let mut s = Shot::new(140, 24);
+    s.file("src/words.rs", DOCS_BASE);
+    s.keys("<C-w>vggi");
+    assert_eq!(s.ed.session.views.len(), 2);
+    let shown = screen_text(&mut s);
+    let n = |t: &str| shown.matches(t).count();
+    assert_eq!(
+        (n("/// Counts"), n("Counts the words in text.")),
+        (1, 1),
+        "raw where edited, folded beside: {shown}"
+    );
+    s.frames_both("split_doc_comments");
+}
+
+/// Scrolled sideways: a folded block is flowed to the width — it stays folded (unshifted), `j` steps over it.
+#[test]
+fn doc_comments_under_sideways_scroll() {
+    let mut s = Shot::new(80, 24);
+    s.ed.config.soft_wrap = "never".into();
+    let long = format!("    let text = \"{}\";", "to be or not to be ".repeat(8));
+    s.file("src/words.rs", &DOCS_BASE.replace("    let text = \"to be or not to be\";", &long));
+    s.ed.goto_line(13);
+    s.keys("gl");
+    let d = s.ed.doc();
+    assert!(d.left > 0, "scrolled sideways: {} at {:?}", d.left, d.selection().primary());
+    assert_eq!(folded(&s), [0, 7]);
+    assert_eq!(s.ed.folded_doc_block_at(1), Some((0, 2)), "j/k step over it as drawn");
+    let shown = screen_text(&mut s);
+    assert!(shown.contains("▎ Counts the words in text."), "unshifted: {shown}");
+    s.frames_both("sideways_doc_comments");
+}
+
+/// Changes shown in the buffer: a block a `:diff` hunk, an edit follow shows or a merge conflict touches stays
+/// raw; the one away from them renders.
+#[test]
+fn doc_comments_by_changes_shown() {
+    let now = docs_now();
+    // `:diff` (a review base, no code review)
+    let mut s = Shot::new(100, 24);
+    s.file("src/words.rs", &now);
+    let doc = s.ed.doc_mut();
+    doc.review_base = Some(Rope::from_str(DOCS_BASE));
+    doc.git_hunks = crate::git::hunks(DOCS_BASE, &now);
+    doc.git_version = doc.version();
+    s.frame();
+    assert_eq!(folded(&s), [0], ":diff");
+    s.frames_both("diff_doc_comments");
+    // An edit of Claude's that follow shows
+    let mut s = Shot::new(100, 24);
+    s.file("src/words.rs", &now);
+    s.ed.doc_mut().shown = Some(vec![crate::replay::Hunk {
+        lines: 7..9,
+        removed: vec!["/// The longest word.".into()],
+        added: now.lines().skip(7).take(2).map(String::from).collect(),
+    }]);
+    s.frame();
+    assert_eq!(folded(&s), [0], "follow");
+    // A merge conflict
+    let mut s = Shot::new(100, 24);
+    let marked = "<<<<<<< ours\n/// The longest word.\n=======\n/// The longest one.\n>>>>>>> theirs\n";
+    s.file("src/words.rs", &DOCS_BASE.replace("/// The longest word.\n", marked));
+    let doc = s.ed.doc_mut();
+    (doc.conflicts, doc.conflicts_of) = (crate::conflict::find(&doc.text), doc.version());
+    assert_eq!(doc.conflicts.len(), 1);
+    s.frame();
+    assert_eq!(folded(&s), [0], "a conflict");
+    s.frames_both("conflict_doc_comments");
+}
+
+/// A picker's preview shows doc comments as the editor would in NORMAL — but the block the item opens at stays
+/// raw (going there selects it).
+#[test]
+fn doc_comments_in_previews() {
+    use crate::picker::{Action, Item, Picker};
+    let mut s = Shot::new(110, 30);
+    let doc = s.file("src/words.rs", DOCS_BASE);
+    s.ed.goto_line(13);
+    let item = |label: &str, index, line| Item {
+        label: label.into(),
+        action: Action::Jump { index, doc, line },
+        hint: String::new(),
+        glyph: None,
+    };
+    let items = vec![item("in the first doc comment", 0, 1), item("at count", 1, 3)];
+    s.ed.open_picker(Picker::new("places", items, false), None);
+    s.frame();
+    let shown = screen_text(&mut s);
+    assert!(shown.contains("/// Counts") && shown.contains("▎ The longest word."), "{shown}");
+    s.check("preview_doc_comments");
+    s.frames_both("preview_doc_comments");
+    s.keys("<C-n>");
+    let shown = screen_text(&mut s);
+    assert!(!shown.contains("/// Counts") && shown.contains("▎ Counts the words in text."), "{shown}");
+}
+
+/// Claude's edit under review: an unchanged doc comment renders, the one the edit changes stays raw.
+#[test]
+fn snapshot_edit_review_doc_comments() {
+    let mut s = Shot::new(100, 24);
+    let id = s.file("src/words.rs", DOCS_BASE);
+    let text = Rope::from_str(DOCS_BASE);
+    let (from, to) = (text.line_to_byte(7), text.line_to_byte(8));
+    let hunk = crate::llm::Hunk {
+        from,
+        to,
+        old: text.byte_slice(from..to).to_string(),
+        new: "/// The longest word, if there is one.\n/// Ties go to the first of them.\n".into(),
+        decision: crate::llm::Decision::Undecided,
+        conflict: false,
+    };
+    let mut rev = crate::llm::Review::new(1, id, "say what it does on a tie", vec![hunk]);
+    // (from the top: following, the change sits a quarter down and the first block's rows go above)
+    (rev.ready, rev.follow) = (true, false);
+    s.ed.session.review = Some(rev);
+    let shown = screen_text(&mut s);
+    assert!(!shown.contains("/// Counts") && shown.contains("Counts the words in text."), "{shown}");
+    assert!(shown.contains("/// The longest word.") && shown.contains("/// Ties go"), "raw: {shown}");
+    s.check("edit_review_doc_comments");
+    s.frames_both("edit_review_doc_comments");
+}
+
 /// Frictions 13, #1: a turn's review says it's the last turn, and under its question what it leaves out —
 /// `9 more differ from HEAD · space v v` on one row where the rail is wide enough, the key on its own row
 /// where it isn't; the files and the key hints still in sight under it.

@@ -1180,6 +1180,9 @@ pub struct Hunk {
 pub enum RRow {
     /// This document line as is.
     Doc(usize),
+    /// Row `index` of a doc comment block (lines `start..=end`) no change is in or beside, drawn rendered as
+    /// outside a review (`term::review_folded` makes them from its `Doc` rows; their text is in `Review.folds`).
+    Folded { start: usize, end: usize, index: usize },
     /// Change header (change number).
     Header(usize),
     /// Line inside a change: ' ' kept · '-' removed · '+' added, old line number (none for added lines).
@@ -1187,6 +1190,9 @@ pub enum RRow {
 }
 
 pub struct Review {
+    /// Its document's doc comments laid out folded, for a version and width (`term::review_folds`) — the review
+    /// shows the whole file, and folding all of it each frame took milliseconds on a big one.
+    pub folds: Option<crate::doccomment::Folds>,
     pub generation: u64,
     pub doc_id: DocId,
     pub instruction: String,
@@ -1247,6 +1253,7 @@ impl Review {
     pub(crate) fn new(generation: u64, doc_id: DocId, instruction: &str, hunks: Vec<Hunk>) -> Self {
         Review {
             generation,
+            folds: None,
             doc_id,
             instruction: instruction.to_string(),
             hunks,

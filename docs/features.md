@@ -142,10 +142,23 @@ configs carry over as they are.
   error). The more serious, the longer they stay ([screenshot](screenshots/ux-toasts-sync.png))
 - **Rendered doc comments** — `///`, `//!`, and `/** */` blocks show as rewrapped prose: markers stripped, paragraphs
   joined, headings in accent, `code`, lists, `@param` tags, and example code in its language's colors, on a lightly
-  tinted panel. In normal mode `j`/`k` step over a block as one line; it unfolds into its source when you edit or
-  select it (`editor.render-doc-comments`, [folded](screenshots/ux-doc-comments.png) ·
+  tinted panel (`editor.render-doc-comments`, [folded](screenshots/ux-doc-comments.png) ·
   [unfolded](screenshots/ux-doc-comments-open.png)). Plain `//` comments are left alone, apart from `TODO`/`NOTE`
-  colors
+  colors. **One rule everywhere** a file's code is drawn — every pane of a split, a code review, `:diff`, Claude's
+  edit under review, an edit follow shows, a picker's preview — and for every move over it (`j`/`k`, clicks,
+  `gw` labels): a block renders unless
+  - the language has none, or the setting is off;
+  - it's being edited or selected: in the pane you're editing in (the focused one), in INSERT or SELECT, any
+    selection or cursor on it opens it; elsewhere (NORMAL, other panes, a review, a preview) only a selection wider
+    than a character on it does (a line selected right above isn't on it). A preview reads the place it opens
+    at as selected — a search hit in a doc comment shows raw. A prompt, picker, card, the chat or the terminal
+    taking the keys leaves the mode as it was, so nothing changes (going to Claude's waiting edit from the inbox
+    ends INSERT first);
+  - a change shown on screen is in or right beside it — a hunk's changed, added or removed lines, or a merge
+    conflict — so a diff is always read against the text it changes.
+
+  A rendered block is flowed to the width, so scrolling sideways moves only the code lines. In NORMAL `j`/`k` step
+  over a rendered block as one line (they land on its first line); through a raw one they go line by line
 - **Indent guides** (the block around the cursor one tone brighter), a **scrollbar** with error and warning ticks for
   the whole file, current-line highlight, per-mode colors and cursor shapes ([screenshot](screenshots/ux-guides.png))
 
