@@ -22,6 +22,10 @@
 //! - `TARAE_SHOT_SCALE` — the picture's scale, a whole number 1–4 (default 1; `--live` too): at 2 the font is
 //!   30 px and every measure of the 1× picture — cells, the margin, lines, blocks, the cursor — doubles, so it's
 //!   the same layout at twice the pixels, box drawing and half-blocks on whole pixels (for a high-density screen).
+//!
+//! Set by the shot for the tarae it runs, never yours to set: `TARAE_SHOT_NO_DISK=1` — the free space is the
+//! machine's the shot is taken on, not the picture's, so the status line's disk mark and the disk card stay off
+//! (`procs::disk_check`); also a color terminal, its own config and state (`as_a_terminal`).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -332,7 +336,8 @@ fn build_shot(root: &Path) -> Result<PathBuf> {
 
 /// tarae's environment in the shot: a color terminal, its own config and state. An inherited `NO_COLOR`
 /// goes — it's meant for the output of whatever runs it (a task panel sets it), and the shot renders tarae
-/// itself: with it, every shot taken from a panel came out gray.
+/// itself: with it, every shot taken from a panel came out gray. `TARAE_SHOT_NO_DISK=1`: the machine's free
+/// space isn't the picture's — tarae's disk mark and card stay off (`procs::disk_check`).
 /// A folder given in `var`: absolute (tarae starts in `TARAE_SHOT_CWD`, so a relative one would mean another
 /// folder there), and there already when `must_exist` — a config folder that isn't found leaves tarae on its
 /// defaults, and the default `llm.command` is the real `claude` (a slip that started it once).
@@ -351,6 +356,7 @@ fn as_a_terminal<'c>(cmd: &'c mut Command, config: &std::ffi::OsStr, state: &Pat
     cmd.env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
         .env("TARAE_UNDERCURL", "0")
+        .env("TARAE_SHOT_NO_DISK", "1")
         .env("XDG_CONFIG_HOME", config)
         .env("XDG_STATE_HOME", state)
         .env_remove("NO_COLOR")
@@ -702,11 +708,12 @@ mod tests {
     #[test]
     fn an_inherited_no_color_doesnt_reach_tarae() {
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", r#"printf '%s|%s' "${NO_COLOR-unset}" "$TERM""#]).env("NO_COLOR", "1");
+        cmd.args(["-c", r#"printf '%s|%s|%s' "${NO_COLOR-unset}" "$TERM" "$TARAE_SHOT_NO_DISK""#])
+            .env("NO_COLOR", "1");
         let out = as_a_terminal(&mut cmd, "/nonexistent-config".as_ref(), Path::new("/nonexistent-state"))
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset|xterm-256color");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset|xterm-256color|1", "(and no host disk mark)");
     }
 
     /// Folders from the environment: a relative one is refused (it'd be read from where tarae starts), and so

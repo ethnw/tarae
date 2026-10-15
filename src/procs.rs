@@ -494,13 +494,16 @@ pub struct Sample {
     usual: Option<Usual>,
     /// The file systems tarae writes to, as this look found them (`volumes`).
     pub free: Vec<Volume>,
+    /// This tarae is a screenshot's (`TARAE_SHOT_NO_DISK`, which only `cargo xtask shot` sets): `disk_check` says
+    /// nothing of the host's free space.
+    pub shot: bool,
 }
 
 impl Sample {
     /// A look of these processes, as the sampling thread sends one (tests).
     #[cfg(test)]
     pub fn of(procs: Vec<(Os, Option<f32>)>) -> Sample {
-        Sample { procs, took: Duration::ZERO, usual: None, free: Vec::new() }
+        Sample { procs, took: Duration::ZERO, usual: None, free: Vec::new(), shot: false }
     }
 }
 
@@ -554,9 +557,10 @@ pub fn volumes(places: &[PathBuf]) -> Vec<Volume> {
 }
 
 /// What free space says: below `DISK_LOW` the status line's mark, below `DISK_FLOOR` a card too (`procs_found`).
-pub fn disk_check(vols: &[Volume]) -> Vec<Finding> {
+/// A screenshot's tarae (`shot`) says nothing: the free space is the machine's it's taken on, not the picture's.
+pub fn disk_check(vols: &[Volume], shot: bool) -> Vec<Finding> {
     let mut out = Vec::new();
-    for v in vols.iter().filter(|v| v.total > 0) {
+    for v in vols.iter().filter(|v| v.total > 0 && !shot) {
         let (low, floor) = (DISK_LOW.min(v.total / 10), DISK_FLOOR.min(v.total / 50));
         let shown = crate::sandbox::home_shown(&v.at.display().to_string());
         let what = format!("{} free of {} on {shown}", mem(v.free), mem(v.total));
@@ -604,7 +608,7 @@ impl Sampler {
             .collect();
         self.prev = procs.iter().map(|(o, _)| ((o.pid, o.started), o.cpu)).collect();
         self.at = Some(t0);
-        Sample { procs, took: t0.elapsed(), usual: None, free: Vec::new() }
+        Sample { procs, took: t0.elapsed(), usual: None, free: Vec::new(), shot: false }
     }
 }
 
@@ -648,10 +652,12 @@ pub fn start(events: crate::event::Tx, usual_path: Option<PathBuf>) -> Sender<Wa
         let places = disk_places();
         // (screenshots and drivers: every volume this free, in bytes — the mark and the card without a full disk)
         let free_as = std::env::var("TARAE_DISK_FREE").ok().and_then(|v| v.parse::<u64>().ok());
+        let shot = std::env::var_os("TARAE_SHOT_NO_DISK").is_some_and(|v| v == "1");
         loop {
             let mut sample = look(&mut s, &mut reaper, Instant::now());
             sample.usual = usual.take();
             sample.free = volumes(&places);
+            sample.shot = shot;
             if let Some(free) = free_as {
                 sample.free.iter_mut().for_each(|v| v.free = free.min(v.total));
             }
@@ -1860,7 +1866,7 @@ impl Editor {
         with_queued(&mut rows, &self.procs_queued(), &groups);
         self.procs.restoring = self.restoring();
         let (mut found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
-        found.extend(disk_check(&s.free));
+        found.extend(disk_check(&s.free, s.shot));
         self.procs.free = s.free.clone();
         // (a run of Claude's printing nothing at next to no CPU — `stuck.rs`)
         crate::stuck::look(self, &rows, Instant::now());
@@ -2308,6 +2314,7 @@ mod tests {
             took: Duration::ZERO,
             usual: None,
             free: Vec::new(),
+            shot: false,
         }
     }
 
@@ -2742,6 +2749,7 @@ mod tests {
             took: Duration::ZERO,
             usual: None,
             free: Vec::new(),
+            shot: false,
         };
         let k = |pid, kind, title: &str, session| Known {
             pid,
@@ -3217,13 +3225,13 @@ mod tests {
     fn a_disk_running_full_is_marked_then_said_on_a_card_once() {
         const GB: u64 = 1 << 30;
         let v = |free| Volume { at: PathBuf::from("/Volumes/x"), free, total: 500 * GB };
-        assert!(disk_check(&[v(50 * GB)]).is_empty());
-        let low = disk_check(&[v(8 * GB)]);
+        assert!(disk_check(&[v(50 * GB)], false).is_empty());
+        let low = disk_check(&[v(8 * GB)], false);
         assert_eq!(low.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["disk-low:/Volumes/x"]);
         assert_eq!(low[0].short, "disk 8.0 GB free");
-        assert_eq!(disk_check(&[v(GB)]).len(), 2, "low and at the floor");
+        assert_eq!(disk_check(&[v(GB)], false).len(), 2, "low and at the floor");
         let small = Volume { at: PathBuf::from("/s"), free: 5 * GB, total: 32 * GB };
-        assert!(disk_check(&[small]).is_empty(), "a small disk: a tenth of it");
+        assert!(disk_check(&[small], false).is_empty(), "a small disk: a tenth of it");
         // Through the looks: the mark, the card once per crossing
         let mut ed = Editor::new(crate::config::Config::default());
         let look = |ed: &mut Editor, free| {
@@ -3253,6 +3261,21 @@ mod tests {
         let vols = volumes(&[tmp.clone(), tmp.join("not-there-yet/x")]);
         assert_eq!(vols.len(), 1, "one file system, once");
         assert!(vols[0].total > 0 && vols[0].free <= vols[0].total, "{vols:?}");
+    }
+
+    /// A screenshot's tarae (`cargo xtask shot` sets `TARAE_SHOT_NO_DISK`) says nothing of the host's disk —
+    /// low or at the floor, no mark and no card: the picture mustn't depend on the machine it's taken on.
+    #[test]
+    fn a_shots_tarae_says_nothing_of_the_hosts_disk() {
+        const GB: u64 = 1 << 30;
+        let v = |free| Volume { at: PathBuf::from("/Volumes/x"), free, total: 500 * GB };
+        assert!(disk_check(&[v(8 * GB), v(GB)], true).is_empty());
+        let mut ed = Editor::new(crate::config::Config::default());
+        let mut s = Sample::of(Vec::new());
+        (s.free, s.shot) = (vec![v(GB)], true);
+        ed.procs_sampled(s);
+        assert_eq!(ed.procs.mark().map(|c| c.short.as_str()), None);
+        assert!(!ed.messages.iter().any(|m| m.2.contains("almost full")), "no card");
     }
 
     /// `:procs` lists tarae and its language server — what it's for, its numbers — in the bottom slot;
