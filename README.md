@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/screenshots/hero-meok.png" width="100%" alt="tarae in meok (ink): Rust code with Claude's change, a new line for hours, waiting for y or n under review; the chat docked on the right, with two sessions' tabs over it and Claude's turn: it read lib.rs, ran cargo test in the sandbox (ok), and said both tests pass">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-meok.png">
+    <img src="docs/screenshots/hero-hanji.png" width="100%" alt="tarae: Rust code with Claude's change, a new line for hours, waiting for y or n under review; the chat docked on the right, with two sessions' tabs over it and Claude's turn: it read lib.rs, ran cargo test in the sandbox (ok), and said both tests pass">
+  </picture>
 </p>
 
 <h1 align="center">tarae</h1>

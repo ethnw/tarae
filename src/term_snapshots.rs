@@ -1403,6 +1403,64 @@ fn sessions_reviewing(w: u16) -> Shot {
     s
 }
 
+/// The chat's session tabs have a row of air under them — the layout's, not the first message's: scrolled to the
+/// top, the first message's chip is two rows under the tabs; at the bottom of a long chat the row under them is
+/// still blank, the last message still in sight and the input where one session has it. One session: no tabs,
+/// no gap — the header's rule is its edge, the chip right under it.
+#[test]
+fn the_chats_session_tabs_have_a_row_of_air_under_them() {
+    use crate::chat::{Msg, Role};
+    let mut s = Shot::new(120, 24);
+    let mut chat = crate::chat::Chat::new();
+    chat.focused = false;
+    chat.msgs.push(Msg::new(Role::User, "Parse hours too.", "lib.rs"));
+    for i in 0..30 {
+        chat.msgs.push(Msg::new(Role::Assistant, format!("answer line {i}"), ""));
+    }
+    s.ed.session.chat = Some(chat);
+    let rows = |s: &mut Shot, scroll: usize| {
+        s.ed.session.chat.as_mut().unwrap().scroll = scroll;
+        let mut p = vt100::Parser::new(s.h, s.w, 0);
+        p.process(&s.frame());
+        p.screen().rows(0, s.w).collect::<Vec<String>>()
+    };
+    let at = |rows: &[String], text: &str| rows.iter().position(|r| r.contains(text));
+    // (the chat's part of a row: from the column `col` on)
+    let col = |row: &str, text: &str| row[..row.find(text).unwrap()].chars().count();
+    let from = |row: &str, col: usize| row.chars().skip(col).collect::<String>();
+    let one = rows(&mut s, 1000);
+    let title = at(&one, "claude").expect("the chat's title");
+    assert_eq!(at(&one, "lib.rs"), Some(title + 2), "one session: the chip under the rule\n{one:#?}");
+    let input = at(&one, "Ask about").expect("the input");
+    s.ed.session_add(std::env::temp_dir().join("tarae-chat-air-other"));
+    let top = rows(&mut s, 1000);
+    let tabs = at(&top, " │ +").expect("the sessions' tabs");
+    let x = col(&top[title], "claude");
+    assert_eq!(at(&top, "lib.rs"), Some(tabs + 2), "the chip a row below the tabs\n{top:#?}");
+    assert_eq!(from(&top[tabs + 1], x).trim(), "", "the row under the tabs\n{top:#?}");
+    assert_eq!(at(&top, "Ask about"), Some(input), "the input stays\n{top:#?}");
+    s.frames_both("chat_tabs_air_top");
+    rows(&mut s, 8);
+    s.frames_both("chat_tabs_air_scrolled");
+    let bottom = rows(&mut s, 0);
+    assert_eq!(from(&bottom[tabs + 1], x).trim(), "", "scrolled: the row under the tabs\n{bottom:#?}");
+    let last = at(&bottom, "answer line 29").expect("the last message in sight");
+    assert!(last < input, "{bottom:#?}");
+    assert_eq!(at(&bottom, "Ask about"), Some(input), "{bottom:#?}");
+    // An empty chat's start text taller than its room (16 rows): from its first line, two rows under the tabs —
+    // what doesn't fit is its end (the suggestions, the model's key), never its heading
+    let mut e = Shot::new(120, 16);
+    let mut chat = crate::chat::Chat::new();
+    chat.focused = false;
+    e.ed.session.chat = Some(chat);
+    e.ed.session_add(std::env::temp_dir().join("tarae-chat-air-other"));
+    let empty = rows(&mut e, 0);
+    let tabs = at(&empty, " │ +").expect("the sessions' tabs");
+    assert_eq!(at(&empty, "Ask Claude"), Some(tabs + 2), "the start text's first line\n{empty:#?}");
+    assert_eq!(at(&empty, "It reads the whole project,"), Some(tabs + 4), "{empty:#?}");
+    assert!(at(&empty, "starting from").is_some_and(|r| r < at(&empty, "Ask about").unwrap()), "{empty:#?}");
+}
+
 /// #195: the reviewer reading, where the sessions are — its tab (`¶ reviewing`, beside the chat's `●`), its
 /// row in the list (`space W`) — and one that ended behind, not looked at (`•`, `¶ reviewer done`): news,
 /// not `▲ waiting` on the status line.

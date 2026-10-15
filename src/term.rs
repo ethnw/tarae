@@ -9402,8 +9402,9 @@ fn draw_chat(
         None => Vec::new(),
     };
     let plan_h = plan_rows.len() + usize::from(!plan_rows.is_empty());
-    // ── The sessions over it all, when there's more than one
-    let tabs_h = usize::from(!editor.sessions.is_empty());
+    // ── The sessions over it all, when there's more than one: their row and a row of air under it (a row of
+    // text, unlike the header's rule, needs one before the messages)
+    let tabs_h = if editor.sessions.is_empty() { 0 } else { 2 };
     // ── What the conversation costs, under it all (once something was reported)
     let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
     let usage_row = usage_spans(
@@ -9643,6 +9644,12 @@ fn draw_chat(
                 ]);
             }
         }
+        // Taller than its room: its end folds (the suggestions, the keys), never its start — messages keep their
+        // last lines, this its first
+        intro.truncate(area);
+        while intro.last().is_some_and(|l| l.is_empty()) {
+            intro.pop();
+        }
         let pad = area.saturating_sub(intro.len()) / 2;
         lines = std::iter::repeat_n(Vec::new(), pad).chain(intro).collect();
     }
@@ -9753,6 +9760,9 @@ fn draw_chat(
         chat_row_end(out, card, lay.chat_w, used)?;
         let mut taken = editor.screen.session_spots.borrow_mut();
         taken.extend(spots.into_iter().map(|(a, b, s)| (y, text_x + a, text_x + b, s)));
+        y += 1;
+        chat_row_start(out, x0, y, edge(y), card)?;
+        chat_row_end(out, card, lay.chat_w, 0)?;
         y += 1;
     }
     if !plan_rows.is_empty() {
