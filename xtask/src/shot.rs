@@ -19,6 +19,9 @@
 //!   `TARAE_SHOT_COLS`/`TARAE_SHOT_ROWS` (default 112×30).
 //! - `TARAE_SHOT_REPLAY=<file>` — draw terminal bytes recorded elsewhere instead of running tarae.
 //! - `TARAE_SHOT_BIN` — another tarae binary (absolute; a saved "before" build for a before/after), not built.
+//! - `TARAE_SHOT_SCALE` — the picture's scale, a whole number 1–4 (default 1; `--live` too): at 2 the font is
+//!   30 px and every measure of the 1× picture — cells, the margin, lines, blocks, the cursor — doubles, so it's
+//!   the same layout at twice the pixels, box drawing and half-blocks on whole pixels (for a high-density screen).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -49,6 +52,7 @@ pub fn run(args: &[String]) -> Result<()> {
         args.split_first().ok_or("usage: cargo xtask shot out.png [keys …] | shot --live out.png")?;
     let num = |k: &str, d: u16| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let (cols, rows) = (num("TARAE_SHOT_COLS", 112), num("TARAE_SHOT_ROWS", 30));
+    let scale = scale(std::env::var("TARAE_SHOT_SCALE").ok().as_deref())?;
     let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
 
     if let Some(replay) = std::env::var_os("TARAE_SHOT_REPLAY") {
@@ -66,11 +70,20 @@ pub fn run(args: &[String]) -> Result<()> {
         res?;
     }
 
-    let fonts = Fonts::load()?;
-    let (w, h, px) = render(vt.parser.screen(), &fonts);
+    let fonts = Fonts::load(scale)?;
+    let (w, h, px) = render(vt.parser.screen(), &fonts, scale);
     save_png(Path::new(out), w, h, &px)?;
     println!("saved {out} ({w}, {h})");
     Ok(())
+}
+
+/// `TARAE_SHOT_SCALE`'s value: 1 when unset, else a whole number from 1 to 4.
+fn scale(given: Option<&str>) -> Result<usize> {
+    match given.map(|v| v.trim().parse::<usize>()) {
+        None => Ok(1),
+        Some(Ok(s @ 1..=4)) => Ok(s),
+        Some(_) => Err(format!("TARAE_SHOT_SCALE={}: a whole number from 1 to 4", given.unwrap_or_default())),
+    }
 }
 
 // ── A running tarae ──────────────────────────────────────────────────────────
@@ -102,8 +115,9 @@ fn live(args: &[String]) -> Result<()> {
     vt.feed(f["bytes"].as_str().unwrap_or_default().as_bytes());
     // (the frame as tarae drew it, before the terminal's update markers: ended here)
     vt.feed(FRAME_END);
-    let fonts = Fonts::load()?;
-    let (w, h, px) = render(vt.parser.screen(), &fonts);
+    let scale = scale(std::env::var("TARAE_SHOT_SCALE").ok().as_deref())?;
+    let fonts = Fonts::load(scale)?;
+    let (w, h, px) = render(vt.parser.screen(), &fonts, scale);
     save_png(Path::new(&out), w, h, &px)?;
     println!("saved {out} ({w}, {h}) — frame {} of {}", f["frames"], sock.display());
     Ok(())
@@ -397,10 +411,12 @@ enum Face {
 }
 
 impl Fonts {
-    fn load() -> Result<Fonts> {
+    /// The fonts, tuned for `SIZE` at `scale`.
+    fn load(scale: usize) -> Result<Fonts> {
+        let size = SIZE * scale as f32;
         let open = |name: &str| -> Option<fontdue::Font> {
             let bytes = std::fs::read(find_font(name)?).ok()?;
-            fontdue::Font::from_bytes(bytes, fontdue::FontSettings { scale: SIZE, ..Default::default() }).ok()
+            fontdue::Font::from_bytes(bytes, fontdue::FontSettings { scale: size, ..Default::default() }).ok()
         };
         let regular = open("JetBrainsMono-Regular.ttf").ok_or("JetBrainsMono-Regular.ttf not found")?;
         let or_regular = |name| open(name).unwrap_or_else(|| regular.clone());
@@ -537,15 +553,19 @@ fn color(c: vt100::Color, default: Rgb) -> Rgb {
     }
 }
 
-fn render(screen: &vt100::Screen, fonts: &Fonts) -> (usize, usize, Vec<u8>) {
+/// The screen as RGB pixels at `s` times the size: glyphs drawn at `SIZE` × `s`, every other measure the 1×
+/// picture's times `s` — so 2× is the 1× layout at twice the pixels, lines and blocks on whole pixels.
+fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec<u8>) {
     let (rows, cols) = screen.size();
     let (rows, cols) = (rows as usize, cols as usize);
-    let cw = fonts.regular.metrics('M', SIZE).advance_width as usize;
-    let ch = (SIZE * 1.45) as usize;
+    let size = SIZE * s as f32;
+    // The 1× cell
+    let (cw1, ch1) = (fonts.regular.metrics('M', SIZE).advance_width as usize, (SIZE * 1.45) as usize);
+    let (cw, ch, pad) = (cw1 * s, ch1 * s, PAD * s);
     let cell = |y: usize, x: usize| screen.cell(y as u16, x as u16);
     // The outer margin takes the edit view's background (the command line's last cell — no card covers it)
     let bg = cell(rows - 1, cols - 1).map_or(BG, |c| color(c.bgcolor(), BG));
-    let (w, h) = (cols * cw + PAD * 2, rows * ch + PAD * 2);
+    let (w, h) = (cols * cw + pad * 2, rows * ch + pad * 2);
     let mut cv = Canvas { w, h, px: bg.repeat(w * h) };
 
     let colors = |c: &vt100::Cell| {
@@ -558,7 +578,7 @@ fn render(screen: &vt100::Screen, fonts: &Fonts) -> (usize, usize, Vec<u8>) {
             let Some(c) = cell(y, x) else { continue };
             let (_, b) = colors(c);
             if b != bg {
-                let (px, py) = (PAD + x * cw, PAD + y * ch);
+                let (px, py) = (pad + x * cw, pad + y * ch);
                 cv.rect(px, py, px + cw * if c.is_wide() { 2 } else { 1 }, py + ch, b);
             }
         }
@@ -573,20 +593,21 @@ fn render(screen: &vt100::Screen, fonts: &Fonts) -> (usize, usize, Vec<u8>) {
                 continue;
             }
             let (fg, _) = colors(c);
-            let (px, py) = (PAD + x * cw, PAD + y * ch);
+            let (px, py) = (pad + x * cw, pad + y * ch);
             if let Some((a0, b0, a1, b1)) = block(text) {
-                let at = |t: f32, n: usize| (t * n as f32).round() as usize;
-                cv.rect(px + at(a0, cw), py + at(b0, ch), px + at(a1, cw), py + at(b1, ch), fg);
+                let at = |t: f32, n: usize| (t * n as f32).round() as usize * s;
+                cv.rect(px + at(a0, cw1), py + at(b0, ch1), px + at(a1, cw1), py + at(b1, ch1), fg);
                 continue;
             }
             if let Some(arms) = box_arms(text) {
-                let (mx, my) = (px + cw / 2, py + ch / 2);
+                // (a line is `s` pixels thick)
+                let (mx, my) = (px + cw1 / 2 * s, py + ch1 / 2 * s);
                 for a in arms.chars() {
                     match a {
-                        'l' => cv.rect(px, my, mx + 1, my + 1, fg),
-                        'r' => cv.rect(mx, my, px + cw + 1, my + 1, fg),
-                        'u' => cv.rect(mx, py, mx + 1, my + 1, fg),
-                        _ => cv.rect(mx, my, mx + 1, py + ch + 1, fg),
+                        'l' => cv.rect(px, my, mx + s, my + s, fg),
+                        'r' => cv.rect(mx, my, px + cw + s, my + s, fg),
+                        'u' => cv.rect(mx, py, mx + s, my + s, fg),
+                        _ => cv.rect(mx, my, mx + s, py + ch + s, fg),
                     }
                 }
                 continue;
@@ -610,10 +631,11 @@ fn render(screen: &vt100::Screen, fonts: &Fonts) -> (usize, usize, Vec<u8>) {
                     face
                 };
                 let font = fonts.face(face);
-                let (m, bitmap) = glyphs.entry((face, chr)).or_insert_with(|| font.rasterize(chr, SIZE));
-                // ceil, as FreeType rounds a scaled ascender (PIL, the reference renders, used it)
-                let ascent = font.horizontal_line_metrics(SIZE).map_or(SIZE, |l| l.ascent).ceil() as i64;
-                let baseline = (py + 3) as i64 + ascent;
+                let (m, bitmap) = glyphs.entry((face, chr)).or_insert_with(|| font.rasterize(chr, size));
+                // ceil, as FreeType rounds a scaled ascender (PIL, the reference renders, used it) — the 1×
+                // baseline's, times the scale
+                let ascent = font.horizontal_line_metrics(SIZE).map_or(SIZE, |l| l.ascent).ceil() as usize;
+                let baseline = (py + (3 + ascent) * s) as i64;
                 let top = baseline - m.ymin as i64 - m.height as i64;
                 let left = pen.round() as i64 + m.xmin as i64;
                 for (i, a) in bitmap.iter().enumerate() {
@@ -623,7 +645,7 @@ fn render(screen: &vt100::Screen, fonts: &Fonts) -> (usize, usize, Vec<u8>) {
             }
             if c.underline() {
                 let uw = cw * if c.is_wide() { 2 } else { 1 };
-                cv.rect(px, py + ch - 3, px + uw, py + ch - 2, fg);
+                cv.rect(px, py + ch - 3 * s, px + uw, py + ch - 2 * s, fg);
             }
         }
     }
@@ -632,8 +654,8 @@ fn render(screen: &vt100::Screen, fonts: &Fonts) -> (usize, usize, Vec<u8>) {
         let (cy, cx) = screen.cursor_position();
         let (cy, cx) = (cy as usize, cx as usize);
         let fg = if cx < cols { cell(cy, cx).map_or(FG, |c| color(c.fgcolor(), FG)) } else { FG };
-        let (px, py) = (PAD + cx * cw, PAD + cy * ch);
-        cv.rect(px, py, px + 2, py + ch, fg);
+        let (px, py) = (pad + cx * cw, pad + cy * ch);
+        cv.rect(px, py, px + 2 * s, py + ch, fg);
     }
     (w, h, cv.px)
 }
@@ -754,6 +776,53 @@ mod tests {
         vt.feed(FRAME_END);
         assert_eq!(vt.parser.screen().contents(), "ab\ncd");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A screen with every kind of cell `render` draws: colors, faces, underline, inverse, box drawing, blocks,
+    /// wide characters, the cursor.
+    fn every_kind_of_cell() -> vt100::Parser {
+        let mut vt = vt100::Parser::new(5, 60, 0);
+        vt.process(
+            "\x1b[48;2;40;42;54m\x1b[38;2;248;248;242m╭──┬──╮ plain \x1b[1mbold\x1b[22m \x1b[3mitalic\x1b[23m \
+             \x1b[1;3mboth\x1b[0m\r\n\x1b[38;2;189;147;249m│ab├cd┤ \x1b[4munder\x1b[24m 가나 ▀▄▌▐█▎▏ ●▲›◦ —…×\r\n\
+             \x1b[48;2;68;71;90m╰──┴──╯ ┼ ┌┐└┘ fn main() { let x: u8 = 0; }\x1b[0m\r\n\
+             \x1b[7minverse\x1b[0m \x1b[38;5;214midx\x1b[0m \x1b[38;5;245mgray\x1b[0m\x1b[4;5H"
+                .as_bytes(),
+        );
+        vt
+    }
+
+    /// At 2× the picture is the 1× one at twice the pixels: twice as wide and tall, and everything but the
+    /// glyphs — backgrounds, box drawing, blocks, the cursor — exactly the 1× pixels doubled, on whole pixels.
+    /// (Skipped without JetBrains Mono, which the cell's width comes from.)
+    #[test]
+    fn a_2x_shot_is_the_1x_layout_at_twice_the_pixels() {
+        let (Ok(f1), Ok(f2)) = (Fonts::load(1), Fonts::load(2)) else { return };
+        let (w1, h1, _) = render(every_kind_of_cell().screen(), &f1, 1);
+        let (w2, h2, _) = render(every_kind_of_cell().screen(), &f2, 2);
+        assert_eq!((w2, h2), (w1 * 2, h1 * 2));
+        let mut vt = vt100::Parser::new(3, 12, 0);
+        vt.process(
+            "\x1b[48;2;40;42;54m\x1b[38;2;189;147;249m╭─┬─╮▀▄▌▐█▎▏\r\n│ ├┼┤\x1b[0m ╰┴╯┌┐\r\n\x1b[7m \x1b[0m└┘\x1b[3;7H"
+                .as_bytes(),
+        );
+        let (one, two) = (render(vt.screen(), &f1, 1), render(vt.screen(), &f2, 2));
+        let (w, h) = (one.0, one.1);
+        for y in 0..h * 2 {
+            for x in 0..w * 2 {
+                let (i, j) = ((y * w * 2 + x) * 3, ((y / 2) * w + x / 2) * 3);
+                assert_eq!(two.2[i..i + 3], one.2[j..j + 3], "at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_scale_is_a_whole_number_from_1_to_4() {
+        assert_eq!((scale(None), scale(Some("2")), scale(Some("4"))), (Ok(1), Ok(2), Ok(4)));
+        for bad in ["0", "5", "1.5", "two", ""] {
+            let e = scale(Some(bad)).unwrap_err();
+            assert_eq!(e, format!("TARAE_SHOT_SCALE={bad}: a whole number from 1 to 4"));
+        }
     }
 
     #[test]
