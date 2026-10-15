@@ -371,6 +371,8 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
     };
     let mut ed = Editor::with_root(crate::config::Config::default(), at.project.clone());
     as_shipped(&mut ed);
+    // (the card record kept as tarae keeps it, in the harness's folder rather than tarae's state)
+    ed.cards_dir = Some(at.scratch.join(crate::cards::DIR));
     for (path, value) in &entry.settings {
         // (checked when the manifest was read)
         let _ = crate::settings::apply(&mut ed.config, path, value);
@@ -407,6 +409,8 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         Err(e) => Some(Err(e)),
         Ok(()) => answered_by_script(&mut ed, entry, &id, &mut v),
     };
+    // (the record's lines written before it's judged, as tarae waits for them at its end)
+    ed.cards_flush();
     let run = ed.session.task_run.as_ref().filter(|r| r.by_claude && r.task.cmd == entry.run);
     match answer {
         None => {
@@ -672,6 +676,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ),
     ("src/editor.rs", "in fn with_root: billing_kept", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: builds", "new sessions' checkouts: compat runs in one"),
+    (
+        "src/editor.rs",
+        "in fn with_root: cards_dir",
+        "given (`run`): the card record kept in the harness's folder, a line per card or run refused",
+    ),
     ("src/editor.rs", "in fn with_root: chats_dir", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: claude_confine", CLAUDES),
     ("src/editor.rs", "in fn with_root: claude_env", CLAUDES),
@@ -695,6 +704,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "src/editor.rs",
         "in fn with_root: read_temp",
         "turned on (`as_shipped`): reads of the temp folders go unasked",
+    ),
+    (
+        "src/editor.rs",
+        "in fn with_root: read_outside",
+        "not a run's: only Claude's Read and tarae's read and search tools go by it (`reads::Gate`)",
     ),
     ("src/editor.rs", "in fn with_root: recovery", NOT_RUNS),
     (
@@ -983,6 +997,10 @@ timeout = 60
         assert_eq!(v.cards, vec!["run not-a-check:touch made-here → n"], "{v}");
         assert!(failed(&v, Check::Exit).iter().any(|f| f.starts_with("it didn't run")), "{v}");
         assert!(!at.project.join("made-here").exists(), "{v}");
+        // Its card is in the record, as tarae keeps it
+        let record = crate::cards::read_record(&at.scratch.join(crate::cards::DIR));
+        let said: Vec<_> = record.iter().map(|e| (&e["kind"], &e["answer"], &e["what"])).collect();
+        assert_eq!(said, [(&json!("run"), &json!("n"), &json!("touch made-here"))], "{record:?}");
     }
 
     /// The settings an entry's run gets (`settings::apply`, as `run` applies them).
