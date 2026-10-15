@@ -6628,8 +6628,11 @@ mod tests {
         std::fs::write(home.join(".shellcheckrc"), "external-sources=true\n").unwrap();
         let card_or_done = |ed: &Editor| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy();
         let cmd = json!({ "command": "shellcheck --norc x.sh" });
+        // (the parser's gate, which only the no-sandbox path keeps until piece 5 — in the sandbox any command
+        // runs, what it reads the sandbox's: P3)
         // (no rc file read: it reads only what it's named — no card, whatever it then says)
         let mut ed = editor("");
+        ed.config.llm.sandbox = false;
         ed.session.root = p.clone();
         ed.shellcheck =
             crate::readonly::Shellcheck { homes: vec![home.join(".shellcheckrc")], opts: Vec::new() };
@@ -6639,6 +6642,7 @@ mod tests {
         assert!(ed.offers.is_empty(), "--norc: no card");
         // (home's rc turns external sources on: the card says so)
         let mut ed = editor("");
+        ed.config.llm.sandbox = false;
         ed.session.root = p.clone();
         ed.shellcheck =
             crate::readonly::Shellcheck { homes: vec![home.join(".shellcheckrc")], opts: Vec::new() };
