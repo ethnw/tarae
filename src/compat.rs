@@ -331,6 +331,7 @@ impl std::fmt::Display for Verdict {
 pub fn as_shipped(ed: &mut Editor) {
     ed.sandbox = crate::sandbox::Availability::Unknown;
     ed.read_temp = true;
+    ed.shellcheck = crate::readonly::Shellcheck::of_process();
     ed.sandbox_here = Some(std::sync::Arc::new(|| {
         let env = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v)));
         crate::sandbox::Here { env: env.collect(), ..crate::sandbox::Here::now() }
@@ -715,6 +716,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "src/editor.rs",
         "in fn with_root: sandbox",
         "turned back to Unknown (`as_shipped`): tests bypass the sandbox",
+    ),
+    (
+        "src/editor.rs",
+        "in fn with_root: shellcheck",
+        "turned on (`as_shipped`): home's shellcheck rc files and SHELLCHECK_OPTS as the process has them",
     ),
     ("src/editor.rs", "in fn with_root: sizes", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: sizes_path", NOT_RUNS),

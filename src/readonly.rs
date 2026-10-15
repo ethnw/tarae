@@ -1195,14 +1195,16 @@ pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path, expanded: &[(String, Pat
 /// where it was and run the rest (after `;` or `||`) from there, so where those read can't be told: the
 /// line is asked about. So is a word naming one of `expansions` when `expanded` (each one's real folder,
 /// `allow::expanded`) doesn't know it, and a glob with `..` after its first wildcard (`*/../..` climbs out of
-/// what's fixed).
-pub fn outside(
+/// what's fixed) — and a shellcheck that would read what it isn't named (`sc`: home's rc files and its options
+/// from the environment, `Shellcheck::of_process` on the run path).
+pub fn outside_with(
     cmd: &str,
     cwd: &Path,
     root: &Path,
     chat: &Allowed,
     kept: &Allowed,
     expanded: &[(String, PathBuf)],
+    sc: &Shellcheck,
 ) -> Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut here = cwd.to_path_buf();
@@ -1216,8 +1218,7 @@ pub fn outside(
                 if let Some(w) = w.iter().find(|w| w.glob && climbs(&w.text)) {
                     return Err(format!("{}: `..` after a wildcard — where it leads can't be told", w.text));
                 }
-                let env = shellcheck_env();
-                if let Some(why) = shellcheck_follows(&w, &here, &shellcheck_homes(), &env, expanded) {
+                if let Some(why) = shellcheck_follows(&w, &here, &sc.homes, &sc.opts, expanded) {
                     return Err(why);
                 }
                 candidates(&w)
@@ -1346,25 +1347,45 @@ fn shellcheck_rcs(here: &Path, scripts: &[PathBuf], homes: &[PathBuf]) -> Vec<Pa
     out
 }
 
-/// The values of `SHELLCHECK_OPTS` a run may see: tarae's own (a sandboxed run gets it or nothing — `runenv`),
-/// a value that isn't UTF-8 as one that can't be judged, and one a pack sets — none in tests (they never read
-/// yours).
-fn shellcheck_env() -> Vec<String> {
-    const NAME: &str = "SHELLCHECK_OPTS";
-    if cfg!(test) {
-        return Vec::new();
-    }
-    let own = std::env::var_os(NAME).map(|v| v.into_string().unwrap_or_else(|_| "\u{FFFD}".into()));
-    let packs = crate::sandboxpack::get().env.iter().filter(|(k, _)| k == NAME).map(|(_, v)| v.clone());
-    own.into_iter().chain(packs).collect()
+/// What shellcheck may read besides its line's words (`shellcheck_follows`): home's rc files, and the values of
+/// `SHELLCHECK_OPTS` a run may see. `of_process` is the run path's; a test gives its own (`Default`: none).
+#[derive(Clone, Debug, Default)]
+pub struct Shellcheck {
+    pub homes: Vec<PathBuf>,
+    pub opts: Vec<String>,
 }
 
-/// Home's rc files for shellcheck: `~/.shellcheckrc`, `$XDG_CONFIG_HOME/shellcheckrc` (`~/.config/` without
-/// it) — none in tests (they never read yours).
-fn shellcheck_homes() -> Vec<PathBuf> {
-    let Some(home) = crate::allow::home().filter(|_| !cfg!(test)) else { return Vec::new() };
-    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
-    vec![home.join(".shellcheckrc"), config.unwrap_or_else(|| home.join(".config")).join("shellcheckrc")]
+impl Shellcheck {
+    /// This process's: `~/.shellcheckrc`, `$XDG_CONFIG_HOME/shellcheckrc` (`~/.config/` without it); and
+    /// `SHELLCHECK_OPTS` — tarae's own (a sandboxed run gets it or nothing: `runenv`; one not UTF-8 as a value
+    /// that can't be judged) and one a pack sets. On a worker.
+    pub fn of_process() -> Shellcheck {
+        const NAME: &str = "SHELLCHECK_OPTS";
+        let homes = crate::allow::home().map_or_else(Vec::new, |home| {
+            let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+            vec![
+                home.join(".shellcheckrc"),
+                config.unwrap_or_else(|| home.join(".config")).join("shellcheckrc"),
+            ]
+        });
+        let own = std::env::var_os(NAME).map(|v| v.into_string().unwrap_or_else(|_| "\u{FFFD}".into()));
+        let packs = crate::sandboxpack::get().env.iter().filter(|(k, _)| k == NAME).map(|(_, v)| v.clone());
+        Shellcheck { homes, opts: own.into_iter().chain(packs).collect() }
+    }
+}
+
+/// `outside_with` where shellcheck has no rc file at home and no options from the environment — a test's (they
+/// never read yours).
+#[cfg(test)]
+pub fn outside(
+    cmd: &str,
+    cwd: &Path,
+    root: &Path,
+    chat: &Allowed,
+    kept: &Allowed,
+    expanded: &[(String, PathBuf)],
+) -> Result<Vec<PathBuf>, String> {
+    outside_with(cmd, cwd, root, chat, kept, expanded, &Shellcheck::default())
 }
 
 /// `word` with the one of `expansions` in it filled in with its folder (`expanded`). Err: it names one whose
@@ -1620,6 +1641,13 @@ mod tests {
         assert!(
             shellcheck_follows(w, &p, &homes, &[], &[]).is_some_and(|e| e.contains(".config/shellcheckrc"))
         );
+        // (through `outside_with`, as the run path gives them — `Shellcheck::of_process`)
+        let with = |sc: Shellcheck| outside_with("shellcheck sub/x.sh", &p, &p, &none, &none, &[], &sc);
+        let e = with(Shellcheck { homes: homes.to_vec(), opts: Vec::new() }).unwrap_err();
+        assert!(e.contains(".config/shellcheckrc"), "{e}");
+        let e = with(Shellcheck { homes: Vec::new(), opts: vec!["--ext".into()] }).unwrap_err();
+        assert!(e.contains("SHELLCHECK_OPTS"), "{e}");
+        assert_eq!(with(Shellcheck::default()), Ok(Vec::new()));
     }
 
     /// The list, and each option that makes one of them write, run something, or never end.

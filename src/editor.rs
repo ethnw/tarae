@@ -600,6 +600,9 @@ pub struct Editor {
     /// Claude reads outside home unasked where the capability model does (`reads::by_default`, D3) — off in
     /// tests, for the same reason.
     pub read_outside: bool,
+    /// What a read-only shellcheck may read beyond its line (`readonly::Shellcheck`): home's rc files and
+    /// `SHELLCHECK_OPTS`, the process's — none in tests (they never read yours; a test sets its own).
+    pub shellcheck: crate::readonly::Shellcheck,
     /// Where commit trees for `run`'s `base` go (`basetree::folder_for`): None — tarae's cache's; tests' a temp
     /// folder, never the user's cache.
     pub base_trees: Option<PathBuf>,
@@ -835,6 +838,11 @@ impl Editor {
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
             read_outside: !cfg!(test),
+            shellcheck: if cfg!(test) {
+                Default::default()
+            } else {
+                crate::readonly::Shellcheck::of_process()
+            },
             base_trees: cfg!(test).then(|| std::env::temp_dir().join("tarae-test-base")),
             claude_settings_gate: !cfg!(test),
             claude_confine: !cfg!(test),
@@ -6593,6 +6601,43 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.offers.is_empty() || answers(&log) == 2);
         assert!(ed.offers.is_empty(), "allowed this chat: no card");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// f22 review: shellcheck of a script in the project runs unasked — but where what it may read beyond its line
+    /// (`Editor.shellcheck`: the process's home and environment outside tests) has an rc file turning external
+    /// sources on, it gets the run card, saying why. (The card is answered `n`: nothing runs.)
+    #[test]
+    fn a_shellcheck_whose_home_rc_follows_sources_asks() {
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("run-shellcheck");
+        let dir = scratch.to_path_buf();
+        let (p, home) = (dir.join("p"), dir.join("home"));
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(p.join("x.sh"), "echo x\n").unwrap();
+        std::fs::write(home.join(".shellcheckrc"), "external-sources=true\n").unwrap();
+        let card_or_done = |ed: &Editor| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy();
+        let cmd = json!({ "command": "shellcheck --norc x.sh" });
+        // (no rc file read: it reads only what it's named — no card, whatever it then says)
+        let mut ed = editor("");
+        ed.session.root = p.clone();
+        ed.shellcheck =
+            crate::readonly::Shellcheck { homes: vec![home.join(".shellcheckrc")], opts: Vec::new() };
+        claude_calls(&mut ed, &dir, "run", &cmd);
+        feed(&mut ed, "<space>lcheck<ret>");
+        settle_for(&mut ed, card_or_done);
+        assert!(ed.offers.is_empty(), "--norc: no card");
+        // (home's rc turns external sources on: the card says so)
+        let mut ed = editor("");
+        ed.session.root = p.clone();
+        ed.shellcheck =
+            crate::readonly::Shellcheck { homes: vec![home.join(".shellcheckrc")], opts: Vec::new() };
+        claude_calls(&mut ed, &dir, "run", &json!({ "command": "shellcheck x.sh" }));
+        feed(&mut ed, "<space>lcheck<ret>");
+        settle_for(&mut ed, card_or_done);
+        let q = ed.offers.first().map(|o| o.question.clone()).expect("a card");
+        assert!(q.contains(".shellcheckrc turns external sources on"), "{q}");
+        ed.offer_dismiss();
     }
 
     /// #164: every run card says in one line why it asks — a line the shell reader doesn't read says what

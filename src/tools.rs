@@ -1692,7 +1692,7 @@ fn read_only(
     pins: Option<Vec<(PathBuf, u64)>>,
     (judge, beyond): (String, Option<Beyond>),
 ) -> Result<(), String> {
-    let (basis, root) = (ed.caps_basis(), ed.session.root.clone());
+    let (basis, root, shellcheck) = (ed.caps_basis(), ed.session.root.clone(), ed.shellcheck.clone());
     ed.events.jobs().spawn(move || {
         let caps = basis.build();
         // (what's read unasked, as the line's reads are judged until the gate goes by `caps` itself — piece 4)
@@ -1701,7 +1701,8 @@ fn read_only(
             ..Default::default()
         };
         let expanded = crate::allow::expanded(&judge, &cwd);
-        let reads = crate::readonly::outside(&judge, &cwd, &root, &basis.chat, &unasked, &expanded);
+        let reads =
+            crate::readonly::outside_with(&judge, &cwd, &root, &basis.chat, &unasked, &expanded, &shellcheck);
         // (where they are, for the card's line)
         let classes = reads.as_ref().map(|r| crate::cards::classes(r, &caps)).unwrap_or_default();
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
