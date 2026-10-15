@@ -12,10 +12,8 @@ fn repository(name: &str) -> (PathBuf, PathBuf) {
 
 /// A repository of the test's own that runs nothing of its own.
 fn plain_repository(name: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("tarae-gittrust-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::scratch::Scratch::new(&format!("gittrust-{name}")).into_path();
     std::fs::create_dir_all(dir.join("repo")).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
     std::fs::write(dir.join("user.gitconfig"), "").unwrap();
     crate::gitrepo::global_config_for(&dir, &dir.join("user.gitconfig"));
     let repo = dir.join("repo");

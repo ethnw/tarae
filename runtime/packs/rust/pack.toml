@@ -221,6 +221,8 @@ quiet = ["tests/", "benches/"]
 # in every folder between the project and home — those files, not the folder (`credentials.toml` sits there):
 # a project below a folder with one doesn't build without it ("could not load Cargo configuration")
 [sandbox]
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+not-settings = ["rs"]
 reads = ["~/.cargo", "~/.rustup", "{cargo}", "{rustup}"]
 reads-above = [".cargo/config.toml", ".cargo/config"]
 # Cargo's tokens: never read, wherever its home is

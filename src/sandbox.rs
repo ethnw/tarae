@@ -4359,9 +4359,8 @@ mod tests {
     #[test]
     fn write_places_are_the_policys_own() {
         let pid = std::process::id();
-        let root = std::env::temp_dir().join(format!("tarae-write-places-{pid}"));
-        std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
+        let scratch = crate::scratch::Scratch::new("write-places");
+        let root = scratch.to_path_buf();
         // (under this crate's `target/`: outside the temp folders; a repository of its own, so a discovery
         // there never climbs into tarae's)
         let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/tarae-gomodcache-{pid}"));
@@ -4478,8 +4477,8 @@ mod tests {
     /// with `GIT_OPTIONAL_LOCKS=0` it leaves it. (A repository of the test's own, in its temp folder.)
     #[test]
     fn git_status_leaves_the_index_in_a_sandboxed_run() {
-        let dir = std::env::temp_dir().join(format!("tarae-sb-gitlock-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("sb-gitlock");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
             let ok = Command::new("git").args(args).current_dir(&dir).output().unwrap().status.success();
@@ -5053,8 +5052,8 @@ mod tests {
     /// this test binary again, holding a lock until its stdin ends.)
     #[test]
     fn a_gone_taraes_run_folders_are_pruned() {
-        let t = std::env::temp_dir().join(format!("tarae-runs-prune-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("runs-prune");
+        let t = scratch.to_path_buf();
         std::fs::create_dir_all(&t).unwrap();
         let t = profile_path(&t);
         let (base, outside) = (t.join("cache/tarae/runs"), t.join("outside"));
@@ -5155,8 +5154,8 @@ mod tests {
     /// held. (A cache of the test's own.)
     #[test]
     fn a_tarae_makes_its_run_folders_in_a_folder_it_holds() {
-        let t = std::env::temp_dir().join(format!("tarae-runs-instance-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("runs-instance");
+        let t = scratch.to_path_buf();
         let base = t.join("runs");
         std::fs::create_dir_all(&base).unwrap();
         let held = |dir: &Path| lock_taken(&dir.join(INSTANCE_LOCK)).unwrap().is_none();
@@ -5337,8 +5336,8 @@ mod tests {
     /// meanwhile — said), the next run makes it again. (Folders of the test's own.)
     #[test]
     fn the_own_build_folder_is_made_through_no_link() {
-        let t = std::env::temp_dir().join(format!("tarae-own-build-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("own-build");
+        let t = scratch.to_path_buf();
         std::fs::create_dir_all(t.join("cargo/build")).unwrap();
         std::fs::create_dir_all(t.join("elsewhere")).unwrap();
         let t = std::fs::canonicalize(&t).unwrap();
@@ -5774,8 +5773,8 @@ mod tests {
         use std::time::Duration;
         let tmp = std::env::temp_dir();
         let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
-        let base = tmp.join(format!("tarae-daemon-home-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "daemon-home");
+        let base = scratch.to_path_buf();
         for d in ["home/work/g", "home/work/plain"] {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
@@ -5866,8 +5865,8 @@ mod tests {
     fn a_run_homes_append_starts_from_the_runs_own_value() {
         let tmp = std::env::temp_dir();
         let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
-        let base = tmp.join(format!("tarae-append-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "append");
+        let base = scratch.to_path_buf();
         std::fs::create_dir_all(base.join("home/work/g")).unwrap();
         let base = std::fs::canonicalize(&base).unwrap();
         let (home, g) = (base.join("home"), base.join("home/work/g"));
@@ -5903,8 +5902,8 @@ mod tests {
         // (never in the shared temp folder: on Linux that's `/tmp`, which every run writes)
         let tmp = std::env::temp_dir();
         let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
-        let base = tmp.join(format!("tarae-gocache-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "gocache");
+        let base = scratch.to_path_buf();
         let made = [
             "work/a",
             "work/b",
@@ -6311,8 +6310,8 @@ mod tests {
     /// (A stand-in home in the test's own temp folder.)
     #[test]
     fn reads_for_a_home() {
-        let home = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-home-{}", std::process::id()));
-        std::fs::remove_dir_all(&home).ok();
+        let scratch = crate::scratch::Scratch::new("sb-home");
+        let home = profile_path(&scratch);
         for d in [".cargo", ".ssh", "Library/Fonts", "src/other", ".claude/x"] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
@@ -6421,8 +6420,8 @@ mod tests {
     /// run's folder takes the link, never what it points at. (Stand-ins in the test's own temp folder.)
     #[test]
     fn a_runs_own_gradle_home() {
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-gradle-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-gradle");
+        let t = profile_path(&scratch);
         let (user, run) = (t.join("user/.gradle"), t.join("run"));
         let dist = user.join("wrapper/dists/gradle-9.7.1-bin/h1");
         for d in [dist.join("gradle-9.7.1-bin"), user.join("wrapper/dists/gradle-8.9-bin/h2"), run.clone()] {
@@ -6471,8 +6470,8 @@ mod tests {
     /// (Gradle's home as a kept one, stand-ins in the test's own temp folder.)
     #[test]
     fn a_kept_home_is_made_through_no_link() {
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-unlinked-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-unlinked");
+        let t = profile_path(&scratch);
         let (user, run, kept, away) = (t.join("user/.gradle"), t.join("run"), t.join("kept"), t.join("away"));
         let dists = user.join("wrapper/dists");
         for d in [&dists, &run, &kept, &away] {
@@ -6552,9 +6551,8 @@ mod tests {
     /// (Linux's supervised runs) their lines are left out. And Node is told to read the proxy variables.
     #[test]
     fn the_java_pack_writes_its_proxy_lines() {
-        let t =
-            profile_path(&std::env::temp_dir()).join(format!("tarae-sb-proxy-lines-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-proxy-lines");
+        let t = profile_path(&scratch);
         let run = t.join("run");
         std::fs::create_dir_all(&run).unwrap();
         let env = proxied(&t, &run, &[], Some(&stand_in_url(true)));
@@ -6603,8 +6601,8 @@ mod tests {
     /// run with one loses it (the file is tarae's whole; Gradle would read a proxy that isn't there).
     #[test]
     fn a_run_without_a_proxy_gets_no_proxy_lines() {
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-no-proxy-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-no-proxy");
+        let t = profile_path(&scratch);
         let (run, kept) = (t.join("run"), t.join("kept"));
         for d in [&run, &kept] {
             std::fs::create_dir_all(d).unwrap();
@@ -6624,8 +6622,8 @@ mod tests {
     /// run keeps the kept home, its lines written there.
     #[test]
     fn per_run_values_never_go_in_a_shared_home() {
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-per-run-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-per-run");
+        let t = profile_path(&scratch);
         let (run, kept) = (t.join("run"), t.join("kept"));
         for d in [&run, &kept] {
             std::fs::create_dir_all(d).unwrap();
@@ -6651,9 +6649,8 @@ mod tests {
     /// at (a marker in the test's own folder) stays as it was.
     #[test]
     fn a_proxy_file_is_written_through_no_link() {
-        let t =
-            profile_path(&std::env::temp_dir()).join(format!("tarae-sb-proxy-link-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-proxy-link");
+        let t = profile_path(&scratch);
         let (run, kept) = (t.join("run"), t.join("kept"));
         for d in [&run, &kept] {
             std::fs::create_dir_all(d).unwrap();
@@ -6688,11 +6685,10 @@ mod tests {
 
     /// A policy made for each system (`policy_in`, a stand-in `Here` and a project in the test's own temp
     /// folder), with the network as `network` says.
-    fn made_for(os: Os, network: bool, name: &str) -> (Policy, PathBuf) {
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+    fn made_for(os: Os, network: bool, name: &str) -> (Policy, crate::scratch::Scratch) {
+        let t = crate::scratch::Scratch::new(&format!("sb-{name}"));
         std::fs::create_dir_all(t.join("p")).unwrap();
-        let here = Here { tmp: Some(t.clone()), uid: 501, os, ..Here::default() };
+        let here = Here { tmp: Some(profile_path(&t)), uid: 501, os, ..Here::default() };
         let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
         (policy_in(&t.join("p"), &llm, &[], &here), t)
     }
@@ -6715,9 +6711,7 @@ mod tests {
         let (user, bare) =
             ("http://u:tarae-fake-token-1@up.example.invalid:3128", "http://up.example.invalid:3128");
         for (os, network) in [(Os::Mac, true), (Os::Linux, true), (Os::Mac, false), (Os::Linux, false)] {
-            let name = format!("tarae-sb-upstream-{os:?}-{network}-{}", std::process::id());
-            let t = profile_path(&std::env::temp_dir()).join(name);
-            std::fs::remove_dir_all(&t).ok();
+            let t = crate::scratch::Scratch::new(&format!("sb-upstream-{os:?}-{network}")).into_path();
             std::fs::create_dir_all(t.join("p")).unwrap();
             std::fs::create_dir_all(t.join("run")).unwrap();
             let vars =
@@ -6839,9 +6833,7 @@ mod tests {
     #[test]
     fn where_the_session_takes_the_connections_a_run_gets_no_proxy_lines() {
         let made = |os: Os, network: bool, redirects: bool| {
-            let name = format!("tarae-sb-6e2-{os:?}-{network}-{redirects}-{}", std::process::id());
-            let t = profile_path(&std::env::temp_dir()).join(name);
-            std::fs::remove_dir_all(&t).ok();
+            let t = crate::scratch::Scratch::new(&format!("sb-6e2-{os:?}-{network}-{redirects}")).into_path();
             std::fs::create_dir_all(t.join("p")).unwrap();
             let here = Here { tmp: Some(t.clone()), uid: 501, os, redirects, ..Here::default() };
             let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
@@ -8020,8 +8012,8 @@ mod tests {
         if skipped_inside("sandbox::tests::a_run_cant_open_another_terminal") {
             return;
         }
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-tty-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-tty");
+        let t = profile_path(&scratch);
         let root = t.join("project");
         std::fs::create_dir_all(&root).unwrap();
         let (master, _slave) = crate::pty::open(24, 80).unwrap();
@@ -8116,9 +8108,7 @@ mod tests {
     /// A project for the real-sandbox tests of files named like keys (7a, 7b), in the test's own temp folder:
     /// each file's whole text a fake token — what a run that reads it prints. (Its folder, its project.)
     fn key_files(tag: &str) -> (PathBuf, PathBuf) {
-        let t =
-            profile_path(&std::env::temp_dir()).join(format!("tarae-sb-keys-{tag}-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let t = profile_path(&crate::scratch::Scratch::new(&format!("sb-keys-{tag}")).into_path());
         let root = t.join("project");
         for f in [
             ".env",
@@ -9213,8 +9203,8 @@ mod tests {
         if skipped_inside("sandbox::tests::what_the_user_granted_opens_under_the_real_profile") {
             return;
         }
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-granted-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-granted");
+        let t = profile_path(&scratch);
         let (root, kept, chat, sibling) =
             (t.join("project"), t.join("kept"), t.join("chat"), t.join("sibling"));
         let (home, readable, unread) = (t.join("home"), t.join("home/readable"), t.join("home/unread"));
@@ -9304,8 +9294,8 @@ mod tests {
         if skipped_inside("sandbox::tests::claudes_runs_cant_reach_the_ui_state_socket") {
             return;
         }
-        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-ui-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("sb-ui");
+        let t = profile_path(&scratch);
         let root = t.join("project");
         std::fs::create_dir_all(&root).unwrap();
         // (as tarae binds it: the state folder's `ui/`, 0700, the socket 0600)
@@ -10267,8 +10257,8 @@ mod tests {
     /// for them).
     #[test]
     fn every_variable_the_policy_reads_reaches_the_run() {
-        let t = std::env::temp_dir().join(format!("tarae-runenv-reads-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("runenv-reads");
+        let t = scratch.to_path_buf();
         let (home, root) = (t.join("home"), t.join("home/work/p"));
         std::fs::create_dir_all(&root).unwrap();
         for f in ["Cargo.toml", "go.mod", "build.gradle", "package.json"] {
@@ -10336,8 +10326,8 @@ mod tests {
             let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
             return;
         }
-        let dir = std::env::temp_dir().join(format!("tarae-runenv-e2e-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("runenv-e2e");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let out = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox::tests::env_in_its_own_process", "--ignored", "--nocapture"])
@@ -10415,8 +10405,8 @@ mod tests {
             let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
             return;
         }
-        let dir = std::env::temp_dir().join(format!("tarae-status-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("status");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let out = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox::tests::status_in_its_own_process", "--ignored", "--nocapture"])

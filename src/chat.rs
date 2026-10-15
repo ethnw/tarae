@@ -163,6 +163,29 @@ mcp__tarae__ui,mcp__tarae__edit,mcp__tarae__git";
 pub(crate) const CHAT_SETTINGS: &str =
     r#"{"permissions":{"ask":["Edit","Write"],"deny":["Skill"]},"disableAllHooks":true}"#;
 
+/// How long claude keeps a conversation before its own cleanup deletes it, in the chat's `--settings` where it
+/// loads your user settings (`keep_transcripts`). Measured (f22 i, claude 2.1.296): at its start, logged out
+/// too, claude deletes every project's transcripts older than `cleanupPeriodDays` (30 by default) — other
+/// projects' with their session folders, and old shell snapshots — which its profile refuses (4,622 refusals a
+/// day); with this, it tries none. Never `0` (all, or no persistence); at least 1, "a large number". Your own
+/// Claude Code, unconfined, still cleans as your settings say.
+const KEEP_TRANSCRIPTS_DAYS: u64 = 36_500;
+
+/// `settings` (the chat's `--settings`) with `cleanupPeriodDays` = `KEEP_TRANSCRIPTS_DAYS` where claude loads
+/// the user source (`sources`, on `os`): on Linux tarae leaves it out (`claudehome::sources`), and claude then
+/// skips its cleanup (it says so) — a value given there would turn it on.
+fn keep_transcripts(settings: &str, sources: &str, os: crate::sandbox::Os) -> String {
+    let user = sources.split(',').any(|s| s.trim() == "user");
+    let Ok(serde_json::Value::Object(mut json)) = serde_json::from_str(settings) else {
+        return settings.into();
+    };
+    if os != crate::sandbox::Os::Mac || !user {
+        return settings.into();
+    }
+    json.insert("cleanupPeriodDays".into(), KEEP_TRANSCRIPTS_DAYS.into());
+    serde_json::Value::Object(json).to_string()
+}
+
 /// Example questions filled in with Tab in an empty chat.
 pub const SUGGESTIONS: [&str; 3] = [
     "Explain what this file does",
@@ -292,6 +315,8 @@ struct Proc {
         Option<(std::sync::Arc<crate::sandbox::claude::Profile>, std::sync::Arc<crate::sandbox::Watch>)>,
     /// What its profile refused it, each said once (`refused`).
     refused: Vec<String>,
+    /// Of those, its own cleanup's — logged once, never said in the chat (`refused`).
+    cleanups: usize,
 }
 
 /// The chat's claude's own sandbox (`sandbox::claude`), made on a worker before its process starts.
@@ -1093,6 +1118,7 @@ fn ensure_proc(ed: &mut Editor) {
         // CLAUDE.md files and settings as `claude` loads them — but hooks don't run, and edits always come
         // here as a review (an `ask` rule and the default mode outrank any allow rule or accept-edits mode)
         args = llm::with_flag(&args, "--setting-sources", &sources);
+        let settings = keep_transcripts(&settings, &sources, crate::sandbox::Os::HOST);
         args = llm::with_flag(&args, "--settings", &settings);
         args = llm::with_flag(&args, "--permission-mode", "default");
     }
@@ -1148,7 +1174,7 @@ fn ensure_proc(ed: &mut Editor) {
             c.note(&note);
         }
     }
-    c.proc = Some(Proc { stdin, pid: child.id(), confined, refused: Vec::new() });
+    c.proc = Some(Proc { stdin, pid: child.id(), confined, refused: Vec::new(), cleanups: 0 });
     llm::pump(child, false, tx, move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
     });
@@ -1256,9 +1282,34 @@ fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox:
 /// What claude's own profile refused it (`sandbox::claude::watch`): tarae's log, each once a process; the chat,
 /// the first `REFUSALS_SAID` — a claude update that needs a new place shows the same day, not as a mystery.
 fn refused(ed: &mut Editor, generation: u64, d: crate::sandbox::Denial) {
+    let Some(c) = ed.session.chat.as_ref().filter(|c| c.generation == generation) else { return };
+    let cleanup = c.confined().is_some_and(|p| p.cleanup(&d));
+    refused_as(ed, generation, d, cleanup);
+}
+
+/// `refused`, told whether it's claude's own cleanup (`Profile::cleanup`: deleting another project's
+/// conversations or an old shell snapshot — `KEEP_TRANSCRIPTS_DAYS` keeps it from trying; this, should a claude
+/// try all the same): logged once a process, never said in the chat — nothing of the chat's failed.
+fn refused_as(ed: &mut Editor, generation: u64, d: crate::sandbox::Denial, cleanup: bool) {
     let log = ed.session.log();
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation == generation) else { return };
     let Some(p) = c.proc.as_mut() else { return };
+    if cleanup {
+        p.cleanups += 1;
+        if p.cleanups == 1 {
+            log.line(
+                "claude",
+                "warn",
+                &format!(
+                    "claude's own sandbox refused its cleanup deleting {} — other projects' conversations and old \
+                     shell snapshots are your Claude Code's to clean (cleanupPeriodDays); the rest of this process's \
+                     not logged",
+                    d.shown()
+                ),
+            );
+        }
+        return;
+    }
     let what = d.plain();
     if p.refused.contains(&what) {
         return;
@@ -2868,8 +2919,7 @@ mod tests {
     /// A project of this test's own temp folder: `.env` holding a fake token, its exception `.env.example`,
     /// and a plain file (`.txt` — no language server starts) — real paths, as `Editor::open` keeps them.
     fn key_project(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-chat-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new(&format!("chat-{name}")).into_path();
         std::fs::create_dir_all(dir.join("project")).unwrap();
         let project = std::fs::canonicalize(dir.join("project")).unwrap();
         let (env, example, plain) =
@@ -3027,6 +3077,79 @@ mod tests {
         let all = said(&ed);
         assert_eq!(all.len(), REFUSALS_SAID + 1, "the first few, then the log: {all:?}");
         assert!(all.last().unwrap().contains("log"), "{all:?}");
+    }
+
+    /// f22 i: claude's own cleanup refused (`Profile::cleanup`) is counted, never said in the chat — its first
+    /// in tarae's log; a refusal of anything else is still said. Through `refused`, as the profile's watch hands
+    /// a denial over: the chat's claude confined, its home a stand-in.
+    #[test]
+    fn claudes_own_cleanup_refused_isnt_said_in_the_chat() {
+        let mut ed = editor("");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        open(&mut ed);
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
+        let dir = crate::scratch::Scratch::new("chat-cleanup");
+        let (root, home) = (dir.join("proj"), dir.join("home"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
+        let p = crate::sandbox::claude::Profile {
+            root: root.clone(),
+            home: home.clone(),
+            writes_project: false,
+            temps: Vec::new(),
+            kept: Vec::new(),
+            log: None,
+            agent: None,
+            tag: "tarae-claude.test.".into(),
+            place: None,
+            rules: None,
+        };
+        let c = ed.session.chat.as_mut().unwrap();
+        let watch = crate::sandbox::Watch::quiet(&p.tag);
+        c.proc.as_mut().unwrap().confined = Some((std::sync::Arc::new(p), watch));
+        let generation = c.generation;
+        let d = |op: &str, t: &std::path::Path| crate::sandbox::Denial {
+            process: "2.1.296(7)".into(),
+            op: op.into(),
+            target: t.display().to_string(),
+        };
+        let said = |ed: &Editor| {
+            let msgs = &ed.session.chat.as_ref().unwrap().msgs;
+            msgs.iter()
+                .filter(|m| m.role == Role::Note && m.text.starts_with("claude itself was refused"))
+                .count()
+        };
+        for t in [".claude/projects/-a/1.jsonl", ".claude/projects/-a", ".claude/shell-snapshots/s.sh"] {
+            refused(&mut ed, generation, d("file-write-unlink", &home.join(t)));
+        }
+        let cleanups = ed.session.chat.as_ref().unwrap().proc.as_ref().map(|p| p.cleanups);
+        assert_eq!(
+            (said(&ed), cleanups),
+            (0, Some(3)),
+            "another project's, a snapshot: kept out of the chat"
+        );
+        refused(&mut ed, generation, d("file-write-create", &root.join("a.rs")));
+        assert_eq!(said(&ed), 1, "a write of the project's: said");
+        refused(&mut ed, generation, d("file-write-unlink", &home.join(".claude/skills/a/SKILL.md")));
+        assert_eq!(said(&ed), 2, "anything else: said");
+    }
+
+    /// f22 i: where claude loads your user settings (macOS), the chat's `--settings` keeps every conversation
+    /// from its cleanup (`cleanupPeriodDays`, never 0); the rest of them as they were. Without the user source —
+    /// Linux, or left out — nothing is added: claude skips its cleanup there, and a value would turn it on.
+    #[test]
+    fn the_chat_keeps_claude_from_cleaning_up_transcripts() {
+        use crate::sandbox::Os;
+        let base = CHAT_SETTINGS;
+        let mac: serde_json::Value =
+            serde_json::from_str(&keep_transcripts(base, crate::claudetrust::SOURCES, Os::Mac)).unwrap();
+        assert_eq!(mac["cleanupPeriodDays"], 36_500);
+        assert_eq!(mac["disableAllHooks"], true);
+        assert_eq!(mac["permissions"]["ask"], serde_json::json!(["Edit", "Write"]));
+        assert_eq!(keep_transcripts(base, crate::claudetrust::SOURCES, Os::Linux), base);
+        assert_eq!(keep_transcripts(base, "project,local", Os::Mac), base);
+        assert_eq!(keep_transcripts("not json", "user", Os::Mac), "not json");
     }
 
     /// A message sent while claude's own profile is made (on a worker, before claude starts) waits and goes once

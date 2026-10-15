@@ -517,10 +517,7 @@ mod tests {
     /// An editor in a fresh temp folder of its own, its chat at work (a stand-in claude that reads and says
     /// nothing) — `sh …` runs unasked, as an allowed check would — and the chat process's generation.
     fn at_work(name: &str) -> (Editor, PathBuf, u64) {
-        let dir = std::env::temp_dir().join(format!("tarae-queued-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("queued-{name}")).into_path();
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();

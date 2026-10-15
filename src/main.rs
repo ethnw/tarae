@@ -121,6 +121,8 @@ mod runtime;
 mod sandbox;
 mod sandboxpack;
 mod saver;
+#[cfg(test)]
+mod scratch;
 mod screen;
 mod search;
 #[cfg(target_os = "linux")]

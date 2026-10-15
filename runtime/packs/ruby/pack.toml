@@ -1,6 +1,10 @@
 # Ruby.
 
 # `spec`, `specs`: RSpec's folders
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+[sandbox]
+not-settings = ["rb"]
+
 [language.ruby]
 extensions = ["rb"]
 filenames = ["Gemfile", "Rakefile"]

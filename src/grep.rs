@@ -377,9 +377,8 @@ mod tests {
     /// this one in the middle of a big file); `each` saying enough ends the walk — no more files come.
     #[test]
     fn a_search_stops_where_it_is() {
-        let dir = std::env::temp_dir().join(format!("tarae-grep-stop-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("grep-stop");
+        let dir = scratch.to_path_buf();
         std::fs::write(dir.join("big.txt"), "hit\n".repeat(1000)).unwrap();
         // (asked for the file itself, then after each match: the third ask says stop)
         let asked = std::sync::atomic::AtomicUsize::new(0);
@@ -407,9 +406,8 @@ mod tests {
     /// isn't one yet said in a few words.
     #[test]
     fn context_counts_globs_and_errors() {
-        let dir = std::env::temp_dir().join(format!("tarae-grep-ctx-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("grep-ctx");
+        let dir = scratch.to_path_buf();
         std::fs::write(dir.join("a.rs"), "one\ntwo\r\nthree\ntwo\nfive\n").unwrap();
         std::fs::write(dir.join("b.md"), "two\n").unwrap();
         let all = |q: &Query| {
@@ -448,8 +446,8 @@ mod tests {
     /// and the answer says so.
     #[test]
     fn a_judged_search_doesnt_follow_a_folder_swapped_for_a_link() {
-        let base = std::env::temp_dir().join(format!("tarae-grep-swap-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("grep-swap");
+        let base = scratch.to_path_buf();
         let (dir, outside) = (base.join("p"), base.join("outside"));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -484,8 +482,8 @@ mod tests {
     /// without reading them (rg `--files`).
     #[test]
     fn types_places_multiline_exclude_and_names() {
-        let dir = std::env::temp_dir().join(format!("tarae-grep-more-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("grep-more");
+        let dir = scratch.to_path_buf();
         for d in ["a", "b", "c"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             std::fs::write(dir.join(d).join("x.rs"), "fn one() {\n    two()\n}\n// fn note\n").unwrap();

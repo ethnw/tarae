@@ -315,13 +315,11 @@ mod tests {
                "session_id": "c1", "uuid": "cb55325e-2353-4ca8-a6f5-0ea977eef5ba"})
     }
 
-    /// An editor in a folder of its own (`name`, made empty).
+    /// An editor in a folder of its own (`name`, made new; the caller's to remove).
     fn editor(name: &str) -> (Editor, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-compaction-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new(&format!("compaction-{name}")).into_path();
         std::fs::create_dir_all(dir.join("front")).unwrap();
         std::fs::create_dir_all(dir.join("back")).unwrap();
-        let dir = std::fs::canonicalize(dir).unwrap();
         let mut ed = Editor::new(Config::default());
         ed.session.root = dir.join("front");
         ed.session.name = "front".into();

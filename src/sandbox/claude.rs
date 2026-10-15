@@ -344,6 +344,21 @@ impl Profile {
         ok
     }
 
+    /// Whether `d` is claude's own cleanup refused (f22 i, measured with 2.1.296 — `chat::KEEP_TRANSCRIPTS_DAYS`):
+    /// a removal in another project's folder of conversations (or of the folder), or of a shell snapshot. Not
+    /// this project's, nor anything else in claude's folder (`skills/`, its settings).
+    pub fn cleanup(&self, d: &crate::sandbox::Denial) -> bool {
+        let own = &self.own_dirs()[0];
+        let t = Path::new(&d.target);
+        let other_project = t
+            .strip_prefix(own.join(MEMORY[0]))
+            .ok()
+            .and_then(|r| r.components().next())
+            .is_some_and(|f| f.as_os_str() != std::ffi::OsStr::new(&project_folder(&self.root)));
+        let snapshot = t.strip_prefix(own.join("shell-snapshots")).is_ok_and(|r| !r.as_os_str().is_empty());
+        d.op == "file-write-unlink" && (other_project || snapshot)
+    }
+
     /// This project's folder of conversations, `~/.claude/projects/<project_folder>` (real).
     fn own_project(&self) -> PathBuf {
         self.own_dirs()[0].join(MEMORY[0]).join(project_folder(&self.root))

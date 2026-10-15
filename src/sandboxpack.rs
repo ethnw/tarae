@@ -128,6 +128,10 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     ("proxy", Reach::BuiltIn),
     // (what the user reads on the host card)
     ("registries", Reach::BuiltIn),
+    // (narrows — a grant of one is never a chat's — but its words are on the card: built-in only)
+    ("engine-sockets", Reach::BuiltIn),
+    // (widens: files never looked in for a token)
+    ("not-settings", Reach::BuiltIn),
 ];
 
 /// `[claude]`'s keys and how a runtime folder's pack counts for each.
@@ -304,6 +308,15 @@ pub struct TimeLimit {
     pub grace: Vec<String>,
 }
 
+/// A container engine's socket (`engine-sockets`): by its file's name, or a folder on its path — a grant of it is
+/// as much as running outside the sandbox (`allow::Grant::warning`), `say` on its card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EngineSocket {
+    pub names: Vec<String>,
+    pub folders: Vec<String>,
+    pub say: String,
+}
+
 /// A pack's words in Claude's prompt and tools (`said`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Said {
@@ -355,6 +368,11 @@ pub struct Packs {
     /// What writing a model's prompt cache costs (`switchcost.rs`) — what a switch of billing, model or effort is
     /// said to cost.
     pub price: Vec<crate::switchcost::Price>,
+    /// The container engines' sockets (`engine-sockets`).
+    pub engine_sockets: Vec<EngineSocket>,
+    /// The extensions of files that are code, never settings (`not-settings`, `tokens::not_settings`): a
+    /// token-like line there is code. Each one of its pack's languages' (a test says).
+    pub not_settings: Vec<String>,
     /// What was wrong: a built-in pack's entry left out (a mistake in tarae's pack — a test fails), a runtime
     /// folder's key that's the built-in packs' only.
     pub problems: Vec<String>,
@@ -733,6 +751,31 @@ fn read_key_of(
             out.warn.extend(crate::cardwarn::read(v, &whose, &mut wrong));
         }
         ("claude", "price") => out.price.extend(crate::switchcost::read(v)?),
+        ("sandbox", "not-settings") => {
+            for x in list(v)? {
+                match !x.is_empty() && x.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+                    true if !out.not_settings.contains(&x) => out.not_settings.push(x),
+                    true => {}
+                    false => wrong.push(format!("`{x}` isn't a file's extension")),
+                }
+            }
+        }
+        ("sandbox", "engine-sockets") => {
+            let Some(entries) = v.as_array() else { return Err("`engine-sockets` isn't a list".into()) };
+            for e in entries {
+                let e = tab(e)?;
+                known(&e, &["names", "folders", "say"], "an `engine-sockets` entry")?;
+                let (names, folders) = (list_in(&e, "names")?, list_in(&e, "folders")?);
+                let say = need(&e, "say", "an `engine-sockets` entry")?;
+                match names.iter().chain(&folders).find(|n| !plain(n) || n.contains('/')) {
+                    Some(n) => wrong.push(format!("`{n}` isn't a file's or a folder's name")),
+                    None if names.is_empty() && folders.is_empty() => {
+                        wrong.push("an entry names nothing".into())
+                    }
+                    None => out.engine_sockets.push(EngineSocket { names, folders, say }),
+                }
+            }
+        }
         ("claude", "time-limits") => {
             let Some(entries) = v.as_array() else { return Err("`time-limits` isn't a list".into()) };
             for e in entries {

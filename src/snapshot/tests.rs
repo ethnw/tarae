@@ -25,11 +25,9 @@ fn git_in(dir: &Path, args: &[&str]) {
 /// A repository in the test's temp folder: text, a file that isn't text, one to delete, an untracked one,
 /// an ignored build folder and an ignored file of its own.
 fn repo(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tarae-snapshot-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::scratch::Scratch::new(&format!("snapshot-{name}")).into_path();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(dir.join("build")).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
     std::fs::write(dir.join("src/a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(dir.join("b.bin"), b"\x00\x01bin-before").unwrap();
     std::fs::write(dir.join("src/gone.txt"), "kept-marker\n").unwrap();
@@ -450,10 +448,8 @@ fn perf_snapshot_of_untracked_files() {
         return;
     }
     let n: usize = std::env::var("TARAE_PERF_SNAP_FILES").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
-    let dir = std::env::temp_dir().join(format!("tarae-snapshot-perf-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
+    let scratch = crate::scratch::Scratch::new("snapshot-perf");
+    let dir = scratch.to_path_buf();
     std::fs::write(dir.join("README"), "tracked\n").unwrap();
     git_in(&dir, &["init", "-q"]);
     git_in(&dir, &["add", "-A"]);
@@ -520,8 +516,8 @@ fn perf_snapshot_around_a_check() {
     if crate::test_results::unoptimized("snapshot::tests::perf_snapshot_around_a_check") {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("tarae-snapshot-check-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let scratch = crate::scratch::Scratch::new("snapshot-check");
+    let dir = scratch.to_path_buf();
     for d in 0..30 {
         std::fs::create_dir_all(dir.join(format!("src/m{d}"))).unwrap();
         for f in 0..20 {

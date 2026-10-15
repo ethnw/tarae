@@ -492,9 +492,8 @@ mod tests {
     /// Changed files come diffed and in `git status` order, however many workers took them.
     #[test]
     fn changed_files_are_diffed_in_order() {
-        let dir = std::env::temp_dir().join(format!("tarae-changed-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("changed");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
             assert!(ok.status.success(), "git {args:?}");
@@ -534,8 +533,8 @@ mod tests {
     /// (`target/sb/gitescape.md`). Each of the five is asked here, so one put back on discovery fails it.
     #[test]
     fn git_from_a_files_folder_keeps_the_trusted_repository() {
-        let top = std::env::temp_dir().join(format!("tarae-gitescape-{}", std::process::id()));
-        std::fs::remove_dir_all(&top).ok();
+        let scratch = crate::scratch::Scratch::new("gitescape");
+        let top = scratch.to_path_buf();
         let sub = top.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         let top = std::fs::canonicalize(&top).unwrap();

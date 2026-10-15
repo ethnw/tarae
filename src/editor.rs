@@ -4659,8 +4659,8 @@ mod tests {
     /// layout planted around it: no git read there — and the status line says why, once.
     #[test]
     fn a_file_where_commands_write_gets_no_git_and_is_told_once() {
-        let dir = std::env::temp_dir().join(format!("tarae-planted-outside-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("planted-outside");
+        let dir = scratch.to_path_buf();
         let sub = dir.join("sub");
         std::fs::create_dir_all(sub.join("objects")).unwrap();
         std::fs::create_dir_all(sub.join("refs")).unwrap();
@@ -4695,10 +4695,9 @@ mod tests {
     /// found from its folder, and nothing is said.
     #[test]
     fn unsandboxed_runs_leave_files_outside_the_sessions_their_git() {
-        let dir = std::env::temp_dir().join(format!("tarae-unsandboxed-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("unsandboxed");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let file = dir.join("sub/a.txt");
         std::fs::write(&file, "one\n").unwrap();
         for args in [&["init", "-q"][..], &["add", "sub/a.txt"]] {
@@ -4838,10 +4837,8 @@ mod tests {
     #[test]
     fn feature_counts_hold_no_content() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-features-content-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("features-content");
+        let dir = scratch.to_path_buf();
         let marker = "zqxmarker";
         let path = dir.join(crate::features::FILE);
         let mut ed = editor("one zqxmarker two\n");
@@ -6019,8 +6016,8 @@ mod tests {
     #[test]
     fn claude_replaces_across_a_tree_in_one_review() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-replace-tool-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("replace-tool");
+        let dir = scratch.to_path_buf();
         for d in ["src/deep", "target", ".git"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -6169,10 +6166,9 @@ mod tests {
     #[test]
     fn claudes_change_across_files_is_one_card() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-change-set-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("change-set");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src/deep")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let files = [
             ("src/a.rs", "fn old_name() {}\nfn x() { old_name() }\n"),
             ("src/b.rs", "use crate::old_name;\n"),
@@ -6555,10 +6551,8 @@ mod tests {
     #[test]
     fn a_read_only_command_asks_only_for_what_is_outside() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-reads-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-reads");
+        let dir = scratch.to_path_buf();
         let marker = dir.join("marker.txt");
         std::fs::write(&marker, "tarae-marker-content\n").unwrap();
         let card_or_done = |ed: &Editor| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy();
@@ -6606,10 +6600,8 @@ mod tests {
     #[test]
     fn a_run_card_says_why_it_asks() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-why-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-why");
+        let dir = scratch.to_path_buf();
         // (no `'` in them: the fake claude's script holds them in single quotes)
         for (command, why) in [
             (
@@ -6638,10 +6630,8 @@ mod tests {
     #[test]
     fn claude_asks_to_run_outside_the_sandbox_with_a_reason() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-outside-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-outside");
+        let dir = scratch.to_path_buf();
         // No reason: told so, nothing asked
         let mut ed = editor("");
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -6690,10 +6680,8 @@ mod tests {
         if crate::sandbox::no_pty_here("editor::tests::claude_sees_the_screen_once_the_user_says_yes") {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("tarae-screen-tool-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("screen-tool");
+        let dir = scratch.to_path_buf();
         std::fs::write(dir.join("a.txt"), "screen-marker on this line\n").unwrap();
         let draw = |ed: &mut Editor| {
             let mut bytes = Vec::new();
@@ -7323,10 +7311,9 @@ mod tests {
     fn stopping_claudes_command_stops_its_containers() {
         use serde_json::json;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("tarae-run-containers-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("run-containers");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("bin")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let asked = dir.join("asked");
         let mut ed = editor("");
         let line = "DOCKER_HOST=tcp://tarae-test.invalid:2375 sleep 30";
@@ -7971,10 +7958,9 @@ mod tests {
 
     #[test]
     fn the_user_opens_what_the_sandbox_blocked() {
-        let dir = std::env::temp_dir().join(format!("tarae-blocked-ks-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("blocked-ks");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("cache/deep")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let (deep, cache) = (dir.join("cache/deep"), dir.join("cache"));
         let store = dir.join("state/sandbox.json");
         let mut ed = editor("");
@@ -8278,8 +8264,8 @@ mod tests {
     fn claudes_reads_outside_the_project_ask_first() {
         use crate::reads::TITLE;
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-reads-ask-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("reads-ask");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("out")).unwrap();
         std::fs::create_dir_all(dir.join("other")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -8376,8 +8362,8 @@ mod tests {
     fn reading_a_key_named_file_in_the_project_asks() {
         use crate::reads::KEYS_TITLE;
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-key-reads-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("key-reads");
+        let dir = scratch.to_path_buf();
         for d in ["src/tls", "deploy", "node_modules/pkg"] {
             std::fs::create_dir_all(dir.join("project").join(d)).unwrap();
         }
@@ -8487,10 +8473,8 @@ mod tests {
     #[test]
     fn what_claudes_run_made_this_turn_reads_unasked() {
         use serde_json::json;
-        let dir = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-made-ask-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("made-ask");
+        let dir = scratch.to_path_buf();
         let (old, shot) = (dir.join("old.png"), dir.join("shot.png"));
         std::fs::write(&old, "x").unwrap();
         let mut ed = editor("");
@@ -9393,9 +9377,8 @@ mod tests {
     /// hears of it with the next message — and `space v a` again turns it off without asking.
     #[test]
     fn review_at_the_end_asks_first() {
-        let dir = std::env::temp_dir().join(format!("tarae-at-end-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("at-end");
+        let dir = scratch.to_path_buf();
         let config = dir.join("config.toml");
         std::fs::write(&config, "# mine\n[llm]\nfollow = false\n").unwrap();
         // Kept at once, in the order you toggle (a worker each could land them the other way round, and the
@@ -10245,9 +10228,7 @@ mod tests {
 
     /// A throwaway git repository: `files` committed on `main`, then `run` on top.
     fn git_repo(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-review-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("review-{name}")).into_path();
         for (f, text) in files {
             std::fs::write(dir.join(f), text).unwrap();
         }
@@ -11070,10 +11051,7 @@ mod tests {
     /// A remote of the test's own — never the network: a bare repository in its temp folder, made
     /// `work`'s `origin` (nothing pushed yet). (the bare repository, the folder holding it)
     fn bare_remote(name: &str, work: &Path) -> (PathBuf, PathBuf) {
-        let base = std::env::temp_dir().join(format!("tarae-remote-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
-        let base = std::fs::canonicalize(base).unwrap();
+        let base = crate::scratch::Scratch::new(&format!("remote-{name}")).into_path();
         git_in(&base, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
         let bare = base.join("origin.git");
         git_in(work, &["remote", "add", "origin", bare.to_str().unwrap()]);
@@ -11459,8 +11437,8 @@ mod tests {
     /// and `run_cwd` compare real paths — a worktree reached through a link would be refused as outside).
     #[test]
     fn the_root_is_its_real_path() {
-        let dir = std::env::temp_dir().join(format!("tarae-root-real-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("root-real");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("project")).unwrap();
         std::os::unix::fs::symlink(dir.join("project"), dir.join("link")).unwrap();
         let ed = Editor::with_root(Config::default(), dir.join("link"));
@@ -11474,9 +11452,8 @@ mod tests {
     /// without changing what's kept; `C-w =` makes all automatic again.
     #[test]
     fn sizes_you_set_are_kept_and_clamped() {
-        let dir = std::env::temp_dir().join(format!("tarae-sizes-keys-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("sizes-keys");
+        let dir = scratch.to_path_buf();
         let mut ed = editor("fn main() {}\n");
         ed.sizes_path = Some(dir.join("sizes.json"));
         // (the chat's process: a stand-in that reads and says nothing)
@@ -11560,9 +11537,8 @@ mod tests {
     #[test]
     fn borders_drag_and_the_size_is_kept() {
         use crate::event::{Mouse, MouseKind as K};
-        let dir = std::env::temp_dir().join(format!("tarae-sizes-drag-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("sizes-drag");
+        let dir = scratch.to_path_buf();
         let mut ed = editor("fn main() {}\n");
         ed.sizes_path = Some(dir.join("sizes.json"));
         ed.config.llm.command = "sh".into();
@@ -11849,8 +11825,8 @@ mod tests {
     /// reads.
     #[test]
     fn the_config_is_the_started_checkouts_whichever_session_is_in_front() {
-        let dir = std::env::temp_dir().join(format!("tarae-config-reload-root-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("config-reload-root");
+        let dir = scratch.to_path_buf();
         for (sub, width) in [("started", 7), ("other", 3)] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
             std::fs::write(dir.join(sub).join(".tarae.toml"), format!("[editor]\ntab-width = {width}\n"))
@@ -12400,9 +12376,8 @@ mod tests {
         let root = git_repo("own-root", &[("a.txt", "tarae-root-marker\n"), ("b.txt", "old\n")]);
         git_in(&root, &["switch", "-q", "-c", "tarae-own-root"]);
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        let out = std::env::temp_dir().join(format!("tarae-own-root-out-{}", std::process::id()));
-        std::fs::remove_dir_all(&out).ok();
-        std::fs::create_dir_all(&out).unwrap();
+        let scratch = crate::scratch::Scratch::new("own-root-out");
+        let out = scratch.to_path_buf();
         let here = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
         assert!(!here.starts_with(&root) && !root.starts_with(&here), "the tests run elsewhere");
         let pwd = |name: &str| format!("pwd -P > '{}'", out.join(name).display());
@@ -13408,9 +13383,8 @@ mod tests {
     /// carries it, and the message's chip row opens a copy of it. `:chat-screen` opens the chat for it.
     #[test]
     fn the_screen_goes_with_the_next_message() {
-        let dir = std::env::temp_dir().join(format!("tarae-chat-screen-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("chat-screen");
+        let dir = scratch.to_path_buf();
         let log = dir.join("stdin.log");
         let mut ed = editor("fn main() {}\n");
         ed.config.llm.command = "sh".into();
@@ -14040,10 +14014,8 @@ q = \"delete_selection\"\n",
     /// again — and the list says its keys.
     #[test]
     fn the_buffer_list_closes_buffers() {
-        let dir = std::env::temp_dir().join(format!("tarae-buflist-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("buflist");
+        let dir = scratch.to_path_buf();
         for f in ["a.txt", "b.txt"] {
             std::fs::write(dir.join(f), "text\n").unwrap();
         }
@@ -14083,10 +14055,9 @@ q = \"delete_selection\"\n",
     fn file_picker_and_global_search_open_files() {
         // In a repository of its own (git lists its files — never in tarae's own): the file list fills, and a
         // search result jumps to its line.
-        let dir = std::env::temp_dir().join(format!("tarae-picker-files-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("picker-files");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         for i in 0..12 {
             std::fs::write(dir.join(format!("src/m{i}.rs")), format!("fn m{i}() {{}}\n")).unwrap();
         }
@@ -14194,9 +14165,8 @@ q = \"delete_selection\"\n",
     /// shown again is parsed again. One opened but never shown (reopened at startup) never gets any.
     #[test]
     fn trees_go_from_files_not_looked_at_for_a_while() {
-        let dir = std::env::temp_dir().join(format!("tarae-trees-sight-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("trees-sight");
+        let dir = scratch.to_path_buf();
         // (documents keep real paths — macOS: /var/folders = /private/var/folders)
         let dir = std::fs::canonicalize(&dir).unwrap();
         let names = ["a", "b", "c", "d", "e", "f", "g", "h", "never"];
@@ -14250,10 +14220,8 @@ q = \"delete_selection\"\n",
     /// an unfinished pattern keeps the last results and says so quietly (no error); Enter goes there.
     #[test]
     fn space_slash_searches_as_you_type() {
-        let dir = std::env::temp_dir().join(format!("tarae-live-search-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("live-search");
+        let dir = scratch.to_path_buf();
         std::fs::write(dir.join("a.rs"), "fn alpha() {}\nlet Beta = alpha();\n").unwrap();
         std::fs::write(dir.join("b.txt"), "ALPHA beta\n").unwrap();
         let mut ed = editor("");
@@ -14314,9 +14282,8 @@ q = \"delete_selection\"\n",
     #[test]
     fn a_click_selects_a_picker_row_and_a_double_click_opens_it() {
         use crate::event::{Mouse, MouseKind as K};
-        let dir = std::env::temp_dir().join(format!("tarae-picker-click-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("picker-click");
+        let dir = scratch.to_path_buf();
         // Opened documents keep real paths (macOS: /var/folders = /private/var/folders)
         let dir = std::fs::canonicalize(&dir).unwrap();
         for f in ["a.txt", "b.txt"] {

@@ -362,9 +362,8 @@ mod tests {
     /// `restore.json` — and once there is, that one wins.
     #[test]
     fn what_earlier_builds_kept_is_restored() {
-        let dir = std::env::temp_dir().join(format!("tarae-restore-old-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("restore-old");
+        let dir = scratch.to_path_buf();
         let old = json!({ "positions": { "/a.rs": [4, 1] },
             "sessions": { "/proj": { "files": ["/a.rs"], "current": 0 } } });
         std::fs::write(dir.join(OLD_FILE), old.to_string()).unwrap();
@@ -426,8 +425,8 @@ mod tests {
     #[test]
     fn notes_of_a_session_behind_outlive_a_quit() {
         use crate::notes::{By, Note};
-        let dir = std::env::temp_dir().join(format!("tarae-restore-notes-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("restore-notes");
+        let dir = scratch.to_path_buf();
         for p in ["front", "back"] {
             std::fs::create_dir_all(dir.join(p)).unwrap();
             std::fs::write(dir.join(p).join("a.txt"), "one\ntwo\n").unwrap();

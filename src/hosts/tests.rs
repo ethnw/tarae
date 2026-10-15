@@ -16,8 +16,7 @@ const HOST: &str = "static.example.invalid";
 /// An editor in `front` with a session for `back` behind it — folders in the test's own temp folder — each with
 /// a sandboxed run of Claude's under way: their policies' run ids.
 fn two(name: &str) -> (Editor, PathBuf, SessionId, u64, u64) {
-    let dir = std::env::temp_dir().join(format!("tarae-hosts-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::scratch::Scratch::new(&format!("hosts-{name}")).into_path();
     for p in ["front", "back"] {
         std::fs::create_dir_all(dir.join(p)).unwrap();
     }

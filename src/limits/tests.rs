@@ -221,11 +221,7 @@ fn windows_are_said_as_people_say_them() {
 /// A project in its own temp folder, its chat's claude a stand-in in `sh` that writes what it's sent to `stdin`
 /// and answers `script`'s cases (`case "$line" in …`).
 fn chat_with(name: &str, cases: &str) -> (Editor, std::path::PathBuf) {
-    let root = std::fs::canonicalize(std::env::temp_dir())
-        .unwrap()
-        .join(format!("tarae-limits-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::scratch::Scratch::new(&format!("limits-{name}")).into_path();
     let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec![

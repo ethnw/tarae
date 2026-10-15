@@ -13,9 +13,7 @@ const ANOTHER_RUNS: &str = "tarae-77-s2-r5-checks";
 /// run's business).
 fn stand_in(name: &str, prefix: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("tarae-containers-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new(&format!("containers-{name}")).into_path();
     let log = dir.join("asked");
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{log}'\n\

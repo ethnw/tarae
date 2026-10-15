@@ -66,6 +66,8 @@ quiet = ["__tests__/", "*.test.js", "*.spec.js", "*.test.jsx", "*.spec.jsx"]
 
 # Claude's sandbox (`sandboxpack.rs`). npm's cache, measured (`target/sb/p2-measured.md`, a Node project)
 [sandbox]
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+not-settings = ["js", "mjs", "jsx"]
 reads = ["~/.npm", "{npm}", "{npm-upper}"]
 # npm's debug log in the run's own folder, not `~/.npm/_logs` (closed): measured, every npm command was denied
 # writing its log and deleting the old ones its cleanup lists — in a folder of its own the cleanup finds none

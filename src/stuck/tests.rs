@@ -528,9 +528,7 @@ fn a_run_found_connected_outside_is_held_to_the_later_minutes() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_runs_connection_to_a_daemon_is_read_from_its_tree() {
-    let dir = crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("sd{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new("sd");
     let path = dir.join("d.sock");
     let daemon = std::os::unix::net::UnixListener::bind(&path).unwrap();
     // (`nc -U` connects and waits on its input, which is held open: a quiet client)

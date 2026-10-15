@@ -283,8 +283,8 @@ mod tests {
     /// in the test's own temp folder.)
     #[test]
     fn what_a_prune_takes_and_what_it_leaves() {
-        let t = std::env::temp_dir().join(format!("tarae-runhomes-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("runhomes");
+        let t = scratch.to_path_buf();
         let (root, project, gone) = (t.join("run-homes"), t.join("p"), t.join("gone"));
         let outside = t.join("outside");
         for d in [&project, &outside] {
@@ -352,8 +352,8 @@ mod tests {
     /// folder); none in it, nothing says so.
     #[test]
     fn a_process_in_a_home_keeps_it() {
-        let t = std::env::temp_dir().join(format!("tarae-runhomes-in-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("runhomes-in");
+        let t = scratch.to_path_buf();
         let (home, other) = (t.join("home"), t.join("other"));
         for d in [&home, &other] {
             std::fs::create_dir_all(d).unwrap();
@@ -391,8 +391,8 @@ mod tests {
     /// A stamp is held while its `Held` lives, the project written in it; a prune can't take its lock then.
     #[test]
     fn a_held_stamp_says_its_project() {
-        let t = std::env::temp_dir().join(format!("tarae-runhomes-stamp-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::new("runhomes-stamp");
+        let t = scratch.to_path_buf();
         let home = t.join("tool/k");
         let held = stamp(&home, Path::new("/w/p")).unwrap();
         let path = stamp_of(&home).unwrap();

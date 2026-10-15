@@ -907,10 +907,7 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tarae-testing-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::scratch::Scratch::new(&format!("testing-{name}")).into_path()
     }
 
     /// Parse with that language's grammar — None where the grammar isn't available (that test is skipped).

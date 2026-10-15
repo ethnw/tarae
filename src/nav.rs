@@ -2749,10 +2749,8 @@ mod tests {
     /// Opened, it's searched like any file.
     #[test]
     fn search_and_the_file_tools_leave_a_key_out_until_opened() {
-        let dir = std::env::temp_dir().join(format!("tarae-nav-keys-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("nav-keys");
+        let dir = scratch.to_path_buf();
         let env = dir.join(".env");
         std::fs::write(&env, "alpha=tarae-fake-token\n").unwrap();
         std::fs::write(dir.join("a.rs"), "let alpha = 1;\n").unwrap();
@@ -2794,8 +2792,8 @@ mod tests {
     /// takes no links), and a search of the link itself is a search of where it leads — Read's card asks.
     #[test]
     fn search_through_a_link_outside_asks() {
-        let base = std::env::temp_dir().join(format!("tarae-nav-link-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("nav-link");
+        let base = scratch.to_path_buf();
         let (dir, outside) = (base.join("p"), base.join("outside"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -2826,8 +2824,8 @@ mod tests {
     /// buffer said.
     #[test]
     fn search_looks_inside_the_project() {
-        let dir = std::env::temp_dir().join(format!("tarae-nav-search-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("nav-search");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join(".github")).unwrap();
         std::fs::write(dir.join("src/a.rs"), "fn Alpha() {}\nlet alpha = 1;\n// x\n").unwrap();

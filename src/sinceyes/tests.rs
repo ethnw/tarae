@@ -25,10 +25,8 @@ fn git_in(dir: &Path, args: &[&str]) {
 /// A repository in the test's temp folder: the project `proj/` in it, and `other.txt` beside it — outside
 /// the project. (repository, project)
 fn repo(name: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("tarae-sinceyes-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::scratch::Scratch::new(&format!("sinceyes-{name}")).into_path();
     std::fs::create_dir_all(dir.join("proj/src")).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
     std::fs::write(dir.join("proj/src/lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
     std::fs::write(dir.join("other.txt"), "outside-marker one\n").unwrap();
     git_in(&dir, &["init", "-q"]);
@@ -100,10 +98,9 @@ fn the_projects_changes_since_the_yes_and_nothing_outside_it() {
 /// script outside a git checkout: it can't tell, and says so.
 #[test]
 fn a_scripts_own_diff_and_one_outside_the_project_named_only() {
-    let dir = std::env::temp_dir().join(format!("tarae-sinceyes-script-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let scratch = crate::scratch::Scratch::new("sinceyes-script");
+    let dir = scratch.to_path_buf();
     std::fs::create_dir_all(dir.join("proj")).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
     let root = dir.join("proj");
     std::fs::write(root.join("check.sh"), "echo one\necho two\n").unwrap();
     std::fs::write(dir.join("outside.sh"), "echo outside-marker\n").unwrap();
@@ -548,9 +545,7 @@ fn no_to(ed: &mut crate::editor::Editor, n: u64, card: u64) {
 #[test]
 fn a_socket_cards_same_as_shows_the_whole_diff() {
     let (dir, root) = repo("socket");
-    let sockets =
-        crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qs{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&sockets);
+    let sockets = crate::scratch::Scratch::new("qs");
     std::fs::create_dir_all(sockets.join("c")).unwrap();
     let (docker, other) = (sockets.join("c/docker.sock"), sockets.join("c/other.sock"));
     let _listening = [&docker, &other].map(|s| std::os::unix::net::UnixListener::bind(s).unwrap());

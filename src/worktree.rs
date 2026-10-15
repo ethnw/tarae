@@ -2040,8 +2040,7 @@ mod tests {
     /// A temp folder of the test's own (real path): a repository on `main` (`a.txt`, `target/` ignored) and
     /// a folder for sessions' checkouts beside it.
     fn place(name: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-sessions-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new(&format!("sessions-{name}")).into_path();
         let repo = dir.join("proj");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
@@ -2460,10 +2459,8 @@ mod tests {
     #[test]
     fn a_build_dir_that_isnt_plainly_the_cargo_homes_build_xx_yyyy_is_never_removed() {
         use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join(format!("tarae-build-escape-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("build-escape");
+        let dir = scratch.to_path_buf();
         let program = fake_cargo_program(&dir);
         let (home, root) = (dir.join("cargo-home"), dir.join("wt/x"));
         let b = Builds::stand_in(&program, &home, &dir.join("user-home"));
@@ -2731,10 +2728,8 @@ mod tests {
     /// checks pass.
     #[test]
     fn a_build_dir_goes_only_from_the_cargo_homes_build_folder_and_only_when_no_one_else_builds_there() {
-        let dir = std::env::temp_dir().join(format!("tarae-build-fate-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("build-fate");
+        let dir = scratch.to_path_buf();
         let (root, home) = (dir.join("wt/x"), dir.join("cargo-home"));
         let builds = home.join("build");
         let (own, elsewhere) = (builds.join("ab/cdef"), dir.join("elsewhere/build"));
@@ -4198,10 +4193,9 @@ mod tests {
     #[test]
     fn a_session_opened_again_is_as_it_ended() {
         use crate::checkpoint::{Checkpoint, Touched};
-        let dir = std::env::temp_dir().join(format!("tarae-sessions-again-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("sessions-again");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("back")).unwrap();
-        let dir = std::fs::canonicalize(dir).unwrap();
         let (back, store) = (dir.join("back"), dir.join("turns"));
         let file = back.join("a.txt");
         std::fs::write(&file, "one\ntwo\n").unwrap();
@@ -4363,8 +4357,8 @@ mod tests {
     /// new checkout builds cold in its own, and what this one's weighs; a fixed one is still said shared.
     #[test]
     fn the_new_session_card_says_where_its_builds_go() {
-        let dir = std::env::temp_dir().join(format!("tarae-builddir-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("builddir");
+        let dir = scratch.to_path_buf();
         let (top, home) = (dir.join("work/proj"), dir.join("cargo-home"));
         std::fs::create_dir_all(top.join("sub")).unwrap();
         std::fs::create_dir_all(dir.join("work/.cargo")).unwrap();
@@ -4430,8 +4424,8 @@ mod tests {
     /// the same — still comes back; once this build has written its own file, that one is read.
     #[test]
     fn sessions_kept_by_earlier_builds_come_back() {
-        let state = std::env::temp_dir().join(format!("tarae-kept-old-{}", std::process::id()));
-        std::fs::remove_dir_all(&state).ok();
+        let scratch = crate::scratch::Scratch::new("kept-old");
+        let state = scratch.to_path_buf();
         let (dir, common) = (state.join(DIR), Path::new("/repo/.git"));
         let kept = |name: &str| json!({ "root": format!("/wt/{name}"), "name": name, "branch": name });
         let old = json!({ "repo": common, "seq": 3, "front": "/wt/a", OLD_NAME: [kept("a")] });

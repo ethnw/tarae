@@ -368,8 +368,8 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#;
-    let dir = std::env::temp_dir().join(format!("tarae-nofile-select-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = crate::scratch::Scratch::new("nofile-select");
+    let dir = scratch.to_path_buf();
     std::fs::write(dir.join("p.c"), PROGRAM).unwrap();
     let bin = dir.join("p");
     let built = std::process::Command::new("cc").arg("-O0").arg("-o").arg(&bin).arg(dir.join("p.c")).output();

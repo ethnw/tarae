@@ -136,10 +136,7 @@ mod tests {
     use std::time::Instant;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tarae-ended-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d.canonicalize().unwrap()
+        crate::scratch::Scratch::new(&format!("ended-{name}")).into_path()
     }
 
     fn sh(script: &str) -> Vec<String> {

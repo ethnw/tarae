@@ -1,5 +1,9 @@
 # C++: clangd and lldb-dap (the c pack's).
 
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+[sandbox]
+not-settings = ["cc", "cpp", "hpp"]
+
 [language.cpp]
 title = "C++"
 extensions = ["cc", "cpp", "cxx", "hpp", "hh", "hxx", "c++"]

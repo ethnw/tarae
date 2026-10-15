@@ -1,6 +1,10 @@
 # Markdown: marksman. tarae draws Markdown itself (hover, docs, the chat), so its grammars are in every
 # build (`core`).
 
+# Its files are prose: a token-like line there is an example, not a token (`tokens::not_settings`)
+[sandbox]
+not-settings = ["md"]
+
 [language.markdown]
 extensions = ["md", "markdown"]
 block-comment-tokens = { start = "<!--", end = "-->" }

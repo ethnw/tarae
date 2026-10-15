@@ -980,12 +980,7 @@ fn the_frame_asked_is_the_one_drawn_after_the_keys() {
 
 /// A short folder of the test's own (a socket's path has 104 bytes at most).
 fn sock_dir(name: &str) -> PathBuf {
-    let d = std::fs::canonicalize(std::env::temp_dir())
-        .unwrap()
-        .join(format!("tu-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&d).ok();
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    crate::scratch::Scratch::new(&format!("tu-{name}")).into_path()
 }
 
 /// Pumps the editor's events, drawing after each batch as the main loop does, until `done`.

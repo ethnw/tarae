@@ -199,6 +199,8 @@ quiet = ["src/test/"]
 # Gradle home: the dependencies downloaded (`caches/modules-2`, read in place as `GRADLE_RO_DEP_CACHE`) and the
 # wrapper's distributions — not its settings (`gradle.properties` holds repository passwords)
 [sandbox]
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+not-settings = ["java"]
 reads = [
     "~/Library/Java/JavaVirtualMachines", "~/.m2/repository", "~/.m2/wrapper", "{gradle}/caches/modules-2",
     "{gradle}/wrapper/dists",

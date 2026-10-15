@@ -221,10 +221,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-dsyms-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(dir).unwrap()
+        crate::scratch::Scratch::new(&format!("dsyms-{name}")).into_path()
     }
 
     /// A thin 64-bit Mach-O's header and load commands (an `LC_SYMTAB`, then an `LC_UUID` of `id` unless None).

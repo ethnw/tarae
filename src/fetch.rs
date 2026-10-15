@@ -577,9 +577,7 @@ mod tests {
 
     #[test]
     fn a_release_is_found_checked_and_unpacked() {
-        let tmp = std::env::temp_dir().join(format!("tarae-fetch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::scratch::Scratch::new("fetch");
         let archive = fake_archive(&tmp);
         let sum = crate::sha256::hex(&archive);
         let name = "tool-1.61.0-202609031315.tar.gz";
@@ -632,8 +630,7 @@ mod tests {
     /// The download is the program itself (a GitHub release's binary), named by a template.
     #[test]
     fn a_program_downloaded_as_it_is() {
-        let tmp = std::env::temp_dir().join(format!("tarae-fetch-file-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::scratch::Scratch::new("fetch-file");
         let body = b"#!/bin/sh\n# a stand-in, never run\n".to_vec();
         let file = format!("tool_{}", std::env::consts::OS);
         let sums = format!("{}  other\n{}  {file}\n", "0".repeat(64), crate::sha256::hex(&body));
@@ -672,9 +669,7 @@ mod tests {
     /// file asked for, and what doesn't match all three isn't put in place.
     #[test]
     fn a_pinned_release_is_checked_against_the_pack() {
-        let tmp = std::env::temp_dir().join(format!("tarae-fetch-pinned-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::scratch::Scratch::new("fetch-pinned");
         let body = b"PK a stand-in jar, never run".to_vec();
         let name = "plugin-0.53.1.jar".to_string();
         let pinned = |base: &str, sum: String, size: usize| Download {

@@ -751,9 +751,8 @@ mod tests {
         if no_pty_here("inside_a_sandbox_the_terminals_git_status_leaves_the_index_alone") {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("tarae-term-git-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("term-git");
+        let dir = scratch.to_path_buf();
         let git = |args: &[&str]| {
             let ok = std::process::Command::new("git")
                 .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null"])

@@ -3387,10 +3387,8 @@ mod tests {
 
     /// The folder `Lived` sessions of `test` live in, made empty.
     fn lived_base(test: &str) -> PathBuf {
-        let base = PathBuf::from("/var/tmp").join(format!("tarae-{test}-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
-        std::fs::canonicalize(&base).unwrap()
+        // (the caller's to remove, as before)
+        crate::scratch::Scratch::in_dir(std::path::Path::new("/var/tmp"), test).into_path()
     }
 
     /// D13: the boundary is the session, not the conversation — a new conversation in the chat (`C-l`:

@@ -495,7 +495,11 @@ Kept:
   `~/.claude`, `projects/` or this project's folder themselves: none is moved aside, removed or made again (a
   folder renamed whole carries what's in it past the denies on its children — settings, a memory, another
   project's conversations filled in elsewhere); tarae makes this project's folder before claude starts, through no
-  link. With the default edit tools not
+  link. Its own cleanup would delete other projects' old conversations and old shell snapshots at each start (measured
+  with 2.1.296): the chat's `--settings` sets `cleanupPeriodDays` to 36500 where claude loads your user settings, so
+  it tries none (test: `chat::tests::the_chat_keeps_claude_from_cleaning_up_transcripts`); one refused all the same is
+  logged once a process, never said in the chat (`sandbox::claude::tests::claudes_own_cleanup_is_told_apart`). Your
+  own Claude Code, unconfined, cleans them as your settings say. With the default edit tools not
   the project (tarae's `edit` writes it), with Edit and Write (`llm.edit-tools` "both"/"native") the project but
   `.git` and the protected names (§1.2) — and a project that holds home (home itself or above) is writable only
   outside home: home's deny stays over it. So a bug in its permission path can't write `~/.config/tarae`, your
@@ -571,7 +575,8 @@ Kept:
   `sandbox::claude::linux::tests::a_claude_program_its_rules_keep_is_told`
 - **It doesn't update itself** from tarae: its updater writes a folder of programs on your `PATH`, closed to it;
   every claude tarae starts gets `DISABLE_UPDATES`. `:claude-update` runs `claude update` as your own task, outside
-  the sandbox; the chat says once when the claude it runs was installed over two weeks ago (without the network
+  the sandbox, without `DISABLE_UPDATES` or `DISABLE_AUTOUPDATER` (a tarae started with one passed it on), and
+  says what came in the versions folder ("Installation complete" with nothing new: a warning); the chat says once when the claude it runs was installed over two weeks ago (without the network
   tarae can tell its age, not whether a newer one exists).
   test: `llm::tests::every_claude_tarae_starts_has_its_updates_off` ·
   `claudeupdate::tests::an_old_claude_is_said_with_how_to_update_it` ·
@@ -638,7 +643,9 @@ Not kept:
   runs anything unconfined), tmux's sockets (a tmux server runs commands as you), the SSH and GPG agents under
   `$XDG_RUNTIME_DIR` (they sign and decrypt for it). Through the first two its own code gets out of the rules
   whole. On macOS the same holds but for the agent sockets its profile knows (below). The chat's claude has no
-  Bash tool: this is claude's own code, not the model's reach. Said once in the chat on Linux.
+  Bash tool: this is claude's own code, not the model's reach. Said once in the chat on Linux. Deferred (user
+  decision 2026-10-15): at V3, on a 7.2+ kernel, Landlock's `RESOLVE_UNIX` (ABI 9) granted only beneath
+  `/tmp/cc-socks/`; below ABI 9 the gap stays, said.
 - **Your keychain, through `security`.** claude reads its login with `/usr/bin/security`; anything else that tool
   may read without a prompt is within the same reach.
 - **Its own git reads the repository's config.** tarae holds a repository's commands for its own git (§1.7), not
@@ -722,7 +729,7 @@ Not Claude's, but a hostile repository reaches them:
 | G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: on Linux claude's folder is tarae's, and the memory folder in it is claude's to read (your `~/.claude` closed to it) — nothing reads it now |
 | G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run (or claude with Edit and Write) makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | caught after the run, asked before anything runs it, as G10 (§1.2: new files, ignored folders' names, names past 5,000 new files, links, repositories); left: an ignored folder that was there before, what a leftover makes later, no git checkout, your tests and `:restart`'s build |
 | G22 | A refusal of claude's own work (not a tool's) goes unseen; `~/.claude/` is a denylist | the kernel didn't report claude's refusals (V1d, live) | an allowlist of what claude writes, once its refusals can be seen — and with it a measurement of `shell-snapshots/` (kept closed unmeasured: whether a later claude sources one it didn't make can't be told from here) |
-| G24 | Linux: claude reaches any unix socket whose path it can find — the session D-Bus (`systemd-run --user` runs anything unconfined), tmux's sockets, the SSH and GPG agents under `$XDG_RUNTIME_DIR` (G20 there: the variable left out, the agent still reached). Against a hostile claude program its confinement is no wall; it holds against claude's file bugs. The chat's claude has no Bash tool: only claude's own code could | its rules are files only (decision 17) | said (the chat, once); closing it is the user's call, not built. Options: Landlock's right to connect to a unix socket by its path (`RESOLVE_UNIX`, ABI 9 — `landlock.rs` reads it from Linux 7.2's uapi header), granted beneath `/tmp/cc-socks/` only, where claude binds its own (measured) — below ABI 9 nothing; seccomp: a plain filter can't see a connect's path (a pointer), and denying `socket(AF_UNIX)` outright refuses that bind too — it needs the runs' supervisor deciding each address (user notification) instead; a mount and user namespace showing claude an empty `$XDG_RUNTIME_DIR` and a `/tmp` of its own (its `cc-socks` inside) — needs user namespaces (tiers A+/A), and abstract sockets stay to the ABI 6 scope |
+| G24 | Linux: claude reaches any unix socket whose path it can find — the session D-Bus (`systemd-run --user` runs anything unconfined), tmux's sockets, the SSH and GPG agents under `$XDG_RUNTIME_DIR` (G20 there: the variable left out, the agent still reached). Against a hostile claude program its confinement is no wall; it holds against claude's file bugs. The chat's claude has no Bash tool: only claude's own code could | its rules are files only (decision 17) | said (the chat, once); deferred (user decision 2026-10-15): at V3, on a 7.2+ kernel, Landlock's right to connect to a unix socket by its path (`RESOLVE_UNIX`, ABI 9 — `landlock.rs` reads it from Linux 7.2's uapi header) granted only beneath `/tmp/cc-socks/`, where claude binds its own (measured); below ABI 9 the gap stays, said. Not taken: seccomp (a plain filter can't see a connect's path, a pointer, and denying `socket(AF_UNIX)` outright refuses that bind too — it needs the runs' supervisor deciding each address instead); a mount and user namespace showing claude an empty `$XDG_RUNTIME_DIR` and a `/tmp` of its own (needs user namespaces, tiers A+/A; abstract sockets stay to the ABI 6 scope) |
 
 ## 5. For a reviewer: where to start
 

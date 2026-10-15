@@ -718,9 +718,9 @@ mod tests {
     /// folder; nothing is written.)
     #[test]
     fn an_edit_is_judged_where_its_path_really_leads() {
-        let base = std::env::temp_dir().join(format!("tarae-edit-judged-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("edit-judged");
         // (the root as given: the temp folder unresolved — `/var` for `/private/var` on macOS)
+        let base = std::env::temp_dir().join(scratch.file_name().unwrap());
         let (root, out) = (base.join("p"), base.join("out"));
         for d in [root.join("src"), root.join(".git/hooks"), out.clone()] {
             std::fs::create_dir_all(d).unwrap();
@@ -783,10 +783,8 @@ mod tests {
     /// written: each review is declined.)
     #[test]
     fn an_edit_to_a_protected_file_warns_on_its_review() {
-        let dir = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-edit-protected-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("edit-protected");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("build.rs"), "fn main() {}\n").unwrap();
         std::fs::write(dir.join("src/a.txt"), "one\n").unwrap();
@@ -834,10 +832,8 @@ mod tests {
     /// (Files and the stand-in claude's log in the test's own temp folder; the review is declined.)
     #[test]
     fn review_at_the_end_still_asks_for_a_protected_file_with_its_warning() {
-        let dir = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-edit-at-end-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("edit-at-end");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("build.rs"), "fn main() {}\n").unwrap();
         std::fs::write(dir.join("src/a.txt"), "one\n").unwrap();

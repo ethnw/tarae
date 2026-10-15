@@ -63,8 +63,8 @@ impl Fixture {
         // places would fold into it)
         let tmp = std::env::temp_dir();
         let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
-        let base = tmp.join(format!("tarae-golden-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        // (removed by its own `Drop`)
+        let base = crate::scratch::Scratch::in_dir(&tmp, &format!("golden-{name}")).into_path();
         std::fs::create_dir_all(base.join("tmp")).unwrap();
         let base = std::fs::canonicalize(&base).unwrap();
         let home = base.join("home");

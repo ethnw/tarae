@@ -2,10 +2,7 @@ use super::*;
 
 /// A project in the test's own temp folder with `files` (path, text).
 fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tarae-edittool-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new(&format!("edittool-{name}")).into_path();
     for (p, t) in files {
         let f = dir.join(p);
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();

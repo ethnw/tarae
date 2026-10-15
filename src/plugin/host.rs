@@ -316,10 +316,7 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tarae-host-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::scratch::Scratch::new(&format!("host-{name}")).into_path()
     }
 
     fn start() -> (Host, Receiver<Note>) {

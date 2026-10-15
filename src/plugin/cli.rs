@@ -221,8 +221,8 @@ mod tests {
 
     #[test]
     fn new_writes_a_plugin_crate() {
-        let root = std::env::temp_dir().join(format!("tarae-plugin-new-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = crate::scratch::Scratch::new("plugin-new");
+        let root = scratch.to_path_buf();
         let dir = root.join("my-plugin");
         new(&dir).unwrap();
         let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
@@ -243,8 +243,8 @@ mod tests {
     #[test]
     #[ignore]
     fn a_new_plugin_builds() {
-        let root = std::env::temp_dir().join(format!("tarae-plugin-builds-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = crate::scratch::Scratch::new("plugin-builds");
+        let root = scratch.to_path_buf();
         let dir = root.join("hello");
         new(&dir).unwrap();
         // (for this machine: the wasm target may not be installed — the bindings and the code are the same)

@@ -2268,11 +2268,8 @@ pub(crate) mod tests {
     #[ignore]
     fn process_env_in_its_own_process() {
         let Some(how) = std::env::var_os("TARAE_CLAUDE_ENV_CHILD") else { return };
-        let dir = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-llm-process-env-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("llm-process-env");
+        let dir = scratch.to_path_buf();
         let mut cfg = LlmConfig { keep_env_key: how == "keep", ..LlmConfig::default() };
         recording(&mut cfg);
         let mut child = spawn(&cfg, &[], &dir, Some(&Env::new()), &Credential::Subscription, None).unwrap();
@@ -2297,11 +2294,8 @@ pub(crate) mod tests {
     /// nothing.
     #[test]
     fn a_login_failure_with_a_key_left_out_names_the_setting() {
-        let root = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-llm-login-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = crate::scratch::Scratch::new("llm-login");
+        let root = scratch.to_path_buf();
         let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
         ed.claude_env = Some(Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into())]));
         // (a stand-in claude with no login: each message answered as Claude Code does under `-p`)
@@ -2359,11 +2353,8 @@ pub(crate) mod tests {
     /// The chat says so once since tarae started, by name: a new conversation's claude doesn't say it again.
     #[test]
     fn the_chats_and_the_asks_claude_leave_out_a_parent_sessions_variables() {
-        let root = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-llm-claude-env-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = crate::scratch::Scratch::new("llm-claude-env");
+        let root = scratch.to_path_buf();
         let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
         recording(&mut ed.config.llm);
         ed.claude_env = Some(nested_env());

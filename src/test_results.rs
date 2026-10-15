@@ -646,14 +646,13 @@ mod tests {
     }
 
     fn tmp_with(tag: &str, files: &[&str]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tarae-results-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::scratch::Scratch::new(&format!("results-{tag}")).into_path();
         for f in files {
             let p = d.join(f);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
         }
-        std::fs::canonicalize(&d).unwrap()
+        d
     }
 
     #[test]

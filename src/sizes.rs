@@ -731,8 +731,7 @@ mod tests {
     /// Kept across runs: read back as written; missing or odd files are automatic.
     #[test]
     fn kept_in_a_file() {
-        let dir = std::env::temp_dir().join(format!("tarae-sizes-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new("sizes");
         let path = dir.join("sizes.json");
         assert_eq!(Sizes::read(Some(&path)), Sizes::default(), "missing: automatic");
         let s = Sizes { chat: Some(70), side: None, bottom: Some(12) };

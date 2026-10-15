@@ -440,10 +440,8 @@ mod tests {
     /// (the bring's preflight: `$TMPDIR` a link, an answer kept and looked up under two names).
     #[test]
     fn an_answer_is_found_whatever_name_its_folder_had() {
-        let base = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-trust-names-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("trust-names");
+        let base = scratch.to_path_buf();
         std::fs::create_dir_all(base.join("real")).unwrap();
         std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
         let path = base.join("trust.json");

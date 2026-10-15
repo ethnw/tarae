@@ -372,10 +372,9 @@ mod tests {
         if crate::test_results::unoptimized("git::tests::perf_gutter_base_of_a_large_file") {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("tarae-gutter-perf-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("gutter-perf");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         for i in 0..3000 {
             std::fs::write(dir.join(format!("src/f{i}.rs")), format!("fn f{i}() {{}}\n").repeat(20)).unwrap();
         }

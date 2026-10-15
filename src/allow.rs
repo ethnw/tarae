@@ -198,18 +198,25 @@ impl Grant {
         }
     }
 
-    /// For a socket that's Docker's (`docker.sock`, colima's, Docker Desktop's): what connecting to it
-    /// means, said on its card.
+    /// For a socket that's a container engine's (the packs' `engine-sockets`: `docker.sock`, colima's, Docker
+    /// Desktop's — the containers pack): what connecting to it means, said on its card.
     pub fn warning(&self) -> Option<&'static str> {
         let Grant::Socket(s) = self else { return None };
-        let docker = s.file_name().is_some_and(|n| n == "docker.sock")
-            || s.components()
-                .any(|c| matches!(c.as_os_str().to_str(), Some(".colima" | ".docker" | ".orbstack")));
-        docker.then_some(
-            "It's Docker's: what connects to it can start a container that mounts any folder — as much as \
-             running outside the sandbox.",
-        )
+        engine_socket(s, &crate::sandboxpack::get().engine_sockets)
     }
+}
+
+/// The words of `engines`' entry `s` is a socket of — by its file's name, or a folder on its path.
+fn engine_socket<'a>(s: &Path, engines: &'a [crate::sandboxpack::EngineSocket]) -> Option<&'a str> {
+    let name = s.file_name().and_then(|n| n.to_str());
+    let folders: Vec<&str> = s.components().filter_map(|c| c.as_os_str().to_str()).collect();
+    engines
+        .iter()
+        .find(|e| {
+            name.is_some_and(|n| e.names.iter().any(|x| x == n))
+                || folders.iter().any(|f| e.folders.iter().any(|x| x == f))
+        })
+        .map(|e| e.say.as_str())
 }
 
 /// `p` with home spelled `~`.
@@ -846,6 +853,34 @@ impl crate::editor::Editor {
 pub(crate) mod tests {
     use super::*;
 
+    /// f22 f: a container engine's socket is the containers pack's to name — by its file's name or a folder on
+    /// its path — and a grant of one warns in its words; any other socket doesn't.
+    #[test]
+    fn engine_sockets_are_the_containers_packs() {
+        let engines = &crate::sandboxpack::get().engine_sockets;
+        assert!(!engines.is_empty(), "the containers pack's");
+        let said = |p: &str| Grant::Socket(PathBuf::from(p)).warning();
+        for p in [
+            "/run/docker.sock",
+            "/u/.colima/default/x.sock",
+            "/u/.docker/run/x.sock",
+            "/u/.orbstack/run/x.sock",
+        ] {
+            assert!(said(p).is_some_and(|w| w.contains("mounts any folder")), "{p}");
+            assert!(Grant::Socket(PathBuf::from(p)).as_outside(), "{p}");
+        }
+        assert_eq!(said("/u/p/.tarae/x.sock"), None);
+        assert_eq!(said("/u/p/docker.sock.bak"), None);
+        let own = [crate::sandboxpack::EngineSocket {
+            names: vec!["podman.sock".into()],
+            folders: vec![".lima".into()],
+            say: "podman's".into(),
+        }];
+        assert_eq!(engine_socket(Path::new("/r/podman.sock"), &own), Some("podman's"));
+        assert_eq!(engine_socket(Path::new("/u/.lima/a/b.sock"), &own), Some("podman's"));
+        assert_eq!(engine_socket(Path::new("/run/docker.sock"), &own), None, "only what's named");
+    }
+
     #[test]
     fn a_place_covers_what_is_in_it() {
         let mut a = Allowed::default();
@@ -869,7 +904,7 @@ pub(crate) mod tests {
 
     #[test]
     fn kept_per_project_and_read_back() {
-        let dir = std::env::temp_dir().join(format!("tarae-allow-{}", std::process::id()));
+        let dir = crate::scratch::Scratch::new("allow");
         let path = dir.join("state/sandbox.json");
         keep(&path, Path::new("/p/one"), |a| a.add_read("/t/a".into())).unwrap();
         keep(&path, Path::new("/p/two"), |a| a.add_read("/t/b".into())).unwrap();
@@ -885,7 +920,6 @@ pub(crate) mod tests {
         // Taken back: the project goes from the file
         keep(&path, Path::new("/p/two"), |a| a.read.clear()).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("/p/two"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A project's hosts (the card's `A`) are kept in `sandbox.json` as `host:port`, read back into the next run's
@@ -894,8 +928,7 @@ pub(crate) mod tests {
     /// again. A hand-edited entry the proxy can't read (a pattern, an address, no port) is left out.
     #[test]
     fn a_projects_hosts_are_kept_and_read_back() {
-        let dir = std::env::temp_dir().join(format!("tarae-allow-hosts-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new("allow-hosts");
         std::fs::create_dir_all(dir.join("p")).unwrap();
         let root = std::fs::canonicalize(dir.join("p")).unwrap();
         let path = dir.join("state/sandbox.json");
@@ -952,7 +985,6 @@ pub(crate) mod tests {
             }
         }
         assert!(ed.sandbox_disallow("host *.example.invalid:443").is_err(), "a host:port, as listed");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -996,8 +1028,7 @@ pub(crate) mod tests {
     /// leads out is judged where it leads. The sysroot rustup names is one of its toolchains, or none.
     #[test]
     fn code_folders_are_the_sources_and_nothing_beside_them() {
-        let base = std::env::temp_dir().join(format!("tarae-code-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::scratch::Scratch::new("code");
         let (cargo, rustup) = (base.join("cargo"), base.join("rustup"));
         let krate = cargo.join("registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.170/src");
         std::fs::create_dir_all(&krate).unwrap();
@@ -1049,7 +1080,6 @@ pub(crate) mod tests {
         for said in ["", "nope-z", "..", "../../cargo", "/tmp/tc (path)", "stable-x/../bare-y"] {
             assert_eq!(named_in(said, &tcs), None, "{said}");
         }
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A real repository in `base`: `main` with a commit, and `wt` added as a linked checkout of it (git's
@@ -1078,9 +1108,7 @@ pub(crate) mod tests {
     /// a checkout, or in none, has none.
     #[test]
     fn the_repositorys_other_checkouts_both_ways_only() {
-        let base = std::env::temp_dir().join(format!("tarae-checkouts-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch::Scratch::new("checkouts");
         let (main, wt) = repo_with_worktree(&base);
         assert_eq!(checkouts(&main), std::slice::from_ref(&wt));
         assert_eq!(checkouts(&wt), std::slice::from_ref(&main));
@@ -1108,7 +1136,6 @@ pub(crate) mod tests {
         let t = defaults(&main, true).temp;
         assert!(t.contains(&crate::sandbox::profile_path(&std::env::temp_dir())), "{t:?}");
         assert!(t.contains(&crate::sandbox::profile_path(Path::new("/tmp"))), "{t:?}");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     fn krate_at(cargo: &Path) -> PathBuf {
@@ -1150,8 +1177,7 @@ pub(crate) mod tests {
     /// the project. (A made-up home in the test's temp folder.)
     #[test]
     fn which_folders_a_denied_write_may_open() {
-        let base = std::env::temp_dir().join(format!("tarae-choices-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::scratch::Scratch::new("choices");
         let home = base.join("home");
         for d in [
             ".npm/_cacache",
@@ -1232,6 +1258,5 @@ pub(crate) mod tests {
         assert_eq!(got.len(), WRITE_CHOICES, "{got:?}");
         assert_eq!(got[0], deep);
         assert!(write_choices(Path::new("/opt/x/y"), &home, &root, &later).is_empty(), "{got:?}");
-        std::fs::remove_dir_all(&base).ok();
     }
 }

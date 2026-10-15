@@ -39,8 +39,8 @@ const FILES: [(&str, &str); 15] = [
 impl Home {
     fn new(name: &str) -> Home {
         let tmp = profile_path(&std::env::temp_dir());
-        let base = tmp.join(format!("tarae-claude-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        // (removed by its own `Drop`)
+        let base = crate::scratch::Scratch::in_dir(&tmp, &format!("claude-{name}")).into_path();
         let home = base.join("home");
         for (rel, text) in FILES {
             let p = home.join(rel);
@@ -63,6 +63,41 @@ impl Home {
 
     fn profile(&self, writes_project: bool) -> Profile {
         Profile::new(&self.root, &self.home, writes_project, &self.here(), "tarae-claude.test.")
+    }
+}
+
+/// f22 i: claude's own cleanup refused — a removal in another project's conversations (their folder too) or of a
+/// shell snapshot, as claude 2.1.296 tried them (`f22-cleanup-measure.out`) — is told apart from any other
+/// refusal: this project's, `skills/`, its settings, the folders themselves, a write.
+#[test]
+fn claudes_own_cleanup_is_told_apart() {
+    let h = Home::new("cleanup");
+    let p = h.profile(false);
+    let own = profile_path(&h.home.join(".claude"));
+    let d = |op: &str, rel: &str| crate::sandbox::Denial {
+        process: "2.1.296(1)".into(),
+        op: op.into(),
+        target: own.join(rel).to_string_lossy().into_owned(),
+    };
+    let cleaned = [
+        "projects/-other/00000000-0000-4000-8000-000000000001.jsonl",
+        "projects/-other/00000000-0000-4000-8000-000000000001/tool-results/x.txt",
+        "projects/-other",
+        "shell-snapshots/snapshot-zsh-1700000000000-f22.sh",
+    ];
+    for rel in cleaned {
+        assert!(p.cleanup(&d("file-write-unlink", rel)), "{rel}");
+    }
+    let this = format!("projects/{}/1.jsonl", project_folder(&h.root));
+    for (op, rel) in [
+        ("file-write-unlink", this.as_str()),
+        ("file-write-unlink", "skills/a/SKILL.md"),
+        ("file-write-unlink", "settings.json"),
+        ("file-write-unlink", "shell-snapshots"),
+        ("file-write-unlink", "projects"),
+        ("file-write-create", "projects/-other/2.jsonl"),
+    ] {
+        assert!(!p.cleanup(&d(op, rel)), "{op} {rel}");
     }
 }
 

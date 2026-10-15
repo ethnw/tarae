@@ -770,10 +770,8 @@ mod tests {
     /// `:open` with both, end to end: the file itself, at its line — no buffer named `typed.rs:3`.
     #[test]
     fn open_takes_a_line_and_home() {
-        let dir = std::env::temp_dir().join(format!("tarae-open-line-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("open-line");
+        let dir = scratch.to_path_buf();
         std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         let mut ed = Editor::new(config::Config::default());
         ed.session.root = dir.clone();

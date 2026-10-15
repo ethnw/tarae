@@ -1,0 +1,10 @@
+# Container engines — no grammar, no language: what of them the sandbox has to know, so the core names no engine.
+
+# A container engine's socket (`allow::Grant::warning`): what connects to it can start a container that mounts any
+# folder, so a grant of it is as much as running outside the sandbox — never for a chat, only for one run or one
+# command (#193), and its card says why (`say`). A socket is one by its file's name (`names`) or a folder on its
+# path (`folders`: colima's, Docker Desktop's, OrbStack's). tarae's own packs only.
+[[sandbox.engine-sockets]]
+names = ["docker.sock"]
+folders = [".colima", ".docker", ".orbstack"]
+say = "It's Docker's: what connects to it can start a container that mounts any folder — as much as running outside the sandbox."

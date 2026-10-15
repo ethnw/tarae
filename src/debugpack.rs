@@ -780,10 +780,7 @@ mod tests {
 
     /// A temp folder of the test's own, as a real path.
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tarae-debugpack-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d.canonicalize().unwrap()
+        crate::scratch::Scratch::new(&format!("debugpack-{name}")).into_path()
     }
 
     fn started(a: Attach) -> Value {

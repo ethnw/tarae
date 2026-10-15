@@ -1209,9 +1209,8 @@ mod tests {
         use super::*;
         let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let (files, kb, sessions) = (env("TARAE_TURN_FILES", 3), env("TARAE_TURN_KB", 150), 26);
-        let dir = std::env::temp_dir().join(format!("tarae-perf-turns-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("perf-turns");
+        let dir = scratch.to_path_buf();
         let text = |seed: usize| -> Rope {
             let line =
                 format!("    let x{seed} = compute(a, b, c); // a line of a source file, as long as most\n");
@@ -1279,7 +1278,6 @@ mod tests {
             mb(holding),
             mb(after)
         );
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(turns, sessions * KEEP);
     }
 
@@ -1290,8 +1288,7 @@ mod tests {
     #[test]
     fn putting_a_file_back_never_goes_through_a_link_swapped_in() {
         use super::*;
-        let base = std::env::temp_dir().join(format!("tarae-undo-beneath-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::scratch::Scratch::new("undo-beneath");
         let (dir, outside) = (base.join("p"), base.join("outside"));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -1319,7 +1316,6 @@ mod tests {
                 "{f}: never through the link"
             );
         }
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Events handled until `until` (5 s at most).
@@ -1333,12 +1329,9 @@ mod tests {
         }
     }
 
-    /// A temp folder of the test's own (real path), empty.
+    /// A temp folder of the test's own (real path), empty — the caller's to remove.
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+        crate::scratch::Scratch::new(name).into_path()
     }
 
     /// A turn that made `root`'s `a.txt` "two\n" from "one\n".
@@ -1639,12 +1632,11 @@ mod tests {
     #[test]
     fn a_session_behind_keeps_its_turns_across_a_start() {
         use super::*;
-        let dir = std::env::temp_dir().join(format!("tarae-turns-behind-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("turns-behind");
+        let dir = scratch.to_path_buf();
         for p in ["front", "back"] {
             std::fs::create_dir_all(dir.join(p)).unwrap();
         }
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let (front, back, store) = (dir.join("front"), dir.join("back"), dir.join("turns"));
         let turn = |q: &str| {
             let path = back.join("a.txt");
@@ -1680,6 +1672,5 @@ mod tests {
                 ed.handle_event(ev);
             }
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

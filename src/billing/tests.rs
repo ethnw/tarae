@@ -62,11 +62,9 @@ struct Place {
 
 impl Place {
     fn new(name: &str) -> Place {
-        let dir = std::env::temp_dir().join(format!("tarae-billing-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::scratch::Scratch::new(&format!("billing-{name}")).into_path();
         std::fs::create_dir_all(dir.join("project")).unwrap();
         std::fs::create_dir_all(dir.join("state")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let root = dir.join("project");
         let git = std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).output().unwrap();
         assert!(git.status.success());

@@ -93,12 +93,13 @@ In this order.
 
 The aim is to state what the sandbox guarantees and show that it holds.
 
-1. **One threat-model document** — written: [threat-model.md](threat-model.md), what is kept from a run and what
-   isn't, per tier and per OS, each claim with its test. Next: the `claude` process itself under a files-only
-   profile (keys and what runs later denied, the network as it is). Today it has Read (Edit and Write when
-   turned on) and tarae's own tools, and its commands go through tarae's `run` into the sandbox.
-2. **Fuzzing the parsers that read what a run sends**: the supervisor's reading of system-call arguments, and the
-   proxy's parsers.
+1. **One threat-model document** — done: [threat-model.md](threat-model.md), what is kept from a run and what
+   isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined on both OSes,
+   files only (macOS: Seatbelt, V1d; Linux: its own folder and Landlock, V1 parts 1–2). Its unix sockets on
+   Linux (G24) wait for V3 and a 7.2+ kernel.
+2. **Fuzzing the parsers that read what a run sends** — paused, the plan kept: the supervisor's reading of
+   system-call arguments, and the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
+   [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12).
 3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
    nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
@@ -108,17 +109,14 @@ The aim is to state what the sandbox guarantees and show that it holds.
 
 Small fixes found while using tarae every day:
 
-- The "Stuck?" card shows for runs on a remote Docker that aren't stuck.
-- A new session's bring card offers the language pack's default checks instead of the project's own quick set.
 - The same safe command asks every time — for example, a card for the Docker socket that can be answered only for
-  one run at a time.
-- `tarae state` cuts a card's question short; it should show the whole command.
-- Each of Claude's commands says where it ran: in the sandbox (its tier), outside it, or with a socket granted — a
-  mark on its row in the chat, with the reason on a click or `K`.
+  one run at a time. Docker's socket stays `y` per command (#193, user decision 2026-10-15); like cards are grouped
+  instead.
 - Small core-only-core moves from the size audit (2026-10-09; its moves are ~40 KB in all, so the reason is the
-  rule, not the size): `term.rs` `output_style`'s pass/fail lines → pack data; `allow.rs`'s Docker socket names →
-  the containers pack, built-in only; the `.java` frame in `test_results` → a pack regex; `tokens.rs`
-  `NOT_SETTINGS` → derived from the packs' file-types; `SELF_SKIP` → Rust pack data.
+  rule, not the size): `term.rs` `output_style`'s pass/fail lines → pack data; the `.java` frame in
+  `test_results` → a pack regex; `SELF_SKIP` → Rust pack data. (Done: the Docker socket names are the containers
+  pack's `engine-sockets`; the files never looked in for a token are the code packs' `not-settings` and a core
+  floor.)
 
 **IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
 nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like

@@ -3632,8 +3632,8 @@ mod tests {
     /// worktrees alone.
     #[test]
     fn every_server_stops_unused_and_rust_analyzer_skips_worktrees() {
-        let dir = std::env::temp_dir().join(format!("tarae-lsp-kinds-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("lsp-kinds");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join(".claude/worktrees/w")).unwrap();
         std::fs::write(dir.join(".claude/worktrees/w/.git"), "gitdir: elsewhere").unwrap();
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
@@ -3687,8 +3687,8 @@ mod tests {
     /// it), until that turn ends. Coming to the front brings the server back for its files.
     #[test]
     fn a_resting_sessions_servers_stop_and_a_working_ones_stay() {
-        let dir = std::env::temp_dir().join(format!("tarae-lsp-rest-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("lsp-rest");
+        let dir = scratch.to_path_buf();
         for d in ["front", "idle", "busy"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             std::fs::write(dir.join(d).join("main.rs"), "fn main() {}\n").unwrap();
@@ -3740,8 +3740,8 @@ mod tests {
     /// outside reopened at startup starts none until it's shown.
     #[test]
     fn servers_outside_the_project_follow_sight() {
-        let dir = std::env::temp_dir().join(format!("tarae-lsp-sight-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("lsp-sight");
+        let dir = scratch.to_path_buf();
         for d in ["proj", "elsewhere", "later"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             std::fs::write(dir.join(d).join("a.toml"), "x = 1\n").unwrap();
@@ -3786,8 +3786,8 @@ mod tests {
     /// the section it names, null for the rest — and its `initialize` carries none.
     #[test]
     fn a_server_asking_for_its_settings_gets_what_to_leave_out() {
-        let dir = std::env::temp_dir().join(format!("tarae-lsp-config-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("lsp-config");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::create_dir_all(dir.join("vendor/clone/.git")).unwrap();
         std::fs::write(dir.join("a.py"), "x = 1\n").unwrap();
@@ -6012,8 +6012,8 @@ mod tests {
     /// `rust-project.json`, gets its server.
     #[test]
     fn a_lone_rust_file_gets_no_server() {
-        let dir = std::env::temp_dir().join(format!("tarae-lsp-lone-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("lsp-lone");
+        let dir = scratch.to_path_buf();
         for d in ["lone", "cargo/src", "json"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }

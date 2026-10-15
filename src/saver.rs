@@ -406,9 +406,7 @@ mod tests {
     }
 
     fn opened(name: &str) -> (Editor, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-saver-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("saver-{name}")).into_path();
         let path = dir.join("a.txt");
         std::fs::write(&path, "one\n").unwrap();
         let mut ed = Editor::new(Config::default());
@@ -446,8 +444,8 @@ mod tests {
     /// is refused. Through `save_beneath` the same: the outside file stays as it was. Your own `:w` follows.
     #[test]
     fn a_save_claude_caused_never_goes_through_a_link_swapped_in() {
-        let base = std::env::temp_dir().join(format!("tarae-saver-beneath-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("saver-beneath");
+        let base = scratch.to_path_buf();
         let (dir, outside) = (base.join("p"), base.join("outside"));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -496,8 +494,8 @@ mod tests {
     /// its path as before.
     #[test]
     fn the_save_for_a_missed_write_never_goes_through_a_link() {
-        let base = std::env::temp_dir().join(format!("tarae-saver-missed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("saver-missed");
+        let base = scratch.to_path_buf();
         let (dir, outside, apart) = (base.join("p"), base.join("outside"), base.join("apart"));
         for d in [dir.join("sub"), outside.clone(), apart.clone()] {
             std::fs::create_dir_all(d).unwrap();

@@ -86,10 +86,7 @@ fn demo_copy(test: &str) -> (PathBuf, PathBuf) {
             if f.is_dir() { copy(&f, &t) } else { std::fs::copy(&f, &t).map(|_| ()).unwrap() }
         }
     }
-    let base = std::env::temp_dir().join(format!("tarae-shot-{test}-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
-    let base = std::fs::canonicalize(&base).unwrap();
+    let base = crate::scratch::Scratch::new(&format!("shot-{test}")).into_path();
     let demo = base.join("src/snapshots/fixtures/demo");
     copy(&fixtures().join("demo"), &demo);
     (base, demo)
@@ -2140,10 +2137,8 @@ fn the_rail_measures_the_grade_it_draws() {
 fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
     use crate::codereview::{Base, CodeReview, File};
     use crate::event::{Mouse, MouseKind};
-    let dir = std::env::temp_dir().join(format!("tarae-rail-full-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(dir).unwrap();
+    let scratch = crate::scratch::Scratch::new("rail-full");
+    let dir = scratch.to_path_buf();
     let mut rels: Vec<String> = ["c-sharp", "go", "java", "python", "rust", "zig"]
         .iter()
         .map(|l| format!("runtime/packs/{l}/pack.toml"))
@@ -2291,10 +2286,8 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
 #[test]
 fn review_rail_with_80_files_scrolls_and_keeps_its_counts() {
     use crate::codereview::{Base, CodeReview, File};
-    let dir = std::env::temp_dir().join(format!("tarae-rail-80-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(dir).unwrap();
+    let scratch = crate::scratch::Scratch::new("rail-80");
+    let dir = scratch.to_path_buf();
     let rel = |i: usize| format!("src/m{}/part{}/f{i:02}.rs", i / 10, i % 3);
     let mut files: Vec<File> = (0..79)
         .map(|i| {
@@ -2403,10 +2396,8 @@ fn review_rail_with_80_files_scrolls_and_keeps_its_counts() {
 fn review_rail_scrolls_by_click_and_marks_by_click() {
     use crate::codereview::{Base, CodeReview, File};
     use crate::event::{Mouse, MouseKind};
-    let dir = std::env::temp_dir().join(format!("tarae-rail-marks-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(dir).unwrap();
+    let scratch = crate::scratch::Scratch::new("rail-marks");
+    let dir = scratch.to_path_buf();
     let files: Vec<File> = (0..30)
         .map(|i| {
             let rel = format!("src/m{}/f{i:02}.txt", i / 5);

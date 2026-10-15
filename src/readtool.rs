@@ -392,8 +392,7 @@ mod tests {
     /// A project, a place outside it, and a link in the project to that place — under the test's own temp
     /// folder. (`dir`, the project's real path, outside's.)
     fn places(name: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let base = std::env::temp_dir().join(format!("tarae-readtool-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::scratch::Scratch::new(&format!("readtool-{name}")).into_path();
         let (dir, outside) = (base.join("p"), base.join("outside"));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();

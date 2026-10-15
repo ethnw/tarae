@@ -1012,7 +1012,8 @@ mod tests {
             ed.session.notes.list.iter().map(|n| (n.thread[0].by, n.thread[0].draft)).collect();
         assert_eq!(by, [(By::Author, false), (By::Reviewer, true), (By::You, true), (By::Author, false)]);
         // The reviewer pins findings in the checkout only, and answers no thread
-        let outside = std::env::temp_dir().join(format!("tarae-notes-by-out-{}.rs", std::process::id()));
+        let away = crate::scratch::Scratch::new("notes-by-out");
+        let outside = away.join("out.rs");
         std::fs::write(&outside, "x\n").unwrap();
         assert!(finding(&mut ed, &dir, &json!({"path": outside, "line": 1, "text": "out"})).is_err());
         assert!(finding(&mut ed, &dir, &json!({"reply_to": 1, "text": "re"})).is_err());
@@ -1071,10 +1072,8 @@ mod tests {
     /// counts its lines as the file had them then.
     #[test]
     fn drafts_on_lines_changed_since_are_offered_to_close() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-stale-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-stale");
+        let dir = scratch.to_path_buf();
         let (f, g) = (dir.join("a.rs"), dir.join("b.rs"));
         std::fs::write(&f, "one\ntwo\nthree\nfour\n").unwrap();
         std::fs::write(&g, "alpha\nbeta\n").unwrap();
@@ -1125,10 +1124,8 @@ mod tests {
     /// card's list follows; `y` closes what's left. (The files are the test's own.)
     #[test]
     fn one_stale_card_grows_in_place_and_lists_its_drafts() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-stale-one-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-stale-one");
+        let dir = scratch.to_path_buf();
         let f = dir.join("a.rs");
         std::fs::write(&f, "one\ntwo\nthree\nfour\nfive\n").unwrap();
         let mut ed = editor();
@@ -1197,10 +1194,9 @@ mod tests {
     /// there too (`stale_sync` behind). (The files are the test's own.)
     #[test]
     fn a_stale_card_behind_grows_and_goes_where_it_is_parked() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-stale-behind-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("notes-stale-behind");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("back")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let back_root = dir.join("back");
         std::fs::write(back_root.join("a.rs"), "one\ntwo\nthree\n").unwrap();
         let mut ed = editor();

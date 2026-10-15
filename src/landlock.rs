@@ -524,8 +524,7 @@ mod tests {
 
     /// A fresh temp folder of the test's own with `granted/` and `sibling/` in it.
     fn folders(test: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-landlock-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::scratch::Scratch::new(&format!("landlock-{test}")).into_path();
         let (granted, sibling) = (dir.join("granted"), dir.join("sibling"));
         std::fs::create_dir_all(&granted).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();

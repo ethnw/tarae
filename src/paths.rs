@@ -105,8 +105,8 @@ mod tests {
     /// `/private/tmp`), and a FIFO opened without waiting for a writer.
     #[test]
     fn what_was_opened_says_where_it_is() {
-        let dir = std::env::temp_dir().join(format!("tarae-paths-opened-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("paths-opened");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("in")).unwrap();
         std::fs::write(dir.join("in/a.txt"), "a").unwrap();
         std::os::unix::fs::symlink(dir.join("in"), dir.join("link")).unwrap();

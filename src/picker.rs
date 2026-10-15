@@ -1416,8 +1416,8 @@ mod tests {
     /// start; `g r`'s whole words with case as written.
     #[test]
     fn the_search_reads_as_rg_does() {
-        let dir = std::env::temp_dir().join(format!("tarae-grep-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("grep");
+        let dir = scratch.to_path_buf();
         for d in ["sub", ".hidden", ".git", "ignored"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -1454,8 +1454,8 @@ mod tests {
     /// The file list's own walk (no git): build and dot folders left out.
     #[test]
     fn the_file_walk_skips_build_folders() {
-        let dir = std::env::temp_dir().join(format!("tarae-walk-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("walk");
+        let dir = scratch.to_path_buf();
         for d in ["sub", "target", ".cache"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             std::fs::write(dir.join(d).join("f.txt"), "x").unwrap();
@@ -1468,9 +1468,8 @@ mod tests {
     /// stopped, it finds every match, by file then line.
     #[test]
     fn a_stopped_search_finds_nothing_more() {
-        let dir = std::env::temp_dir().join(format!("tarae-search-stop-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("search-stop");
+        let dir = scratch.to_path_buf();
         for f in ["b.txt", "a.txt"] {
             std::fs::write(dir.join(f), "x\nno\nx x\n").unwrap();
         }

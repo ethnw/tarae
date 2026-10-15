@@ -4224,10 +4224,8 @@ mod tests {
     #[test]
     fn each_answer_on_a_card_is_one_line_in_the_log() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-card-lines-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("card-lines");
+        let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.session.name = "cardlines".into();
@@ -4305,10 +4303,8 @@ mod tests {
     #[test]
     fn stacked_cards_for_the_same_run_are_answered_as_one_group() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-group-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-group");
+        let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.session.name = "group".into();
@@ -4434,10 +4430,8 @@ mod tests {
     fn calls_behind_a_run_card_are_said_and_a_second_card_waits_its_turn() {
         use crate::chat::Called;
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-queue-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-queue");
+        let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
@@ -4520,10 +4514,8 @@ mod tests {
     #[test]
     fn a_run_waiting_on_cargos_lock_is_said_and_traced() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-waits-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-waits");
+        let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.config.llm.command = "sh".into();
@@ -4602,10 +4594,8 @@ mod tests {
     #[test]
     fn what_tarae_hands_claude_is_measured_by_size() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-tokcost-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("tokcost");
+        let dir = scratch.to_path_buf();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         // (its own session name: the log is shared by tests running beside it)
@@ -4714,10 +4704,9 @@ mod tests {
     #[test]
     fn a_copy_of_an_unseen_file_is_unseen_too() {
         use crate::checkpoint::Touched;
-        let dir = std::env::temp_dir().join(format!("tarae-carried-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("carried");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("bin")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("evil.sh"), "echo evil\n").unwrap();
         std::fs::write(dir.join("blob.bin"), [0xff, 0xfe, 0x00]).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
@@ -4759,9 +4748,8 @@ mod tests {
     #[test]
     fn claude_asks_for_one_socket_not_the_sandbox_off() {
         use serde_json::json;
-        let dir =
-            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("q{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("q");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("c")).unwrap();
         let sock = dir.join("c/docker.sock");
         let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -4823,9 +4811,8 @@ mod tests {
     #[test]
     fn a_on_dockers_socket_is_this_command_never_the_socket() {
         use serde_json::json;
-        let dir =
-            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qd{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("qd");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("c")).unwrap();
         let sock = dir.join("c/docker.sock");
         let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -4928,9 +4915,8 @@ mod tests {
     #[test]
     fn a_socket_allowed_for_the_chat_isnt_asked_again() {
         use serde_json::json;
-        let dir =
-            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qa{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("qa");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("c")).unwrap();
         let sock = dir.join("c/app.sock");
         let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -4979,10 +4965,9 @@ mod tests {
     #[test]
     fn a_card_shows_the_script_a_command_runs() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-scripts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("scripts");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("tools")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         for (f, text) in [
             ("x.awk", "# marker-awk\n{ print }\n"),
             ("x.sed", "# marker-sed\np\n"),
@@ -5050,8 +5035,8 @@ mod tests {
     /// reading that folder was allowed; inside, the same line runs at once.
     #[test]
     fn a_chain_that_runs_outside_the_project_asks() {
-        let dir = std::env::temp_dir().join(format!("tarae-chain-out-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("chain-out");
+        let dir = scratch.to_path_buf();
         for d in ["proj/sub", "other"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -5505,10 +5490,9 @@ mod tests {
     #[test]
     fn a_scripted_line_allowed_for_the_chat_runs_again_unasked_while_its_script_is_the_same() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-script-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("run-script");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("target/x")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("target/x/setup.sh"), "touch set-up\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
@@ -5597,10 +5581,9 @@ mod tests {
     #[test]
     fn a_check_runs_on_a_commits_tree_apart_from_the_checkout() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-base-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("run-base");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("p/src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let p = dir.join("p");
         let git = |args: &[&str]| crate::basetree::tests::git(&p, args);
         std::fs::write(p.join("src/a.txt"), "committed\n").unwrap();
@@ -5679,10 +5662,9 @@ mod tests {
     #[test]
     fn a_line_allowed_for_the_chat_asks_again_once_the_entry_it_runs_changed() {
         use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-entry-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("run-entry");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("xtask/src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
@@ -5900,9 +5882,9 @@ mod tests {
     /// shown as it is stops it.
     #[test]
     fn a_command_names_the_unseen_files_it_runs() {
-        let dir = std::env::temp_dir().join(format!("tarae-named-{}", std::process::id()));
+        let scratch = crate::scratch::Scratch::new("named");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("tools")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let (x, g, seen) = (dir.join("x.sh"), dir.join("tools/gen.py"), dir.join("seen.sh"));
         std::fs::write(&x, "echo x\n").unwrap();
         std::fs::write(&g, "print(1)\n").unwrap();
@@ -5947,7 +5929,13 @@ mod tests {
         std::fs::write(&x, format!("{}{}\n", "a\n".repeat(20), "a".repeat(200))).unwrap();
         let e = super::named(&dir, "sh x.sh", &dir, &unseen).unwrap_err();
         assert!(e.contains("21 lines") && e.contains(", and its line 21 is 200 characters"), "both: {e}");
-        std::fs::remove_dir_all(&dir).ok();
+        // f22 j: its syntax checked runs nothing of it — nothing to show, however long
+        for c in ["sh -n x.sh", "bash -n x.sh", "zsh -n x.sh && shellcheck x.sh"] {
+            assert_eq!(super::named(&dir, c, &dir, &unseen), Ok(Vec::new()), "{c}");
+        }
+        assert!(super::named(&dir, "sh -n x.sh; sh x.sh", &dir, &unseen).is_err(), "run after: shown");
+        // (shellcheck following sources the line doesn't name: as any command's)
+        assert!(super::named(&dir, "shellcheck -x x.sh", &dir, &unseen).is_err(), "-x: shown");
     }
 
     #[test]
@@ -6148,8 +6136,8 @@ mod tests {
         // shared temp folder, which every run writes: on Linux that's `/tmp`)
         let tmp = std::env::temp_dir();
         let tmp = if tmp.starts_with("/tmp") { std::path::PathBuf::from("/var/tmp") } else { tmp };
-        let t = tmp.join(format!("tarae-not-started-{}", std::process::id()));
-        std::fs::remove_dir_all(&t).ok();
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "not-started");
+        let t = scratch.to_path_buf();
         std::fs::create_dir_all(t.join("p")).unwrap();
         std::fs::create_dir_all(t.join("tmp")).unwrap();
         let t = crate::sandbox::profile_path(&t);

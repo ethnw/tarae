@@ -678,11 +678,14 @@ const VISIT_MAX: usize = 10_000;
 const BYTES_MAX: u64 = 32 << 20;
 /// Bigger files aren't settings.
 const FILE_MAX: u64 = 256 << 10;
-/// Code, docs and pictures: a `token = …` there is code, not a token.
-const NOT_SETTINGS: [&str; 30] = [
-    "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp", "swift",
-    "rb", "php", "cs", "scala", "lua", "md", "html", "css", "svg", "png", "jpg", "pdf", "lock", "sum",
-];
+/// Pictures, documents and lock files — no language's: never settings.
+const NOT_SETTINGS_FLOOR: [&str; 6] = ["svg", "png", "jpg", "pdf", "lock", "sum"];
+
+/// Whether a file of extension `ext` (lowercase) is code, docs or a picture: a `token = …` there is code, not a
+/// token — the built-in packs' `not-settings` (their code's extensions) and `NOT_SETTINGS_FLOOR`.
+fn not_settings(ext: &str) -> bool {
+    NOT_SETTINGS_FLOOR.contains(&ext) || crate::sandboxpack::get().not_settings.iter().any(|x| x == ext)
+}
 /// A folder of tools' output, never looked in (below the place asked about): git's `objects`, and the
 /// packs' `outputs` — the built-in packs' only (`packs::Reach::BuiltIn`): one of one's own would hide a token.
 pub(crate) fn output_dir(name: &str) -> bool {
@@ -762,7 +765,7 @@ fn found_under(place: &Path, home: Option<&Path>) -> Found {
             continue;
         }
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-        if !meta.is_file() || meta.len() > FILE_MAX || (p != place && NOT_SETTINGS.contains(&ext.as_str())) {
+        if !meta.is_file() || meta.len() > FILE_MAX || (p != place && not_settings(&ext)) {
             continue;
         }
         if looked >= LOOK_MAX || bytes + meta.len() > BYTES_MAX {
@@ -826,12 +829,47 @@ impl Found {
 mod tests {
     use super::*;
 
+    /// f22 f: the files never looked in for a token are the code packs' (`[sandbox] not-settings`) — each one of
+    /// its own pack's languages' extensions — and the core's floor, the 30 the core listed before; settings stay
+    /// looked in (`kts`: a Gradle script's credentials; toml, json, yaml, env, sh).
+    #[test]
+    fn files_not_settings_are_the_code_packs_and_a_floor() {
+        let mut all: Vec<&str> = NOT_SETTINGS_FLOOR.to_vec();
+        all.extend(crate::sandboxpack::get().not_settings.iter().map(String::as_str));
+        crate::sorting::sort(&mut all);
+        let mut before = [
+            "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp",
+            "swift", "rb", "php", "cs", "scala", "lua", "md", "html", "css", "svg", "png", "jpg", "pdf",
+            "lock", "sum",
+        ];
+        crate::sorting::sort(&mut before);
+        assert_eq!(all, before);
+        for x in ["kts", "toml", "json", "yaml", "env", "sh", ""] {
+            assert!(!not_settings(x), "{x}");
+        }
+        // (each pack's its own languages')
+        for (pack, t) in crate::packs::builtin_manifests() {
+            let Ok(t) = t else { continue };
+            let Some(said) = t.get("sandbox").and_then(|s| s.get("not-settings")).and_then(|v| v.as_array())
+            else {
+                continue;
+            };
+            let langs = t.get("language").and_then(|l| l.as_table());
+            let exts: Vec<&str> = langs
+                .into_iter()
+                .flat_map(|l| l.values())
+                .filter_map(|l| l.get("extensions").and_then(|e| e.as_array()))
+                .flatten()
+                .filter_map(|e| e.as_str())
+                .collect();
+            for x in said.iter().filter_map(|x| x.as_str()) {
+                assert!(exts.contains(&x), "the {pack} pack's `{x}` isn't one of its languages': {exts:?}");
+            }
+        }
+    }
+
     fn scratch(name: &str) -> PathBuf {
-        let d = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-tokens-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&d).ok();
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::scratch::Scratch::new(&format!("tokens-{name}")).into_path()
     }
 
     fn write(path: &Path, text: &str) {

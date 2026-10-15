@@ -1389,10 +1389,8 @@ mod tests {
     /// rename that reaches it is refused whole, naming it.
     #[test]
     fn a_key_named_file_is_out_of_replace_and_rename_until_opened() {
-        let dir = std::env::temp_dir().join(format!("tarae-refactor-keys-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("refactor-keys");
+        let dir = scratch.to_path_buf();
         let env = dir.join(".env");
         std::fs::write(&env, "alpha=tarae-fake-token\n").unwrap();
         std::fs::write(dir.join("a.rs"), "let alpha = 1;\n").unwrap();
@@ -1442,8 +1440,8 @@ mod tests {
     /// in its temp folder.)
     #[test]
     fn a_change_is_never_written_through_a_link_swapped_in_since() {
-        let base = std::env::temp_dir().join(format!("tarae-refactor-swapped-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("refactor-swapped");
+        let base = scratch.to_path_buf();
         let (dir, outside) = (base.join("p"), base.join("outside"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -1491,8 +1489,8 @@ mod tests {
     /// folder.)
     #[test]
     fn a_folder_swapped_after_the_check_never_takes_the_write_outside() {
-        let base = std::env::temp_dir().join(format!("tarae-refactor-race-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("refactor-race");
+        let base = scratch.to_path_buf();
         std::fs::create_dir_all(base.join("p/sub")).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
         let dir = std::fs::canonicalize(base.join("p")).unwrap();
@@ -1587,10 +1585,9 @@ mod tests {
     /// missing before. (The test's own files; the review is closed, nothing written.)
     #[test]
     fn a_protected_file_in_a_change_set_is_reviewed_with_its_warning() {
-        let dir = std::env::temp_dir().join(format!("tarae-refactor-protected-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("refactor-protected");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("build.rs"), "fn alpha() {}\n").unwrap();
         std::fs::write(dir.join("a.rs"), "fn alpha() {}\n").unwrap();
         std::os::unix::fs::symlink("../build.rs", dir.join("src/x.rs")).unwrap();

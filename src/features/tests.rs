@@ -46,10 +46,7 @@ fn count_of(ed: &Editor, key: &str) -> u32 {
 }
 
 fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tarae-features-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::scratch::Scratch::new(&format!("features-{name}")).into_path()
 }
 
 /// What a key counts is the command it ran: `j` and `↓` are two keys of one command, one row with both —

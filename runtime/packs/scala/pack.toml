@@ -1,5 +1,9 @@
 # Scala.
 
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+[sandbox]
+not-settings = ["scala"]
+
 [language.scala]
 extensions = ["scala", "sc"]
 comment-token = "//"

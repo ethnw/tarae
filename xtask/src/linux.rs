@@ -36,7 +36,8 @@
 //! `--yes`.
 //! After the checks, past `VOLUMES_SAY` (30 GB), a line says what tarae's volumes take — the checkouts'
 //! targets, which ends and `prune` free, apart from the shared ones (colima's disk filled at 40 GB, 2026-10-06,
-//! with nothing said); a Docker that can't measure them is said so.
+//! with nothing said); a Docker that can't measure them is said so. The line says the disk's use too (the
+//! container's `df -P /target`, read off its output), and comes past `DISK_SAY` (80 %) however little they take.
 //!
 //! `--platform linux/amd64` runs them on another architecture, its target and rustup volumes its own — on
 //! colima's aarch64 VM under qemu-user: slow, and a build was seen to stall (2026-10-05); a Docker on a real
@@ -444,25 +445,30 @@ pub fn run(args: &[String]) -> Result<()> {
     if cgroups {
         eprintln!("--cgroup: the container in the machine's cgroup namespace, the hierarchy writable");
     }
-    let st = match tree {
-        Tree::Mounted(_) => docker.status(),
-        Tree::Streamed => {
-            let tar = streamed(&root)?;
-            let mut child =
-                docker.stdin(std::process::Stdio::piped()).spawn().map_err(|e| format!("docker: {e}"))?;
-            let mut stdin = child.stdin.take().expect("piped");
-            let feed = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &tar));
-            let st = child.wait();
-            if let Ok(Err(e)) = feed.join() {
-                eprintln!("the checkout didn't all go in: {e}");
-            }
-            st
-        }
+    let tar = match tree {
+        Tree::Mounted(_) => None,
+        Tree::Streamed => Some(streamed(&root)?),
+    };
+    if tar.is_some() {
+        docker.stdin(std::process::Stdio::piped());
     }
-    .map_err(|e| format!("docker: {e}"))?;
-    say_sizes();
+    // (its output passed on as it comes, but the disk's line the script ends with — `DISK_MARK`)
+    let mut child =
+        docker.stdout(std::process::Stdio::piped()).spawn().map_err(|e| format!("docker: {e}"))?;
+    let out = child.stdout.take().expect("piped");
+    let seen = std::thread::spawn(move || forwarded(std::io::BufReader::new(out), &mut std::io::stdout()));
+    let feed = tar.map(|tar| {
+        let mut stdin = child.stdin.take().expect("piped");
+        std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &tar))
+    });
+    let st = child.wait().map_err(|e| format!("docker: {e}"))?;
+    if let Some(Ok(Err(e))) = feed.map(|f| f.join()) {
+        eprintln!("the checkout didn't all go in: {e}");
+    }
+    let seen = seen.join().unwrap_or_default();
+    say_sizes(seen.disk);
     if !st.success() {
-        return Err("the Linux checks failed (above)".into());
+        return Err(failed_said(&seen.failed));
     }
     Ok(())
 }
@@ -937,6 +943,85 @@ fn prune_notes(
 /// Past this, a run says what tarae's volumes take — before a full disk does.
 const VOLUMES_SAY: u64 = 30_000_000_000;
 
+/// Past this share of the disk used (the Docker machine's, where the target volume is), a run says what
+/// tarae's volumes take however little that is — a disk filled by others' fills for tarae too.
+const DISK_SAY: u32 = 80;
+
+/// The line the checks' script ends with (`script`'s trap, on any exit): `df -P /target`'s row after it.
+const DISK_MARK: &str = "tarae-xtask-disk: ";
+
+/// The disk the target volume is on, as the container's `df -P` saw it: its share used (`Capacity`), bytes used
+/// and its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Disk {
+    pct: u32,
+    used: u64,
+    size: u64,
+}
+
+/// `df -P`'s row (filesystem, 1024-blocks, used, available, capacity, mounted on — one row under `-P`).
+fn disk(row: &str) -> Option<Disk> {
+    let f: Vec<&str> = row.split_whitespace().collect();
+    let [_, size, used, _, pct, ..] = f[..] else { return None };
+    let kb = |n: &str| n.parse::<u64>().ok().map(|n| n * 1024);
+    Some(Disk { pct: pct.strip_suffix('%')?.parse().ok()?, used: kb(used)?, size: kb(size)? })
+}
+
+/// What the container's output said besides passing through (`forwarded`).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Seen {
+    /// The disk (the last `DISK_MARK` line).
+    disk: Option<Disk>,
+    /// The test binaries that failed, as cargo names them (`--bin tarae`, `--test e2e`), each once, in order.
+    failed: Vec<String>,
+}
+
+/// cargo's line for each test binary that failed (`--no-fail-fast` goes on past it): `error: test failed, to
+/// rerun pass `--test e2e``.
+const RERUN: &str = "error: test failed, to rerun pass `";
+
+/// `from` (the container's output) written to `to` as it comes, byte for byte, but the line after `DISK_MARK`,
+/// read as the disk; cargo's failed test binaries noted on the way (`RERUN`).
+fn forwarded(mut from: impl std::io::BufRead, to: &mut impl std::io::Write) -> Seen {
+    let (mut seen, mut line) = (Seen::default(), Vec::new());
+    loop {
+        line.clear();
+        if from.read_until(b'\n', &mut line).unwrap_or(0) == 0 {
+            return seen;
+        }
+        let text = std::str::from_utf8(&line).ok();
+        if let Some(row) = text.and_then(|l| l.strip_prefix(DISK_MARK)) {
+            seen.disk = disk(row.trim_end());
+            continue;
+        }
+        if let Some(b) = text.and_then(|l| l.trim_end().strip_prefix(RERUN)).and_then(|r| r.strip_suffix('`'))
+            && !seen.failed.iter().any(|f| f == b)
+        {
+            seen.failed.push(b.to_string());
+        }
+        let _ = to.write_all(&line);
+        let _ = to.flush();
+    }
+}
+
+/// How the run ended, said last: which test binaries failed when cargo named them.
+fn failed_said(failed: &[String]) -> String {
+    match failed {
+        [] => "the Linux checks failed (above)".into(),
+        f => format!(
+            "the Linux checks failed — {} test {} failed (every one ran): {}",
+            f.len(),
+            if f.len() == 1 { "binary" } else { "binaries" },
+            f.join(", ")
+        ),
+    }
+}
+
+/// `the disk 82 % used (48 of 59 GB)`
+fn disk_said(d: Disk) -> String {
+    format!("the disk {} % used ({:.0} of {:.0} GB)", d.pct, d.used as f64 / 1e9, d.size as f64 / 1e9)
+}
+
 /// Docker's size as it prints it (`7.21GB`, `606.3MB`, `0B` — powers of 1000) in bytes.
 fn bytes(size: &str) -> Option<u64> {
     let at = size.find(|c: char| !c.is_ascii_digit() && c != '.')?;
@@ -972,14 +1057,19 @@ fn gb(n: u64) -> String {
     format!("{:.1} GB", n as f64 / 1e9)
 }
 
-/// The line saying what tarae's volumes take, once past `over`: the checkouts' targets — what a session's
-/// end and `prune` free, with how — apart from the shared ones (registry, toolchains, trace's target), which
-/// only `prune --all` frees; each part's total and its three biggest (a target by its checkout's folder name).
-fn size_line(volumes: &[(String, u64, String)], over: u64) -> Option<String> {
+/// The line saying what tarae's volumes take, once past `over` — or the disk (`disk`, when the container said
+/// it) past `DISK_SAY`, however little they take; the disk's use said with it: the checkouts' targets — what a
+/// session's end and `prune` free, with how — apart from the shared ones (registry, toolchains, trace's target),
+/// which only `prune --all` frees; each part's total and its three biggest (a target by its checkout's folder
+/// name).
+fn size_line(volumes: &[(String, u64, String)], over: u64, disk: Option<Disk>) -> Option<String> {
     let total: u64 = volumes.iter().map(|v| v.1).sum();
-    if total < over {
+    let full = disk.is_some_and(|d| d.pct >= DISK_SAY);
+    if total < over && !full {
         return None;
     }
+    let past = if total >= over { format!(" (past {})", gb(over)) } else { String::new() };
+    let disk = disk.map(|d| format!(" — {}", disk_said(d))).unwrap_or_default();
     let (targets, shared): (Vec<_>, Vec<_>) = volumes.iter().partition(|v| v.0.starts_with("tarae-target-"));
     let part = |mut vs: Vec<&(String, u64, String)>| {
         vs.sort_by_key(|v| std::cmp::Reverse(v.1));
@@ -1010,7 +1100,7 @@ fn size_line(volumes: &[(String, u64, String)], over: u64) -> Option<String> {
             part(shared)
         ));
     }
-    Some(format!("tarae's Docker volumes take {} (past {}): {}", gb(total), gb(over), parts.join("; ")))
+    Some(format!("tarae's Docker volumes take {}{past}{disk}: {}", gb(total), parts.join("; ")))
 }
 
 /// `docker system df -v`'s volumes as `sizes` reads them: name, size, labels a line.
@@ -1031,15 +1121,19 @@ fn df(docker: &mut Command) -> std::result::Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// What tarae's volumes take, said once past `VOLUMES_SAY` — and said when it can't be measured.
-fn say_sizes() {
+/// What tarae's volumes take, said once past `VOLUMES_SAY` or the disk (`disk`: the container's) past
+/// `DISK_SAY` — and said when it can't be measured, with the disk past `DISK_SAY` all the same.
+fn say_sizes(disk: Option<Disk>) {
     match df(&mut Command::new("docker")) {
         Ok(listed) => {
-            if let Some(line) = size_line(&sizes(&listed), VOLUMES_SAY) {
+            if let Some(line) = size_line(&sizes(&listed), VOLUMES_SAY, disk) {
                 eprintln!("{line}");
             }
         }
-        Err(why) => eprintln!("couldn't measure the volumes ({why})"),
+        Err(why) => match disk.filter(|d| d.pct >= DISK_SAY) {
+            Some(d) => eprintln!("{} — couldn't measure tarae's volumes ({why})", disk_said(d)),
+            None => eprintln!("couldn't measure the volumes ({why})"),
+        },
     }
 }
 
@@ -1064,7 +1158,8 @@ pub fn prune(mine: bool) -> Result<()> {
     for note in notes {
         println!("{note}");
     }
-    say_sizes();
+    // (no container ran: the disk unknown)
+    say_sizes(None);
     Ok(())
 }
 
@@ -1294,7 +1389,12 @@ pub(crate) fn image(pin: &str) -> String {
 /// made a repository of one commit — then the checks.
 fn script(tree: Tree, what: &What) -> String {
     // (home made first: `--env HOME=/work` names one the clone hasn't made yet)
-    let mut s = String::from(
+    // (on any exit, the checks' failing too: the target volume's disk, for `forwarded` — an EXIT trap keeps
+    // the script's own exit status)
+    let mut s = format!("trap 'df -P /target 2>/dev/null | sed -n \"2s/^/{DISK_MARK}/p\"' EXIT\n");
+    // (one stream: cargo's "to rerun pass" lines are stderr's, and `forwarded` reads them for the summary)
+    s.push_str("exec 2>&1\n");
+    s.push_str(
         "mkdir -p \"$HOME\"\n\
          git config --global --add safe.directory '*'\n\
          mkdir -p /target/tarae-second-mount && chmod 1777 /target/tarae-second-mount\n",
@@ -1351,9 +1451,10 @@ fn script(tree: Tree, what: &What) -> String {
                 args.join(" ")
             ));
         }
-        What::Both => s.push_str("cargo test --locked --workspace\n"),
+        // (`--no-fail-fast`: every test binary runs — a unit test failing hid e2e's, f22 o)
+        What::Both => s.push_str("cargo test --locked --no-fail-fast --workspace\n"),
         What::Test { args, repeat } => {
-            let test = std::iter::once("cargo test --locked".to_string())
+            let test = std::iter::once("cargo test --locked --no-fail-fast".to_string())
                 .chain(args.iter().map(|a| quoted(a)))
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -1590,7 +1691,7 @@ mod tests {
         assert!(s.contains("git -C /src diff HEAD | git apply") && s.contains("ls-files --others"), "{s}");
         assert!(
             s.contains("--features bundled-grammars -- -D warnings")
-                && s.contains("cargo test --locked --workspace\n"),
+                && s.contains("cargo test --locked --no-fail-fast --workspace\n"),
             "xtask's tests too: {s}"
         );
         let clippy = script(Tree::Mounted(None), &What::Clippy);
@@ -1605,12 +1706,13 @@ mod tests {
     fn test_takes_cargo_tests_arguments_and_a_repeat() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let once = script(Tree::Mounted(None), &what(&args(&["test", "recovery", "--", "it's"])).unwrap());
-        assert!(once.contains("cargo test --locked 'recovery' '--' 'it'\\''s'\n"), "{once}");
+        assert!(once.contains("cargo test --locked --no-fail-fast 'recovery' '--' 'it'\\''s'\n"), "{once}");
         assert!(!once.contains("while"), "{once}");
         let looped =
             script(Tree::Mounted(None), &what(&args(&["test", "--repeat", "20", "recovery"])).unwrap());
         assert!(
-            looped.contains("while [ $n -lt 20 ]") && looped.contains("cargo test --locked 'recovery' ||")
+            looped.contains("while [ $n -lt 20 ]")
+                && looped.contains("cargo test --locked --no-fail-fast 'recovery' ||")
         );
         assert!(looped.contains("exit 1") && looped.contains("all 20 runs passed"), "{looped}");
         assert_eq!(what(&args(&["test"])), Ok(What::Test { args: Vec::new(), repeat: 1 }));
@@ -2312,8 +2414,8 @@ mod tests {
         let listed = sizes(df);
         assert_eq!(listed.len(), 5, "tarae's only: {listed:?}");
         assert_eq!(listed[0], ("tarae-target-1.99.0-aaaa".into(), 12_000_000_000, "/w/wt/landlock".into()));
-        assert_eq!(size_line(&listed, VOLUMES_SAY), None, "29.4 GB: under the line");
-        let line = size_line(&listed, 29_000_000_000).expect("past it");
+        assert_eq!(size_line(&listed, VOLUMES_SAY, None), None, "29.4 GB: under the line");
+        let line = size_line(&listed, 29_000_000_000, None).expect("past it");
         let (targets, shared) = line.split_once("; ").expect("two parts");
         assert!(
             targets.starts_with(
@@ -2332,12 +2434,84 @@ mod tests {
         );
         // (only shared ones: only that advice; more than three: counted)
         let shared_only = sizes("tarae-trace-target-1.99.0\t40GB\t\n");
-        let line = size_line(&shared_only, VOLUMES_SAY).unwrap();
+        let line = size_line(&shared_only, VOLUMES_SAY, None).unwrap();
         assert!(!line.contains("session.ended") && line.contains("prune --all"), "{line}");
         let many: Vec<_> =
             (0..5).map(|i| (format!("tarae-target-1.99.0-{i}"), 7_000_000_000, String::new())).collect();
-        assert!(size_line(&many, VOLUMES_SAY).unwrap().contains(" and 2 more)"));
+        assert!(size_line(&many, VOLUMES_SAY, None).unwrap().contains(" and 2 more)"));
         assert_eq!(VOLUMES_SAY, 30_000_000_000);
+    }
+
+    /// f22 l: the checks' script ends saying the target volume's disk (`df -P`, on any exit), read off the
+    /// container's output (every other byte passed on as it came); the volumes' line says its use, and comes
+    /// past `DISK_SAY` (80 %) under 30 GB too. Under both: nothing.
+    #[test]
+    fn the_disks_use_is_said_with_the_volumes_and_past_80_percent() {
+        let s = script(Tree::Mounted(None), &What::Clippy);
+        assert!(
+            s.starts_with("trap 'df -P /target 2>/dev/null | sed -n \"2s/^/tarae-xtask-disk: /p\"' EXIT\n"),
+            "{s}"
+        );
+        let out = "toolchain: rustc 1.99.0\n\
+                   tarae-xtask-disk: /dev/vdb1 61255492 47984064 10133136 83% /target\n\
+                   test result: ok\n\
+                   no newline at its end";
+        let mut passed = Vec::new();
+        let d = forwarded(out.as_bytes(), &mut passed).disk.expect("the disk");
+        assert_eq!(
+            String::from_utf8(passed).unwrap(),
+            "toolchain: rustc 1.99.0\ntest result: ok\nno newline at its end"
+        );
+        assert_eq!(d, Disk { pct: 83, used: 47_984_064 * 1024, size: 61_255_492 * 1024 });
+        assert_eq!(disk("overlay 100 50"), None, "a row cut short");
+        assert_eq!(forwarded("plain\n".as_bytes(), &mut Vec::new()), Seen::default());
+        // (past 30 GB: its use with it)
+        let listed = sizes("tarae-target-1.99.0-aaaa\t31GB\ttarae.checkout=/w/wt/landlock\n");
+        let low = Disk { pct: 52, ..d };
+        let line = size_line(&listed, VOLUMES_SAY, Some(low)).unwrap();
+        assert!(
+            line.starts_with(
+                "tarae's Docker volumes take 31.0 GB (past 30.0 GB) — the disk 52 % used (49 of 63 GB): "
+            ),
+            "{line}"
+        );
+        // (under 30 GB: only past 80 %)
+        let small = sizes("tarae-target-1.99.0-aaaa\t12GB\ttarae.checkout=/w/wt/landlock\n");
+        assert_eq!(size_line(&small, VOLUMES_SAY, Some(low)), None);
+        assert_eq!(size_line(&small, VOLUMES_SAY, None), None);
+        let line = size_line(&small, VOLUMES_SAY, Some(d)).expect("past 80 %");
+        assert!(line.starts_with("tarae's Docker volumes take 12.0 GB — the disk 83 % used (49 of 63 GB): checkouts' targets 12.0 GB (landlock's 12.0 GB)"), "{line}");
+        assert_eq!(DISK_SAY, 80);
+    }
+
+    /// f22 o: every test binary runs (`--no-fail-fast`, stderr folded into what's read), and the run's last
+    /// line names the ones that failed, each once, as cargo does — their lines passed on as they came.
+    #[test]
+    fn every_test_binary_runs_and_the_failed_ones_are_named() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for w in [What::Both, what(&args(&["test", "--bin", "tarae"])).unwrap()] {
+            let s = script(Tree::Mounted(None), &w);
+            assert!(s.contains("cargo test --locked --no-fail-fast") && s.contains("\nexec 2>&1\n"), "{s}");
+        }
+        let out = "test result: FAILED. 2200 passed; 2 failed\n\
+                   error: test failed, to rerun pass `--bin tarae`\n\
+                   test result: FAILED. 40 passed; 1 failed\n\
+                   error: test failed, to rerun pass `--test e2e`\n\
+                   error: test failed, to rerun pass `--bin tarae`\n\
+                   error: 2 targets failed:\n    `--bin tarae`\n    `--test e2e`\n";
+        let mut passed = Vec::new();
+        let seen = forwarded(out.as_bytes(), &mut passed);
+        assert_eq!(String::from_utf8(passed).unwrap(), out, "passed on whole");
+        assert_eq!(seen.failed, ["--bin tarae", "--test e2e"]);
+        assert_eq!(
+            failed_said(&seen.failed),
+            "the Linux checks failed — 2 test binaries failed (every one ran): --bin tarae, --test e2e"
+        );
+        assert_eq!(
+            failed_said(&["--test e2e".into()]),
+            "the Linux checks failed — 1 test binary failed (every one ran): --test e2e"
+        );
+        assert_eq!(failed_said(&[]), "the Linux checks failed (above)");
     }
 
     /// No Docker to talk to: said in a line a preflight note can match, not an error.

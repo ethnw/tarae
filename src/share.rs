@@ -1208,10 +1208,7 @@ mod tests {
     /// makes them — no git run), each a cargo project with `src/main.rs`; the stand-in servers (`cat`) write
     /// what they're sent to `srv-<pid>.log`. `main` is the session's checkout.
     fn fixture(name: &str, worktrees: &[&str], room: ReadRoom) -> (PathBuf, Editor) {
-        let t = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-share-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
+        let t = crate::scratch::Scratch::new(&format!("share-{name}")).into_path();
         std::fs::create_dir_all(t.join("main/.git")).unwrap();
         for c in std::iter::once(&"main").chain(worktrees) {
             std::fs::create_dir_all(t.join(c).join("src")).unwrap();
@@ -1724,8 +1721,8 @@ mod tests {
 
     #[test]
     fn a_worktree_shares_its_repositorys_key_and_a_toolchain_tells_them_apart() {
-        let t = std::env::temp_dir().join(format!("tarae-share-key-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
+        let scratch = crate::scratch::Scratch::new("share-key");
+        let t = scratch.to_path_buf();
         let (main, wt, clone) = (t.join("main"), t.join("wt"), t.join("clone"));
         std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
         std::fs::create_dir_all(&wt).unwrap();

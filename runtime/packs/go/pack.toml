@@ -139,6 +139,8 @@ quiet = ["*_test.go", "testdata/"]
 # project): GOPATH (the module cache in it) and its settings (`os.UserConfigDir`'s `go/`) — not the user's
 # build cache: runs have one of their own (below), and the user's is never read
 [sandbox]
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+not-settings = ["go"]
 reads = ["~/go", "{user-config}/go"]
 kept = ["{user-cache}/go-build"]
 # Its telemetry counters: every go command (`go version` too) writes `…/go/telemetry/local/<…>.count` in its

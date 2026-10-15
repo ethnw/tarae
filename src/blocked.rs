@@ -527,8 +527,7 @@ mod tests {
     /// What a run's denials offer: the folders a write may open, a port that isn't a risky one — once each.
     #[test]
     fn what_a_runs_denials_offer() {
-        let base = std::env::temp_dir().join(format!("tarae-blocked-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::scratch::Scratch::new("blocked");
         std::fs::create_dir_all(base.join("home/data/cache")).unwrap();
         std::fs::create_dir_all(base.join("home/proj")).unwrap();
         let home = std::fs::canonicalize(base.join("home")).unwrap();
@@ -559,7 +558,6 @@ mod tests {
             ],
             "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once"
         );
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A terminal refused (macOS, 3c — reading or writing `/dev/ttysN`) offers the terminals, once, whichever
@@ -588,7 +586,7 @@ mod tests {
         let g = Grant::Terminals;
         assert!(g.keepable() && !g.as_outside());
         assert!(g.risk().is_some_and(|r| r.contains("read what you type")), "{:?}", g.risk());
-        let base = std::env::temp_dir().join(format!("tarae-blocked-tty-{}", std::process::id()));
+        let base = crate::scratch::Scratch::new("blocked-tty");
         let store = base.join("sandbox.json");
         crate::allow::keep(&store, Path::new("/p"), |a| a.add(&g)).unwrap();
         let kept = crate::allow::Store::read(Some(&store)).get(Path::new("/p"));
@@ -601,7 +599,6 @@ mod tests {
         assert!(w.terminals && w.granted == [g.shown()], "{:?}", w.granted);
         crate::allow::keep(&store, Path::new("/p"), |a| a.remove(crate::allow::TERMINALS_LISTED)).unwrap();
         assert_eq!(crate::allow::Store::read(Some(&store)).get(Path::new("/p")), Default::default());
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A file named like a key refused in the project (macOS, 7a) offers that one file, once — never a folder of
@@ -628,7 +625,7 @@ mod tests {
         let outside = choices(&[d("/Users/u/q/.env")], &crate::caps::Caps::at(home, root));
         assert!(outside.iter().all(|c| matches!(c.grant, Grant::Read(_))), "{outside:?}");
         assert!(g.keepable() && !g.as_outside() && g.risk().is_some_and(|r| r.contains("reaches Claude")));
-        let base = std::env::temp_dir().join(format!("tarae-blocked-key-{}", std::process::id()));
+        let base = crate::scratch::Scratch::new("blocked-key");
         let store = base.join("sandbox.json");
         crate::allow::keep(&store, root, |a| a.add(&g)).unwrap();
         let kept = crate::allow::Store::read(Some(&store)).get(root);
@@ -641,7 +638,6 @@ mod tests {
         assert!(w.keys == [env.clone()] && w.granted == [g.shown()] && w.reads.is_empty(), "{:?}", w.granted);
         crate::allow::keep(&store, root, |a| a.remove(&env.display().to_string())).unwrap();
         assert_eq!(crate::allow::Store::read(Some(&store)).get(root), Default::default());
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A host the proxy held and the user's answer would lift (`network-host`: not among the hosts, no answer,
@@ -687,8 +683,7 @@ mod tests {
     /// stand-in home in the test's temp folder.)
     #[test]
     fn a_shared_cache_is_never_offered_in_a_project_not_the_tools() {
-        let base = std::env::temp_dir().join(format!("tarae-blocked-cache-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::scratch::Scratch::new("blocked-cache");
         let modcache = "go/pkg/mod/golang.org/x/text@v0.1.0";
         for d in [
             modcache,
@@ -741,15 +736,13 @@ mod tests {
         assert!(why.as_ref().is_err_and(|w| w.starts_with("it's in a toolchain's home")), "{why:?}");
         let p = crate::sandbox::Policy::for_project(&env);
         assert!(!p.writes_allow(&home.join(modcache).join("new.go")), "{:?}", p.write);
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Card model P2: a read the sandbox denied in home offers the places it may open, nearest first — never
     /// a key's; one only the output said (reading or writing — it doesn't say which) offers both.
     #[test]
     fn what_a_denied_read_offers() {
-        let base = std::env::temp_dir().join(format!("tarae-blocked-read-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::scratch::Scratch::new("blocked-read");
         for d in ["home/src/lib", "home/.ssh", "home/notes", "home/proj"] {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
@@ -778,7 +771,6 @@ mod tests {
             ],
             "nothing for the key"
         );
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A read's grant card says first when the place holds a token-like line — by the file's name, never the
@@ -786,9 +778,8 @@ mod tests {
     /// without one says nothing of tokens. (Fake values in the test's own temp folder.)
     #[test]
     fn a_grants_card_says_when_a_token_is_there() {
-        let base = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-blocked-tok-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("blocked-tok");
+        let base = scratch.to_path_buf();
         for (f, text) in [("conf/hosts.yml", "oauth_token: tarae-fake-token\n"), ("plain/x.txt", "marker\n")]
         {
             std::fs::create_dir_all(base.join(f).parent().unwrap()).unwrap();
@@ -827,7 +818,6 @@ mod tests {
         assert!(!q.contains("tarae-fake-token"), "{q}");
         let (q, warned) = card(&mut ed, "1");
         assert!(warned.is_empty() && !q.contains("token"), "{q}");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// #119: a denied connect to a unix socket offers that socket — its real path, the file only — and not
@@ -836,9 +826,8 @@ mod tests {
     #[test]
     fn a_denied_socket_offers_that_socket_only() {
         // (a socket's path has 104 bytes at most: short names — the temp folder is the home)
-        let base =
-            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("k{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("k");
+        let base = scratch.to_path_buf();
         std::fs::create_dir_all(base.join(".colima/t")).unwrap();
         std::fs::create_dir_all(base.join("p")).unwrap();
         let home = base.clone();
@@ -865,6 +854,5 @@ mod tests {
         let g = Grant::Socket(sock);
         assert!(!g.keepable() && g.warning().is_some_and(|w| w.contains("mounts any folder")));
         assert!(Grant::Socket("/tmp/x/app.sock".into()).warning().is_none());
-        std::fs::remove_dir_all(&base).ok();
     }
 }

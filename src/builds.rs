@@ -816,10 +816,7 @@ mod tests {
 
     /// A cargo project ending at `dir/wt/x`, the rust pack's `[builds]` with stand-ins.
     fn place(name: &str) -> Place {
-        let dir = std::env::temp_dir().join(format!("tarae-builds-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("builds-{name}")).into_path();
         let (home, user, root) = (dir.join("cargo-home"), dir.join("user-home"), dir.join("wt/x"));
         for d in [home.join("build"), user.clone(), root.clone()] {
             std::fs::create_dir_all(d).unwrap();

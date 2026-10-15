@@ -772,8 +772,7 @@ mod tests {
     /// The test's own temp folder (real path), holding a repository `repo/`: `a.txt` committed then changed,
     /// `b.txt` new — and beside it `outside.txt`, not the repository's.
     fn place(name: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-reviewer-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new(&format!("reviewer-{name}")).into_path();
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();

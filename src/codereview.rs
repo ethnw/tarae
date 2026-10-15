@@ -282,6 +282,11 @@ impl CodeReview {
             }
             None => worker().to_vec(),
         };
+        // (held against the looks before any cut: a look is a whole change's — `take` — and the pane's height,
+        // or where its definitions are known from, moves where it's cut, never a line within it — f22 h: looks
+        // per piece, held against pieces cut elsewhere, asked again for ~30 lines nothing had moved)
+        let looked = &ed.session.looked;
+        let moved = moved_within(&f.rel, &g, orders, looked, live.map(|d| &d.text));
         if at != CutAt::Whole && g.iter().any(tall) {
             let defs = match (at, tree, known) {
                 (CutAt::Tree, Some(t), _) => live.map(|d| defs_in(t, &d.text)).unwrap_or_default(),
@@ -290,9 +295,8 @@ impl CodeReview {
             };
             g = g.iter().flat_map(|g| pieces(g, &defs, rows)).collect();
         }
-        let looked = &ed.session.looked;
         let out = self.taken_out_of(ed, f, &g, lines, orders);
-        g.extend(moved_within(&f.rel, &g, orders, looked, live.map(|d| &d.text)));
+        g.extend(moved);
         g.extend(out);
         let g: Graded = g.into();
         self.live.borrow_mut().insert(f.path.clone(), (stamp, g.clone()));
@@ -626,6 +630,11 @@ fn moved_within(
         let bracket = |i: usize| plain(i) && texts[i].as_deref().is_some_and(|t| !t.trim().is_empty());
         let (mut moved, mut crossings) = (Vec::new(), Vec::new());
         for then in orders.iter().filter(|o| added.iter().filter(|k| o.keys.contains(k)).nth(1).is_some()) {
+            // (the order looked at still there line for line: nothing in it moved — a change grown around it
+            // since, or a look kept from when looks were a piece's)
+            if then.keys.len() <= added.len() && added.windows(then.keys.len()).any(|w| w == then.keys) {
+                continue;
+            }
             moved.extend(crate::risk::out_of_order(&then.keys, added));
             crossings.extend(crossed(&then.keys, added, &plain, &bracket));
         }
@@ -682,8 +691,17 @@ fn crossed(
     if then[..t_first].iter().chain(&then[t_last + 1..]).all(|k| all.contains(k)) {
         let lo = (0..n_first).rev().take_while(|&i| plain(i)).last().unwrap_or(n_first);
         let hi = (n_last + 1..now.len()).take_while(|&i| plain(i)).last().map_or(n_last + 1, |i| i + 1);
-        gaps.push((0..t_first, lo..n_first, n_first));
-        gaps.push((t_last + 1..then.len(), n_last + 1..hi, n_last));
+        // (`then`'s the same way, out to its first line saying something — a line of it rewritten since: its
+        // `}` after it was held against none, and the line above asked as moved)
+        let says: std::collections::HashSet<crate::risk::Key> =
+            (0..now.len()).filter(|&i| !plain(i)).map(|i| now[i]).collect();
+        let t_lo = (0..t_first).rev().take_while(|&t| !says.contains(&then[t])).last().unwrap_or(t_first);
+        let t_hi = (t_last + 1..then.len())
+            .take_while(|&t| !says.contains(&then[t]))
+            .last()
+            .map_or(t_last + 1, |t| t + 1);
+        gaps.push((t_lo..t_first, lo..n_first, n_first));
+        gaps.push((t_last + 1..t_hi, n_last + 1..hi, n_last));
     }
     for (ts, ns, closing) in gaps {
         let mut count: std::collections::HashMap<crate::risk::Key, isize> = Default::default();
@@ -1325,6 +1343,22 @@ fn in_place(text: &ropey::Rope, o: &crate::risk::LookedOrder, place: usize, end:
         None => n,
     };
     (from..to).filter(|&l| at(l) == line).count() as u32
+}
+
+/// The whole change `g` is of (`graded`: a file's changes, a tall one in pieces — `pieces`: they stand together,
+/// in order): its first line and its added lines' keys, in order. Not a piece, or its pieces not found
+/// together: its own.
+fn whole_change(graded: &[crate::risk::Graded], g: &crate::risk::Graded) -> (usize, Vec<crate::risk::Key>) {
+    let own = || (g.at, added_keys(g).to_vec());
+    let Some((k, n)) = g.piece else { return own() };
+    let Some(i) = graded.iter().position(|x| std::ptr::eq(x, g)) else { return own() };
+    let Some(all) = i.checked_sub(k - 1).and_then(|first| graded.get(first..first + n)) else { return own() };
+    let together = all.iter().enumerate().all(|(j, p)| p.piece == Some((j + 1, n)))
+        && all.windows(2).all(|w| w[0].at + w[0].added == w[1].at);
+    match together {
+        true => (all[0].at, all.iter().flat_map(|p| added_keys(p).iter().copied()).collect()),
+        false => own(),
+    }
 }
 
 /// `g`'s added lines' keys, in order.
@@ -2744,15 +2778,22 @@ fn take(ed: &mut Editor, whole_file: bool) {
             crate::risk::LookedLine::new(&rel, *l, t, n)
         })
         .collect();
-    // (each change's lines in order, and the lines just above and below it: its place)
+    // (each change's lines in order, and the lines just above and below it: its place — a piece's, its whole
+    // change's: held against the change as it is, wherever a pane cuts it next — `moved_within`)
     let around = |l: Option<usize>| l.filter(|&l| l < doc.text.len_lines()).map(|l| line_at(&doc.text, l));
-    let orders: Vec<crate::risk::LookedOrder> = high
-        .iter()
-        .filter(|g| g.added > 0)
-        .map(|g| crate::risk::LookedOrder {
-            keys: added_keys(g).to_vec(),
-            above: around(g.at.checked_sub(1)),
-            below: around(Some(g.at + g.added)),
+    let mut wholes: Vec<(usize, Vec<crate::risk::Key>)> = Vec::new();
+    for g in high.iter().filter(|g| g.added > 0) {
+        let (at, keys) = whole_change(&graded, g);
+        if !wholes.iter().any(|(a, _)| *a == at) {
+            wholes.push((at, keys));
+        }
+    }
+    let orders: Vec<crate::risk::LookedOrder> = wholes
+        .into_iter()
+        .map(|(at, keys)| crate::risk::LookedOrder {
+            above: around(at.checked_sub(1)),
+            below: around(Some(at + keys.len())),
+            keys,
         })
         .collect();
     // (a line taken out, looked at as such: done — its records go, so its change no longer misses it)
@@ -4089,10 +4130,9 @@ mod tests {
     /// on it, refused); `space v h` on it is — then the file is marked and the review ends.
     #[test]
     fn a_high_change_holds_the_end_until_looked_at() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-hold-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("review-hold");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
@@ -4142,10 +4182,8 @@ mod tests {
     /// (centered, a tall change was half below it). A file never drawn gives nothing; drawn, one key takes it.
     #[test]
     fn space_v_capital_h_takes_the_files_changes_that_were_all_on_screen() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-file-seen-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("review-file-seen");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
@@ -4217,10 +4255,8 @@ mod tests {
     /// `space v h`. Once it took one, it goes on to the next (#214).
     #[test]
     fn the_high_risk_changes_are_reached_by_keys() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-reach-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("review-reach");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
@@ -4353,10 +4389,8 @@ mod tests {
     /// v h` over it says how much is left to scroll through — and takes it once every line of it was drawn.
     #[test]
     fn a_high_risk_change_taller_than_the_pane_is_taken_once_scrolled_through() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-tall-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("review-tall");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
@@ -4452,10 +4486,7 @@ mod tests {
     /// A repository in the test's own temp folder (`name`): `files` committed as (path, base text), then each
     /// written as its text now — the review is opened on it, on its first file, its diff there.
     fn reviewing(name: &str, files: &[(&str, &str, &str)]) -> (Editor, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-review-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("review-{name}")).into_path();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
@@ -4559,6 +4590,26 @@ mod tests {
         (ed, dir, rows)
     }
 
+    /// f22 h: a line rewritten near a change's end (`b();` → `bc();` above its `}`) asks for that line and the
+    /// one it took out — nothing moved: the `}` after it is where it was (held against none, the `unsafe` line
+    /// above was asked as moved).
+    #[test]
+    fn a_line_rewritten_at_a_changes_end_moved_nothing() {
+        let base = "fn main() {}\n";
+        let now = format!("{base}{}", four_line_fns(2));
+        let (mut ed, dir, _) = reviewing_parsed("rewritten-end", &[("a.rs", base, &now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        let at = ed.doc().text.line_to_byte(1 + 4 + 2) + "    b".len();
+        edited(&mut ed, vec![crate::transaction::Change::insert(at, "c")]);
+        let looked = &ed.session.looked;
+        let mut asked: Vec<String> =
+            highs(&ed).iter().filter(|g| !g.looked_at(looked)).map(|g| g.why.clone()).collect();
+        crate::sorting::sort(&mut asked);
+        assert_eq!(asked, ["taken out since your look: `b();`", "unsafe (rust pack)"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// `n` functions of four lines each, the second an `unsafe` (a high-risk change, added whole).
     fn four_line_fns(n: usize) -> String {
         (0..n).map(|i| format!("fn g{i}() {{\n    unsafe {{ a() }};\n    b();\n}}\n")).collect()
@@ -4567,7 +4618,9 @@ mod tests {
     /// cardburden 2: a high-risk change taller than the pane (24 new lines, six functions) is looked at in
     /// pieces — cut at its functions, each piece fitting the pane, named — one piece a look, each with every
     /// line of it on screen: the cursor on a piece not drawn is no look (it was a tall change's). A fix in one
-    /// function then asks for that piece's line only (cardburden 1's keys, piece by piece).
+    /// function then asks for that piece's line only (cardburden 1's keys, piece by piece) — and, as a change
+    /// not cut does, for the line it took out, at the change's top (f22 h: a look a piece's let the other
+    /// pieces' copies of `b();` stand in for it).
     #[test]
     fn a_tall_change_is_looked_at_piece_by_piece() {
         let base = "fn main() {}\n";
@@ -4598,7 +4651,7 @@ mod tests {
         let at = ed.doc().text.line_to_byte(1 + 4 * 4 + 2) + "    b".len();
         edited(&mut ed, vec![crate::transaction::Change::insert(at, "c")]);
         let left_lines: Vec<usize> = highs(&ed).iter().flat_map(|g| g.left(&ed.session.looked)).collect();
-        assert_eq!((left(&ed), left_lines), (1, vec![1 + 4 * 4 + 2]));
+        assert_eq!((left(&ed), left_lines), (2, vec![1 + 4 * 4 + 2, 1]));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5155,9 +5208,8 @@ mod tests {
     }
 
     /// An earlier look goes once the looks after it hold most of its lines between them: a change looked at
-    /// whole, then its pieces looked at one by one (each holding less than half of it) — its whole order goes,
-    /// a look a piece is what's kept. (Replaced only by one look holding most of it, it stayed for good: the
-    /// session's orders only grew, and every piece was held against it.)
+    /// whole, then its pieces looked at one by one — each look the whole change's (f22 h), so one is kept, the
+    /// last. (Replaced only by one look holding most of it, it stayed for good: the session's orders only grew.)
     #[test]
     fn a_changes_old_look_goes_once_its_pieces_are_looked_at() {
         let base = "fn main() {}\n";
@@ -5179,7 +5231,74 @@ mod tests {
             frame(&mut ed, 12);
             feed(&mut ed, "<space>vh");
         }
-        assert_eq!(orders(&ed), pieces.len(), "a look a piece: {:?}", ed.status);
+        assert_eq!(orders(&ed), 1, "a look a change: {:?}", ed.status);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// f22 h: a tall new file of tests (`#[test]`, `let dir = temp();`, `Ok(())` in every one) looked at piece
+    /// by piece, then cut elsewhere — another pane's height, at its tree's definitions, the review's, none —
+    /// asks for nothing: a look is the whole change's, held against it before any cut. (Looks a piece's, held
+    /// against pieces cut elsewhere, asked again for the repeated lines two pieces shared.)
+    #[test]
+    fn looks_taken_piece_by_piece_hold_wherever_the_change_is_cut_next() {
+        let body =
+            ["#[test]", "fn t{}() -> Result<(), ()> {", "    let dir = temp();", "    unsafe { x{}() };"];
+        let tail = ["    drop(dir);", "    Ok(())", "}"];
+        let fns = text_of(8 * 7, |l| match l % 7 {
+            k @ 0..4 => body[k].replace("{}", &(l / 7).to_string()),
+            k => tail[k - 4].to_string(),
+        });
+        let (mut ed, dir) = reviewing("cut-elsewhere", &[("a.rs", "", &fns)]);
+        let frame = |ed: &mut Editor, h: u16| crate::term::render(ed, &mut Vec::new(), 100, h).unwrap();
+        let asked = |ed: &Editor| -> Vec<String> {
+            let r = ed.session.code_review.as_ref().unwrap();
+            let looked = &ed.session.looked;
+            let g = r.graded(ed, &r.files[0]);
+            g.iter()
+                .filter(|g| g.grade == Grade::High && !g.looked_at(looked))
+                .map(|g| g.why.clone())
+                .collect()
+        };
+        frame(&mut ed, 12);
+        feed(&mut ed, "]h");
+        frame(&mut ed, 12);
+        let pieces: Vec<usize> = highs(&ed).iter().filter(|g| g.piece.is_some()).map(|g| g.at).collect();
+        assert!(pieces.len() > 3, "cut in pieces: {pieces:?}");
+        for &at in &pieces {
+            ed.goto_line(at);
+            frame(&mut ed, 12);
+            feed(&mut ed, "<space>vh");
+        }
+        assert_eq!(asked(&ed), Vec::<String>::new(), "every piece looked at: {:?}", ed.status);
+        // (at the tree's definitions, in other panes)
+        for h in [17, 9, 30] {
+            frame(&mut ed, h);
+            assert_eq!(asked(&ed), Vec::<String>::new(), "cut at the tree's, {h} rows");
+        }
+        // (looks kept from before, a piece's each — a restore file's: held against the whole change too)
+        frame(&mut ed, 12);
+        let whole = ed.session.looked_orders["a.rs"].clone();
+        let old: Vec<crate::risk::LookedOrder> = highs(&ed)
+            .iter()
+            .filter(|g| g.piece.is_some())
+            .map(|g| crate::risk::LookedOrder { keys: added_keys(g).to_vec(), above: None, below: None })
+            .collect();
+        ed.session.looked_orders.insert("a.rs".into(), old);
+        for h in [17, 9] {
+            frame(&mut ed, h);
+            assert_eq!(asked(&ed), Vec::<String>::new(), "a piece's look kept, {h} rows");
+        }
+        ed.session.looked_orders.insert("a.rs".into(), whole);
+        // (closed: at the definitions the review found; then none known, every pane's height)
+        closed(&mut ed, &dir, "a.rs");
+        frame(&mut ed, 15);
+        assert_eq!(asked(&ed), Vec::<String>::new(), "cut at the review's");
+        let path = dir.join("a.rs");
+        ed.session.code_review.as_mut().unwrap().defs.insert(path, None);
+        for h in [11, 23] {
+            frame(&mut ed, h);
+            assert_eq!(asked(&ed), Vec::<String>::new(), "cut every {h} rows");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5423,10 +5542,8 @@ mod tests {
     /// none is left, and the bring card that held for them has its yes back.
     #[test]
     fn every_kind_of_high_risk_change_can_be_looked_at() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-kinds-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("review-kinds");
+        let dir = scratch.to_path_buf();
         let git_ok = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let o = std::process::Command::new("git")
@@ -5542,9 +5659,8 @@ mod tests {
     /// size from its metadata — and a FIFO or a folder where the file was is said, never opened for reading.
     #[test]
     fn a_binary_files_buffer_reads_only_its_head_and_never_waits_on_a_fifo() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-head-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("review-head");
+        let dir = scratch.to_path_buf();
         let big = dir.join("big.raw");
         std::fs::write(&big, vec![7u8; HEX_MAX * 3]).unwrap();
         let (head, size) = read_head(&big).unwrap();
@@ -6163,10 +6279,9 @@ mod tests {
     #[test]
     fn a_review_and_a_bring_see_the_same_changes() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("tarae-review-names-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("review-names");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("ü")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let git_out = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let o = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output().unwrap();
@@ -6273,10 +6388,9 @@ mod tests {
     /// opened is the bring's, key for key.
     #[test]
     fn the_bring_gate_and_the_review_agree_on_a_changes_lines() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-agree-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("review-agree");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("docs")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         // (the test's own git: no config of the user's or the system's)
         let git_out = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
@@ -6365,10 +6479,7 @@ mod tests {
     /// A repository for a bring's card: `main` with `files`, then a branch `work` with `changed` committed —
     /// the test's own git (no config of the user's or the system's). Its real path.
     fn bring_repo(name: &str, files: &[(&str, String)], changed: &[(&str, String)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-review-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("review-{name}")).into_path();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let o = std::process::Command::new("git")
@@ -6550,11 +6661,11 @@ mod tests {
     /// nothing else has, so a bring's `h` shows it as the bring takes it) and said.
     #[test]
     fn a_file_git_cant_read_is_graded_unread_and_said() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-unread-{}", std::process::id()));
-        let user = std::env::temp_dir().join(format!("tarae-review-unread-{}.gitconfig", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (scratch, home) = (
+            crate::scratch::Scratch::new("review-unread"),
+            crate::scratch::Scratch::new("review-unread-user"),
+        );
+        let (dir, user) = (scratch.to_path_buf(), home.join(".gitconfig"));
         std::fs::write(&user, "[filter \"nope\"]\n\trequired = true\n").unwrap();
         crate::gitrepo::global_config_for(&dir, &user);
         let run = |args: &[&str]| {
@@ -6608,8 +6719,6 @@ mod tests {
             "{:?}",
             ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_file(&user).ok();
     }
 
     /// Review finding 7: only the blobs whose text is graded are read — a binary file's and a converted one's
@@ -6633,11 +6742,10 @@ mod tests {
     /// index gitlink says — git's discovery from its folder would climb to the superproject and give that HEAD.
     #[test]
     fn a_submodule_not_checked_out_is_its_index_gitlink() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-deinit-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("review-deinit");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("top")).unwrap();
         std::fs::create_dir_all(dir.join("lib")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let git_in = |at: &Path, args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let o = std::process::Command::new("git")
@@ -6695,11 +6803,11 @@ mod tests {
     /// commit has (`one`, `two` against the stored `ONE`).
     #[test]
     fn a_filtered_file_is_graded_as_git_cleans_it() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-filter-{}", std::process::id()));
-        let user = std::env::temp_dir().join(format!("tarae-review-filter-{}.gitconfig", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (scratch, home) = (
+            crate::scratch::Scratch::new("review-filter"),
+            crate::scratch::Scratch::new("review-filter-user"),
+        );
+        let (dir, user) = (scratch.to_path_buf(), home.join(".gitconfig"));
         std::fs::write(&user, "[filter \"upper\"]\n\tclean = tr a-z A-Z\n\tsmudge = tr A-Z a-z\n").unwrap();
         crate::gitrepo::global_config_for(&dir, &user);
         let run = |args: &[&str]| {
@@ -6740,8 +6848,6 @@ mod tests {
         let bring = held_keys(&highs_between(&dir, "main", "HEAD", &rules).unwrap());
         assert_eq!(review, bring, "the review's key, as git cleans the file, is the bring's");
         assert!(grading.whole.contains(&path));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_file(&user).ok();
     }
 
     /// Review finding 1, `text`/`eol`: a file kept with `\r\n` in the working tree and `\n` in the commit is
@@ -6937,11 +7043,10 @@ mod tests {
     /// checked-out commit) and in the bring of the commit that records it — by the same keys.
     #[test]
     fn a_submodule_moved_is_the_same_change_to_a_review_and_a_bring() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-sub-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("review-sub");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("top")).unwrap();
         std::fs::create_dir_all(dir.join("lib")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let git_in = |at: &Path, args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let o = std::process::Command::new("git")
@@ -6996,10 +7101,8 @@ mod tests {
     /// and `core.checkStat=minimal` don't stop it); `diff-index` leaves it and doesn't list that file.
     #[test]
     fn a_reviews_changes_leave_the_index() {
-        let dir = std::env::temp_dir().join(format!("tarae-review-index-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("review-index");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();

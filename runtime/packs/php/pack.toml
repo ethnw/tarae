@@ -3,6 +3,10 @@
 # Read by Composer as soon as it's on disk
 config-files = { json = ["composer.json"] }
 
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+[sandbox]
+not-settings = ["php"]
+
 [language.php]
 title = "PHP"
 extensions = ["php"]

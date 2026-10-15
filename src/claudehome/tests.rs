@@ -4,11 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 
 /// A home of the test's own in the temp folder (real), empty.
 fn home(name: &str) -> PathBuf {
-    let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-    let h = tmp.join(format!("tarae-claudehome-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&h);
-    std::fs::create_dir_all(&h).unwrap();
-    h
+    crate::scratch::Scratch::new(&format!("claudehome-{name}")).into_path()
 }
 
 fn env_of(home: &Path) -> Env {

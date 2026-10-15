@@ -785,6 +785,9 @@ impl Editor {
         crate::rebase::run_dropped(self);
         self.task_generation += 1;
         let generation = self.task_generation;
+        if !claudes {
+            crate::claudeupdate::started(self, &task.cmd, generation);
+        }
         let pid = child.pid;
         // (its watch ends with this process, whatever becomes of the run here)
         if let Some(w) = sandbox.and_then(|p| p.watch.as_ref()) {
@@ -920,6 +923,7 @@ impl Editor {
                 if crate::restart::built(ed, generation, passed, errors)
                     || ed.preflight_done(generation)
                     || crate::rebase::ran(ed, generation)
+                    || crate::claudeupdate::ran(ed, passed)
                 {
                     return;
                 }

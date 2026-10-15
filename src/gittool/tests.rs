@@ -23,10 +23,7 @@ fn git_in(dir: &Path, args: &[&str]) {
 
 /// A repository in the test's own temp folder: `files` committed, then each of `changed` written over.
 fn repo(name: &str, files: &[(&str, &str)], changed: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tarae-gittool-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new(&format!("gittool-{name}")).into_path();
     git_in(&dir, &["init", "-q"]);
     for (f, t) in files {
         std::fs::write(dir.join(f), t).unwrap();

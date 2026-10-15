@@ -1057,7 +1057,48 @@ fn reads_only(words: &[&str]) -> bool {
         "awk" => awk_reads(args, true),
         // `uniq in out` writes `out` — `uniq - out` too (`-` is the input: an operand, not an option)
         "uniq" => args.iter().filter(|w| **w == "-" || !w.starts_with('-')).count() <= 1,
+        // (a script's syntax checked: nothing in it runs — f22 j)
+        _ if SHELLS.contains(&name) => syntax_only(args),
+        // (it reads the scripts it names and its rc file, runs none of them — but never with what lets it follow a
+        // source the line doesn't name: `-x`, a source path, another rc file; an rc file or a directive that turns
+        // external sources on is `outside`'s — f22 review)
+        "shellcheck" => shellcheck_names_only(args),
         _ => COMMANDS.contains(&name),
+    }
+}
+
+/// shellcheck's words that let it read nothing but what it's named (f22 review): no `-x`/`--external-sources`,
+/// no source path (`-P`, `--source-path`), no other rc file (`--rcfile`) — its line's, and `SHELLCHECK_OPTS`'s
+/// (`shellcheck_follows`).
+fn shellcheck_names_only(args: &[&str]) -> bool {
+    let short = |w: &str, c: char| w.starts_with('-') && !w.starts_with("--") && w[1..].contains(c);
+    // (any start of a long option's name, as getopt_long takes it — `reads_only`'s rule)
+    let long = |w: &str, name: &str| {
+        w.strip_prefix("--")
+            .map(|o| o.split_once('=').map_or(o, |(o, _)| o))
+            .is_some_and(|o| !o.is_empty() && name.starts_with(o))
+    };
+    !args.iter().any(|w| {
+        short(w, 'x')
+            || short(w, 'P')
+            || long(w, "external-sources")
+            || long(w, "source-path")
+            || long(w, "rcfile")
+    })
+}
+
+/// A shell's words that only check one script's syntax: `-n` (noexec: the script read, nothing of it run), then
+/// the script alone — no other option (`-c`'s body, `-i`'s or `-l`'s startup files, `-s`'s input, `-o`), nothing
+/// after it.
+fn syntax_only(args: &[&str]) -> bool {
+    match args {
+        [opts @ .., script] => {
+            !opts.is_empty()
+                && opts.iter().all(|o| *o == "-n")
+                && !script.is_empty()
+                && !script.starts_with(['-', '+'])
+        }
+        [] => false,
     }
 }
 
@@ -1175,6 +1216,10 @@ pub fn outside(
                 if let Some(w) = w.iter().find(|w| w.glob && climbs(&w.text)) {
                     return Err(format!("{}: `..` after a wildcard — where it leads can't be told", w.text));
                 }
+                let env = shellcheck_env();
+                if let Some(why) = shellcheck_follows(&w, &here, &shellcheck_homes(), &env, expanded) {
+                    return Err(why);
+                }
                 candidates(&w)
             }
         };
@@ -1193,6 +1238,133 @@ pub fn outside(
         }
     }
     Ok(out)
+}
+
+/// Why shellcheck would read a file its line doesn't name (f22 review) — its options are `reads_only`'s; this is
+/// what turns external sources on without them: an rc file it looks for (`shellcheck_rcs`; it reads the first
+/// it finds, any of them counts here) that says `external-sources=true` or can't be read, or a script it checks
+/// whose own `# shellcheck` directive says it (shellcheck's docs give that key to the rc file; a script's is
+/// taken as one all the same) — and the options the run's environment gives it (`opts`: each value of
+/// `SHELLCHECK_OPTS` it may see, `shellcheck_env`), judged as its line's words; one that isn't plain words can't
+/// be judged. None: it reads only what it's named. `--norc`: no rc file. On a worker.
+fn shellcheck_follows(
+    w: &[Word],
+    here: &Path,
+    homes: &[PathBuf],
+    opts: &[String],
+    expanded: &[(String, PathBuf)],
+) -> Option<String> {
+    let (first, args) = w.split_first()?;
+    if first.text != "shellcheck" {
+        return None;
+    }
+    // (never its value on the card: a name only)
+    for o in opts {
+        let plain = o.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\t')
+            && !o.contains(['\'', '"', '\\', '$', '`']);
+        if !plain {
+            return Some("shellcheck: SHELLCHECK_OPTS in the run's environment isn't plain words".into());
+        }
+        if !shellcheck_names_only(&o.split_ascii_whitespace().collect::<Vec<_>>()) {
+            return Some(
+                "shellcheck: SHELLCHECK_OPTS in the run's environment lets it read what its line doesn't name"
+                    .into(),
+            );
+        }
+    }
+    // (every word that isn't an option may be a script: an option's value only adds a folder to look in)
+    let scripts: Vec<PathBuf> = (args.iter())
+        .filter(|a| !a.text.starts_with('-'))
+        .filter_map(|a| expand(&a.text, expanded).ok())
+        .map(|a| here.join(a))
+        .collect();
+    for s in &scripts {
+        // (a file only: a fifo or a device would never end the read)
+        let file = std::fs::metadata(s).is_ok_and(|m| m.is_file());
+        if file && std::fs::read_to_string(s).is_ok_and(|t| t.lines().any(directive_turns_on)) {
+            let s = s.display();
+            return Some(format!(
+                "shellcheck: {s} turns external sources on itself — what it sources is read too"
+            ));
+        }
+    }
+    if args.iter().any(|a| a.text == "--norc") {
+        return None;
+    }
+    for rc in shellcheck_rcs(here, &scripts, homes) {
+        match std::fs::read_to_string(&rc) {
+            Ok(t) if t.lines().any(|l| turns_on(l.split('#').next().unwrap_or(""))) => {
+                let rc = rc.display();
+                return Some(format!(
+                    "shellcheck: {rc} turns external sources on — what a script sources is read too"
+                ));
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                let rc = rc.display();
+                return Some(format!(
+                    "shellcheck: {rc} can't be read — whether it turns external sources on can't be told"
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether an rc file's line (its comment cut off) or a directive's words say `external-sources=true` —
+/// spaces and case aside, the safe way.
+fn turns_on(s: &str) -> bool {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    s.contains("external-sources=true")
+}
+
+/// A script's line that's a `# shellcheck …` directive turning external sources on.
+fn directive_turns_on(line: &str) -> bool {
+    let directive = line.trim_start().strip_prefix('#').map(str::trim_start);
+    directive.and_then(|d| d.strip_prefix("shellcheck")).is_some_and(turns_on)
+}
+
+/// The rc files shellcheck looks for checking `scripts` from `here`: `.shellcheckrc` and `shellcheckrc` in each
+/// script's folder (as named and as it really is) and every folder above it — `here`'s too, for what's read from
+/// stdin — then `homes`' (`shellcheck_homes`).
+fn shellcheck_rcs(here: &Path, scripts: &[PathBuf], homes: &[PathBuf]) -> Vec<PathBuf> {
+    let mut starts = vec![here.to_path_buf()];
+    for s in scripts {
+        starts.extend(s.parent().map(Path::to_path_buf));
+        starts.extend(std::fs::canonicalize(s).ok().and_then(|r| r.parent().map(Path::to_path_buf)));
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in starts.iter().flat_map(|s| s.ancestors()) {
+        for name in [".shellcheckrc", "shellcheckrc"] {
+            let p = dir.join(name);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out.extend(homes.iter().cloned());
+    out
+}
+
+/// The values of `SHELLCHECK_OPTS` a run may see: tarae's own (a sandboxed run gets it or nothing — `runenv`),
+/// a value that isn't UTF-8 as one that can't be judged, and one a pack sets — none in tests (they never read
+/// yours).
+fn shellcheck_env() -> Vec<String> {
+    const NAME: &str = "SHELLCHECK_OPTS";
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let own = std::env::var_os(NAME).map(|v| v.into_string().unwrap_or_else(|_| "\u{FFFD}".into()));
+    let packs = crate::sandboxpack::get().env.iter().filter(|(k, _)| k == NAME).map(|(_, v)| v.clone());
+    own.into_iter().chain(packs).collect()
+}
+
+/// Home's rc files for shellcheck: `~/.shellcheckrc`, `$XDG_CONFIG_HOME/shellcheckrc` (`~/.config/` without
+/// it) — none in tests (they never read yours).
+fn shellcheck_homes() -> Vec<PathBuf> {
+    let Some(home) = crate::allow::home().filter(|_| !cfg!(test)) else { return Vec::new() };
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+    vec![home.join(".shellcheckrc"), config.unwrap_or_else(|| home.join(".config")).join("shellcheckrc")]
 }
 
 /// `word` with the one of `expansions` in it filled in with its folder (`expanded`). Err: it names one whose
@@ -1355,6 +1527,99 @@ mod tests {
         assert!(!crate::tools::allowed("GOMODCACHE=/x go build", &gomodcache), "the module cache moved");
         let rule = ["GRADLE_USER_HOME=… cargo build".to_string()];
         assert!(!crate::tools::allowed("GRADLE_USER_HOME=/x cargo build", &rule), "no pattern sets one");
+    }
+
+    /// f22 j: a script's syntax checked (`sh -n`, `bash -n`, `zsh -n`, `dash -n`; `shellcheck`) only reads it —
+    /// never with another option (a `-c` body, `-i`'s startup files, `-s`'s input), nor anything after it.
+    #[test]
+    fn a_scripts_syntax_check_only_reads() {
+        for c in
+            ["sh -n x.sh", "bash -n target/sb/a.sh", "zsh -n x.zsh", "dash -n -n x.sh", "shellcheck x.sh"]
+        {
+            assert!(read_only(c), "{c}");
+        }
+        assert!(read_only("shellcheck -f gcc -s bash -e SC1091 --norc x.sh && sh -n x.sh"));
+        for c in [
+            "sh x.sh",
+            "sh -n",
+            "sh -n -c 'rm -rf x'",
+            "bash -n -i x.sh",
+            "bash -nx x.sh",
+            "bash -n --rcfile r x.sh",
+            "sh -n x.sh y",
+            "sh -n -s",
+            "sh -n x.sh; sh x.sh",
+            // (what lets shellcheck follow a source its line doesn't name)
+            "shellcheck -x x.sh",
+            "shellcheck -ax x.sh",
+            "shellcheck --external-sources x.sh",
+            "shellcheck --ext x.sh",
+            "shellcheck -P /etc x.sh",
+            "shellcheck -PSCRIPTDIR x.sh",
+            "shellcheck --source-path=/etc x.sh",
+            "shellcheck --rcfile r x.sh",
+            "SHELLCHECK_OPTS=-x shellcheck x.sh",
+        ] {
+            assert!(!read_only(c), "{c}");
+        }
+    }
+
+    /// f22 review: shellcheck reads only what its line names — an rc file where it looks (the script's folder or
+    /// one above it, home's) or the script's own directive that turns external sources on, or an rc file it
+    /// can't read, and where it reads can't be told: the card. `--norc` leaves the rc files out; a comment or
+    /// another key says nothing.
+    #[test]
+    fn shellcheck_follows_a_source_only_where_external_sources_are_on() {
+        let dir = crate::scratch::Scratch::new("shellcheck-rc");
+        let p = dir.join("p");
+        std::fs::create_dir_all(p.join("sub")).unwrap();
+        std::fs::write(p.join("sub/x.sh"), "# shellcheck source=/etc/hosts\n. ./lib.sh\n").unwrap();
+        let none = Allowed::default();
+        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none, &[]);
+        assert_eq!(at("shellcheck sub/x.sh"), Ok(Vec::new()), "its directive names a file: not followed");
+        std::fs::write(p.join(".shellcheckrc"), "# external-sources=true\nsource-path=SCRIPTDIR\n").unwrap();
+        assert_eq!(at("shellcheck sub/x.sh"), Ok(Vec::new()), "a comment, another key");
+        // (in the folder above the script's)
+        std::fs::write(p.join(".shellcheckrc"), "disable=SC1091\nexternal-sources = true # mine\n").unwrap();
+        let e = at("cd sub && shellcheck -f gcc x.sh").unwrap_err();
+        assert!(e.contains(".shellcheckrc turns external sources on"), "{e}");
+        assert_eq!(at("shellcheck --norc sub/x.sh"), Ok(Vec::new()), "no rc file");
+        std::fs::remove_file(p.join(".shellcheckrc")).unwrap();
+        // (one it can't read: a folder by that name)
+        std::fs::create_dir(p.join("sub/shellcheckrc")).unwrap();
+        assert!(at("shellcheck sub/x.sh").unwrap_err().contains("can't be read"));
+        std::fs::remove_dir(p.join("sub/shellcheckrc")).unwrap();
+        // (the script's own directive, --norc or not)
+        std::fs::write(p.join("sub/x.sh"), "#!/bin/sh\n# shellcheck disable=SC1 external-sources=true\n")
+            .unwrap();
+        let e = at("shellcheck --norc sub/x.sh").unwrap_err();
+        assert!(e.contains("x.sh turns external sources on itself"), "{e}");
+        std::fs::write(p.join("sub/x.sh"), "echo external-sources=true\n").unwrap();
+        assert_eq!(at("shellcheck sub/x.sh"), Ok(Vec::new()), "not a directive");
+        // Home's: `~/.shellcheckrc`, the config folder's
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        let homes = [home.join(".shellcheckrc"), home.join(".config/shellcheckrc")];
+        let words = parse("shellcheck sub/x.sh").unwrap();
+        let [Part::Cmd(w)] = &words[..] else { panic!() };
+        assert_eq!(shellcheck_follows(w, &p, &homes, &[], &[]), None);
+        // The run's environment: `SHELLCHECK_OPTS`'s words, as its line's
+        let env = |v: &str| shellcheck_follows(w, &p, &homes, &[v.to_string()], &[]);
+        for fine in ["", "-f gcc --severity=warning", "-s bash\t-e SC1091 --norc"] {
+            assert_eq!(env(fine), None, "{fine:?}");
+        }
+        for follows in
+            ["-x", "-a -x", "--external-sources", "-P /etc", "--source-path=SCRIPTDIR", "--rcfile r"]
+        {
+            assert!(env(follows).is_some_and(|e| e.contains("lets it read")), "{follows}");
+        }
+        for odd in ["'-x'", "-f $F", "-e\nSC1", "\u{FFFD}"] {
+            assert!(env(odd).is_some_and(|e| e.contains("isn't plain words")), "{odd:?}");
+        }
+        std::fs::write(&homes[1], "external-sources=true\n").unwrap();
+        assert!(
+            shellcheck_follows(w, &p, &homes, &[], &[]).is_some_and(|e| e.contains(".config/shellcheckrc"))
+        );
     }
 
     /// The list, and each option that makes one of them write, run something, or never end.
@@ -1619,10 +1884,9 @@ mod tests {
     /// files only — nothing here runs them.)
     #[test]
     fn only_a_text_script_in_the_checkout_is_pinned() {
-        let dir = std::env::temp_dir().join(format!("tarae-pins-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("pins");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("p/sub")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let p = dir.join("p");
         std::fs::write(p.join("run"), "#!/bin/sh\necho marker\n").unwrap();
         std::fs::write(p.join("x.sh"), "echo marker\n").unwrap();
@@ -1669,10 +1933,9 @@ mod tests {
     /// here runs them.)
     #[test]
     fn what_a_packs_entry_runs_is_pinned_as_it_is() {
-        let dir = std::env::temp_dir().join(format!("tarae-entry-pins-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("entry-pins");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("p/xtask/src")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let p = dir.join("p");
         std::fs::write(p.join("xtask/Cargo.toml"), "[package]\n").unwrap();
         std::fs::write(p.join("xtask/src/main.rs"), "fn main() {}\n").unwrap();
@@ -1794,8 +2057,8 @@ mod tests {
     /// path: inside the toolchain's sources a read like any other; unknown, or climbing out of it, asked.
     #[test]
     fn the_sysroot_is_filled_in_where_it_is_judged() {
-        let base = std::env::temp_dir().join(format!("tarae-sysroot-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("sysroot");
+        let base = scratch.to_path_buf();
         let tc = base.join("rustup/toolchains/1.99.0-aarch64-apple-darwin");
         std::fs::create_dir_all(tc.join("lib/rustlib/src/rust/library/core/src")).unwrap();
         std::fs::create_dir_all(base.join("p")).unwrap();
@@ -1975,8 +2238,8 @@ mod tests {
         assert_eq!(unreadable("grep $x a"), Some("a `$` the shell fills in as it runs"));
         assert_eq!(unreadable("sh -c 'bash -c ls'"), Some("an `sh -c` inside an `sh -c`"));
         // Where they read, with a folder in the temp dir standing in for home: cargo's crates are allowed
-        let base = std::env::temp_dir().join(format!("tarae-cd-glob-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("cd-glob");
+        let base = scratch.to_path_buf();
         std::fs::create_dir_all(base.join("reg/src/index-a/libc-0.2.189/src")).unwrap();
         std::fs::create_dir_all(base.join("reg/src/.hidden/libc-0.2.189/src")).unwrap();
         std::fs::create_dir_all(base.join("p")).unwrap();

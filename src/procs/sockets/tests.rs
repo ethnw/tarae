@@ -30,9 +30,7 @@ fn only_peers_outside_the_tree_are_named() {
 /// a port-0 one on 127.0.0.1.
 #[test]
 fn a_processs_connections_are_read_with_their_peers() {
-    let dir = crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("ps{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new("ps");
     // (a datagram client with an address of its own, `c.sock`, connected to `d.sock`: the peer's path read
     // as its own address would say `c.sock` — a stream pair's two ends can't tell those apart)
     let path = dir.join("d.sock");

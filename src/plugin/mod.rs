@@ -643,9 +643,7 @@ mod tests {
 
     /// An editor with the demo plugin loaded from its own folder, on `text`.
     fn setup(name: &str, text: &str) -> (Editor, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-plugins-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("plugins-{name}")).into_path();
         std::fs::write(dir.join("demo.wasm"), DEMO).unwrap();
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = ropey::Rope::from_str(text);

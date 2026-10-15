@@ -266,10 +266,7 @@ fn chat_settings_l6_checks_are_what_tarae_passes() {
 
 /// A temp folder of the test's own.
 fn temp(name: &str) -> PathBuf {
-    let base = std::fs::canonicalize(std::env::temp_dir())
-        .unwrap()
-        .join(format!("tarae-claudetrust-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let base = crate::scratch::Scratch::new(&format!("claudetrust-{name}")).into_path();
     std::fs::create_dir_all(base.join(".claude")).unwrap();
     base
 }
@@ -506,6 +503,9 @@ fn the_chats_claude_starts_only_as_the_card_answers() {
     // (not on `RESTORED`: empty, whatever tarae's environment holds — the test gives one that has it)
     assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "");
     assert_eq!(settings["disableAllHooks"], true);
+    // (f22 i: claude's transcript cleanup kept off where it loads the user source)
+    let keep = (crate::sandbox::Os::HOST == crate::sandbox::Os::Mac).then_some(36_500);
+    assert_eq!(settings["cleanupPeriodDays"].as_u64(), keep);
     let argv = std::fs::read_to_string(root.join("argv")).unwrap();
     let theirs: Vec<&str> = argv.lines().filter(|l| l.contains("theirs-zq7")).collect();
     assert!(theirs.is_empty(), "names only, no value of theirs: {theirs:?}");

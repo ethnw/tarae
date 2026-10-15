@@ -1291,9 +1291,8 @@ mod tests {
     /// folder.)
     #[test]
     fn a_reads_card_says_when_a_token_is_there() {
-        let base = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-reads-tok-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("reads-tok");
+        let base = scratch.to_path_buf();
         let out = base.join("out");
         for (f, text) in [
             ("p/README", "marker\n"),
@@ -1387,10 +1386,8 @@ mod tests {
     /// (`Editor.read_temp`); and a card's read is sorted where the capability model sorts it.
     #[test]
     fn other_checkouts_and_the_temp_folders_read_unasked() {
-        let base = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-dflt-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
+        let scratch = crate::scratch::Scratch::new("dflt");
+        let base = scratch.to_path_buf();
         let (main, wt) = crate::allow::tests::repo_with_worktree(&base);
         std::fs::write(main.join("notes.md"), "marker\n").unwrap();
         std::fs::create_dir_all(base.join("shot")).unwrap();
@@ -1413,9 +1410,8 @@ mod tests {
     /// came after it ended, nor what it made outside the temp folders, nor the temp folder itself.
     #[test]
     fn what_a_run_made_reads_unasked() {
-        let base = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-made-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let scratch = crate::scratch::Scratch::new("made");
+        let base = scratch.to_path_buf();
         let (temp, elsewhere, own) = (base.join("tmp"), base.join("elsewhere"), base.join("tmp/run-1"));
         for d in [&temp, &elsewhere, &own] {
             std::fs::create_dir_all(d).unwrap();
@@ -1498,10 +1494,8 @@ mod tests {
     /// coarse clock against the kernel's own stamps (`SystemTime::now()` failed this there).
     #[test]
     fn a_file_made_after_the_file_clock_is_read_is_never_older() {
-        let dir = crate::sandbox::profile_path(&std::env::temp_dir())
-            .join(format!("tarae-file-clock-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("file-clock");
+        let dir = scratch.to_path_buf();
         for i in 0..200 {
             let t = file_clock();
             let p = dir.join(i.to_string());
@@ -1565,8 +1559,8 @@ mod tests {
     /// link) counts it whatever its glob or type: ripgrep searches a file it's given by name.
     #[test]
     fn a_link_to_a_key_file_is_the_key_file() {
-        let dir = std::env::temp_dir().join(format!("tarae-key-link-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("key-link");
+        let dir = scratch.to_path_buf();
         for d in [".git", "node_modules/pkg"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }

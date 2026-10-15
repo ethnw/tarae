@@ -12764,9 +12764,8 @@ mod tests {
             return;
         }
         let budget = frame_budget();
-        let dir = std::env::temp_dir().join(format!("tarae-perf-recovery-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("perf-recovery");
+        let dir = scratch.to_path_buf();
         let text: String =
             (0..150_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
         let keys = ["j", "j", "w", "x", "x", "C", "g", "e", "g", "g", "i", "a", "b", "esc", "u", "x", "C-d"];
@@ -12868,9 +12867,8 @@ mod tests {
             return;
         }
         let budget = frame_budget();
-        let dir = std::env::temp_dir().join(format!("tarae-perf-plugin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("perf-plugin");
+        let dir = scratch.to_path_buf();
         std::fs::write(dir.join("demo.wasm"), include_bytes!("../plugin-sdk/demo.wasm")).unwrap();
         let text: String =
             (0..240_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}   \n")).collect();

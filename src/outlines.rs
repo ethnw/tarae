@@ -109,8 +109,8 @@ mod tests {
     /// outline nor its test code — what's opened must be that very file.
     #[test]
     fn a_file_swapped_for_a_link_isnt_read_for_its_symbols() {
-        let base = std::env::temp_dir().join(format!("tarae-outlines-swap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("outlines-swap");
+        let base = scratch.to_path_buf();
         for d in ["p/src", "outside/src"] {
             std::fs::create_dir_all(base.join(d)).unwrap();
             std::fs::write(base.join(d).join("a.rs"), "#[test]\nfn secret_name() {}\n").unwrap();

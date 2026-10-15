@@ -210,10 +210,8 @@ static REGISTRIES: OnceLock<Option<Registries>> = OnceLock::new();
 fn registries() -> Option<&'static Registries> {
     REGISTRIES
         .get_or_init(|| {
-            let base = std::env::temp_dir().join(format!("tarae-m5-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&base);
-            std::fs::create_dir_all(&base).unwrap();
-            let base = std::fs::canonicalize(&base).unwrap();
+            // (the registries' for the whole run: never removed, as before)
+            let base = crate::scratch::Scratch::new("m5").into_path();
             let ip = outside_at(&base)?;
             let served = Arc::new(Mutex::new(Vec::new()));
             plain_registry(&base.join("plain"), &base.join("scratch"));

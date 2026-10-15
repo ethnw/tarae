@@ -1417,8 +1417,8 @@ mod tests {
     /// front one when it is, the only one, or the user's pick of several; a session named goes first.
     #[test]
     fn by_hand_it_goes_to_the_session_rebasing() {
-        let dir = std::env::temp_dir().join(format!("tarae-rebase-which-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("rebase-which");
+        let dir = scratch.to_path_buf();
         for p in ["front", "a", "b"] {
             std::fs::create_dir_all(dir.join(p)).unwrap();
         }

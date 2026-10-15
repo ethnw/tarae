@@ -1691,8 +1691,8 @@ mod tests {
     /// unfocused pane: the focused one takes the document's scroll.
     #[test]
     fn a_pane_whose_document_closed_behind_shows_the_next_from_its_top() {
-        let dir = std::env::temp_dir().join(format!("tarae-sessions-closed-behind-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("sessions-closed-behind");
+        let dir = scratch.to_path_buf();
         for p in ["front", "back"] {
             std::fs::create_dir_all(dir.join(p)).unwrap();
         }
@@ -1723,8 +1723,7 @@ mod tests {
     /// server is a stand-in (`cat`: the test answers for it, as its reader thread would, in whichever session
     /// is in front).
     fn two_projects(name: &str) -> (Editor, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-sessions-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new(&format!("sessions-{name}")).into_path();
         for p in ["front", "back"] {
             std::fs::create_dir_all(dir.join(p)).unwrap();
             std::fs::write(dir.join(p).join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();

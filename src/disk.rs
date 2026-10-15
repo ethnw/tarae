@@ -1042,8 +1042,8 @@ mod tests {
     /// auto-save writes it. Other files, and configs that parse, save as ever. (Its own temp folder.)
     #[test]
     fn autosave_holds_a_config_that_doesnt_parse() {
-        let dir = std::env::temp_dir().join(format!("tarae-disk-config-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("disk-config");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join(".cargo")).unwrap();
         let path = dir.join(".cargo/config.toml");
         std::fs::write(&path, "[build]\njobs = 4\n").unwrap();
@@ -1341,9 +1341,8 @@ mod tests {
     fn a_private_file_is_never_readable_by_others() {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("tarae-disk-private-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("disk-private");
+        let dir = scratch.to_path_buf();
         let file = dir.join("restore.json");
         std::fs::write(&file, "old").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();

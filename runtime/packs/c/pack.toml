@@ -21,6 +21,8 @@ bundle = true
 # (measured on Linux: cc reads LIBRARY_PATH, COMPILER_PATH…). Not the loader's `LD_LIBRARY_PATH`: only the
 # user's own llm.sandbox-env passes it
 [sandbox]
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+not-settings = ["c", "h"]
 pass = [
     "CC", "CXX", "CPP", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "AR", "RANLIB", "PKG_CONFIG_PATH",
     "PKG_CONFIG_LIBDIR", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "SDKROOT", "DEVELOPER_DIR",

@@ -791,13 +791,13 @@ pub(crate) mod tests {
         assert!(w[0].starts_with("config.toml:2:"), "{w:?}");
     }
 
-    /// A project file in a temp dir (its real path) — the values are never run.
+    /// A project file in a scratch folder of its own (its real path; the folder is the caller's to remove) —
+    /// the values are never run.
     pub(crate) fn project_file(name: &str, src: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-config-{name}-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("config-{name}")).into_path();
         let path = dir.join(".tarae.toml");
         fs::write(&path, src).unwrap();
-        fs::canonicalize(path).unwrap()
+        path
     }
 
     pub(crate) const RISKY_PROJECT: &str = r#"
@@ -833,10 +833,8 @@ Z = ["move_line_down", ":sh touch marker"]
     fn a_setting_only_yours_sets_is_refused_from_both_project_files() {
         use crate::billing::Billing;
         use crate::trust::Store;
-        let dir = std::env::temp_dir().join(format!("tarae-config-yours-only-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let dir = fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("config-yours-only");
+        let dir = scratch.to_path_buf();
         let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
         assert!(ok.status.success());
         let (user, project, local) =
@@ -886,7 +884,6 @@ Z = ["move_line_down", ":sh touch marker"]
                 && !l.claude_sandbox,
             "{w:?}"
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// Who pays for Claude is switched only by your own keys or a command you type: a key a project's file binds
@@ -896,10 +893,8 @@ Z = ["move_line_down", ":sh touch marker"]
     fn a_projects_key_binding_never_switches_billing() {
         use crate::keymap::{Lookup, MappableCommand};
         use crate::trust::Store;
-        let dir = std::env::temp_dir().join(format!("tarae-config-bill-keys-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let dir = fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("config-bill-keys");
+        let dir = scratch.to_path_buf();
         let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
         assert!(ok.status.success());
         let (user, project, local) =
@@ -950,7 +945,6 @@ Z = ["move_line_down", ":sh touch marker"]
         fs::write(&user, "[keys.normal]\nV = \":session-billing api\"\n").unwrap();
         let (mine, _) = load(Some(user.clone()), &trusted);
         assert_eq!(typed(&mine, "V"), ["session-billing api"], "your own key does");
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// `.tarae.local.toml` is read as yours only while git says it's untracked and ignored: its settings over
@@ -959,10 +953,8 @@ Z = ["move_line_down", ":sh touch marker"]
     #[test]
     fn a_local_layer_is_read_only_while_git_ignores_it() {
         use crate::trust::{State, Store};
-        let dir = std::env::temp_dir().join(format!("tarae-config-local-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let dir = fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("config-local");
+        let dir = scratch.to_path_buf();
         let git = |args: &[&str]| {
             let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
             assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
@@ -1032,7 +1024,6 @@ Z = ["move_line_down", ":sh touch marker"]
         let (c, w) = load(&Store::default());
         assert_eq!(c.editor.scrolloff, 9);
         assert!(w.iter().any(|w| w.contains("not read — git tracks it")), "{w:?}");
-        fs::remove_dir_all(&dir).ok();
     }
 
     fn bound(c: &Config, keys: &str) -> Option<String> {
@@ -1165,10 +1156,9 @@ Z = ["move_line_down", ":sh touch marker"]
     /// stays as written, for the root to resolve when it starts.
     #[test]
     fn the_project_layer_is_the_roots() {
-        let root = std::env::temp_dir().join(format!("tarae-config-root-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let scratch = crate::scratch::Scratch::new("config-root");
+        let root = scratch.to_path_buf();
         std::fs::create_dir_all(root.join("deep/er")).unwrap();
-        let root = fs::canonicalize(&root).unwrap();
         assert_eq!(local_path(&root), Some(root.join(".tarae.local.toml")), "none yet: beside the root");
         fs::write(root.join(".tarae.toml"), "[task.t]\ncmd = \"true\"\ncwd = \"sub\"\n").unwrap();
         assert_eq!(project_path(&root.join("deep/er")), Some(root.join(".tarae.toml")), "walking up");
@@ -1178,7 +1168,6 @@ Z = ["move_line_down", ":sh touch marker"]
         let (c, _) = load_from(project_layer(&root), None, &crate::trust::Store::default());
         let t = c.editor.tasks.iter().find(|t| t.name == "t").map(|t| t.cwd.clone());
         assert_eq!(t, Some(PathBuf::from("sub")), "as written");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

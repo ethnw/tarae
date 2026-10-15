@@ -550,9 +550,8 @@ mod tests {
     /// went. The last run's log is still `tarae.log.old`, untouched by the rewrites.
     #[test]
     fn a_busy_session_doesnt_push_out_anothers() {
-        let dir = std::env::temp_dir().join(format!("tarae-log-busy-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("log-busy");
+        let dir = scratch.to_path_buf();
         let path = dir.join("tarae.log");
         std::fs::write(&path, "the last run's log\n").unwrap();
         let cap = 8 << 10;
@@ -610,9 +609,8 @@ mod tests {
     fn a_rewrite_that_cant_be_made_loses_no_line_and_repeats_none() {
         use std::os::unix::fs::PermissionsExt as _;
         let test = "log::tests::a_rewrite_that_cant_be_made_loses_no_line_and_repeats_none";
-        let dir = std::env::temp_dir().join(format!("tarae-log-unwritable-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("log-unwritable");
+        let dir = scratch.to_path_buf();
         let path = dir.join("tarae.log");
         std::fs::write(&path, "").unwrap();
         let mode = |m: u32| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m)).unwrap();
@@ -649,9 +647,8 @@ mod tests {
     #[test]
     fn the_open_log_follows_a_trim_and_what_comes_after() {
         use std::time::{Duration, Instant};
-        let dir = std::env::temp_dir().join(format!("tarae-log-follow-trim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("log-follow-trim");
+        let dir = scratch.to_path_buf();
         let path = std::fs::canonicalize(&dir).unwrap().join("tarae.log");
         let (tx, rx) = channel::<Entry>();
         let writer = std::thread::spawn({

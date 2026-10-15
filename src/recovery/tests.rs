@@ -21,8 +21,7 @@ fn feed(ed: &mut Editor, keys: &str) {
 
 /// A test's own folder: `state` (the copies), `home` (where keys are), `project` (the files).
 fn place(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tarae-recovery-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::scratch::Scratch::new(&format!("recovery-{name}")).into_path();
     std::fs::create_dir_all(dir.join("project")).unwrap();
     std::fs::create_dir_all(dir.join("home")).unwrap();
     dir.canonicalize().unwrap()

@@ -16,10 +16,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str) -> Fixture {
-        let dir = std::env::temp_dir().join(format!("tarae-held-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::scratch::Scratch::new(&format!("held-{name}")).into_path();
         std::fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let (repo, marks) = (dir.join("repo"), dir.join("marks"));
         std::fs::create_dir_all(&marks).unwrap();
         std::fs::write(dir.join("user.gitconfig"), "").unwrap();

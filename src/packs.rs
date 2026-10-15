@@ -2131,7 +2131,8 @@ mod tests {
     /// held back, saying how to list it); a folder that's no kind of project, none.
     #[test]
     fn preflight_defaults_by_the_project_files() {
-        let dir = std::env::temp_dir().join(format!("tarae-pack-preflight-{}", std::process::id()));
+        let scratch = crate::scratch::Scratch::new("pack-preflight");
+        let dir = scratch.join("p");
         let found = |files: &[&str]| {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -2225,8 +2226,8 @@ mod tests {
     /// the program it recorded).
     #[test]
     fn a_tool_off_path_is_found_where_it_landed() {
-        let d = std::env::temp_dir().join(format!("tarae-found-in-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let scratch = crate::scratch::Scratch::new("found-in");
+        let d = scratch.to_path_buf();
         let fetched = d.join("data/tool");
         std::fs::create_dir_all(fetched.join("bin")).unwrap();
         let bins = [d.join("go/bin")];
@@ -2386,8 +2387,8 @@ mod tests {
     /// the version in its name.
     #[test]
     fn a_file_is_found_newest_where_editors_left_it() {
-        let t = std::env::temp_dir().join(format!("tarae-look-in-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
+        let scratch = crate::scratch::Scratch::new("look-in");
+        let t = scratch.to_path_buf();
         for (dir, file) in [
             ("ours", "p-0.9.0.jar"),
             ("ext/vscjava.debug-0.50/server", "p-0.50.0.jar"),

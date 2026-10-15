@@ -6,10 +6,8 @@ use super::*;
 /// The test's own folder: `p/` a repository with one commit (`a.txt` = `committed`), then `a.txt` changed and
 /// `new.txt` made in its working tree — and the base folder beside it.
 fn place(name: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("tarae-basetree-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::scratch::Scratch::new(&format!("basetree-{name}")).into_path();
     std::fs::create_dir_all(dir.join("p/src")).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
     let p = dir.join("p");
     std::fs::write(p.join("a.txt"), "committed\n").unwrap();
     std::fs::write(p.join("src/b.txt"), "b\n").unwrap();

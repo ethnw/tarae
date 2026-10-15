@@ -1401,10 +1401,7 @@ mod tests {
     use crate::config::Config;
 
     fn temp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-restart-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(dir).unwrap()
+        crate::scratch::Scratch::new(&format!("restart-{name}")).into_path()
     }
 
     /// #136: a child of the last tarae still running at the restart (nothing here holds it) is waited for
@@ -2573,7 +2570,9 @@ mod tests {
 
     /// Restart anyway with Claude in a turn whose accepted edit is still being written: the write is waited
     /// for (until then the file would count as unsaved), and on the way the turn the card named isn't (the
-    /// wait's `sync` lets what it was told to end go on).
+    /// wait's `sync` lets what it was told to end go on). The wait is the real one (`agent_will_write`), ended
+    /// as its job ends it (`agent_write_missed`) once the restart waits on it — never by the clock: a 300 ms
+    /// window ran out while the card's check ran the stand-in binary, and the restart went on unwaiting (1 in 5).
     #[test]
     fn restart_anyway_waits_for_claudes_write_not_its_turn() {
         let dir = temp("anyway-write");
@@ -2584,11 +2583,15 @@ mod tests {
         ed.open(&file).unwrap();
         let edit = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, "TWO\n")]);
         ed.doc_mut().apply(&edit);
-        let v = ed.doc().version();
-        ed.doc_mut().agent_writes = Some((Instant::now() + Duration::from_millis(300), v));
+        ed.doc_mut().agent_will_write();
+        let (id, v) = (ed.doc().id, ed.doc().version());
         let i = ed.offers.iter().position(|o| matches!(o.what, crate::offer::What::Restart(_))).unwrap();
         ed.offer_to_front(i);
         ed.offer_accept();
+        settle_until(&mut ed, |ed| ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Writes));
+        assert!(toasts(&ed).contains("once Claude's edits are on disk"), "it waited: {}", toasts(&ed));
+        // (the write never came: the wait's end saves it as accepted)
+        ed.agent_write_missed(id, v);
         settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert!(toasts(&ed).contains("once Claude's edits are on disk"), "it waited: {}", toasts(&ed));

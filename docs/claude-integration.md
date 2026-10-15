@@ -554,7 +554,11 @@ echo clean` — where it reads judged as below.
 `rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `cut`, `pwd`, `nm`, `otool`, `strings`, `size`,
 `sed -n 'a,bp'` (line numbers only), `echo`, `printf`, `true` and `false` (they read nothing), and git's `blame`,
 `rev-parse`, `ls-files`, `show` (`git show :2:src/a.rs`, `HEAD~1:a.rs`), `diff --no-index` and a bare `branch` —
-git's `-C <dir>` too, the folder read like any other. Besides the project, the Rust toolchains' own sources
+git's `-C <dir>` too, the folder read like any other. A script's syntax checked runs nothing of it: `sh -n`,
+`bash -n`, `zsh -n`, `dash -n` with the script alone after it, and `shellcheck` — so one Claude wrote this turn
+isn't shown on a card for it. shellcheck only while it reads nothing its line doesn't name: never with `-x`, a
+source path or another rc file, and an rc file where it looks (the script's folder and those above it, home's)
+or the script's own directive that turns external sources on gets the card. Besides the project, the Rust toolchains' own sources
 (`$(rustc --print sysroot)/lib/rustlib/src/…`, written out or just so — tarae asks rustup which toolchain that
 is) and the crates cargo downloaded (`~/.cargo/registry/src/…`) read the same: code, nothing of yours. So do
 the repository's other checkouts and the temp folders (as Claude's own reads, below). Not

@@ -952,11 +952,8 @@ mod tests {
     #[test]
     fn the_defaults_card_shows_once_per_clone_for_the_steps_it_listed() {
         use crate::editor::Editor;
-        let dir = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-preflight-told-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("preflight-told");
+        let dir = scratch.to_path_buf();
         // (a file system that can't tell when a folder was made keeps nothing: the card each start, as before)
         if identity(&dir).is_none() {
             return;

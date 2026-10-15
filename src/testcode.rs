@@ -508,8 +508,8 @@ mod tests {
         if Tests::new(Path::new("/")).parser.is_none() {
             return; // (no Rust grammar in this build)
         }
-        let base = std::env::temp_dir().join(format!("tarae-testcode-real-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let scratch = crate::scratch::Scratch::new("testcode-real");
+        let base = scratch.to_path_buf();
         std::fs::create_dir_all(base.join("p/src")).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
         let code = "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
@@ -533,9 +533,8 @@ mod tests {
         if Tests::new(Path::new("/")).parser.is_none() {
             return; // (no Rust grammar in this build)
         }
-        let dir = std::env::temp_dir().join(format!("tarae-testcode-kept-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("testcode-kept");
+        let dir = scratch.to_path_buf();
         let hour_ago = SystemTime::now() - Duration::from_secs(3600);
         let write = |p: &Path, text: &str, at: Option<SystemTime>| {
             std::fs::write(p, text).unwrap();
@@ -595,8 +594,8 @@ mod tests {
         if Tests::new(Path::new("/")).parser.is_none() {
             return; // (no Rust grammar in this build)
         }
-        let dir = std::env::temp_dir().join(format!("tarae-testcode-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("testcode");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let lib = dir.join("src/lib.rs");
         std::fs::write(

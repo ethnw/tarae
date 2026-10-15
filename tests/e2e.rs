@@ -153,12 +153,13 @@ fn a_subcommand_under_a_low_limit_leaves_no_pin() {
 /// `tarae state … | head -3`: the reader closes its end early, and every way `tarae state` prints (the text,
 /// `--json`, `--watch`, `--frame FILE`'s line, `--help`) ends quietly — exit 0, nothing on stderr — where `println!` panicked on the EPIPE
 /// (#229). A stand-in tarae answers on a socket of the test's own (`TARAE_UI`); tarae's stdout is a pipe
-/// whose read end is closed before it starts.
+/// whose read end is closed before it starts — made in the child (`pre_exec`): made here, a fork of another
+/// test's between `pipe` and `close` kept the read end alive in that child, and `--watch` never ended.
 #[test]
 fn tarae_state_ends_quietly_when_its_reader_is_gone() {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixListener;
+    use std::os::unix::process::CommandExt;
     let sb = Sandbox::new("epipe");
     // (short: a socket's path fits `sun_path`)
     let sock = sb.home().join("u.sock");
@@ -184,24 +185,29 @@ fn tarae_state_ends_quietly_when_its_reader_is_gone() {
     for args in
         [&[][..], &["--json"], &["--watch"], &["--json", "--watch"], &["--frame", frame_arg], &["--help"]]
     {
-        let mut fds = [0; 2];
-        // SAFETY: a fresh pipe; each end owned once.
-        let write_end = unsafe {
-            cvt(libc::pipe(fds.as_mut_ptr())).unwrap();
-            libc::close(fds[0]);
-            std::os::fd::OwnedFd::from_raw_fd(fds[1])
-        };
-        let mut child = Command::new(BIN)
-            .arg("state")
+        let mut cmd = Command::new(BIN);
+        cmd.arg("state")
             .args(args)
             .env_clear()
             .envs(sb.env())
             .env("TARAE_UI", &sock)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(write_end))
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        // SAFETY: raw calls only, in the child between fork and exec: a pipe whose read end is closed, its
+        // write end the child's stdout — no other process ever holds the read end.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut fds = [0; 2];
+                let made = libc::pipe(fds.as_mut_ptr()) == 0;
+                if !made || libc::close(fds[0]) != 0 || libc::dup2(fds[1], 1) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(fds[1]);
+                Ok(())
+            })
+        };
+        let mut child = cmd.spawn().unwrap();
         let end = std::time::Instant::now() + Duration::from_secs(10);
         let status = loop {
             if let Some(s) = child.try_wait().unwrap() {
@@ -1153,7 +1159,21 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     t.send(" f");
     t.wait_for("the picker", |s| s.contains("files in work"));
     sb.write_config(&format!("{BASE_CONFIG}tab-width = \"wide\"\n"));
-    t.wait_for("the error on the status line", |s| s.status().contains("config:"));
+    // (f22 n: on Linux this never came, every run — so a timeout says what tarae did say: its toasts, and its
+    // log's last lines — whether the config was read again, what it said, what came after it)
+    if t.poll_for(sb.timeout(), |s| s.status().contains("config:")).is_none() {
+        let state: serde_json::Value = serde_json::from_str(&t.state(&["--json"])).unwrap_or_default();
+        let log = fs::read_to_string(sb.state().join("tarae.log")).unwrap_or_default();
+        let tail: Vec<&str> = log.lines().rev().take(40).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        panic!(
+            "no config error on the status line after {:?} — toasts: {:#}\nthe log's end:\n{}\n{}",
+            sb.timeout(),
+            state["toasts"],
+            tail.join("\n"),
+            t.screen()
+        );
+    }
     idle(&mut t, "a picker over an error");
     // The picker gone, the card comes up — its time starts and its fade-in gets frames (first drawn
     // transparent, it would stay so without them)

@@ -11,8 +11,7 @@ use crate::offer::{Offer, What};
 /// An editor in `front`, with sessions for `back` and `third` behind it — folders in the test's own temp
 /// folder.
 fn three(name: &str) -> (Editor, PathBuf, SessionId, SessionId) {
-    let dir = std::env::temp_dir().join(format!("tarae-inbox-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::scratch::Scratch::new(&format!("inbox-{name}")).into_path();
     for p in ["front", "back", "third"] {
         std::fs::create_dir_all(dir.join(p)).unwrap();
     }

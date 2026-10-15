@@ -478,10 +478,7 @@ mod tests {
     const SOON: Duration = Duration::from_secs(3);
 
     fn tmp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-fswatch-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::scratch::Scratch::new(&format!("fswatch-{name}")).into_path()
     }
 
     fn watching(f: impl FnOnce(&mut Watcher)) -> Watcher {

@@ -431,10 +431,7 @@ fn a_secret_store_read_outside_the_sandbox_warns_and_asks_each_time() {
 /// An editor in a temp folder of its own (`name`) with Claude mid-turn (a stand-in claude that reads and says
 /// nothing), `project` its `[[cards.warn]]` (as a `.tarae.toml` would say them) — and its chat's generation.
 fn chat_in(name: &str, project: &str) -> (crate::editor::Editor, u64, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("tarae-cardwarn-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new(&format!("cardwarn-{name}")).into_path();
     let (config, warnings) = crate::config::parse(project);
     assert!(warnings.is_empty(), "{warnings:?}");
     let mut ed = crate::editor::Editor::new(config);
@@ -550,7 +547,8 @@ fn taraes_own_project_warns_of_xtask_linux_bare() {
 /// `asks` one still asks); one of its own ids comes in.
 #[test]
 fn a_projects_file_only_adds_warnings() {
-    let dir = std::env::temp_dir().join(format!("tarae-cardwarn-layers-{}", std::process::id()));
+    let scratch = crate::scratch::Scratch::new("cardwarn-layers");
+    let dir = scratch.to_path_buf();
     std::fs::create_dir_all(dir.join("proj")).unwrap();
     let dir = std::fs::canonicalize(&dir).unwrap();
     let user = dir.join("config.toml");

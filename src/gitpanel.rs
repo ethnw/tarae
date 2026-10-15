@@ -1717,10 +1717,8 @@ mod tests {
     /// own, in its temp folder.)
     #[test]
     fn a_clean_tree_shows_what_bring_takes_and_the_last_commit() {
-        let dir = std::env::temp_dir().join(format!("tarae-gitpanel-clean-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("gitpanel-clean");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
@@ -1781,10 +1779,9 @@ mod tests {
     /// waited, here a stray one beside — is never staged. (A repository of the test's own, in its temp folder.)
     #[test]
     fn staging_waits_for_saves_and_never_takes_a_temp_file() {
-        let dir = std::env::temp_dir().join(format!("tarae-gitpanel-saves-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let scratch = crate::scratch::Scratch::new("gitpanel-saves");
+        let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
         let git_out = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let out =
@@ -1824,10 +1821,8 @@ mod tests {
     /// fail on the lock. (A repository of the test's own, in its temp folder.)
     #[test]
     fn reading_the_status_leaves_the_index() {
-        let dir = std::env::temp_dir().join(format!("tarae-gitpanel-index-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("gitpanel-index");
+        let dir = scratch.to_path_buf();
         let run = |args: &[&str]| {
             let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
             let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();

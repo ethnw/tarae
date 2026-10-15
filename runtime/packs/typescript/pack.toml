@@ -8,6 +8,10 @@ checks = ["tsc"]
 [[places]]
 match = '^(?<path>.+?)\((?<line>\d+),(?<col>\d+)\): ?(?<message>.*)$'
 
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+[sandbox]
+not-settings = ["ts", "tsx"]
+
 [language.typescript]
 extensions = ["ts", "mts", "cts"]
 comment-token = "//"

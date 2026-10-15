@@ -272,8 +272,8 @@ mod tests {
         }
         let answer = std::env::var("TARAE_CHAT_ANSWER_B").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
         let sessions = 26;
-        let dir = std::env::temp_dir().join(format!("tarae-perf-chats-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = crate::scratch::Scratch::new("perf-chats");
+        let dir = scratch.to_path_buf();
         let said = |n: usize, i: usize| format!("{i} words of a sentence, as most are. ").repeat(n / 36 + 1);
         let turn = |i: usize| -> Vec<Msg> {
             let mut v = vec![
@@ -364,13 +364,13 @@ mod tests {
             mb(holding),
             mb(after)
         );
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(rows_held, sessions * ROWS);
     }
 
     #[test]
     fn rows_go_and_come_back_and_the_newest_conversation_leads() {
-        let dir = std::env::temp_dir().join(format!("tarae-chats-{}", std::process::id()));
+        let scratch = crate::scratch::Scratch::new("chats");
+        let dir = scratch.to_path_buf();
         let root = Path::new("/p/project");
         let mut tool = Msg::new(Role::Tool, "", "");
         tool.look = Some(Look {
@@ -415,7 +415,6 @@ mod tests {
             "> why?\n\n- read `src/a.rs`\n\nBecause.\n\n",
             "the picker's preview"
         );
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(ago(100, 100), "just now");
         assert_eq!(ago(0, 7300), "2 h ago");
     }

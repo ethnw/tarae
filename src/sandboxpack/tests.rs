@@ -517,8 +517,8 @@ fn places_for_a_home() {
     let v = Vars::new(&t, home, &relative_first, Os::Mac);
     assert_eq!((v.place("{go}"), &v.listed[..]), (Some(PathBuf::from("/u/go")), &[PathBuf::from("/b")][..]));
     // `{a}`, `{b}`: each a folder that's there, the same name for the same letter
-    let dir = std::env::temp_dir().join(format!("tarae-filled-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let scratch = crate::scratch::Scratch::new("filled");
+    let dir = scratch.to_path_buf();
     for d in ["dists/g-8/h1", "dists/g-8/h2", "dists/g-9/h3"] {
         std::fs::create_dir_all(dir.join(d)).unwrap();
     }

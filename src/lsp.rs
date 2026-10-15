@@ -1358,8 +1358,8 @@ mod tests {
 
     #[test]
     fn root_is_the_topmost_marker_below_the_repo() {
-        let t = std::env::temp_dir().join(format!("tarae-lsp-root-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
+        let scratch = crate::scratch::Scratch::new("lsp-root");
+        let t = scratch.to_path_buf();
         let member = t.join("repo/crates/core/src");
         std::fs::create_dir_all(&member).unwrap();
         std::fs::create_dir_all(t.join("repo/.git")).unwrap();
@@ -1384,8 +1384,8 @@ mod tests {
     /// Others get their options untouched, and so does every server of a project with nothing nested.
     #[test]
     fn servers_leave_nested_checkouts_alone() {
-        let t = std::env::temp_dir().join(format!("tarae-lsp-nested-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
+        let scratch = crate::scratch::Scratch::new("lsp-nested");
+        let t = scratch.to_path_buf();
         let root = t.join("repo");
         for d in [
             ".git",

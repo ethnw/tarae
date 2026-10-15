@@ -518,9 +518,8 @@ fn two_sessions_cant_reach_each_others_sockets() {
     if skipped_inside(test) {
         return;
     }
-    let t = PathBuf::from(format!("/private/tmp/tarae-ap-{}", std::process::id()));
-    std::fs::remove_dir_all(&t).ok();
-    std::fs::create_dir_all(&t).unwrap();
+    let held = crate::scratch::Scratch::in_dir(Path::new("/private/tmp"), "ap");
+    let t = held.to_path_buf();
     let theirs = Session::new(&t.join("q"), &t, vec![]);
     let (open, closed) = (
         std::net::TcpListener::bind("127.0.0.1:0").unwrap(),

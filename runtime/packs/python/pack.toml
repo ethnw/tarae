@@ -159,6 +159,8 @@ quiet = ["tests/", "test_*.py", "*_test.py", "conftest.py"]
 # Claude's sandbox (`sandboxpack.rs`). pip's settings files (2026-10-05, `target/sb/tokens-checkpoint.md`:
 # denied, pip loses its index and the rest without a word)
 [sandbox]
+# Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
+not-settings = ["py"]
 reads = ["~/.pip/pip.conf", "~/.config/pip/pip.conf", "~/Library/Application Support/pip/pip.conf"]
 # What of the user's environment a run gets for Python (measured: `PYTHON*`, ~50 names), its environments
 # (venv, conda, pyenv) and installers (pip, uv) — an index URL with a password left out as a token

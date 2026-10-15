@@ -1701,8 +1701,8 @@ mod tests {
     /// `llm.sandbox-protect`'s; a link isn't followed.
     #[test]
     fn protected_names_are_found_where_they_are() {
-        let dir = std::env::temp_dir().join(format!("tarae-protected-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("protected");
+        let dir = held.to_path_buf();
         for f in [
             "Cargo.toml",
             ".git/HEAD",
@@ -1740,8 +1740,8 @@ mod tests {
     /// folders their listing only, and takes no new file.
     #[test]
     fn keys_are_found_where_they_are() {
-        let dir = std::env::temp_dir().join(format!("tarae-keys-found-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("keys-found");
+        let dir = held.to_path_buf();
         for f in [
             ".env",
             ".env.example",
@@ -1845,8 +1845,8 @@ mod tests {
     /// reads files, the key no rule of its own.
     #[test]
     fn a_key_reached_through_root_closes_its_way_there_and_grants_the_rest() {
-        let dir = std::env::temp_dir().join(format!("tarae-through-root-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("through-root");
+        let dir = held.to_path_buf();
         // (the bind stood for by two folders alike: what's mounted is only read from the table)
         let (real, bound) = (dir.join("real"), dir.join("bound"));
         for at in [&real, &bound] {
@@ -1901,8 +1901,8 @@ mod tests {
     /// skip it. A bind of a folder inside home elsewhere, and the source of a mount inside home, are holes too.
     #[test]
     fn a_hole_reached_through_another_mount_is_a_hole_there() {
-        let dir = std::env::temp_dir().join(format!("tarae-holes-elsewhere-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("holes-elsewhere");
+        let dir = held.to_path_buf();
         let dir = {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::canonicalize(&dir).unwrap()
@@ -2026,8 +2026,8 @@ mod tests {
     #[test]
     fn the_shut_file_is_taraes_empty_unopenable_one() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let dir = std::env::temp_dir().join(format!("tarae-shut-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("shut");
+        let dir = held.to_path_buf();
         let (run, key) = (dir.join("instance/1"), dir.join("p/.env"));
         std::fs::create_dir_all(&run).unwrap();
         std::fs::create_dir_all(key.parent().unwrap()).unwrap();
@@ -2117,7 +2117,8 @@ mod tests {
     #[test]
     fn what_a_folder_holding_a_protected_name_may_be_given() {
         let Some(abi) = kernel_abi("what_a_folder_holding_a_protected_name_may_be_given") else { return };
-        let base = std::env::temp_dir().join(format!("tarae-own-rights-{}", std::process::id()));
+        let scratch = crate::scratch::Scratch::new("own-rights");
+        let base = scratch.to_path_buf();
         // Each try in a fresh project: (what, done)
         let tries = |own: u64| -> Vec<(&'static str, bool)> {
             let f = base.join(format!("p{own}"));
@@ -2520,8 +2521,8 @@ mod tests {
     /// core name (`.envrc`), nothing that's there, nor where a link is. (A tree in the test's own folder.)
     #[test]
     fn what_a_first_build_makes_is_made_first_where_it_goes() {
-        let dir = std::env::temp_dir().join(format!("tarae-made-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("made");
+        let dir = held.to_path_buf();
         for f in [
             "Cargo.toml",
             ".git/HEAD",
@@ -2589,8 +2590,8 @@ mod tests {
             assert!(!makeable(bad), "{bad}");
         }
         // (a pack listing one: left out of the plan)
-        let root = std::env::temp_dir().join(format!("tarae-made-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let held = crate::scratch::Scratch::new("made-bad");
+        let root = held.to_path_buf();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
         let bad = crate::packs::MadeBeside {
@@ -3184,8 +3185,8 @@ mod tests {
 
     /// A stand-in for auditd's log: a file of its own, with a line already in it.
     fn auditd_log(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tarae-auditd-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // (the caller's to remove, as before)
+        let dir = crate::scratch::Scratch::new(&format!("auditd-{test}")).into_path();
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("audit.log");
         std::fs::write(&log, "type=DAEMON_START msg=audit(1791193000.000:1): op=start ver=3.1.2\n").unwrap();
@@ -3439,8 +3440,8 @@ mod tests {
     /// kernel's lines once the run's thread is told), and stops with it.
     #[test]
     fn a_watch_reads_its_runs_audit_records() {
-        let dir = std::env::temp_dir().join(format!("tarae-audit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let held = crate::scratch::Scratch::new("audit");
+        let dir = held.to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let go = dir.join("go");
         let mut stream = std::process::Command::new("sh");

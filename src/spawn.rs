@@ -392,6 +392,24 @@ pub fn wait_and_drain(
     status
 }
 
+/// `start` again while it fails with ETXTBSY, 10 ms apart, for up to a second — for a test that runs a script it
+/// just wrote: Linux won't run a file any process holds open for writing, and every child another test forks holds
+/// a copy of this process's descriptors until its own exec closes them (O_CLOEXEC acts only then), so a fork landing
+/// between the script's `open` and `close` keeps it busy a moment after the write is done (`cargo xtask linux
+/// test`, once). Tests only: tarae's own spawns don't wait on the main thread.
+#[cfg(test)]
+pub(crate) fn when_not_busy<T>(mut start: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match start() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            r => return r,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,10 +427,7 @@ mod tests {
     }
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tarae-spawn-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::scratch::Scratch::new(&format!("spawn-{name}")).into_path()
     }
 
     fn sh(script: &str) -> Command {
@@ -491,8 +506,53 @@ mod tests {
         assert_eq!((out.as_str(), status.success()), ("one\ntwo\nend\n", true));
     }
 
+    /// `when_not_busy` starts again only while it's ETXTBSY, and gives up with it after its second.
+    #[test]
+    fn a_busy_program_is_started_again_and_nothing_else_is() {
+        let busy = || io::Error::from_raw_os_error(libc::ETXTBSY);
+        let mut n = 0;
+        let r = when_not_busy(|| {
+            n += 1;
+            if n < 3 { Err(busy()) } else { Ok(n) }
+        });
+        assert_eq!(r.unwrap(), 3, "started again until it wasn't busy");
+        let mut n = 0;
+        let e = when_not_busy(|| -> io::Result<()> {
+            n += 1;
+            Err(io::Error::from_raw_os_error(libc::ENOENT))
+        });
+        assert_eq!((e.unwrap_err().kind(), n), (io::ErrorKind::NotFound, 1), "another error at once");
+        let t = Instant::now();
+        let e = when_not_busy(|| -> io::Result<()> { Err(busy()) });
+        assert_eq!(e.unwrap_err().raw_os_error(), Some(libc::ETXTBSY));
+        assert!(t.elapsed() >= Duration::from_secs(1), "gave up only after its second");
+    }
+
+    /// Linux refuses to run a script open for writing (ETXTBSY) — the window `when_not_busy` waits out: held
+    /// open here as another test's fork would hold it, run once the holder lets go.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_script_held_open_for_writing_runs_once_let_go() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("busy");
+        let script = d.join("tarae-busy-probe");
+        std::fs::write(&script, "#!/bin/sh\necho ran\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let held = std::fs::OpenOptions::new().write(true).open(&script).unwrap();
+        let e = setsid(&Command::new(&script)).err().expect("busy while held");
+        assert_eq!(e.raw_os_error(), Some(libc::ETXTBSY), "{e}");
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(held);
+        });
+        assert_eq!(output(when_not_busy(|| setsid(&Command::new(&script))).unwrap()).0, "ran\n");
+        letting_go.join().unwrap();
+        std::fs::remove_dir_all(d).ok();
+    }
+
     /// The program is found as execvp in the child found it: `./x` from the run's folder, a bare name
-    /// along the child's own `PATH`; one that isn't there is the error std gave.
+    /// along the child's own `PATH`; one that isn't there is the error std gave. (Its script just written:
+    /// started through `when_not_busy`.)
     #[test]
     fn a_program_is_found_where_the_child_would_find_it() {
         use std::os::unix::fs::PermissionsExt;
@@ -503,10 +563,10 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut rel = Command::new("./bin/tarae-spawn-probe");
         rel.arg("rel").current_dir(&d);
-        assert_eq!(output(setsid(&rel).unwrap()).0, "probe rel\n");
+        assert_eq!(output(when_not_busy(|| setsid(&rel)).unwrap()).0, "probe rel\n");
         let mut on_path = Command::new("tarae-spawn-probe");
         on_path.arg("path").env("PATH", d.join("bin"));
-        assert_eq!(output(setsid(&on_path).unwrap()).0, "probe path\n");
+        assert_eq!(output(when_not_busy(|| setsid(&on_path)).unwrap()).0, "probe path\n");
         let missing = Command::new("tarae-no-such-program");
         let e = setsid(&missing).err().unwrap();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
