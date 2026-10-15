@@ -3,8 +3,8 @@
 00  tarae  ›  src  ›  demo.rs  ›  ƒ main
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02     ▎ Words are split on whitespace; case is kept.
-03   9 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-04   8     let mut counts = HashMap::new();
+03   9 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
+04   8     let mut counts = HashMap::new();                                                           ▐
 05   7     for word in text.split_whitespace() {                                                      ▐
 06   6     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
 07   5     }                                                                                          ▐
@@ -53,8 +53,8 @@
 00  ddddd  f  ddd  f  TTTTTTT  f    dddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02
-03   f
-04   f
+03   f                                                                                                f
+04   f                                                                                                f
 05   f                                                                                                f
 06   f                                                                                                f
 07   f                                                                                                f

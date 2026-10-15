@@ -1196,18 +1196,19 @@ fn show_labels(cx: &mut Context, extend: bool) {
     use crate::codeview::Row;
     let ed = &*cx.editor;
     let doc = ed.doc();
-    let mut lines: Vec<usize> = ed
+    // The columns of each row drawn: a wrapped part's own, else what's in sight sideways
+    let cols = (doc.left, doc.left + ed.viewport.1);
+    let rows: Vec<(usize, usize, usize)> = ed
         .view
         .iter()
         .filter_map(|v| match v {
-            Row::Text { line, .. } => Some(*line),
+            Row::Text { line, part: Some(p), .. } => Some((*line, p.row.col, p.row.end_col)),
+            Row::Text { line, part: None, .. } => Some((*line, cols.0, cols.1)),
             Row::Doc { .. } | Row::Other { .. } | Row::Header { .. } => None, // not the text's own words
         })
         .collect();
-    lines.dedup();
-    let cols = if ed.wraps(doc) { (0, usize::MAX) } else { (doc.left, doc.left + ed.viewport.1) };
     let cursor = doc.selection().primary().cursor(&doc.text);
-    let targets = crate::labels::targets(&doc.text, &lines, cursor, cols, ed.config.tab_width);
+    let targets = crate::labels::targets(&doc.text, &rows, cursor, ed.config.tab_width);
     if targets.is_empty() {
         return cx.editor.set_status("no words on screen to jump to");
     }

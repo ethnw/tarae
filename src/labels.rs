@@ -38,17 +38,19 @@ impl Labels {
     }
 }
 
-/// Words of two or more chars on `lines`, starting at or after `from_col` and before `to_col` (the visible
-/// columns) — ordered by distance from `cursor`, alternating after/before, at most 26×26.
+/// Words of two or more chars on the screen's rows — `rows` = (line, from column, the column it stops before),
+/// in order, a line's wrapped parts one after another: both label chars on a row drawn — ordered by distance
+/// from `cursor`, alternating after/before, at most 26×26.
 pub fn targets(
     text: &Rope,
-    lines: &[usize],
+    rows: &[(usize, usize, usize)],
     cursor: usize,
-    (from_col, to_col): (usize, usize),
     tab: usize,
 ) -> Vec<(usize, usize)> {
     let mut words = Vec::new();
-    for &line in lines {
+    for parts in rows.chunk_by(|a, b| a.0 == b.0) {
+        let line = parts[0].0;
+        let seen = |c: usize| parts.iter().any(|&(_, from, to)| from <= c && c < to);
         let (start, end) = (mv::line_start(text, line), mv::line_end(text, line));
         if end - start > crate::wrap::MAX_LINE {
             continue;
@@ -70,7 +72,7 @@ pub fn targets(
                     len += 1;
                 }
                 // Both label chars must be on screen
-                if len >= 2 && col >= from_col && col + 1 < to_col {
+                if len >= 2 && seen(col) && seen(col + 1) {
                     words.push((p, q));
                 }
             }
@@ -100,7 +102,7 @@ mod tests {
     #[test]
     fn words_nearest_first_and_labels() {
         let t = Rope::from_str("alpha be c delta\nzeta eta\n");
-        let all = targets(&t, &[0, 1], 9, (0, usize::MAX), 4); // cursor on `c`
+        let all = targets(&t, &[(0, 0, usize::MAX), (1, 0, usize::MAX)], 9, 4); // cursor on `c`
         let words: Vec<String> = all.iter().map(|&(a, b)| t.byte_slice(a..b).to_string()).collect();
         assert_eq!(words, ["delta", "be", "zeta", "alpha", "eta"], "after/before in turn; `c` is too short");
         assert_eq!(Labels::label(0), ('a', 'a'));
@@ -113,7 +115,23 @@ mod tests {
     #[test]
     fn only_visible_columns() {
         let t = Rope::from_str("one two three\n");
-        let words = targets(&t, &[0], 0, (4, 9), 4);
+        let words = targets(&t, &[(0, 4, 9)], 0, 4);
         assert_eq!(words, [(4, 7)], "`one` is left of the view; `three` at col 8 would show one label char");
+    }
+
+    /// A wrapped line's parts are rows of their own: a word on a part not drawn (above the screen's top, below
+    /// its end) gets no label; one split by the wrap is labelled when both its first chars are drawn.
+    #[test]
+    fn only_the_rows_drawn() {
+        let t = Rope::from_str("one two three four\n");
+        // (`two ` at 4..8 not drawn: the screen starts at `three`)
+        let words = |rows: &[(usize, usize, usize)]| {
+            let mut w = targets(&t, rows, 0, 4);
+            w.sort();
+            w
+        };
+        assert_eq!(words(&[(0, 0, 4), (0, 8, usize::MAX)]), [(0, 3), (8, 13), (14, 18)]);
+        let both = words(&[(0, 0, 6), (0, 6, 9)]);
+        assert_eq!(both, [(0, 3), (4, 7)], "`two` across two rows, both drawn; `three` cut at the end");
     }
 }

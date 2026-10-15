@@ -395,7 +395,8 @@ by what you asked for. The change in hand says what its keys do: `y accept this 
 change still undecided), `n reject`, `esc back, unanswered` (shorter where the row is narrow); `q` rejects the
 rest. Esc gives the keys back where they were before the review took them — the chat, or the code (NORMAL) —
 and leaves the change waiting; `C-q` answers it. While it waits, `C-d` `C-u` (and
-the wheel) scroll it, and `space`, `:` and `C-w` work over it. Under that title, Claude's own
+the wheel) scroll it, a click on a change takes that one in hand (one answered already too, to change the answer),
+and `space`, `:` and `C-w` work over it. Under that title, Claude's own
 words from just before it made the edit say why ([screenshot](screenshots/chat-edit-why.png)): what it
 concluded, in a row or two. Its full reasoning is in the chat. The accepted changes are what gets
 written. Accept part of a change, and only that part is written. Decline, and Claude is told so. Several edits
@@ -1497,7 +1498,8 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   left another, committed and not, like a pull request's diff. The branch can be local or remote (`origin/main`, which
   is fetched first), and branch names complete as you type
 - A rail on the left lists the changed files with their `+added −removed` counts and your comments. Removed lines show
-  in red where they were; added and changed lines sit on a green wash. `]g`/`[g` walk the changes and go on into the
+  in red where they were (a click on one goes to the start of the line it went above); added and changed lines sit on
+  a green wash. `]g`/`[g` walk the changes and go on into the
   next or previous file. `space e` gives the rail the keys: `j`/`k` over the files, Enter opens one, `m` marks it
   viewed and goes on to the next, Esc back to the code. A click on a file opens it, a click on its `◦` marks it
   viewed too (a second click leaves it marked), and a click on `↑ N more` / `↓ N more` or the wheel scrolls the list

@@ -158,7 +158,10 @@ configs carry over as they are.
     conflict — so a diff is always read against the text it changes.
 
   A rendered block is flowed to the width, so scrolling sideways moves only the code lines. In NORMAL `j`/`k` step
-  over a rendered block as one line (they land on its first line); through a raw one they go line by line
+  over a rendered block as one line (they land on its first line); through a raw one they go line by line. The view
+  counts a rendered block's rows as drawn — keeping the cursor in sight, `zz`/`zt`/`zb`, the scroll margin — and
+  `zj`/`zk` step over it whole; a click anywhere on it lands where the comment starts; a picker's preview never
+  starts partway into one
 - **Indent guides** (the block around the cursor one tone brighter), a **scrollbar** with error and warning ticks for
   the whole file, current-line highlight, per-mode colors and cursor shapes ([screenshot](screenshots/ux-guides.png))
 

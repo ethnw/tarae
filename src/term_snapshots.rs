@@ -2128,6 +2128,255 @@ fn snapshot_review_doc_comments() {
     assert!(s.ed.screen.panes[0].3.iter().any(|r| r.0 == 7), "on screen");
 }
 
+/// A file whose first lines are a doc comment that folds to more rows than it has lines (one long line flowed),
+/// then a function a line.
+fn tall_doc_block(s: &mut Shot) {
+    s.ed.config.soft_wrap = "never".into();
+    let mut text = format!("/// {}\n/// More.\n/// End.\nfn z() {{}}\n", "word ".repeat(60));
+    for i in 0..30 {
+        text.push_str(&format!("fn a{i}() {{}}\n"));
+    }
+    s.file("src/p.rs", &text);
+}
+
+/// Scrolling counts a folded doc comment's rows as they're drawn, not its lines: `j` below a block that folds
+/// to more rows than lines keeps the cursor on screen (it went below the pane's end, the block counted a row a
+/// line).
+#[test]
+fn scrolling_counts_a_folded_blocks_rows() {
+    use crate::codeview::Row;
+    let mut s = Shot::new(50, 12);
+    tall_doc_block(&mut s);
+    let doc_rows = s.ed.view.iter().filter(|r| matches!(r, Row::Doc { .. })).count();
+    assert!(doc_rows > 3, "folds to more rows than lines: {:?}", s.ed.view);
+    for _ in 0..12 {
+        s.keys("j");
+        let line = s.ed.cursor_line();
+        let drawn = s.ed.view.iter().any(|r| matches!(r, Row::Text { line: l, .. } if *l == line));
+        assert!(drawn, "line {line} on screen (top {}): {:?}", s.ed.doc().top, s.ed.view);
+    }
+}
+
+/// `zb` and `zj` count a folded doc comment's rows as drawn: `zb` under it puts the cursor's line at the bottom
+/// with the block's last rows above it (it went below the screen, the block counted a row a line), `zj` steps
+/// over it whole.
+#[test]
+fn view_moves_step_over_a_folded_block() {
+    use crate::codeview::Row;
+    let mut s = Shot::new(50, 12);
+    tall_doc_block(&mut s);
+    s.ed.goto_line(4);
+    s.frame();
+    for c in "zb".chars() {
+        s.ed.handle_event(Event::Key(Key::plain(Code::Char(c))));
+    }
+    s.frame();
+    let rows = s.ed.viewport.0;
+    let so = s.ed.config.scrolloff.min((rows - 1) / 2);
+    let at = s.ed.view.iter().position(|r| matches!(r, Row::Text { line: 4, .. }));
+    assert_eq!(at, Some(rows - 1 - so), "at the bottom: {:?}", s.ed.view);
+    assert!(matches!(s.ed.view[0], Row::Doc { index: 1.., .. }), "the block's last rows: {:?}", s.ed.view);
+    // `zj` from the block: over it, to the line after
+    s.ed.goto_line(20);
+    s.ed.doc_mut().set_top(0);
+    for c in "zj".chars() {
+        s.ed.handle_event(Event::Key(Key::plain(Code::Char(c))));
+    }
+    assert_eq!(s.ed.doc().top, 3, "one step over the block");
+}
+
+/// In a soft-wrapped file `zt` `zz` `zb` and a follow stop count rows, not lines: a wrapped line above that
+/// doesn't fit whole shows its last rows, so the cursor's line lands on the row asked for.
+#[test]
+fn view_moves_start_partway_into_a_wrapped_line() {
+    use crate::codeview::Row;
+    let mut s = Shot::new(50, 13);
+    (s.ed.config.soft_wrap, s.ed.config.scrolloff) = ("always".into(), 1);
+    // (every line wraps to four rows: 10 rows high, none of the places is a whole number of lines down)
+    let text: String = (0..40).map(|i| format!("{}\n", format!("l{i:02} ").repeat(40))).collect();
+    s.file("notes.txt", &text);
+    let line = 20;
+    // (where the line's first row is, its rows, whether the view starts partway into a line)
+    let at = |s: &Shot| {
+        let of = |r: &Row| matches!(r, Row::Text { line: l, .. } if *l == line);
+        let partway = matches!(s.ed.view[0], Row::Text { part: Some(p), .. } if p.index > 0);
+        (s.ed.view.iter().position(of), s.ed.view.iter().filter(|r| of(r)).count(), partway)
+    };
+    s.ed.goto_line(line);
+    for keys in ["zt", "zz", "zb"] {
+        s.ed.doc_mut().set_top(line);
+        s.frame();
+        for c in keys.chars() {
+            s.ed.handle_event(Event::Key(Key::plain(Code::Char(c))));
+        }
+        s.frame();
+        let (rows, (first, n, partway)) = (s.ed.viewport.0, at(&s));
+        let above = match keys {
+            "zt" => 1,
+            "zz" => (rows - n) / 2,
+            _ => rows - n - 1,
+        };
+        assert_eq!((first, partway), (Some(above), true), "{keys} ({n} rows a line): {:?}", s.ed.view);
+    }
+    // A follow stop: the line centred
+    s.ed.doc_mut().set_top(0);
+    s.ed.show_range(line..line + 1);
+    s.frame();
+    let (rows, (first, n, partway)) = (s.ed.viewport.0, at(&s));
+    assert_eq!((first, partway), (Some((rows - n) / 2), true), "a follow stop: {:?}", s.ed.view);
+}
+
+/// A preview whose first line falls inside a folded doc comment starts at the block's first row — it started on
+/// a row inside it, the block cut at the top — or past the block when the item's line wouldn't show then.
+#[test]
+fn a_preview_never_starts_inside_a_folded_block() {
+    use crate::codeview::Row;
+    let mut s = Shot::new(50, 12);
+    tall_doc_block(&mut s);
+    let doc = s.ed.doc();
+    // (opens at line 6: the preview starts a third of its rows up, at line 2 — inside the block)
+    let rows = |n: usize| super::rows_preview(&s.ed, doc, Some("rust"), (Some(6), Some(6), 0), n, 40);
+    let tall = rows(30);
+    assert!(matches!(tall[0], Row::Doc { start: 0, index: 0, .. }), "the block whole: {tall:?}");
+    let short = rows(12);
+    assert!(matches!(short[0], Row::Text { line: 3, .. }), "past it: {short:?}");
+    assert!(short.iter().any(|r| matches!(r, Row::Text { line: 6, .. })), "the item's line: {short:?}");
+}
+
+/// A picker's item on a file open in a buffer is previewed from the buffer: nothing read from disk for it.
+#[test]
+fn a_preview_of_an_open_file_reads_no_disk() {
+    let mut s = Shot::new(100, 30);
+    s.file("src/open.rs", "fn open() {}\n");
+    let path = s.ed.doc().path.clone().unwrap();
+    let item = |action| crate::picker::Item {
+        label: "src/open.rs".into(),
+        action,
+        hint: String::new(),
+        glyph: None,
+    };
+    let picker = crate::picker::Picker::new("t", vec![item(crate::picker::Action::Open(path.clone()))], true);
+    s.ed.open_picker(picker, None);
+    s.frame();
+    let shown = screen_text(&mut s);
+    let p = s.ed.picker.as_ref().unwrap();
+    assert!(p.previews.is_empty(), "read: {:?}", p.previews.keys().collect::<Vec<_>>());
+    assert!(shown.contains("fn open() {}"), "the buffer's text: {shown}");
+}
+
+/// `gw` labels only the words on rows drawn: a wrapped line cut at the pane's end has none past it.
+#[test]
+fn jump_labels_only_on_the_rows_drawn() {
+    use crate::codeview::Row;
+    let mut s = Shot::new(40, 8);
+    let words: String = (0..80).map(|i| format!("w{i} ")).collect();
+    s.file("notes.md", &format!("top\n{words}\n"));
+    s.keys("gw");
+    let doc = s.ed.doc();
+    let labels = s.ed.jump_labels.as_ref().expect("labels up");
+    let drawn = |at: usize| {
+        let line = doc.text.byte_to_line(at);
+        let col = crate::movement::visual_col(&doc.text, at, 4);
+        s.ed.view.iter().any(|r| match r {
+            Row::Text { line: l, part: Some(p), .. } => *l == line && p.row.col <= col && col < p.row.end_col,
+            Row::Text { line: l, part: None, .. } => *l == line,
+            _ => false,
+        })
+    };
+    let off: Vec<String> = labels
+        .targets
+        .iter()
+        .filter(|t| !drawn(t.0))
+        .map(|t| doc.text.byte_slice(t.0..t.1).to_string())
+        .collect();
+    assert!(!labels.targets.is_empty() && off.is_empty(), "labelled off screen: {off:?}");
+}
+
+/// A click on a row whose text isn't the line's lands on one place of it, wherever it's clicked: a removed line
+/// the start of the line it went above, a folded doc comment where the comment starts.
+#[test]
+fn a_click_on_a_removed_or_folded_row() {
+    use crate::codeview::Row;
+    let mut s = review_of(100, 24, DOCS_BASE, &docs_now());
+    s.ed.goto_line(13);
+    s.frame();
+    let (_, rect, gutter, _) = s.ed.screen.panes[0].clone();
+    let click = |s: &mut Shot, at: &dyn Fn(&Row) -> bool| {
+        let row = s.ed.view.iter().position(at).expect("the row");
+        for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
+            let (x, y) = ((rect.x + gutter + 6) as u16, (rect.y + row) as u16);
+            s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
+        }
+        s.frame();
+        let doc = s.ed.doc();
+        doc.selection().primary().cursor(&doc.text)
+    };
+    let start = |s: &Shot, l: usize| s.ed.doc().text.line_to_byte(l);
+    let removed = click(&mut s, &|r| matches!(r, Row::Other { at: 7, .. }));
+    assert_eq!(removed, start(&s, 7), "the start of the line it went above");
+    let folded = click(&mut s, &|r| matches!(r, Row::Doc { start: 0, index: 1, .. }));
+    assert_eq!(folded, start(&s, 0), "where the comment starts");
+}
+
+/// A folded doc comment indented with tabs is drawn at its code's column (it was drawn a cell a tab, left of
+/// it), and a click on it lands where the comment starts, past the tabs (it landed inside them).
+#[test]
+fn a_tab_indented_folded_block_at_its_column() {
+    use crate::codeview::Row;
+    let mut s = Shot::new(80, 12);
+    s.file("src/t.rs", "impl S {\n\t/// Does it.\n\t/// Really.\n\tfn f() {}\n}\n");
+    s.ed.goto_line(3);
+    let shown = screen_text(&mut s);
+    // (the column, in cells, `needle` starts at on its row)
+    let col = |needle: &str| {
+        let l = shown.lines().find(|l| l.contains(needle)).expect(needle);
+        l[..l.find(needle).unwrap()].chars().count()
+    };
+    assert_eq!(col("▎ Does it."), col("fn f() {}"), "under its code: {shown}");
+    let (_, rect, gutter, _) = s.ed.screen.panes[0].clone();
+    let row = s.ed.view.iter().position(|r| matches!(r, Row::Doc { start: 1, .. })).expect("folded");
+    for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
+        let (x, y) = ((rect.x + gutter + 6) as u16, (rect.y + row) as u16);
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
+    }
+    let doc = s.ed.doc();
+    assert_eq!(doc.selection().primary().cursor(&doc.text), doc.text.line_to_byte(1) + 1, "past the tab");
+}
+
+/// A click in Claude's edit review on a change's row (its head, a line it proposes) takes that change in hand;
+/// on a row of no change (a folded doc comment) it moves nothing.
+#[test]
+fn a_click_in_the_edit_review_takes_a_change_in_hand() {
+    let mut s = Shot::new(100, 30);
+    let id = s.file("src/words.rs", DOCS_BASE);
+    let text = Rope::from_str(DOCS_BASE);
+    let hunk = |line: usize, new: &str| {
+        let (from, to) = (text.line_to_byte(line), text.line_to_byte(line + 1));
+        let old = text.byte_slice(from..to).to_string();
+        let (decision, conflict) = (crate::llm::Decision::Undecided, false);
+        crate::llm::Hunk { from, to, old, new: new.into(), decision, conflict }
+    };
+    let hunks =
+        vec![hunk(4, "    text.split(' ').count()\n"), hunk(13, "    let text = \"proposed here\";\n")];
+    let mut rev = crate::llm::Review::new(1, id, "two", hunks);
+    (rev.ready, rev.follow) = (true, false);
+    s.ed.session.review = Some(rev);
+    // (the row showing `needle`, on the screen as it is now)
+    let click = |s: &mut Shot, needle: &str| {
+        let shown = screen_text(s);
+        let y = shown.lines().position(|l| l.contains(needle)).expect(needle);
+        for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
+            s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x: 20, y: y as u16, alt: false }));
+        }
+        s.frame();
+        s.ed.session.review.as_ref().unwrap().current
+    };
+    assert_eq!(click(&mut s, "proposed here"), 1, "the line it proposes");
+    // (after change 1 is in hand: a click that took change 0 would show)
+    assert_eq!(click(&mut s, "Counts the words in text."), 1, "a folded doc comment: no change");
+    assert_eq!(click(&mut s, "Change 1 of 2"), 0, "its head");
+}
+
 /// The first lines of the focused pane's folded doc comments (its view, as drawn).
 fn folded(s: &Shot) -> Vec<usize> {
     let starts = s.ed.view.iter().filter_map(|r| match r {
@@ -2398,6 +2647,61 @@ fn the_bases_parse_is_a_frame_only_in_sight() {
         assert!(s.ed.doc().base_syntax.is_some(), "parsed");
         assert_eq!(s.ed.unchanged, !seen, "a frame only when seen ({seen})");
     }
+}
+
+/// A review's base parse follows sight as the document's own trees do: gone with them from a file not looked at
+/// for a while (it was kept for every reviewed file), parsed again once it's shown.
+#[test]
+fn the_bases_parse_follows_sight() {
+    let mut s = Shot::new(60, 12);
+    let (base, text) = ("/*\nremoved inside\n*/\nfn f() {}\n", "/*\n*/\nfn f() {}\n");
+    let id = s.file("src/c.rs", text);
+    let version = s.ed.doc().version();
+    s.ed.diff_show(id, version, base.into(), "base".into(), crate::git::hunks(base, text));
+    s.until("the parse", |ed| ed.doc().base_syntax.is_some());
+    // Other buffers looked at since, ten minutes on: its trees go, the base's with them
+    let start = Instant::now();
+    for k in 1..=8 {
+        s.keys(":new<ret>");
+        s.ed.trees_follow_sight(start + Duration::from_secs(600 + k));
+    }
+    let d = s.ed.docs.iter().find(|d| d.id == id).unwrap();
+    assert!(d.syntax.as_ref().is_some_and(|s| s.dormant), "its trees went");
+    assert!(d.base_syntax.is_none() && !d.base_parsing, "the base's too");
+    // Shown again: parsed again
+    while s.ed.doc().id != id {
+        s.ed.cycle_buffer(1);
+    }
+    s.ed.trees_follow_sight(start + Duration::from_secs(700));
+    s.until("the parse again", |ed| ed.doc().base_syntax.is_some());
+}
+
+/// A review's base parse that lands after its file's trees went is let go, as they were (it was kept until the
+/// file was shown again), and asked again once it is.
+#[test]
+fn a_base_parse_landing_after_the_trees_went_is_let_go() {
+    let mut s = Shot::new(60, 12);
+    let (base, text) = ("/*\nremoved inside\n*/\nfn f() {}\n", "/*\n*/\nfn f() {}\n");
+    let id = s.file("src/c.rs", text);
+    let version = s.ed.doc().version();
+    s.ed.diff_show(id, version, base.into(), "base".into(), crate::git::hunks(base, text));
+    // (its trees go while the parse is out: nothing applies its result meanwhile)
+    let start = Instant::now();
+    for k in 1..=8 {
+        s.keys(":new<ret>");
+        s.ed.trees_follow_sight(start + Duration::from_secs(600 + k));
+    }
+    let parsing = |ed: &Editor| ed.docs.iter().find(|d| d.id == id).unwrap().base_parsing;
+    assert!(parsing(&s.ed), "the parse still out");
+    s.until("the parse", |ed| !parsing(ed));
+    let d = s.ed.docs.iter().find(|d| d.id == id).unwrap();
+    assert!(d.syntax.as_ref().is_some_and(|s| s.dormant), "its trees went");
+    assert!(d.base_syntax.is_none(), "the base's let go");
+    while s.ed.doc().id != id {
+        s.ed.cycle_buffer(1);
+    }
+    s.ed.trees_follow_sight(start + Duration::from_secs(700));
+    s.until("the parse again", |ed| ed.doc().base_syntax.is_some());
 }
 
 /// A pane without the keys paints its primary cursor as it paints the others (it painted none).

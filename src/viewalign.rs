@@ -3,6 +3,7 @@
 //! `gb` do the opposite: the cursor goes to the top / middle / bottom of what's on screen. Rows, not lines,
 //! when the document soft-wraps.
 
+use crate::codeview::Measure;
 use crate::editor::Editor;
 use crate::movement as mv;
 use crate::selection::Selection;
@@ -16,44 +17,62 @@ pub enum Place {
 }
 
 impl Editor {
-    /// Screen rows line `l` takes in the focused pane.
-    /// Screen rows line `l` takes: wrapped rows, plus the removed rows a code review shows above it.
-    fn rows_of(&self, l: usize) -> usize {
+    /// Screen rows the focused pane's lines near `line` take, as it lays them out (`codeview::Measure`): wrapped
+    /// rows, the removed rows a code review shows above a line, a folded doc comment's rows.
+    fn measure(&self, line: usize) -> Measure<'_> {
         let doc = self.doc();
-        let (width, tab) = (self.wraps(doc).then_some(self.viewport.1), self.config.tab_width);
-        let extra = crate::codeview::Changes::of(doc).rows_above(doc, l, width, tab);
-        match width {
-            None => 1 + extra,
-            Some(w) => crate::wrap::rows(&doc.text, l, w, tab).len() + extra,
-        }
+        let wrap = self.wraps(doc).then_some(self.viewport.1);
+        Measure::new(self, doc, self.editing_in(true), (wrap, self.viewport.1), line, self.viewport.0.max(1))
     }
 
     fn scrolloff(&self) -> usize {
         self.config.scrolloff.min(self.viewport.0.saturating_sub(1) / 2)
     }
 
-    /// The top line that puts `line` (its first row) `above` rows down the screen.
-    fn top_for(&self, line: usize, above: usize) -> usize {
+    /// The top line and its rows above the screen that put `line` (its first row) `above` rows down the screen:
+    /// a line above that doesn't fit whole shows its last rows (a wrapped line's, a folded doc comment's — never
+    /// some of the removed rows above a line); never a top inside a folded block past its first line.
+    fn top_for(m: &Measure, line: usize, above: usize) -> (usize, usize) {
         let mut top = line;
         let mut rows = 0;
-        while top > 0 && rows + self.rows_of(top - 1) <= above {
+        while top > 0 && rows < above {
+            let n = m.rows(top - 1);
+            if rows + n > above {
+                let skip = n - (above - rows);
+                if skip <= m.skippable(top - 1) {
+                    return (m.shown_as(top - 1), skip);
+                }
+                break;
+            }
             top -= 1;
-            rows += self.rows_of(top);
+            rows += n;
         }
-        top
+        match m.folded(top) {
+            Some((a, b, _)) if top > a => (b + 1, 0),
+            _ => (top, 0),
+        }
+    }
+
+    /// The view starts at `top`, `skip` of its rows above the screen.
+    fn set_top_rows(&mut self, (top, skip): (usize, usize)) {
+        let doc = self.doc_mut();
+        doc.set_top(top);
+        doc.top_rows = (skip > 0).then_some((top, skip));
     }
 
     /// `zz` `zt` `zb` — scroll so the cursor line sits there (the scrolloff margin still applies).
     pub fn align_view(&mut self, at: Place) {
         let rows = self.viewport.0.max(1);
-        let line = self.cursor_line();
+        let m = self.measure(self.cursor_line());
+        let line = m.shown_as(self.cursor_line());
         let above = match at {
             Place::Top => self.scrolloff(),
-            Place::Center => rows.saturating_sub(self.rows_of(line)) / 2,
-            Place::Bottom => rows.saturating_sub(self.rows_of(line) + self.scrolloff()),
+            Place::Center => rows.saturating_sub(m.rows(line)) / 2,
+            Place::Bottom => rows.saturating_sub(m.rows(line) + self.scrolloff()),
         };
-        let top = self.top_for(line, above);
-        self.doc_mut().set_top(top);
+        let top = Self::top_for(&m, line, above);
+        drop(m);
+        self.set_top_rows(top);
     }
 
     /// Puts `lines` in sight as a whole (a follow or replay stop — the cursor on its first line): left as
@@ -66,14 +85,15 @@ impl Editor {
         let so = self.scrolloff();
         let doc = self.doc();
         let last = mv::last_line(&doc.text);
-        let start = lines.start.min(last);
+        let m = self.measure(lines.start.min(last));
+        let start = m.shown_as(lines.start.min(last));
         let end = lines.end.min(last + 1).max(start + 1);
         let top = doc.top;
         // Rows of lines `a..b`, counted no further than a screen and a row
         let rows_in = |a: usize, b: usize| {
             let mut n = 0;
             for l in a..b {
-                n += self.rows_of(l);
+                n += m.rows(l);
                 if n > rows {
                     break;
                 }
@@ -86,23 +106,26 @@ impl Editor {
         }
         let tall = rows_in(start, end);
         let above = if tall <= rows { ((rows - tall) / 2).max(so) } else { RANGE_CONTEXT.max(so) };
-        let top = self.top_for(start, above);
-        self.doc_mut().set_top(top);
+        let top = Self::top_for(&m, start, above);
+        drop(m);
+        self.set_top_rows(top);
     }
 
-    /// First and last lines fully on screen, inside the scrolloff margin.
+    /// First and last lines fully on screen, inside the scrolloff margin (a folded doc comment's first line for
+    /// one inside it).
     fn inner_lines(&self) -> (usize, usize) {
         let doc = self.doc();
         let (top, last) = (doc.top, mv::last_line(&doc.text));
         let (rows, so) = (self.viewport.0.max(1), self.scrolloff());
+        let m = self.measure(top);
         let first = if top == 0 { 0 } else { (top + so).min(last) };
         let (mut l, mut used) = (top, 0);
-        while l < last && used + self.rows_of(l) + self.rows_of(l + 1) <= rows {
-            used += self.rows_of(l);
+        while l < last && used + m.rows(l) + m.rows(l + 1) <= rows {
+            used += m.rows(l);
             l += 1;
         }
         let bottom = if l >= last { last } else { l.saturating_sub(so).max(first) };
-        (first, bottom)
+        (m.shown_as(first), m.shown_as(bottom))
     }
 
     /// Put the primary cursor on `line`, same column (select mode: extend).
@@ -120,6 +143,17 @@ impl Editor {
     pub fn scroll_view(&mut self, delta: isize, extend: bool) {
         let last = mv::last_line(&self.doc().text);
         let top = (self.doc().top as isize + delta).clamp(0, last as isize) as usize;
+        // (a folded doc comment is one line: the view steps over it)
+        let top = match self.measure(top).folded(top) {
+            Some((a, b, _)) if top > a => {
+                if delta > 0 {
+                    (b + 1).min(last)
+                } else {
+                    a
+                }
+            }
+            _ => top,
+        };
         self.doc_mut().set_top(top);
         let (first, bottom) = self.inner_lines();
         let line = self.cursor_line();

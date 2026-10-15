@@ -509,9 +509,14 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     if let Some(p) = editor.picker.as_mut() {
         let pb = PickerBox::new(&lay, p);
         p.view = p.visible(pb.list_rows);
-        if pb.preview_w > 0 {
-            request_preview(p, &editor.events.jobs());
-        }
+    }
+    // (a file open in a buffer is previewed from it — nothing read from disk)
+    let read =
+        editor.picker.as_ref().filter(|p| PickerBox::new(&lay, p).preview_w > 0).and_then(|p| p.current());
+    if read.is_some_and(|i| preview_buffer(editor, &i.action).is_none())
+        && let Some(p) = editor.picker.as_mut()
+    {
+        request_preview(p, &editor.events.jobs());
     }
     // Reviewing: put the current change's head at the top 1/4 of the screen (follow — off once j/k scroll)
     // (its doc comments' layout kept on it while it holds: taken out, refreshed when stale, put back)
@@ -2549,29 +2554,33 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
     let tab = editor.config.tab_width;
     let mode = editor.mode;
     let wrap_w = editor.wraps(editor.doc()).then_some(lay.text_cols);
-    let doc = editor.doc_mut();
+    let ed = &*editor;
+    let doc = ed.doc();
     let pos = cursor_idx(mode, doc.selection().primary(), &doc.text);
     let line = mv::line_of(&doc.text, pos);
-    // Rows a line takes: its wrapped rows, plus the removed rows a code review (or a shown edit) puts above it
-    let reviewing = doc.review_base.is_some() || doc.shown.is_some();
-    if wrap_w.is_some() || reviewing {
-        let doc = &*doc;
-        let wrapped = |l: usize| match wrap_w {
-            Some(w) => crate::wrap::rows(&doc.text, l, w, tab),
-            None => vec![crate::wrap::Row { start: 0, col: 0, end_col: usize::MAX, x0: 0 }],
+    // Rows a line takes, as the pane lays them out: its wrapped rows, the removed rows a code review (or a
+    // shown edit) puts above it, a folded doc comment's rows
+    let m = crate::codeview::Measure::new(
+        ed,
+        doc,
+        ed.editing_in(true),
+        (wrap_w, lay.text_cols),
+        line,
+        lay.text_rows,
+    );
+    if !m.uniform() {
+        let rows = |l: usize| m.rows(l);
+        let skippable = |l: usize| m.skippable(l);
+        let here = m.wrapped(line);
+        let wraps_here = here.len() > 1
+            || mv::line_end(&doc.text, line) - mv::line_start(&doc.text, line) <= crate::wrap::MAX_LINE;
+        // Screen rows between the top and the cursor's row: its row in the line, below the removed ones (a cursor
+        // in a folded doc comment is on its first row)
+        let (line, k) = match m.folded(line) {
+            Some((a, ..)) => (a, m.removed(a)),
+            None if wrap_w.is_some() => (line, crate::wrap::row_of(&here, pos) + m.removed(line)),
+            None => (line, m.removed(line)),
         };
-        let changes = Changes::of(doc);
-        let rows = |l: usize| wrapped(l).len() + changes.rows_above(doc, l, wrap_w, tab);
-        // The rows of a line that can go above the screen while it's the top line: its wrapped rows but the
-        // last (none under removed rows — those are shown whole)
-        let skippable = |l: usize| match changes.rows_above(doc, l, wrap_w, tab) {
-            0 => wrapped(l).len() - 1,
-            _ => 0,
-        };
-        let here = wrapped(line);
-        // Screen rows between the top and the cursor's row: its row in the line, below the removed ones
-        let k = if wrap_w.is_some() { crate::wrap::row_of(&here, pos) } else { 0 }
-            + changes.rows_above(doc, line, wrap_w, tab);
         let mut above = k;
         let mut top = line;
         while top > 0 && above < so {
@@ -2581,18 +2590,25 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
         // The latest start that keeps `so` rows above the cursor: `top`, less its rows past those
         let up = (top, above.saturating_sub(so).min(skippable(top)));
         // (no more rows of it than the top line has now: wider, unwrapped or edited, it may have fewer — or be
-        // gone, the text shorter)
-        let skip = match doc.top_skip() {
-            n if n > 0 && doc.top < doc.text.len_lines() => n.min(skippable(doc.top)),
-            _ => 0,
+        // gone, the text shorter; inside a folded block, as it's drawn)
+        let (mut new_top, mut skip) = match doc.top < doc.text.len_lines() {
+            true => m.top(doc.top, doc.top_skip()),
+            false => (doc.top, 0),
         };
-        let (mut new_top, mut skip) = (doc.top, skip);
         if (new_top, skip) > up {
             (new_top, skip) = up;
         } else {
-            // Each line is at least a row — a top more than a screen above can't show the cursor
+            // A top more than a screen of lines above: from where a screen's rows up from the cursor reach (not a
+            // line a row: a folded doc comment's lines past its first take none)
             if line >= new_top + lay.text_rows {
-                (new_top, skip) = (line + 1 - lay.text_rows, 0);
+                let (mut t, mut r) = (line, k + 1);
+                while t > new_top && r < lay.text_rows {
+                    t -= 1;
+                    r += rows(t);
+                }
+                if t > new_top {
+                    (new_top, skip) = (t, 0);
+                }
             }
             // Rows from the screen's start through the cursor's, plus `so` below, must fit — scrolled by rows,
             // so a tall line's rows never go by unseen (a whole line at a time jumped past them: #233)
@@ -2610,9 +2626,13 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
                 used -= rows(new_top) - skip;
                 (new_top, skip) = (new_top + 1, 0);
             }
+            // Never a top inside a folded block past its first line: every row of it went above
+            // (the cursor's line is below it: a cursor in a block is on its first line)
+            if let Some((_, b, _)) = m.folded(new_top).filter(|&(a, ..)| new_top > a) {
+                (new_top, skip) = (b + 1, 0);
+            }
         }
-        let wraps_here = here.len() > 1
-            || mv::line_end(&doc.text, line) - mv::line_start(&doc.text, line) <= crate::wrap::MAX_LINE;
+        drop(m);
         let doc = editor.doc_mut();
         doc.top = new_top;
         doc.top_rows = (skip > 0).then_some((new_top, skip));
@@ -2621,10 +2641,14 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
             doc.left = 0;
             return;
         }
-    } else if line < doc.top + so {
-        doc.set_top(line.saturating_sub(so));
-    } else if line + so >= doc.top + lay.text_rows {
-        doc.set_top(line + so + 1 - lay.text_rows);
+    } else {
+        drop(m);
+        let doc = editor.doc_mut();
+        if line < doc.top + so {
+            doc.set_top(line.saturating_sub(so));
+        } else if line + so >= doc.top + lay.text_rows {
+            doc.set_top(line + so + 1 - lay.text_rows);
+        }
     }
     let doc = editor.doc_mut();
     let col = mv::visual_col(&doc.text, pos, tab);
@@ -4322,7 +4346,7 @@ fn rows_pane(
     // The blocks that show folded here (`Editor::doc_block_folded`: the one rule — a block being edited or
     // selected, or with a change shown in or beside it, stays raw). Horizontal scroll leaves them be: a folded
     // block is flowed to the width, so it has nothing to scroll — only the code lines move
-    let blocks: Vec<_> = crate::doccomment::blocks(text, w0..=w1)
+    let blocks: Vec<_> = crate::doccomment::blocks(text, w0..=w1, editor.config.tab_width)
         .into_iter()
         .filter(|b| editor.doc_block_closed(doc, shows.editing, (b.start, b.end)))
         .collect();
@@ -4338,8 +4362,10 @@ fn rows_pane(
             Some(&crate::doccomment::Block { start: a, end: b, indent, ref bodies }) => {
                 let width = lay.text_cols.saturating_sub(indent + 3).max(8);
                 let folded = fold_rows(editor, &parts(bodies), width, lang.as_deref());
-                // If the top of the screen is mid-block, skip that proportion
-                let skip = (line - a).min(folded.len().saturating_sub(1));
+                // The top of the screen mid-block: its rows above it skipped — the rows scrolling put above
+                // (`top_rows`), or as many as lines when a top line inside it was set (`codeview::Measure::top`)
+                let skip = if line == a && line == top { top_skip } else { line - a };
+                let skip = skip.min(folded.len().saturating_sub(1));
                 for (k, (spans, code)) in folded.into_iter().enumerate().skip(skip) {
                     if view.len() == rows {
                         break;
@@ -4358,7 +4384,7 @@ fn rows_pane(
 }
 
 /// Screen rows of a folded doc-comment block: (chunk, is example code line).
-fn fold_rows(
+pub(crate) fn fold_rows(
     editor: &Editor,
     parts: &[crate::doccomment::Part],
     width: usize,
@@ -4488,11 +4514,12 @@ fn review_folds(
         return None;
     }
     let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
-    let key = (doc.id, doc.version(), code_w, editor.theme.name.clone(), lang.clone());
+    let tab = editor.config.tab_width;
+    let key = (doc.id, doc.version(), (code_w, tab), editor.theme.name.clone(), lang.clone());
     if let Some(c) = cache.filter(|c| c.key == key) {
         return Some(c);
     }
-    let blocks = crate::doccomment::blocks(&doc.text, 0..=mv::last_line(&doc.text))
+    let blocks = crate::doccomment::blocks(&doc.text, 0..=mv::last_line(&doc.text), tab)
         .into_iter()
         .map(|b| {
             let width = code_w.saturating_sub(b.indent + 3).max(8);
@@ -4774,13 +4801,12 @@ fn draw_review(
     // The change in hand: its rows on screen (a notification keeps off them — U9); every change's rows (the
     // follow card keeps off them)
     let top = lay.text_top as usize + title_h;
-    let rows_of = |hunk: Option<usize>| -> Vec<usize> {
-        let of = |r: &Row| r.hunk().is_some() && (hunk.is_none() || r.hunk() == hunk);
-        view.iter().enumerate().filter(|(_, r)| of(r)).map(|(k, _)| top + k).collect()
-    };
-    let mine = rows_of(Some(rev.current));
-    editor.screen.review_change.set(mine.first().copied().zip(mine.last().copied()));
-    *editor.screen.review_rows.borrow_mut() = rows_of(None);
+    let changes: Vec<(usize, usize)> =
+        view.iter().enumerate().filter_map(|(k, r)| r.hunk().map(|h| (top + k, h))).collect();
+    let mut mine = changes.iter().filter(|r| r.1 == rev.current).map(|r| r.0);
+    let first = mine.next();
+    editor.screen.review_change.set(first.zip(mine.next_back().or(first)));
+    *editor.screen.review_rows.borrow_mut() = changes;
     let gutter = crate::chrome::SIGNS + num_w(doc);
     let body_lay = Layout {
         x0: 0,
@@ -5610,13 +5636,9 @@ fn preview_lines<'a>(
             });
         }
         // A file open in a buffer: the buffer — what enter opens (`open_at` goes to the line there), with its
-        // diagnostics, change marks and unsaved edits (paths of buffers are kept as `open` made them: real ones)
-        _ if let Some((path, focus)) = action.preview_target()
-            && let path = editor.path_of(path)
-            && let Some(d) =
-                editor.docs.iter().find(|d| !d.loading && d.path.as_deref() == Some(path.as_path())) =>
-        {
-            (d, focus)
+        // diagnostics, change marks and unsaved edits
+        _ if let Some(d) = preview_buffer(editor, action) => {
+            (d, action.preview_target().and_then(|(_, f)| f))
         }
         _ => {
             let focus = action.preview_target().and_then(|(_, f)| f);
@@ -5637,11 +5659,20 @@ fn preview_lines<'a>(
     Some(PreviewView::Code { doc, rows: rows_preview(editor, doc, lang, at, rows, code_w), focus })
 }
 
+/// The buffer a picker item's file is open in — its preview (what enter opens; paths of buffers are kept as
+/// `open` made them: real ones).
+fn preview_buffer<'a>(editor: &'a Editor, action: &Action) -> Option<&'a crate::document::Document> {
+    let path = editor.path_of(action.preview_target()?.0);
+    editor.docs.iter().find(|d| !d.loading && d.path.as_deref() == Some(path.as_path()))
+}
+
 /// A picker's code preview's rows: `rows` of them from where the item opens (`focus`, a third down) — scrolled
 /// by `scroll` (the wheel, `C-f`/`C-b`) but not past the last page — each line wrapped at `width` (the code's
 /// columns; a line wider continues on the next rows, no number there), and doc comments in `lang` as the editor
 /// shows the file in normal mode (`Editor::doc_block_closed`: an open buffer's selection and changes count) —
-/// but the block the item opens in (`opens_at`) is read raw: going there selects it.
+/// but the block the item opens in (`opens_at`) is read raw: going there selects it. A first line inside a folded
+/// block starts the preview at the block's first row (never a block cut at the top — it began on a blank row of
+/// it), or past the block when then the item's line wouldn't show.
 fn rows_preview(
     editor: &Editor,
     doc: &crate::document::Document,
@@ -5657,7 +5688,8 @@ fn rows_preview(
         .min(last.saturating_sub(rows.saturating_sub(1)).max(focus.unwrap_or(0).min(last)));
     let blocks: Vec<_> = match editor.doc_comments_render(lang) {
         true => {
-            crate::doccomment::blocks(text, first.saturating_sub(200)..=(first + rows * 3 + 200).min(last))
+            let lines = first.saturating_sub(200)..=(first + rows * 3 + 200).min(last);
+            crate::doccomment::blocks(text, lines, editor.config.tab_width)
                 .into_iter()
                 .filter(|b| !opens_at.is_some_and(|f| (b.start..=b.end).contains(&f)))
                 .filter(|b| editor.doc_block_closed(doc, false, (b.start, b.end)))
@@ -5666,34 +5698,51 @@ fn rows_preview(
         false => Vec::new(),
     };
     let tab = editor.config.tab_width;
-    let mut vis = Vec::with_capacity(rows);
-    let mut line = first;
-    while vis.len() < rows && line <= last {
-        if let Some(b) = blocks.iter().find(|b| b.start <= line && line <= b.end) {
-            let w = width.saturating_sub(b.indent + 3).max(8);
-            let folded = fold_rows(editor, &crate::doccomment::parts(&b.bodies), w, lang);
-            // (opened mid-block: from as far into it)
-            let skip = (line - b.start).min(folded.len().saturating_sub(1));
-            for (index, (spans, code)) in folded.into_iter().enumerate().skip(skip) {
+    let from = |first: usize| {
+        let mut vis = Vec::with_capacity(rows);
+        let mut line = first;
+        while vis.len() < rows && line <= last {
+            if let Some(b) = blocks.iter().find(|b| b.start <= line && line <= b.end) {
+                let w = width.saturating_sub(b.indent + 3).max(8);
+                let folded = fold_rows(editor, &crate::doccomment::parts(&b.bodies), w, lang);
+                for (index, (spans, code)) in folded.into_iter().enumerate() {
+                    if vis.len() == rows {
+                        break;
+                    }
+                    vis.push(Row::Doc { start: b.start, end: b.end, indent: b.indent, index, spans, code });
+                }
+                line = b.end + 1;
+                continue;
+            }
+            let parts = crate::wrap::rows(text, line, width, tab);
+            let n = parts.len();
+            for (index, row) in parts.into_iter().enumerate() {
                 if vis.len() == rows {
                     break;
                 }
-                vis.push(Row::Doc { start: b.start, end: b.end, indent: b.indent, index, spans, code });
+                vis.push(Row::Text {
+                    line,
+                    part: Some(Part { row, index, last: index + 1 == n }),
+                    edit: None,
+                });
             }
-            line = b.end + 1;
-            continue;
+            line += 1;
         }
-        let parts = crate::wrap::rows(text, line, width, tab);
-        let n = parts.len();
-        for (index, row) in parts.into_iter().enumerate() {
-            if vis.len() == rows {
-                break;
-            }
-            vis.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }), edit: None });
-        }
-        line += 1;
+        vis
+    };
+    let vis = from(first);
+    let past = blocks.iter().find(|b| b.start < first && first <= b.end).map(|b| b.end + 1);
+    let shown = |vis: &[Row]| {
+        let has = |r: &Row, f: usize| match r {
+            Row::Doc { start, end, .. } => (*start..=*end).contains(&f),
+            _ => r.line() == f,
+        };
+        focus.is_none_or(|f| vis.iter().any(|r| has(r, f)))
+    };
+    match past {
+        Some(past) if scroll == 0 && !shown(&vis) && past <= last => from(past),
+        _ => vis,
     }
-    vis
 }
 
 fn draw_preview_row(
@@ -8185,7 +8234,7 @@ fn draw_follow_card(
             .or(top)
             .or_else(|| gaps.iter().filter(fits).max_by_key(|g| g.1 - g.0).map(|g| (g.0, g.1, true)))
     };
-    let changes = editor.screen.review_rows.borrow().clone();
+    let changes: Vec<usize> = editor.screen.review_rows.borrow().iter().map(|r| r.0).collect();
     let current: Vec<usize> =
         editor.screen.review_change.get().map_or(Vec::new(), |(a, b)| (a..=b).collect());
     let and = |a: &[usize], b: &[usize]| -> Vec<usize> { a.iter().chain(b).copied().collect() };
@@ -13037,6 +13086,79 @@ mod tests {
             keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 120, 40)).collect()
         });
         measured("key_to_frame_on_large_file", worst, budget);
+        assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
+    }
+
+    /// The same keys (and a run of `j`) in a Rust file thick with doc comments — a block every 20 lines, its first
+    /// line long, as `term.rs` has them — soft-wrapped and not: what counting the folded blocks' rows costs the
+    /// key path (`codeview::Measure`, every frame's scroll). The worst key within one frame, and the keys' sum.
+    #[test]
+    fn perf_budget_key_to_frame_on_doc_comments() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_on_doc_comments") {
+            return;
+        }
+        let budget = frame_budget();
+        let block = |i: usize| {
+            let body = "    let x = 1;\n".repeat(13);
+            let words = "word ".repeat(30);
+            format!(
+                "/// Block {i}: {words}\n///\n/// More, with `code`.\npub fn f{i}() -> usize {{\n{body}    {i}\n}}\n\n"
+            )
+        };
+        let rope = Rope::from_str(&(0..1_000).map(block).collect::<String>());
+        let mut keys = vec!["j"; 30];
+        keys.extend([
+            "w", "e", "g", "e", "g", "g", "5", "0", "0", "0", "G", "i", "a", "esc", "u", "%", ";", "C-d",
+            "C-u", "z", "z", "k", "k",
+        ]);
+        for wrap in ["always", "never"] {
+            let mut sum = Duration::ZERO;
+            let (worst, key) = worst_of_best(&keys, || {
+                let mut ed = Editor::new(Config::default());
+                ed.config.soft_wrap = wrap.into();
+                ed.docs[0].text = rope.clone();
+                ed.docs[0].path = Some(std::path::PathBuf::from("/nonexistent/doc_comments.rs"));
+                let mut buf = Vec::with_capacity(1 << 16);
+                render(&mut ed, &mut buf, 120, 40).unwrap();
+                let folded = ed.view.iter().any(|r| matches!(r, crate::codeview::Row::Doc { .. }));
+                assert!(folded, "the blocks fold: {:?}", &ed.view[..3]);
+                let times: Vec<Duration> =
+                    keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 120, 40)).collect();
+                sum = times.iter().sum();
+                times
+            });
+            let name = format!("key_to_frame_on_doc_comments_{wrap}");
+            measured(&name, worst, budget);
+            measured(&format!("{name}_sum"), sum, budget * keys.len() as u32);
+            assert!(worst < budget, "{wrap}: key {key:?} took {worst:?} (budget {budget:?})");
+        }
+    }
+
+    /// The view moves under a long `//!` header that folds to less than a screen (short lines, one paragraph):
+    /// counting rows from the top walks its lines past what `Measure` looked at first, each a row of none — the
+    /// block is looked for once there, not for each line (~400 lines scanned a line, twice a step).
+    #[test]
+    fn perf_budget_key_to_frame_under_a_long_header() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_under_a_long_header") {
+            return;
+        }
+        let budget = frame_budget();
+        let mut text: String = (0..300).map(|i| format!("//! a b {i}\n")).collect();
+        text.extend((0..3_000).map(|i| format!("fn f{i}() {{}}\n")));
+        let rope = Rope::from_str(&text);
+        let keys =
+            ["g", "b", "g", "t", "g", "c", "z", "k", "z", "b", "z", "z", "z", "t", "j", "k", "C-d", "C-u"];
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = rope.clone();
+            ed.docs[0].path = Some(std::path::PathBuf::from("/nonexistent/header.rs"));
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 120, 40).unwrap();
+            let rows = ed.view.iter().filter(|r| matches!(r, crate::codeview::Row::Doc { .. })).count();
+            assert!((1..30).contains(&rows), "the header folds to less than a screen: {rows}");
+            keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 120, 40)).collect()
+        });
+        measured("key_to_frame_under_a_long_header", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
     }
 

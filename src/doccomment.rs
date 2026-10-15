@@ -91,6 +91,7 @@ pub fn scan(
 pub struct Block {
     pub start: usize,
     pub end: usize,
+    /// The display column its marker starts at (tabs to their stops) — where its folded rows are drawn.
     pub indent: usize,
     pub bodies: Vec<String>,
 }
@@ -103,18 +104,19 @@ pub struct Folded {
     pub rows: Vec<(crate::codeview::Spans, bool)>,
 }
 
-pub type FoldsKey = (crate::document::DocId, u64, usize, String, Option<String>);
+pub type FoldsKey = (crate::document::DocId, u64, (usize, usize), String, Option<String>);
 
-/// Every doc comment block of a document laid out folded, for `key` = (document, version, width, theme, the
-/// language its grammar parses — example code is coloured by it: a grammar loading lays it out again).
+/// Every doc comment block of a document laid out folded, for `key` = (document, version, width and tab width,
+/// theme, the language its grammar parses — example code is coloured by it: a grammar loading lays it out again).
 pub struct Folds {
     pub key: FoldsKey,
     /// In order of their lines.
     pub blocks: Vec<Folded>,
 }
 
-/// The doc comment blocks among `lines` (`scan` over them: start it far enough above to join a `/** */`).
-pub fn blocks(text: &ropey::Rope, lines: std::ops::RangeInclusive<usize>) -> Vec<Block> {
+/// The doc comment blocks among `lines` (`scan` over them: start it far enough above to join a `/** */`), tabs
+/// `tab` wide.
+pub fn blocks(text: &ropey::Rope, lines: std::ops::RangeInclusive<usize>, tab: usize) -> Vec<Block> {
     let w0 = *lines.start();
     let info: Vec<Option<(usize, String)>> = scan(text, lines).collect();
     let mut out = Vec::new();
@@ -130,6 +132,7 @@ pub fn blocks(text: &ropey::Rope, lines: std::ops::RangeInclusive<usize>) -> Vec
         }
         let bodies =
             info[start..i].iter().map(|x| x.as_ref().map(|v| v.1.clone()).unwrap_or_default()).collect();
+        let indent = crate::movement::visual_col(text, text.line_to_byte(w0 + start) + indent, tab);
         out.push(Block { start: w0 + start, end: w0 + i - 1, indent, bodies });
     }
     out

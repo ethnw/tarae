@@ -248,15 +248,194 @@ impl Changes {
     }
 }
 
+/// The screen rows a pane's lines take, as `term::rows_pane` lays them out — what scrolling counts
+/// (`term::scroll_to_cursor`, `viewalign`): a line's wrapped rows, the removed rows above it, and for a doc
+/// comment block that shows folded its rows on its first line and none on the rest (`j`/`k` step over it as one
+/// line; a top inside it is its first line with rows skipped, as it's drawn).
+pub struct Measure<'a> {
+    editor: &'a Editor,
+    doc: &'a Document,
+    editing: bool,
+    wrap: Option<usize>,
+    cols: usize,
+    tab: usize,
+    changes: Changes,
+    /// The doc comment blocks among `near` (none where they don't render), each with whether it shows folded once
+    /// asked (`Editor::doc_block_closed` — its rows are laid out only when a line of it is counted).
+    blocks: Vec<(crate::doccomment::Block, std::cell::OnceCell<bool>)>,
+    /// The lines `blocks` were looked for in — elsewhere a line's block is looked for by itself.
+    near: std::ops::RangeInclusive<usize>,
+    /// The last block found outside `near`, with whether it shows folded: a long one (a big `//!` header) is
+    /// looked for once, not for each of its lines a move counts past `near` (each ~400 lines scanned).
+    far: std::cell::RefCell<Option<(crate::doccomment::Block, bool)>>,
+    folding: bool,
+}
+
+/// A document's folded doc comment blocks' row counts (by first line) for one version, code width and tab width
+/// — what `Measure` counts, kept so a key doesn't lay them out again.
+#[derive(Default)]
+pub struct FoldCounts {
+    key: (u64, usize, usize),
+    rows: std::collections::HashMap<usize, usize>,
+}
+
+impl<'a> Measure<'a> {
+    /// For a pane on `doc` whose code is `cols` wide (`wrap`: soft-wrapped at it), `rows` tall, its lines near
+    /// `line` looked at.
+    pub fn new(
+        editor: &'a Editor,
+        doc: &'a Document,
+        editing: bool,
+        (wrap, cols): (Option<usize>, usize),
+        line: usize,
+        rows: usize,
+    ) -> Measure<'a> {
+        let last = crate::movement::last_line(&doc.text);
+        // (the lines the moves count: a screen up from the cursor's, one down from a top)
+        let near = line.saturating_sub(rows + 2)..=(line + rows + 2).min(last);
+        let folding = editor.doc_comments_render(doc.lang_name());
+        // (from far enough above to join a `/** */` that starts there, as `rows_pane` looks)
+        let blocks = match folding {
+            true => crate::doccomment::blocks(
+                &doc.text,
+                near.start().saturating_sub(200)..=*near.end(),
+                editor.config.tab_width,
+            ),
+            false => Vec::new(),
+        };
+        Measure {
+            editor,
+            doc,
+            editing,
+            wrap,
+            cols,
+            tab: editor.config.tab_width,
+            changes: Changes::of(doc),
+            blocks: blocks.into_iter().map(|b| (b, std::cell::OnceCell::new())).collect(),
+            near,
+            far: Default::default(),
+            folding,
+        }
+    }
+
+    /// Every line near is one row: nothing wraps, no removed rows, no block shows folded (asked of the fold rule
+    /// only — nothing laid out).
+    pub fn uniform(&self) -> bool {
+        let near = |b: &crate::doccomment::Block| b.end >= *self.near.start();
+        self.wrap.is_none()
+            && !self.changes.rows()
+            && self
+                .blocks
+                .iter()
+                .filter(|(b, _)| near(b))
+                .all(|(b, closed)| !*closed.get_or_init(|| self.closed(b)))
+    }
+
+    fn closed(&self, b: &crate::doccomment::Block) -> bool {
+        self.editor.doc_block_closed(self.doc, self.editing, (b.start, b.end))
+    }
+
+    /// A folded block's rows: laid out once for a version of the document and a width (`Document.fold_counts`),
+    /// not on every key — counted without colouring its example code (a row each either way).
+    fn laid(&self, b: &crate::doccomment::Block) -> usize {
+        let mut counts = self.doc.fold_counts.borrow_mut();
+        let key = (self.doc.version(), self.cols, self.tab);
+        if counts.key != key {
+            *counts = FoldCounts { key, rows: Default::default() };
+        }
+        *counts.rows.entry(b.start).or_insert_with(|| {
+            let width = self.cols.saturating_sub(b.indent + 3).max(8);
+            crate::term::fold_rows(self.editor, &crate::doccomment::parts(&b.bodies), width, None).len()
+        })
+    }
+
+    /// The doc comment block holding `l` when it shows folded: (first line, last line, its rows).
+    pub fn folded(&self, l: usize) -> Option<(usize, usize, usize)> {
+        if !self.folding {
+            return None;
+        }
+        if self.near.contains(&l) {
+            let i = self.blocks.partition_point(|(b, _)| b.end < l);
+            let (b, closed) = self.blocks.get(i).filter(|(b, _)| b.start <= l)?;
+            return closed.get_or_init(|| self.closed(b)).then(|| (b.start, b.end, self.laid(b)));
+        }
+        if let Some((b, closed)) = &*self.far.borrow()
+            && (b.start..=b.end).contains(&l)
+        {
+            return closed.then(|| (b.start, b.end, self.laid(b)));
+        }
+        let (a, e) = crate::doccomment::block_at(&self.doc.text, l)?;
+        let b = crate::doccomment::blocks(&self.doc.text, a..=e, self.tab).into_iter().next()?;
+        let closed = self.closed(&b);
+        let shown = closed.then(|| (a, e, self.laid(&b)));
+        *self.far.borrow_mut() = Some((b, closed));
+        shown
+    }
+
+    /// The line `l` is drawn as: a folded block's first line, else itself.
+    pub fn shown_as(&self, l: usize) -> usize {
+        self.folded(l).map_or(l, |(a, ..)| a)
+    }
+
+    /// `l`'s soft-wrapped rows (one whole row when it doesn't wrap).
+    pub fn wrapped(&self, l: usize) -> Vec<crate::wrap::Row> {
+        match self.wrap {
+            Some(w) => crate::wrap::rows(&self.doc.text, l, w, self.tab),
+            None => vec![crate::wrap::Row { start: 0, col: 0, end_col: usize::MAX, x0: 0 }],
+        }
+    }
+
+    /// The removed rows above `l`.
+    pub fn removed(&self, l: usize) -> usize {
+        self.changes.rows_above(self.doc, l, self.wrap, self.tab)
+    }
+
+    /// The rows `l` takes: the removed ones above it, then its own.
+    pub fn rows(&self, l: usize) -> usize {
+        self.removed(l)
+            + match self.folded(l) {
+                Some((a, _, n)) if l == a => n,
+                Some(_) => 0,
+                None => self.wrapped(l).len(),
+            }
+    }
+
+    /// The rows of `l` that can go above the screen while it's the top line: its own but the last (none under
+    /// removed rows — those are shown whole).
+    pub fn skippable(&self, l: usize) -> usize {
+        if self.removed(l) > 0 {
+            return 0;
+        }
+        match self.folded(l) {
+            Some((a, _, n)) if l == a => n - 1,
+            Some(_) => 0,
+            None => self.wrapped(l).len() - 1,
+        }
+    }
+
+    /// A top line as drawn: inside a folded block, its first line with the rows above `top` skipped.
+    pub fn top(&self, top: usize, skip: usize) -> (usize, usize) {
+        match self.folded(top) {
+            Some((a, _, n)) if top > a => (a, (top - a).min(n - 1)),
+            _ => (top, skip.min(self.skippable(top))),
+        }
+    }
+}
+
 impl Editor {
     /// Parses document `id`'s review base whole on a worker (`Document.base_syntax`) — a frame only when its
-    /// removed rows are on screen.
+    /// removed rows are on screen. Not while its own trees are gone (`trees_follow_sight` asks again when it's
+    /// shown), nor twice at once.
     pub fn base_parse(&mut self, id: crate::document::DocId) {
-        let Some(d) = self.docs.iter().find(|d| d.id == id) else { return };
-        let (Some(base), Some(lang)) = (d.review_base.clone(), d.syntax.as_ref().map(|s| s.lang.clone()))
-        else {
+        let Some(d) = self.docs.iter_mut().find(|d| d.id == id) else { return };
+        let syntax = d.syntax.as_ref().filter(|s| !s.dormant);
+        let (Some(base), Some(lang)) = (d.review_base.clone(), syntax.map(|s| s.lang.clone())) else {
             return;
         };
+        if d.base_parsing {
+            return;
+        }
+        d.base_parsing = true;
         let seq = d.base_seq;
         self.events.jobs().spawn(move || {
             let syn = crate::syntax::Syntax::parsed(lang, &base);
@@ -266,7 +445,16 @@ impl Editor {
                     ed.unchanged = true;
                     return;
                 };
-                d.base_syntax = Some(syn);
+                d.base_parsing = false;
+                // (its trees went while it parsed: so does the base's — asked again when it's shown)
+                if d.syntax.as_ref().is_none_or(|s| s.dormant) {
+                    crate::event::drop_later(syn);
+                    ed.unchanged = true;
+                    return;
+                }
+                if let Some(old) = d.base_syntax.replace(syn) {
+                    crate::event::drop_later(old);
+                }
                 // (the removed rows' lines: in a pane of the last frame?)
                 let gone = |l: usize| d.git_hunks.iter().any(|h| h.removed > 0 && h.lines.start == l);
                 let views = &ed.session.views;
@@ -493,14 +681,14 @@ impl Row {
     }
 
     /// For the mouse: (doc line, display column at the row's first text cell, cells before the text,
-    /// column the row stops before).
+    /// column the row stops before). A row whose text isn't the line's is one place of it, wherever it's
+    /// clicked: a removed line the start of the line it went above, a folded doc comment its first line where
+    /// the comment starts (it doesn't scroll sideways).
     pub fn origin(&self, left: usize) -> (usize, usize, usize, usize) {
         match self {
-            Row::Text { line, part: Some(p), .. } | Row::Other { at: line, part: Some(p), .. } => {
-                (*line, p.row.col, p.row.x0, p.row.end_col)
-            }
-            // (a folded block doesn't scroll sideways)
-            Row::Doc { start, .. } => (*start, 0, 0, usize::MAX),
+            Row::Text { line, part: Some(p), .. } => (*line, p.row.col, p.row.x0, p.row.end_col),
+            Row::Other { at, .. } => (*at, 0, 0, 1),
+            Row::Doc { start, indent, .. } => (*start, *indent, 0, indent + 1),
             _ => (self.line(), left, 0, usize::MAX),
         }
     }

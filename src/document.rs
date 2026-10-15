@@ -235,9 +235,14 @@ pub struct Document {
     /// the version it was seen in): its lines on the review's wash, the ones they replaced above them.
     pub shown: Option<Vec<crate::replay::Hunk>>,
     /// `review_base` parsed whole, for its removed rows' colours (`Editor::base_parse`, on a worker) — until it
-    /// lands they're coloured one line at a time. `base_seq` tells a parse of an older base from this one's.
+    /// lands they're coloured one line at a time. It follows sight as the document's own trees do
+    /// (`Editor::trees_follow_sight`: gone with them, parsed again when shown). `base_seq` tells a parse of an
+    /// older base from this one's; `base_parsing`, one under way.
     pub base_syntax: Option<crate::syntax::Syntax>,
     pub base_seq: u64,
+    pub base_parsing: bool,
+    /// Its folded doc comments' row counts, for scrolling (`codeview::Measure`).
+    pub fold_counts: std::cell::RefCell<crate::codeview::FoldCounts>,
 }
 
 impl Document {
@@ -245,6 +250,7 @@ impl Document {
     pub fn set_review_base(&mut self, base: Option<ropey::Rope>) {
         self.review_base = base;
         self.base_seq += 1;
+        self.base_parsing = false;
         if let Some(old) = self.base_syntax.take() {
             crate::event::drop_later(old);
         }
@@ -295,6 +301,8 @@ impl Document {
             review_base: None,
             base_syntax: None,
             base_seq: 0,
+            base_parsing: false,
+            fold_counts: Default::default(),
             indent_unit: std::cell::Cell::new(None),
             diff_of: None,
             conflicts: Vec::new(),

@@ -337,8 +337,9 @@ pub struct Screen {
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// The in-buffer review's change in hand: its first and last screen rows.
     pub review_change: std::cell::Cell<Option<(usize, usize)>>,
-    /// The in-buffer review's changes: every screen row of one (its header, its lines) — cards keep off them.
-    pub review_rows: std::cell::RefCell<Vec<usize>>,
+    /// The in-buffer review's changes: every screen row of one (its header, its lines) and which change — cards
+    /// keep off them, a click takes that change in hand.
+    pub review_rows: std::cell::RefCell<Vec<(usize, usize)>>,
     /// The cards' half-block edges this frame — `screen::Screen::present` seats them on what's under them.
     pub edges: std::cell::RefCell<Vec<crate::screen::Edge>>,
     /// The task panel's: (first, last, rows of output).
@@ -2223,13 +2224,21 @@ impl Editor {
             }
             return;
         }
-        // The wheel over a change in review scrolls it (#61: a long insertion ran off the screen)
+        // The wheel over a change in review scrolls it (#61: a long insertion ran off the screen); a click on a
+        // change takes it in hand (the view stays: it's in sight; one answered already, to change the answer, as
+        // `tab` can't) — the review has no cursor, a click elsewhere moves nothing
         if let Some(r) = self.session.review.as_mut().filter(|r| r.ready)
             && x < s.chat_x.unwrap_or(usize::MAX)
         {
             match m.kind {
                 K::ScrollDown => (r.scroll, r.follow) = (r.scroll + 3, false),
                 K::ScrollUp => (r.scroll, r.follow) = (r.scroll.saturating_sub(3), false),
+                K::Down => {
+                    let hunk = s.review_rows.borrow().iter().find(|c| c.0 == y).map(|c| c.1);
+                    if let Some(i) = hunk.filter(|&i| r.hunks.get(i).is_some_and(|h| !h.conflict)) {
+                        (r.current, r.follow) = (i, false);
+                    }
+                }
                 _ => {}
             }
         }
@@ -3055,11 +3064,16 @@ impl Editor {
     pub fn trees_follow_sight(&mut self, now: std::time::Instant) {
         let current = self.doc().id;
         let shown = |id: DocId, views: &[View]| id == current || views.iter().any(|v| v.doc == id);
+        // (a review's base parse goes and comes back with the trees: shown without it, it's asked again)
+        let mut bases = Vec::new();
         for d in &mut self.docs {
             if shown(d.id, &self.session.views) {
                 d.seen = Some(now);
                 if let Some(s) = d.syntax.as_mut() {
                     s.dormant = false;
+                }
+                if d.review_base.is_some() && d.base_syntax.is_none() && !d.base_parsing {
+                    bases.push(d.id);
                 }
             }
         }
@@ -3076,7 +3090,13 @@ impl Editor {
             };
             if let Some(s) = d.syntax.as_mut().filter(|s| !keep && !s.dormant) {
                 s.sleep();
+                if let Some(base) = d.base_syntax.take() {
+                    crate::event::drop_later(base);
+                }
             }
+        }
+        for id in bases {
+            self.base_parse(id);
         }
     }
 
@@ -8837,7 +8857,7 @@ mod tests {
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 120, 40).unwrap();
         let (_, y, _, h) = ed.screen.thought_card.get().expect("the follow card");
-        let rows = ed.screen.review_rows.borrow().clone();
+        let rows: Vec<usize> = ed.screen.review_rows.borrow().iter().map(|r| r.0).collect();
         assert!(rows.iter().any(|&r| r > 30), "the second change is near the bottom: {rows:?}");
         assert!(!rows.iter().any(|r| (y..y + h).contains(r)), "card {y}..{} over {rows:?}", y + h);
         std::fs::remove_dir_all(&dir).ok();
