@@ -1,0 +1,447 @@
+### rebase
+== 100 × 50, the anchor column on: 18 rows × 91 columns, folds []
+ rebase · a session's rebase onto its base                  12 states · 15 transitions · 1 ▲ changed
+▸● base moved · card                                        ƒ Moved::card
+ │ y
+ ● checkout looked at ◀───────────────────╮                 ƒ Editor::rebase_check
+ ├─changes─▶ ● held · card ─s autostash───┤                 ƒ Held::card
+ ├─busy─▶ ● queued behind a run ─its turn─╯                 ƒ Editor::rebase_queued
+ │ clean
+▎● git running · 2/5 ◀──────────────────────────────────╮   ƒ Editor::rebase_run
+ ├─▶ ● done · bring card ─y bring · p preflight─▶ end   │   ƒ Moved::bring_card
+ ├─▶ ● aborted                                          │   ƒ Ended::Aborted
+ ├─▶ ▲ failed to begin                                  │   ▲ Ended::Failed · changed
+ │ conflicts                                            │
+ ╎ stopped at a conflict ◀─ ▸● taken up after a restart │   ƒ Stage::Stopped · rebase_adopt
+ ╎ ● Claude resolving ◀───────╮                         │   ƒ Editor::rebase_ask
+ ╎ │ turn over                │                         │
+ ╎ ● markers left? ─some left─╯                         │   ƒ turn_over
+ │ none left                                            │
+ ● resolved · review and card ─y continue · X abort─────╯   ƒ Editor::rebase_checked
+== 60 × 24: 18 rows × 57 columns, folds []
+ rebase · a session's rebase onto its base         12 states
+▸● base moved · card
+ │ y
+ ● checkout looked at ◀───────────────────╮
+ ├─changes─▶ ● held · card ─s autostash───┤
+ ├─busy─▶ ● queued behind a run ─its turn─╯
+ │ clean
+▎● git running · 2/5 ◀──────────────────────────────────╮
+ ├─▶ ● done · bring card ─y bring · p preflight─▶ end   │
+ ├─▶ ● aborted                                          │
+ ├─▶ ▲ failed to begin                                  │
+ │ conflicts                                            │
+ ╎ stopped at a conflict ◀─ ▸● taken up after a restart │
+ ╎ ● Claude resolving ◀───────╮                         │
+ ╎ │ turn over                │                         │
+ ╎ ● markers left? ─some left─╯                         │
+ │ none left                                            │
+ ● resolved · review and card ─y continue · X abort─────╯
+### run
+== 100 × 50, the anchor column on: 36 rows × 87 columns, folds []
+ run · a run of Claude's, its ask to its answer                  15 states · 6 ends · 32 transitions
+▸╎ until it starts ─turn ended─▶ dropped                  ƒ queued::turn_over
+ ╎ ● asked · run tool                                     ƒ tools::run
+ ╎ ├─too long─▶ refused
+ ╎ ├─same run─▶ joined                                    ƒ queued::join
+ ╎ ├─reads only─▶ ● judged where it reads                 ƒ tools::read_only
+ ╎ │              ├─inside──╮
+ ╎ │              ╰─past─╮  │
+ ╎ ├─asks─▶ ● run card ◀─╯  │                             ƒ tools::card
+ ╎ │        ├─n─▶ told no   │
+ ╎ │        ╰─y · a · A─────┤
+ ╎ │ allowed                │
+ ╎ ● admitted ◀─────────────╯                             ƒ queued::admit
+ ╎ ├─same run─▶ joined
+▎╎ ├─slot busy─▶ ● in line · 2nd ◀───────────────────╮    ƒ queued::push_at
+ ╎ │             ├─s in :procs─▶ not run             │    ƒ queued::leave
+ ╎ │             ╰─its turn───────────────╮          │
+ ╎ │ free                                 │          │
+ ╎ ● made a protected name? ◀─────────────┤          │    ƒ tools::guard_then_go · 2622
+ ╎ ├─yes─▶ ● made card ─y keep · r remove─┤          │    ƒ tools::ask_made
+ ╎ │       ╰─n─▶ told no                  │          │
+ ╎ ├─a commit─▶ ● its tree written ───────╯          │    ƒ basetree::export
+ ╎ │ clear                                           │
+ ╎ ● sandbox made                                    │    ƒ tools::guard_then_go · 2669
+ ╎ ├─partial · none─▶ ● no-sandbox card ─n─▶ told no │    ƒ tools::ask_unprotected
+ ╎ │                  ╰─y · a────╮                   │
+ ╎ ├─policy failed─▶ not started │                   │    ƒ tools::not_started
+ ╎ │ in it                       │                   │
+ ╎ ● saved · snapshot ◀──────────╯                   │    ƒ tools::go
+ ● started ─slot taken───────────────────────────────╯    ƒ tools::go_now
+ ● running · task panel                                   ƒ tools::run_start
+ │ ended
+ ● what it changed                                        ƒ tools::run_changes_now
+ ├─made protected─▶ ↑ made a protected name? · next run
+ │ report
+ ● answered                                               ƒ tools::run_done
+== 60 × 30: 30 rows × 55 columns, folds [Moved(6)]
+ run · a run of Claude's, its ask to its answer    15 states
+▸╎ until it starts ─turn ended─▶ dropped
+ ╎ ● asked · run tool  ↓ allowed
+ ╎ ├─too long─▶ refused
+ ╎ ├─same run─▶ joined
+ ╎ ├─reads only─▶ ● judged where it reads
+ ╎ │              ├─inside──╮
+ ╎ │              ╰─past─╮  │
+ ╎ ├─asks─▶ ● run card ◀─╯  │
+ ╎ │        ├─n─▶ told no   │
+ ╎ │        ╰─y · a · A─────┤
+ ╎ ● admitted  ↓ free ◀─────╯
+ ╎ ├─same run─▶ joined
+▎╎ ├─slot busy─▶ ● in line · 2nd ◀───────────────────╮
+ ╎ │             ├─s in :procs─▶ not run             │
+ ╎ │             ╰─its turn───────────────╮          │
+ ╎ ● made a protected name?  ↓ clear ◀────┤          │
+ ╎ ├─yes─▶ ● made card ─y keep · r remove─┤          │
+ ╎ │       ╰─n─▶ told no                  │          │
+ ╎ ├─a commit─▶ ● its tree written ───────╯          │
+ ╎ ● sandbox made  ↓ in it                           │
+ ╎ ├─partial · none─▶ ● no-sandbox card ─n─▶ told no │
+ ╎ │                  ╰─y · a────╮                   │
+ ╎ ├─policy failed─▶ not started │                   │
+ ╎ ● saved · snapshot ◀──────────╯                   │
+ ● started ─slot taken───────────────────────────────╯
+ ● running · task panel  ↓ ended
+ ● what it changed  ↓ report
+ ├─made protected─▶ ↑ made a protected name? · next run
+ ● answered
+### card
+== 100 × 50, the anchor column on: 28 rows × 75 columns, folds []
+ card · a card's life, asked to gone                             14 states · 2 ends · 20 transitions
+▸● asked · push_offer                              ƒ Editor::push_offer
+ ├─same title─▶ merged                             ƒ push_offer · 1085
+ ├─session behind─▶ ● parked ─session in front─╮   ƒ push_offer · 1076
+ │ placed by rank                              │
+ ╎ up ─turn ended─▶ dropped                    │   ƒ Editor::drop_cards_for
+ ╎ ● stacked ◀─────────────────────────────────┤   ƒ Editor::offer_place
+ ╎ │ first                                     │
+ ╎ ╎ in front ─one ranking first───────────────╯   ƒ Editor::offer_to_front
+ ╎ ╎ ● settling ◀─────────────╮                    ƒ Editor::offer_settled
+ ╎ ╎ │ in sight               │
+ ╎ ╎ ● settled ─text replaced─╯                    ƒ offer_settled · 2000
+ ╎ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+ ╎ ╎ ● keys elsewhere ◀────────────╮               ƒ Editor::card_has_keys
+ ╎ ╎ │ keys free · C-q             │
+▎╎ ╎ ● has the keys ─prompt · chat─╯               ƒ Editor::card_key
+ ╎ ╎ ╰─y · a · A · n · r───────────────────╮
+ ╎ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   │
+ ╎ ╎ ◦ whole ◀──────────────────────────╮  │       ◦ untied
+ ╎ ╎ ├─v─▶ ● text open ─read to its end─┤  │       ƒ Editor::offer_viewing
+ ╎ ╎ ╰─h─▶ ● aside ─h───────────────────╯  │       ƒ Editor::offer_bar
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   │
+ ╎ ● asking                                │       ƒ OfferState::Asking
+ ╎ │ y on a download                       │
+ ╎ ● downloading ◀───────╮                 │       ƒ OfferState::Installing
+ ╎ ╰─▶ ● failed ─y again─╯                 │       ƒ OfferState::Failed
+ │ done                                    │
+ ● gone · answered ◀───────────────────────╯       ƒ Editor::offer_finished
+== 60 × 24: 24 rows × 48 columns, folds [Moved(4)]
+ card · a card's life, asked to gone      14 states · 2 ends
+▸● asked · push_offer
+ ├─same title─▶ merged
+ ├─session behind─▶ ● parked ─session in front─╮
+ │ placed by rank                              │
+ ╎ up ─turn ended─▶ dropped                    │
+ ╎ ● stacked  ↓ first ◀────────────────────────┤
+ ╎ ╎ in front ─one ranking first───────────────╯
+ ╎ ╎ ● settling  ↓ in sight ◀─╮
+ ╎ ╎ ● settled ─text replaced─╯
+ ╎ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+ ╎ ╎ ● keys elsewhere  ↓ keys free · C-q ◀─╮
+▎╎ ╎ ● has the keys ─prompt · chat─────────╯
+ ╎ ╎ ╰─y · a · A · n · r────────────────────╮
+ ╎ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │
+ ╎ ╎ ◦ whole ◀──────────────────────────╮   │
+ ╎ ╎ ├─v─▶ ● text open ─read to its end─┤   │
+ ╎ ╎ ╰─h─▶ ● aside ─h───────────────────╯   │
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │
+ ╎ ● asking  ↓ y on a download              │
+ ╎ ● downloading ◀───────╮                  │
+ ╎ ╰─▶ ● failed ─y again─╯                  │
+ │ done                                     │
+ ● gone · answered ◀────────────────────────╯
+### keeper
+== 100 × 50, the anchor column on: 35 rows × 70 columns, folds []
+ keeper · a session's keeper, as tarae sees it — Linux           12 states · 4 ends · 20 transitions
+▸● asked for · a run's policy ◀─────────╮   ƒ keeper::ready
+ ├─died too often─▶ refused             │   ƒ keeper::ready · 195
+ ├─one fits──────────────────────────╮  │
+ │ none · another key                │  │
+ ● born · clone3                     │  │   ƒ Keeper::born_lo
+ ├─a step failed─▶ couldn't start    │  │
+ │ exec'd                            │  │
+▎● waiting for Ready                 │  │   ƒ keeper::said_ready
+ ├─Ready─────────────────────────────┤  │
+ ├─none───────────────────────────╮  │  │
+ │ own network                    │  │  │
+ ● planting · its sockets         │  │  │   ƒ Keeper::plant
+ ├─failed─────────────────────────┤  │  │
+ │ planted                        │  │  │
+ ╎ alive ◀────────────────────────│──╯  │   ƒ Keeper::heard
+ ╎ ● a run asked · ×n             │     │   ƒ channel::Msg::Run
+ ╎ ├─no Started─▶ not started     │     │
+ ╎ │ forked                       │     │
+ ╎ ◦ its child readies            │     │   ◦ keeper::child · 2 places
+ ╎ ├─a step failed─▶ failed at it │     │   ƒ channel::Step
+ ╎ │ exec'd                       │     │
+ ╎ ● running · its pidfd          │     │   ƒ channel::Msg::Started
+ ╎ ├─signal─▶ itself              │     │
+ ╎ │ reaped                       │     │
+ ╎ ● exited · its status          │     │   ƒ channel::Msg::Exited
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │     │
+ ╎ ● serving                      │     │   ƒ Keeper::run
+ ╎ │ another key                  │     │
+ ╎ ● draining · its runs go on    │     │   ƒ keeper::ready · 179
+ ╎ │ the last exited              │     │
+ ╎ ● ending · End sent            │     │   ƒ Keeper::end
+ │ exited                         │     │
+ ● gone ◀─────────────────────────╯     │   ƒ Keeper::gone
+ ╰─the next ask─────────────────────────╯
+== 60 × 30: 30 rows × 57 columns, folds [Moved(5)]
+ keeper · a session's keeper, as tarae sees it     12 states
+▸● asked for · a run's policy  ↓ none · another key ◀───╮
+ ├─died too often─▶ refused                             │
+ ├─one fits──────────────────────────────────────────╮  │
+ ● born · clone3  ↓ exec'd                           │  │
+ ├─a step failed─▶ couldn't start                    │  │
+▎● waiting for Ready                                 │  │
+ ├─Ready─────────────────────────────────────────────┤  │
+ ├─none───────────────────────────────────────────╮  │  │
+ │ own network                                    │  │  │
+ ● planting · its sockets                         │  │  │
+ ├─failed─────────────────────────────────────────┤  │  │
+ │ planted                                        │  │  │
+ ╎ alive ◀────────────────────────────────────────│──╯  │
+ ╎ ● a run asked · ×n                             │     │
+ ╎ ├─no Started─▶ not started                     │     │
+ ╎ │ forked                                       │     │
+ ╎ ◦ its child readies                            │     │
+ ╎ ├─a step failed─▶ failed at it                 │     │
+ ╎ │ exec'd                                       │     │
+ ╎ ● running · its pidfd                          │     │
+ ╎ ├─signal─▶ itself                              │     │
+ ╎ │ reaped                                       │     │
+ ╎ ● exited · its status                          │     │
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │     │
+ ╎ ● serving  ↓ another key                       │     │
+ ╎ ● draining · its runs go on  ↓ the last exited │     │
+ ╎ ● ending · End sent  ↓ exited                  │     │
+ ● gone ◀─────────────────────────────────────────╯     │
+ ╰─the next ask─────────────────────────────────────────╯
+### keeper, narrowing
+== 60 × 50, the anchor column on: 35 rows × 41 columns, folds [Anchors]
+ keeper · a session's keeper, as tarae sees it     12 states
+▸● asked for · a run's policy ◀─────────╮
+ ├─died too often─▶ refused             │
+ ├─one fits──────────────────────────╮  │
+ │ none · another key                │  │
+ ● born · clone3                     │  │
+ ├─a step failed─▶ couldn't start    │  │
+ │ exec'd                            │  │
+▎● waiting for Ready                 │  │
+ ├─Ready─────────────────────────────┤  │
+ ├─none───────────────────────────╮  │  │
+ │ own network                    │  │  │
+ ● planting · its sockets         │  │  │
+ ├─failed─────────────────────────┤  │  │
+ │ planted                        │  │  │
+ ╎ alive ◀────────────────────────│──╯  │
+ ╎ ● a run asked · ×n             │     │
+ ╎ ├─no Started─▶ not started     │     │
+ ╎ │ forked                       │     │
+ ╎ ◦ its child readies            │     │
+ ╎ ├─a step failed─▶ failed at it │     │
+ ╎ │ exec'd                       │     │
+ ╎ ● running · its pidfd          │     │
+ ╎ ├─signal─▶ itself              │     │
+ ╎ │ reaped                       │     │
+ ╎ ● exited · its status          │     │
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │     │
+ ╎ ● serving                      │     │
+ ╎ │ another key                  │     │
+ ╎ ● draining · its runs go on    │     │
+ ╎ │ the last exited              │     │
+ ╎ ● ending · End sent            │     │
+ │ exited                         │     │
+ ● gone ◀─────────────────────────╯     │
+ ╰─the next ask─────────────────────────╯
+== 40 × 50, the anchor column on: 35 rows × 40 columns, folds [Anchors, Gists(12)]
+ keeper · a session's keeper, as tarae …
+▸● asked for · a run's policy ◀────────╮
+ ├─died too of…─▶ refused              │
+ ├─one fits─────────────────────────╮  │
+ │ none · anot…                     │  │
+ ● born · clone3                    │  │
+ ├─a step fail…─▶ couldn't start    │  │
+ │ exec'd                           │  │
+▎● waiting for Ready                │  │
+ ├─Ready────────────────────────────┤  │
+ ├─none──────────────────────────╮  │  │
+ │ own network                   │  │  │
+ ● planting · its sockets        │  │  │
+ ├─failed────────────────────────┤  │  │
+ │ planted                       │  │  │
+ ╎ alive ◀───────────────────────│──╯  │
+ ╎ ● a run asked · ×n            │     │
+ ╎ ├─no Started─▶ not started    │     │
+ ╎ │ forked                      │     │
+ ╎ ◦ its child readies           │     │
+ ╎ ├─a step fail…─▶ failed at it │     │
+ ╎ │ exec'd                      │     │
+ ╎ ● running · its pidfd         │     │
+ ╎ ├─signal─▶ itself             │     │
+ ╎ │ reaped                      │     │
+ ╎ ● exited · its status         │     │
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │     │
+ ╎ ● serving                     │     │
+ ╎ │ another key                 │     │
+ ╎ ● draining · its runs go on   │     │
+ ╎ │ the last ex…                │     │
+ ╎ ● ending · End sent           │     │
+ │ exited                        │     │
+ ● gone ◀────────────────────────╯     │
+ ╰─the next ask────────────────────────╯
+== 36 × 50, the anchor column on: 35 rows × 36 columns, folds [Anchors, Gists(6), Names(23)]
+ keeper · a session's keeper, as ta…
+▸● asked for · a run's po… ◀───────╮
+ ├─died …─▶ refused                │
+ ├─one f…───────────────────────╮  │
+ │ none …                       │  │
+ ● born · clone3                │  │
+ ├─a ste…─▶ couldn't start      │  │
+ │ exec'd                       │  │
+▎● waiting for Ready            │  │
+ ├─Ready────────────────────────┤  │
+ ├─none──────────────────────╮  │  │
+ │ own network               │  │  │
+ ● planting · its sockets    │  │  │
+ ├─failed────────────────────┤  │  │
+ │ plant…                    │  │  │
+ ╎ alive ◀───────────────────│──╯  │
+ ╎ ● a run asked · ×n        │     │
+ ╎ ├─no St…─▶ not started    │     │
+ ╎ │ forked                  │     │
+ ╎ ◦ its child readies       │     │
+ ╎ ├─a ste…─▶ failed at it   │     │
+ ╎ │ exec'd                  │     │
+ ╎ ● running · its pidfd     │     │
+ ╎ ├─signal─▶ itself         │     │
+ ╎ │ reaped                  │     │
+ ╎ ● exited · its status     │     │
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │     │
+ ╎ ● serving                 │     │
+ ╎ │ anoth…                  │     │
+ ╎ ● draining · its runs go… │     │
+ ╎ │ the l…                  │     │
+ ╎ ● ending · End sent       │     │
+ │ exited                    │     │
+ ● gone ◀────────────────────╯     │
+ ╰─the n…──────────────────────────╯
+== 30 × 50, the anchor column on: 35 rows × 30 columns, folds [Anchors, Gists(6), Names(8)]
+ keeper · a session's keeper,…
+▸● asked f… ◀────────────────╮
+ ├─died …─▶ refused          │
+ ├─one f…─────────────────╮  │
+ │ none …                 │  │
+ ● born · …               │  │
+ ├─a ste…─▶ couldn'…      │  │
+ │ exec'd                 │  │
+▎● waiting for Ready      │  │
+ ├─Ready──────────────────┤  │
+ ├─none────────────────╮  │  │
+ │ own network         │  │  │
+ ● plantin…            │  │  │
+ ├─failed──────────────┤  │  │
+ │ plant…              │  │  │
+ ╎ alive ◀─────────────│──╯  │
+ ╎ ● a run a…          │     │
+ ╎ ├─no St…─▶ not sta… │     │
+ ╎ │ forked            │     │
+ ╎ ◦ its chi…          │     │
+ ╎ ├─a ste…─▶ failed … │     │
+ ╎ │ exec'd            │     │
+ ╎ ● running…          │     │
+ ╎ ├─signal─▶ itself   │     │
+ ╎ │ reaped            │     │
+ ╎ ● exited …          │     │
+ ╎ ┄ at once ┄┄┄┄┄┄┄┄  │     │
+ ╎ ● serving           │     │
+ ╎ │ anoth…            │     │
+ ╎ ● drainin…          │     │
+ ╎ │ the l…            │     │
+ ╎ ● ending …          │     │
+ │ exited              │     │
+ ● gone ◀──────────────╯     │
+ ╰─the n…────────────────────╯
+== 24 × 50, the anchor column on: 35 rows × 28 columns, folds [Anchors, Gists(6), Names(4)]
+ keeper · a session's k…
+▸● ask… ◀──────────────────╮
+ ├─died …─▶ ref…           │
+ ├─one f…───────────────╮  │
+ │ none …               │  │
+ ● bor…                 │  │
+ ├─a ste…─▶ cou…        │  │
+ │ exec'd               │  │
+▎● waiting for Ready    │  │
+ ├─Ready────────────────┤  │
+ ├─none──────────────╮  │  │
+ │ own network       │  │  │
+ ● pla…              │  │  │
+ ├─failed────────────┤  │  │
+ │ plant…            │  │  │
+ ╎ ali… ◀────────────│──╯  │
+ ╎ ● a r…            │     │
+ ╎ ├─no St…─▶ not…   │     │
+ ╎ │ forked          │     │
+ ╎ ◦ its…            │     │
+ ╎ ├─a ste…─▶ fai…   │     │
+ ╎ │ exec'd          │     │
+ ╎ ● run…            │     │
+ ╎ ├─signal─▶ itself │     │
+ ╎ │ reaped          │     │
+ ╎ ● exi…            │     │
+ ╎ ┄ at once ┄┄┄┄┄┄  │     │
+ ╎ ● ser…            │     │
+ ╎ │ anoth…          │     │
+ ╎ ● dra…            │     │
+ ╎ │ the l…          │     │
+ ╎ ● end…            │     │
+ │ exited            │     │
+ ● gone ◀────────────╯     │
+ ╰─the n…──────────────────╯
+### rails, narrowing
+== 100 × 50: 16 rows × 21 columns, folds []
+ rails · five ways back                                                    6 states · 10 transitions
+▸◦ a ◀──────────────╮
+ │ one              │
+ ◦ b ◀───────────╮  │
+ │ two           │  │
+ ◦ c ◀────────╮  │  │
+ │ three      │  │  │
+ ◦ d ◀─────╮  │  │  │
+ │ four    │  │  │  │
+ ◦ e ◀──╮  │  │  │  │
+ │ five │  │  │  │  │
+ ◦ f ─z─╯  │  │  │  │
+ ├─y───────╯  │  │  │
+ ├─x──────────╯  │  │
+ ├─w─────────────╯  │
+ ╰─v────────────────╯
+== 15 × 50: 16 rows × 15 columns, folds [Refs(4)]
+ rails · five …
+▸◦ a
+ │ one
+ ◦ b
+ │ two
+ ◦ c
+ │ three
+ ◦ d
+ │ four
+ ◦ e ◀────────╮
+ │ five       │
+ ◦ f ─v─▶ ↑ a │
+ ├─w─▶ ↑ b    │
+ ├─x─▶ ↑ c    │
+ ├─y─▶ ↑ d    │
+ ╰─z──────────╯

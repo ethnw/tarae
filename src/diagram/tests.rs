@@ -18,6 +18,7 @@ fn sample() -> Diagram {
         id: id.into(),
         label: label.into(),
         parent: parent.map(Into::into),
+        region: 0,
         at: anchor(at),
     };
     let edge =
@@ -26,6 +27,7 @@ fn sample() -> Diagram {
             to: to.map(Into::into),
             within: within.map(Into::into),
             label: label.into(),
+            next_run: false,
             at: at.and_then(anchor),
         };
     let stopped = Some("stopped");
@@ -221,6 +223,7 @@ fn stale_anchors_say_how() {
         id: "stage".into(),
         label: "the stages".into(),
         parent: None,
+        region: 0,
         at: Some(Anchor::parse(&format!("src/rebase.rs:{}-{}", stage + 1, stage + 3)).unwrap()),
     });
     let root = Path::new(ROOT);

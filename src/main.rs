@@ -34,6 +34,7 @@ mod completion;
 mod config;
 mod conflict;
 mod containers;
+mod cut;
 mod dap;
 mod debugpack;
 mod diagram;

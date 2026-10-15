@@ -20,6 +20,8 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::cut::{fit, fit_ellipsis};
+
 use crate::chrome::Keys;
 use crate::config::{CursorShape, LineNumber};
 use crate::editor::{Editor, Mode};
@@ -5856,20 +5858,6 @@ fn draw_diff_row(
     Ok(used)
 }
 
-fn fit(s: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut w = 0;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if w + cw > width {
-            break;
-        }
-        w += cw;
-        out.push(ch);
-    }
-    out
-}
-
 /// The code's title row, over it between the side panel and the chat: `project › folder › file ● › ƒ
 /// definition` ……… open buffers (current one bold) — and its rule under it (the accent while the code has
 /// the keys). When narrow, drop less important parts first (project, folders, outer definitions).
@@ -10720,19 +10708,6 @@ fn scroll_thumb(rows: usize, n: usize, first: usize) -> std::ops::Range<usize> {
     let len = (rows * rows).div_ceil(n).clamp(1, rows);
     let at = if n > rows { first * (rows - len) / (n - rows) } else { 0 };
     at..at + len
-}
-
-/// Truncate to width, ending with '…' if cut — nothing when there's no room at all (the `…` is a cell too).
-fn fit_ellipsis(s: &str, width: usize) -> String {
-    if s.width() <= width {
-        return s.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut out = fit(s, width.saturating_sub(1));
-    out.push('…');
-    out
 }
 
 /// Floating docs (hover) — below the cursor (above if no room), text's first cell at the cursor column.

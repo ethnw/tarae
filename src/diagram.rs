@@ -22,6 +22,8 @@ use ropey::Rope;
 
 use crate::nav::Sym;
 
+pub mod layout;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     State,
@@ -43,6 +45,8 @@ pub struct Node {
     pub label: String,
     /// The composite it's in (a node's id) — None: the diagram's top level.
     pub parent: Option<String>,
+    /// Which of its parent's regions it's in, from 0 — regions run at the same time (Mermaid's `--`).
+    pub region: usize,
     pub at: Option<Anchor>,
 }
 
@@ -55,6 +59,8 @@ pub struct Edge {
     /// The composite whose start or end a None end is — None: the diagram's.
     pub within: Option<String>,
     pub label: String,
+    /// Into the machine's next run, not this one (drawn `↑ name · next run`).
+    pub next_run: bool,
     pub at: Option<Anchor>,
 }
 
