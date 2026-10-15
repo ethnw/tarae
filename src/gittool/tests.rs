@@ -4,16 +4,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// git in `dir` as a test sets up its repository (its own name, no signing, no hooks).
-fn git_in(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+fn git_cmd(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
         .args(["-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null"])
         .args(args)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd
+}
+
+/// `git_cmd`, which must succeed.
+fn git_in(dir: &Path, args: &[&str]) {
+    let out = git_cmd(dir, args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -256,7 +260,10 @@ fn a_merges_combined_diff_never_has_the_key_file() {
     std::fs::write(dir.join("a.rs"), "fn main() {}\n").unwrap();
     git_in(&dir, &["commit", "-qam", "main"]);
     // (both sides changed both files: resolved by hand, a combined diff for each)
-    let _ = Command::new("git").args(["merge", "-q", "side"]).current_dir(&dir).output();
+    // (it stops on the conflicts — after it began, which needs a committer: without one, as root in a container,
+    // it refused and the commit below had one parent)
+    let _ = git_cmd(&dir, &["merge", "-q", "side"]).output().unwrap();
+    assert!(dir.join(".git/MERGE_HEAD").exists(), "the merge began");
     std::fs::write(dir.join(".env"), "K=tarae-fake-merged\n").unwrap();
     std::fs::write(dir.join("a.rs"), "fn merged() {}\n").unwrap();
     git_in(&dir, &["add", "-A"]);

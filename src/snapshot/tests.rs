@@ -324,7 +324,12 @@ fn a_made_name_that_cant_be_read_isnt_kept() {
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
     std::fs::write(dir.join("build.rs"), "fn main() {}\n").unwrap();
     std::fs::set_permissions(dir.join("build.rs"), std::fs::Permissions::from_mode(0o000)).unwrap();
-    for p in ["Makefile", "build.rs"] {
+    // (root reads a file of mode 000 — CAP_DAC_OVERRIDE; no regular file is unreadable to it, so as root —
+    // `cargo xtask linux`'s container — only the FIFO is a name tarae can't read)
+    // SAFETY: geteuid has no preconditions.
+    let root = unsafe { libc::geteuid() } == 0;
+    let names: &[&str] = if root { &["Makefile"] } else { &["Makefile", "build.rs"] };
+    for &p in names {
         let made = Made { path: p.into(), hash: made_hash(&dir, p) };
         assert_eq!(made.hash, "", "{p}");
         assert!(!made.keepable(), "{p}");
