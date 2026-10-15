@@ -27,6 +27,8 @@ mod codereview;
 mod commands;
 mod comment;
 mod compaction;
+#[cfg(test)]
+mod compat;
 mod completion;
 mod config;
 mod conflict;

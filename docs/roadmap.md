@@ -127,6 +127,13 @@ what the session may do rather than by what a command looks like, and **P4**, sc
 ([design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
 evidence panel, "explain this hunk".
 
+**A "must work" compatibility suite for the sandbox** (2026-10-15), ahead of §1's items 3–5 in priority. The sandbox
+must not be too strict for an open editor, and this repository, Rust only, never shows what other stacks hit. So
+popular stacks' everyday commands (install, build, test, lint, format, a dev server) run inside tarae's sandbox
+regularly, exactly as Claude's runs are, on macOS and on Linux's tiers, with a table per stack × command × OS. A
+breakage is found before a user meets it, fixed in pack data or the core, and kept from coming back by an entry the
+suite runs again.
+
 ### 3. Shuttle keys
 
 A **shuttle** is a program that works a running tarae from outside: an AI assistant, a test script. ("Agent" in

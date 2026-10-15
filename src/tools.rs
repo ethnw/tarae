@@ -1154,7 +1154,7 @@ thread_local! {
 }
 
 /// Runs `command` now (allowed), or once the user says yes on its card — answered when it ends.
-fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
+pub(crate) fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let cmd =
         args["command"].as_str().map(str::trim).filter(|c| !c.is_empty()).ok_or("command is required")?;
     // Said as what was crossed, not every limit at once ("3 lines; at most 12" read as the reason)

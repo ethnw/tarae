@@ -180,7 +180,7 @@ pub enum Why {
 }
 
 impl Why {
-    fn word(&self) -> String {
+    pub(crate) fn word(&self) -> String {
         match self {
             Why::NotACheck(p) => format!("not-a-check:{p}"),
             Why::Unreadable(_) => "unreadable".into(),
