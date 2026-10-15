@@ -184,66 +184,6 @@ pub fn parts(bodies: &[String]) -> Vec<Part> {
         .collect()
 }
 
-/// One row of the edit view: one document line, or one row of a folded doc comment block (a rendered piece).
-#[derive(Clone, Debug)]
-pub enum ViewRow {
-    Line(usize),
-    /// One screen row of a soft-wrapped line (`index` from 0; `last` = the row the line ends on).
-    Part {
-        line: usize,
-        row: crate::wrap::Row,
-        index: usize,
-        last: bool,
-    },
-    Doc {
-        /// Document line range of the block [start, end].
-        start: usize,
-        end: usize,
-        indent: usize,
-        /// Which row within the block.
-        index: usize,
-        spans: Vec<crate::markdown::Span>,
-        /// Example code row (background one shade deeper).
-        code: bool,
-    },
-    /// A line the code review's base had here and the text no longer does (shown above `before`).
-    Removed {
-        before: usize,
-        text: String,
-    },
-}
-
-impl ViewRow {
-    /// Document line this screen row points to (first line if folded — clicking goes there and unfolds it).
-    pub fn line(&self) -> usize {
-        match self {
-            ViewRow::Line(l) | ViewRow::Part { line: l, .. } => *l,
-            ViewRow::Doc { start, .. } => *start,
-            ViewRow::Removed { before, .. } => *before,
-        }
-    }
-
-    pub fn last_line(&self) -> usize {
-        match self {
-            ViewRow::Line(l) | ViewRow::Part { line: l, .. } => *l,
-            ViewRow::Doc { end, .. } => *end,
-            // Not a line of the text: it doesn't widen the per-line tables
-            ViewRow::Removed { before, .. } => before.saturating_sub(1),
-        }
-    }
-
-    /// For the mouse: (doc line, display column at the row's first text cell, cells before the text,
-    /// column the row stops before).
-    pub fn origin(&self, left: usize) -> (usize, usize, usize, usize) {
-        match self {
-            ViewRow::Part { line, row, .. } => (*line, row.col, row.x0, row.end_col),
-            // (a folded block doesn't scroll sideways)
-            ViewRow::Doc { start, .. } => (*start, 0, 0, usize::MAX),
-            _ => (self.line(), left, 0, usize::MAX),
-        }
-    }
-}
-
 /// Chunks of a folded (compacted) doc comment — regrouped by meaning, not by line breaks.
 /// Consecutive text lines are merged into one paragraph and rewrapped to the width (markdown rules — same as
 /// rustdoc), blank lines become one line between paragraphs (one even if several), code fence lines

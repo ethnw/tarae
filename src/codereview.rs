@@ -5,7 +5,7 @@
 //!   remote branch is fetched first). Changed files = `git diff --numstat` against it + untracked files.
 //! - Each file opens as the real buffer (every motion, LSP and edit still work) with the base as its diff
 //!   base: the gutter, `]g`/`[g` (which go on into the next file) and the hunk card follow it, removed lines
-//!   show in place (`ViewRow::Removed`), added ones on a green wash. A rail on the left lists the files.
+//!   show in place (`codeview::Row::Other`), added ones on a green wash. A rail on the left lists the files.
 //! - Comments are notes; while a review is open (or has drafts) `space n` writes a draft, and `space v s`
 //!   sends them all in one message with their diffs — Claude answers each on its note, its edits come as the
 //!   usual review.
@@ -2350,7 +2350,7 @@ pub struct HeldView {
     pub drawn: std::collections::HashMap<usize, (bool, bool)>,
 }
 
-/// Of the rows a frame drew of document `doc` (its panes' `ViewRow::origin`s), what of each line: its first
+/// Of the rows a frame drew of document `doc` (its panes' `codeview::Row::origin`s), what of each line: its first
 /// row (from column 0), its last (to its end). The buffer wraps, so a line is all on screen only with both — a
 /// long line's tail past the pane's edge is never "drawn".
 fn line_ends(ed: &Editor, doc: DocId) -> std::collections::HashMap<usize, (bool, bool)> {

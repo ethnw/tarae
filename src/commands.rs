@@ -1193,15 +1193,15 @@ fn extend_to_word(cx: &mut Context) {
     show_labels(cx, true)
 }
 fn show_labels(cx: &mut Context, extend: bool) {
-    use crate::doccomment::ViewRow;
+    use crate::codeview::Row;
     let ed = &*cx.editor;
     let doc = ed.doc();
     let mut lines: Vec<usize> = ed
         .view
         .iter()
         .filter_map(|v| match v {
-            ViewRow::Line(l) | ViewRow::Part { line: l, .. } => Some(*l),
-            ViewRow::Doc { .. } | ViewRow::Removed { .. } => None, // not the text's own words
+            Row::Text { line, .. } => Some(*line),
+            Row::Doc { .. } | Row::Other { .. } => None, // not the text's own words
         })
         .collect();
     lines.dedup();

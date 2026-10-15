@@ -2088,11 +2088,11 @@ fn snapshot_review_doc_comments() {
     assert!(shown.contains("/// The longest word, if there is one."), "the changed block stays raw: {shown}");
     assert!(shown.contains("/// The longest word."), "its removed row: {shown}");
     let folded = |s: &Shot| {
-        s.ed.view.iter().filter(|r| matches!(r, crate::doccomment::ViewRow::Doc { start: 0, .. })).count()
+        s.ed.view.iter().filter(|r| matches!(r, crate::codeview::Row::Doc { start: 0, .. })).count()
     };
     assert!(folded(&s) > 0, "{:?}", s.ed.view);
     assert!(
-        s.ed.view.iter().any(|r| matches!(r, crate::doccomment::ViewRow::Removed { before: 7, .. })),
+        s.ed.view.iter().any(|r| matches!(r, crate::codeview::Row::Other { at: 7, .. })),
         "both kinds of rows in one view: {:?}",
         s.ed.view
     );
@@ -2131,7 +2131,7 @@ fn snapshot_review_doc_comments() {
 /// The first lines of the focused pane's folded doc comments (its view, as drawn).
 fn folded(s: &Shot) -> Vec<usize> {
     let starts = s.ed.view.iter().filter_map(|r| match r {
-        crate::doccomment::ViewRow::Doc { start, index: 0, .. } => Some(*start),
+        crate::codeview::Row::Doc { start, index: 0, .. } => Some(*start),
         _ => None,
     });
     starts.collect()

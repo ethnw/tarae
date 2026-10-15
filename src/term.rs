@@ -3127,7 +3127,7 @@ fn draw_text(
     top: usize,
     left: usize,
     focused: bool,
-    view: &[crate::doccomment::ViewRow],
+    view: &[crate::codeview::Row],
     ui: &Ui,
     lay: &Layout,
     out: &mut impl Write,
@@ -3484,7 +3484,7 @@ fn draw_text(
                 continue;
             }
             // Folded doc comment: line number only on the block's first row; git sign if any in the block
-            Some(crate::doccomment::ViewRow::Doc { start, end, indent, index, spans, code }) => {
+            Some(crate::codeview::Row::Doc { start, end, indent, index, spans, code }) => {
                 apply(out, ui.base)?;
                 queue!(out, Spaces(signs))?;
                 // Cursor inside a folded block (normal mode): current-line number color, accent bar
@@ -3526,7 +3526,7 @@ fn draw_text(
             }
             // A line the review's base had here: `−` where the number goes (the old numbers would read as
             // the new ones — or clash with relative numbers), its text in the language's colors
-            Some(crate::doccomment::ViewRow::Removed { text: gone, .. }) => {
+            Some(crate::codeview::Row::Other { text: gone, .. }) => {
                 let base = Style { bg: removed_bg, ..ui.base };
                 apply(out, base)?;
                 queue!(out, Spaces(lay.gutter - 1))?;
@@ -3558,9 +3558,8 @@ fn draw_text(
                 clear_rest(out, base)?;
                 continue;
             }
-            Some(crate::doccomment::ViewRow::Line(l)) => (*l, None),
-            Some(crate::doccomment::ViewRow::Part { line, row, index, last }) => {
-                (*line, Some((*row, *index, *last)))
+            Some(crate::codeview::Row::Text { line, part }) => {
+                (*line, part.map(|p| (p.row, p.index, p.last)))
             }
         };
         let (line, part) = line;
@@ -4144,8 +4143,9 @@ fn build_view(
     (top, top_skip): (usize, usize),
     focused: bool,
     lay: &Layout,
-) -> Vec<crate::doccomment::ViewRow> {
-    use crate::doccomment::{ViewRow, parts};
+) -> Vec<crate::codeview::Row> {
+    use crate::codeview::{Part, Row};
+    use crate::doccomment::parts;
     let text = &doc.text;
     let rows = lay.text_rows;
     let last = mv::last_line(text);
@@ -4156,11 +4156,11 @@ fn build_view(
     // the screen, at least from the cursor's part)
     let wrap_w = editor.wraps(doc).then_some(lay.text_cols);
     let tab = editor.config.tab_width;
-    let push_line = |view: &mut Vec<ViewRow>, line: usize| {
-        let Some(w) = wrap_w else { return view.push(ViewRow::Line(line)) };
+    let push_line = |view: &mut Vec<Row>, line: usize| {
+        let Some(w) = wrap_w else { return view.push(Row::Text { line, part: None }) };
         let parts = crate::wrap::rows(text, line, w, tab);
         if parts.len() == 1 {
-            return view.push(ViewRow::Line(line));
+            return view.push(Row::Text { line, part: None });
         }
         let skip = match line == top {
             true if line == cur_line => {
@@ -4176,7 +4176,7 @@ fn build_view(
             if view.len() == rows {
                 break;
             }
-            view.push(ViewRow::Part { line, row, index, last: index + 1 == n });
+            view.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }) });
         }
     };
     // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded (raw
@@ -4190,10 +4190,10 @@ fn build_view(
     let removed = if reviewing { removed_rows(doc, top, w1 + rows) } else { Vec::new() };
     let mut next = removed.iter().peekable();
     type Next<'a> = std::iter::Peekable<std::slice::Iter<'a, (usize, String)>>;
-    let removed_before = |view: &mut Vec<ViewRow>, line: usize, next: &mut Next| {
+    let removed_before = |view: &mut Vec<Row>, line: usize, next: &mut Next| {
         while let Some(r) = next.next_if(|r| r.0 <= line) {
             if view.len() < rows {
-                view.push(ViewRow::Removed { before: r.0, text: r.1.clone() });
+                view.push(Row::Other { at: r.0, text: r.1.clone() });
             }
         }
     };
@@ -4235,7 +4235,7 @@ fn build_view(
                     if view.len() == rows {
                         break;
                     }
-                    view.push(ViewRow::Doc { start: a, end: b, indent, index: k, spans, code });
+                    view.push(Row::Doc { start: a, end: b, indent, index: k, spans, code });
                 }
                 line = b + 1;
             }
@@ -5643,9 +5643,9 @@ type DiffRow = (usize, Option<usize>, Option<crate::wrap::Row>);
 enum PreviewView<'a> {
     Code {
         text: &'a ropey::Rope,
-        /// Screen rows: a line's parts (`ViewRow::Part` — long lines wrap), a folded doc comment's rows
-        /// (`ViewRow::Doc`).
-        rows: Vec<crate::doccomment::ViewRow>,
+        /// Screen rows: a line's parts (`Row::Text`, always with its `part` — long lines wrap), a folded doc
+        /// comment's rows (`Row::Doc`).
+        rows: Vec<crate::codeview::Row>,
         focus: Option<usize>,
         spans: Vec<(usize, usize, u32)>,
     },
@@ -5744,7 +5744,7 @@ fn preview_lines<'a>(
         .min(last.saturating_sub(rows.saturating_sub(1)).max(focus.unwrap_or(0).min(last)));
     // Doc comments as the editor shows the file in normal mode (`Editor::doc_block_folded`; an open buffer's
     // selection and changes count) — but the place a hit or a jump opens at is read raw: going there selects it
-    use crate::doccomment::ViewRow;
+    use crate::codeview::{Part, Row};
     let lang = match doc {
         Some(d) => d.lang_name(),
         None => syntax.map(|s| s.lang.name.as_str()).or_else(|| {
@@ -5777,7 +5777,7 @@ fn preview_lines<'a>(
                 if vis.len() == rows {
                     break;
                 }
-                vis.push(ViewRow::Doc { start: b.start, end: b.end, indent: b.indent, index, spans, code });
+                vis.push(Row::Doc { start: b.start, end: b.end, indent: b.indent, index, spans, code });
             }
             line = b.end + 1;
             continue;
@@ -5788,7 +5788,7 @@ fn preview_lines<'a>(
             if vis.len() == rows {
                 break;
             }
-            vis.push(ViewRow::Part { line, row, index, last: index + 1 == n });
+            vis.push(Row::Text { line, part: Some(Part { row, index, last: index + 1 == n }) });
         }
         line += 1;
     }
@@ -5828,11 +5828,11 @@ fn draw_preview_row(
             Ok(msg.width())
         }
         PreviewView::Code { text, rows, focus, spans } => {
-            use crate::doccomment::ViewRow;
+            use crate::codeview::Row;
             let (line, part, first_row) = match rows.get(row) {
-                Some(&ViewRow::Part { line, row, index, .. }) => (line, row, index == 0),
+                Some(&Row::Text { line, part: Some(p) }) => (line, p.row, p.index == 0),
                 // A folded doc comment: its number on its first row, the panel on the card
-                Some(ViewRow::Doc { start, indent, index, spans, code, .. }) => {
+                Some(Row::Doc { start, indent, index, spans, code, .. }) => {
                     let num = if *index == 0 { format!("{:>4}  ", start + 1) } else { " ".repeat(6) };
                     apply(out, Style { fg: ui.linenr.fg, ..popup })?;
                     queue!(out, Print(&num))?;
@@ -11095,9 +11095,8 @@ fn note_card_geom(editor: &Editor, at: (u16, u16), ui: &Ui, lay: &Layout) -> Opt
     let lines = note_lines(n, of, editor, ui, replying);
     // Beside the note's lines, not over them (the code it's about stays in sight) — the rows of them on
     // screen (`view` rows count from the focused pane's top), the cursor's row among them
-    let on = |r: &crate::doccomment::ViewRow| {
-        matches!(r, crate::doccomment::ViewRow::Line(_) | crate::doccomment::ViewRow::Part { .. })
-            && n.lines.contains(&r.line())
+    let on = |r: &crate::codeview::Row| {
+        matches!(r, crate::codeview::Row::Text { .. }) && n.lines.contains(&r.line())
     };
     let pane = focused_pane(editor, lay);
     let row = |r: usize| pane.text_top as usize + r;
@@ -11303,10 +11302,8 @@ fn draw_conflict_card(
         },
     ];
     // Below the conflict (so both sides stay in sight) — at the cursor if its end is off screen
-    let end_row = editor.view.iter().rposition(|r| {
-        matches!(r, crate::doccomment::ViewRow::Line(_) | crate::doccomment::ViewRow::Part { .. })
-            && r.line() == c.end
-    });
+    let end_row =
+        editor.view.iter().rposition(|r| matches!(r, crate::codeview::Row::Text { .. }) && r.line() == c.end);
     // (`view` rows count from the focused pane's top; the card is five rows)
     let pane = focused_pane(editor, lay);
     let at = match end_row {

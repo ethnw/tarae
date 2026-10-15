@@ -25,6 +25,7 @@ mod claudeupdate;
 mod clipboard;
 mod cmdline;
 mod codereview;
+mod codeview;
 mod commands;
 mod comment;
 mod compaction;
