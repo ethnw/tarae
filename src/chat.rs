@@ -1908,15 +1908,16 @@ fn submit_as(
         Some(a) => format!("{context}\n{a}\n\n{question}"),
         None => format!("{context}\n\n{question}"),
     };
-    if let Err(e) = p.stdin.send(llm::user_message(&content)) {
-        // (said again with the next message that goes)
+    // A write that fails: the process stopped reading — it ended, and its exit, on the way (`llm::pump`), says
+    // why. Until then the message is the turn's, as one written a moment before that exit is: for a conversation
+    // claude no longer has it goes again to the new one; any other end is said once, as an exit mid-turn is
+    if p.stdin.send(llm::user_message(&content)).is_err() {
+        // (said with the next message that goes; ended, if it only closed its stdin — so its exit comes)
         ed.session.checkpoints.tell = told;
-        c.screen = shot;
-        c.kill();
-        c.msgs.push(Msg::new(Role::Note, format!("claude: {e} — press enter to retry"), ""));
-        return false;
+        llm::kill(p.pid);
+    } else {
+        crate::usage::message_sent(&session, content.len(), context.len());
     }
-    crate::usage::message_sent(&session, content.len(), context.len());
     c.sent.extend(sent);
     c.hop = 0;
     c.follow.new_turn();
@@ -2882,9 +2883,80 @@ mod tests {
         let end = Instant::now() + std::time::Duration::from_secs(5);
         while !done(ed) {
             let left = end.saturating_duration_since(Instant::now());
-            let ev = ed.events.recv_timeout(left).expect("event before timeout");
+            let Some(ev) = ed.events.recv_timeout(left) else {
+                let rows: Vec<_> =
+                    ed.session.chat.iter().flat_map(|c| c.msgs.iter().map(|m| &m.text)).collect();
+                panic!("no event before the timeout — the chat: {rows:?}");
+            };
             ed.handle_event(ev);
         }
+    }
+
+    /// A message whose write fails because its claude already ended — the writer met the ended process on an
+    /// earlier line (its `initialize`) before tarae heard of the exit — is the turn's, as one written a moment
+    /// before that exit: claude no longer having the conversation, it goes again to the new one and is answered
+    /// there, no error said; a claude that just died says so once. (The fake refusing `--resume` exits before
+    /// reading anything; the message is sent after the writer met that exit, before tarae handles its event.)
+    #[test]
+    fn a_message_written_after_claude_ended_waits_for_why_it_ended() {
+        let init = serde_json::json!({"type": "system", "subtype": "init", "session_id": "s-2"});
+        let text = serde_json::json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hello back."}}});
+        let result = serde_json::json!({"type": "result", "result": "done"});
+        // (`gone`: it no longer has the conversation; else it dies without a word, resumed or not)
+        let started = |gone: bool| {
+            let mut ed = editor("");
+            ed.config.llm.command = "sh".into();
+            let ends = match gone {
+                true => {
+                    "case \"$*\" in *--resume*) echo 'No conversation found with session ID: s-1' >&2; exit 1;; esac;"
+                }
+                false => "echo 'it fell over' >&2; exit 1;",
+            };
+            ed.config.llm.args = vec![
+                "-c".into(),
+                format!(
+                    "{ends} while read -r line; do case \"$line\" in '{{\"message\"'*) \
+                     printf '%s\\n' '{init}' '{text}' '{result}';; esac; done"
+                ),
+            ];
+            let mut c = Chat::new();
+            (c.resume, c.conversation) = (Some("s-1".into()), Some("s-1".into()));
+            ed.session.chat = Some(c);
+            ensure_proc(&mut ed);
+            // (it starts once what it waits on is read — and nothing after: its exit stays unheard)
+            settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().proc.is_some());
+            // (the writer has met the ended process once a line can't be handed to it)
+            let end = Instant::now() + std::time::Duration::from_secs(5);
+            let p = ed.session.chat.as_ref().unwrap().proc.as_ref().unwrap();
+            while p.stdin.send(String::new()).is_ok() {
+                assert!(Instant::now() < end, "the writer still writes");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let c = ed.session.chat.as_mut().unwrap();
+            c.input = "again".into();
+            send(&mut ed);
+            ed
+        };
+        let said = |ed: &Editor, t: &str| {
+            ed.session.chat.as_ref().unwrap().msgs.iter().filter(|m| m.text.contains(t)).count()
+        };
+        let asked = |ed: &Editor| {
+            let c = ed.session.chat.as_ref().unwrap();
+            c.msgs.iter().filter(|m| m.role == Role::User && m.text == "again").count()
+        };
+        let mut ed = started(true);
+        settle_until(&mut ed, |ed| said(ed, "Hello back.") == 1 && !ed.session.chat.as_ref().unwrap().busy());
+        assert_eq!(said(&ed, "no longer has this conversation"), 1);
+        assert_eq!((said(&ed, "broken pipe"), said(&ed, "claude exited")), (0, 0), "not an error");
+        assert_eq!(asked(&ed), 1, "asked once, answered in the new one");
+        assert!(ed.session.chat.as_ref().unwrap().input.is_empty());
+        // A claude that just died: said once, as an exit mid-turn is
+        let mut ed = started(false);
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().proc.is_none());
+        assert_eq!(said(&ed, "claude exited: it fell over"), 1);
+        assert_eq!(said(&ed, "broken pipe"), 0);
+        assert_eq!(asked(&ed), 1);
+        assert!(!ed.session.chat.as_ref().unwrap().busy(), "the turn is over");
     }
 
     /// #153: the editor's page keys page the conversation — `C-u` up from an empty input, `C-d` down; with

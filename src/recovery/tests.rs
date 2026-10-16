@@ -174,7 +174,7 @@ fn discard_removes_the_copy_and_not_now_keeps_it() {
     let mut ed = started(&dir);
     ed.offer_dismiss();
     assert!(cards(&ed).is_empty() && copy.exists(), "n keeps it");
-    drop(ed);
+    quit(ed, &dir, || {});
     let mut ed = started(&dir);
     assert_eq!(cards(&ed).len(), 1, "asked again");
     let docs = ed.docs.len();
@@ -214,12 +214,109 @@ fn a_file_changed_on_disk_since_says_so() {
     let card = cards(&ed)[0];
     assert!(card.question.contains("The file changed since"), "{}", card.question);
     assert!(card.warning.is_some());
-    drop(ed);
+    // (a child forked while this tarae holds the gone one's folder for its card — as another test's would — let
+    // go only once this tarae has quit)
+    let child = HeldBack::fork();
+    quit(ed, &dir, move || drop(child));
     std::fs::write(&file, "TWOne\n").unwrap();
     let copy = copies_in(&dir)[0].clone();
     assert!(cards(&started(&dir)).is_empty(), "nothing to recover");
     assert!(!copy.exists());
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// This tarae quits, and the next start finds the folders in `dir`'s state as a real next start would: once no
+/// process has their locks open. A child forked meanwhile holds them too until its exec (another test's, here;
+/// a fork copies every descriptor), so a lock it held for a card, its own keeper's, one let go at `n`, stay held
+/// a moment past the quit — the next scan took the gone tarae for a running one and left its copy (a full run's
+/// flake, `a_file_changed_on_disk_since_says_so`). `meanwhile` runs while it waits (a held-back child let go).
+/// As `Recovery::killed` waits for a death.
+fn quit(ed: Editor, dir: &Path, meanwhile: impl FnOnce() + Send + 'static) {
+    drop(ed);
+    let going = std::thread::spawn(meanwhile);
+    let locks: Vec<PathBuf> = std::fs::read_dir(dir.join("state"))
+        .map(|rd| rd.flatten().map(|e| e.path().join(LOCK)).filter(|l| l.exists()).collect())
+        .unwrap_or_default();
+    for lock in &locks {
+        until(&format!("{} let go", lock.display()), || File::open(lock).is_ok_and(|f| f.try_lock().is_ok()));
+    }
+    going.join().unwrap();
+}
+
+/// A child forked now — holding a copy of every descriptor open, a lock's too — that waits before its exec until
+/// it's let go (`go`, or dropped: a failing test's too): another test's child not yet exec'd, made to wait as long
+/// as the test needs. Harmless: `true`. Never longer than `HELD_AT_MOST`: it holds the test binary's output open
+/// (the first version, without a bound, held a `cargo test … | grep` open for good once its test failed before
+/// letting it go) — then it gives up before its exec, and `go` says so.
+struct HeldBack {
+    go: Option<std::io::PipeWriter>,
+    child: Option<std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
+}
+
+/// How long a held-back child waits to be let go, at most.
+const HELD_AT_MOST: Duration = Duration::from_secs(10);
+
+impl HeldBack {
+    fn fork() -> HeldBack {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let (mut forked, said) = std::io::pipe().unwrap();
+        let (wait, go) = std::io::pipe().unwrap();
+        let (said_fd, wait_fd) = (said.as_raw_fd(), wait.as_raw_fd());
+        let at_most = HELD_AT_MOST.as_millis() as libc::c_int;
+        let child = std::thread::spawn(move || {
+            let mut cmd = std::process::Command::new("true");
+            // SAFETY: only async-signal-safe calls (write, poll, read) between the fork and the exec; the error
+            // made is an OS code's, no allocation
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::write(said_fd, b"f".as_ptr().cast(), 1);
+                    // (it holds the write end too: a byte lets it go, no end of file ever would)
+                    let mut p = libc::pollfd { fd: wait_fd, events: libc::POLLIN, revents: 0 };
+                    if libc::poll(&mut p, 1, at_most) == 0 {
+                        return Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT));
+                    }
+                    let mut b = 0u8;
+                    libc::read(wait_fd, (&raw mut b).cast(), 1);
+                    Ok(())
+                });
+            }
+            let status = cmd.status();
+            drop((said, wait));
+            status
+        });
+        forked.read_exact(&mut [0]).unwrap();
+        HeldBack { go: Some(go), child: Some(child) }
+    }
+
+    /// Its exec goes ahead; it's waited for (within `HELD_AT_MOST` of its fork, by its own bound). Err: what
+    /// went wrong, in words. None: let go already.
+    fn go(&mut self) -> Option<Result<std::process::ExitStatus, String>> {
+        let mut go = self.go.take()?;
+        let child = self.child.take()?;
+        let wrote = std::io::Write::write_all(&mut go, b"g").map_err(|e| format!("couldn't let it go: {e}"));
+        let ended = match child.join() {
+            Err(_) => Err("its thread panicked".to_string()),
+            Ok(Err(e)) if e.raw_os_error() == Some(libc::ETIMEDOUT) => {
+                Err(format!("never let go: it gave up after {HELD_AT_MOST:?} before its exec"))
+            }
+            Ok(Err(e)) => Err(format!("it didn't start: {e}")),
+            Ok(Ok(s)) => Ok(s),
+        };
+        Some(wrote.and(ended))
+    }
+}
+
+impl Drop for HeldBack {
+    fn drop(&mut self) {
+        let ended = self.go();
+        if !std::thread::panicking()
+            && let Some(ended) = ended
+        {
+            assert!(ended.as_ref().is_ok_and(|s| s.success()), "the held-back child: {ended:?}");
+        }
+    }
 }
 
 /// Saving removes the copy; so does undoing back to the file, and closing the buffer without saving.

@@ -353,6 +353,37 @@ fresh = { append = { D_OPTS = "-Ddaemon=off" } }
 /// can end up on a command line), only the proxy's values there, no newline in a line, a file's name and no
 /// path, none of the core's proxy variables, `{file}` only in a file's `append`, a registry a host's name.
 #[test]
+fn an_env_entry_may_wait_for_a_fact_the_core_knows() {
+    let t = table(
+        &[(
+            "t",
+            "[sandbox]\nenv = { T_PLAIN = \"1\", T_OPTS = { value = \"-Dv4\", on = \"v4-mapped-refused\" } }\n",
+        )],
+        &[],
+    );
+    assert_eq!(t.problems, Vec::<String>::new());
+    assert_eq!(t.env, [("T_PLAIN".to_string(), "1".to_string())]);
+    assert_eq!(t.env_on, [EnvOn { name: "T_OPTS".into(), value: "-Dv4".into(), on: On::V4MappedRefused }]);
+    // (not a name a run gets from the user's environment: where the fact doesn't hold, theirs stays out)
+    assert!(!t.env_names().any(|n| n == "T_OPTS"));
+    for (text, said) in [
+        ("env = { T = { value = \"x\", on = \"macos\" } }", "`on` is no fact tarae knows (`macos`)"),
+        ("env = { T = { value = \"x\" } }", "`env.T`"),
+        ("env = { T = { value = \"x\", on = \"v4-mapped-refused\", os = \"x\" } }", "has no `os`"),
+        ("env = { T = 1 }", "isn't a string, nor `{ value, on }`"),
+        (
+            "env = { LD_PRELOAD = { value = \"x\", on = \"v4-mapped-refused\" } }",
+            "a variable a pack may not set",
+        ),
+    ] {
+        let text = format!("[sandbox]\n{text}\n");
+        let t = table(&[("x", text.as_str())], &[]);
+        assert!(t.problems.iter().any(|p| p.contains(said)), "{text}: {:?}", t.problems);
+        assert!(t.env_on.is_empty(), "{text}");
+    }
+}
+
+#[test]
 fn the_proxy_keys_are_said_in_the_parsers_words() {
     let good = r#"
 [sandbox]

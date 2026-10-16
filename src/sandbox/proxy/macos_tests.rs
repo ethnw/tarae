@@ -249,7 +249,9 @@ fn a_runs_port_closes_with_it() {
 /// run's port, which its token alone couldn't (M3: any process reads a run's environment). A JVM's default
 /// socket reaches its own too: the proxy's address is the IPv4 literal (M3d: Seatbelt's `localhost` doesn't
 /// match `::ffff:127.0.0.1`). Harmless: the listeners are the test's own, on 127.0.0.1; `nc -z` and an empty
-/// connect knock. The JVM part skips without a JDK.
+/// connect knock. The JVM gets the packs' variables as a run's does (below macOS 27 its IPv4 stack: the Java pack's
+/// `JAVA_TOOL_OPTIONS`); its JDK is `JAVA_HOME`'s, as Gradle's and Maven's scripts take it, else macOS's own pick
+/// (`/usr/libexec/java_home`: a CI's tool cache JDK is only the first). Without either it skips, said.
 #[test]
 fn a_run_reaches_only_its_own_proxy_port() {
     if skipped_inside("sandbox::proxy::macos_tests::a_run_reaches_only_its_own_proxy_port") {
@@ -279,16 +281,33 @@ fn a_run_reaches_only_its_own_proxy_port() {
     assert!(!reached(&a, &lb, nc), "a run: the other run's port");
     assert!(!reached(&b, &la, nc), "the other run: this one's port");
     assert!(!reached(&a, &ordinary, nc), "a run: an ordinary port of this machine's");
-    let jdk = Command::new("/usr/libexec/java_home").output().ok().filter(|o| o.status.success());
-    if let Some(home) = jdk.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) {
-        let src = root.join("Knock.java");
-        let knock = "public class Knock { public static void main(String[] a) throws Exception { \
-                     try (var s = new java.net.Socket()) { s.connect(new java.net.InetSocketAddress(a[0], \
-                     Integer.parseInt(a[1])), 2000); } } }";
-        std::fs::write(&src, knock).unwrap();
-        let java = format!("'{home}/bin/java' '{}' 127.0.0.1", src.display());
-        assert!(reached(&a, &la, &java), "a JVM's default socket: its own port");
-        assert!(!reached(&a, &lb, &java), "a JVM's default socket: the other run's port");
+    let given =
+        std::env::var_os("JAVA_HOME").map(std::path::PathBuf::from).filter(|h| h.join("bin/java").is_file());
+    let picked = || {
+        let o = Command::new("/usr/libexec/java_home").output().ok().filter(|o| o.status.success())?;
+        Some(std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+    };
+    match given.or_else(picked) {
+        Some(home) => {
+            let src = root.join("Knock.java");
+            let knock = "public class Knock { public static void main(String[] a) throws Exception { \
+                         try (var s = new java.net.Socket()) { s.connect(new java.net.InetSocketAddress(a[0], \
+                         Integer.parseInt(a[1])), 2000); } } }";
+            std::fs::write(&src, knock).unwrap();
+            let java = format!("'{}/bin/java' '{}' 127.0.0.1", home.display(), src.display());
+            // (the packs' variables, as `for_its_run` gives a run them)
+            let here = Here::now();
+            let vars = here.path("HOME").map(|h| crate::sandbox::vars_in(&h, &here));
+            let env = vars.map(|v| crate::sandbox::packs_env(&v, &here)).unwrap_or_default();
+            let jvm = Policy { env, ..a.clone() };
+            assert!(reached(&jvm, &la, &java), "a JVM's default socket: its own port");
+            assert!(!reached(&jvm, &lb, &java), "a JVM's default socket: the other run's port");
+        }
+        None => eprintln!(
+            "{}sandbox::proxy::macos_tests::a_run_reaches_only_its_own_proxy_port — its JVM part: no JDK (no \
+             JAVA_HOME, none /usr/libexec/java_home knows)",
+            crate::test_results::SELF_SKIP
+        ),
     }
     std::fs::remove_dir_all(&root).ok();
 }

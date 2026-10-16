@@ -658,7 +658,8 @@ const ENV_NEVER: [&str; 46] = [
 /// built-in packs set or read for a run (a tool's home, a run's own home, their `env`, a setting's file —
 /// `sandboxpack::Packs::env_names`: `GRADLE_USER_HOME=~/.gradle` would point a run back at the user's).
 pub fn env_allowed(name: &str) -> bool {
-    env_core(name) && !crate::sandboxpack::get().env_names().any(|n| n == name)
+    let packs = crate::sandboxpack::get();
+    env_core(name) && !packs.env_names().any(|n| n == name) && !packs.env_on.iter().any(|e| e.name == name)
 }
 
 /// `env_allowed` with `ENV_NEVER` alone — what the packs' own variables are checked against as they're read.

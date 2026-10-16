@@ -49,7 +49,8 @@
 //!   (its path) in its `append`.
 //! - `registries`: the hosts the pack's tools fetch from, as `llm.sandbox-hosts` writes them — words only, never
 //!   a grant: the host card names them (Q6).
-//! - `env`: variables in every run's environment (`{run}`: the run's own folder).
+//! - `env`: variables in every run's environment (`{run}`: the run's own folder) — or `{ value, on }`: only where
+//!   the fact `on` names holds on the system tarae runs on (`On`: `v4-mapped-refused`).
 //! - `pass`: what of the user's environment a run gets besides the core's floor (`sandbox::runenv`) — the
 //!   toolchain's own variables: names, or `PREFIX*` families (two characters at least before the `*`); never
 //!   the loader's (`LD_*`, `DYLD_*`), nor a name only a secret has (`NPM_TOKEN`). A token-like one is left out
@@ -328,6 +329,29 @@ pub struct Said {
     pub protect: Option<String>,
 }
 
+/// A fact of the system a run's sandbox is on, that a pack's variable may wait for (`env`'s `on`) — the core
+/// tells it (`sandbox::Here`), never the pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum On {
+    /// `v4-mapped-refused`: the sandbox refuses an IPv6 socket on this machine's loopback reached through a
+    /// v4-mapped address (`::ffff:127.0.0.1`) — macOS's Seatbelt below 27 (`Here::v4_mapped_refused`).
+    V4MappedRefused,
+}
+
+impl On {
+    fn read(word: &str) -> Option<On> {
+        (word == "v4-mapped-refused").then_some(On::V4MappedRefused)
+    }
+}
+
+/// A variable set in every run only where `on` holds (`env = { NAME = { value, on } }`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvOn {
+    pub name: String,
+    pub value: String,
+    pub on: On,
+}
+
 /// Every pack's `[sandbox]` and `[claude]` together.
 #[derive(Clone, Debug, Default)]
 pub struct Packs {
@@ -341,6 +365,10 @@ pub struct Packs {
     pub builds_said: Vec<BuildsSaid>,
     pub run_homes: Vec<RunHome>,
     pub env: Vec<(String, String)>,
+    /// `env`'s entries that wait for a fact of the system (`on`) — not among `env_names`: those a run gets from
+    /// the user's environment, and where the fact doesn't hold the user's own must stay out (`JAVA_TOOL_OPTIONS`:
+    /// agents). No command of Claude's sets one unasked either (`readonly::env_allowed`).
+    pub env_on: Vec<EnvOn>,
     pub pass: Vec<String>,
     pub bins: Vec<String>,
     pub quiet_writes: Vec<String>,
@@ -630,9 +658,22 @@ fn read_key_of(
             }
         }
         ("sandbox", "env") => {
-            for (k, val) in pairs(v, "env")? {
-                check_var(&k)?;
-                out.env.push((k, val));
+            let t = v.as_table().ok_or("`env` isn't a table")?;
+            for (k, val) in t {
+                check_var(k)?;
+                let what = format!("`env.{k}`");
+                match val {
+                    Value::String(s) => out.env.push((k.clone(), s.clone())),
+                    Value::Table(e) => {
+                        known(e, &["value", "on"], &what)?;
+                        let value = need(e, "value", &what)?;
+                        let on = need(e, "on", &what)?;
+                        let on =
+                            On::read(&on).ok_or(format!("{what}: `on` is no fact tarae knows (`{on}`)"))?;
+                        out.env_on.push(EnvOn { name: k.clone(), value, on });
+                    }
+                    _ => return Err(format!("{what} isn't a string, nor `{{ value, on }}`")),
+                }
             }
         }
         ("sandbox", "pass") => {

@@ -220,6 +220,17 @@ write-files = ["{gradle}/wrapper/dists/{a}/{b}/{a}.zip.lck"]
 # loaded into every JVM). An options variable giving one of those as an option (`GRADLE_OPTS=-Dorg.gradle.project.
 # signingPassword=…`, `-Dpassword=…` in `MAVEN_OPTS`) is token-like and left out whole (`tokens::option_secret`)
 pass =["JAVA_HOME", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "GRADLE_*", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_HOME", "M2_HOME"]
+# A JVM's sockets are IPv6 ones (dual-stack) unless told otherwise: its 127.0.0.1 is `::ffff:127.0.0.1`, which
+# macOS's Seatbelt below 27 takes as no `localhost` — every connect and bind of a JVM on this machine's ports
+# refused: the proxy, Gradle's client to its daemon and the daemon's listener, a test's server (measured on
+# 26.6.2; 27.0.1 takes it; Linux's supervisor reads the address itself — `target/sb/macos26-jvm.md`). There, the
+# runs' JVMs are IPv4-only. In `JAVA_TOOL_OPTIONS`, which every JVM reads (what `java` starts: Gradle's client,
+# daemon and test workers, Maven and its forks, Java 8's; and JVMs started through JNI) — tarae's value alone:
+# the user's own is never passed (it loads agents). Each JVM says "Picked up JAVA_TOOL_OPTIONS: …" on stderr.
+# Through the proxy nothing is lost (the JVM connects only to it; the proxy resolves and connects, any family);
+# the project's own IPv6 sockets are. A project's own command line (`-Djava.net.preferIPv4Stack=false` in
+# `org.gradle.jvmargs`) comes after it and wins. Claude Code's sandbox does the same
+env = { JAVA_TOOL_OPTIONS = { value = "-Djava.net.preferIPv4Stack=true", on = "v4-mapped-refused" } }
 # Where Maven and Gradle fetch from by default — words on the card that asks for a host, never a grant
 registries = [
     "repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "services.gradle.org", "downloads.gradle.org",

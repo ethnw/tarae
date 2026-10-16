@@ -942,6 +942,11 @@ pub struct Here {
     /// Linux: a keeper of a policy that opens the network takes its runs' connections in the session's network
     /// (`tier::redirects`) — asked on a run's way only (`policy_from`: the probe); `now` and stand-ins: false.
     pub redirects: bool,
+    /// The sandbox refuses an IPv6 socket on this machine's loopback reached through a v4-mapped address
+    /// (`::ffff:127.0.0.1`, what a JVM's 127.0.0.1 is): macOS's Seatbelt takes it as no `localhost`, connect and
+    /// bind alike, below 27 — measured refused on 26.6.2, taken on 27.0.1 (`target/sb/macos26-jvm.md`; older ones
+    /// taken as 26). Linux's supervisor reads the address itself: false. The packs' `env` `on = "v4-mapped-refused"`.
+    pub v4_mapped_refused: bool,
     /// Tests: every variable asked (`path`, `var`) — what a policy reads of the environment
     /// (`every_variable_the_policy_reads_reaches_the_run`).
     #[cfg(test)]
@@ -979,10 +984,18 @@ impl Here {
                 })
                 .ok(),
             redirects: false,
+            v4_mapped_refused: macos_major().is_some_and(|m| m < 27),
             #[cfg(test)]
             asked: Default::default(),
             #[cfg(test)]
             runs: Some(profile_path(&std::env::temp_dir())),
+        }
+    }
+
+    /// Whether `on` holds here.
+    pub fn holds(&self, on: crate::sandboxpack::On) -> bool {
+        match on {
+            crate::sandboxpack::On::V4MappedRefused => self.v4_mapped_refused,
         }
     }
 
@@ -3362,7 +3375,7 @@ fn for_its_run(
         .zip(vars.as_ref())
         .map(|(r, v)| run_homes_made(r.path(), v, &p.run_env, &p.kept, url.as_ref()));
     p.env = made.unwrap_or_default();
-    p.env.extend(vars.as_ref().map(packs_env).unwrap_or_default());
+    p.env.extend(vars.as_ref().map(|v| packs_env(v, here)).unwrap_or_default());
     // What a run with a proxy URL gets of the packs besides (`[sandbox.proxy]`)
     let mut env = std::mem::take(&mut p.env);
     proxy_made(p.run.as_ref().map(|r| r.path()), url.as_ref(), &mut env, &p.run_env);
@@ -3370,14 +3383,47 @@ fn for_its_run(
 }
 
 /// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
-/// isn't known (`{run}` without a run) is left out.
-fn packs_env(vars: &crate::sandboxpack::Vars) -> Vec<(String, String)> {
+/// isn't known (`{run}` without a run) is left out — and one waiting for a fact of the system (`on`), where
+/// `here` says it holds.
+fn packs_env(vars: &crate::sandboxpack::Vars, here: &Here) -> Vec<(String, String)> {
     let filled = |v: &str| match v.starts_with('{') || v.starts_with("~/") {
         true => vars.place(v).map(|p| p.display().to_string()),
         false => Some(v.to_string()),
     };
-    let env = &crate::sandboxpack::get().env;
-    env.iter().filter_map(|(k, v)| Some((k.clone(), filled(v)?))).collect()
+    let packs = crate::sandboxpack::get();
+    let on = packs.env_on.iter().filter(|e| here.holds(e.on)).map(|e| (&e.name, &e.value));
+    packs
+        .env
+        .iter()
+        .map(|(k, v)| (k, v))
+        .chain(on)
+        .filter_map(|(k, v)| Some((k.clone(), filled(v)?)))
+        .collect()
+}
+
+/// macOS's major version (`kern.osproductversion`: `26.6.2` → 26) — None where it can't be read.
+#[cfg(target_os = "macos")]
+fn macos_major() -> Option<u32> {
+    let mut buf = [0u8; 32];
+    let mut len = buf.len();
+    // SAFETY: a NUL-ended name, a buffer of `len` bytes and its length to fill; nothing set.
+    let r = unsafe {
+        libc::sysctlbyname(
+            c"kern.osproductversion".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let text = (r == 0).then(|| String::from_utf8_lossy(&buf[..len.min(buf.len())]).into_owned())?;
+    text.trim_end_matches('\0').split('.').next()?.parse().ok()
+}
+
+/// (not macOS)
+#[cfg(not(target_os = "macos"))]
+fn macos_major() -> Option<u32> {
+    None
 }
 
 /// The tools that get a home of the run's own, with the user's own home of each that's there (real).
@@ -3887,7 +3933,7 @@ fn asks_for(root: &Path, home: Option<&Path>, here: &Here) -> Asks {
     let others: Vec<crate::sandboxpack::Ask> = t.ask.iter().filter(|a| has(&a.when)).cloned().collect();
     let mut set_by = tool.as_ref().map(|t| t.set_by(root, tool_home.as_deref())).unwrap_or_default();
     set_by.extend(others.iter().flat_map(|a| a.when.iter().map(|f| root.join(f))));
-    let env = home.map(|h| packs_env(&vars_in(h, here))).unwrap_or_default();
+    let env = home.map(|h| packs_env(&vars_in(h, here), here)).unwrap_or_default();
     Asks { tool, builder, said, own, others, env, set_by }
 }
 
@@ -6414,6 +6460,49 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// Where the sandbox refuses a v4-mapped loopback (macOS below 27), a run's JVMs are IPv4-only: the Java
+    /// pack's `JAVA_TOOL_OPTIONS`, tarae's value alone — the user's own (an agent here) never reaches a run, set
+    /// there or not; elsewhere (27, Linux) a run has none. The fact as this Mac says it.
+    #[test]
+    fn runs_jvms_are_ipv4_only_where_the_sandbox_refuses_a_mapped_loopback() {
+        let scratch = crate::scratch::Scratch::new("sb-jvm-v4");
+        let base = profile_path(&scratch);
+        let (home, root) = (base.join("home"), base.join("home/work/j"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("build.gradle"), "").unwrap();
+        let options = |os: Os, refused: bool| {
+            let env =
+                [("HOME", home.clone().into()), ("JAVA_TOOL_OPTIONS", "-javaagent:/x/agent.jar".into())];
+            let here = Here {
+                env: env.map(|(k, v): (&str, std::ffi::OsString)| (k.to_string(), v)).into(),
+                os,
+                v4_mapped_refused: refused,
+                ..Here::default()
+            };
+            toolchain_found_in(&root, ToolDirs::default(), &here);
+            let p =
+                run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+            let c = command(Some(&p), "java", &[]);
+            let set = c.get_envs().filter(|(k, _)| *k == "JAVA_TOOL_OPTIONS").filter_map(|(_, v)| v);
+            set.map(|v| v.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        assert_eq!(options(Os::Mac, true), ["-Djava.net.preferIPv4Stack=true"], "macOS 26: tarae's, alone");
+        assert_eq!(options(Os::Mac, false), Vec::<String>::new(), "macOS 27: none, nor the user's");
+        assert_eq!(options(Os::Linux, false), Vec::<String>::new(), "Linux: none, nor the user's");
+        assert!(
+            !crate::readonly::env_allowed("JAVA_TOOL_OPTIONS"),
+            "no command line of Claude's sets it unasked"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let major = macos_major().expect("this Mac's version");
+            assert!(major >= 11, "{major}");
+            assert_eq!(Here::now().v4_mapped_refused, major < 27);
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(!Here::now().v4_mapped_refused);
+    }
+
     /// The JDK `JAVA_HOME` names in home (sdkman's, asdf's, mise's, a CI tool cache's — the Java pack's `jdk`
     /// home) is read whole, by its real path, and never written; home itself, a kept place, or a folder that isn't
     /// there isn't read; a kept place inside it stays closed. (A stand-in home in the test's own folder.)
@@ -7602,10 +7691,15 @@ mod tests {
         assert!(r.starts_with("The sandbox blocked one thing — 1 time:\n  writing ~/marker"), "{r}");
         // npm's log folder: the run's own (the packs' `env`, `{run}` filled in)
         let run = RunDir::new().unwrap();
-        let vars = vars_in(Path::new(&home), &Here::default());
-        let env =
-            packs_env(&crate::sandboxpack::Vars { run: Some(run.path().to_path_buf()), ..vars.clone() });
-        assert!(packs_env(&vars).iter().all(|(k, _)| k != "npm_config_logs_dir"), "no run: no log folder");
+        let (here, vars) = (Here::default(), vars_in(Path::new(&home), &Here::default()));
+        let env = packs_env(
+            &crate::sandboxpack::Vars { run: Some(run.path().to_path_buf()), ..vars.clone() },
+            &here,
+        );
+        assert!(
+            packs_env(&vars, &here).iter().all(|(k, _)| k != "npm_config_logs_dir"),
+            "no run: no log folder"
+        );
         let p = Policy { run: Some(run.clone()), env, ..p };
         let c = command(Some(&p), "npm", &["test".into()]);
         let logs = c.get_envs().find(|(k, _)| *k == "npm_config_logs_dir").and_then(|(_, v)| v);
