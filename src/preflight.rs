@@ -901,6 +901,54 @@ mod tests {
         assert_eq!(set(ran), expected, "CI's checks and .tarae.toml's [preflight] (perf aside)");
     }
 
+    /// CI's network job runs the tests that need the network by name, and those are the ones marked so
+    /// (`#[ignore = "network: …"]`): `--ignored` alone also holds the children run in a process of their own,
+    /// measurements and checks by hand on a VM, none of them CI's.
+    #[test]
+    fn cis_network_job_runs_every_network_test_and_only_those() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        let line = ci.lines().find(|l| l.contains("-- --ignored")).expect("the network job");
+        let named: std::collections::BTreeSet<String> = line
+            .split(" --exact ")
+            .nth(1)
+            .expect("its tests named, `--exact`")
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        // (the marked ones: a test fn below the mark, by name)
+        let mut marked = std::collections::BTreeSet::new();
+        let mut dirs = vec![root.join("src")];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    dirs.push(p);
+                    continue;
+                }
+                if p.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap();
+                let lines: Vec<&str> = text.lines().collect();
+                for (i, l) in lines.iter().enumerate() {
+                    if !l.trim().starts_with("#[ignore = \"network: ") {
+                        continue;
+                    }
+                    let f = lines[i..].iter().find_map(|l| l.trim().strip_prefix("fn ")).expect("a fn below");
+                    marked.insert(f.split('(').next().unwrap().to_string());
+                }
+            }
+        }
+        let src = root.join("src");
+        for n in &named {
+            assert!(crate::sandbox::golden::test_exists(&src, n), "CI names {n}: no such test");
+        }
+        let names: std::collections::BTreeSet<String> =
+            named.iter().map(|n| n.rsplit("::").next().unwrap().to_string()).collect();
+        assert_eq!(names, marked, "CI's network job and the tests marked `network:`");
+    }
+
     /// Clippy in the checks lints the whole workspace: without `--workspace`, cargo in a workspace with a root
     /// package lints only that package — tarae's `netlink/` and `xtask/` went unlinted by `:preflight` and CI
     /// alike. Here (`.tarae.toml`, which CONTRIBUTING and CI follow — the test above) and in the Rust pack's

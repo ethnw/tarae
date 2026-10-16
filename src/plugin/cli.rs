@@ -241,7 +241,7 @@ mod tests {
     /// A plugin `tarae plugin new` starts builds as it is — the template keeps up with the WIT. (Ignored: it
     /// fetches the SDK's crates; CI's network job runs it.)
     #[test]
-    #[ignore]
+    #[ignore = "network: CI's network job runs it"]
     fn a_new_plugin_builds() {
         let scratch = crate::scratch::Scratch::new("plugin-builds");
         let root = scratch.to_path_buf();

@@ -902,7 +902,7 @@ fn is_test_path(s: &str) -> bool {
 /// Whether `name` is a `#[test]` fn at its module path, each part checked as Rust finds modules: a file
 /// (`a/b.rs`, `a/b/mod.rs`) beside the one before, or an inline `mod b {` in it. Of inline modules only the order
 /// is checked — each opens below the one before, the fn below the last — not that their braces hold it.
-fn test_exists(src: &Path, name: &str) -> bool {
+pub(crate) fn test_exists(src: &Path, name: &str) -> bool {
     let parts: Vec<&str> = name.split("::").collect();
     let (mods, f) = parts.split_at(parts.len() - 1);
     let (mut dir, mut file, mut text, mut after) = (src.to_path_buf(), None::<PathBuf>, String::new(), 0);
@@ -1183,6 +1183,7 @@ fn landlocks_rules_are_pinned() {
             .collect();
         // (a set: sorted as shown — in path order the run's folder, numbered by the runs before, moves about)
         rules.sort();
+        ptmx_apart(&mut rules);
         out.extend(rules);
     }
     pinned("sandbox_landlock.txt", &out);
@@ -1259,7 +1260,25 @@ fn landlocks_rules_with_ptys_are_pinned() {
             .collect();
         rules.sort();
         rules.dedup();
+        ptmx_apart(&mut rules);
         out.extend(rules);
     }
     pinned("sandbox_landlock_ptys.txt", &out);
+}
+
+/// `/dev/ptmx`'s rule taken out of `rules` (`    <access> <path>` lines) and checked apart: this machine's `/dev`
+/// decides it, not the policy — a node of its own on a machine (granted as `/dev/null` is, `linux::DEVICES`), a
+/// link to `pts/ptmx` in a container (a link gets no rule; what it names is granted in `/dev/pts`). A pinned
+/// text with it held only where it was blessed (CI's runners: a node; `cargo xtask linux`: a link).
+#[cfg(target_os = "linux")]
+fn ptmx_apart(rules: &mut Vec<String>) {
+    let access = |l: &String| l.split_whitespace().next().unwrap_or_default().to_string();
+    let null: Vec<String> = rules.iter().filter(|l| l.ends_with(" /dev/null\n")).map(access).collect();
+    let ptmx: Vec<String> =
+        rules.extract_if(.., |l| l.ends_with(" /dev/ptmx\n")).map(|l| access(&l)).collect();
+    let node = std::fs::symlink_metadata("/dev/ptmx").is_ok_and(|m| !m.file_type().is_symlink());
+    match node {
+        true => assert_eq!(ptmx, null, "/dev/ptmx, a node here: granted as /dev/null is"),
+        false => assert!(ptmx.is_empty(), "/dev/ptmx, a link here or none: no rule of its own — {ptmx:?}"),
+    }
 }

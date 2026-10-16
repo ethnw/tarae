@@ -176,9 +176,9 @@ fn read(
 }
 
 /// What an item found: a file opened (read from that descriptor — never by its path again), a folder,
-/// nothing there.
+/// nothing there. (Boxed: an `Opened` holds a `Metadata`, 200 bytes on x86_64.)
 enum Found {
-    File(crate::paths::Opened),
+    File(Box<crate::paths::Opened>),
     Folder,
     Missing,
 }
@@ -206,7 +206,7 @@ fn read_between(
                 let inside = o.real.starts_with(&root);
                 let judged = (!inside || o.meta.is_file()).then(|| (o.real.clone(), !o.meta.is_dir()));
                 let f = match () {
-                    _ if o.meta.is_file() => Found::File(o),
+                    _ if o.meta.is_file() => Found::File(Box::new(o)),
                     _ if o.meta.is_dir() => Found::Folder,
                     _ => Found::Missing,
                 };
@@ -233,7 +233,7 @@ fn read_between(
     let mut dirty = Vec::new();
     for (it, f) in items.iter().zip(found) {
         let o = match f {
-            Found::File(o) => o,
+            Found::File(o) => *o,
             Found::Folder => {
                 out.push_str(&format!("== {}: a folder — search with output files lists it\n", it.given));
                 continue;

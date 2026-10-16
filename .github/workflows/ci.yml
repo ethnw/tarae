@@ -62,13 +62,14 @@ jobs:
       # are too noisy for. The dev grammars (rust) for the syntax budgets: only debug builds have them unasked
       - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
 
-  # Downloads and builds a grammar from GitHub (the #[ignore]d network test).
+  # The tests that need the network, by name (`#[ignore = "network: …"]`): a grammar downloaded and built from
+  # GitHub, a new plugin built with the SDK's crates. The rest of `--ignored` isn't CI's — children run in a
+  # process of their own, measurements, checks by hand on a VM, the installed claude's
+  # (preflight's cis_network_job_runs_every_network_test_and_only_those)
   network:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      # installed_claude_speaks_a_revision_we_speak is ignored too, but it runs the installed claude CLI —
-      # the runner has none; it's a local check
-      - run: cargo test --locked -- --ignored --skip installed_claude_speaks_a_revision_we_speak
+      - run: cargo test --locked --bin tarae -- --ignored --exact grammar::tests::grammar_install_e2e plugin::cli::tests::a_new_plugin_builds

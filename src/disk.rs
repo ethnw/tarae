@@ -730,10 +730,12 @@ mod tests {
     /// until the file has been quiet: a burst of four writes is one. A write the buffer doesn't take (a
     /// conflict) is none; the user's own `:w` goes at once, and a held one goes with it. (The burst's writes
     /// are 30 ms apart over longer than `SAVE_QUIET` — so the quiet restarts with each; a try where a gap
-    /// stretched to half of it (a stalled runner) wasn't one burst — tried again.)
+    /// stretched to half of it (a stalled runner) wasn't one burst — tried again. "No more" is looked at
+    /// `PAST_QUIET` later.)
     #[test]
     fn a_burst_of_writes_from_outside_is_one_save() {
         const TRIES: u32 = 5;
+        let quiet = crate::lsp_editor::SAVE_QUIET;
         let mut s = Saving::new("burst");
         s.outside("fn b() {}\n");
         assert_eq!(s.ed.doc().text.to_string(), "fn b() {}\n");
@@ -741,18 +743,20 @@ mod tests {
         assert_eq!(s.saves_reach(1, true), 1, "reloaded, then quiet");
         for attempt in 1.. {
             let before = s.saves();
-            let mut gap = Duration::ZERO;
-            for body in ["fn c() {}\n", "fn d() {}\n", "fn e() {}\n", "fn f() {}\n"] {
+            let (start, mut gap) = (std::time::Instant::now(), Duration::ZERO);
+            let mut n = 0;
+            while n < 4 || start.elapsed() < quiet * 3 / 2 {
                 let t = std::time::Instant::now();
-                s.outside(body);
+                s.outside(&format!("fn w{n}() {{}}\n"));
                 s.pump(30);
                 gap = gap.max(t.elapsed());
+                n += 1;
             }
-            if gap >= crate::lsp_editor::SAVE_QUIET / 2 {
+            if gap >= quiet / 2 {
                 assert!(attempt < TRIES, "a write {gap:?} after the last in each of {TRIES} tries");
                 // (what that try sent — mid-burst and after it — all out before the next counts)
                 s.saves_reach(before + 1, true);
-                s.pump(500);
+                s.pump(PAST_QUIET);
                 continue;
             }
             assert_eq!(s.saves(), before, "not during the burst");
@@ -770,7 +774,7 @@ mod tests {
         feed(&mut s.ed, "ggid<esc>");
         s.outside("something else\n");
         assert!(s.ed.doc().disk_conflict);
-        s.pump(300);
+        s.pump(PAST_QUIET);
         assert_eq!(s.saves(), n + 1, "a conflict is no save");
         // The user's :w: at once — a held one doesn't follow it
         crate::typed::execute(&mut s.ed, "reload").unwrap();
@@ -778,7 +782,7 @@ mod tests {
         crate::typed::execute(&mut s.ed, "w!").unwrap();
         // (its didSave once the write is done — the saver's worker, an event)
         assert_eq!(s.saves_reach(n + 2, true), n + 2, ":w is sent");
-        s.pump(300);
+        s.pump(PAST_QUIET);
         assert_eq!(s.saves(), n + 2, "and the held one went with it");
         std::fs::remove_dir_all(&s.dir).ok();
     }
@@ -790,11 +794,11 @@ mod tests {
     #[test]
     fn a_held_save_goes_with_a_slow_w() {
         let mut s = Saving::new("slow-w");
-        s.ed.saver.slow = crate::lsp_editor::SAVE_QUIET * 3;
+        s.ed.saver.slow = crate::lsp_editor::SAVE_QUIET * 2;
         s.outside("fn b() {}\n");
         crate::typed::execute(&mut s.ed, "w!").unwrap();
         assert_eq!(s.saves_reach(1, true), 1, ":w is sent");
-        s.pump(300);
+        s.pump(PAST_QUIET);
         assert_eq!(s.saves(), 1, "and the held one went with it");
         // Its write failed: the held one still goes, once quiet
         s.outside("fn c() {}\n");
@@ -806,7 +810,10 @@ mod tests {
     }
 
     /// Long enough for a slow write (`a_held_save_goes_with_a_slow_w`) and the quiet after it.
-    const SAVE_PUMP: u64 = 800;
+    const SAVE_PUMP: u64 = 4 * crate::lsp_editor::SAVE_QUIET.as_millis() as u64;
+
+    /// Long enough past the quiet for a held save that would go to have gone — for checking none more did.
+    const PAST_QUIET: u64 = 2 * crate::lsp_editor::SAVE_QUIET.as_millis() as u64;
 
     /// #160: a file the buffer takes from disk elsewhere than the watch — the end of a turn whose edits went
     /// in unseen (a rebase's conflicts resolved), `:reload` — is a change and a save to its servers, as the
@@ -846,7 +853,7 @@ mod tests {
         assert!(change.contains(r#""text":"c""#) && !change.contains("fn b") && saved, "{change}");
         // Taking what the buffer already has: no change, no save
         s.ed.disk_take(&file, &Rope::from_str("fn c() {}\n"), Some((std::time::SystemTime::UNIX_EPOCH, 1)));
-        s.pump(300);
+        s.pump(PAST_QUIET);
         assert_eq!(s.saves(), 3, "nothing changed");
         std::fs::remove_dir_all(&s.dir).ok();
     }
@@ -860,7 +867,7 @@ mod tests {
         let args = serde_json::json!({ "paths": ["main.rs"], "wait": 1 });
         crate::nav::diagnostics(&mut s.ed, crate::tools::Call::test(1), &args).unwrap();
         assert_eq!(s.saves_reach(1, false), 1, "sent as it's asked, before any wait");
-        s.pump(300);
+        s.pump(PAST_QUIET);
         assert_eq!(s.saves(), 1, "and not again");
         std::fs::remove_dir_all(&s.dir).ok();
     }
@@ -875,7 +882,7 @@ mod tests {
         (run.state, run.by_claude) = (crate::task::State::Running, true);
         s.ed.session.task_run = Some(run);
         s.outside("fn b() {}\n");
-        s.pump(400);
+        s.pump(PAST_QUIET);
         assert_eq!(s.saves(), 0, "not while it builds");
         // Its end comes as an event, as a real run's does
         s.ed.events.jobs().spawn(|| {

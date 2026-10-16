@@ -629,7 +629,7 @@ mod tests {
     /// Actually downloads and builds — on a machine with network·git·cc:
     /// `cargo test -- --ignored grammar_install_e2e`.
     #[test]
-    #[ignore]
+    #[ignore = "network: CI's network job runs it"]
     fn grammar_install_e2e() {
         let dir = std::env::temp_dir().join(format!("tarae-grammar-{}", std::process::id()));
         // SAFETY: a variable only this test uses

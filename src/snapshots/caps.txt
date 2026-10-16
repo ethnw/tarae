@@ -58,6 +58,7 @@ never written: toolchains' homes
     $HOME/.gradle
     $HOME/.npm
     $HOME/.rustup
+    $HOME/Library/Java/JavaVirtualMachines
     $HOME/go
     $HOME/go/bin
 ══ Linux
@@ -120,5 +121,6 @@ never written: toolchains' homes
     $HOME/.gradle
     $HOME/.npm
     $HOME/.rustup
+    $HOME/Library/Java/JavaVirtualMachines
     $HOME/go
     $HOME/go/bin

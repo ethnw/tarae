@@ -194,16 +194,18 @@ risky = [
 quiet = ["src/test/"]
 
 # Claude's sandbox (`sandboxpack.rs`). What Java's builds read in home, measured
-# (`target/sb/java-checkpoint.md`): the JDKs `/usr/bin/java` looks for, Maven's downloaded repository and its
-# wrapper's distributions — not `~/.m2/settings.xml` (a repository's password lives there). In the user's
-# Gradle home: the dependencies downloaded (`caches/modules-2`, read in place as `GRADLE_RO_DEP_CACHE`) and the
-# wrapper's distributions — not its settings (`gradle.properties` holds repository passwords)
+# (`target/sb/java-checkpoint.md`): the JDKs `/usr/bin/java` looks for, the JDK `JAVA_HOME` names (`{jdk}`:
+# sdkman, asdf, mise and CI's tool caches keep theirs in home — without it `java` can't load its own libjli),
+# Maven's downloaded repository and its wrapper's distributions — not `~/.m2/settings.xml` (a repository's
+# password lives there). In the user's Gradle home: the dependencies downloaded (`caches/modules-2`, read in
+# place as `GRADLE_RO_DEP_CACHE`) and the wrapper's distributions — not its settings (`gradle.properties` holds
+# repository passwords)
 [sandbox]
 # Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
 not-settings = ["java"]
 reads = [
-    "~/Library/Java/JavaVirtualMachines", "~/.m2/repository", "~/.m2/wrapper", "{gradle}/caches/modules-2",
-    "{gradle}/wrapper/dists",
+    "~/Library/Java/JavaVirtualMachines", "{jdk}", "~/.m2/repository", "~/.m2/wrapper",
+    "{gradle}/caches/modules-2", "{gradle}/wrapper/dists",
 ]
 # The user's Gradle daemons' registry: their ports and the token each takes — kept from every run, whatever is
 # granted. Measured (`target/sb/java-checkpoint.md`, c0): with it readable and this machine's ports open, a
@@ -230,6 +232,10 @@ out of reach — the registry that names them is kept from your commands.""" }
 
 [sandbox.homes]
 gradle = { env = "GRADLE_USER_HOME", else = "~/.gradle" }
+# The JDK runs use (`JAVA_HOME`, passed on above) — read whole where it's there, as a home: never home itself
+# nor in a kept place, the kept places in it still closed (`sandbox::reads_for`), never written
+# (`sandbox::RunsLater`). Unset: macOS's own folder of the user's JDKs, read already
+jdk = { env = "JAVA_HOME", else = "~/Library/Java/JavaVirtualMachines" }
 
 # Gradle's home of the runs' own. The user's holds what their own builds run later — compiled build scripts,
 # the wrapper's distributions, the dependencies — and the registry of their daemons, so a run never writes

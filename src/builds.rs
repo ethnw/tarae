@@ -438,6 +438,8 @@ fn overlap(a: &Path, b: &Path) -> bool {
 pub struct Builds {
     /// (pack, its `when` as far as it reads, the table read).
     pub entries: Vec<(String, Vec<String>, Result<Tool, String>)>,
+    /// A stand-in for every `ask`'s program (tests): a script, read by `/bin/sh` — never run itself (Linux
+    /// won't exec a file another test's fork still holds open for writing: ETXTBSY, an ask that never answered).
     pub program: Option<PathBuf>,
     pub home: Option<PathBuf>,
     pub user_home: Option<PathBuf>,
@@ -534,8 +536,15 @@ impl Builds {
     pub fn ask(&self, tool: &Tool, dir: &Path) -> Option<(PathBuf, PathBuf)> {
         use std::io::Read as _;
         use std::process::{Command, Stdio};
-        let program = self.program.clone().unwrap_or_else(|| PathBuf::from(&tool.ask[0]));
-        let mut child = Command::new(program)
+        let mut cmd = match &self.program {
+            Some(script) => {
+                let mut c = Command::new("/bin/sh");
+                c.arg(script);
+                c
+            }
+            None => Command::new(&tool.ask[0]),
+        };
+        let mut child = cmd
             .args(&tool.ask[1..])
             .current_dir(dir)
             .stdin(Stdio::null())

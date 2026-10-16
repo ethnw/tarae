@@ -40,7 +40,7 @@ pub mod claude;
 // (a keeper's scope from the user's manager: the wire built everywhere — its tests run on macOS too —, asked on Linux)
 pub mod dbus;
 #[cfg(test)]
-mod golden;
+pub(crate) mod golden;
 // (9a: what a run's sandbox keeps apart and shares — pure, built everywhere: its golden says every tier on any machine;
 // Landlock's said on Linux)
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -6412,6 +6412,46 @@ mod tests {
         assert_eq!(above, want.map(|w| home.join(w)));
         assert!(reads_above(Path::new("/opt/p"), &home).is_empty());
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The JDK `JAVA_HOME` names in home (sdkman's, asdf's, mise's, a CI tool cache's — the Java pack's `jdk`
+    /// home) is read whole, by its real path, and never written; home itself, a kept place, or a folder that isn't
+    /// there isn't read; a kept place inside it stays closed. (A stand-in home in the test's own folder.)
+    #[test]
+    fn the_jdk_java_home_names_is_read_within_bounds() {
+        let scratch = crate::scratch::Scratch::new("sb-jdk");
+        let home = profile_path(&scratch);
+        let jdk = home.join(".sdkman/candidates/java/21.0.4-tem");
+        for d in [jdk.join("lib"), jdk.join("bin"), home.join(".ssh"), home.join("Library/Keychains")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // (sdkman's `current`: a link to the version in use)
+        let current = home.join(".sdkman/candidates/java/current");
+        std::os::unix::fs::symlink(&jdk, &current).unwrap();
+        let with = |java_home: &Path| {
+            let env = HashMap::from([("JAVA_HOME".to_string(), java_home.into())]);
+            let vars = vars_in(&home, &Here { env, ..Here::default() });
+            (reads_for(&home, &[], &vars), RunsLater::new(&home, &vars, &[]))
+        };
+        let (r, later) = with(&current);
+        assert!(r.allow.contains(&jdk), "its real path: {:?}", r.allow);
+        let policy = Policy::for_project(&Env { root: home.join("proj"), reads: r, ..Env::default() });
+        for f in ["lib/libjli.dylib", "bin/java"] {
+            assert!(policy.reads_allow(&jdk.join(f)), "{f}");
+        }
+        assert!(later.refuses(&jdk).is_some_and(|w| w.contains("toolchain's home")), "never written");
+        for (java_home, why) in [
+            (home.clone(), "home itself"),
+            (home.join(".ssh"), "a kept place"),
+            (home.join("jdk-never-made"), "not there"),
+        ] {
+            let (r, _) = with(&java_home);
+            assert!(!r.allow.contains(&java_home), "{why}: {:?}", r.allow);
+        }
+        // (a JAVA_HOME holding a kept place: what's kept stays closed in it)
+        let (r, _) = with(&home.join("Library"));
+        let policy = Policy::for_project(&Env { root: home.join("proj"), reads: r, ..Env::default() });
+        assert!(!policy.reads_allow(&home.join("Library/Keychains/login.keychain-db")));
     }
 
     /// The files the packs' `write-files` give with the user's Gradle home at `gradle` (`GRADLE_USER_HOME`; no

@@ -3974,8 +3974,10 @@ mod tests {
     }
 
     /// For real: a Gradle build of a small project (no dependencies, so offline) in the sandbox — its client
-    /// talks to a daemon of its own over this machine's ports (the project asks other JVM options, so a
-    /// single-use daemon is forked) and binds the socket its file locks share. With
+    /// talks to a daemon of its own over this machine's ports and binds the socket its file locks share. The
+    /// daemon is the runs' own: in a Gradle home kept with its daemon where tarae ends what runs leave (the Java
+    /// pack's `run-home.gradle` `daemon`; a new project's first build starts it, ended here after), else in the
+    /// run's own home with no daemon kept, where the project's other JVM options fork a single-use one. With
     /// `llm.sandbox-localhost` it builds; with this machine's ports closed it can't reach its daemon, and the
     /// report hears Java was refused a port. Skips without `gradle` and `java` on PATH.
     #[test]
@@ -4028,13 +4030,20 @@ mod tests {
             io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
             let status = crate::spawn::wait(spawned.pid).unwrap();
             let blocked = p.watch.as_ref().map(|w| w.blocked()).unwrap_or_default();
-            (status.success(), format!("{out}\n{}", reading.join().unwrap()), blocked)
+            // (whether its Gradle home is one kept with its daemon)
+            let home = p.env.iter().find(|(k, _)| k == "GRADLE_USER_HOME").map(|(_, v)| PathBuf::from(v));
+            let kept = home.is_some_and(|h| p.kept.iter().any(|k| k.daemon && k.home == h));
+            (status.success(), format!("{out}\n{}", reading.join().unwrap()), blocked, kept)
         };
-        let (built, said, _) = build(true);
+        let (built, said, _, kept) = build(true);
         assert!(built, "{said}");
         assert!(s.root.join("build/classes/java/main/fx/Main.class").exists(), "{said}");
-        assert!(said.contains("single-use Daemon"), "it went through a daemon of its own: {said}");
-        let (built, said, blocked) = build(false);
+        let daemon = if kept { "Starting a Gradle Daemon" } else { "single-use Daemon" };
+        let (built, said_closed, blocked, _) = build(false);
+        // (the daemons kept with the homes: this project's, ended)
+        super::super::end_leftovers(Some(&s.root));
+        assert!(said.contains(daemon), "it went through a daemon of its own (kept home: {kept}): {said}");
+        let said = said_closed;
         // (routed — the session's netns: its daemon is the session's, reached on the session's loopback)
         if super::super::tier::get().ns.netns() {
             assert!(built, "this machine's ports closed, the daemon the session's own: {said}");
