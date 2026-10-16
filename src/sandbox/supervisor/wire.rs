@@ -197,6 +197,8 @@ impl From<i32> for Unsent {
 }
 
 impl Unsent {
+    /// Tests: the errno the caller gets.
+    #[cfg(test)]
     pub(super) fn errno(&self) -> i32 {
         match self {
             Unsent::Errno(e) => *e,
