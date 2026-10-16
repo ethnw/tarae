@@ -26,6 +26,8 @@ mod abi {
     pub const SOL_SOCKET: i32 = 1;
     pub const SCM_RIGHTS: i32 = 1;
     pub const SCM_CREDENTIALS: i32 = 2;
+    /// The most descriptors one message passes (`include/net/scm.h`).
+    pub const SCM_MAX_FD: usize = 253;
     pub const UIO_MAXIOV: i32 = 1024;
     pub const NLM_F_REQUEST: i32 = 1;
     pub const NLM_F_ACK: i32 = 4;
@@ -170,13 +172,45 @@ pub(super) fn netlink_reads(data: &[u8]) -> Result<(), String> {
 }
 
 /// One `struct msghdr` of the caller's, read once: where it goes (if it names it), what it carries, and its
-/// control data with the descriptors it passes (`SCM_RIGHTS`) taken as tarae's own (`Served::passed`) — passing on
-/// what the run holds. Credentials (`SCM_CREDENTIALS`) are refused: tarae can't speak for the run's process.
+/// control data — built by tarae: only the descriptors it passes (`SCM_RIGHTS`), taken as tarae's own
+/// (`Served::passed`), passing on what the run holds. Every other control message is refused (`Unsent::Control`):
+/// credentials (`SCM_CREDENTIALS`) tarae can't speak for, and no other type goes on as the run's bytes.
 pub(super) struct Msg {
     pub(super) name: Option<Vec<u8>>,
     pub(super) data: Vec<u8>,
     pub(super) control: Vec<u8>,
     pub(super) fds: Vec<OwnedFd>,
+}
+
+/// Why a message isn't sent: the errno the caller gets — or a control message of a type tarae doesn't pass on
+/// (every one but `SCM_RIGHTS`: `EPERM`, and the caller says it in the run's report by its `named`).
+#[derive(Debug, PartialEq)]
+pub(super) enum Unsent {
+    Errno(i32),
+    Control { level: i32, kind: i32 },
+}
+
+impl From<i32> for Unsent {
+    fn from(errno: i32) -> Unsent {
+        Unsent::Errno(errno)
+    }
+}
+
+impl Unsent {
+    pub(super) fn errno(&self) -> i32 {
+        match self {
+            Unsent::Errno(e) => *e,
+            Unsent::Control { .. } => libc::EPERM,
+        }
+    }
+}
+
+/// A control message as the run's report names it.
+pub(super) fn named(level: i32, kind: i32) -> String {
+    match (level, kind) {
+        (SOL_SOCKET, SCM_CREDENTIALS) => "SCM_CREDENTIALS".into(),
+        _ => format!("control message level {level}, type {kind}"),
+    }
 }
 
 /// The message at `at` in `m`, each descriptor it passes taken by `pass` (the caller's number → tarae's own).
@@ -189,7 +223,7 @@ pub(super) fn read_msg<M: Mem>(
     mut pass: impl FnMut(i32) -> Result<OwnedFd, i32>,
     at: u64,
     datagram: bool,
-) -> Result<Msg, i32> {
+) -> Result<Msg, Unsent> {
     let h = m.read(at, MSGHDR)?;
     let word = |o: usize| u64::from_ne_bytes(h[o..o + 8].try_into().unwrap_or_default());
     let (name_at, name_len) =
@@ -200,7 +234,7 @@ pub(super) fn read_msg<M: Mem>(
         (a, len) => Some(address(m, a, len)?),
     };
     if iov_len > UIO_MAXIOV as u64 {
-        return Err(libc::EMSGSIZE);
+        return Err(libc::EMSGSIZE.into());
     }
     let iov = m.read(iov_at, iov_len as usize * 16)?;
     // (`struct iovec`: where, how long)
@@ -215,11 +249,11 @@ pub(super) fn read_msg<M: Mem>(
         })
         .collect();
     if iov.iter().any(|&(_, len)| len > isize::MAX as u64) {
-        return Err(libc::EINVAL);
+        return Err(libc::EINVAL.into());
     }
     let total = iov.iter().fold(0u64, |total, &(_, len)| total.saturating_add(len));
     if datagram && total > SEND_MAX as u64 {
-        return Err(libc::EMSGSIZE);
+        return Err(libc::EMSGSIZE.into());
     }
     let mut data = Vec::new();
     for (base, len) in iov {
@@ -231,32 +265,38 @@ pub(super) fn read_msg<M: Mem>(
     }
     let control_len = usize::try_from(control_len).unwrap_or(usize::MAX);
     if control_len > CONTROL_MAX {
-        return Err(libc::ENOBUFS);
+        return Err(libc::ENOBUFS.into());
     }
-    let mut control = if control_at == 0 { Vec::new() } else { m.read(control_at, control_len)? };
-    let mut fds = Vec::new();
+    let theirs = if control_at == 0 { Vec::new() } else { m.read(control_at, control_len)? };
+    // (what goes out is built here: a header of tarae's per `SCM_RIGHTS`, nothing of the run's bytes)
+    let (mut control, mut fds) = (Vec::new(), Vec::new());
     // `struct cmsghdr`: its length (with itself), level, type, then the data — each aligned to 8
     let mut o = 0;
-    while o + 16 <= control.len() {
-        let len = usize::try_from(u64::from_ne_bytes(control[o..o + 8].try_into().unwrap_or_default()))
+    while o + 16 <= theirs.len() {
+        let len = usize::try_from(u64::from_ne_bytes(theirs[o..o + 8].try_into().unwrap_or_default()))
             .unwrap_or(usize::MAX);
-        if len < 16 || len > control.len() - o {
-            return Err(libc::EINVAL);
+        if len < 16 || len > theirs.len() - o {
+            return Err(libc::EINVAL.into());
         }
-        let level = i32::from_ne_bytes(control[o + 8..o + 12].try_into().unwrap_or_default());
-        let kind = i32::from_ne_bytes(control[o + 12..o + 16].try_into().unwrap_or_default());
-        match (level, kind) {
-            (SOL_SOCKET, SCM_RIGHTS) => {
-                for at in (o + 16..o + len).step_by(4).filter(|at| at + 4 <= o + len) {
-                    let theirs = i32::from_ne_bytes(control[at..at + 4].try_into().unwrap_or_default());
-                    let ours = pass(theirs)?;
-                    control[at..at + 4].copy_from_slice(&ours.as_raw_fd().to_ne_bytes());
-                    fds.push(ours);
-                }
-            }
-            (SOL_SOCKET, SCM_CREDENTIALS) => return Err(libc::EPERM),
-            _ => {}
+        let level = i32::from_ne_bytes(theirs[o + 8..o + 12].try_into().unwrap_or_default());
+        let kind = i32::from_ne_bytes(theirs[o + 12..o + 16].try_into().unwrap_or_default());
+        if (level, kind) != (SOL_SOCKET, SCM_RIGHTS) {
+            return Err(Unsent::Control { level, kind });
         }
+        // (a tail under 4 bytes ignored, as the kernel does)
+        let n = (len - 16) / 4;
+        if fds.len() + n > SCM_MAX_FD {
+            return Err(libc::EINVAL.into());
+        }
+        control.extend((16 + 4 * n as u64).to_ne_bytes());
+        control.extend(SOL_SOCKET.to_ne_bytes());
+        control.extend(SCM_RIGHTS.to_ne_bytes());
+        for at in (o + 16..).step_by(4).take(n) {
+            let ours = pass(i32::from_ne_bytes(theirs[at..at + 4].try_into().unwrap_or_default()))?;
+            control.extend(ours.as_raw_fd().to_ne_bytes());
+            fds.push(ours);
+        }
+        control.resize(control.len().next_multiple_of(8), 0);
         o += len.div_ceil(8) * 8;
     }
     Ok(Msg { name, data, control, fds })

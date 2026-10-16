@@ -47,8 +47,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use super::route::{Reach, Refusal, Route};
 use super::tier::RunNet;
 use super::wire::{
-    Addr, MSG_LEN_AT, Mem, Msg, SEND_MAX, address, mmsg_at, named_in, netlink_address, netlink_reads, parse,
-    read_msg, unix_address,
+    Addr, MSG_LEN_AT, Mem, Msg, SEND_MAX, Unsent, address, mmsg_at, named, named_in, netlink_address,
+    netlink_reads, parse, read_msg, unix_address,
 };
 use super::{Denial, Policy};
 
@@ -2173,12 +2173,25 @@ fn send_one(
     c.sigpipe(flags, result(r))
 }
 
+/// The caller's message at `at` (`read_msg`), each descriptor it passes taken as tarae's (`Served::passed`) — a
+/// control message of any other type refused, said.
+fn message(p: &Served, c: &Caller, at: u64, datagram: bool) -> Result<Msg, i32> {
+    read_msg(c, |fd| p.passed(c, fd as u64), at, datagram).or_else(|u| match u {
+        Unsent::Errno(e) => Err(e),
+        Unsent::Control { level, kind } => {
+            let why =
+                format!("sending {} — a message passes only descriptors (SCM_RIGHTS)", named(level, kind));
+            refuse(p, c, "network-bound", why).and(Err(libc::EPERM))
+        }
+    })
+}
+
 /// `sendmsg(fd, msg, flags)` — every one, as only the message says where it goes.
 fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let mut sock = p.sock(&c, args[0])?;
-    let m = read_msg(&c, |fd| p.passed(&c, fd as u64), args[1], whole(sockopt(&sock, libc::SO_TYPE)?))?;
+    let m = message(p, &c, args[1], whole(sockopt(&sock, libc::SO_TYPE)?))?;
     send_one((l, n), p, &c, (args[0], &mut sock), m, args[2] as i32)
 }
 
@@ -2194,7 +2207,7 @@ fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let mut sent = 0;
     for i in 0..count {
         let r = mmsg_at(args[1], i).ok_or(libc::EFAULT).and_then(|at| {
-            let m = read_msg(&c, |fd| p.passed(&c, fd as u64), at, datagram)?;
+            let m = message(p, &c, at, datagram)?;
             Ok((at, send_one((l, n), p, &c, (args[0], &mut sock), m, args[3] as i32)?))
         });
         match r {
@@ -2621,6 +2634,95 @@ mod tests {
             libc::close(fds[1]);
         }
         "ok".into()
+    }
+
+    /// A datagram socket pair, a byte sent with `sendmsg` and one control message of `level` and `kind` —
+    /// `SCM_RIGHTS` passing `/dev/null`, any other the run's own credentials (`struct ucred`) — and read back:
+    /// `ok` and how many descriptors came, or the send's error.
+    fn pair_cmsg(level: i32, kind: i32) -> String {
+        let mut fds = [0; 2];
+        // SAFETY: a two-slot array the call fills.
+        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) } != 0 {
+            return format!("socketpair {}", io::Error::last_os_error());
+        }
+        let null = std::fs::File::open("/dev/null").unwrap();
+        let data: Vec<u8> = if (level, kind) == (libc::SOL_SOCKET, libc::SCM_RIGHTS) {
+            null.as_raw_fd().to_ne_bytes().to_vec()
+        } else {
+            // SAFETY: plain calls.
+            let ucred = unsafe { [libc::getpid() as u32, libc::getuid(), libc::getgid()] };
+            ucred.iter().flat_map(|w| w.to_ne_bytes()).collect()
+        };
+        let mut control = (16 + data.len() as u64).to_ne_bytes().to_vec();
+        control.extend(level.to_ne_bytes());
+        control.extend(kind.to_ne_bytes());
+        control.extend(&data);
+        control.resize(control.len().next_multiple_of(8), 0);
+        let mut byte = [1u8];
+        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        // SAFETY: zeroed, then its buffer and control set; no address.
+        let mut m: libc::msghdr = unsafe { std::mem::zeroed() };
+        (m.msg_iov, m.msg_iovlen) = (&raw mut iov, 1);
+        (m.msg_control, m.msg_controllen) = (control.as_mut_ptr().cast(), control.len() as _);
+        // SAFETY: the message and all it points to live for the call.
+        let result = match unsafe { libc::sendmsg(fds[0], &raw const m, 0) } {
+            1 => {
+                let mut back = [0u64; 8];
+                // SAFETY: as above, the control a buffer of ours to fill.
+                let mut m: libc::msghdr = unsafe { std::mem::zeroed() };
+                (m.msg_iov, m.msg_iovlen) = (&raw mut iov, 1);
+                (m.msg_control, m.msg_controllen) = (back.as_mut_ptr().cast(), size_of_val(&back) as _);
+                // SAFETY: as above.
+                let read = unsafe { libc::recvmsg(fds[1], &raw mut m, libc::MSG_DONTWAIT) };
+                let back: Vec<u8> = back.iter().flat_map(|w| w.to_ne_bytes()).collect();
+                let word = |o: usize| i32::from_ne_bytes(back[o..o + 4].try_into().unwrap());
+                let len = u64::from_ne_bytes(back[..8].try_into().unwrap()) as usize;
+                let came: Vec<i32> = if m.msg_controllen >= 16 && word(12) == libc::SCM_RIGHTS {
+                    (16..len).step_by(4).map(word).collect()
+                } else {
+                    Vec::new()
+                };
+                for fd in &came {
+                    // SAFETY: a descriptor the message gave us.
+                    unsafe { libc::close(*fd) };
+                }
+                if read == 1 { format!("ok {}", came.len()) } else { format!("recvmsg {read}") }
+            }
+            _ => said::<()>(Err(io::Error::last_os_error())),
+        };
+        // SAFETY: ours.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        result
+    }
+
+    /// A run's message passes descriptors (`SCM_RIGHTS`) and no other control message (`wire::read_msg`): the
+    /// descriptor arrives; credentials, `SOL_SOCKET`'s other types and another level's are `EPERM`, each named in
+    /// the run's report.
+    #[test]
+    fn a_runs_message_passes_descriptors_and_no_other_control() {
+        if !served("a_runs_message_passes_descriptors_and_no_other_control") {
+            return;
+        }
+        let s = Scratch::new("cmsg");
+        let p = s.policy(Vec::new(), false, Vec::new());
+        let ops =
+            [(1, 1), (1, 2), (1, 99), (41, 77)].map(|(level, kind)| format!("pair-cmsg {level} {kind}"));
+        let got = probe_in(&p, &ops);
+        assert_eq!(got, ["ok 1".to_string(), refused(), refused(), refused()]);
+        let blocked = p.watch.as_ref().unwrap().blocked();
+        let said: Vec<&str> = blocked
+            .seen
+            .iter()
+            .filter(|d| d.op == "network-bound")
+            .filter_map(|d| d.target.strip_prefix("sending ")?.split_once(" — ").map(|t| t.0))
+            .collect();
+        assert_eq!(
+            said,
+            ["SCM_CREDENTIALS", "control message level 1, type 99", "control message level 41, type 77"]
+        );
     }
 
     /// For real (step 7: a sandboxed loop of `sendmsg` and `recv` on a socket pair hung): every message a run
@@ -3137,6 +3239,7 @@ mod tests {
                     race(good.parse().unwrap(), bad.parse().unwrap(), n.parse().unwrap())
                 }
                 ["pair-sendmsg", n] => pair_sendmsg(n.parse().unwrap()),
+                ["pair-cmsg", level, kind] => pair_cmsg(level.parse().unwrap(), kind.parse().unwrap()),
                 ["lookup", name] => lookup(name),
                 ["netlink-route"] => said(netlink_route()),
                 ["net-state"] => net_state().unwrap_or_else(|e| format!("err {e}")),

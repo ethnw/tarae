@@ -130,6 +130,31 @@ fn the_numbers_are_linuxs() {
     );
     assert_eq!((MSGHDR, MMSGHDR), (size_of::<libc::msghdr>(), size_of::<libc::mmsghdr>()));
     assert_eq!(MSG_LEN_AT as usize, std::mem::offset_of!(libc::mmsghdr, msg_len));
+    // (`SCM_MAX_FD`, which libc doesn't name: the kernel's own answer on a socket pair — the most, and one more)
+    let null = std::fs::File::open("/dev/null").unwrap();
+    let mut pair = [0; 2];
+    // SAFETY: a two-slot array the call fills.
+    assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, pair.as_mut_ptr()) }, 0);
+    let send = |n: usize| {
+        let control = rights(&vec![null.as_raw_fd(); n]);
+        let mut byte = [0u8];
+        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        // SAFETY: zeroed, then set to buffers that live for the call.
+        let mut h: libc::msghdr = unsafe { std::mem::zeroed() };
+        (h.msg_iov, h.msg_iovlen) = (&raw mut iov, 1);
+        (h.msg_control, h.msg_controllen) = (control.as_ptr() as *mut libc::c_void, control.len() as _);
+        // SAFETY: as above.
+        match unsafe { libc::sendmsg(pair[0], &h, 0) } {
+            r if r < 0 => Err(std::io::Error::last_os_error().raw_os_error()),
+            r => Ok(r),
+        }
+    };
+    assert_eq!((send(SCM_MAX_FD), send(SCM_MAX_FD + 1)), (Ok(1), Err(Some(libc::EINVAL))));
+    // SAFETY: ours.
+    unsafe {
+        libc::close(pair[0]);
+        libc::close(pair[1]);
+    }
 }
 
 /// A message as glibc's `sendmsg` lays it out — an address, two buffers, two descriptors passed — is read whole:
@@ -138,7 +163,7 @@ fn the_numbers_are_linuxs() {
 #[test]
 fn a_message_is_read_whole_each_piece_once() {
     let to = v4([127, 0, 0, 1], 53);
-    let control = [rights(&[3, 5]), cmsg(SOL_SOCKET, 99, &[7; 4])].concat();
+    let control = rights(&[3, 5]);
     let m = Fake::default()
         .at(HEAD, msghdr((NAME, 16), (IOV, 2), (CONTROL, control.len() as u64)))
         .at(NAME, to.clone())
@@ -171,8 +196,9 @@ fn a_message_is_read_whole_each_piece_once() {
 /// there (`EFAULT`).
 #[test]
 fn what_a_message_may_not_hold() {
-    let read =
-        |m: &Fake, datagram: bool| read_msg(m, passer(&mut Vec::new()), HEAD, datagram).map(|m| m.data.len());
+    let read = |m: &Fake, datagram: bool| {
+        read_msg(m, passer(&mut Vec::new()), HEAD, datagram).map(|m| m.data.len()).map_err(|u| u.errno())
+    };
     let with_control = |c: Vec<u8>| {
         let h = msghdr((0, 0), (IOV, 0), (CONTROL, c.len() as u64));
         Fake::default().at(HEAD, h).at(CONTROL, c)
@@ -207,6 +233,63 @@ fn what_a_message_may_not_hold() {
     assert_eq!(read(&name, false), Err(libc::EINVAL));
     assert_eq!(name.reads.borrow().len(), 1, "an address too long isn't read");
     assert_eq!(read(&Fake::default(), false), Err(libc::EFAULT));
+}
+
+/// A message laid out at `HEAD` with only `control`.
+fn with_control(control: Vec<u8>) -> Fake {
+    Fake::default().at(HEAD, msghdr((0, 0), (IOV, 0), (CONTROL, control.len() as u64))).at(CONTROL, control)
+}
+
+/// Only descriptors go (`SCM_RIGHTS`): every other control message — credentials, `SOL_SOCKET`'s other types,
+/// another level's — is refused (`EPERM`), handed back by its level and type for the run's report to name it.
+#[test]
+fn a_control_message_but_descriptors_is_refused_by_its_type() {
+    for (level, kind, name) in [
+        (SOL_SOCKET, SCM_CREDENTIALS, "SCM_CREDENTIALS"),
+        (SOL_SOCKET, 99, "control message level 1, type 99"),
+        (41, 77, "control message level 41, type 77"),
+        (0, SCM_RIGHTS, "control message level 0, type 1"),
+    ] {
+        let m = with_control([rights(&[3]), cmsg(level, kind, &[7; 12])].concat());
+        let got = read_msg(&m, passer(&mut Vec::new()), HEAD, false).err();
+        assert_eq!(got, Some(Unsent::Control { level, kind }), "{name}");
+        assert_eq!(got.map(|u| u.errno()), Some(libc::EPERM));
+        assert_eq!(named(level, kind), name);
+    }
+}
+
+/// At most `SCM_MAX_FD` (253) descriptors in a message: 253 taken; one more `EINVAL`, said before the header holding
+/// it passes any — none past the 253rd taken, in one header or across two.
+#[test]
+fn past_scm_max_fd_descriptors_none_more_is_taken() {
+    let read = |control: Vec<u8>| {
+        let mut passed = Vec::new();
+        let got = read_msg(&with_control(control), passer(&mut passed), HEAD, false).map(|msg| msg.fds.len());
+        (got, passed.len())
+    };
+    assert_eq!(read(rights(&[3; 253])), (Ok(253), 253));
+    assert_eq!(read(rights(&[3; 254])), (Err(Unsent::Errno(libc::EINVAL)), 0));
+    let two = [rights(&[3; 200]), rights(&[4; 54])].concat();
+    assert_eq!(read(two), (Err(Unsent::Errno(libc::EINVAL)), 200));
+}
+
+/// What goes to `sendmsg` is a buffer tarae built: a header per `SCM_RIGHTS` of the run's, as long as its
+/// descriptors (a tail under 4 bytes left out, as the kernel ignores it), tarae's descriptors, padding zeroed —
+/// nothing of the run's bytes, a tail past the last header neither.
+#[test]
+fn only_a_buffer_tarae_built_goes_out() {
+    // (two descriptors and 3 bytes more, then the run's bytes as padding)
+    let mut first = rights(&[3, 5]);
+    first[..8].copy_from_slice(&27u64.to_ne_bytes());
+    first.extend([0xaa; 8]);
+    let mut second = rights(&[6]);
+    second[20..24].copy_from_slice(&[0xbb; 4]);
+    let m = with_control([first, second, vec![0xcc; 10]].concat());
+    let mut passed = Vec::new();
+    let msg = read_msg(&m, passer(&mut passed), HEAD, false).unwrap();
+    let ours: Vec<i32> = msg.fds.iter().map(AsRawFd::as_raw_fd).collect();
+    assert_eq!(passed.iter().map(|p| p.0).collect::<Vec<_>>(), [3, 5, 6]);
+    assert_eq!(msg.control, [rights(&ours[..2]), rights(&ours[2..])].concat());
 }
 
 /// A small fixed-seed generator: the loops are the same every run.
@@ -470,6 +553,8 @@ struct Read {
     control: Vec<u8>,
     /// Where in the control each descriptor passed sits.
     slots: Vec<usize>,
+    /// How many descriptors each `SCM_RIGHTS` holds, in order.
+    rights: Vec<usize>,
 }
 
 /// Why the kernel refuses a message: the errno, and the step that says it.
@@ -477,8 +562,8 @@ type Refused = (i32, &'static str);
 
 /// What Linux's `sendmsg` makes of the message at `at` in `m` (6.1–7.0: `net/socket.c`, `lib/iov_iter.c`,
 /// `net/core/scm.c`), written from its rules — not from `read_msg` — with tarae's own limits where `read_msg` says
-/// it has them (1 MiB of data, 64 KiB of control, no credentials): the run's memory it copies, in order, and what
-/// comes of it. Step by step:
+/// it has them (1 MiB of data, 64 KiB of control, no control message but `SCM_RIGHTS`): the run's memory it copies,
+/// in order, and what comes of it. Step by step:
 /// - `copy_msghdr_from_user`: the header (`EFAULT`).
 /// - `__copy_msghdr`: `msg_namelen` is an `int` — none without a pointer, below 0 `EINVAL`, past
 ///   `sockaddr_storage` cut to it — the name copied (`move_addr_to_kernel`, `EFAULT`); past `UIO_MAXIOV` iovecs
@@ -492,9 +577,9 @@ type Refused = (i32, &'static str);
 /// - `____sys_sendmsg`: the control copied when it has a length (`EFAULT`; past 64 KiB `ENOBUFS`, tarae's — the
 ///   kernel's is `optmem_max`).
 /// - `__scm_send`: each `cmsghdr` whole (`CMSG_OK`, else `EINVAL`), the next at the 8-byte alignment while a
-///   header fits; at `SOL_SOCKET`: `SCM_RIGHTS` at most `SCM_MAX_FD` (253) in all (`EINVAL`), each held
-///   (`scm_fp_copy`'s `EBADF` — `passer`'s 0–7), `SCM_CREDENTIALS` tarae's `EPERM`, any other type `EINVAL`;
-///   another level's is the protocol's.
+///   header fits; `SCM_RIGHTS` at most `SCM_MAX_FD` (253) in all (`EINVAL`, before any of that header's is
+///   taken), each held (`scm_fp_copy`'s `EBADF` — `passer`'s 0–7); any other level or type tarae's `EPERM` (the
+///   kernel's: `SOL_SOCKET`'s credentials taken, its other types `EINVAL`, another level's the protocol's).
 fn kernel(m: &Fake, at: u64, datagram: bool) -> (Vec<(u64, usize)>, Result<Read, Refused>) {
     let copies = RefCell::new(Vec::new());
     let copy = |a: u64, len: usize, step: &'static str| {
@@ -546,45 +631,49 @@ fn kernel(m: &Fake, at: u64, datagram: bool) -> (Vec<(u64, usize)>, Result<Read,
             len if len > CONTROL_MAX as u64 => return Err((libc::ENOBUFS, "control length")),
             len => copy(long(&h, 32), len as usize, "control")?,
         };
-        let (mut slots, mut o) = (Vec::new(), 0);
+        let (mut slots, mut rights, mut o) = (Vec::new(), Vec::new(), 0);
         while o + 16 <= control.len() {
             let len = long(&control, o);
             if len < 16 || len > (control.len() - o) as u64 {
                 return Err((libc::EINVAL, "cmsg length"));
             }
             let len = len as usize;
-            if int(&control, o + 8) == SOL_SOCKET {
-                match int(&control, o + 12) {
-                    SCM_RIGHTS => {
-                        let fds = (len - 16) / 4;
-                        if slots.len() + fds > 253 {
-                            return Err((libc::EINVAL, "SCM_MAX_FD"));
-                        }
-                        for s in (0..fds).map(|i| o + 16 + 4 * i) {
-                            if !(0..8).contains(&int(&control, s)) {
-                                return Err((libc::EBADF, "a descriptor not held"));
-                            }
-                            slots.push(s);
-                        }
+            match (int(&control, o + 8), int(&control, o + 12)) {
+                (SOL_SOCKET, SCM_RIGHTS) => {
+                    let fds = (len - 16) / 4;
+                    if slots.len() + fds > 253 {
+                        return Err((libc::EINVAL, "SCM_MAX_FD"));
                     }
-                    SCM_CREDENTIALS => return Err((libc::EPERM, "credentials")),
-                    _ => return Err((libc::EINVAL, "SOL_SOCKET type")),
+                    for s in (0..fds).map(|i| o + 16 + 4 * i) {
+                        if !(0..8).contains(&int(&control, s)) {
+                            return Err((libc::EBADF, "a descriptor not held"));
+                        }
+                        slots.push(s);
+                    }
+                    rights.push(fds);
                 }
+                (SOL_SOCKET, SCM_CREDENTIALS) => return Err((libc::EPERM, "credentials")),
+                _ => return Err((libc::EPERM, "another control message")),
             }
             o += len.next_multiple_of(8);
         }
-        Ok(Read { name, data, control, slots })
+        Ok(Read { name, data, control, slots, rights })
     })();
     (copies.into_inner(), came)
 }
 
 /// Where `read_msg` reads the message at `at` apart from the kernel — each a difference known and named (the
 /// loop counts them; `read_apart_from_the_kernel` pins each); `None`: it must read it as the kernel does.
-fn apart(m: &Fake, at: u64, got: &Result<Msg, i32>, kernel: &Result<Read, Refused>) -> Option<&'static str> {
+fn apart(
+    m: &Fake,
+    at: u64,
+    got: &Result<Msg, Unsent>,
+    kernel: &Result<Read, Refused>,
+) -> Option<&'static str> {
     let h = m.peek(at, MSGHDR).ok()?;
     let long = |o: usize| u64::from_ne_bytes(h[o..o + 8].try_into().unwrap());
     let namelen = i32::from_ne_bytes(h[8..12].try_into().unwrap());
-    let refused = got.as_ref().err().copied();
+    let refused = got.as_ref().err().map(Unsent::errno);
     match kernel {
         // (F3) a name past `sockaddr_storage`: the kernel cuts it to 128 bytes, tarae refuses it
         _ if long(0) != 0 && namelen > ADDR_MAX as i32 && refused == Some(libc::EINVAL) => {
@@ -592,9 +681,6 @@ fn apart(m: &Fake, at: u64, got: &Result<Msg, i32>, kernel: &Result<Read, Refuse
         }
         // (F4) a control length with no pointer: the kernel's copy faults, tarae reads no control and goes on
         Err((libc::EFAULT, "control")) if long(32) == 0 => Some("F4 control at 0"),
-        // what the kernel refuses in the control tarae passes on as it is: its own `sendmsg` of the copy is
-        // refused for the same (the descriptors are tarae's by then)
-        Err((libc::EINVAL, "SCM_MAX_FD" | "SOL_SOCKET type")) => Some("refused again"),
         // the iovec array not all there: tarae reads it whole (`EFAULT`), the kernel meets a bad length first
         Err((libc::EINVAL, "iovec length"))
             if refused == Some(libc::EFAULT) && m.peek(long(16), 16 * long(24) as usize).is_err() =>
@@ -608,8 +694,8 @@ fn apart(m: &Fake, at: u64, got: &Result<Msg, i32>, kernel: &Result<Read, Refuse
 /// Whatever a message holds and wherever its pointers land, `read_msg` never panics and reads it as the kernel does
 /// (`kernel`) but where it's known to differ (`apart`): the same memory read, in order — each pointer the run gave
 /// once; what tarae decides on is what it read, never fetched again — at most a header, an address, 1024 iovecs,
-/// 1 MiB of data and 64 KiB of control asked in all; the kernel's errno, else its address and data, its control as
-/// the run's but at each `SCM_RIGHTS` slot, which holds tarae's descriptor for the run's number there. Laid out
+/// 1 MiB of data and 64 KiB of control asked in all; the kernel's errno, else its address and data, and a control
+/// tarae built: a header per `SCM_RIGHTS`, tarae's descriptor for each number the run passed there. Laid out
 /// messages mutated 100,000 times, their pointers now and then sent to another piece or their own.
 #[test]
 fn a_message_is_read_as_the_kernel_reads_it() {
@@ -642,7 +728,7 @@ fn a_message_is_read_as_the_kernel_reads_it() {
         assert_eq!(touched(&reads), touched(&copies), "the memory read, in order");
         let what = match (got, said) {
             (Err(e), Err((w, step))) => {
-                assert_eq!(e, w, "{step}");
+                assert_eq!(e.errno(), w, "{step}");
                 step
             }
             (Ok(msg), Ok(r)) => {
@@ -659,11 +745,17 @@ fn a_message_is_read_as_the_kernel_reads_it() {
                 );
                 let ours: Vec<i32> = msg.fds.iter().map(AsRawFd::as_raw_fd).collect();
                 assert_eq!(passed.iter().map(|p| p.1).collect::<Vec<_>>(), ours);
-                let mut control = r.control;
-                for (&s, fd) in r.slots.iter().zip(&ours) {
-                    control[s..s + 4].copy_from_slice(&fd.to_ne_bytes());
-                }
-                assert_eq!(msg.control, control, "swapped at each slot, nowhere else");
+                let mut left = &ours[..];
+                let built: Vec<u8> = r
+                    .rights
+                    .iter()
+                    .flat_map(|&n| {
+                        let (these, rest) = left.split_at(n);
+                        left = rest;
+                        rights(these)
+                    })
+                    .collect();
+                assert_eq!(msg.control, built, "tarae's descriptors in tarae's headers, nothing else");
                 if r.slots.is_empty() { "taken" } else { "taken with descriptors" }
             }
             (got, kernel) => panic!("{:?} where the kernel says {kernel:?}", got.map(|m| m.data)),
@@ -683,10 +775,11 @@ fn a_message_is_read_as_the_kernel_reads_it() {
         "control",
         "cmsg length",
         "a descriptor not held",
+        "SCM_MAX_FD",
         "credentials",
+        "another control message",
         "F3 name past 128",
         "F4 control at 0",
-        "refused again",
     ];
     let each = steps.iter().all(|s| seen.get(s).is_some_and(|&n| n > 20));
     assert!(each && seen["taken"] > 5000 && seen["taken with descriptors"] > 5000, "{seen:?}");
@@ -694,22 +787,19 @@ fn a_message_is_read_as_the_kernel_reads_it() {
 
 /// Where `read_msg` reads a message apart from the kernel, each as `apart` names it: (F3) a name past 128 bytes —
 /// the kernel cuts it, tarae refuses it; (F4) a control length with no pointer — the kernel's copy faults, tarae
-/// goes on without control; past `SCM_MAX_FD` descriptors — the kernel refuses, tarae takes them all and its own
-/// `sendmsg` is refused; an iovec array not all there — tarae `EFAULT` where the kernel meets a bad length first.
+/// goes on without control; an iovec array not all there — tarae `EFAULT` where the kernel meets a bad length first.
 #[test]
 fn read_apart_from_the_kernel() {
     let both = |m: &Fake| {
-        let got = read_msg(m, passer(&mut Vec::new()), HEAD, false).map(|msg| (msg.name, msg.control.len()));
+        let got = read_msg(m, passer(&mut Vec::new()), HEAD, false)
+            .map(|msg| (msg.name, msg.control.len()))
+            .map_err(|u| u.errno());
         (got, kernel(m, HEAD, false).1.map(|r| (r.name, r.control.len())))
     };
     let long_name = Fake::default().at(HEAD, msghdr((NAME, 200), (IOV, 0), (0, 0))).at(NAME, [7; 200]);
     assert_eq!(both(&long_name), (Err(libc::EINVAL), Ok((Some(vec![7; 128]), 0))));
     let no_control = Fake::default().at(HEAD, msghdr((0, 0), (IOV, 0), (0, 16)));
     assert_eq!(both(&no_control), (Ok((None, 0)), Err((libc::EFAULT, "control"))));
-    let many = rights(&[3; 254]);
-    let (len, many) = (many.len() as u64, Fake::default().at(CONTROL, many));
-    let many = many.at(HEAD, msghdr((0, 0), (IOV, 0), (CONTROL, len)));
-    assert_eq!(both(&many), (Ok((None, len as usize)), Err((libc::EINVAL, "SCM_MAX_FD"))));
     let cut = Fake::default().at(HEAD, msghdr((0, 0), (IOV, 2), (0, 0))).at(IOV, iovecs(&[(BUFS, 1 << 63)]));
     assert_eq!(both(&cut), (Err(libc::EFAULT), Err((libc::EINVAL, "iovec length"))));
 }

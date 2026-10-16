@@ -389,6 +389,14 @@ Kept:
 - **tarae's state** (trust answers, grants, chats) isn't read or written (§1.3).
 - **Unix sockets** only in the project and the run's own folder — not tmux's, zellij's, ssh-agent's.
   test: `sandbox::tests::unix_sockets_only_in_the_run_and_the_project` · `sandbox::tests::the_multiplexers_socket_folders`
+- **Control messages** (Linux, a `sendmsg`/`sendmmsg` tarae makes for a run): only descriptors go (`SCM_RIGHTS`,
+  at most `SCM_MAX_FD` 253 a message); every other type — credentials included — is refused (`EPERM`) and named in
+  the run's report; what reaches `sendmsg` is a buffer tarae built, nothing of the run's bytes. A run's own
+  `setsockopt` runs with its own rights.
+  test: `sandbox::supervisor::wire::tests::a_control_message_but_descriptors_is_refused_by_its_type` ·
+  `sandbox::supervisor::wire::tests::past_scm_max_fd_descriptors_none_more_is_taken` ·
+  `sandbox::supervisor::wire::tests::only_a_buffer_tarae_built_goes_out` ·
+  `sandbox::supervisor::tests::a_runs_message_passes_descriptors_and_no_other_control`
 - **No Apple Events, no LaunchServices** (macOS: a run can't ask another app to act).
   test: `sandbox::golden::the_policy_is_pinned` (rule only)
 

@@ -125,9 +125,11 @@ The aim is to state what the sandbox guarantees and show that it holds.
    the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the
    supervisor reads of a run's memory is `wire.rs`, built and tested on every OS; `sendmmsg`'s offsets can't
-   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 next. The
-   control messages it forwards wait for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped
-   that work twice).
+   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 next. Q1
+   done (2026-10-16): of the control messages it forwards only descriptors go (`SCM_RIGHTS`, at most 253), every
+   other type refused and named in the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing
+   that forwarding further waits for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped
+   that work twice); a run's own `setsockopt` is unchanged (its own rights).
 3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
    nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
