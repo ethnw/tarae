@@ -925,14 +925,52 @@ mod tests {
         ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains(s))
     }
 
+    /// A FIFO in `dir` a test's program reads a line from to go on (`read -r _ < fifo`).
+    fn fifo_in(dir: &std::path::Path) -> std::path::PathBuf {
+        let fifo = dir.join("go");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-ended path of the test's own folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "{}", std::io::Error::last_os_error());
+        fifo
+    }
+
+    /// The program waiting on `fifo` goes on: a line written once it has it open (5 s at most — never an open
+    /// that waits for good on a program that's gone).
+    fn let_go(fifo: &std::path::Path) {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut w = loop {
+            match std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo) {
+                Ok(w) => break w,
+                Err(e) if e.raw_os_error() == Some(libc::ENXIO) && std::time::Instant::now() < end => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(e) => panic!("the program never opened {} to read: {e}", fifo.display()),
+            }
+        };
+        std::io::Write::write_all(&mut w, b"\n").unwrap();
+    }
+
     /// A drag over a program that didn't ask for the mouse selects (backwards too) and copies on release;
-    /// its next output clears the highlight.
+    /// its next output clears the highlight. The drag comes once the program's output is all in — its last
+    /// line, `end`, on screen: a selection made while part of it was still on its way went with that part (CI,
+    /// a loaded runner: `second` shown, ` line` read after the drag). Its next output is the test's to send:
+    /// the program waits on a FIFO for it.
     #[test]
     fn a_drag_selects_and_copies() {
         if no_pty_here("a_drag_selects_and_copies") {
             return;
         }
-        let mut ed = run_until("printf 'hello world\\nsecond line\\n'; sleep 30", |ed| shows(ed, "second"));
+        let scratch = crate::scratch::Scratch::new("terminal-drag");
+        let fifo = fifo_in(&scratch);
+        let script = format!(
+            "printf 'hello world\\nsecond line\\nend\\n'; read -r _ < '{}'; printf 'more\\n'; sleep 30",
+            fifo.display()
+        );
+        let contents = |ed: &Editor| ed.session.terminal.as_ref().map(|t| t.parser.screen().contents());
+        let mut ed = run_until(&script, |ed| shows(ed, "end"));
+        assert!(shows(&ed, "end"), "its output, all in: {:?}", contents(&ed));
+        let selection = |ed: &Editor| ed.session.terminal.as_ref().unwrap().selection.is_some();
         ed.terminal_mouse(MouseKind::Down, Some((1, 5)), false);
         ed.terminal_mouse(MouseKind::Drag, Some((0, 6)), false);
         assert_eq!(ed.session.terminal.as_ref().unwrap().selected_text(), "world\nsecond");
@@ -943,11 +981,19 @@ mod tests {
             "{:?}",
             ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
         );
-        assert!(ed.session.terminal.as_ref().unwrap().selection.is_some(), "stays highlighted");
+        assert!(selection(&ed), "stays highlighted");
+        // Its next output clears the highlight
+        let_go(&fifo);
+        wait(&mut ed, |ed| shows(ed, "more"));
+        assert!(shows(&ed, "more"), "its next output: {:?}", contents(&ed));
+        assert!(!selection(&ed), "its next output clears the highlight");
         // A click without a drag selects nothing
+        ed.terminal_mouse(MouseKind::Down, Some((1, 5)), false);
+        ed.terminal_mouse(MouseKind::Drag, Some((0, 6)), false);
+        assert!(selection(&ed));
         ed.terminal_mouse(MouseKind::Down, Some((0, 0)), false);
         ed.terminal_mouse(MouseKind::Up, Some((0, 0)), false);
-        assert!(ed.session.terminal.as_ref().unwrap().selection.is_none());
+        assert!(!selection(&ed));
     }
 
     /// A program that asked for the mouse gets it (SGR here); a full-screen one that didn't gets the wheel as
