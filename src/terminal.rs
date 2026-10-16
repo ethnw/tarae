@@ -952,10 +952,11 @@ mod tests {
     }
 
     /// A drag over a program that didn't ask for the mouse selects (backwards too) and copies on release;
-    /// its next output clears the highlight. The drag comes once the program's output is all in — its last
-    /// line, `end`, on screen: a selection made while part of it was still on its way went with that part (CI,
-    /// a loaded runner: `second` shown, ` line` read after the drag). Its next output is the test's to send:
-    /// the program waits on a FIFO for it.
+    /// its next output clears the highlight. The drag comes once the program's output is all in: it ends
+    /// with `end`, nothing after it — not even its newline, which the pty can hand over in a read of its
+    /// own after the drag (CI, twice: first ` line` after `second`, then the `\r\n` after `end`), and any
+    /// output after the release clears the highlight. Its next output is the test's to send: the program
+    /// waits on a FIFO for it, then prints the newline and `more`.
     #[test]
     fn a_drag_selects_and_copies() {
         if no_pty_here("a_drag_selects_and_copies") {
@@ -964,7 +965,7 @@ mod tests {
         let scratch = crate::scratch::Scratch::new("terminal-drag");
         let fifo = fifo_in(&scratch);
         let script = format!(
-            "printf 'hello world\\nsecond line\\nend\\n'; read -r _ < '{}'; printf 'more\\n'; sleep 30",
+            "printf 'hello world\\nsecond line\\nend'; read -r _ < '{}'; printf '\\nmore\\n'; sleep 30",
             fifo.display()
         );
         let contents = |ed: &Editor| ed.session.terminal.as_ref().map(|t| t.parser.screen().contents());
