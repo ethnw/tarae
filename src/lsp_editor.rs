@@ -20,6 +20,19 @@ fn exited_said(name: &str) -> String {
     format!("{name} exited · :log-open shows why")
 }
 
+/// Where the re-save decisions read the time (`recent_saves`, `changed_at`, `saves_again`): `Instant::now`,
+/// called the same way on every path — a test gives its own clock instead, so a burst's changes are as far
+/// apart as it says, however loaded the machine (a runner's 130 ms between two keys made a burst of 20 ms
+/// gaps two). The worker's `RESAVE_QUIET` sleep only wakes the check; what's quiet is the clock's to say.
+#[derive(Clone, Copy)]
+pub(crate) struct Clock(pub(crate) fn() -> std::time::Instant);
+
+impl Default for Clock {
+    fn default() -> Clock {
+        Clock(std::time::Instant::now)
+    }
+}
+
 #[derive(Default)]
 pub struct LspState {
     pub clients: Vec<Client>,
@@ -118,6 +131,8 @@ pub struct LspState {
     recent_saves: HashMap<ClientId, Vec<(std::path::PathBuf, std::time::Instant)>>,
     resaves: HashMap<ClientId, Vec<std::path::PathBuf>>,
     changed_at: HashMap<ClientId, std::time::Instant>,
+    /// What those times are read from (`Clock`): the system's — a test's own, moved by hand.
+    pub(crate) clock: Clock,
     /// One server for a repository's checkouts, and swapping it (`share.rs`).
     pub(crate) share: crate::share::Shares,
     /// (tests: the trace lines written — the log writes nothing in tests)
@@ -251,10 +266,9 @@ pub(crate) const SAVE_QUIET: std::time::Duration =
 /// the check out from a snapshot that an edit landing meanwhile cancels — measured (ra-open 2026-10-04) 0 of
 /// 12 checks started with the change ≤ 2 ms after, some at 5–10 ms, every one from 20 ms (5× that here); a
 /// save alone or a request in between never lost one. Such a save goes again once the server's changes are
-/// quiet for `RESAVE_QUIET` (8 of 8 brought back, a typing burst between). (In tests 200 ms: a loaded runner
-/// took over 50 ms between two keys of a test's typing burst.)
+/// quiet for `RESAVE_QUIET` (8 of 8 brought back, a typing burst between).
 const RESAVE_WITHIN: std::time::Duration = std::time::Duration::from_millis(100);
-const RESAVE_QUIET: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 200 } else { 50 });
+const RESAVE_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long `g r`'s text matches wait for a busy server's own answer before they show (N3) — one that
 /// answers by then (warm rust-analyzer: 35–68 ms) isn't preceded by a flash of text matches.
@@ -702,7 +716,7 @@ impl Editor {
         if sent.is_empty() {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = (self.lsp.clock.0)();
         let mut again = false;
         for cid in sent {
             self.lsp.changed_at.insert(cid, now);
@@ -732,7 +746,7 @@ impl Editor {
     /// `RESAVE_QUIET` — the others wait on (and are looked at again then). A file closed meanwhile isn't.
     fn saves_again(&mut self) {
         self.lsp_flush();
-        let now = std::time::Instant::now();
+        let now = (self.lsp.clock.0)();
         let cids: Vec<ClientId> = self.lsp.resaves.keys().copied().collect();
         let mut later = false;
         for cid in cids {
@@ -825,7 +839,7 @@ impl Editor {
         let Some(doc) = self.docs.iter().find(|d| d.id == id) else { return };
         let Some(path) = doc.path.clone() else { return };
         let clients: Vec<ClientId> = doc.lsp.clients().collect();
-        let now = std::time::Instant::now();
+        let now = (self.lsp.clock.0)();
         for cid in clients {
             if let Some(c) = self.client_mut(cid) {
                 c.notify("textDocument/didSave", json!({ "textDocument": { "uri": lsp::uri(&path) } }));
@@ -3820,69 +3834,87 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    thread_local! {
+        /// `a_save_with_a_change_right_after_is_sent_again_once_quiet`'s clock (`Clock`): moved by hand only.
+        static TEST_NOW: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// The test's clock as the editor reads it.
+    fn test_now() -> std::time::Instant {
+        TEST_NOW.with(|n| n.get()).expect("the test's clock is set")
+    }
+
+    /// The test's clock moved on `by`.
+    fn advance(by: Duration) {
+        TEST_NOW.with(|n| n.set(n.get().map(|t| t + by)));
+    }
+
     /// A save followed at once by a change to the same server (the same file typed on, or another
     /// checkout's file the server shares) is sent again once that server's changes are quiet — the change
     /// may have cancelled the check the save started. A change later than that, or none, leaves it alone;
-    /// a burst of changes after it makes one more, after the burst. (The burst's changes are 20 ms apart over
-    /// longer than `RESAVE_QUIET` — so the quiet restarts with each; a try where a gap stretched to half of it
-    /// (a stalled runner) wasn't one burst — tried again. What's sent is waited for; "no more" is looked at
-    /// twice the quiet later.)
+    /// a burst of changes after it makes one more, after the burst. On the test's own clock (`Clock`): the
+    /// burst's changes are 20 ms apart on it however loaded the machine (a runner put 130 ms between two keys),
+    /// and the worker's check is called as it could come, after each. What was sent is read up to a mark sent
+    /// last — everything before it is in, the writer keeps the order.
     #[test]
     fn a_save_with_a_change_right_after_is_sent_again_once_quiet() {
-        const TRIES: u32 = 5;
         let (mut ed, file, log) = setup("resave", "fn main() {}\n");
-        ready(&mut ed);
+        let cid = ready(&mut ed);
         let id = ed.doc().id;
-        let saves = |log: &PathBuf| sent(log).matches("textDocument/didSave").count();
-        let past_quiet = 2 * RESAVE_QUIET.as_millis() as u64;
-        // A save alone: once
+        TEST_NOW.with(|n| n.set(Some(std::time::Instant::now())));
+        ed.lsp.clock = Clock(test_now);
+        let mut marks = 0;
+        let mut synced = |ed: &mut Editor| {
+            marks += 1;
+            let mark = format!("m{marks}");
+            ed.client_mut(cid).unwrap().notify("tarae/test-mark", json!({ "mark": mark }));
+            let want = format!("\"{mark}\"");
+            let out = sent_until(&log, &[&want]);
+            assert!(out.contains(&want), "the stand-in never got {mark}");
+            out
+        };
+        let saves = |out: &str| out.matches("textDocument/didSave").count();
+        let after_the_change = |out: &str| out.rfind("didSave") > out.rfind("didChange");
+        // A save alone: once — its quiet long past, nothing more
         ed.lsp_did_save(id);
-        settle_for_ms(&mut ed, 10_000, |_| saves(&log) >= 1);
-        settle_for_ms(&mut ed, past_quiet, |_| false);
-        assert_eq!(saves(&log), 1, "a save alone goes once");
-        // A change right after it: again, once the change is quiet — and after the change
+        advance(RESAVE_QUIET * 4);
+        ed.saves_again();
+        assert_eq!(saves(&synced(&mut ed)), 1, "a save alone goes once");
+        // A change right after it: again once the change is quiet — not before — and after the change
         ed.lsp_did_save(id);
+        advance(Duration::from_millis(1));
         feed(&mut ed, "ix<esc>");
-        settle_for_ms(&mut ed, 10_000, |_| saves(&log) >= 3);
-        settle_for_ms(&mut ed, past_quiet, |_| false);
-        let out = sent(&log);
-        assert_eq!(out.matches("textDocument/didSave").count(), 3, "sent again: {out}");
-        let (last_change, last_save) = (out.rfind("didChange").unwrap(), out.rfind("didSave").unwrap());
-        assert!(last_save > last_change, "the save went again after the change");
-        // A burst of changes right after a save: one more save, after the burst
-        for attempt in 1.. {
-            let before = saves(&log);
-            ed.lsp_did_save(id);
-            let (start, mut gap) = (std::time::Instant::now(), Duration::ZERO);
-            while start.elapsed() < RESAVE_QUIET * 3 / 2 {
-                let t = std::time::Instant::now();
-                feed(&mut ed, "iy<esc>");
-                settle_for_ms(&mut ed, 20, |_| false);
-                gap = gap.max(t.elapsed());
-            }
-            if gap >= RESAVE_QUIET / 2 {
-                assert!(attempt < TRIES, "a change {gap:?} after the last in each of {TRIES} tries");
-                // (what that try sent, all out before the next counts)
-                settle_for_ms(&mut ed, 10_000, |_| saves(&log) >= before + 2);
-                settle_for_ms(&mut ed, past_quiet, |_| false);
-                continue;
-            }
-            settle_for_ms(&mut ed, 10_000, |_| saves(&log) >= before + 2);
-            settle_for_ms(&mut ed, past_quiet, |_| false);
-            let out = sent(&log);
-            let n = out.matches("textDocument/didSave").count();
-            assert_eq!(n, before + 2, "one more for the whole burst: {out}");
-            assert!(out.rfind("didSave").unwrap() > out.rfind("didChange").unwrap());
-            break;
-        }
-        // A change well after the save: not again
-        let before = saves(&log);
+        advance(RESAVE_QUIET / 2);
+        ed.saves_again();
+        assert_eq!(saves(&synced(&mut ed)), 2, "not while the change is fresh");
+        advance(RESAVE_QUIET);
+        // (the worker's wake does it: its sleep, then the check)
+        settle_for_ms(&mut ed, 10_000, |ed| ed.lsp.resaves.is_empty());
+        let out = synced(&mut ed);
+        assert_eq!(saves(&out), 3, "sent again: {out}");
+        assert!(after_the_change(&out), "the save went again after the change");
+        // A burst of changes right after a save, 20 ms apart over three times the quiet: none while it lasts —
+        // the quiet restarts with each — and one more after it
         ed.lsp_did_save(id);
-        std::thread::sleep(RESAVE_WITHIN + Duration::from_millis(50));
+        for _ in 0..8 {
+            advance(Duration::from_millis(20));
+            feed(&mut ed, "iy<esc>");
+            ed.saves_again();
+        }
+        let out = synced(&mut ed);
+        assert_eq!(saves(&out), 4, "none while the burst lasts: {out}");
+        advance(RESAVE_QUIET);
+        ed.saves_again();
+        let out = synced(&mut ed);
+        assert_eq!(saves(&out), 5, "one more for the whole burst: {out}");
+        assert!(after_the_change(&out), "after the burst: {out}");
+        // A change later than `RESAVE_WITHIN` after its save: not again
+        ed.lsp_did_save(id);
+        advance(RESAVE_WITHIN + Duration::from_millis(1));
         feed(&mut ed, "iz<esc>");
-        settle_for_ms(&mut ed, 10_000, |_| saves(&log) > before);
-        settle_for_ms(&mut ed, past_quiet, |_| false);
-        assert_eq!(saves(&log), before + 1, "a change 150 ms after its save doesn't send it again");
+        advance(RESAVE_QUIET * 4);
+        ed.saves_again();
+        assert_eq!(saves(&synced(&mut ed)), 6, "a change past RESAVE_WITHIN doesn't send its save again");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
