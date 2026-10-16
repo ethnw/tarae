@@ -674,7 +674,8 @@ impl Term {
         }
     }
 
-    /// `tarae state --pid <its pid> args…` in its environment: what it prints (panics if it fails).
+    /// `tarae state --pid <its pid> args…` in its environment: what it prints (panics if it fails, saying how it
+    /// ended — a code, or the signal that ended it, which says nothing of its own — and both its streams).
     pub fn state(&self, args: &[&str]) -> String {
         let out = Command::new(&self.bin)
             .arg("state")
@@ -685,7 +686,12 @@ impl Term {
             .output()
             .expect("tarae state");
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        assert!(out.status.success(), "tarae state {args:?}: {stderr}\n{}", self.screen());
+        assert!(
+            out.status.success(),
+            "tarae state {args:?} ended with {} — stderr: {stderr:?}, stdout: {stdout:?}\n{}",
+            out.status,
+            self.screen()
+        );
         stdout.into_owned()
     }
 
