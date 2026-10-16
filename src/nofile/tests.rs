@@ -41,8 +41,7 @@ fn the_shim_takes_only_a_number_an_absolute_path_and_an_argv0() {
 /// clean`); pinning again (a `:restart`, the same pid) replaces the pin. (A stand-in binary in the test's folder.)
 #[test]
 fn the_pinned_binary_stays_the_one_started_whatever_happens_to_its_path() {
-    let dir = std::env::temp_dir().join(format!("tarae-nofile-pin-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::scratch::Scratch::new("nofile-pin");
     let exe = dir.join("tarae");
     std::fs::write(&exe, "build one").unwrap();
     let pins = dir.join("pins");
@@ -64,7 +63,46 @@ fn the_pinned_binary_stays_the_one_started_whatever_happens_to_its_path() {
     assert!(!pins.join("4242.new").exists(), "nothing left beside it");
     use std::os::unix::fs::PermissionsExt as _;
     assert_eq!(std::fs::metadata(&pins).unwrap().permissions().mode() & 0o777, 0o700, "tarae's own folder");
-    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Pinning again (a `:restart`'s new image keeps its pid) isn't held up by a child forked meanwhile — anywhere in
+/// tarae, a server, a run, git: from its fork to its exec it holds a copy of every descriptor, the lock's too, and
+/// a lock that belonged to that open file would still be held. (The child is this test's own `true`, waiting
+/// between its fork and its exec until the pin is taken again.)
+#[test]
+fn pinning_again_isnt_held_up_by_a_child_forked_meanwhile() {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    let dir = crate::scratch::Scratch::new("nofile-repin");
+    let exe = dir.join("tarae");
+    std::fs::write(&exe, "build one").unwrap();
+    let pins = dir.join("pins");
+    pin(&exe, &pins, "4243").unwrap();
+    // (the child says it's forked, then waits a second before its exec)
+    let (mut forked, told) = std::io::pipe().unwrap();
+    let child = std::thread::spawn(move || {
+        let told_fd = told.as_raw_fd();
+        let mut c = std::process::Command::new("true");
+        // SAFETY: write and nanosleep only, between fork and exec.
+        unsafe {
+            c.pre_exec(move || {
+                libc::write(told_fd, b"f".as_ptr().cast(), 1);
+                let t = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+                libc::nanosleep(&t, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let status = c.status();
+        drop(told);
+        status
+    });
+    forked.read_exact(&mut [0u8]).unwrap();
+    std::fs::write(&exe, "build two").unwrap();
+    let again = pin(&exe, &pins, "4243");
+    assert!(child.join().unwrap().unwrap().success());
+    let (at, _) = again.expect("pinned again while a child forked before it still held its copies");
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), "build two");
 }
 
 /// A pin is made through no link: a folder of pins that's a link is refused (not gone through), and so is one
@@ -72,8 +110,8 @@ fn the_pinned_binary_stays_the_one_started_whatever_happens_to_its_path() {
 #[test]
 fn a_pin_goes_through_no_link() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = std::env::temp_dir().join(format!("tarae-nofile-pin-links-{}", std::process::id()));
-    std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+    let dir = crate::scratch::Scratch::new("nofile-pin-links");
+    std::fs::create_dir(dir.join("elsewhere")).unwrap();
     // (this user's alone, as a pins folder must be: only going through no link keeps it out)
     std::fs::set_permissions(dir.join("elsewhere"), std::fs::Permissions::from_mode(0o700)).unwrap();
     let exe = dir.join("tarae");
@@ -97,29 +135,40 @@ fn a_pin_goes_through_no_link() {
         "theirs",
         "never gone through"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A pin whose tarae is gone — its lock free, or no lock at all — is removed with its lock and any `.new`; a
-/// running one's (its lock held — here by this test, as that tarae would) and this tarae's own stay, and what
-/// isn't a pin is left alone.
+/// running one's (its lock held by another process, as that tarae holds it: here the test's own `sleep`, the
+/// lock taken between its fork and its exec and kept across it) and this tarae's own stay, and what isn't a pin
+/// is left alone.
 #[test]
 fn the_pins_of_a_tarae_thats_gone_are_removed() {
-    use std::os::fd::AsRawFd as _;
-    let dir = std::env::temp_dir().join(format!("tarae-nofile-prune-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    use std::os::unix::process::CommandExt as _;
+    let dir = crate::scratch::Scratch::new("nofile-prune");
     for name in ["10", "10.lock", "11", "11.lock", "12", "12.lock", "12.new", "13", "notes.txt"] {
         std::fs::write(dir.join(name), "").unwrap();
     }
-    let held = std::fs::OpenOptions::new().read(true).write(true).open(dir.join("11.lock")).unwrap();
-    // SAFETY: flock on a file this test opened.
-    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let lock = CString::new(dir.join("11.lock").as_os_str().as_bytes()).unwrap();
+    let mut c = std::process::Command::new("sleep");
+    c.arg("30");
+    // SAFETY: open and fcntl only, between fork and exec (the descriptor left open: the lock goes with the exec).
+    unsafe {
+        c.pre_exec(move || {
+            let fd = libc::open(lock.as_ptr(), libc::O_RDWR);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            lock_now(fd)
+        });
+    }
+    // (spawn returns once it exec'd: the lock is held by then)
+    let mut held = c.spawn().unwrap();
     let gone = prune_pins_in(&dir, 10);
     let mut left: Vec<String> =
         std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     left.sort();
-    drop(held);
-    std::fs::remove_dir_all(&dir).ok();
+    held.kill().ok();
+    held.wait().ok();
     assert_eq!(gone, 2, "12 (its lock free) and 13 (none)");
     assert_eq!(left, ["10", "10.lock", "11", "11.lock", "notes.txt"], "its own, a running one's, not a pin");
 }

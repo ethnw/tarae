@@ -213,6 +213,27 @@ fn pins_folder(dir: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
     }
 }
 
+/// A pin's lock taken now, or not (`EAGAIN`/`EACCES`: a running tarae holds it): a POSIX record lock on the
+/// whole file. It's the process's, not the open file's — a child forked meanwhile (anywhere in tarae: a server,
+/// a run, git) holds a copy of the descriptor until its exec, and a `flock` would stay held through it, so pinning
+/// again (a `:restart`, the same pid) failed under load; a fork doesn't inherit this one, and the process takes
+/// its own again. Its rule: closing any descriptor of the file in this process lets it go — only `pin` and
+/// `unpin` open this tarae's lock (`prune_pins_in` passes it by). macOS has it conflict with `flock` both ways
+/// (measured): an older build's pins and this one's still tell a running tarae.
+#[cfg(any(not(target_os = "linux"), test))]
+fn lock_now(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: a zeroed `flock` struct is a valid one; filled in, then passed to fcntl on a descriptor of ours.
+    let mut l: libc::flock = unsafe { std::mem::zeroed() };
+    l.l_type = libc::F_WRLCK as _;
+    l.l_whence = libc::SEEK_SET as _;
+    // (l_start 0, l_len 0: the whole file, however long it grows)
+    // SAFETY: as above.
+    match unsafe { libc::fcntl(fd, libc::F_SETLK, &l) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
 /// tarae's binary pinned for the shim (macOS: `posix_spawn` takes a path, never a descriptor): a hard link to
 /// `exe` (real path), `dir/name`, and its identity. A build that replaces that file (cargo writes a new one and
 /// renames it over), a link under way, or a `cargo clean` leave this one as it was — the same inode, this very
@@ -239,9 +260,7 @@ pub fn pin(exe: &Path, dir: &Path, name: &str) -> std::io::Result<(std::path::Pa
             return fail();
         }
         let l = std::os::fd::OwnedFd::from_raw_fd(l);
-        if libc::flock(l.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 {
-            return fail();
-        }
+        lock_now(l.as_raw_fd())?;
         libc::unlinkat(d.as_raw_fd(), new.as_ptr(), 0);
         if libc::linkat(libc::AT_FDCWD, exe_c.as_ptr(), d.as_raw_fd(), new.as_ptr(), 0) != 0 {
             return fail();
@@ -300,10 +319,7 @@ pub fn prune_pins_in(dir: &Path, own: u32) -> usize {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&lock);
         // (no lock at all: a pin without one is no running tarae's — `pin` takes it first)
-        // SAFETY: flock on a descriptor we just opened.
-        let free = opened
-            .as_ref()
-            .map_or(true, |f| unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0);
+        let free = opened.as_ref().map_or(true, |f| lock_now(f.as_raw_fd()).is_ok());
         if free {
             for n in [pid.to_string(), format!("{pid}.new"), format!("{pid}.lock")] {
                 let _ = std::fs::remove_file(dir.join(n));
