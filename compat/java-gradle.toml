@@ -1,0 +1,122 @@
+# Java with Gradle's wrapper: JUnit and Checkstyle from Maven Central, the wrapper's distribution and the
+# dependencies fetched by a build outside the sandbox first; then the wrapper's offline runs, each with this
+# machine's ports open (its client talks to a daemon of the runs' own).
+stack = "java-gradle"
+pack = "java"
+tools = ["gradle", "java"]
+# (the pre-warm's own daemons stopped after it: while they're up they write their logs in `~/.gradle/daemon`, which
+# the entries' look can't tell from a run's)
+prewarm = [
+    "gradle --console=plain wrapper",
+    "./gradlew --console=plain build",
+    "./gradlew --stop",
+    "gradle --stop",
+]
+# (Gradle's caches of what it downloads and its distributions — not all of `~/.gradle`: a tree's walk is 200,000
+# entries at most. Not `daemon/`: kept from runs, so a run's write there is a denial in its report; what changes
+# there is the user's daemons' logs — the baseline's own `./gradlew` starts one, outside the sandbox)
+watch = ["~/.gradle/caches/modules-2", "~/.gradle/wrapper", "~/.m2"]
+
+[files]
+".gitignore" = """
+.gradle/
+build/
+"""
+"settings.gradle" = """
+rootProject.name = 'fx'
+"""
+"build.gradle" = """
+plugins {
+    id 'java'
+    id 'checkstyle'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+"""
+"gradle.properties" = """
+org.gradle.jvmargs=-Xmx320m
+"""
+"config/checkstyle/checkstyle.xml" = """
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+  <module name="TreeWalker">
+    <module name="UnusedImports"/>
+  </module>
+</module>
+"""
+"src/main/java/fx/Sum.java" = """
+package fx;
+
+public final class Sum {
+    private Sum() {}
+
+    public static int of(int a, int b) {
+        return a + b;
+    }
+}
+"""
+"src/test/java/fx/SumTest.java" = """
+package fx;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.junit.jupiter.api.Test;
+
+class SumTest {
+    @Test
+    void adds() {
+        assertEquals(3, Sum.of(1, 2));
+    }
+}
+"""
+
+[[entry]]
+name = "install"
+run = "./gradlew --offline --console=plain dependencies --configuration testRuntimeClasspath"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+
+[[entry]]
+name = "build"
+run = "./gradlew --offline --console=plain assemble"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+quick = true
+
+[[entry]]
+name = "test"
+run = "./gradlew --offline --console=plain test"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+quick = true
+
+[[entry]]
+name = "lint"
+run = "./gradlew --offline --console=plain checkstyleMain checkstyleTest"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+
+# (no format: Java's formatters are plugins of their own — Spotless, google-java-format — not Gradle's)
+
+# A subproject's settings in a folder that holds no protected name: refused, or found made
+[[entry]]
+name = "subproject"
+run = "printf \"rootProject.name = 'extra'\\n\" > sub/settings.gradle"
+expect = "refused"
+said = ["settings.gradle"]
+baseline = false
+timeout = 60

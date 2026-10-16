@@ -1,0 +1,99 @@
+# Node / TypeScript with npm: tsc, eslint and prettier from the project's devDependencies, installed outside the
+# sandbox first (npm's cache warmed, the lock file written); tests by Node's own runner.
+stack = "node-npm"
+pack = "javascript"
+tools = ["node", "npm", "npx"]
+prewarm = ["npm install --no-audit --no-fund"]
+watch = ["~/.npm"]
+
+[files]
+".gitignore" = """
+node_modules/
+dist/
+"""
+".prettierignore" = """
+package-lock.json
+"""
+"package.json" = """
+{
+  "name": "fx",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "eslint": "^9",
+    "prettier": "^3",
+    "typescript": "^5"
+  }
+}
+"""
+"tsconfig.json" = """
+{
+  "compilerOptions": {
+    "outDir": "dist",
+    "strict": true,
+    "module": "nodenext",
+    "target": "es2022"
+  },
+  "include": ["src"]
+}
+"""
+"eslint.config.js" = """
+export default [
+  { ignores: ["dist/"] },
+  { files: ["**/*.js"], rules: { "no-unused-vars": "error" } },
+];
+"""
+"src/sum.ts" = """
+export function sum(a: number, b: number): number {
+  return a + b;
+}
+"""
+"test/sum.test.js" = """
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+test("adds", () => {
+  assert.equal(1 + 1, 2);
+});
+"""
+
+[[entry]]
+name = "install"
+run = "npm ci --offline --no-audit --no-fund"
+expect = "pass"
+
+[[entry]]
+name = "build"
+run = "npm run build"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "test"
+run = "npm test"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "lint"
+run = "npx eslint ."
+expect = "pass"
+
+[[entry]]
+name = "format"
+run = "npx prettier --check ."
+expect = "pass"
+
+# A package made in a folder that holds no protected name (`sub/`): its package.json refused, or found made
+[[entry]]
+name = "init"
+run = "cd sub && npm init -y"
+expect = "refused"
+said = ["package.json"]
+baseline = false
+timeout = 60

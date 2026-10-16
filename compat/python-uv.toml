@@ -1,0 +1,66 @@
+# Python with uv: the lock and `.venv` made outside the sandbox first (uv's cache warmed), then uv's offline sync
+# and its runs of pytest and ruff from the dev group.
+stack = "python-uv"
+pack = "python"
+tools = ["uv"]
+prewarm = ["uv sync"]
+# (the Pythons and tools uv installs — not its cache, `~/.cache/uv`: with the wheels it unpacks it's past a tree's
+# 200,000 entries; no run writes there while the sandbox closes it)
+watch = ["~/.local/share/uv"]
+
+[files]
+".gitignore" = """
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+"""
+"pyproject.toml" = """
+[project]
+name = "fx"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+"""
+"fx/__init__.py" = """
+def add(a: int, b: int) -> int:
+    return a + b
+"""
+"tests/test_add.py" = """
+from fx import add
+
+
+def test_add() -> None:
+    assert add(1, 2) == 3
+"""
+
+[[entry]]
+name = "install"
+run = "uv sync --offline"
+expect = "pass"
+
+[[entry]]
+name = "test"
+run = "uv run --offline python -m pytest -q"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "lint"
+run = "uv run --offline ruff check ."
+expect = "pass"
+
+[[entry]]
+name = "format"
+run = "uv run --offline ruff format --check ."
+expect = "pass"
+
+[[entry]]
+name = "makefile"
+run = "printf 'test:\\n\\tuv run pytest\\n' > sub/Makefile"
+expect = "refused"
+said = ["Makefile"]
+baseline = false
+timeout = 60

@@ -123,6 +123,8 @@ fn ask(args: &[String]) -> Result<Ask> {
 struct Stack {
     name: String,
     fixture: Option<String>,
+    /// The files its manifest writes into the project.
+    files: usize,
     prewarm: Vec<String>,
     rows: Vec<Row>,
 }
@@ -150,6 +152,7 @@ fn stack(name: &str, text: &str) -> Result<Stack> {
     Ok(Stack {
         name: name.into(),
         fixture: s(&t, "fixture"),
+        files: t.get("files").and_then(|f| f.as_table()).map_or(0, |f| f.len()),
         prewarm: prewarm.iter().filter_map(|p| p.as_str().map(String::from)).collect(),
         rows: rows.collect(),
     })
@@ -213,9 +216,11 @@ fn linux_args(s: &Stack, lane: Lane, tier: Tier, image: Option<&str>) -> Vec<Str
 fn plan(stacks: &[Stack], lane: Lane, linux: &[Tier], cargo: &str) -> Vec<String> {
     let mut out = vec![format!("{cargo} {} --no-run --quiet", TEST.join(" "))];
     for s in stacks {
-        let from = match &s.fixture {
-            Some(f) => format!("a copy of {MANIFESTS}/{f}/"),
-            None => "an empty project".into(),
+        let from = match (&s.fixture, s.files) {
+            (Some(f), 0) => format!("a copy of {MANIFESTS}/{f}/"),
+            (Some(f), n) => format!("a copy of {MANIFESTS}/{f}/ and the {n} files its manifest writes"),
+            (None, 0) => "an empty project".into(),
+            (None, n) => format!("a project of the {n} files {MANIFESTS}/{}.toml writes", s.name),
         };
         for p in &s.prewarm {
             out.push(format!("# {}: the driver first runs, outside the sandbox, in {from}:", s.name));
@@ -245,11 +250,17 @@ struct Driven {
 }
 
 impl Driven {
-    /// One line of its output: a cell taken; else said as it comes.
+    /// One line of its output: a cell taken — the first one comes after libtest's `test … ... ` on its line,
+    /// what's before it said; else said as it comes.
     fn line(&mut self, l: &str) {
-        let parts: Option<Vec<&str>> = l.strip_prefix("COMPAT\t").map(|r| r.splitn(3, '\t').collect());
+        let at = l.find("COMPAT\t");
+        let parts: Option<Vec<&str>> = at.map(|i| l[i + "COMPAT\t".len()..].splitn(3, '\t').collect());
         match parts.as_deref() {
             Some([stack, entry, cell]) => {
+                let before = l[..at.unwrap_or(0)].trim_end();
+                if !before.is_empty() {
+                    println!("{before}");
+                }
                 _ = self.cells.insert((stack.to_string(), entry.to_string()), cell.to_string())
             }
             _ => {
@@ -543,14 +554,27 @@ pending = "manifest-review"
                     .into(),
             ]
         );
+        // (a fixture kept in the manifest: its files said)
+        let written = format!(
+            "{}[files]\n\"a\" = \"x\"\n\"b/c\" = \"y\"\n",
+            NODE.replace("fixture = \"node-npm\"\n", "")
+        );
+        let s = [stack("node-npm", &written).unwrap()];
+        assert_eq!(
+            plan(&s, Lane::Gate, &[], "cargo")[1],
+            "# node-npm: the driver first runs, outside the sandbox, in a project of the 2 files compat/node-npm.toml writes:"
+        );
     }
 
     #[test]
     fn cells_come_from_the_drivers_lines_and_a_missing_one_says_why() {
         let s = [stack("node-npm", NODE).unwrap()];
         let mut d = Driven { ok: true, ..Driven::default() };
-        for l in ["running 1 test", "COMPAT\tnode-npm\ttest\t✓ 1.7×", "COMPAT\tnode-npm\t(manifest)\t✗ x\ty"]
-        {
+        for l in [
+            "running 1 test",
+            "test compat::tests::driver ... COMPAT\tnode-npm\ttest\t✓ 1.7×",
+            "COMPAT\tnode-npm\t(manifest)\t✗ x\ty",
+        ] {
             d.line(l);
         }
         let mut cells = Cells::new();

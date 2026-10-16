@@ -68,6 +68,9 @@ pub struct Entry {
 /// fixture = "node-npm"                # compat/node-npm/, copied in as the project
 /// prewarm = ["npm ci"]                # outside the sandbox, as the user's own build
 /// watch = ["~/.npm"]                  # outside the project, checked for what it changes
+/// writes = ["~/.npm/_logs"]           # what every entry may change there
+/// [files]                             # written into the project (after the fixture's copy)
+/// "package.json" = """{ … }"""
 /// [[entry]]
 /// name = "test"
 /// run = "npm test"                    # never from the repository under test
@@ -85,6 +88,9 @@ pub struct Manifest {
     pub tools: Vec<String>,
     /// A folder in `compat/` copied in as the project — None: an empty one.
     pub fixture: Option<String>,
+    /// Files written into the project, each path in it with its text: a fixture kept in the manifest, so no
+    /// `Cargo.toml` or `package.json` of a fixture's is in tarae's own tree for its tools to find.
+    pub files: Vec<(String, String)>,
     pub prewarm: Vec<String>,
     /// Places outside the project watched for what the entries change (absolute, or `~/`): the toolchain's homes
     /// (§2.1) — none: a folder of the harness's own.
@@ -95,7 +101,8 @@ pub struct Manifest {
 /// Where the manifests and their fixtures are, from the checkout's root.
 pub const MANIFESTS: &str = "compat";
 
-const MANIFEST_KEYS: [&str; 7] = ["stack", "pack", "tools", "fixture", "prewarm", "watch", "entry"];
+const MANIFEST_KEYS: [&str; 9] =
+    ["stack", "pack", "tools", "fixture", "files", "prewarm", "watch", "writes", "entry"];
 const ENTRY_KEYS: [&str; 10] =
     ["name", "run", "cwd", "expect", "said", "cards", "settings", "writes", "pending", "baseline"];
 const ENTRY_KEYS_MORE: [&str; 2] = ["timeout", "quick"];
@@ -110,21 +117,41 @@ impl Manifest {
         let t: toml::Table = text.parse().map_err(|e| format!("not TOML: {e}"))?;
         unknown(&t, &MANIFEST_KEYS, "the manifest")?;
         let stack = string(&t, "stack")?.ok_or("no stack")?;
-        let entries = match t.get("entry") {
+        let mut entries: Vec<Entry> = match t.get("entry") {
             None => Vec::new(),
             Some(toml::Value::Array(a)) => a.iter().map(entry).collect::<Result<_, _>>()?,
             Some(_) => return Err("entry: an array of tables ([[entry]])".into()),
         };
+        // (what every entry may change outside the project: a toolchain's own lock or last-use files)
+        let writes = strings(&t, "writes")?;
+        if let Some(w) = writes.iter().find(|w| !w.starts_with('/') && !w.starts_with("~/")) {
+            return Err(format!("writes: {w} — absolute or ~/"));
+        }
+        for e in &mut entries {
+            e.writes.extend(writes.iter().cloned());
+        }
         let mut names = BTreeSet::new();
         if let Some(e) = entries.iter().find(|e: &&Entry| !names.insert(e.name.clone())) {
             return Err(format!("entry {}: twice", e.name));
         }
         let fixture = string(&t, "fixture")?;
-        if let Some(f) = fixture.as_deref().filter(|f| {
-            f.is_empty() || Path::new(f).components().any(|c| !matches!(c, std::path::Component::Normal(_)))
-        }) {
+        if let Some(f) = fixture.as_deref().filter(|f| !below(f)) {
             return Err(format!("fixture: {f} — a folder in {MANIFESTS}/"));
         }
+        let files = match t.get("files") {
+            None => Vec::new(),
+            Some(toml::Value::Table(f)) => f
+                .iter()
+                .map(|(p, v)| match v.as_str() {
+                    Some(_) if !below(p) || p.split('/').next() == Some(".git") => {
+                        Err(format!("files: {p} — a path in the project, not in .git"))
+                    }
+                    Some(text) => Ok((p.clone(), text.to_string())),
+                    None => Err(format!("files: {p} — its text, a string")),
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err("files: a table of paths and their text".into()),
+        };
         let watch = strings(&t, "watch")?;
         if let Some(w) = watch.iter().find(|w| !w.starts_with('/') && !w.starts_with("~/")) {
             return Err(format!("watch: {w} — absolute or ~/"));
@@ -134,6 +161,7 @@ impl Manifest {
             pack: string(&t, "pack")?,
             tools: strings(&t, "tools")?,
             fixture,
+            files,
             prewarm: strings(&t, "prewarm")?,
             watch,
             entries,
@@ -214,6 +242,11 @@ fn flatten(t: &toml::Table, prefix: &str, out: &mut Vec<(String, toml::Value)>) 
             _ => out.push((path, v.clone())),
         }
     }
+}
+
+/// Whether `p` is a relative path that stays below where it's joined: no `..`, no root, not empty.
+fn below(p: &str) -> bool {
+    !p.is_empty() && Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 fn unknown(t: &toml::Table, known: &[&str], what: &str) -> Result<(), String> {
@@ -306,9 +339,11 @@ pub struct Verdict {
     pub ended: Option<crate::task::State>,
     /// Where it ran, as its chat row says it (`Guard::where_ran`: `sandbox`, `sandbox A+`, `outside` …).
     pub ran: Option<String>,
-    /// The run's own time, and the same command's unsandboxed.
+    /// The run's own time (its second run's, warm, where one was timed), and the same command's unsandboxed.
     pub took: Option<Duration>,
     pub baseline: Option<Duration>,
+    /// The first run's time, where a second was timed.
+    pub cold: Option<Duration>,
     /// What Claude would have read.
     pub answer: String,
     /// Each card it raised, as `kind why → answer`.
@@ -366,10 +401,11 @@ impl std::fmt::Display for Verdict {
             Some(s) => format!("{s:?}").to_lowercase(),
         };
         let secs = |d: Duration| crate::term::duration(d.as_secs_f32());
+        let cold = self.cold.map(|c| format!(" warm, {} first", secs(c))).unwrap_or_default();
         let took = match (self.took, self.baseline) {
             (Some(t), Some(b)) => {
                 let slow = if self.slow() { ", slow" } else { "" };
-                format!(" in {} (unsandboxed {}{slow})", secs(t), secs(b))
+                format!(" in {}{cold} (unsandboxed {}{slow})", secs(t), secs(b))
             }
             (Some(t), None) => format!(" in {}", secs(t)),
             _ => String::new(),
@@ -392,11 +428,13 @@ impl std::fmt::Display for Verdict {
 }
 
 /// The editor as tarae ships it, where `cfg(test)` changes the run path (`BRANCHES`): the sandbox looked for
-/// (tests bypass it), the temp folders read unasked, and a policy made from the whole environment — tests'
+/// (tests bypass it) and the look landed — as claude's `tools/list` starts it (`tools::sandbox_look`) before its
+/// first command; the stand-in chat lists no tools, and while it's `Unknown` every run takes today's gate and
+/// its card (`tools::sandboxed_here`) —, the temp folders read unasked, and a policy made from the whole environment — tests'
 /// `Here::now` drops the proxy variables. What stays a test's: no stored grants, trust or tokens told (an entry
 /// says its settings), runs' folders in the temp folder (`Here::runs`).
 pub fn as_shipped(ed: &mut Editor) {
-    ed.sandbox = crate::sandbox::Availability::Unknown;
+    ed.sandbox = crate::sandbox::probe();
     ed.read_temp = true;
     ed.shellcheck = crate::readonly::Shellcheck::of_process();
     ed.sandbox_here = Some(std::sync::Arc::new(|| {
@@ -433,6 +471,7 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         ran: None,
         took: None,
         baseline: None,
+        cold: None,
         answer: String::new(),
         cards: Vec::new(),
         failed: Vec::new(),
@@ -504,20 +543,35 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
     v.ended = Some(r.state.clone());
     v.took = r.took;
     judge_report(&mut v, entry, r);
-    if let Some(c) = &copy
-        && v.ended == Some(crate::task::State::Passed)
-    {
-        v.baseline = baseline(&entry.run, &c.join(entry.cwd.as_deref().unwrap_or("")));
-    }
     for m in &ed.session.made_protected {
         v.fail(Check::Made, format!("it made {}, a protected name", m.path));
     }
+    // (before the baseline: what the same command writes outside the sandbox is the user's own build's)
     let after = Tree::of(&at.watched, &allowed);
     for (path, how) in before.changes(&after) {
         v.fail(
             Check::Writes,
             format!("{how} {} — outside the project, and not in its writes", path.display()),
         );
+    }
+    if let Some(c) = &copy
+        && v.ended == Some(crate::task::State::Passed)
+    {
+        // (timed warm, both sides — §2.1, D9: a project's first run in the sandbox fills the run homes kept for
+        // it, the user's own caches are warm already; how the second run ended and what it was denied are as
+        // real as the first's — what it changes outside, the first's again, was judged)
+        let warm = crate::compat::run(&Entry { baseline: false, ..entry.clone() }, at);
+        if warm.ended == Some(crate::task::State::Passed) {
+            v.cold = v.took;
+            v.took = warm.took;
+        }
+        let again: Vec<Failure> = (warm.failed.into_iter())
+            .filter(|f| matches!(f.check, Check::Exit | Check::Report) && !v.failed.contains(f))
+            .collect();
+        for f in again {
+            v.fail(f.check, format!("(its second run) {}", f.what));
+        }
+        v.baseline = baseline(&entry.run, &c.join(entry.cwd.as_deref().unwrap_or("")));
     }
     v
 }
@@ -582,7 +636,15 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
         crate::sandbox::Guard::In(p) => p.said_in_output(&r.output, &seen),
         _ => Vec::new(),
     };
-    let denials: Vec<String> = seen.iter().chain(&said).map(|d| d.reported()).collect();
+    // (in Seatbelt's words too where the plain ones name no target: `opening apps` is a mach service)
+    let denials: Vec<String> = seen
+        .iter()
+        .chain(&said)
+        .map(|d| match d.plain() == d.shown() {
+            true => d.reported(),
+            false => format!("{} — {}", d.reported(), d.shown()),
+        })
+        .collect();
     let passed = r.state == crate::task::State::Passed;
     match &entry.expect {
         Expect::Pass => {
@@ -590,7 +652,14 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
                 v.fail(Check::Exit, format!("{:?}: {}", r.state, tail(&r.output)));
             }
             if report.blocked {
-                v.fail(Check::Report, format!("the sandbox blocked: {}", denials.join("; ")));
+                // (a line each: one line of them all is cut where it's shown)
+                for d in denials.iter().take(DENIALS_SAID) {
+                    v.fail(Check::Report, format!("the sandbox blocked: {d}"));
+                }
+                if denials.len() > DENIALS_SAID {
+                    let more = denials.len() - DENIALS_SAID;
+                    v.fail(Check::Report, format!("the sandbox blocked {more} more"));
+                }
             } else if !passed {
                 v.fail(Check::Report, NO_CAUSE);
             }
@@ -610,13 +679,21 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
     }
 }
 
-/// The same command unsandboxed, in the copy made before the run, from `dir` — its time, when it ran.
+/// The distinct denials a passing entry's verdict names, a line each.
+const DENIALS_SAID: usize = 12;
+
+/// The same command unsandboxed, in the copy made before the run, from `dir` — its time, when it ran: run twice,
+/// the second timed (warm, as the sandboxed run it's against).
 fn baseline(cmd: &str, dir: &Path) -> Option<Duration> {
-    let mut c = crate::nofile::command("sh", Some(dir));
-    c.args(["-c", cmd]).stdin(std::process::Stdio::null());
-    c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let at = Instant::now();
-    c.status().ok().map(|_| at.elapsed())
+    let once = || {
+        let mut c = crate::nofile::command("sh", Some(dir));
+        c.args(["-c", cmd]).stdin(std::process::Stdio::null());
+        c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let at = Instant::now();
+        c.status().ok().map(|_| at.elapsed())
+    };
+    once()?;
+    once()
 }
 
 /// The last lines of a run's output, on one line.
@@ -843,7 +920,7 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     (
         "src/editor.rs",
         "in fn with_root: sandbox",
-        "turned back to Unknown (`as_shipped`): tests bypass the sandbox",
+        "looked for (`as_shipped`, `sandbox::probe`): tests bypass the sandbox",
     ),
     (
         "src/editor.rs",
@@ -993,8 +1070,13 @@ mod tests {
 
     impl Scratch {
         fn new(test: &str) -> Scratch {
+            Scratch::new_in(&std::env::temp_dir(), test)
+        }
+
+        /// In `temp`, a temp folder.
+        fn new_in(temp: &Path, test: &str) -> Scratch {
             use std::os::unix::fs::DirBuilderExt;
-            let base = std::env::temp_dir().join(format!("tarae-compat-{test}-{}", std::process::id()));
+            let base = temp.join(format!("tarae-compat-{test}-{}", std::process::id()));
             let dir = (0..)
                 .map(|n| PathBuf::from(format!("{}-{n}", base.display())))
                 .find(|d| match std::fs::DirBuilder::new().mode(0o700).create(d) {
@@ -1046,6 +1128,12 @@ tools = ["node", "npm"]
 fixture = "node-npm"
 prewarm = ["npm ci"]
 watch = ["~/.npm"]
+writes = ["~/.npm/_logs"]
+[files]
+"package.json" = "{}"
+"src/a.js" = """
+export {};
+"""
 [[entry]]
 name = "test"
 run = "npm test"
@@ -1075,6 +1163,11 @@ timeout = 60
         assert_eq!(add.expect, Expect::Refused(vec!["package.json".into()]));
         assert_eq!(add.pending.as_deref(), Some("manifest-review"));
         assert!(!add.baseline && add.timeout == Duration::from_secs(60));
+        let files: Vec<(&str, &str)> = m.files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        assert_eq!(files, [("package.json", "{}"), ("src/a.js", "export {};\n")]);
+        // (the stack's writes are every entry's, after its own)
+        assert_eq!(t.writes, ["~/.npm/_logs"]);
+        assert_eq!(add.writes, ["~/.npm", "~/.npm/_logs"]);
         let refused =
             |e: &str| Manifest::parse(&format!("stack = \"s\"\n[[entry]]\nname = \"e\"\nrun = \"x\"\n{e}"));
         for (e, why) in [
@@ -1094,10 +1187,39 @@ timeout = 60
             ("fixture = \"../x\"", "a folder in compat/"),
             ("fixture = \"/x\"", "a folder in compat/"),
             ("watch = [\"cache\"]", "absolute or ~/"),
+            ("writes = [\"cache\"]", "absolute or ~/"),
+            ("files = { \"../a\" = \"x\" }", "a path in the project"),
+            ("files = { \"/a\" = \"x\" }", "a path in the project"),
+            ("files = { \".git/config\" = \"x\" }", "not in .git"),
+            ("files = { \"a\" = 1 }", "its text, a string"),
+            ("files = [\"a\"]", "a table of paths"),
         ] {
             let r = Manifest::parse(&format!("stack = \"s\"\n{top}"));
             assert!(r.as_ref().is_err_and(|r| r.contains(why)), "{top}: {r:?}");
         }
+    }
+
+    #[test]
+    fn every_manifest_in_compat_reads_and_has_a_refusal() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(MANIFESTS);
+        let mut read = Vec::new();
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let Some(stack) = e.file_name().to_str().and_then(|n| n.strip_suffix(".toml")).map(String::from)
+            else {
+                continue;
+            };
+            let m = Manifest::parse(&std::fs::read_to_string(e.path()).unwrap())
+                .unwrap_or_else(|e| panic!("{MANIFESTS}/{stack}.toml: {e}"));
+            assert_eq!(m.stack, stack, "its stack is its file's name");
+            assert!(!m.tools.is_empty() && !m.watch.is_empty(), "{stack}: its tools and its homes");
+            // (§9, piece 2: a protected name made where none is — the case only the snapshot catches on Linux)
+            assert!(
+                m.entries.iter().any(|e| matches!(e.expect, Expect::Refused(_)) && e.run.contains("sub")),
+                "{stack}: an entry that makes a protected name in sub/"
+            );
+            read.push(stack);
+        }
+        assert!(read.len() >= 5, "the first stacks: {read:?}");
     }
 
     #[test]
@@ -1166,7 +1288,8 @@ timeout = 60
     }
 
     /// What a run changes outside the project, where the sandbox let it write, fails the entry — only the
-    /// harness's look before and after finds it — unless the entry lists the place. Where the sandbox lets it
+    /// harness's look before and after finds it — unless the entry lists the place; what its baseline writes
+    /// there doesn't. Where the sandbox lets it
     /// write, from the policy (`writes_allow` is the profile's rule): not the temp folders here — the project is in
     /// one, and a policy never opens what holds the project (`Policy::for_project`) — but a folder
     /// `llm.sandbox-write` opens.
@@ -1198,6 +1321,12 @@ timeout = 60
         let listed = format!("{}\n{opened}\nwrites = [\"{}\"]", e_text(&cmd), outside.display());
         let v = run(&entry(&listed), at);
         assert!(v.ok(), "{v}");
+        // (what only its unsandboxed baseline writes there is the user's own build's, not the entry's)
+        std::fs::remove_file(&marker).unwrap();
+        let baseline_only = format!("case $PWD in */baseline-*) touch {};; esac", marker.display());
+        let v = run(&entry(&e_text(&baseline_only)), at);
+        assert!(v.ok() && v.baseline.is_some(), "{v}");
+        assert!(marker.exists(), "the baseline wrote it: {v}");
     }
 
     fn e_text(cmd: &str) -> String {
@@ -1300,6 +1429,7 @@ timeout = 60
             ran: None,
             took: Some(Duration::from_millis(1700)),
             baseline: Some(Duration::from_millis(1000)),
+            cold: None,
             answer: String::new(),
             cards: Vec::new(),
             failed: Vec::new(),
@@ -1360,11 +1490,25 @@ timeout = 60
         if !sandboxed_here("compat::tests::driver") {
             return skip("no sandbox here");
         }
-        let s = Scratch::new(stack);
+        // (macOS: not in $TMPDIR — a policy never opens what holds the project, and a user's project isn't in
+        // it: a JVM's `$TMPDIR/hsperfdata_<user>` was refused only because the fixture was there; `/private/tmp`
+        // is closed instead)
+        let temp = match cfg!(target_os = "macos") {
+            true => PathBuf::from("/private/tmp"),
+            false => std::env::temp_dir(),
+        };
+        let s = Scratch::new_in(&temp, stack);
         if let Some(f) = &m.fixture
             && let Err(e) = copy_tree(&root.join(MANIFESTS).join(f), &s.place.project)
         {
             return skip(&format!("fixture {f}: {e}"));
+        }
+        for (f, text) in &m.files {
+            let path = s.place.project.join(f);
+            let parent = path.parent().map_or(Ok(()), std::fs::create_dir_all);
+            if let Err(e) = parent.and_then(|()| std::fs::write(&path, text)) {
+                return skip(&format!("file {f}: {e}"));
+            }
         }
         if let Err(e) = checkout(&s.place.project) {
             return skip(&format!("the fixture's checkout: {e}"));

@@ -1,0 +1,94 @@
+# Go: a module with one dependency (golang.org/x/text, at a version old enough for golangci-lint's own Go to
+# read), fetched outside the sandbox first.
+stack = "go"
+pack = "go"
+tools = ["go", "gofmt", "golangci-lint"]
+prewarm = ["go get golang.org/x/text@v0.14.0", "go mod tidy"]
+# (GOPATH's module cache — its downloads and the dependency's tree, not every module unpacked: a tree's walk is
+# 200,000 entries at most —, the user's own build cache — runs have one of their own —, golangci-lint's cache and
+# Go's settings, telemetry in them)
+watch = [
+    "~/go/pkg/mod/cache",
+    "~/go/pkg/mod/golang.org",
+    "~/Library/Caches/go-build",
+    "~/Library/Caches/golangci-lint",
+    "~/Library/Application Support/go",
+]
+
+[files]
+"go.mod" = """
+module fx
+
+go 1.22
+"""
+"main.go" = """
+package main
+
+import (
+	"fmt"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+)
+
+func title(s string) string {
+	return cases.Title(language.English).String(s)
+}
+
+func main() {
+	fmt.Println(title("hello"))
+}
+"""
+"main_test.go" = """
+package main
+
+import "testing"
+
+func TestTitle(t *testing.T) {
+	if got := title("hello world"); got != "Hello World" {
+		t.Fatalf("title: %q", got)
+	}
+}
+"""
+
+[[entry]]
+name = "install"
+run = "go mod download"
+expect = "pass"
+
+[[entry]]
+name = "build"
+run = "go build ./..."
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "test"
+run = "go test ./..."
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "vet"
+run = "go vet ./..."
+expect = "pass"
+
+[[entry]]
+name = "lint"
+run = "golangci-lint run"
+expect = "pass"
+
+# (gofmt -l lists what isn't formatted and exits 0 either way: a listed file fails it)
+[[entry]]
+name = "format"
+run = "test -z \"$(gofmt -l .)\""
+expect = "pass"
+
+# Go's pack protects no name of its own: a Makefile beside the module, in a folder that holds no protected name
+[[entry]]
+name = "makefile"
+run = "printf 'all:\\n\\tgo build ./...\\n' > sub/Makefile"
+expect = "refused"
+said = ["Makefile"]
+baseline = false
+timeout = 60

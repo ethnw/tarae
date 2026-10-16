@@ -1,0 +1,88 @@
+# Java with Maven: JUnit and the plugins a build takes fetched outside the sandbox first (`~/.m2/repository`
+# warmed); then Maven's offline runs.
+stack = "java-maven"
+pack = "java"
+tools = ["mvn", "java"]
+prewarm = ["mvn -B -q dependency:go-offline", "mvn -B -q package"]
+watch = ["~/.m2"]
+
+[files]
+".gitignore" = """
+target/
+"""
+"pom.xml" = """
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>fx</groupId>
+  <artifactId>fx</artifactId>
+  <version>0.1.0</version>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"""
+"src/main/java/fx/Sum.java" = """
+package fx;
+
+public final class Sum {
+    private Sum() {}
+
+    public static int of(int a, int b) {
+        return a + b;
+    }
+}
+"""
+"src/test/java/fx/SumTest.java" = """
+package fx;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.junit.jupiter.api.Test;
+
+class SumTest {
+    @Test
+    void adds() {
+        assertEquals(3, Sum.of(1, 2));
+    }
+}
+"""
+
+[[entry]]
+name = "build"
+run = "mvn -B -o -DskipTests package"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "test"
+run = "mvn -B -o test"
+expect = "pass"
+quick = true
+
+# A module's pom.xml in a folder that holds no protected name: refused, or found made
+[[entry]]
+name = "module"
+run = "printf '<project/>\\n' > sub/pom.xml"
+expect = "refused"
+said = ["pom.xml"]
+baseline = false
+timeout = 60

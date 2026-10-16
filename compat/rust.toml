@@ -1,0 +1,73 @@
+# Rust, the control (`target/sb/compat-plan.md` §6): cargo's everyday commands on a crate with one dependency
+# from the registry, fetched outside the sandbox first — they should stay green and show the harness's overhead.
+stack = "rust"
+pack = "rust"
+tools = ["cargo", "rustc", "cargo-clippy", "rustfmt"]
+prewarm = ["cargo fetch"]
+# (cargo's home but `build/`: the build folders `build.build-dir` puts there are each checkout's — this one's
+# the policy opens for it — and with every other checkout's they're past a tree's 200,000 entries)
+watch = ["~/.cargo/registry", "~/.cargo/git", "~/.cargo/bin"]
+
+[files]
+".gitignore" = """
+/target
+"""
+"Cargo.toml" = """
+[package]
+name = "fx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+itoa = "1"
+"""
+"src/lib.rs" = """
+pub fn show(n: u32) -> String {
+    itoa::Buffer::new().format(n).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shows() {
+        assert_eq!(super::show(7), "7");
+    }
+}
+"""
+
+[[entry]]
+name = "install"
+run = "cargo fetch"
+expect = "pass"
+
+[[entry]]
+name = "build"
+run = "cargo build"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "test"
+run = "cargo test"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "lint"
+run = "cargo clippy --all-targets -- -D warnings"
+expect = "pass"
+
+[[entry]]
+name = "format"
+run = "cargo fmt --check"
+expect = "pass"
+
+# A crate made in a folder that holds no protected name (`sub/`): Seatbelt refuses its Cargo.toml anywhere;
+# Landlock can't there, and the snapshot finds it made
+[[entry]]
+name = "new crate"
+run = "cargo new --vcs none sub/extra"
+expect = "refused"
+said = ["Cargo.toml"]
+baseline = false
+timeout = 60

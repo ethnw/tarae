@@ -1,0 +1,78 @@
+# Node with pnpm (its own install, or corepack's): the store warmed outside the sandbox first, then pnpm's
+# offline install, a build and a test.
+stack = "node-pnpm"
+pack = "javascript"
+tools = ["node", "pnpm"]
+prewarm = ["pnpm install"]
+# (pnpm's store, state and cache where macOS puts them)
+watch = ["~/Library/pnpm", "~/Library/Caches/pnpm", "~/.local/state/pnpm"]
+
+[files]
+".gitignore" = """
+node_modules/
+dist/
+"""
+"package.json" = """
+{
+  "name": "fx",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
+"""
+"tsconfig.json" = """
+{
+  "compilerOptions": {
+    "outDir": "dist",
+    "strict": true,
+    "module": "nodenext",
+    "target": "es2022"
+  },
+  "include": ["src"]
+}
+"""
+"src/sum.ts" = """
+export function sum(a: number, b: number): number {
+  return a + b;
+}
+"""
+"test/sum.test.js" = """
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+test("adds", () => {
+  assert.equal(1 + 1, 2);
+});
+"""
+
+[[entry]]
+name = "install"
+run = "pnpm install --offline --frozen-lockfile"
+expect = "pass"
+
+[[entry]]
+name = "build"
+run = "pnpm run build"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "test"
+run = "pnpm test"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "init"
+run = "cd sub && pnpm init"
+expect = "refused"
+said = ["package.json"]
+baseline = false
+timeout = 60

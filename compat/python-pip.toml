@@ -1,0 +1,86 @@
+# Python with a virtualenv and pip: pytest, ruff and mypy installed in `.venv` outside the sandbox first (pip's
+# cache warmed), setuptools downloaded to `.wheels/`; then the project installed editable from there, offline.
+stack = "python-pip"
+pack = "python"
+tools = ["python3"]
+prewarm = [
+    "python3 -m venv .venv",
+    ".venv/bin/pip install -q -r requirements-dev.txt",
+    ".venv/bin/pip download -q -d .wheels setuptools",
+]
+watch = ["~/Library/Caches/pip"]
+
+[files]
+".gitignore" = """
+.venv/
+.wheels/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+"""
+"requirements-dev.txt" = """
+pytest
+ruff
+mypy
+"""
+"pyproject.toml" = """
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fx"
+version = "0.1.0"
+
+[tool.setuptools]
+packages = ["fx"]
+"""
+"fx/__init__.py" = """
+def add(a: int, b: int) -> int:
+    return a + b
+"""
+"tests/test_add.py" = """
+from fx import add
+
+
+def test_add() -> None:
+    assert add(1, 2) == 3
+"""
+
+[[entry]]
+name = "install"
+run = ".venv/bin/pip install --no-index --find-links .wheels -e ."
+expect = "pass"
+
+[[entry]]
+name = "test"
+run = ".venv/bin/python -m pytest -q"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "types"
+run = ".venv/bin/mypy fx tests"
+expect = "pass"
+quick = true
+
+[[entry]]
+name = "lint"
+run = ".venv/bin/ruff check ."
+expect = "pass"
+
+[[entry]]
+name = "format"
+run = ".venv/bin/ruff format --check ."
+expect = "pass"
+
+# Python's pack protects no name of its own: a Makefile, in a folder that holds no protected name
+[[entry]]
+name = "makefile"
+run = "printf 'test:\\n\\tpytest\\n' > sub/Makefile"
+expect = "refused"
+said = ["Makefile"]
+baseline = false
+timeout = 60
