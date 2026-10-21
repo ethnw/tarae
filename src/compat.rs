@@ -1071,6 +1071,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn with_root: cards_dir",
         "given (`run`): the card record kept in the harness's folder, a line per card or run refused",
     ),
+    (
+        "src/editor.rs",
+        "in fn with_root: calls_dir",
+        "stays off: no call-order record written — a turn's tool names, never read by a run",
+    ),
     ("src/editor.rs", "in fn with_root: caps_home", HOOK),
     ("src/editor.rs", "in fn with_root: chats_dir", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: claude_env", CLAUDES),
