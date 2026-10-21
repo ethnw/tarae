@@ -17,6 +17,18 @@ pub const SILENT: Duration = Duration::from_secs(180);
 /// Under this share of a core, all its processes told, a run is doing nothing (`Waiting::looked`).
 pub const IDLE_PCT: f32 = 1.0;
 
+/// A run that has printed nothing this long at `BUSY_PCT` or more of a core — no new process in its tree since,
+/// no time limit of its own still to come — is busy at something it doesn't show (frictions 53: a `grep` with a
+/// runaway pattern held a turn 20 minutes at full CPU, never said — the stuck card asks only at next to no CPU):
+/// its rows say its CPU and the key that stops it, and the inbox lists it — said, never a card. Measured: the
+/// longest quiet stretch of real work tarae's own runs have, its release build (`cargo build --release -q`
+/// after a touch: 3:37 at 120% of a core, one rustc then the linker, M-series Mac, 2026-10-20) — ten minutes is
+/// that on a machine three times slower.
+pub const BUSY: Duration = Duration::from_secs(600);
+
+/// At this share of a core or more, all its processes told, a quiet run is busy (a loop on one thread: 100).
+pub const BUSY_PCT: f32 = 50.0;
+
 /// Claude's report's line on a run that ended (or was stopped) at `end` after printing nothing since `last`
 /// for `SILENT` or more: `It printed nothing for its last 27:04.`
 pub fn silent_line(last: Instant, end: Instant) -> Option<String> {
@@ -162,11 +174,11 @@ impl Waiting {
         (self.now.is_none() && d >= SILENT).then_some(d)
     }
 
-    /// Whether a quiet run is for the user to look at (the inbox): its processes idle as well for `SILENT`, or
-    /// not looked at yet; one still working — a build under `| tail -60`, its output held by the filter — only
-    /// once half the time its own command gives it (`limited`) is gone (frictions29 9: three long Linux runs an
-    /// hour landed there at 3 minutes).
-    pub fn worth_a_look(&self, started: Instant, now: Instant) -> bool {
+    /// Whether a quiet run (its last line at `last`) is for the user to look at (the inbox): its processes idle as
+    /// well for `SILENT`, or not looked at yet; one still working — a build under `| tail -60`, its output held
+    /// by the filter — only once half the time its own command gives it (`limited`) is gone (frictions29 9: three
+    /// long Linux runs an hour landed there at 3 minutes), or once it's busy at nothing it shows (`busy`).
+    pub fn worth_a_look(&self, started: Instant, last: Instant, now: Instant) -> bool {
         let idle = match (self.cpu, self.idle) {
             (None, _) => true,
             (Some(_), Some(since)) => now.saturating_duration_since(since) >= SILENT,
@@ -179,7 +191,17 @@ impl Waiting {
             .and_then(|at| at.checked_duration_since(started))
             .and_then(|d| started.checked_add(d / 2))
             .is_some_and(|at| now >= at);
-        idle || half
+        idle || half || self.busy(last, now).is_some()
+    }
+
+    /// Its share of a core when it's busy at something it doesn't show (`BUSY`): printing nothing since `last`
+    /// and no new process in its tree for `BUSY`, at `BUSY_PCT` or more at the last look, waiting on nothing it
+    /// said, with no time limit of its own still to come (it ends by then).
+    pub fn busy(&self, last: Instant, now: Instant) -> Option<f32> {
+        let quiet = now.saturating_duration_since(self.progress(last));
+        let limited = self.limit_at.is_some_and(|at| at > now);
+        let cpu = self.cpu.filter(|&c| c >= BUSY_PCT)?;
+        (self.now.is_none() && quiet >= BUSY && !limited).then_some(cpu)
     }
 
     /// How long until a running run that printed last at `last` goes silent — None: it is, or it waits.
@@ -242,7 +264,9 @@ impl Waiting {
             .and_then(|at| at.checked_duration_since(now))
             .map(|d| format!(" · its timeout ends it in {}", span(d)))
             .unwrap_or_default();
-        self.silent_for(last, now).map(|d| format!("no output for {}{limit}", clock(d)))
+        // (busy at it: its CPU said — frictions 53)
+        let busy = self.busy(last, now).map(|c| format!(" · {c:.0}% CPU")).unwrap_or_default();
+        self.silent_for(last, now).map(|d| format!("no output for {}{busy}{limit}", clock(d)))
     }
 
     /// Claude's report's line, once the run ended (`took` all told — from its start): `Waited 16.0s for

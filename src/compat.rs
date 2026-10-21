@@ -1214,6 +1214,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ("src/sandbox/supervisor.rs", "in fn routed: if p.resolvers.iter().any(|r| r.ip().to_canonical(", RECORD),
     ("src/sandbox/supervisor.rs", "in fn serve: ENDED.lock().unwrap_or_else(|e| e.into_inner()).pu", RECORD),
     ("src/sandbox/supervisor.rs", "in fn swapped_for: if let Some(pause) = p.swap_pause {", HOOK),
+    (
+        "src/sandbox/sysv.rs",
+        "in fn after: made",
+        "a run's end names only the tests' own System V segments: an entry's are unsaid — none measures them",
+    ),
     ("src/sandbox/tier.rs", r#"in fn get: if std::env::var_os("TARAE_TEST_NO_NS").is_some() "#, SEAM),
     ("src/sandbox/tier.rs", r#"in fn get: if std::env::var_os("TARAE_TEST_NO_PID").is_some()"#, SEAM),
     ("src/tools.rs", "in fn answer_parts: answered(&call, &r);", "the answer kept: compat reads it there"),

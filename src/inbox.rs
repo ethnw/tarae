@@ -124,24 +124,39 @@ fn ms(since: Instant, now: Instant) -> u64 {
 fn silent_runs(l: &crate::session::Session, now: Instant) -> Vec<(String, Slot, String, Instant, String)> {
     let mut out = Vec::new();
     if let Some(r) = l.task_run.as_ref().filter(|r| r.by_claude && r.state == crate::task::State::Running)
-        && r.wait.worth_a_look(r.started, now)
+        && r.wait.worth_a_look(r.started, r.last_output, now)
         && let Some(said) = r.wait.silent(r.last_output, now)
     {
         let label = crate::task::traced(&r.task.cmd);
         let held = crate::readonly::filtered_by(&r.task.cmd)
             .map(|f| format!(" · its output goes through {f}"))
             .unwrap_or_default();
-        out.push((format!("run#{}", r.trace.id()), Slot::Task, label, r.last_output, said + &held));
+        let stop = busy_stop(&r.wait, r.last_output, now, Slot::Task);
+        out.push((format!("run#{}", r.trace.id()), Slot::Task, label, r.last_output, said + &held + &stop));
     }
     if let Some(r) =
         l.test_run.as_ref().filter(|r| r.by_claude && r.state == crate::testing::RunState::Running)
-        && r.wait.worth_a_look(r.started, now)
+        && r.wait.worth_a_look(r.started, r.last_output, now)
         && let Some(said) = r.wait.silent(r.last_output, now)
     {
         let label = format!("tests {}", r.target.label);
-        out.push((format!("run#{}", r.trace.id()), Slot::Test, label, r.last_output, said));
+        let stop = busy_stop(&r.wait, r.last_output, now, Slot::Test);
+        out.push((format!("run#{}", r.trace.id()), Slot::Test, label, r.last_output, said + &stop));
     }
     out
+}
+
+/// The key that stops a run in `slot` (its panel's).
+pub fn stop_key(slot: Slot) -> &'static str {
+    match slot {
+        Slot::Test => "space x c",
+        _ => "space m c",
+    }
+}
+
+/// ` — space m c stops it` for a run busy at nothing it shows (`Waiting::busy`, frictions 53), else nothing.
+fn busy_stop(w: &crate::waits::Waiting, last: Instant, now: Instant, slot: Slot) -> String {
+    w.busy(last, now).map(|_| format!(" — {} stops it", stop_key(slot))).unwrap_or_default()
 }
 
 impl Editor {

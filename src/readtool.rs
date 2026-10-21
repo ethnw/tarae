@@ -315,8 +315,8 @@ fn section(
         return pictures(kind, bytes, shown, it, room);
     }
     let (real, stamp) = (o.real.as_path(), crate::testcode::stamp_of(&o.meta));
-    let text = section_of(&bytes, &|text| crate::outlines::of_text(real, stamp, text), shown, it, left);
-    vec![Part::Text(text)]
+    let outline = |text: &str| crate::outlines::of_text(real, stamp, text);
+    vec![Part::Text(section_of(&bytes, &outline, shown, it, left, &mut Vec::new()))]
 }
 
 /// An image's part: its heading — what it is, how it's sent, what it costs — then the picture, while `room` has
@@ -370,13 +370,14 @@ fn pictures(kind: Kind, bytes: Vec<u8>, shown: &str, it: &Item, room: &mut Room)
 /// A file's outline, or why there's none.
 type Outline = Result<std::sync::Arc<Vec<crate::nav::Sym>>, String>;
 
-/// `section` of a file's `bytes`, its outline from `outline_of` (given its text).
+/// `section` of a file's `bytes`, its outline from `outline_of` (given its text) — the lines it gives in `seen`.
 fn section_of(
     bytes: &[u8],
     outline_of: &dyn Fn(&str) -> Outline,
     shown: &str,
     it: &Item,
     left: &mut usize,
+    seen: &mut Vec<(usize, usize)>,
 ) -> String {
     if bytes.contains(&0) {
         return format!("== {shown}: binary — not read\n");
@@ -431,6 +432,9 @@ fn section_of(
         for (i, l) in lines[a - 1..a - 1 + take].iter().enumerate() {
             out.push_str(&format!("{}: {}\n", a + i, crate::nav::clip(l, LINE_MAX)));
         }
+        if take > 0 {
+            seen.push((a, a + take - 1));
+        }
         *left -= take;
         if take < b - a + 1 {
             let from = a + take;
@@ -444,7 +448,23 @@ fn section_of(
 /// it was taken, whatever the files hold now, in the chat's form. A path outside the checkout, a file it leaves
 /// out (named like a key, a link, …) or none there is said in its item's place; Err: nothing could be read. A
 /// worker's (it reads git).
+#[cfg(test)]
 pub fn read_snapshot(snap: &crate::snapread::Snap, args: &Value) -> Result<String, String> {
+    read_snapshot_seen(snap, args).0
+}
+
+/// The lines of a snapshot's files a read gave: each file's path and the ranges it showed (from 1, both ends in).
+pub type Seen = Vec<(String, Vec<(usize, usize)>)>;
+
+/// `read_snapshot`, and the lines it gave (`Seen`) — those shown, never those asked: an outline, a refusal or
+/// what `LINES_MAX` cut isn't read (the reviewer's files left out of its diff count as read by these).
+pub fn read_snapshot_seen(snap: &crate::snapread::Snap, args: &Value) -> (Result<String, String>, Seen) {
+    let mut seen = Seen::new();
+    let r = read_snapshot_into(snap, args, &mut seen);
+    (r, seen)
+}
+
+fn read_snapshot_into(snap: &crate::snapread::Snap, args: &Value, seen: &mut Seen) -> Result<String, String> {
     use crate::snapread::Found;
     let items = items_of(args)?;
     let rels: Vec<Option<String>> = items.iter().map(|it| snap.rel_of(&it.path)).collect();
@@ -469,7 +489,7 @@ pub fn read_snapshot(snap: &crate::snapread::Snap, args: &Value) -> Result<Strin
                 Ok(bytes) => {
                     read += 1;
                     let none = |_: &str| Err(String::new());
-                    for l in section_of(&bytes, &none, rel, it, &mut left).lines() {
+                    for l in section_of(&bytes, &none, rel, it, &mut left, &mut Vec::new()).lines() {
                         let from = if l.starts_with("== ") {
                             " — from the checkout: not in the snapshot"
                         } else {
@@ -486,7 +506,11 @@ pub fn read_snapshot(snap: &crate::snapread::Snap, args: &Value) -> Result<Strin
             (Found::File, Some(bytes)) => {
                 read += 1;
                 let outline = |text: &str| snap.outline(rel, text);
-                out.push_str(&section_of(bytes, &outline, rel, it, &mut left));
+                let mut lines = Vec::new();
+                out.push_str(&section_of(bytes, &outline, rel, it, &mut left, &mut lines));
+                if !lines.is_empty() {
+                    seen.push((rel.clone(), lines));
+                }
             }
             (Found::Folder, _) => {
                 out.push_str(&format!("== {}: a folder — search with output files lists it\n", it.given))

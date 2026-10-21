@@ -725,6 +725,49 @@ fn sample_with_children(pid: u32, kids: &[(&str, u64, Duration)]) -> Sample {
     Sample::of(procs)
 }
 
+/// frictions 53: a run that prints nothing at full CPU (a `grep` with a runaway pattern) is never stuck — the card
+/// asks only at next to no CPU — but past `waits::BUSY` with no output it's said busy where the user looks: its
+/// rows say its CPU, the inbox lists it with the key that stops it, and still no card. Under that, under a time
+/// limit of its own still to come, below `BUSY_PCT` or with a process new in its tree lately, it isn't.
+#[test]
+fn a_run_busy_at_nothing_it_shows_is_said_not_asked() {
+    let dir = crate::scratch::Scratch::new("stuck-busy");
+    let (mut ed, pid) = quiet_run(dir.path(), "grep -a -o -E '.{0,220}x' big.bin");
+    let me = std::process::id();
+    let os = |pid, ppid, name: &str| Os { pid, ppid, name: name.into(), started: 1, ..Default::default() };
+    let busy = |pct| Sample::of(vec![(os(me, 1, "tarae"), Some(1.0)), (os(pid, me, "grep"), Some(pct))]);
+    let silent = |ed: &Editor| {
+        let (now, r) = (Instant::now(), ed.session.task_run.as_ref().unwrap());
+        (
+            r.wait.silent(r.last_output, now).unwrap_or_default(),
+            ed.inbox().into_iter().find(|e| e.kind == "silent-run"),
+        )
+    };
+    // 11 minutes quiet at full CPU: said, listed with its stop key — no card
+    ed.procs_sampled(busy(100.0));
+    ed.handle_event(crate::event::Event::Resize);
+    assert!(ed.offers.iter().all(|o| o.stuck().is_none()), "busy isn't stuck: {:?}", ed.offers);
+    let (said, listed) = silent(&ed);
+    assert!(said.starts_with("no output for 11:") && said.ends_with(" · 100% CPU"), "{said}");
+    let listed = listed.expect("in the inbox").asks;
+    assert!(listed.contains("100% CPU — space m c stops it"), "{listed}");
+    // Under BUSY, or at a share of a core below BUSY_PCT: neither
+    ed.session.task_run.as_mut().unwrap().last_output = Instant::now().checked_sub(MIN * 9).unwrap();
+    assert!(!silent(&ed).0.contains("CPU") && silent(&ed).1.is_none(), "{:?}", silent(&ed));
+    ed.session.task_run.as_mut().unwrap().last_output = Instant::now().checked_sub(MIN * 11).unwrap();
+    ed.procs_sampled(busy(30.0));
+    assert!(!silent(&ed).0.contains("CPU") && silent(&ed).1.is_none(), "{:?}", silent(&ed));
+    // A time limit of its own still to come, or a new process in its tree lately: neither
+    ed.procs_sampled(busy(100.0));
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.wait.limit_at = Instant::now().checked_add(MIN);
+    assert!(!silent(&ed).0.contains("CPU"), "{:?}", silent(&ed));
+    let r = ed.session.task_run.as_mut().unwrap();
+    (r.wait.limit_at, r.wait.moved) = (None, Instant::now().checked_sub(MIN));
+    assert!(!silent(&ed).0.contains("CPU") && silent(&ed).1.is_none(), "{:?}", silent(&ed));
+    ed.session.task_run = None;
+}
+
 /// A run of Claude's started as `cmd`, quiet and idle for 11 minutes, as the looks before saw it.
 fn quiet_run(dir: &std::path::Path, cmd: &str) -> (Editor, u32) {
     let mut ed = Editor::new(crate::config::Config::default());
@@ -750,7 +793,7 @@ fn a_new_process_in_the_runs_tree_is_progress() {
     ed.procs_sampled(sample_with_child(pid, "tarae", 2, Duration::from_secs(3)));
     let w = &ed.session.task_run.as_ref().unwrap().wait;
     assert!(w.moved.is_some() && w.at_work == [(pid + 100_000, 2)], "a new child seen");
-    assert!(!w.worth_a_look(Instant::now(), Instant::now()), "not for the inbox either");
+    assert!(!w.worth_a_look(Instant::now(), Instant::now(), Instant::now()), "not for the inbox either");
     // (the stuck card would come on a job — none was started)
     ed.handle_event(crate::event::Event::Resize);
     assert!(ed.offers.iter().all(|o| o.stuck().is_none()), "working: not asked");

@@ -4781,6 +4781,10 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
     if let Some(s) = r.ended.ptys_said() {
         out.push_str(&s);
     }
+    // (the System V segments it left — nothing was refused, so nothing else would say them: frictions 56)
+    if let Some(s) = r.ended.sysv_said() {
+        out.push_str(&s);
+    }
     // (the sandbox's report goes after it — `rules_known`)
     let lines = &r.output;
     if lines.is_empty() {
@@ -4894,6 +4898,9 @@ fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
     }
     // (the ptys its broker made — no card asked for them: said, as a run's report says them)
     if let Some(s) = r.ended.ptys_said() {
+        out.push_str(&s);
+    }
+    if let Some(s) = r.ended.sysv_said() {
         out.push_str(&s);
     }
     if r.state != RunState::Passed && fails.is_empty() {
@@ -5363,11 +5370,16 @@ mod tests {
         assert!(text.contains("running 0 tests\n"), "the output says why: {text}");
         assert_eq!(super::verdict(&text), "no tests ran");
         // (the review of terminals A: a test run's ptys from its broker are said, as a run's — and its refusals)
-        r.ended = crate::sandbox::RunEnd { ptys: 2, ptys_refused: 1, skipped: Vec::new() };
+        r.ended = crate::sandbox::RunEnd { ptys: 2, ptys_refused: 1, ..Default::default() };
         let text = super::report(elsewhere(), &r, super::Waited::No);
         let said =
             "It made 2 ptys — new ones, tarae's, handed in (none of the user's terminals). 1 ask past the";
         assert!(text.contains(said), "{text}");
+        // (frictions 56: System V segments made while it ran, said with how to free them — the review's finding)
+        r.ended.sysv = vec![65536, 131074];
+        let text = super::report(elsewhere(), &r, super::Waited::No);
+        assert!(text.contains("While it ran, 2 System V shared memory segments were made"), "{text}");
+        assert!(text.contains("`ipcrm -m 65536 -m 131074` frees them"), "{text}");
     }
 
     /// A run's policy has what the user allowed in it — kept, this chat's, and a grant for this run alone —
@@ -8555,6 +8567,11 @@ mod tests {
             text.contains("It made 3 ptys — new ones, tarae's, handed in (none of the user's terminals)."),
             "{text}"
         );
+        // frictions 56: a System V segment made while it ran, said with how to free it (the review's finding)
+        r.ended.sysv = vec![65536];
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(text.contains("While it ran, 1 System V shared memory segment was made"), "{text}");
+        assert!(text.contains("`ipcrm -m 65536` frees them"), "{text}");
     }
 
     /// frictions29 21: a long run whose output went through a filter (`| grep … | head -40`) has its report say what

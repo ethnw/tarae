@@ -65,6 +65,9 @@ pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
+// (macOS: the System V segments made while a run ran — named in its report, never removed: frictions 56)
+#[cfg(target_os = "macos")]
+pub mod sysv;
 // (V2: what the supervisor reads of a run's memory, as the kernel reads it — built and tested everywhere, its loops on
 // macOS too —, read on Linux)
 #[path = "sandbox/supervisor/wire.rs"]
@@ -5628,6 +5631,8 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() -> RunEnd + Send + 's
     #[cfg(not(target_os = "linux"))]
     let brokered = policy.filter(|p| p.brokers_ptys()).map(|p| p.run_id);
     let skips = policy.and_then(|p| p.run.as_ref()).map(|r| r.path().join(SKIPS_FILE));
+    #[cfg(target_os = "macos")]
+    let began = policy.map(|_| crate::clock::system());
     move || {
         #[cfg(target_os = "linux")]
         if let Some(k) = kept {
@@ -5644,7 +5649,12 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() -> RunEnd + Send + 's
         // (the tests that said they skipped themselves, as the run's own file has them — its output may have gone
         // through a filter that dropped their lines: frictions29 #29; read bounded, `skips_of`)
         let skipped = skips.map(|f| skips_of(&f)).unwrap_or_default();
-        RunEnd { ptys, ptys_refused, skipped }
+        // (the System V segments made while it ran and left unattached: named, never removed — `sysv`)
+        #[cfg(target_os = "macos")]
+        let sysv = began.map(sysv::after).unwrap_or_default();
+        #[cfg(not(target_os = "macos"))]
+        let sysv = Vec::new();
+        RunEnd { ptys, ptys_refused, skipped, sysv }
     }
 }
 
@@ -5657,9 +5667,32 @@ pub struct RunEnd {
     pub ptys_refused: usize,
     /// Each `<test> — <why>`, at most `SKIPS_KEPT`.
     pub skipped: Vec<String>,
+    /// The ids of the System V segments made while it ran and left unattached (macOS, `sysv`) — never removed.
+    pub sysv: Vec<libc::c_int>,
 }
 
 impl RunEnd {
+    /// What a report says of the System V segments made while it ran (frictions 56) — None: none was. Never
+    /// that they're the run's: tarae can't tell (`sysv`), so it removes none and the user decides.
+    pub fn sysv_said(&self) -> Option<String> {
+        if self.sysv.is_empty() {
+            return None;
+        }
+        let ids: Vec<String> = self.sysv.iter().map(|id| format!("-m {id}")).collect();
+        let made = match self.sysv.len() {
+            1 => "1 System V shared memory segment was".to_string(),
+            n => format!("{n} System V shared memory segments were"),
+        };
+        Some(format!(
+            "\nWhile it ran, {} made that nothing has attached — by it or by another program of the user's: tarae \
+             can't tell whose, so it removes none. In the sandbox a command can make one but never use or remove it, \
+             and each lasts until the Mac restarts (32 fill it for every program); `ipcrm {}` frees them, the \
+             user's to decide.\n",
+            made,
+            ids.join(" ")
+        ))
+    }
+
     /// What a report says of its ptys — None: it made none and was refused none.
     pub fn ptys_said(&self) -> Option<String> {
         let refused = match self.ptys_refused {
@@ -13494,7 +13527,13 @@ mod tests {
         let watched = Policy { tag: Some(tag), watch: Some(w.clone()), ..p.clone() };
         std::fs::write(root.join("build.rs"), "kept\n").unwrap();
         sh(&watched, "echo pwned >> build.rs; mkdir -p d/.git");
-        std::thread::sleep(WATCH_LAST * 2);
+        // (the system log hands the denials over when it does — under load past any fixed time: both waited for,
+        // bounded — frictions 52: `WATCH_LAST * 2` of sleep missed the second)
+        let seen = |end: &str| w.blocked().seen.iter().any(|d| d.target.ends_with(end));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !(seen("/build.rs") && seen("/d/.git")) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         w.finish();
         assert_eq!(w.blocked().failed, None);
         let r = Guard::In(Box::new(watched)).report(&[]);

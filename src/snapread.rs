@@ -1,5 +1,5 @@
 //! What a review run reads (bgreview, "tarae native" 2026-10-20): the snapshot it took (`snapshot::snap`'s tree)
-//! as git holds it. Its members' tools are tarae's own `read` and `search` (`readtool::read_snapshot`,
+//! as git holds it. Its members' tools are tarae's own `read` and `search` (`readtool::read_snapshot_seen`,
 //! `nav::search_snapshot`) over this — each file's text from git's objects, never the checkout you go on
 //! editing — so what a member reads is what its diff says, and every line it names is the snapshot's
 //! (`notes::pin_finding` places it on the lines now). Nothing is written anywhere.
@@ -98,6 +98,17 @@ impl Drop for Snap {
             outlines,
         ));
     }
+}
+
+/// An instruction file there for the snapshot's reader (`Snap::rules`): its path, its lines, whether it's the
+/// checkout's (git ignores it) rather than the snapshot's — and why it isn't read when it isn't (a link, past
+/// `FILE_MAX`; its lines then 0).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rule {
+    pub rel: String,
+    pub lines: usize,
+    pub from_checkout: bool,
+    pub unread: Option<String>,
 }
 
 impl std::fmt::Debug for Snap {
@@ -219,6 +230,33 @@ impl Snap {
             Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Err(Left::Link.said()),
             Err(e) => Err(format!("not read from the checkout: {e}")),
         })
+    }
+
+    /// The checkout's instruction files (`worktree::INSTRUCTIONS`, at its top) `read` gives — the snapshot's, else
+    /// one git ignores from the checkout (`instruction`) — with their lines: named in the reviewer's prompt, whose
+    /// listing and search never show an ignored one (frictions 55: it concluded there was none). One there that
+    /// isn't read is listed with why — never taken for none. Blocks (a worker's).
+    pub fn rules(&self) -> Vec<Rule> {
+        let lines = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count() + usize::from(!b.ends_with(b"\n"));
+        let rule = |rel: &str, read: Result<Vec<u8>, String>, from_checkout| match read {
+            Ok(b) => Rule { rel: rel.to_string(), lines: lines(&b), from_checkout, unread: None },
+            Err(why) => Rule { rel: rel.to_string(), lines: 0, from_checkout, unread: Some(why) },
+        };
+        // (the checkout's, git ignoring it: there when its name is, a link too)
+        let there = |rel: &str| std::fs::symlink_metadata(self.root.join(rel)).is_ok();
+        (crate::worktree::INSTRUCTIONS.iter())
+            .filter_map(|&rel| match (self.instruction(rel), self.found(rel)) {
+                (Some(Err(_)), _) if !there(rel) => None,
+                (Some(got), _) => Some(rule(rel, got, true)),
+                (None, Found::File) => {
+                    let text =
+                        self.text(rel).map(|t| t.to_vec()).ok_or_else(|| "not read from git".to_string());
+                    Some(rule(rel, text, false))
+                }
+                (None, Found::Left(why)) => Some(rule(rel, Err(why.said()), false)),
+                (None, _) => None,
+            })
+            .collect()
     }
 
     /// What `rel` (a path of the snapshot) names.
@@ -494,6 +532,14 @@ pub(crate) mod tests {
             assert!(!said.contains("1: "), "{refused}: {said}");
         }
         assert!(read("AGENTS.md").contains("a link"), "{}", read("AGENTS.md"));
+        // (named for the reviewer's prompt: what read gives, the ignored one marked the checkout's)
+        let rule = |rel: &str, from_checkout| Rule { rel: rel.into(), lines: 1, from_checkout, unread: None };
+        let rules = snap.rules();
+        assert_eq!(rules[..2], [rule("CLAUDE.md", true), rule("CLAUDE.local.md", false)]);
+        // (one there that isn't read — the linked AGENTS.md — said with why, never taken for none: the review's
+        // finding)
+        assert_eq!((rules.len(), rules[2].rel.as_str(), rules[2].lines), (3, "AGENTS.md", 0), "{rules:?}");
+        assert!(rules[2].unread.as_deref().is_some_and(|w| w.contains("a link")), "{rules:?}");
     }
 
     /// A path from the root or absolute under it (as given or as its real path) is the snapshot's; `..` past the

@@ -646,11 +646,10 @@ fn cut(text: &str, max: usize) -> String {
     }
 }
 
-/// What an angle is asked after the diff (`reviewer::prefix`): the bar, its own ask, how to pin.
+/// What an angle is asked after the diff and the project's rules (`reviewer::prefix`): its own ask, how to pin.
 pub fn angle_ask(a: &Angle) -> String {
     format!(
-        "Read the project's CLAUDE.md or AGENTS.md first if there is one: its rules are the bar. Read the code \
-         around each change where you need to.\n\n\
+        "Read the code around each change where you need to.\n\n\
          You are one of several readers of these changes, each from its own angle (angle: {}). Yours:\n{}\n\n\
          Pin each finding to its exact lines with the note tool — one or two sentences: what's wrong and why it \
          matters. At most {}, the most important first, no style nits: a second reader checks each by tracing \

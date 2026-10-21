@@ -142,6 +142,13 @@ reader where a thread waits; `sample <pid>` in a terminal shows its stacks). Not
 run (its panel and output stay, and Claude hears how it ended), `w` shows those lines in its panel, `n` keeps
 waiting and asks again after as long again. If the run prints or ends, the card goes away.
 
+**A run busy at something it doesn't show** — a `grep` with a runaway pattern, a loop — is never stuck: it uses
+the CPU. Once it has printed nothing for ten minutes at half a core or more (no new process in its tree meanwhile,
+no time limit of its own still to come), it's said, not asked: its panel and Claude's run row say `no output for
+10:03 · 100% CPU`, the row with `space m c stop it`, and it joins the quiet runs (`1 run quiet`, the list's entry
+ending `— space m c stops it`). Ten minutes is tarae's own longest quiet stretch of real work — its release build,
+3:37 at 120% of a core on an M-series Mac — on a machine three times slower.
+
 A run's output is a pipe, so a filter at its end (`2>&1 | tail -15`, `| grep FAIL`, `| head`, `| sed …`) holds
 what it writes in its buffer, and lines may show only when the run ends — unless the line asks it for its lines
 as they come (`grep --line-buffered`, `sed -u`, `stdbuf -oL` before it). Where the output is held, no line may
@@ -1657,14 +1664,18 @@ continued from it, and nothing of the chat goes into what it's sent
 ([screenshot](screenshots/claude-reviews.png)).
 
 - It reads a **snapshot** of the changes, taken as you press the key: uncommitted, since a branch, or, with a
-  review open, what that review is of (a turn's too). The working tree, untracked files with it, is taken as a
+  review open, what that review is of — never a turn's review: one comes up by itself at a turn's end, and the
+  reviewer reads the whole change (its report's first line says what it read). The working tree, untracked files with it, is taken as a
   git tree the way a turn's checkpoint is (`git add` into tarae's own index), so the repository's clean filters
   run then, and only once you've trusted them. Its `read` and `search` read that tree's files from git's own
   objects, so every file it reads is as it was then, never what you write after, and every line it names is the
   snapshot's. Nothing is written out, so no smudge filter or hook runs. Files named like keys, links, submodules
   and files over 1 MB aren't read (asked for, it's told why), and neither is a file a partial clone doesn't have:
   git never fetches one for it, and the start says how many. The diff it's sent names such a file, and a file
-  named like a key, in its place without its lines. (Listing and grading the changed files is the review's own,
+  named like a key, in its place without its lines. Past 150 KB the diff leaves whole files out, never half of one,
+  and names each with its changed lines to read itself; one no reader read is said at its end and in the report's
+  first line. Its prompt names the project's rules — the checkout's CLAUDE.md, CLAUDE.local.md, AGENTS.md, one git
+  ignores read from the checkout (said so) — or says there are none, tarae having looked. (Listing and grading the changed files is the review's own,
   as `space v v`'s: in a partial clone that may fetch what it needs to count lines; none of it is sent.) No snapshot can be taken: it doesn't start, and says
   why.
 

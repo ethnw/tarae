@@ -3191,7 +3191,12 @@ fn draw(
         // A shell's cursor is a block
         Some(p) if Some(p) == terminal_cursor => (Some(p), CursorShape::Block),
         Some(p) => (Some(p), CursorShape::Bar),
-        None => (text_cursor, cursor_shape(editor)),
+        // (the code's cursor under a card floating over it is hidden with the code it's on — frictions 57: the
+        // follow card in replay showed it inside its title)
+        None => (
+            text_cursor.filter(|&c| !under_a_card(c, &[note_rect, follow_rect, offer_rect, ask_rect])),
+            cursor_shape(editor),
+        ),
     };
     // (a list whose letters are keys has nothing to type into: no cursor, there or under it — nor labels up)
     let pos = pos.filter(|_| editor.prompt.is_some() || !editor.picker.as_ref().is_some_and(|p| p.keys));
@@ -10468,25 +10473,39 @@ fn draw_chat(
         let queued = matches!(look.verb, "run" | "test")
             .then(|| crate::queued::chat_said(&editor.session, now))
             .flatten();
+        // (what it waits on, or how long it's said nothing — and, busy at nothing it shows, the key that stops
+        // it: frictions 53)
+        let said = |wait: &crate::waits::Waiting, last, slot| {
+            let stop = wait.busy(last, now).map(|_| crate::inbox::stop_key(slot));
+            wait.shown(now).map(|s| (s, None)).or_else(|| wait.silent(last, now).map(|s| (s, stop)))
+        };
         let wait = match look.verb {
-            _ if queued.is_some() => queued.as_ref().map(|q| q.said.clone()),
+            _ if queued.is_some() => queued.as_ref().map(|q| (q.said.clone(), None)),
             // (this turn's — a stopped turn's still going isn't this row's: frictions26)
             "run" => editor
                 .session
                 .task_run
                 .as_ref()
                 .filter(|r| r.chat.is_some() && r.state == crate::task::State::Running)
-                .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
+                .and_then(|r| said(&r.wait, r.last_output, crate::sizes::Slot::Task)),
             "test" => editor
                 .session
                 .test_run
                 .as_ref()
                 .filter(|r| r.chat.is_some() && r.state == crate::testing::RunState::Running)
-                .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
+                .and_then(|r| said(&r.wait, r.last_output, crate::sizes::Slot::Test)),
             _ => None,
         };
-        if let Some(wait) = wait {
-            pieces.push(Piece::Own(plain(vec![sp(format!("  {}", fit_ellipsis(&wait, w - 2)), faint)])));
+        if let Some((wait, stop)) = wait {
+            let hint = stop.map(|key| hint_spans(&[(key, "stop it")], dim, faint)).unwrap_or_default();
+            let hint_w: usize = hint.iter().map(|s| s.text.width()).sum();
+            let room = w.saturating_sub(2 + if hint_w > 0 { hint_w + 2 } else { 0 });
+            let mut row = vec![sp(format!("  {}", fit_ellipsis(&wait, room)), faint)];
+            if hint_w > 0 {
+                row.push(sp("  ".into(), faint));
+                row.extend(hint);
+            }
+            pieces.push(Piece::Own(plain(row)));
             total += 1;
             // (the run it waits behind, a stopped turn's: what, how long, the key that stops it — the name cut,
             // the time and the key whole)
@@ -11438,6 +11457,12 @@ fn trail_spans(
 
 /// A card's place: (x, y, width, height).
 type Rect4 = (usize, usize, usize, usize);
+
+/// Whether cell `at` is under one of `cards` (drawn over it).
+fn under_a_card((x, y): (u16, u16), cards: &[Option<Rect4>]) -> bool {
+    let (x, y) = (x as usize, y as usize);
+    cards.iter().flatten().any(|&(cx, cy, w, h)| (cx..cx + w).contains(&x) && (cy..cy + h).contains(&y))
+}
 
 fn overlaps(a: Rect4, b: Rect4) -> bool {
     a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
@@ -15439,6 +15464,45 @@ mod tests {
         assert_eq!(rows, ["▲ test failed tests::adds", "left: 4, right: 5"], "{card:#?}");
     }
 
+    /// The code's cursor under the follow card in replay (`[r`) is hidden — never drawn inside the card — and
+    /// shows again where the card isn't (frictions 57: a bar in the card's title row).
+    #[test]
+    fn the_codes_cursor_never_shows_through_a_card() {
+        let mut ed = threaded_turn();
+        // (code to the screen's foot and across it: the card can only float over it)
+        let line = format!("{}\n", "x".repeat(90));
+        ed.docs[0].text = Rope::from_str(&line.repeat(100));
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.unfolded, c.focused) = (false, false);
+        c.follow.on = true;
+        let look = c.msgs[2].look.clone().unwrap();
+        c.follow.replaying = Some(crate::follow::Gaze {
+            call: "r1".into(),
+            step: Some((1, 3)),
+            ..crate::follow::Gaze::new(look, None, None)
+        });
+        let (mut under, mut beside) = (0, 0);
+        for at in 0..60 {
+            ed.docs[0].set_selection(crate::selection::Selection::point(at * line.len() + 45));
+            let vt = screen_at(&mut ed, 120);
+            let (x, y, w, h) = ed.screen.thought_card.get().expect("the card is up");
+            let (cy, cx) = vt.screen().cursor_position();
+            let inside = (x..x + w).contains(&(cx as usize)) && (y..y + h).contains(&(cy as usize));
+            match vt.screen().hide_cursor() {
+                true => under += 1,
+                false => {
+                    assert!(
+                        !inside,
+                        "line {at}: the cursor at ({cx}, {cy}) shows inside the card {:?}",
+                        (x, y, w, h)
+                    );
+                    beside += 1;
+                }
+            }
+        }
+        assert!(under > 0 && beside > 0, "lines under the card: {under}, beside it: {beside}");
+    }
+
     /// What `wet_head` drew wet in a frame of `ed`, by surface.
     fn wet_in_frame(ed: &mut Editor, surface: &str) -> Vec<String> {
         WET_SEEN.with_borrow_mut(Vec::clear);
@@ -16435,6 +16499,21 @@ mod tests {
         ed.session.task_run.as_mut().unwrap().last_output = std::time::Instant::now();
         assert!(!shown(&mut ed).contains("no output"));
         assert!(ed.ui_runs()[0].silent.is_none() && ed.inbox().is_empty());
+        // Quiet past `waits::BUSY` at a core's worth (frictions 53): its CPU said in both, the chat's row with the
+        // key that stops it
+        let Some(then) =
+            std::time::Instant::now().checked_sub(crate::waits::BUSY + std::time::Duration::from_secs(3))
+        else {
+            return;
+        };
+        let r = ed.session.task_run.as_mut().unwrap();
+        r.last_output = then;
+        r.wait.looked(100.0, std::time::Instant::now());
+        let s = shown(&mut ed);
+        let said =
+            s.lines().filter(|l| l.contains("no output for 10:0") && l.contains(" · 100% CPU")).count();
+        assert_eq!(said, 2, "the panel's header and the chat's row: {s}");
+        assert!(s.lines().any(|l| l.contains("100% CPU  space m c stop it")), "{s}");
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.
