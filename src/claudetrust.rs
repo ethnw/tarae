@@ -183,8 +183,8 @@ impl Seen {
 /// A chat's gate: claude starts once the project's settings are read — held back while their card waits.
 pub struct Gate {
     pub seen: Option<Seen>,
-    /// A read under way.
-    reading: bool,
+    /// A read under way: since when (the chat says `claude is starting` meanwhile — frictions29 #67).
+    reading: Option<std::time::Instant>,
     /// This gate's — a closed chat's late read isn't another chat's.
     id: u64,
     /// The `--settings` and `--setting-sources` its claude was started with: a change that needs other ones
@@ -201,7 +201,7 @@ impl Default for Gate {
     fn default() -> Gate {
         static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Gate { seen: None, reading: false, id, started: None, watch: None, again: false }
+        Gate { seen: None, reading: None, id, started: None, watch: None, again: false }
     }
 }
 
@@ -216,7 +216,18 @@ impl Drop for Gate {
 impl Gate {
     /// claude can't start yet: the settings are being read (milliseconds — a card waiting doesn't hold it).
     pub fn waiting(&self) -> bool {
+        self.reading.is_some()
+    }
+
+    /// Since when claude has waited for the read (`waiting`).
+    pub fn waiting_since(&self) -> Option<std::time::Instant> {
         self.reading
+    }
+
+    /// Tests and shots: a read under way since `at`.
+    #[cfg(test)]
+    pub fn reading_since(&mut self, at: std::time::Instant) {
+        self.reading = Some(at);
     }
 }
 
@@ -515,7 +526,7 @@ pub fn ready(ed: &mut Editor, base: &str) -> Option<(String, String)> {
     let c = ed.session.chat.as_mut()?;
     let start = match &c.settings.seen {
         None => {
-            if !c.settings.reading {
+            if c.settings.reading.is_none() {
                 read(ed);
             }
             return None;
@@ -558,7 +569,7 @@ pub fn still_holds(ed: &mut Editor, then: impl FnOnce(&mut Editor, Option<bool>)
 /// Reads the project's settings on a worker — the chat's gate gets them.
 fn read(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_mut() else { return };
-    c.settings.reading = true;
+    c.settings.reading.get_or_insert_with(crate::clock::now);
     let id = c.settings.id;
     let places = Places::of(ed);
     ed.events.jobs().spawn(move || {
@@ -629,7 +640,7 @@ fn seen_now(ed: &mut Editor, id: u64, mut seen: Seen, (key, at): (String, u64)) 
     }
     let gate_on = ed.claude_settings_gate;
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.settings.id == id) else { return };
-    c.settings.reading = false;
+    c.settings.reading = None;
     let first = c.settings.seen.is_none();
     // The same content: the answer in hand holds — the store may not have it yet (kept on a worker)
     if c.settings.seen.as_ref().is_some_and(|s| s.digest() == seen.digest() && s.file == seen.file) {
@@ -675,6 +686,11 @@ fn seen_now(ed: &mut Editor, id: u64, mut seen: Seen, (key, at): (String, u64)) 
 
 /// Reads the settings again whenever either file changes, while the chat is open (its gate's waker ends it).
 fn watch(ed: &mut Editor, id: u64) {
+    // (a simulation's stand-in claude: its files' watch is a thread the simulation doesn't model)
+    #[cfg(test)]
+    if ed.claude_lines.is_some() {
+        return;
+    }
     let waker = crate::fswatch::Waker::new();
     let Some(c) = ed.session.chat.as_mut() else { return };
     c.settings.watch = Some(waker.clone());
@@ -870,7 +886,7 @@ impl Editor {
         let c = self.session.chat.as_ref().ok_or("the chat reads them when it opens — space l")?;
         let seen = match &c.settings.seen {
             Some(s) => s.clone(),
-            None if c.settings.reading => return Err("still reading them — a moment".into()),
+            None if c.settings.reading.is_some() => return Err("still reading them — a moment".into()),
             None => return Err("not read yet — they're read when Claude starts".into()),
         };
         if seen.scan.is_none() {

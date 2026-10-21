@@ -203,6 +203,36 @@ fn write_atomic_as(
 /// (if changed and worth reading).
 type Stat = (DocId, Option<Stamp>, Option<Stamp>, Option<Rope>);
 
+/// The reloads of a git action that writes the checkout (a rebase, a git-tab action) said as one line
+/// (frictions29 #68: a rebase's 120 "reloaded from disk" toasts buried its one conflict line and the one
+/// deletion that mattered): while it runs, and the disk round asked as it ends, each file's line goes to
+/// `:messages` only — a deletion still its own warning — then `rebase: 112 files reloaded, 1 deleted on disk`.
+/// A session's own (the one whose checkout the action writes): another session's reloads meanwhile are said as
+/// ever (the review of frictions36: one batch for the editor quieted every session's).
+#[derive(Debug)]
+pub struct DiskBatch {
+    session: crate::event::SessionId,
+    what: String,
+    /// Its actions under way, each by its token (`disk_batch_start`): one ended is that one, never another's.
+    open: Vec<u64>,
+    reloaded: usize,
+    deleted: usize,
+    /// All ended: the disk round asked then — its result (or a later one's) says the line.
+    after: Option<u64>,
+    /// When the first began — one whose end never came (a run cut off) holds its session's toasts no longer than
+    /// `BATCH_MAX`.
+    began: std::time::Instant,
+}
+
+/// The longest a git action's reloads go unsaid (`DiskBatch`).
+const BATCH_MAX: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// A token for a git-tab action's batch (`disk_batch_start`) — apart from a rebase's, its task's generation.
+pub fn batch_token() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) | 1 << 63
+}
+
 impl Editor {
     /// Start watching (once at startup — it keeps itself going after that).
     pub fn disk_watch(&mut self) {
@@ -269,6 +299,7 @@ impl Editor {
                 // (a backstop round that found nothing is nothing to draw)
                 ed.unchanged = stats.is_empty();
                 ed.on_disk(stats);
+                ed.disk_batch_said(generation);
                 if ed.disk_poll_gen == generation {
                     ed.disk_poll(true);
                 }
@@ -282,6 +313,8 @@ impl Editor {
         // a burst of writes goes on, `lsp_saved_outside`)
         let mut saved = Vec::new();
         let mut said: Vec<(DocId, String, bool)> = Vec::new();
+        // (each reload or deletion, by document: counted into its own session's batch)
+        let mut counted: Vec<(DocId, bool)> = Vec::new();
         for (id, known, now, body) in stats {
             let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { continue };
             // Saved (or reloaded) since the stat started — the change it saw may be our own write; or a save
@@ -299,6 +332,7 @@ impl Editor {
                 (None, _) => {
                     if doc.disk.is_some() {
                         doc.disk = None;
+                        counted.push((id, true));
                         said.push((id, format!("{name} was deleted on disk — :w to write it back"), true));
                     }
                 }
@@ -326,6 +360,7 @@ impl Editor {
                             0 => String::new(),
                             d => format!(" · {}{} lines", if d > 0 { "+" } else { "" }, d),
                         };
+                        counted.push((id, false));
                         said.push((id, format!("{name} reloaded from disk{lines}"), false));
                     }
                 }
@@ -356,20 +391,122 @@ impl Editor {
                 }
             }
         }
+        // (a git action under way: its reloads go to `:messages`, said as one line once it's over — a deletion
+        // still its own warning)
+        for (id, deleted) in counted {
+            let sid = self.doc_session(id);
+            if let Some(b) = self.disk_batch.iter_mut().find(|b| b.session == sid) {
+                (b.reloaded, b.deleted) =
+                    (b.reloaded + usize::from(!deleted), b.deleted + usize::from(deleted));
+            }
+        }
         for (id, msg, warn) in said {
-            self.disk_said(id, msg, warn);
+            let sid = self.doc_session(id);
+            let quiet = !warn && self.disk_batch.iter().any(|b| b.session == sid);
+            self.disk_said(id, msg, warn, quiet);
         }
         for id in saved {
             self.lsp_saved_outside(id);
         }
     }
 
+    /// The session document `id` is of (the one in front when none says so).
+    fn doc_session(&self, id: DocId) -> crate::event::SessionId {
+        match self.session.docs.contains(&id) {
+            true => self.session.id,
+            false => self.sessions.iter().find(|l| l.docs.contains(&id)).map_or(self.session.id, |l| l.id),
+        }
+    }
+
+    /// A git action that writes the front session's checkout started (a rebase: its task's generation as `token`; a
+    /// git-tab action: `batch_token`): that session's reloads are one line (`DiskBatch`). One under way there
+    /// already: both are.
+    pub(crate) fn disk_batch_start(&mut self, what: &str, token: u64) {
+        let session = self.session.id;
+        match self.disk_batch.iter_mut().find(|b| b.session == session) {
+            Some(b) => {
+                b.open.push(token);
+                b.after = None;
+            }
+            None => {
+                let (what, began) = (what.to_string(), crate::clock::now());
+                let open = vec![token];
+                let b = DiskBatch { session, what, open, reloaded: 0, deleted: 0, after: None, began };
+                self.disk_batch.push(b);
+            }
+        }
+    }
+
+    /// The git action of `token` ended (another's token: nothing): its batch's last, a disk round at once — what it
+    /// wrote is in it, and its result says the line.
+    pub(crate) fn disk_batch_end(&mut self, token: u64) {
+        let Some(b) = self.disk_batch.iter_mut().find(|b| b.open.contains(&token)) else { return };
+        b.open.retain(|t| *t != token);
+        if !b.open.is_empty() {
+            return;
+        }
+        // (no watch running — tests, a simulation — no reload to wait for: said now, never a watch started)
+        if self.disk_round.is_none() {
+            b.after = Some(self.disk_poll_gen);
+            return self.disk_batch_said(self.disk_poll_gen);
+        }
+        let session = b.session;
+        self.disk_poll(false);
+        let generation = self.disk_poll_gen;
+        if let Some(b) = self.disk_batch.iter_mut().find(|b| b.session == session) {
+            b.after = Some(generation);
+        }
+    }
+
+    /// After disk round `generation`: each batch's line, once its actions ended and the round asked then is in —
+    /// said for its session (behind: in `:messages`, its tab's `•`, as `disk_said` does).
+    fn disk_batch_said(&mut self, generation: u64) {
+        let done = |b: &DiskBatch| {
+            b.open.is_empty() && b.after.is_some_and(|g| generation >= g)
+                || crate::clock::since(b.began) > BATCH_MAX
+        };
+        let (said, kept): (Vec<DiskBatch>, Vec<DiskBatch>) =
+            std::mem::take(&mut self.disk_batch).into_iter().partition(done);
+        self.disk_batch = kept;
+        for b in said {
+            let mut parts = Vec::new();
+            if b.reloaded > 0 {
+                parts.push(format!("{} reloaded", crate::nav::count(b.reloaded, "file")));
+            }
+            if b.deleted > 0 {
+                parts.push(format!("{} deleted on disk", b.deleted));
+            }
+            if parts.is_empty() {
+                continue;
+            }
+            let msg = format!("{}: {}", b.what, parts.join(", "));
+            if self.sessions.is_empty() {
+                self.set_status(msg);
+                continue;
+            }
+            let behind = self.sessions.iter_mut().find(|l| l.id == b.session && b.session != self.session.id);
+            let label = behind.as_deref().map_or_else(|| self.session.label(), |l| l.label()).to_string();
+            let msg = format!("{label} · {msg}");
+            match behind {
+                Some(l) => {
+                    l.reloaded += 1;
+                    self.recorded(crate::editor::ToastKind::Info, msg);
+                }
+                None => self.set_status(msg),
+            }
+        }
+    }
+
     /// What became of document `id` on disk, said for its session (#59): with several sessions, named after
     /// it; shown only when it's the one in front — a session behind's goes to `:messages`, and its tab, the
     /// chip and its row in the list get a `•` (#6, `Session.reloaded`).
-    fn disk_said(&mut self, id: DocId, msg: String, warn: bool) {
+    fn disk_said(&mut self, id: DocId, msg: String, warn: bool, quiet: bool) {
         if self.sessions.is_empty() {
-            return if warn { self.set_warning(msg) } else { self.set_status(msg) };
+            return match (warn, quiet) {
+                (true, _) => self.set_warning(msg),
+                (false, true) => self.recorded(crate::editor::ToastKind::Info, msg),
+                (false, false) => self.set_status(msg),
+            };
         }
         let front = self.session.docs.contains(&id);
         let mut behind = self.sessions.iter_mut().find(|l| l.docs.contains(&id) && !front);
@@ -379,7 +516,7 @@ impl Editor {
         let label = behind.as_deref().map_or_else(|| self.session.label(), |l| l.label()).to_string();
         let msg = format!("{label} · {msg}");
         let kind = if warn { crate::editor::ToastKind::Warning } else { crate::editor::ToastKind::Info };
-        match (behind.is_some(), warn) {
+        match (behind.is_some() || quiet, warn) {
             (true, _) => self.recorded(kind, msg),
             (false, true) => self.set_warning(msg),
             (false, false) => self.set_status(msg),
@@ -1043,6 +1180,94 @@ mod tests {
         ed.flush_saves(); // (saves are written in the background)
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine theirs\n");
         assert!(!ed.doc().is_modified());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #68: a git action's reloads (here a rebase) are one line once it's over — the deletion its own
+    /// warning, each file's line in `:messages` only; after it, a reload is said as ever. A key-sequence test, not a
+    /// simulation step: the batch rides the disk watch, whose round waits on the file system for a change until one
+    /// comes (`fswatch`) — a job that can't end within a step (measured: `sim/commit.rs` ran into its time limit on
+    /// those rounds while `disk_batch_end` still started a watch where none ran; it no longer does).
+    #[test]
+    fn a_git_actions_reloads_are_said_as_one_line() {
+        let dir = crate::scratch::Scratch::new("disk-batch").into_path();
+        let mut ed = Editor::new(Config::default());
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(f), "one\n").unwrap();
+            ed.open(&dir.join(f)).unwrap();
+        }
+        let texts = |ed: &Editor| ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        ed.disk_batch_start("rebase", 7);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        poll_once(&mut ed);
+        std::fs::write(dir.join("b.txt"), "one\ntwo\n").unwrap();
+        std::fs::remove_file(dir.join("c.txt")).unwrap();
+        ed.disk_batch_end(7);
+        let round = ed.disk_poll_gen;
+        while ed.disk_poll_gen == round || !ed.disk_batch.is_empty() {
+            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            ed.handle_event(ev);
+        }
+        let shown = texts(&ed);
+        assert!(shown.contains(&"rebase: 2 files reloaded, 1 deleted on disk".to_string()), "{shown:?}");
+        assert!(shown.contains(&"c.txt was deleted on disk — :w to write it back".to_string()), "{shown:?}");
+        assert!(!shown.iter().any(|t| t.contains("reloaded from disk")), "{shown:?}");
+        assert!(ed.messages.iter().any(|m| m.2 == "a.txt reloaded from disk · +1 lines"), "in :messages");
+        // (over: said as ever — a round that woke on the writes above may land first and end a `poll_once`: a
+        // second's round started after this write; seen under the full suite's load)
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        for _ in 0..3 {
+            poll_once(&mut ed);
+            if texts(&ed).iter().any(|t| t == "a.txt reloaded from disk · -1 lines") {
+                break;
+            }
+        }
+        assert!(texts(&ed).iter().any(|t| t == "a.txt reloaded from disk · -1 lines"), "{:?}", texts(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The review of frictions36: a batch is its session's — the one in front's reloads meanwhile are said as ever,
+    /// the line goes to the session that ran git (behind: `:messages`), and only that action's end ends it (another
+    /// token's leaves it open).
+    #[test]
+    fn a_batch_is_its_sessions_and_its_actions() {
+        let dir = crate::scratch::Scratch::new("disk-batch-sessions").into_path();
+        let (front, back) = (dir.join("front"), dir.join("back"));
+        for d in [&front, &back] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("f.txt"), "one\n").unwrap();
+        }
+        let mut ed = Editor::new(Config::default());
+        ed.open(&front.join("f.txt")).unwrap();
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("f.txt")).unwrap();
+            ed.disk_batch_start("rebase", 7);
+        });
+        for d in [&front, &back] {
+            std::fs::write(d.join("f.txt"), "one\ntwo\n").unwrap();
+        }
+        poll_once(&mut ed);
+        let toasts = |ed: &Editor| ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            toasts(&ed).iter().filter(|t| t.contains("f.txt reloaded from disk")).count(),
+            1,
+            "the front's said, the batch's not: {:?}",
+            toasts(&ed)
+        );
+        ed.disk_batch_end(8);
+        // (the round an end asks lands: still open, nothing said)
+        poll_once(&mut ed);
+        assert_eq!(ed.disk_batch.len(), 1, "another action's end: still open");
+        assert!(!ed.messages.iter().any(|m| m.2.contains("rebase:")), "{:?}", ed.messages);
+        ed.disk_batch_end(7);
+        let round = ed.disk_poll_gen;
+        while ed.disk_poll_gen == round || !ed.disk_batch.is_empty() {
+            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            ed.handle_event(ev);
+        }
+        assert!(ed.messages.iter().any(|m| m.2.ends_with(" · rebase: 1 file reloaded")), "{:?}", ed.messages);
+        assert!(!toasts(&ed).iter().any(|t| t.contains("rebase:")), "behind: not a toast in front");
         std::fs::remove_dir_all(&dir).ok();
     }
 

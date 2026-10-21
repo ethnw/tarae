@@ -71,6 +71,10 @@ pub struct Restart {
     /// Its card was answered with work under way (`under_way`) — restart anyway: what the card named is
     /// ended, not waited for; what began after it is (it wasn't named).
     anyway: Vec<Work>,
+    /// The session that asked — where it's said when it's called off (frictions29 #66: said in the session whose
+    /// run was ended, behind, it went unseen) — and its build's run (`RunTrace` id): only that one's end stops it.
+    asked: SessionId,
+    build_run: Option<u64>,
 }
 
 /// One thing `under_way` names, told apart from what begins after its card: a session's Claude turn (and
@@ -157,7 +161,16 @@ impl Restart {
     #[cfg(test)]
     pub fn ready_to(bin: PathBuf) -> Restart {
         let stage = Stage::Ready(bin);
-        Restart { id: 0, build: false, stage, target: None, kept: None, anyway: Vec::new() }
+        Restart {
+            id: 0,
+            build: false,
+            stage,
+            target: None,
+            kept: None,
+            anyway: Vec::new(),
+            asked: 0,
+            build_run: None,
+        }
     }
 
     /// The binary to run once the loop has ended.
@@ -195,7 +208,9 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let stage = Stage::Turn;
-    ed.restart = Some(Restart { id, build, stage, target: None, kept: None, anyway: Vec::new() });
+    let asked = ed.session.id;
+    let anyway = Vec::new();
+    ed.restart = Some(Restart { id, build, stage, target: None, kept: None, anyway, asked, build_run: None });
     // What's under way in any session — Claude's turns (#109), commands, tests — is named on its card:
     // restart anyway (ended) or wait (frictions15: one session's turn and its long command held it, unsaid)
     go(ed);
@@ -634,8 +649,9 @@ pub fn chosen(ed: &mut Editor, card: u64, choice: Choice, which: Option<usize>) 
     let Some(generation) = ed.task_start_restart(task) else {
         return cancel(ed, "the build didn't start".into());
     };
+    let run = ed.session.task_run.as_ref().filter(|r| r.generation() == generation).map(|r| r.trace.id());
     if let Some(r) = ed.restart.as_mut() {
-        r.stage = Stage::Building(generation);
+        (r.stage, r.build_run) = (Stage::Building(generation), run);
     }
     ed.set_status(format!(
         "building {} — tarae restarts when it's done (:restart again asks to call it off)",
@@ -709,12 +725,17 @@ pub fn same_answer(ed: &mut Editor, card: u64, id: u64, yes: bool) {
     }
 }
 
-/// The task panel's run was stopped or replaced: a build being waited for won't finish.
-pub fn run_dropped(ed: &mut Editor) {
-    if ed.restart.as_ref().is_some_and(|r| matches!(r.stage, Stage::Building(_))) {
-        ed.restart = None;
-        ed.set_warning("restart canceled — its build was stopped");
+/// A task panel's run (`run`: its `RunTrace` id) was stopped or replaced: the restart's own build won't finish —
+/// called off, said in the session that asked. Another run (frictions29 #66: another session's clippy, ended by
+/// "restart anyway") is nothing to it.
+pub fn run_dropped(ed: &mut Editor, run: Option<u64>) {
+    let Some(r) = ed.restart.as_ref() else { return };
+    if !matches!(r.stage, Stage::Building(_)) || run.is_none() || r.build_run != run {
+        return;
     }
+    let asked = r.asked;
+    ed.restart = None;
+    ed.with_session(asked, |ed| ed.set_warning("restart canceled — its build was stopped"));
 }
 
 /// The binary answers `--version` as a tarae (on a worker) — then the loop ends and main runs it. One the
@@ -2368,6 +2389,21 @@ mod tests {
         settle_answering(&mut ed, |ed| {
             ed.restart.as_ref().is_some_and(|r| matches!(r.stage, Stage::Building(_)))
         });
+        // (frictions29 #66: another session's run stopped — as "restart anyway" ends one — isn't its build)
+        let back = dir.join("back");
+        std::fs::create_dir_all(&back).unwrap();
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            let task = crate::task::Task { name: "long".into(), cmd: "sleep 30".into(), cwd: back.clone() };
+            let who = crate::tools::For::User("long".into());
+            assert!(ed.task_start_for(task, who, None, Default::default()).is_ok());
+            ed.task_close();
+        });
+        assert!(
+            ed.restart.as_ref().is_some_and(|r| matches!(r.stage, Stage::Building(_))),
+            "still building: {}",
+            toasts(&ed)
+        );
         feed(&mut ed, "<space>mc");
         assert!(ed.restart.is_none());
         assert!(toasts(&ed).contains("restart canceled — its build was stopped"), "{}", toasts(&ed));
@@ -2993,6 +3029,8 @@ mod tests {
             target: None,
             kept: None,
             anyway: Vec::new(),
+            asked: 0,
+            build_run: None,
         });
         let t = Target {
             label: "front".into(),
@@ -3403,8 +3441,17 @@ mod tests {
             vt.screen().rows(0, 160).nth(29).unwrap()
         };
         let stage = Stage::Keeping;
-        ed.restart =
-            Some(Restart { id: 7, build: false, stage, target: None, kept: None, anyway: Vec::new() });
+        let anyway = Vec::new();
+        ed.restart = Some(Restart {
+            id: 7,
+            build: false,
+            stage,
+            target: None,
+            kept: None,
+            anyway,
+            asked: 0,
+            build_run: None,
+        });
         let line = status(&mut ed);
         assert!(line.contains("restarting — keeping its symbols"), "{line}");
         crate::typed::execute(&mut ed, "restart!").unwrap();

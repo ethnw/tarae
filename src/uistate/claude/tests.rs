@@ -132,6 +132,13 @@ fn claudes_level_holds_back_unsent_text_and_other_sessions() {
         assert!(!text.contains(held), "{held:?} at Claude's level:\n{text}");
     }
     assert!(text.contains("other · waiting · 1 cards"), "the other session as counts:\n{text}");
+    // (its `answer` too: blocked, never by what — the review of frictions36)
+    let json = s.json().to_string();
+    assert!(!json.contains("Their own card"), "{json}");
+    let theirs =
+        s.json()["sessions"].as_array().unwrap().iter().find(|l| l["name"] == "other").cloned().unwrap();
+    assert_eq!(theirs["answer"], "blocked", "{theirs}");
+    assert!(full.contains("Their own card"), "the full level names it");
     assert!(text.contains("End the review?"), "its own session's card:\n{text}");
     assert!(!text.contains("frame"), "no pid, frame, input:\n{text}");
     assert!(s.panels.chat.as_ref().is_some_and(|c| c.draft.is_empty()));

@@ -59,7 +59,14 @@ pub fn start(run_id: u64, run: &Path) {
 
 /// `start`, making at most `cap` (tests: a small one).
 fn start_capped(run_id: u64, run: &Path, cap: usize) {
-    match Broker::start(run, cap) {
+    // (inside a sandboxed run itself — tarae's tests run by Claude — its ptys come from the run's broker)
+    let ask = std::env::var_os(crate::pty::BROKER).map(PathBuf::from);
+    start_asking(run_id, run, cap, ask);
+}
+
+/// `start_capped`, its ptys asked of the broker at `ask` (None: made here).
+fn start_asking(run_id: u64, run: &Path, cap: usize, ask: Option<PathBuf>) {
+    match Broker::start(run, cap, ask) {
         Ok(b) => {
             let mut all = BROKERS.lock().unwrap_or_else(|e| e.into_inner());
             all.get_or_insert_with(HashMap::new).insert(run_id, b);
@@ -86,7 +93,7 @@ pub fn going() -> Vec<u64> {
 }
 
 impl Broker {
-    fn start(run: &Path, cap: usize) -> io::Result<Broker> {
+    fn start(run: &Path, cap: usize, ask: Option<PathBuf>) -> io::Result<Broker> {
         let path = socket(run);
         let listener = UnixListener::bind(&path)?;
         let (made, over) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
@@ -107,7 +114,7 @@ impl Broker {
                     }
                     continue;
                 }
-                match conn.map(serve) {
+                match conn.map(|c| serve(c, ask.as_deref())) {
                     Ok(Ok(made)) => {
                         open.push(made);
                         m.fetch_add(1, Ordering::SeqCst);
@@ -130,23 +137,58 @@ impl Broker {
 
 /// One ask: its size read (rows, cols, little-endian), a pty made that size and both ends sent — tarae's own
 /// copies closed as this returns. The pair's slave as it is (`still_open`): its path and its node's inode.
-fn serve(mut c: UnixStream) -> io::Result<(PathBuf, u64)> {
+/// A broker inside a sandboxed run itself (tarae's tests and simulations run by Claude) asks the run's own
+/// (`from`): no pty opens there (frictions29 #72: every whole-suite run asked for the terminals) — and takes the
+/// slave's node as that broker sends it: an `fstat` on a pty there is Seatbelt's `pseudo-tty`, refused and said in
+/// the run's report though the run never needed it. The node goes with the pair (`pty::node_bytes`).
+fn serve(mut c: UnixStream, from: Option<&Path>) -> io::Result<(PathBuf, u64)> {
     c.set_read_timeout(Some(ASK_WITHIN))?;
     let mut ask = [0u8; 4];
     c.read_exact(&mut ask)?;
     let (rows, cols) = (u16::from_le_bytes([ask[0], ask[1]]), u16::from_le_bytes([ask[2], ask[3]]));
-    let (master, slave) = crate::pty::made(rows, cols)?;
-    let (mut path, s) = ([0u8; libc::PATH_MAX as usize], slave.as_raw_fd());
+    let (master, slave, node) = match from {
+        Some(socket) => crate::pty::asked_with_node(socket, rows, cols)?,
+        None => crate::pty::made(rows, cols).map(|(m, s)| (m, s, None))?,
+    };
+    let made = match node {
+        Some(n) => n,
+        None => node_of(&slave)?,
+    };
+    let data = crate::pty::node_bytes(&made);
+    crate::pty::send_fds(c.as_raw_fd(), &[master.as_raw_fd(), slave.as_raw_fd()], &data)?;
+    Ok(made)
+}
+
+unsafe extern "C" {
+    /// macOS's `devname_r(3)` — `devname` into the caller's buffer (the `libc` crate doesn't declare it).
+    fn devname_r(
+        dev: libc::dev_t,
+        kind: libc::mode_t,
+        buf: *mut libc::c_char,
+        len: libc::c_int,
+    ) -> *mut libc::c_char;
+}
+
+/// The node of a slave made here, outside a sandbox: its path in /dev (by its device — `devname`) and its inode.
+fn node_of(slave: &std::os::fd::OwnedFd) -> io::Result<(PathBuf, u64)> {
+    let s = slave.as_raw_fd();
     // SAFETY: a zeroed stat is a buffer for fstat to fill.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: fstat fills one stat, F_GETPATH a PATH_MAX buffer with a NUL-terminated path — on our own slave.
-    if unsafe { libc::fstat(s, &mut st) != 0 || libc::fcntl(s, libc::F_GETPATH, path.as_mut_ptr()) != 0 } {
+    // SAFETY: fstat fills one stat — on our own slave.
+    if unsafe { libc::fstat(s, &mut st) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let path = std::ffi::CStr::from_bytes_until_nul(&path).map_err(io::Error::other)?;
-    let made = (PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())), st.st_ino);
-    crate::pty::send_fds(c.as_raw_fd(), &[master.as_raw_fd(), slave.as_raw_fd()])?;
-    Ok(made)
+    // (`devname_r` into a buffer of its own: `devname`'s is the process's, and every run's broker is a thread)
+    let mut buf = [0 as libc::c_char; 128];
+    // SAFETY: devname_r writes a NUL-terminated name of at most `len` bytes into a live local buffer, or fails.
+    let name = unsafe { devname_r(st.st_rdev, libc::S_IFCHR, buf.as_mut_ptr(), buf.len() as libc::c_int) };
+    if name.is_null() {
+        return Err(io::Error::other("the pty has no name in /dev"));
+    }
+    // SAFETY: non-null, NUL-terminated within `buf`, read at once.
+    let name = unsafe { std::ffi::CStr::from_ptr(name) };
+    let path = Path::new("/dev").join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    Ok((path, st.st_ino))
 }
 
 /// Whether a pair the broker made is open still — on either end, in any process: macOS keeps a pty's slave node
@@ -167,12 +209,14 @@ mod tests {
     /// read on the other — and the broker's end says how many it made; after it, nothing answers.
     #[test]
     fn a_runs_broker_hands_in_ptys_and_counts_them() {
-        // (the broker makes them here, from `/dev/ptmx` itself: inside a sandbox, where none opens — a pty there
-        // comes from that sandbox's own broker, which `no_pty_here` would find — skipped, said)
-        if crate::sandbox::skipped_inside_for(
-            "sandbox::ptybroker::tests::a_runs_broker_hands_in_ptys_and_counts_them",
-            "its broker makes ptys from /dev/ptmx, closed to a run",
-        ) {
+        // (inside a sandboxed run — Claude running tarae's tests — its broker asks the run's own: frictions29 #72;
+        // a run with none — a unix socket of the user's granted it, `Policy::brokers_ptys` — opens no pty: skipped)
+        if std::env::var_os(crate::pty::BROKER).is_none()
+            && crate::sandbox::skipped_inside_for(
+                "sandbox::ptybroker::tests::a_runs_broker_hands_in_ptys_and_counts_them",
+                "its run has no pty broker (a socket was granted it), and /dev/ptmx is closed to a run",
+            )
+        {
             return;
         }
         let dir = crate::scratch::Scratch::new("ptybroker");
@@ -389,6 +433,25 @@ mod tests {
             let cut = if n > 3 { 6000 } else { 400 };
             println!("measure: {l} — {}", why.join("\n").chars().take(cut).collect::<String>());
         }
+    }
+
+    /// frictions29 #72: a broker that asks another (inside a sandboxed run: the run's) hands on the slave's node
+    /// that one sent with the pair — it never looks at the pty itself (an `fstat` on one in a run is Seatbelt's
+    /// `pseudo-tty`, said in the run's report: measured, the one denial a passing suite still had). Both count it.
+    #[test]
+    fn a_broker_asking_another_takes_the_slaves_node_from_it() {
+        let dir = crate::scratch::Scratch::new("ptybroker-chain");
+        let run = std::fs::canonicalize(dir.path()).unwrap();
+        let (outer, inner) = (run.join("outer"), run.join("inner"));
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::create_dir(&inner).unwrap();
+        start(9_000_011, &outer);
+        start_asking(9_000_012, &inner, PTYS_MAX, Some(socket(&outer)));
+        let (m, s, node) = crate::pty::asked_with_node(&socket(&inner), 24, 80).unwrap();
+        let (path, ino) = node.expect("the node, handed on");
+        assert!(path.starts_with("/dev/") && ino != 0, "{path:?} {ino}");
+        drop((m, s));
+        assert_eq!((end(9_000_012), end(9_000_011)), ((1, 0), (1, 0)), "each made one");
     }
 
     /// The run's side of `a_runs_cap_is_on_its_ptys_open_at_once`: `PTYS_MAX + 2` asked in turn, each closed at

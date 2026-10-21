@@ -147,15 +147,24 @@ impl Limits {
     }
 
     /// A line's readings: each window's latest wins. One that doesn't say the status keeps the one said for the
-    /// same period (the event says it, `get_usage` doesn't). Whether anything changed.
+    /// same period (the event says it, `get_usage` doesn't) — nor the figure, the one said for it (frictions29
+    /// #81: the event a claude sends as it starts has none, and `5-hour 4 %` became `no figure yet` for two
+    /// hours). Whether anything changed.
     pub fn seen(&mut self, r: Report) -> bool {
         let mut changed = false;
         for new in r.readings {
             match self.windows.iter_mut().find(|w| w.window == new.window) {
                 Some(old) if old.seen_at_ms > new.seen_at_ms => {}
                 Some(old) => {
-                    let status = new.status.or(old.status.filter(|_| same_period(old, &new)));
-                    let new = Reading { status, ..new };
+                    let same = same_period(old, &new);
+                    let status = new.status.or(old.status.filter(|_| same));
+                    // (a figure kept is as old as it is: its time kept with it — never a newer guess)
+                    let kept = new.percent.is_none() && same && old.percent.is_some();
+                    let (percent, seen_at_ms) = match kept {
+                        true => (old.percent, old.seen_at_ms),
+                        false => (new.percent, new.seen_at_ms),
+                    };
+                    let new = Reading { status, percent, seen_at_ms, ..new };
                     changed |= (old.percent, old.resets_at_ms, old.status)
                         != (new.percent, new.resets_at_ms, status);
                     *old = new;
@@ -199,10 +208,12 @@ impl Limits {
         v
     }
 
-    /// Whether `get_usage` need not be asked: a reading, or a question, younger than `FRESH_MS`.
+    /// Whether `get_usage` need not be asked: a reading with a figure, or a question, younger than `FRESH_MS` (an
+    /// event with none is no reading of where it stands — frictions29 #81).
     pub fn fresh(&self, now_ms: u64) -> bool {
         let young = |at: u64| now_ms.saturating_sub(at) < FRESH_MS;
-        self.windows.iter().any(|w| young(w.seen_at_ms)) || self.asked_ms.is_some_and(young)
+        let read = |w: &&Reading| w.percent.is_some() || w.status == Some(Status::Rejected);
+        self.windows.iter().filter(read).any(|w| young(w.seen_at_ms)) || self.asked_ms.is_some_and(young)
     }
 
     /// The state's `limits` (`json`) as of `now_ms`.
@@ -489,10 +500,15 @@ pub fn key_said(source: &str) -> String {
 
 // ── On the main loop ────────────────────────────────────────────────────────
 
-/// A line of any claude's said where the limits stand: kept, `:usage` says it, watchers hear it.
+/// A line of any claude's said where the limits stand: kept, `:usage` says it, watchers hear it. One that names a
+/// window with no figure asks the chat's claude `get_usage` (frictions29 #81 — when nothing is fresh).
 pub fn seen(ed: &mut Editor, r: Report) {
     if let Some(Answer::Unknown(why)) = &r.answer {
         crate::log::line("claude", "warn", &format!("get_usage (experimental): {why} — limits unknown"));
+    }
+    let no_figure = r.answer.is_none() && r.readings.iter().any(|w| w.percent.is_none());
+    if no_figure {
+        ask(ed, false);
     }
     if ed.limits.seen(r) {
         crate::uistate::watch::limits(ed);
@@ -504,9 +520,16 @@ pub fn seen(ed: &mut Editor, r: Report) {
 /// to that same claude is unanswered (in flight: `Limits::pending`; a question to a claude that's gone blocks no
 /// other).
 pub fn ask_chat(ed: &mut Editor) {
+    ask(ed, true);
+}
+
+/// `ask_chat` — `readings`: a fresh reading of another window holds it too; else (a window said with no figure)
+/// only a question asked lately does.
+fn ask(ed: &mut Editor, readings: bool) {
     let Some(c) = ed.session.chat.as_ref().filter(|c| c.running()) else { return };
     let (now, l) = (crate::usage::now_ms(), &mut ed.limits);
-    if !l.ask || l.pending == Some(c.generation()) || l.fresh(now) {
+    let asked = l.asked_ms.is_some_and(|at| now.saturating_sub(at) < FRESH_MS);
+    if !l.ask || l.pending == Some(c.generation()) || asked || (readings && l.fresh(now)) {
         return;
     }
     if c.to_claude(request()) {

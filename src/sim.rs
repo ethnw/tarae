@@ -28,10 +28,13 @@ mod applies;
 mod board;
 mod brings;
 mod cardwait;
+mod claudestart;
+mod commit;
 mod hosts;
 mod instructions;
 #[cfg(not(target_os = "linux"))]
 mod ptybroker;
+mod quota;
 mod rebasemsg;
 mod reviews;
 mod sessions;

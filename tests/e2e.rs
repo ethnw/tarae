@@ -1296,7 +1296,7 @@ fn a_driver_reads_where_the_keys_go() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
     let s = t.state_json(0);
-    assert_eq!(s["v"], 9, "the schema's version (`uistate::V`)");
+    assert_eq!(s["v"], 10, "the schema's version (`uistate::V`)");
     assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
     assert_eq!(s["tarae"]["pid"], t.pid());
     let input = s["input"].as_u64().unwrap();

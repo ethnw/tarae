@@ -610,6 +610,8 @@ pub struct Editor {
     pub messages: Vec<(std::time::Instant, ToastKind, String)>,
     /// The disk watch round that's current — a newer one (an immediate check) takes over the watch.
     pub disk_poll_gen: u64,
+    /// Git actions' reloads, said as one line a session once its actions are over (`disk::DiskBatch`).
+    pub disk_batch: Vec<crate::disk::DiskBatch>,
     /// The disk round that waits for changes: what ends its wait (a newer round), and the files it watches.
     pub disk_round: Option<(crate::fswatch::Waker, Vec<(DocId, PathBuf)>)>,
     /// Set by a job result that changed nothing on screen (a disk round that found nothing) — when a batch
@@ -735,6 +737,10 @@ pub struct Editor {
     /// (`sim/board.rs`: a process's reader threads aren't the simulation's).
     #[cfg(test)]
     pub reviewer_stand_in: bool,
+    /// Tests: the chat's claude is no process — its stdin's lines go here (a simulation's stand-in: a process's
+    /// reader threads aren't the simulation's).
+    #[cfg(test)]
+    pub claude_lines: Option<std::sync::mpsc::Sender<String>>,
     /// The review record's folder (`reviews.rs`, `$state/reviews`) — None in tests: nothing written.
     pub reviews_dir: Option<PathBuf>,
     /// The border the mouse is dragging (pressed on it, not let go yet).
@@ -899,6 +905,7 @@ impl Editor {
             toasts: Vec::new(),
             messages: Vec::new(),
             disk_poll_gen: 0,
+            disk_batch: Vec::new(),
             disk_round: None,
             unchanged: false,
             frame_at: None,
@@ -986,6 +993,8 @@ impl Editor {
             reviewer_pressure: crate::share::Pressure::Unknown,
             #[cfg(test)]
             reviewer_stand_in: false,
+            #[cfg(test)]
+            claude_lines: None,
             reviews_dir: if cfg!(test) {
                 None
             } else {

@@ -1835,6 +1835,9 @@ impl Editor {
         self.events.shared_jobs().spawn(move || {
             // (where its own kept answers are, while its checkout is there to say)
             let here = crate::allow::Where::of(&e.root);
+            // (its changes to the instruction files, read before its checkout goes — asked for the main checkout's
+            // once it's gone: the card carries what it read, frictions29 #79)
+            let out = crate::instructions::look_out_of(&e.root);
             let result = remove(&e, both, builds.as_ref());
             // (the checkout's own kept answers go with it — one made at its path later starts with none; what
             // every checkout of the repository uses stays)
@@ -1853,7 +1856,14 @@ impl Editor {
                         // (its notes and turns go with its checkout — a session made there later starts
                         // without them)
                         ed.restore.set_notes(&e.root, Vec::new());
+                        // (its viewed marks too, once it's gone — a removal that failed opens it again with them:
+                        // the review of frictions36)
+                        ed.restore.set_viewed(&e.root, Vec::new());
                         crate::checkpoint::forget(ed, e.root.clone());
+                        for b in out {
+                            let b = crate::instructions::Both { ended: true, ..b };
+                            crate::instructions::push_card(ed, b);
+                        }
                         let branch = match (&e.branch, both) {
                             (Some(b), false) => format!(" · branch {b} kept"),
                             (Some(b), true) => {
@@ -2333,6 +2343,11 @@ impl Editor {
                 ed.git_refresh();
                 ed.git_reload_bases();
                 return;
+            }
+            // (its changes to the instruction files, asked for the main checkout's as its bring (or move up) card
+            // comes — the bring decided, its checkout there while the card waits: frictions29 #79)
+            if let Bringing::Ready(m) = &result {
+                crate::instructions::carry_out(ed, m.root.clone());
             }
             match result {
                 Bringing::Brought(b) => {
@@ -2945,10 +2960,16 @@ mod tests {
             }
         };
         wait("its turn kept", &|| kept(1));
+        // (a viewed mark kept for it in the restore file — the review of frictions36)
+        let root = ed.session.root.clone();
+        let mark = serde_json::json!({ "path": wt.join("a.txt"), "keys": [], "added": [] });
+        ed.restore.set_viewed(&root, vec![mark]);
+        assert_eq!(ed.restore.viewed(&root).len(), 1);
         feed(&mut ed, ":session-end<ret>");
         settle_until(&mut ed, |ed| says(ed, "Ended gone") || says(ed, "end gone:"));
         assert!(!wt.exists(), "{}", said(&ed));
         wait("its turns forgotten", &|| kept(0));
+        assert!(ed.restore.viewed(&root).is_empty(), "its viewed marks went with it");
         // Another checkout at the same path, a session for it
         git_in(&repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "gone"]);
         let id = ed.session_open(&wt).unwrap();
@@ -4135,6 +4156,106 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// frictions29 #79: the other direction — a session's own changes to its CLAUDE.md, asked as it's brought:
+    /// the card counts them, `v` shows them as a diff, `y` carries them into the main checkout's beside its own
+    /// changes since (and the session's copy then takes those, as an untouched one does).
+    #[test]
+    fn a_bring_carries_the_sessions_instruction_changes_into_the_main_checkouts() {
+        let (repo, dir) = place("instructions-out");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+        std::fs::write(wt.join("CLAUDE.md"), "rule one\nrule two\nmine\n").unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "rule zero\nrule one\nrule two\n").unwrap();
+        let title = "CLAUDE.md: this session's changes for the main checkout";
+        // (a bring refused — nothing of its own yet — asks nothing: the card comes with the bring's)
+        let _ = ed.session_bring("feat");
+        settle_until(&mut ed, |ed| says(ed, "nothing to bring"));
+        assert!(card(&ed, title).is_none(), "a refused bring raises no card");
+        git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "its own"]);
+        let _ = ed.session_bring("feat");
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        let q = card(&ed, title).unwrap().question.clone();
+        assert!(q.starts_with("This session changed its CLAUDE.md since its copy (1 line added)."), "{q}");
+        // (the change itself on the card, in its part drawn at full strength — the review of frictions36)
+        let o = card(&ed, title).unwrap();
+        assert!(q.contains("\n  + mine\n\n"), "{q}");
+        assert!(o.question.lines().take(o.decided_lines().end).any(|l| l == "  + mine"), "{q}");
+        // (in front, the keys its own)
+        while ed.offers.first().is_some_and(|o| o.title != title) {
+            let o = ed.offers.remove(0);
+            ed.offers.push(o);
+        }
+        assert!(crate::instructions::look_out(&wt, &repo)[0].view_text().contains("\n+ mine\n"));
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| says(ed, "takes this session's changes") || says(ed, "CLAUDE.md: "));
+        assert_eq!(read(&repo.join("CLAUDE.md")), "rule zero\nrule one\nrule two\nmine\n", "{}", said(&ed));
+        assert!(crate::instructions::look_out(&wt, &repo).is_empty(), "asked once");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #79 at a session's end (the review of frictions36: only a bring asked): its CLAUDE.md changes are
+    /// read before its checkout goes, and asked once it's gone — `y` carries what the card showed into the main
+    /// checkout's.
+    #[test]
+    fn an_ended_session_carries_its_instruction_changes_into_the_main_checkouts() {
+        let (repo, dir) = place("instructions-end");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        std::fs::write(wt.join("CLAUDE.md"), "rule one\nmine\n").unwrap();
+        let title = "CLAUDE.md: this session's changes for the main checkout";
+        feed(&mut ed, ":session-end<ret>");
+        // (its end card, when it asks one: `y`)
+        let ending =
+            |ed: &Editor| ed.offers.iter().position(|o| matches!(o.what, crate::offer::What::SessionEnd(_)));
+        settle_until(&mut ed, |ed| {
+            ending(ed).is_some() || card(ed, title).is_some() || says(ed, "end feat:")
+        });
+        if let Some(i) = ending(&ed) {
+            ed.offer_to_front(i);
+            ed.offer_accept();
+        }
+        settle_until(&mut ed, |ed| card(ed, title).is_some() || says(ed, "end feat:"));
+        assert!(!wt.exists(), "ended: {}", said(&ed));
+        let q = card(&ed, title).unwrap().question.clone();
+        assert!(q.contains("\n  + mine\n"), "{q}");
+        // (its `n` is final: said on the card — the review of frictions36)
+        assert!(q.contains("n leaves it as it is — the session has ended: they're dropped."), "{q}");
+        // (and the main checkout's changed meanwhile: merged into it as it is now, never refused — asked never again)
+        std::fs::write(repo.join("CLAUDE.md"), "rule zero\nrule one\n").unwrap();
+        // (a checkout made again at its path meanwhile, a CLAUDE.md of its own: no part of the ended one's — the
+        // review of frictions36)
+        git_in(&repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"]);
+        std::fs::write(wt.join("CLAUDE.md"), "another session's\n").unwrap();
+        while ed.offers.first().is_some_and(|o| o.title != title) {
+            let o = ed.offers.remove(0);
+            ed.offers.push(o);
+        }
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| says(ed, "takes this session's changes") || says(ed, "CLAUDE.md: "));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap(),
+            "rule zero\nrule one\nmine\n",
+            "{}",
+            said(&ed)
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap(),
+            "another session's\n",
+            "untouched"
+        );
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// frictions29 #27: a session's git-ignored instruction files follow the main checkout's — a copy untouched
     /// since it was made takes the main checkout's (said, and told to Claude); one changed on both sides is a
     /// card whose `y` takes the main checkout's changes beside the session's own; one changed only here stays.
@@ -4507,7 +4628,9 @@ mod tests {
         let main = ed.sessions.iter().map(|s| s.id).find(|&id| id != feat).expect("the other session");
         assert!(ed.session_switch(main));
         settle_until(&mut ed, |ed| {
-            says(ed, "Rebase aborted") || says(ed, "rebase feat:") || says(ed, "rebase:")
+            // (`rebase: 1 file reloaded` is its reloads, said earlier — frictions29 #68)
+            let failed = ed.messages.iter().any(|m| m.2.contains("rebase:") && !m.2.contains(" reloaded"));
+            says(ed, "Rebase aborted") || says(ed, "rebase feat:") || failed
         });
         assert!(says(&ed, "Rebase aborted — feat is back where it was"), "{}", said(&ed));
         assert!(ed.session.task_run.is_none(), "nothing ran in the session in front");

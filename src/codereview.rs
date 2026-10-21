@@ -733,16 +733,33 @@ fn moved_within(
                 continue;
             }
             moved.extend(crate::risk::out_of_order(&then.keys, added));
-            crossings.extend(crossed(&then.keys, added, &plain, &bracket));
+            let net = |i: usize| texts[i].as_deref().map(bracket_net);
+            crossings.extend(crossed(&then.keys, added, &plain, &bracket, &net));
         }
+        // (a line that carries nothing never: the lines it crossed are asked — frictions29 #74)
         moved.retain(|&i| !plain(i));
-        moved.extend(crossings);
-        crate::sorting::sort(&mut moved);
-        moved.dedup();
-        for i in moved {
-            let line = texts[i].as_deref();
-            let around = (added[i], i.checked_sub(1).map(|j| added[j]), added.get(i + 1).copied());
-            let m = crate::risk::moved(rel, g.at + i, line, around);
+        crossings.retain(|i| !moved.contains(i));
+        let mut asked: Vec<(usize, bool)> =
+            moved.into_iter().map(|i| (i, false)).chain(crossings.into_iter().map(|i| (i, true))).collect();
+        crate::sorting::sort(&mut asked);
+        asked.dedup();
+        // (lines next to each other, asked alike: one change to look at)
+        let mut runs: Vec<Vec<(usize, bool)>> = Vec::new();
+        for (i, block) in asked {
+            match runs.last_mut() {
+                Some(run) if run.last().is_some_and(|&(j, b)| j + 1 == i && b == block) => {
+                    run.push((i, block))
+                }
+                _ => runs.push(vec![(i, block)]),
+            }
+        }
+        for run in runs {
+            let (first, block) = run[0];
+            let around: Vec<_> = run
+                .iter()
+                .map(|&(i, _)| (added[i], i.checked_sub(1).map(|j| added[j]), added.get(i + 1).copied()))
+                .collect();
+            let m = crate::risk::moved(rel, g.at + first, texts[first].as_deref(), &around, block);
             if !m.looked_at(looked) {
                 out.push(m);
             }
@@ -751,16 +768,22 @@ fn moved_within(
     out
 }
 
-/// Of `now` (a change's added lines, in order), where a bracket line (`bracket`: `}`, `{`, `});` … — never a blank
-/// one) crossed a line saying something (`plain` false) since `then` was looked at. The lines saying something
-/// both have are paired in order; between two of them now — and before the first, after the last — the bracket
-/// lines are held against what `then` had there — a gap that gained one asks for it, one that lost one asks for
-/// the line closing the gap, the last one for the end (what it runs under changed).
+/// Of `now` (a change's added lines, in order), the lines saying something (`plain` false) a bracket line
+/// (`bracket`: `}`, `{`, `});` … — never a blank one) crossed since `then` was looked at. The lines saying
+/// something both have are paired in order; between two of them now — and before the first, after the last — the
+/// bracket lines are held against what `then` had there: a gap that gained or lost one asks for the line closing
+/// it, the last one for the end (what it runs under changed) — never the bracket (frictions29 #74: a `}` asked by
+/// itself, flapping). A gap holding a line saying something added since isn't held when its bracket lines gained
+/// and lost are that line's own: what they close is what the new lines open (`net`: a now line's opening minus
+/// closing brackets — #74: a block added between two lines looked at asked for its `}`). Not so (a `}` moved over a
+/// guarded line beside an innocuous new one — the review of frictions36), or not known (no text: a closed file),
+/// it's held.
 fn crossed(
     then: &[crate::risk::Key],
     now: &[crate::risk::Key],
     plain: &dyn Fn(usize) -> bool,
     bracket: &dyn Fn(usize) -> bool,
+    net: &dyn Fn(usize) -> Option<i32>,
 ) -> Vec<usize> {
     let brackets: std::collections::HashSet<crate::risk::Key> =
         (0..now.len()).filter(|&i| bracket(i)).map(|i| now[i]).collect();
@@ -811,13 +834,58 @@ fn crossed(
         if count.values().all(|&c| c == 0) {
             continue;
         }
-        let gained: Vec<usize> = ns.filter(|&i| bracket(i) && count[&now[i]] > 0).collect();
-        match gained.is_empty() {
-            true => out.push(closing),
-            false => out.extend(gained),
+        // (lines saying something new since in it: its brackets' change theirs when the new lines and the brackets
+        // gained, walked in order, open before they close and end level — a block of their own: never a closer
+        // first, which closes the block looked at (`}` then `if debug {`: the guard swapped — the review of
+        // frictions36), never a bracket lost. Which of a key's lines are the gained ones can't be told: it holds
+        // either way taken, the first ones or the last)
+        let new: Vec<usize> = ns.clone().filter(|&i| !plain(i) && !then.contains(&now[i])).collect();
+        let walk = |last: bool| -> Option<bool> {
+            let mut left = count.clone();
+            let mut order: Vec<usize> = ns.clone().collect();
+            if last {
+                order.reverse();
+            }
+            let mut counted = std::collections::HashSet::new();
+            for i in order {
+                let gained = bracket(i)
+                    && left.get_mut(&now[i]).is_some_and(|c| {
+                        *c > 0 && {
+                            *c -= 1;
+                            true
+                        }
+                    });
+                if gained || new.contains(&i) {
+                    counted.insert(i);
+                }
+            }
+            let mut depth = 0;
+            for i in ns.clone().filter(|i| counted.contains(i)) {
+                depth += net(i)?;
+                if depth < 0 {
+                    return Some(false);
+                }
+            }
+            Some(depth == 0)
+        };
+        let lost = count.values().any(|&c| c < 0);
+        if !new.is_empty() && !lost && walk(false) == Some(true) && walk(true) == Some(true) {
+            continue;
         }
+        out.push(closing);
     }
     out
+}
+
+/// The blocks a line opens less those it closes, by its structure only: the brackets it opens at its end (`if x {`,
+/// `call(`) and closes at its start (`}`, `});`, `} else {`) — never one inside it, a string's or a comment's (the
+/// review of frictions36: `x = "{";` beside a moved `}` balanced it, the guard unasked). Undercounting errs to
+/// asking.
+fn bracket_net(line: &str) -> i32 {
+    let t = line.trim();
+    let opens = t.chars().rev().take_while(|c| "{([".contains(*c)).count();
+    let closes = t.chars().take_while(|c| "})]".contains(*c)).count();
+    opens as i32 - closes as i32
 }
 
 /// An open document's diff against the review's base, graded — its lines as `risk::changes` takes them (the
@@ -1579,17 +1647,34 @@ pub fn since_here(ed: &Editor) -> Option<String> {
 /// root: each file's keys (hex) and added lines.
 pub fn viewed_snapshot(ed: &Editor) -> Value {
     let sessions = ed.sessions_in_order().into_iter().filter(|s| !s.viewed.is_empty());
-    let marks = |s: &crate::session::Session| -> Vec<Value> {
-        s.viewed
-            .iter()
-            .map(|(p, v)| {
-                let keys: Vec<String> = v.keys.iter().map(|k| crate::risk::key_hex(*k)).collect();
-                let added: Vec<Value> = v.added.iter().map(|(t, n)| json!([t, n])).collect();
-                json!({ "path": p, "keys": keys, "added": added, "text": v.text })
-            })
-            .collect()
+    Value::Array(sessions.map(|s| json!({ "root": s.root, "files": viewed_json(s) })).collect())
+}
+
+/// A session's viewed marks as `:restart`'s state and the restore file keep them: each file's keys (hex),
+/// added lines and text's hash — never a file named like a key's (its lines' text: the review of frictions36;
+/// marked again after a restart).
+pub fn viewed_json(s: &crate::session::Session) -> Vec<Value> {
+    s.viewed
+        .iter()
+        .filter(|(p, _)| !crate::sandbox::key_named(&s.root, p))
+        .map(|(p, v)| {
+            let keys: Vec<String> = v.keys.iter().map(|k| crate::risk::key_hex(*k)).collect();
+            let added: Vec<Value> = v.added.iter().map(|(t, n)| json!([t, n])).collect();
+            json!({ "path": p, "keys": keys, "added": added, "text": v.text })
+        })
+        .collect()
+}
+
+/// The marks `viewed_json` wrote, one it can't read left out.
+pub fn viewed_from(files: &Value) -> Vec<(PathBuf, Viewed)> {
+    let mark = |f: &Value| {
+        let (path, keys, added) = (f["path"].as_str()?, f["keys"].as_array()?, f["added"].as_array()?);
+        let keys = keys.iter().filter_map(Value::as_str).filter_map(crate::risk::key_of_hex).collect();
+        let added =
+            added.iter().filter_map(|a| Some((a[0].as_str()?.to_string(), a[1].as_u64()? as u32))).collect();
+        Some((PathBuf::from(path), Viewed::new(keys, added, f["text"].as_u64())))
     };
-    Value::Array(sessions.map(|s| json!({ "root": s.root, "files": marks(s) })).collect())
+    files.as_array().into_iter().flatten().filter_map(mark).collect()
 }
 
 /// Back from `:restart`'s state, into the sessions there are again (after `worktree::restore`) — each mark
@@ -1602,27 +1687,18 @@ pub fn viewed_restore(ed: &mut Editor, v: &Value) {
         else {
             continue;
         };
-        for f in s["files"].as_array().into_iter().flatten() {
-            let (Some(path), Some(keys), Some(added)) =
-                (f["path"].as_str(), f["keys"].as_array(), f["added"].as_array())
-            else {
-                continue;
-            };
-            let keys = keys.iter().filter_map(Value::as_str).filter_map(crate::risk::key_of_hex).collect();
-            let added = added
-                .iter()
-                .filter_map(|a| Some((a[0].as_str()?.to_string(), a[1].as_u64()? as u32)))
-                .collect();
-            session.viewed.insert(PathBuf::from(path), Viewed::new(keys, added, f["text"].as_u64()));
-        }
+        session.viewed.extend(viewed_from(&s["files"]));
     }
 }
 
 /// File `i` marked viewed as its diff is now — or, its base still on the way (a click on a file opening,
-/// #67), once it's there. Marking a marked file (or one partly viewed) marks it as it is now.
+/// #67), once it's there. Marking a marked file (or one partly viewed) marks it as it is now — the lines its
+/// earlier mark had kept with it (frictions29 #73: a turn's review marks the turn's lines, the uncommitted one
+/// the rest; each review's mark took the other's away).
 fn mark(ed: &mut Editor, i: usize) {
     let Some(r) = ed.session.code_review.as_ref() else { return };
     let Some(f) = r.files.get(i) else { return };
+    let before = ed.session.viewed.get(&f.path);
     // (a binary file has no lines: its blob's key is all there is)
     let doc = doc_of(ed, f).filter(|d| !d.loading && d.review_base.is_some());
     let text = doc.filter(|_| !f.binary).map(|d| rope_hash(&d.text));
@@ -1637,16 +1713,29 @@ fn mark(ed: &mut Editor, i: usize) {
             crate::sorting::sort(&mut texts);
             texts.dedup();
             let counts = r.counts_of(ed, f, texts.iter().map(String::as_str));
-            let added: Vec<(String, u32)> = texts
+            let mut added: Vec<(String, u32)> = texts
                 .iter()
                 .map(|t| (t.clone(), counts.get(t.as_str()).copied().flatten().unwrap_or(0)))
                 .collect();
+            // (the earlier mark's lines this diff doesn't add, each at the fewer of the times that mark saw it and
+            // the file has it now — never more: a second line of the same text added since was viewed by neither,
+            // the review of frictions36; one taken out since, as this review is marked, is)
+            let kept: Vec<(String, u32)> = (before.into_iter().flat_map(|v| v.added.iter()))
+                .filter(|(t, _)| !texts.contains(t))
+                .cloned()
+                .collect();
+            let now = r.counts_of(ed, f, kept.iter().map(|(t, _)| t.as_str()));
+            added.extend(kept.iter().map(|(t, then)| {
+                (t.clone(), now.get(t.as_str()).copied().flatten().map_or(*then, |n| n.min(*then)))
+            }));
+            crate::sorting::sort(&mut added);
             Some(added)
         }
         None => None,
     };
-    let keys: std::collections::HashSet<crate::risk::Key> =
+    let mut keys: std::collections::HashSet<crate::risk::Key> =
         r.graded(ed, f).iter().filter(|g| of_lines(g)).flat_map(|g| g.keys.iter().copied()).collect();
+    keys.extend(before.into_iter().flat_map(|v| v.keys.iter().copied()));
     let path = f.path.clone();
     let r = ed.session.code_review.as_mut().expect("checked");
     match now {
@@ -4792,6 +4881,19 @@ pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
         if f == 1 { "" } else { "s" }
     );
     if !crate::chat::submit(ed, &question, Some(body), Some(chip)) {
+        // (its claude starting — the project's settings read first, as after `:restart`: the review waits for it,
+        // frictions29 #67; it went out as "couldn't reach claude" while the chat said nothing of it)
+        if let Some(c) = ed.session.chat.as_mut().filter(|c| c.settings.waiting()) {
+            if !c.sends.contains(&crate::chat::Later::Review(lines)) {
+                c.sends.push(crate::chat::Later::Review(lines));
+            }
+            let k = drafts.len();
+            return ed.set_status(format!(
+                "review queued — claude is starting; its {} go{} once it's up",
+                crate::nav::count(k, "comment"),
+                if k == 1 { "es" } else { "" }
+            ));
+        }
         return ed.set_warning("couldn't reach claude — the chat panel says why (the drafts are kept)");
     }
     for n in ed.session.notes.list.iter_mut().filter(|n| drafts.contains(&n.id)) {
@@ -5374,6 +5476,310 @@ mod tests {
         assert!(said(&ed, "unviewed a.txt — 1 of 3 viewed"), "{:?}", ed.toasts);
         feed(&mut ed, "<space>vM");
         assert!(said(&ed, "a.txt isn't marked viewed — space v m marks it"), "{:?}", ed.toasts);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #73: a fix turn changed one file of a viewed review — the review closed and opened again
+    /// keeps every other file's mark (their hunks are the same), only the changed one to view again.
+    #[test]
+    fn marks_stay_on_the_files_a_fix_turn_left_alone_when_the_review_opens_again() {
+        let base = text_of(30, |i| format!("para {i}"));
+        let now = text_of(30, |i| match i {
+            3 => "changed 3".into(),
+            20 => "changed 20".into(),
+            _ => format!("para {i}"),
+        });
+        let files = [
+            ("a.txt", base.as_str(), now.as_str()),
+            ("b.txt", base.as_str(), now.as_str()),
+            ("c.txt", base.as_str(), now.as_str()),
+        ];
+        let (mut ed, dir) = reviewing("marks-fix-turn", &files);
+        for i in 0..3 {
+            show(&mut ed, i, false);
+            settle_until(&mut ed, |ed| {
+                let r = ed.session.code_review.as_ref().unwrap();
+                r.in_hand(ed) == Some(i) && landed(ed)
+            });
+            feed(&mut ed, "<space>vm");
+        }
+        assert!(["a.txt", "b.txt", "c.txt"].iter().all(|f| viewed_now(&ed, f)));
+        // (the fix turn: b.txt written on disk, as Claude's edit is)
+        let fixed = now.replace("para 10\n", "fixed 10\n");
+        std::fs::write(dir.join("b.txt"), &fixed).unwrap();
+        show(&mut ed, 1, false);
+        ed.reload_current().unwrap();
+        close(&mut ed);
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        let marks: Vec<(String, bool)> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|f| {
+                // (each file in hand, as `]u` walks them)
+                let i = ed.session.code_review.as_ref().unwrap().files.iter().position(|x| x.rel == *f);
+                show(&mut ed, i.unwrap(), false);
+                settle_until(&mut ed, landed);
+                (f.to_string(), viewed_now(&ed, f))
+            })
+            .collect();
+        let want = [("a.txt", true), ("b.txt", false), ("c.txt", true)].map(|(f, v)| (f.to_string(), v));
+        assert_eq!(marks, want);
+        // Kept in the restore file too: a tarae started again (a session opened again) has them
+        let mut state = crate::restore::State::from_json(json!({}));
+        ed.session.root = dir.clone();
+        state.set_viewed(&dir, viewed_json(&ed.session));
+        let mut back = Editor::new(crate::config::Config::default());
+        (back.session.root, back.restore) = (dir.clone(), state);
+        let id = back.session.id;
+        crate::notes::restore_in(&mut back, id);
+        start_in(&mut back, dir.clone(), None);
+        settle_until(&mut back, landed);
+        assert!(viewed_now(&back, "a.txt") && viewed_now(&back, "c.txt"), "restored");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #77: `:commit <file>` from a review — refused, saying which, while a file isn't viewed; once
+    /// all are, the review ends, every change is staged and committed with the file as its message (`#` lines
+    /// left out), said.
+    #[test]
+    fn commit_from_a_review_all_viewed_stages_and_commits_with_the_file_as_its_message() {
+        let files = [("a.txt", "a\n", "a2\n"), ("b.txt", "b\n", "b2\n"), ("c.txt", "c\n", "c\n")];
+        let (mut ed, dir) = reviewing("commit-from", &files);
+        // (the session's checkout: where its git runs)
+        ed.session.root = dir.clone();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        // (beside the checkout, named from it: `../` — the review of frictions36: excluded as if inside, git refused)
+        let name = format!("{}-msg.txt", dir.file_name().unwrap().to_string_lossy());
+        let msg = dir.parent().unwrap().join(&name);
+        std::fs::write(&msg, "Two files\n\nThe body.\n# left out\n").unwrap();
+        let toasts = |ed: &Editor| ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        feed(&mut ed, &format!(":commit ../{name}<ret>"));
+        assert!(
+            toasts(&ed)
+                .iter()
+                .any(|t| t == "nothing committed — a.txt and 1 more not viewed (]u goes to them)"),
+            "{:?}",
+            toasts(&ed)
+        );
+        for i in 0..2 {
+            show(&mut ed, i, false);
+            settle_until(&mut ed, |ed| {
+                let r = ed.session.code_review.as_ref().unwrap();
+                r.in_hand(ed) == Some(i) && landed(ed)
+            });
+            feed(&mut ed, "<space>vm");
+        }
+        // (c.txt as it was committed, only touched — a stash, a checkout, a tool: no change to stage, nothing to
+        // refuse — the review of frictions36)
+        let touched = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options().write(true).open(dir.join("c.txt")).unwrap().set_modified(touched).unwrap();
+        feed(&mut ed, &format!(":commit ../{name}<ret>"));
+        settle_until(&mut ed, |ed| {
+            toasts(ed).iter().any(|t| t.starts_with("Committed ") || t.starts_with("commit: "))
+        });
+        assert!(
+            toasts(&ed).iter().any(|t| t.ends_with(" Two files — the review ended")),
+            "{:?}",
+            toasts(&ed)
+        );
+        assert!(ed.session.code_review.is_none(), "the review ended with the commit");
+        assert_eq!(git(&["log", "-1", "--format=%B"]), "Two files\n\nThe body.");
+        assert_eq!(git(&["status", "--porcelain"]), "", "every change in");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&msg).ok();
+    }
+
+    /// The review of frictions36: a file named like a key's viewed mark (its lines' text) never goes into the
+    /// restore file — marked again after a restart; the others' do.
+    #[test]
+    fn a_key_named_files_mark_is_never_kept_on_disk() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = PathBuf::from("/stand-in");
+        for f in [".env", "a.txt"] {
+            let mark = Viewed::new(Default::default(), vec![("SECRET=stand-in".into(), 1)], None);
+            ed.session.viewed.insert(PathBuf::from("/stand-in").join(f), mark);
+        }
+        let kept = viewed_json(&ed.session);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0]["path"], "/stand-in/a.txt");
+    }
+
+    /// The review of frictions36: only a git-tab action that rewrites the working tree (a stash, a discard) holds
+    /// its session's reloads as one line — a stage (or a push, a fetch) none.
+    #[test]
+    fn only_a_git_action_that_rewrites_the_tree_holds_its_reloads() {
+        let (mut ed, dir) = reviewing("git-batch", &[("a.txt", "a\n", "a2\n")]);
+        ed.session.root = dir.clone();
+        close(&mut ed);
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        ed.git_stage("", true);
+        settle_until(&mut ed, |ed| ed.session.git_busy);
+        assert!(ed.disk_batch.is_empty(), "a stage holds nothing");
+        settle_until(&mut ed, |ed| !ed.session.git_busy && ed.session.git_queue.is_empty());
+        ed.git_stash(false);
+        settle_until(&mut ed, |ed| ed.session.git_busy);
+        assert_eq!(ed.disk_batch.len(), 1, "a stash holds its reloads while it runs");
+        settle_until(&mut ed, |ed| !ed.session.git_busy && ed.disk_batch.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The review of frictions36: `:commit` stages only what was viewed — refused for a turn's review, an unsaved
+    /// buffer, Claude working, a changed file not in the review; a file changed between `:commit` and the staging
+    /// stages nothing; a message file in the checkout is never staged.
+    #[test]
+    fn commit_from_a_review_stages_only_what_was_viewed() {
+        let files = [("a.txt", "a\n", "a2\n"), ("msg-b.txt", "b\n", "b2\n")];
+        let (mut ed, dir) = reviewing("commit-viewed", &files);
+        ed.session.root = dir.clone();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        for (k, v) in [("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")] {
+            git(&["config", k, v]);
+        }
+        // (both marked, a.txt last: the file in hand)
+        for i in [1, 0] {
+            show(&mut ed, i, false);
+            settle_until(&mut ed, |ed| {
+                ed.session.code_review.as_ref().unwrap().in_hand(ed) == Some(i) && landed(ed)
+            });
+            feed(&mut ed, "<space>vm");
+        }
+        // (a name `:(exclude)` reads as a glob — `msg*.txt` would leave the viewed `msg-b.txt` unstaged too: the
+        // review of frictions36)
+        std::fs::write(dir.join("msg*.txt"), "In the checkout\n").unwrap();
+        let toasts = |ed: &Editor| ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        let said = |ed: &Editor, s: &str| toasts(ed).iter().any(|t| t.contains(s));
+        let commit = |ed: &mut Editor| crate::typed::execute(ed, "commit msg*.txt");
+        // A buffer unsaved, Claude working: refused
+        let at = ed.doc().text.len_chars();
+        let edit = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(at, "x")]);
+        ed.doc_mut().apply(&edit);
+        assert_eq!(commit(&mut ed).unwrap_err(), "nothing committed — a.txt has unsaved changes (:w)");
+        ed.reload_current().unwrap();
+        let mut c = crate::chat::Chat::new();
+        c.state = crate::chat::State::Thinking;
+        ed.session.chat = Some(c);
+        assert!(commit(&mut ed).unwrap_err().contains("Claude is working"));
+        ed.session.chat = None;
+        // A file of the review's for the message: refused (left out, its change would go uncommitted)
+        assert_eq!(
+            crate::typed::execute(&mut ed, "commit a.txt").unwrap_err(),
+            "nothing committed — a.txt is a file of this review; write the message elsewhere"
+        );
+        // A changed file not in the review (new since it opened): refused once the tree is read
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        commit(&mut ed).unwrap();
+        settle_until(&mut ed, |ed| said(ed, "commit: "));
+        assert!(
+            said(&ed, "commit: new.txt changed, not in the review — nothing committed"),
+            "{:?}",
+            toasts(&ed)
+        );
+        assert!(ed.session.code_review.is_some(), "the review stays");
+        std::fs::remove_file(dir.join("new.txt")).unwrap();
+        // Changed between `:commit` and the staging: nothing staged
+        ed.toasts.clear();
+        commit(&mut ed).unwrap();
+        // (the tree read and checked: on to the staging — the change comes before it. No race: the job that reads the
+        // tree again is queued only as the hooks' look lands, a later event than the one that said this — held so)
+        settle_until(&mut ed, |ed| said(ed, "staging every change"));
+        assert!(!ed.session.git_busy && ed.session.git_queue.is_empty(), "the staging's job not queued yet");
+        std::fs::write(dir.join("a.txt"), "a3\n").unwrap();
+        settle_until(&mut ed, |ed| said(ed, "commit: ") || said(ed, "Committed "));
+        let refused = "commit: a.txt changed since :commit — nothing staged — the review stays open";
+        assert!(said(&ed, refused), "{:?}", toasts(&ed));
+        assert_eq!(git(&["diff", "--cached", "--name-only"]), "", "nothing staged");
+        assert!(ed.session.code_review.is_some(), "the review stays, to go on from");
+        // Viewed as it is: committed, the message's file left out
+        std::fs::write(dir.join("a.txt"), "a2\n").unwrap();
+        ed.toasts.clear();
+        // (from the review still open — written before the message's file, which is none of its files)
+        commit(&mut ed).unwrap();
+        settle_until(&mut ed, |ed| said(ed, "commit: ") || said(ed, "Committed "));
+        assert!(said(&ed, "Committed "), "{:?}", toasts(&ed));
+        assert_eq!(
+            git(&["status", "--porcelain"]),
+            "?? msg*.txt",
+            "the message's file never staged, msg-b.txt in"
+        );
+        // A turn's review: refused
+        let turn = Base::Turn { at: 0, question: "do it".into() };
+        ed.session.code_review = Some(CodeReview::for_test(turn, dir.clone(), Vec::new()));
+        assert!(commit(&mut ed).unwrap_err().starts_with("a turn's review shows only that turn's changes"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #73: a file marked in two reviews of different bases (the uncommitted one, then a turn's of
+    /// its fix — here: since a branch, then the uncommitted one after a commit) is viewed in the first again — the
+    /// second mark, of the fix's lines only, keeps the first's lines.
+    #[test]
+    fn a_mark_in_one_review_keeps_the_mark_another_review_made() {
+        let dir = crate::scratch::Scratch::new("review-marks-two-bases").into_path();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        let text = |changed: &[usize]| {
+            text_of(30, |i| if changed.contains(&i) { format!("changed {i}") } else { format!("para {i}") })
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), text(&[])).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "base"]);
+        run(&["branch", "start"]);
+        std::fs::write(dir.join("a.txt"), text(&[3, 20])).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        // (each review's own base in, not the last one's: line 21 as it is there)
+        let review = |ed: &mut Editor, branch: Option<&str>, line: &str| {
+            close(ed);
+            start_in(ed, dir.clone(), branch.map(str::to_string));
+            settle_until(ed, |ed| {
+                let base = ed.doc().review_base.as_ref().map(|b| b.line(20).to_string());
+                base.as_deref() == Some(line) && landed(ed)
+            });
+        };
+        review(&mut ed, Some("start"), "para 20\n");
+        feed(&mut ed, "<space>vm");
+        assert!(viewed_now(&ed, "a.txt"), "since the branch: lines 4 and 21");
+        // (committed with a second `changed 3` the first mark never saw; then the fix: line 21 again — the
+        // uncommitted review shows only that)
+        let dup = |t: String| t.replace("para 25\n", "changed 3\n");
+        std::fs::write(dir.join("a.txt"), dup(text(&[3, 20]))).unwrap();
+        run(&["commit", "-qam", "one"]);
+        std::fs::write(dir.join("a.txt"), dup(text(&[3]).replace("para 20\n", "fixed 20\n"))).unwrap();
+        if let Some(d) = ed.docs.iter_mut().find(|d| d.path.as_deref() == Some(&dir.join("a.txt"))) {
+            crate::disk::reload_text(
+                d,
+                &ropey::Rope::from_str(&std::fs::read_to_string(dir.join("a.txt")).unwrap()),
+            );
+        }
+        review(&mut ed, None, "changed 20\n");
+        assert!(!viewed_now(&ed, "a.txt"), "the fix is new");
+        feed(&mut ed, "<space>vm");
+        assert!(viewed_now(&ed, "a.txt"), "uncommitted: the fix viewed");
+        // (the first mark's line this diff doesn't show keeps the count that mark saw: one, not the file's two)
+        let mark = ed.session.viewed.get(&dir.join("a.txt")).unwrap();
+        assert!(mark.added.contains(&("changed 3".into(), 1)), "{:?}", mark.added);
+        review(&mut ed, Some("start"), "para 20\n");
+        // (since the branch again: lines 4 and 21 kept from the two marks — only line 26, the second `changed 3`
+        // neither saw, is new)
+        let since = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.since(ed, &r.files[0])
+        };
+        assert_eq!(since(&ed), Some(Since { new: 1, out: 0, unsure: false }));
+        assert_eq!(unviewed_here(&ed), Some(vec![25]), "line 26 alone");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6145,6 +6551,36 @@ mod tests {
         assert_eq!(left(&ed), 1, "the same keys, another order");
         let moved = highs(&ed).into_iter().find(|g| !g.looked_at(&ed.session.looked)).unwrap();
         assert!(moved.why.starts_with("moved since your look: `"), "{}", moved.why);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #74: lines next to each other moved together since the look are asked once, together —
+    /// one change to look at, its lines the run of them; looked at, done.
+    #[test]
+    fn lines_moved_together_are_asked_once() {
+        let base = "fn main() {\n}\n";
+        let body = |order: &[&str]| order.iter().map(|l| format!("    {l}();\n")).collect::<String>();
+        let now =
+            format!("fn main() {{\n{}    unsafe {{ go() }}\n}}\n", body(&["one", "two", "three", "four"]));
+        let (mut ed, dir) = reviewing("moved-together", &[("a.rs", base, &now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        // (`one();` and `two();` after `five();`)
+        let (a, b, end) =
+            (ed.doc().text.line_to_byte(1), ed.doc().text.line_to_byte(3), ed.doc().text.line_to_byte(6));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::delete(a, b),
+                crate::transaction::Change::insert(end, "    one();\n    two();\n"),
+            ],
+        );
+        let asked = unseen_whys(&ed);
+        assert_eq!(asked, vec!["2 lines moved since your look: `one();`".to_string()]);
+        let g = highs(&ed).into_iter().find(|g| !g.looked_at(&ed.session.looked)).unwrap();
+        assert_eq!((g.at, g.lines), (4, 2), "the run of them");
         look(&mut ed);
         assert_eq!(left(&ed), 0);
         std::fs::remove_dir_all(&dir).ok();
@@ -6965,7 +7401,8 @@ mod tests {
     }
 
     /// A `}` moved above the lines it closed over since the look: asked — they run unguarded now. Every line that
-    /// says something is still in the order looked at; only the bracket crossed them.
+    /// says something is still in the order looked at; only the bracket crossed them. What's asked is the lines
+    /// whose block moved, never the `}` (frictions29 #74).
     #[test]
     fn a_brace_moved_across_the_lines_it_closed_is_asked() {
         let base = "fn main() {\n    keep();\n}\n";
@@ -6985,7 +7422,62 @@ mod tests {
             ],
         );
         let asked = unseen_whys(&ed);
-        assert!(asked.iter().any(|w| w == "moved since your look: `}`"), "{asked:?}");
+        assert!(
+            asked.iter().any(|w| w == "its block moved since your look: `unsafe { delete_all() }`"),
+            "{asked:?}"
+        );
+        assert!(!asked.iter().any(|w| w.ends_with("`}`")), "{asked:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        // The same move with an innocuous new line in each gap it changed: asked all the same — a gap's new line
+        // excuses only brackets that are its own (the review of frictions36)
+        let (mut ed, dir) = reviewing("brace-crossed-beside-new", &[("a.rs", base, now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        let (b0, b1, above) = (at(&ed, 5), at(&ed, 6), at(&ed, 3));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(above, "    }\n        trace();\n"),
+                crate::transaction::Change { from: b0, to: b1, insert: "        note();\n".into() },
+            ],
+        );
+        let asked = unseen_whys(&ed);
+        assert!(
+            asked.iter().any(|w| w == "its block moved since your look: `unsafe { delete_all() }`"),
+            "{asked:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        // …nor new lines whose brackets are a string's: `x = "{";` and `y = ")";` balance nothing (the review of
+        // frictions36: counted as characters, they hid the move)
+        let (mut ed, dir) = reviewing("brace-crossed-beside-strings", &[("a.rs", base, now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        let (b0, b1, above) = (at(&ed, 5), at(&ed, 6), at(&ed, 3));
+        edited(
+            &mut ed,
+            vec![
+                crate::transaction::Change::insert(above, "    }\n        x = \"{\";\n"),
+                crate::transaction::Change { from: b0, to: b1, insert: "        y = \")\";\n".into() },
+            ],
+        );
+        let asked = unseen_whys(&ed);
+        assert!(
+            asked.iter().any(|w| w == "its block moved since your look: `unsafe { delete_all() }`"),
+            "{asked:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        // …nor a new opener after a `}` moved up: the guard swapped (`if authorized() {` closed at once, `if debug()
+        // {` around what it guarded) — they balance, and are asked all the same (the review of frictions36)
+        let (mut ed, dir) = reviewing("brace-reguarded", &[("a.rs", base, now)]);
+        look(&mut ed);
+        assert_eq!(left(&ed), 0);
+        let above = at(&ed, 3);
+        edited(&mut ed, vec![crate::transaction::Change::insert(above, "    }\n    if debug() {\n")]);
+        let asked = unseen_whys(&ed);
+        assert!(
+            asked.iter().any(|w| w == "its block moved since your look: `unsafe { delete_all() }`"),
+            "{asked:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
         // The change's own `}` from its end over every line of it to its start: no gap between two lines saying
         // something changed, only the edges — asked all the same
@@ -7003,13 +7495,19 @@ mod tests {
             ],
         );
         let asked = unseen_whys(&ed);
-        assert!(asked.iter().any(|w| w == "moved since your look: `}`"), "{asked:?}");
+        assert!(
+            asked.iter().any(|w| w == "its block moved since your look: `if authorized() {`"),
+            "{asked:?}"
+        );
+        assert!(!asked.iter().any(|w| w.ends_with("`}`")), "{asked:?}");
         std::fs::remove_dir_all(&dir).ok();
         // …and a block added after it since, or one and a line before it, their own `    }` and all: new lines,
         // but no `}` moved
+        // … or between two lines looked at (frictions29 #74: its `}` was asked as moved)
         for (name, line, added) in [
             ("brace-added-after", 6, "    if other() {\n        more();\n    }\n"),
             ("brace-added-before", 2, "    if other() {\n        more();\n    }\n    again();\n"),
+            ("brace-added-between", 4, "        if other() {\n            more();\n        }\n"),
         ] {
             let (mut ed, dir) = reviewing(name, &[("a.rs", base, closed)]);
             look(&mut ed);
@@ -7017,7 +7515,8 @@ mod tests {
             let into = at(&ed, line);
             edited(&mut ed, vec![crate::transaction::Change::insert(into, added)]);
             let asked = unseen_whys(&ed);
-            assert!(!asked.is_empty() && !asked.iter().any(|w| w.starts_with("moved")), "{name}: {asked:?}");
+            let moved = |w: &String| w.contains("moved since your look");
+            assert!(!asked.is_empty() && !asked.iter().any(moved), "{name}: {asked:?}");
             std::fs::remove_dir_all(&dir).ok();
         }
         // An `end` (it says something: the order looked at holds it) moved up the same way, and the guarded line
@@ -7136,10 +7635,11 @@ mod tests {
             ],
         );
         saved(&mut ed, &dir, "a.rs");
-        assert!(unseen_whys(&ed).iter().any(|w| w == "moved since your look: `}`"), "open: asked");
+        let open = unseen_whys(&ed);
+        assert!(open.iter().any(|w| w.starts_with("its block moved since your look: `")), "open: {open:?}");
         let asked = asked_closed(&mut ed, &dir, "b.rs", "a.rs");
         assert!(
-            asked.iter().any(|w| w.ends_with("a line moved since your look")),
+            asked.iter().any(|w| w.ends_with("a line's block moved since your look")),
             "closed: asked too — {asked:?}"
         );
         std::fs::remove_dir_all(&dir).ok();

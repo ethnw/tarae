@@ -110,9 +110,9 @@ pub struct Session {
     pub instructions: crate::instructions::Look,
     /// The commit message being opened is for ending the session after it (`worktree.rs`).
     pub commit_then_end: bool,
-    /// Git work waiting its turn (one at a time) · one running · reads of the status asked for (the latest
-    /// lands).
-    pub git_queue: std::collections::VecDeque<crate::gitpanel::GitJob>,
+    /// Git work waiting its turn (one at a time), each with whether it rewrites the working tree
+    /// (`gitpanel::git_do_rewriting`) · one running · reads of the status asked for (the latest lands).
+    pub git_queue: std::collections::VecDeque<(bool, crate::gitpanel::GitJob)>,
     pub git_busy: bool,
     pub git_reads: u64,
     /// Current git branch (filled by the watcher thread — for the status line).

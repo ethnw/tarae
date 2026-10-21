@@ -1117,6 +1117,18 @@ fn every_card() -> Vec<Offer> {
             here: String::new(),
             main: String::new(),
             left: 0,
+            out: None,
+            ended: false,
+        })),
+        W::Instructions(Box::new(crate::instructions::Both {
+            root: p(),
+            rel: "CLAUDE.md".into(),
+            base: Some(String::new()),
+            here: "mine\n".into(),
+            main: String::new(),
+            left: 0,
+            out: Some(p()),
+            ended: true,
         })),
         W::UpTo(Box::new(moved())),
         W::BringQueue(Box::new(crate::bringqueue::Ask {

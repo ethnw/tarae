@@ -173,7 +173,9 @@ side git · 4 rows · in hand git:src/term.rs
   cards waiting, `rebasing n/m`, the reloaded `•`, and once its Claude compacted its
   conversation (`compaction.rs`), `compacted`: `count` since tarae started, the `last` one's `at_ms`, `trigger`
   (`auto` · `manual`), `pre_tokens`, `post_tokens`, and `unseen` (it came behind, not in front since). Claude's
-  level has only its own session's. `key_source_seen` (apibill): the last `apiKeySource` its chat's claude
+  level has only its own session's. `answer` (frictions29 #76): where its last answer leaves it, one line a driver
+  keys on — `ready` · `working` · `blocked: <the card or edit that waits for you>`, then ` · context N %` once
+  reported; null without a chat. `key_source_seen` (apibill): the last `apiKeySource` its chat's claude
   reported (`none` · `apiKeyHelper` · `ANTHROPIC_API_KEY` · `/login managed key`) — absent before one; Claude's
   level has only its own session's.
 - **`notes`** (f24, `notes.rs`) — the front session's notes in the order pinned, where each is, never what it
@@ -194,9 +196,15 @@ side git · 4 rows · in hand git:src/term.rs
     body, which `v` shows. Whole at the full level (JSON, text line, a watcher's `card-up`, which carries
     it as `asks` too): a driver reads all of a command it's asked to approve. Cut at Claude's level and in
     the inbox picker's one-row label.
-  - `answers`: from a new `Offer::answers()`, which the hint row is drawn from too.
+  - `answers`: from a new `Offer::answers()`, which the hint row is drawn from too — a weighty card in front not
+    seen whole has `v` first (its `y` waits until it is; frictions29 #69).
   - `settled`: in sight past `SETTLE`, so `y` would count.
   - `seen_whole`: `offer_read`.
+  - `refused` (frictions29 #69): the front card's last key it didn't take, and why — what it says on itself
+    (`offer_refused`; a `y` before it was seen whole: `y — see it whole first (v)`) — null until one, and again
+    once the card changes.
+  - `session` is the session a card is about — a bring card's the session it brings (frictions29 #70) — and
+    `shown_in` where it stands when that's another (else null).
   - `waited_ms` / `in_sight_ms`: from `since` and `offer_seen`.
   - `at`: its rect, as drawn.
   - (a run, in `runs`: `ran` — cardburden 4 — where Claude's command ran, from its run's record: `where`

@@ -690,9 +690,11 @@ impl Offer {
 
     /// Whether answering it runs something (an install, a plugin's permissions).
     pub fn weighty(&self) -> bool {
-        matches!(
-            self.what,
-            What::Install { .. }
+        // (what a session wrote, into every session's instructions — frictions29 #79)
+        matches!(&self.what, What::Instructions(b) if b.out.is_some())
+            || matches!(
+                self.what,
+                What::Install { .. }
                 | What::Fetch { .. }
                 | What::PluginPermissions { .. }
                 | What::PluginAsk { .. }
@@ -737,7 +739,7 @@ impl Offer {
                 | What::Board(_)
                 // (its yes lets a program type — when it comes is the program's: a `y` typed as it came isn't one)
                 | What::Shuttle
-        )
+            )
     }
 
     /// Whether `a` answers it: the limit card whose window's reset is known (new sessions too, until then).
@@ -1294,6 +1296,9 @@ impl Offer {
                 vec![('y', "Continue"), ('m', "Message"), ('X', "Abort"), ('n', "Not now")]
             }
             W::RebaseResolved { .. } => vec![('y', "Continue"), ('X', "Abort"), ('n', "Not now")],
+            W::Instructions(b) if b.out.is_some() => {
+                vec![('y', "Carry them into main's"), ('v', "See them"), ('n', "Leave main's")]
+            }
             W::Instructions(_) => {
                 vec![('y', "Take the main checkout's"), ('v', "See them"), ('n', "Keep this one")]
             }

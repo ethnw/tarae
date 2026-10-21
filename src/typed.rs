@@ -466,6 +466,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
                 Ok(())
             }
         },
+        "commit" => editor.commit_from_review(rest),
         "commit-draft" => {
             editor.commit_draft();
             Ok(())

@@ -30,8 +30,9 @@ use serde_json::{Value, json};
 
 use crate::editor::Editor;
 
+/// The wall clock in unix milliseconds, as logic reads it (`clock::system`: a simulation moves it).
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    crate::clock::system().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// How long a cache write lives (`cache_creation`'s split says which).

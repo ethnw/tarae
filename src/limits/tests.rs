@@ -401,6 +401,75 @@ fn a_status_never_carries_into_another_period() {
     }
 }
 
+/// frictions29 #81: the event a claude sends as it starts names a window with no figure — it keeps the figure said
+/// for that period, as old as it is (then `get_usage` is asked again: no fresh figure), never one of another period.
+#[test]
+fn an_event_with_no_figure_keeps_the_one_said_and_isnt_fresh() {
+    let said = Reading {
+        window: "five_hour".into(),
+        percent: Some(4),
+        resets_at_ms: Some(RESETS_MS),
+        status: None,
+        seen_at_ms: BEFORE,
+        from: Source::Usage,
+    };
+    let event = |resets_at_ms| Reading {
+        percent: None,
+        resets_at_ms,
+        status: Some(Status::Allowed),
+        seen_at_ms: BEFORE + FRESH_MS * 2,
+        from: Source::Event,
+        ..said.clone()
+    };
+    let mut l = Limits::default();
+    l.seen(Report { readings: vec![said.clone()], ..Report::default() });
+    l.seen(Report { readings: vec![event(Some(RESETS_MS))], ..Report::default() });
+    let w = l.get("five_hour", BEFORE + FRESH_MS * 2).unwrap();
+    assert_eq!((used(w).as_str(), w.seen_at_ms, w.status), ("4 %", BEFORE, Some(Status::Allowed)));
+    assert!(!l.fresh(BEFORE + FRESH_MS * 2), "a figure that old isn't fresh");
+    // Another period: no figure carried
+    let mut l = Limits::default();
+    l.seen(Report { readings: vec![said.clone()], ..Report::default() });
+    l.seen(Report { readings: vec![event(Some(RESETS_MS + 5 * 3_600_000))], ..Report::default() });
+    let w = l.get("five_hour", BEFORE + FRESH_MS * 2).unwrap();
+    assert_eq!(used(w), "no figure yet");
+    assert!(!l.fresh(BEFORE + FRESH_MS * 2), "no figure: not fresh");
+}
+
+/// frictions29 #81: with the chat's claude running and a figure fresh for another window, an event naming a window
+/// with none asks `get_usage` again — once while that question is young.
+#[test]
+fn an_event_with_no_figure_asks_get_usage() {
+    let mut answer = line(2);
+    answer["response"]["request_id"] = json!(REQUEST_ID);
+    answer["response"]["response"]["rate_limits"]["seven_day"]["resets_at"] =
+        json!("2099-01-06T01:00:00+00:00");
+    let (mut ed, root) = chat_with("no-figure", &format!("*get_usage*) printf '%s\\n' '{answer}';;"));
+    ed.limits.ask = true;
+    crate::chat::open(&mut ed);
+    until(&mut ed, "the answer", |ed| ed.limits.get(WEEKLY, crate::usage::now_ms()).is_some());
+    let asked = |root: &std::path::Path| {
+        std::fs::read_to_string(root.join("stdin")).unwrap().matches("get_usage").count()
+    };
+    assert_eq!(asked(&root), 1);
+    let event = |at| Reading {
+        window: "five_hour".into(),
+        percent: None,
+        resets_at_ms: None,
+        status: Some(Status::Allowed),
+        seen_at_ms: at,
+        from: Source::Event,
+    };
+    // (the question just asked is young: not again)
+    seen(&mut ed, Report { readings: vec![event(crate::usage::now_ms())], ..Report::default() });
+    assert_eq!(asked(&root), 1, "young: not again");
+    ed.limits.asked_ms = ed.limits.asked_ms.map(|t| t - FRESH_MS * 2);
+    seen(&mut ed, Report { readings: vec![event(crate::usage::now_ms())], ..Report::default() });
+    until(&mut ed, "asked again", |_| asked(&root) == 2);
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// A window with a reset and no figure says what's known, not "not said" beside a time (frictions29 6).
 #[test]
 fn a_window_with_no_figure_says_so_beside_its_reset() {

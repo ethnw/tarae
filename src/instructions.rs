@@ -45,22 +45,69 @@ pub struct Both {
     /// The session's now, the main checkout's now.
     pub here: String,
     pub main: String,
-    /// The main checkout's changes that touch the session's own (left as the session has them on `y`).
+    /// The main checkout's changes that touch the session's own (left as the session has them on `y`) — or,
+    /// carried out, the session's that touch the main checkout's (left as it has them).
     pub left: usize,
+    /// The other direction (frictions29 #79): the session's own changes since its copy, for the main checkout
+    /// at this root — asked as its bring's card comes, or once it's ended (read before its checkout went: `y`
+    /// carries what the card showed).
+    pub out: Option<PathBuf>,
+    /// Carried out once its session ended (`session_remove`): what the card showed is what `y` carries, its `n` is
+    /// final — by this flag, never by its path (a session opened there again since: the review of frictions36).
+    pub ended: bool,
 }
 
 impl Both {
     /// What `y` writes: the main checkout's changes over the session's own — with no base, the main checkout's.
     fn merged(&self) -> String {
-        match &self.base {
-            Some(b) => crate::checkpoint::rebase(b, &self.main, &self.here).0,
-            None => self.main.clone(),
+        match (&self.base, &self.out) {
+            (Some(b), Some(_)) => crate::checkpoint::rebase(b, &self.here, &self.main).0,
+            (Some(b), None) => crate::checkpoint::rebase(b, &self.main, &self.here).0,
+            (None, _) => self.main.clone(),
         }
     }
 
     /// The card.
     pub fn card(&self) -> Offer {
         let rel = &self.rel;
+        if self.out.is_some() {
+            let from = self.base.as_deref().unwrap_or(&self.here);
+            let (mut added, mut out) = (0, 0);
+            for (_, _, old, new) in crate::editdiff::line_changes(from, &self.here) {
+                (added, out) = (added + new.lines().count(), out + old.lines().count());
+            }
+            let lines = match (added, out) {
+                (a, 0) => crate::nav::count(a, "line") + " added",
+                (0, o) => crate::nav::count(o, "line") + " taken out",
+                (a, o) => format!("{} added, {o} taken out", crate::nav::count(a, "line")),
+            };
+            let left = match self.left {
+                0 => String::new(),
+                n => format!(
+                    " {n} of them touch lines the main checkout changed since: those stay as it has them."
+                ),
+            };
+            // (the changes themselves, on the card at full strength: every session's Claude reads what `y` writes —
+            // and a run can write this copy; a long one is drawn cut, and its `y` waits until `v` is read to its end:
+            // the review of frictions36)
+            let mut shown = String::new();
+            for (_, _, old, new) in crate::editdiff::line_changes(from, &self.here) {
+                shown.extend(old.lines().map(|l| format!("\n  - {l}")));
+                shown.extend(new.lines().map(|l| format!("\n  + {l}")));
+            }
+            let q = format!(
+                "This session changed its {rel} since its copy ({lines}). y carries those changes into the main \
+                 checkout's {rel}, v shows them, n leaves it as it is.{left}{shown}\n\nEvery session's Claude reads \
+                 it from its next start."
+            );
+            return Offer::new(
+                format!("{rel}: this session's changes for the main checkout"),
+                &q,
+                "Carrying them into the main checkout's…",
+                format!("Couldn't update the main checkout's {rel}"),
+                What::Instructions(Box::new(self.clone())),
+            );
+        }
         let q = match &self.base {
             Some(_) => {
                 let left = match self.left {
@@ -93,11 +140,20 @@ impl Both {
     /// `v`: the main checkout's changes since the copy (with no base: this one's against it), line by line.
     pub fn view_text(&self) -> String {
         let from = self.base.as_deref().unwrap_or(&self.here);
-        let mut out = match self.base {
-            Some(_) => format!("The main checkout's {} since this session's copy:\n", self.rel),
-            None => format!("This session's {} → the main checkout's:\n", self.rel),
+        let (mut out, to) = match (&self.base, &self.out) {
+            (_, Some(_)) => (
+                format!(
+                    "This session's {} since its copy — what y carries into the main checkout's:\n",
+                    self.rel
+                ),
+                &self.here,
+            ),
+            (Some(_), None) => {
+                (format!("The main checkout's {} since this session's copy:\n", self.rel), &self.main)
+            }
+            (None, None) => (format!("This session's {} → the main checkout's:\n", self.rel), &self.main),
         };
-        for (start, _, old, new) in crate::editdiff::line_changes(from, &self.main) {
+        for (start, _, old, new) in crate::editdiff::line_changes(from, to) {
             out += &format!("\n@@ line {}\n", from[..start].matches('\n').count() + 1);
             out.extend(old.lines().map(|l| format!("- {l}\n")));
             out.extend(new.lines().map(|l| format!("+ {l}\n")));
@@ -120,6 +176,8 @@ mod tests {
                 here: "a\nb\n".into(),
                 main: "a\nc\n".into(),
                 left,
+                out: None,
+                ended: false,
             };
             b.card().question
         };
@@ -197,11 +255,88 @@ pub fn look(root: &Path, main: &Path, dirty: &[PathBuf]) -> Found {
                     here,
                     main: main_text,
                     left,
+                    out: None,
+                    ended: false,
                 });
             }
         }
     }
     found
+}
+
+/// The other direction (frictions29 #79: carried to the main checkout by hand, a `cp` refused): the session's
+/// own changes to its copies since their base, each for the main checkout's — a worker. Only a copy with a base
+/// (whose change it is can be told) and changed here; one the main checkout's is the same as, nothing.
+pub fn look_out(root: &Path, main: &Path) -> Vec<Both> {
+    let Some(dir) = bases(root) else { return Vec::new() };
+    let untracked = crate::worktree::instructions(main);
+    let mut out = Vec::new();
+    for rel in crate::worktree::INSTRUCTIONS.iter().filter(|r| untracked.iter().any(|u| u == *r)) {
+        let (Some(main_text), Some(here)) = (plain(main, rel), plain(root, rel)) else { continue };
+        let Ok(base) = std::fs::read_to_string(dir.join(rel)) else { continue };
+        if here == base || here == main_text {
+            continue;
+        }
+        let (_, left) = crate::checkpoint::rebase(&base, &here, &main_text);
+        let out_to = Some(main.to_path_buf());
+        let (root, rel) = (root.to_path_buf(), rel.to_string());
+        out.push(Both {
+            root,
+            rel,
+            base: Some(base),
+            here,
+            main: main_text,
+            left,
+            out: out_to,
+            ended: false,
+        });
+    }
+    out
+}
+
+/// Session `root`'s changes to its instruction files, asked for the main checkout (`look_out`) — as its bring's
+/// card comes (an end looks on its own worker, before its checkout goes: `look_out_of`, `session_remove`). A card
+/// each (one a file), on the session's card stack.
+pub fn carry_out(ed: &mut Editor, root: PathBuf) {
+    ed.events.jobs().spawn(move || {
+        let found = look_out_of(&root);
+        move |ed: &mut Editor| {
+            if found.is_empty() {
+                ed.unchanged = true;
+            }
+            for b in found {
+                push_card(ed, b);
+            }
+        }
+    });
+}
+
+/// `look_out` for checkout `root` against its repository's main checkout (a worker; none: it is that one).
+pub fn look_out_of(root: &Path) -> Vec<Both> {
+    let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let main = crate::gitrepo::repo(&real)
+        .ok()
+        .and_then(|r| crate::worktree::main_checkout(&r.common_dir, &real))
+        .filter(|m| *m != real);
+    main.map(|main| look_out(&real, &main)).unwrap_or_default()
+}
+
+/// `b`'s card, in place of one up for the same file and direction — an ended session's (`Both.ended`): its `n`
+/// drops them, never asked again, said on the card.
+pub(crate) fn push_card(ed: &mut Editor, b: Both) {
+    let ended = b.ended;
+    let mine = |o: &Offer| matches!(&o.what, What::Instructions(x) if x.root == b.root && x.rel == b.rel && x.out == b.out);
+    ed.offers.retain(|o| !mine(o));
+    ed.session.parked.retain(|o| !mine(o));
+    let mut card = b.card();
+    if ended {
+        card.question = card.question.replacen(
+            "n leaves it as it is.",
+            "n leaves it as it is — the session has ended: they're dropped.",
+            1,
+        );
+    }
+    ed.push_offer(card);
 }
 
 /// A session's look under way, and another asked for meanwhile — one at a time, so two never write over each
@@ -301,11 +436,7 @@ fn said(ed: &mut Editor, found: Found) {
         ed.set_error(format!("instruction files not updated: {}", failed.join("; ")));
     }
     for b in both {
-        let mine = |o: &Offer| matches!(&o.what, What::Instructions(x) if x.root == b.root && x.rel == b.rel);
-        ed.offers.retain(|o| !mine(o));
-        ed.session.parked.retain(|o| !mine(o));
-        let card = b.card();
-        ed.push_offer(card);
+        push_card(ed, b);
     }
 }
 
@@ -318,10 +449,50 @@ pub fn answer(ed: &mut Editor, b: Both, take: bool) {
     if ed.docs.iter().any(|d| d.is_modified() && d.path.as_deref() == Some(path.as_path())) {
         return ed.set_warning(format!("{rel} has unsaved changes — asked again at claude's next start"));
     }
-    let work = move || -> Result<(), String> {
-        let here = plain(&b.root, &b.rel).ok_or("it isn't a plain file now — left as it is")?;
-        if here != b.here {
-            return Err("it changed since the card — asked again at claude's next start".into());
+    let theirs = b.out.as_ref().map(|m| m.join(&b.rel));
+    if take && ed.docs.iter().any(|d| d.is_modified() && d.path.is_some() && d.path == theirs) {
+        return ed.set_warning(format!(
+            "the main checkout's {rel} has unsaved changes — save it, then bring again"
+        ));
+    }
+    let out = b.out.is_some();
+    // (Ok: whether its session had ended — its checkout gone)
+    let work = move || -> Result<bool, String> {
+        // (a session ended: what the card showed is what's carried — read as the end began; whatever is at its path
+        // now, another session's maybe, is no part of it)
+        let gone = b.out.is_some() && b.ended;
+        if !gone {
+            let here = plain(&b.root, &b.rel).ok_or("it isn't a plain file now — left as it is")?;
+            if here != b.here {
+                return Err("it changed since the card — asked again at claude's next start".into());
+            }
+        }
+        // (into the main checkout's — still as the card read it; this session's copy then its base: the main
+        // checkout's other changes come back here as untouched ones do)
+        if let Some(main) = &b.out {
+            if !take {
+                return Ok(gone);
+            }
+            let now = plain(main, &b.rel);
+            // (an ended session's changes are never asked again: merged into the main checkout's as it is now —
+            // the review of frictions36; a session's still there is asked again at its next bring)
+            let merged = match (now, gone, &b.base) {
+                (Some(now), _, _) if now == b.main => b.merged(),
+                (Some(now), true, Some(base)) => crate::checkpoint::rebase(base, &b.here, &now).0,
+                _ => {
+                    return Err(
+                        "the main checkout's changed since the card — asked again at the next bring".into()
+                    );
+                }
+            };
+            crate::beneath::Dir::root(main)
+                .and_then(|d| d.replace(OsStr::new(&b.rel), merged.as_bytes()))
+                .map_err(|e| e.to_string())?;
+            if gone {
+                return Ok(true);
+            }
+            let dir = bases(&b.root).ok_or("no git folder")?;
+            return std::fs::write(dir.join(&b.rel), &b.here).map(|_| false).map_err(|e| e.to_string());
         }
         if take {
             crate::beneath::Dir::root(&b.root)
@@ -331,6 +502,7 @@ pub fn answer(ed: &mut Editor, b: Both, take: bool) {
         let dir = bases(&b.root).ok_or("no git folder")?;
         std::fs::create_dir_all(&dir)
             .and_then(|_| std::fs::write(dir.join(&b.rel), &b.main))
+            .map(|_| false)
             .map_err(|e| e.to_string())
     };
     let state = &mut ed.session.instructions;
@@ -345,10 +517,29 @@ pub fn answer(ed: &mut Editor, b: Both, take: bool) {
         let done = work();
         move |ed: &mut Editor| {
             ed.session.instructions.answering -= 1;
-            answered(ed, rel, done, take);
+            match out {
+                true => answered_out(ed, rel, done, take),
+                false => answered(ed, rel, done.map(|_| ()), take),
+            }
             again(ed);
         }
     });
+}
+
+/// A carry-out card's answer, said — `n` for an ended session's (`Ok(true)`) is final: never asked again.
+fn answered_out(ed: &mut Editor, rel: String, done: Result<bool, String>, take: bool) {
+    match (done, take) {
+        (Ok(_), true) => ed.set_success(format!(
+            "the main checkout's {rel} takes this session's changes — every session's Claude reads it from its next start"
+        )),
+        (Ok(true), false) => ed.set_status(format!(
+            "the main checkout's {rel} left as it is — the ended session's changes to it are dropped"
+        )),
+        (Ok(false), false) => ed.set_status(format!(
+            "the main checkout's {rel} left as it is — asked again at the next bring"
+        )),
+        (Err(e), _) => ed.set_warning(format!("{rel}: {e}")),
+    }
 }
 
 /// An answer's write, said.

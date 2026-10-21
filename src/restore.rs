@@ -102,6 +102,25 @@ impl State {
         }
     }
 
+    /// The files marked viewed in this folder's reviews (`Session.viewed`, `codereview::viewed_json`) — kept
+    /// past a quit and a session ended and opened again (frictions29 #73), each checked against its diff.
+    pub fn viewed(&self, cwd: &Path) -> Vec<(std::path::PathBuf, crate::codereview::Viewed)> {
+        let files = self.root.get("viewed").and_then(|n| n.get(cwd.to_str()?));
+        files.map(crate::codereview::viewed_from).unwrap_or_default()
+    }
+
+    /// The viewed marks of the session in `cwd` as they are now (as `set_looked`).
+    pub fn set_viewed(&mut self, cwd: &Path, files: Vec<Value>) {
+        let Some(cwd) = cwd.to_str() else { return };
+        let saved = self.root.entry("viewed").or_insert_with(|| json!({}));
+        if let Some(map) = saved.as_object_mut() {
+            match files.is_empty() {
+                true => map.remove(cwd),
+                false => map.insert(cwd.to_string(), Value::Array(files)),
+            };
+        }
+    }
+
     /// The added lines looked at in this folder's reviews (`Session.looked_lines` — `risk::LookedLine`): by
     /// file, each `[line then, text, how many times the file had it]`.
     pub fn looked_lines(
@@ -290,6 +309,14 @@ impl Editor {
             self.sessions_in_order().iter().map(|l| (l.root.clone(), l.looked.clone())).collect();
         for (cwd, looked) in looked {
             self.restore.set_looked(&cwd, &looked);
+        }
+        let viewed: Vec<(PathBuf, Vec<Value>)> = self
+            .sessions_in_order()
+            .iter()
+            .map(|l| (l.root.clone(), crate::codereview::viewed_json(l)))
+            .collect();
+        for (cwd, files) in viewed {
+            self.restore.set_viewed(&cwd, files);
         }
         type Looked = (
             PathBuf,

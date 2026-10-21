@@ -618,6 +618,90 @@ fn arg_after(root: &Path, flag: &str) -> Option<String> {
     it.next().map(String::from)
 }
 
+/// frictions29 #67: right after the chat opens (as after `:restart`) its claude waits for the settings' read —
+/// the chat says `claude is starting`, and a reply sent meanwhile waits for it (queued, said) and goes once it's
+/// up, where it was refused as "couldn't reach claude".
+#[test]
+fn a_reply_sent_while_claude_starts_waits_for_it() {
+    let root = temp("starting");
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
+    ed.claude_settings_gate = true;
+    stand_in(&mut ed);
+    ed.open(&root.join("a.rs")).unwrap();
+    crate::chat::open(&mut ed);
+    assert!(ed.session.chat.as_ref().is_some_and(|c| c.settings.waiting()), "{}", state(&ed));
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, 140, 30).unwrap();
+    let mut vt = vt100::Parser::new(30, 140, 0);
+    vt.process(&bytes);
+    assert!(vt.screen().contents().contains(" starting "), "{}", vt.screen().contents());
+    let id = crate::notes::add(&mut ed, &root.join("a.rs"), 0..1, crate::notes::By::You, "why this?");
+    crate::notes::send(&mut ed, id, "why this?", true, None, Some(true));
+    let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    assert_eq!(said, "reply queued — claude is starting; it goes once it's up");
+    // (what sends what waits while it's still starting — `:session-billing`'s `billing_changed` — returns, the reply
+    // still waiting: it queued itself again, and the loop took it again, for good — the review of frictions36)
+    crate::chat::send_queued(&mut ed);
+    assert_eq!(ed.session.chat.as_ref().map(|c| c.sends.len()), Some(1), "{}", state(&ed));
+    until(&mut ed, "the reply", |_| {
+        std::fs::read_to_string(root.join("stdin")).is_ok_and(|s| s.contains("why this?"))
+    });
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The review of frictions36: a re-read of the settings while the chat's claude runs (its watch) holds nothing —
+/// what waits for a turn's end goes at it as ever (one re-read finding nothing new never opens the gate again).
+#[test]
+fn a_re_read_while_claude_runs_holds_no_send() {
+    let root = temp("re-read");
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    ed.claude_lines = Some(tx);
+    ed.open(&root.join("a.rs")).unwrap();
+    crate::chat::open(&mut ed);
+    assert!(ed.session.chat.as_ref().is_some_and(|c| c.running()), "{}", state(&ed));
+    let id = crate::notes::add(&mut ed, &root.join("a.rs"), 0..1, crate::notes::By::You, "and this?");
+    let c = ed.session.chat.as_mut().unwrap();
+    c.settings.reading_since(crate::clock::now());
+    c.sends.push(crate::chat::Later::Reply { id, text: "and this?".into(), fresh: true, why: None });
+    // (its turn over, the re-read still under way)
+    crate::chat::send_queued(&mut ed);
+    let sent: Vec<String> = rx.try_iter().collect();
+    assert!(sent.iter().any(|l| l.contains("and this?")), "{sent:?}");
+    assert!(ed.session.chat.as_ref().unwrap().sends.is_empty());
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The review of frictions36: the review's notes (`space v s`) sent while the chat's claude starts wait for it too —
+/// queued, said — and go once it's up.
+#[test]
+fn a_review_sent_while_claude_starts_waits_for_it() {
+    let root = temp("starting-review");
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
+    ed.claude_settings_gate = true;
+    stand_in(&mut ed);
+    ed.open(&root.join("a.rs")).unwrap();
+    crate::chat::open(&mut ed);
+    assert!(ed.session.chat.as_ref().is_some_and(|c| c.settings.waiting()), "{}", state(&ed));
+    let id = crate::notes::add(&mut ed, &root.join("a.rs"), 0..1, crate::notes::By::You, "is this right?");
+    if let Some(n) = ed.session.notes.list.iter_mut().find(|n| n.id == id) {
+        n.thread[0].draft = true;
+    }
+    crate::codereview::send_as(&mut ed, Some(true));
+    let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    assert_eq!(said, "review queued — claude is starting; its 1 comment goes once it's up");
+    until(&mut ed, "the review", |_| {
+        std::fs::read_to_string(root.join("stdin")).is_ok_and(|s| s.contains("is this right?"))
+    });
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// The chat's claude doesn't start before the repository's settings are read, nor waits for their card: it starts
 /// held back as `n` leaves it — them overridden, no value of theirs on its command line — the card up beside the
 /// chat, which keeps the keys, its first line saying so; a message typed reaches claude before any answer. `n`

@@ -142,6 +142,91 @@ fn the_state_says_a_card_waits_for_the_keys_to_go_quiet() {
     assert!(!s.text().contains("quiet"), "{}", s.text());
 }
 
+/// frictions29 #69, #70, #76: a weighty card's `y` before it was seen whole is said in its state entry
+/// (`refused`), `v` first among its answers while `y` waits; a bring card is about the session it brings
+/// (`session`), `shown_in` where it stands; a session's `answer` says where its last answer leaves it.
+#[test]
+fn the_state_says_a_refused_y_whose_card_it_is_and_where_an_answer_leaves_a_session() {
+    let mut ed = editor();
+    // (drawn cut: more lines than the screen holds)
+    let q = (0..30).map(|i| format!("file {i}")).collect::<Vec<_>>().join("\n");
+    let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(999), ops: false };
+    ed.push_offer(Offer::new("Claude changes 30 files".into(), &q, "", String::new(), what));
+    ed.focus_sync();
+    crate::term::render(&mut ed, &mut Vec::new(), 100, 16).unwrap();
+    settle(&mut ed);
+    let front = |ed: &Editor| ed.ui_state().json()["cards"][0].clone();
+    assert_eq!(front(&ed)["answers"][0]["key"], "v", "v first while y waits: {}", front(&ed));
+    assert!(front(&ed)["refused"].is_null());
+    feed(&mut ed, &["y"]);
+    assert_eq!(ed.offers.len(), 1, "not taken");
+    assert_eq!(front(&ed)["refused"], "y — see it whole first (v)", "{}", front(&ed));
+    ed.offers.clear();
+    // A bring card of another session's, standing in front
+    let back = crate::scratch::Scratch::new("state-bring").into_path();
+    let id = ed.session_add(back.clone());
+    let moved = crate::rebase::Moved {
+        root: back.clone(),
+        name: "back".into(),
+        branch: "b".into(),
+        base: "main".into(),
+        moved: 0,
+        ahead: 1,
+    };
+    ed.push_offer(Offer::new(
+        "Bring back into main".into(),
+        "1 commit.",
+        "",
+        String::new(),
+        What::UpTo(Box::new(moved)),
+    ));
+    let card = front(&ed);
+    assert_eq!(card["session"], session_id(id), "{card}");
+    assert_eq!(card["shown_in"], session_id(ed.session.id), "{card}");
+    // A session's answer: none without a chat; ready once there is one, blocked while a card of its waits
+    ed.offers.clear();
+    let answer = |ed: &Editor| ed.ui_state().json()["sessions"][0]["answer"].clone();
+    assert!(answer(&ed).is_null());
+    chat(&mut ed, "");
+    assert_eq!(answer(&ed), "ready");
+    let call = crate::tools::Call::test(7);
+    ed.push_offer(Offer::new(
+        "Claude asks to see the screen".into(),
+        "?",
+        "",
+        String::new(),
+        What::Screen { call },
+    ));
+    assert_eq!(answer(&ed), "blocked: Claude asks to see the screen");
+    std::fs::remove_dir_all(&back).ok();
+}
+
+/// The review of frictions36: a session's CLAUDE.md changes for the main checkout's are on their card — a long
+/// one drawn cut, and its `y` waits until they've been read whole (`v`): never written unseen into what every
+/// session's Claude reads.
+#[test]
+fn a_long_carry_out_card_waits_to_be_read() {
+    let mut ed = editor();
+    let here: String = (0..40).map(|i| format!("rule {i}\n")).collect();
+    let b = crate::instructions::Both {
+        root: "/stand-in/feat".into(),
+        rel: "CLAUDE.md".into(),
+        base: Some(String::new()),
+        here,
+        main: String::new(),
+        left: 0,
+        out: Some("/stand-in/main".into()),
+        ended: false,
+    };
+    ed.push_offer(b.card());
+    ed.focus_sync();
+    crate::term::render(&mut ed, &mut Vec::new(), 100, 24).unwrap();
+    settle(&mut ed);
+    feed(&mut ed, &["y"]);
+    assert_eq!(ed.offers.len(), 1, "not carried");
+    assert_eq!(ed.ui_state().json()["cards"][0]["refused"], "y — see it whole first (v)");
+}
+
 /// A weighty card whose answers do nothing here: a change set of a chat process that isn't there.
 fn weighty_card(ed: &mut Editor) {
     let q = "Claude renames `a` to `b` in 3 files.\n\nOne review for the set.";

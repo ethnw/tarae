@@ -335,6 +335,10 @@ pub fn restore_in(ed: &mut Editor, id: crate::event::SessionId) {
     restore_from(&mut s.notes, docs, saved);
     // (and the lines looked at in its reviews — `risk.rs` — with the added ones' text)
     s.looked.extend(restore.looked(&s.root));
+    // (and its viewed marks — one made since, in this run, stays: frictions29 #73)
+    for (path, v) in restore.viewed(&s.root) {
+        s.viewed.entry(path).or_insert(v);
+    }
     for (rel, lines) in restore.looked_lines(&s.root) {
         let kept = s.looked_lines.entry(rel).or_default();
         for l in lines {
@@ -1111,6 +1115,11 @@ pub fn send(ed: &mut Editor, id: u64, text: &str, fresh: bool, why: Option<Strin
     if crate::chat::submit(ed, text, Some(about), Some(chip)) {
         ed.session.notes.turn = vec![id];
         return;
+    }
+    // (its claude starting — the project's settings read first: the reply waits for it, frictions29 #67)
+    if let Some(c) = ed.session.chat.as_mut().filter(|c| c.settings.waiting()) {
+        c.sends.push(crate::chat::Later::Reply { id, text: text.to_string(), fresh, why });
+        return ed.set_status("reply queued — claude is starting; it goes once it's up");
     }
     // Claude never saw it — take it back (the chat panel says why)
     if fresh {

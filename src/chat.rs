@@ -1428,6 +1428,12 @@ fn ensure_proc(ed: &mut Editor) {
         false => None,
     };
     let Some(c) = &mut ed.session.chat else { return };
+    // (a simulation's stand-in: no process — its lines kept, its turns the scenario's)
+    #[cfg(test)]
+    if let Some(tx) = ed.claude_lines.clone() {
+        c.proc = Some(Proc { stdin: llm::Lines::to(tx), pid: 0 });
+        return;
+    }
     // (the edit tools are this process's for its life: `tools/list` reads them here — `Chat.edit_tools`)
     let arm = cfg.edit_tools;
     c.edit_tools = arm;
@@ -1998,6 +2004,15 @@ pub(crate) fn send_queued(ed: &mut Editor) {
     if crate::reads::pointing_asks(ed) {
         return;
     }
+    // (its claude not started yet, waiting for the settings' read: what waits goes as the gate opens,
+    // `gate_opened`; a send now would only queue itself again, and this loop take it again, for good — the review
+    // of frictions36. A re-read while it runs — the settings' watch — holds nothing: its claude is there)
+    let held = |ed: &Editor| {
+        ed.session.chat.as_ref().is_some_and(|c| c.busy() || (c.settings.waiting() && !c.running()))
+    };
+    if held(ed) {
+        return;
+    }
     // (what waits besides a message goes first, one a turn — frictions29 18; one that sends nothing now, its
     // drafts gone meanwhile, lets the next go)
     while let Some(later) =
@@ -2007,7 +2022,7 @@ pub(crate) fn send_queued(ed: &mut Editor) {
             Later::Review(lines) => crate::codereview::send_as(ed, lines),
             Later::Reply { id, text, fresh, why } => crate::notes::send(ed, id, &text, fresh, why, None),
         }
-        if ed.session.chat.as_ref().is_some_and(Chat::busy) {
+        if held(ed) {
             return;
         }
     }

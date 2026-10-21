@@ -709,7 +709,7 @@ pub fn turn_over(ed: &mut Editor) {
 
 impl Editor {
     /// A session by its checkout.
-    fn session_at(&self, root: &Path) -> Option<crate::event::SessionId> {
+    pub(crate) fn session_at(&self, root: &Path) -> Option<crate::event::SessionId> {
         std::iter::once(&self.session).chain(&self.sessions).find(|l| l.root == root).map(|l| l.id)
     }
 
@@ -796,6 +796,8 @@ impl Editor {
         if let Some(r) = self.session.rebase.as_mut() {
             r.stage = Stage::Running { generation, aborting };
         }
+        // (its reloads said as one line once it's over — frictions29 #68; this run's, by its generation)
+        self.disk_batch_start("rebase", generation);
         poll(self, root, generation, None);
         Ok(())
     }
@@ -922,6 +924,8 @@ impl Editor {
     /// A git run of the rebase ended — `end` as git left it, `exit` as its process did.
     fn rebase_ended(&mut self, generation: u64, end: Ended, exit: crate::task::State) {
         use crate::task::State;
+        // (this run's reloads, whatever became of the rebase meanwhile: never left holding its session's toasts)
+        self.disk_batch_end(generation);
         let running = |r: &Rebase| matches!(r.stage, Stage::Running { generation: g, .. } if g == generation);
         let Some((branch, base)) =
             self.session.rebase.as_ref().filter(|r| running(r)).map(|r| (r.branch.clone(), r.base.clone()))

@@ -655,6 +655,16 @@ test: `allow::tests::which_folders_a_denied_write_may_open` · `allow::tests::ho
 `tools::tests::also_asks_for_localhost_a_variable_and_the_terminals` ·
 `editor::tests::claude_asks_to_run_outside_the_sandbox_with_a_reason` · `tools::tests::claude_asks_for_one_socket_not_the_sandbox_off`
 
+Planned, not built (frictions29 #78): the sandbox's own tier-own tests run in a user namespace on Docker's VM
+(`cargo xtask linux --userns`, the VM's `userns-run.sh`), so a session can't run the branch it wrote. Claude can ask
+for one unix socket already (`unix_socket`; the run's `where` says `sandbox own + Docker socket`), but whoever holds
+the Docker socket is root on the VM, and the VM mounts your home (colima, Docker Desktop): what a container does
+there no Seatbelt sees. So that run is an outside run for what it can reach, and its card is the run-outside
+card's — `y` only, once, never `a`/`A`, the command whole with what changed since the last `y` (`sinceyes.rs`) —
+naming the socket and saying "root on Docker's VM, which mounts your home"; its output comes back as any run's.
+Left to build: that card for a run naming the socket (today a socket grant is a sandboxed run's), and `xtask linux`
+keeping its Docker config (`DOCKER_CONFIG`) in the run's own folder. Until then you run it.
+
 Each of these settings is yours: a project's `.tarae.toml` sets one only once you trust it.
 test: `trust::tests::every_sandbox_setting_waits_for_trust`
 

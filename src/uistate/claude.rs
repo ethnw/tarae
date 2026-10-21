@@ -83,6 +83,12 @@ impl Editor {
             l.compacted = None;
             l.key_source = None;
             l.sandbox = None;
+            // (its answer's word and context share, never what blocks it: a card's title — the review of
+            // frictions36)
+            if let Some(a) = l.answer.as_mut().filter(|a| a.starts_with("blocked: ")) {
+                let context = a.rfind(" · context ").map(|i| a[i..].to_string()).unwrap_or_default();
+                *a = format!("blocked{context}");
+            }
         }
         // A reviewer — its own session's too — is how it goes and its counts, never its words: nothing of it
         // goes to the author until you send its findings (`space v s`), and its verdict never does

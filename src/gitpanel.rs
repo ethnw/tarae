@@ -621,7 +621,7 @@ impl Editor {
         let args: &'static [&'static str] =
             if pop { &["stash", "pop"] } else { &["stash", "push", "--include-untracked"] };
         self.git_hooked("stash", hooks::STASH, move |ed, pre| {
-            ed.git_do(
+            ed.git_do_rewriting(
                 Box::new(move |top| crate::gitrepo::hooked(top, &hooks::with(pre, args))),
                 Box::new(move |ed, r| match r {
                     Ok(_) if pop => ed.set_success("Took the stashed changes back"),
@@ -701,16 +701,39 @@ impl Editor {
         self.git_queued(work, done);
     }
 
+    /// `git_do` for an action that rewrites the working tree (a discard, a stash): what it rewrites is said as one
+    /// line while it runs (`disk::DiskBatch`, frictions29 #68) — never a push's or a stage's (the review of
+    /// frictions36: a slow push held the session's reloads, then blamed git for them).
+    fn git_do_rewriting(&mut self, work: GitWork, done: GitDone) {
+        if self.session.git_status.is_none() {
+            return self.set_warning("not a git repository");
+        }
+        self.git_queued_as(true, work, done);
+    }
+
     /// Queue work in the repository, the status read or not: `done` gets what `work` gave.
     fn git_queued<T: Send + 'static>(
         &mut self,
         work: impl FnOnce(&Path) -> T + Send + 'static,
         done: impl FnOnce(&mut Editor, T) + Send + 'static,
     ) {
-        self.session.git_queue.push_back(Box::new(move |top| {
-            let result = work(top);
-            Box::new(move |ed: &mut Editor| done(ed, result))
-        }));
+        self.git_queued_as(false, work, done);
+    }
+
+    /// `git_queued` — `rewrites`: its work rewrites the working tree.
+    fn git_queued_as<T: Send + 'static>(
+        &mut self,
+        rewrites: bool,
+        work: impl FnOnce(&Path) -> T + Send + 'static,
+        done: impl FnOnce(&mut Editor, T) + Send + 'static,
+    ) {
+        self.session.git_queue.push_back((
+            rewrites,
+            Box::new(move |top| {
+                let result = work(top);
+                Box::new(move |ed: &mut Editor| done(ed, result))
+            }),
+        ));
         self.git_next();
     }
 
@@ -719,12 +742,18 @@ impl Editor {
             return;
         }
         let top = self.session.git_status.as_ref().map_or_else(|| self.git_cwd(), |s| s.top.clone());
-        let Some(job) = self.session.git_queue.pop_front() else { return };
+        let Some((rewrites, job)) = self.session.git_queue.pop_front() else { return };
         self.session.git_busy = true;
+        // (what it rewrites in the checkout said as one line, from its start — frictions29 #68)
+        let token = crate::disk::batch_token();
+        if rewrites {
+            self.disk_batch_start("git", token);
+        }
         self.events.jobs().spawn(move || {
             let done = job(&top);
             move |ed: &mut Editor| {
                 ed.session.git_busy = false;
+                ed.disk_batch_end(token);
                 done(ed);
                 ed.git_next();
                 if ed.session.git_queue.is_empty() {
@@ -805,7 +834,7 @@ impl Editor {
         }
         self.session.git_discard_asked = None;
         let n = tracked.len() + untracked.len();
-        self.git_do(
+        self.git_do_rewriting(
             Box::new(move |top| {
                 if !tracked.is_empty() {
                     let mut args = vec!["restore", "--"];
@@ -978,6 +1007,170 @@ impl Editor {
         if self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
             self.git_refresh();
         }
+    }
+
+    /// `:commit <file>` from a code review once every file is viewed (frictions29 #77: ten keys with timing) — the
+    /// git tab's steps in one: the review ends, every change is staged (`S`), committed with the file as its
+    /// message (`c` … `:w`: `#` lines left out, the hooks asked about as there), then a session's bring card.
+    /// Said as it goes; refused, saying why, while a file isn't viewed, a buffer isn't saved, Claude is working or
+    /// the review is a turn's (it shows only part of what would be committed). What's staged is what was viewed
+    /// (the review of frictions36: the check ran as it was typed, `add --all` after the saves, a hooks card and the
+    /// queue): the tree is read as it's typed (`commit_tree`: every changed file one of the review's, an open one
+    /// as its buffer has it) and again right before staging — changed since, nothing is staged; the message's
+    /// file, in the checkout, is never staged.
+    pub fn commit_from_review(&mut self, file: &str) -> Result<(), String> {
+        use crate::codereview::Base;
+        let file = file.trim();
+        if file.is_empty() {
+            return Err("name the commit message's file — :commit <file>".into());
+        }
+        let Some(r) = self.session.code_review.as_ref() else {
+            return Err(
+                ":commit commits from a code review once every file is viewed — space v v opens one".into()
+            );
+        };
+        if matches!(r.base, Base::Turn { .. }) {
+            return Err("a turn's review shows only that turn's changes — :commit from space v v's".into());
+        }
+        // (unsaved first: an edit makes its file not viewed too, and this is what to do about it)
+        let unsaved = |f: &crate::codereview::File| {
+            self.docs.iter().any(|d| d.path.as_ref() == Some(&f.path) && d.is_modified() && !d.throwaway)
+        };
+        if let Some(f) = r.files.iter().find(|f| unsaved(f)) {
+            return Err(format!("nothing committed — {} has unsaved changes (:w)", f.rel));
+        }
+        let left: Vec<&str> = r.files.iter().filter(|f| !r.viewed(self, f)).map(|f| f.rel.as_str()).collect();
+        if let Some(first) = left.first() {
+            let more = if left.len() > 1 { format!(" and {} more", left.len() - 1) } else { String::new() };
+            return Err(format!("nothing committed — {first}{more} not viewed (]u goes to them)"));
+        }
+        if self.session.chat.as_ref().is_some_and(|c| c.busy()) {
+            return Err("nothing committed — Claude is working; :commit once its turn is over".into());
+        }
+        let (path, root) = (self.session.root.join(file), r.root.clone());
+        // (the message's file, in the checkout — its `..` taken: `../m.txt` is beside it — never staged with the rest)
+        let exclude = rel_inside(&root, &path);
+        let rels: Vec<String> = r.files.iter().map(|f| f.rel.clone()).collect();
+        // (a file of the review's for the message: kept out, its viewed change would go uncommitted — the review of
+        // frictions36)
+        if let Some(rel) = exclude.as_ref().filter(|rel| rels.contains(rel)) {
+            return Err(format!(
+                "nothing committed — {rel} is a file of this review; write the message elsewhere"
+            ));
+        }
+        let buffers: Vec<(String, [u8; 32])> = (r.files.iter())
+            .filter_map(|f| self.docs.iter().find(|d| d.path.as_ref() == Some(&f.path)).map(|d| (f, d)))
+            .map(|(f, d)| (f.rel.clone(), crate::sha256::digest(d.text.to_string().as_bytes())))
+            .collect();
+        let started = r.started;
+        let (top, ex) = (root.clone(), exclude.clone());
+        let work = move || commit_tree(&top, ex.as_deref());
+        self.step(
+            self.events.jobs(),
+            "commit",
+            "reading what :commit would stage…",
+            work,
+            move |ed, tree| {
+                // (the review it was typed in, still open)
+                if ed.session.code_review.as_ref().is_none_or(|r| r.started != started) {
+                    return ed.set_warning("commit: the review changed meanwhile — nothing committed");
+                }
+                let tree = match tree {
+                    Ok(t) => t,
+                    Err(e) => return ed.set_error(format!("commit: {e}")),
+                };
+                let disk = |rel: &str| tree.iter().find(|(r, _)| r == rel).and_then(|(_, d)| *d);
+                let outside = tree.iter().find(|(rel, _)| !rels.contains(rel));
+                let differs = buffers
+                    .iter()
+                    .find(|(rel, d)| tree.iter().any(|(r, _)| r == rel) && disk(rel) != Some(*d));
+                match (outside, differs) {
+                    (Some((rel, _)), _) => {
+                        return ed.set_error(format!(
+                            "commit: {rel} changed, not in the review — nothing committed"
+                        ));
+                    }
+                    (_, Some((rel, _))) => {
+                        return ed.set_error(format!(
+                            "commit: {rel} on disk isn't its buffer — nothing committed"
+                        ));
+                    }
+                    _ => {}
+                }
+                ed.commit_viewed(path, root, exclude, tree, started);
+            },
+        );
+        Ok(())
+    }
+
+    /// `commit_from_review`, the tree checked as viewed: every change staged and committed — once the tree is
+    /// `viewed` still, read again right before staging — and then the review (the one `:commit` was typed in,
+    /// `started`) ends. Until then it stays: what refuses (no message, a change since) leaves it open to go on
+    /// from (the review of frictions36: it had ended first, its error saying "nothing staged" with it gone).
+    fn commit_viewed(
+        &mut self,
+        path: PathBuf,
+        root: PathBuf,
+        exclude: Option<String>,
+        viewed: CommitTree,
+        started: std::time::Instant,
+    ) {
+        let file = path.display().to_string();
+        self.set_status(format!("staging every change, then committing with {file}…"));
+        self.after_saves(move |ed| {
+            ed.git_hooked("commit", hooks::COMMIT, move |ed, pre| {
+                // (the git queue, the git tab read or not — in the review's repository)
+                ed.git_queued(
+                    move |_: &Path| -> Result<String, String> {
+                        let top = root.as_path();
+                        // (the message first: none, nothing staged either)
+                        let msg =
+                            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                        if msg.lines().all(|l| l.trim().is_empty() || l.starts_with('#')) {
+                            return Err(format!("{} holds no message — nothing staged", path.display()));
+                        }
+                        // (what was viewed, still — a turn, a tool or a save since: nothing staged)
+                        let now = commit_tree(top, exclude.as_deref())?;
+                        if let Some((rel, _)) =
+                            now.iter().chain(&viewed).find(|e| !now.contains(e) || !viewed.contains(e))
+                        {
+                            return Err(format!("{rel} changed since :commit — nothing staged"));
+                        }
+                        let f = path.to_string_lossy().into_owned();
+                        // (literal: a name with `*`, `?` or `[` is itself, never a pattern — as `commit_tree` left it out)
+                        let kept_out = exclude.as_ref().map(|rel| format!(":(exclude,literal){rel}"));
+                        let mut add = vec!["add", "--all", "--", ".", crate::disk::NOT_TEMP];
+                        add.extend(kept_out.as_deref());
+                        git(top, &add, None)?;
+                        crate::gitrepo::hooked(
+                            top,
+                            &hooks::with(pre, &["commit", "--cleanup=strip", "-F", &f]),
+                        )
+                        .map_err(|e| format!("{e} (every change stays staged)"))?;
+                        git(top, &["log", "-1", "--format=%h %s"], None)
+                    },
+                    move |ed: &mut Editor, result: Result<String, String>| match result {
+                        Ok(line) => {
+                            if ed.session.code_review.as_ref().is_some_and(|r| r.started == started) {
+                                crate::codereview::close(ed);
+                            }
+                            ed.set_success(format!("Committed {} — the review ended", line.trim()));
+                            // (a session's: on to its bring card, as `space W` `b`)
+                            if ed.session.id != 0
+                                && let Err(e) = ed.session_bring("")
+                            {
+                                ed.set_warning(format!("bring: {e}"));
+                            }
+                        }
+                        Err(e) => {
+                            let open = ed.session.code_review.as_ref().is_some_and(|r| r.started == started);
+                            let review = if open { " — the review stays open" } else { "" };
+                            ed.set_error(format!("commit: {e}{review}"))
+                        }
+                    },
+                );
+            });
+        });
     }
 
     /// `C` · `:commit-draft` — Claude drafts the commit message from what's staged (amending: the whole
@@ -1468,6 +1661,74 @@ pub fn show(cwd: &Path, hash: &str) -> Result<String, String> {
 /// Most bytes of the staged diff sent for a draft (the stat always goes).
 const DRAFT_DIFF_MAX: usize = 80_000;
 
+/// What `:commit` stages: each changed file (from the top), its text's SHA-256 on disk (None: gone) — sorted.
+type CommitTree = Vec<(String, Option<[u8; 32]>)>;
+
+/// `path` from `root` once its `.` and `..` are taken (by its parts, no disk) — None: not inside it.
+fn rel_inside(root: &Path, path: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir if !out.pop() => return None,
+            Component::ParentDir | Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    let rel = out.strip_prefix(root).ok()?;
+    (!rel.as_os_str().is_empty()).then(|| rel.to_string_lossy().into_owned())
+}
+
+/// The checkout at `top` as `:commit` would stage it (a worker): its files changed against HEAD and those
+/// untracked, ignored ones out, `exclude` (the message's file) out — plumbing only (`git diff` over the working
+/// tree refreshes the index, its lock taken whatever `GIT_OPTIONAL_LOCKS` says), each read and hashed. What
+/// `diff-index` only suspects by its stat (a file touched, or written again as it was: a stash, a checkout) is
+/// held against HEAD's blob by content (`hash-object`, which writes nothing) — the same, it isn't a change (the
+/// review of frictions36: refused as "changed, not in the review").
+fn commit_tree(top: &Path, exclude: Option<&str>) -> Result<CommitTree, String> {
+    let raw = git(top, &["diff-index", "-z", "HEAD"], None)?;
+    let (mut changed, suspected) = suspected_of(&raw);
+    if !suspected.is_empty() {
+        let paths: String = suspected.iter().map(|(p, _)| format!("{p}\n")).collect();
+        let shas = git(top, &["hash-object", "--stdin-paths"], Some(&paths))?;
+        let now: Vec<&str> = shas.lines().collect();
+        for (i, (path, then)) in suspected.into_iter().enumerate() {
+            if now.get(i) != Some(&then.as_str()) {
+                changed.push(path);
+            }
+        }
+    }
+    let new = git(top, &["ls-files", "--others", "--exclude-standard", "-z"], None)?;
+    let mut out: CommitTree = (changed.iter().map(String::as_str).chain(new.split('\0')))
+        .filter(|rel| !rel.is_empty() && Some(*rel) != exclude)
+        .map(|rel| (rel.to_string(), std::fs::read(top.join(rel)).ok().map(|b| crate::sha256::digest(&b))))
+        .collect();
+    crate::sorting::sort(&mut out);
+    out.dedup();
+    Ok(out)
+}
+
+/// `diff-index -z`'s raw entries (`:<mode> <mode> <sha> <sha> <status>` NUL `<path>` NUL): those changed, and those
+/// only suspected by their stat — a regular file's modification, its mode the same (its path, HEAD's blob) — to be
+/// held against HEAD by content. A gitlink (`160000`: a submodule's commit or its dirt) or a link (`120000`) is
+/// changed as git says: `hash-object` reads neither as git stores it (the review of frictions36: a submodule
+/// failed every `:commit` with git's error).
+fn suspected_of(raw: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let (mut changed, mut suspected) = (Vec::new(), Vec::new());
+    let mut fields = raw.split('\0');
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let regular = |mode: &str| matches!(mode, "100644" | "100755");
+        match parts.as_slice() {
+            [old, new, sha, _, "M"] if old == new && regular(old) => {
+                suspected.push((path.to_string(), sha.to_string()))
+            }
+            _ => changed.push(path.to_string()),
+        }
+    }
+    (changed, suspected)
+}
+
 /// What Claude reads to draft a commit message: the repository's recent messages (their style), the stat and
 /// the staged diff — amending, the whole commit's (from HEAD's parent).
 fn commit_prompt(top: &Path, amend: bool) -> Result<String, String> {
@@ -1522,6 +1783,30 @@ fn commit_prompt(top: &Path, amend: bool) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The review of frictions36: of `diff-index`'s entries only a regular file's modification (its mode the same) is
+    /// held against HEAD by content — a gitlink (a submodule) and a link are changed as git says, never handed to
+    /// `hash-object`; an add, a delete, a mode change are changed.
+    #[test]
+    fn only_a_regular_files_modification_is_held_against_head_by_content() {
+        let z = "0000000000000000000000000000000000000000";
+        let (h1, h2) =
+            ("1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222");
+        let entries = [
+            format!(":100644 100644 {h1} {z} M\0touched.txt\0"),
+            format!(":100755 100755 {h1} {z} M\0run.sh\0"),
+            format!(":160000 160000 {h1} {h2} M\0sub\0"),
+            format!(":120000 120000 {h1} {z} M\0link\0"),
+            format!(":100644 100755 {h1} {z} M\0chmod.txt\0"),
+            format!(":000000 100644 {z} {z} A\0added.txt\0"),
+            format!(":100644 000000 {h1} {z} D\0gone.txt\0"),
+        ];
+        let (changed, suspected) = suspected_of(&entries.concat());
+        assert_eq!(changed, ["sub", "link", "chmod.txt", "added.txt", "gone.txt"]);
+        let paths: Vec<&str> = suspected.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["touched.txt", "run.sh"]);
+        assert!(suspected.iter().all(|(_, sha)| sha == h1), "HEAD's blob, not the work tree's");
+    }
 
     #[test]
     fn porcelain_v2() {

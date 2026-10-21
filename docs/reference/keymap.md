@@ -596,6 +596,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:soft-wrap` |  | Wrap this buffer's long lines, or scroll sideways (on/off) |
 | `:note-close` |  | Close Claude's note on this line |
 | `:notes-clear` |  | Close all notes (or one author's: reviewer, author, you) |
+| `:commit` |  | Commit every change from a review all viewed (message file) |
 | `:commit-draft` |  | Let Claude draft the commit message |
 | `:undo-turn` |  | Undo what Claude changed in its last turn |
 | `:redo-turn` |  | Bring back the turn you undid |

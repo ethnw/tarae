@@ -10809,6 +10809,11 @@ fn draw_chat(
     // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready" — either only where it fits
     let left = w.saturating_sub(title_w + 2);
     let status: Vec<Span> = match c.state {
+        // (its claude not up yet: the project's settings read first — frictions29 #67, a send then waits for it)
+        State::Idle if let Some(t) = c.settings.waiting_since() => vec![
+            sp(wave(), accent),
+            sp(format!(" starting {:>4.1}s", crate::clock::since(t).as_secs_f32()), dim),
+        ],
         State::Idle => match crate::models::label(editor) {
             Some(m) if left >= 4 => vec![sp(fit_ellipsis(&m, left), faint)],
             None if left >= 5 => vec![sp("ready".into(), faint)],

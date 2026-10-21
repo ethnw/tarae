@@ -31,7 +31,7 @@ use crate::sizes::Slot;
 /// `chat-view`.
 /// 9: `keys.waiting` (the card that takes the keys once they've been quiet — friction 60) and a card's `waits`
 /// (`keys quiet`).
-pub const V: u64 = 9;
+pub const V: u64 = 10;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -889,6 +889,10 @@ pub struct SessionState {
     pub root: String,
     /// What its chat's Claude does.
     pub doing: String,
+    /// Where its last answer leaves it, one line a driver can key on (frictions29 #76: the prose said "Ready" or
+    /// didn't): `ready` · `working` · `blocked: <what waits for you>`, then ` · context N %` once reported — None:
+    /// no chat.
+    pub answer: Option<String>,
     /// Its reviewer (`reviewer.rs`): `reviewing` while it reads — None else. A field of its own beside
     /// `doing`: the two are at work apart, often at once, and a driver waiting for `doing` to be `idle` waits
     /// for the chat's turn, not a review it didn't ask for (#195).
@@ -1225,6 +1229,13 @@ pub struct CardState {
     /// What it waits for before it takes the keys: `keys quiet` — it came while they were coming in (friction 60;
     /// the keys' `waiting` names it); its letters are the code's meanwhile, `C-q` answers it.
     pub waits: Option<&'static str>,
+    /// The front card's last key it didn't take, and why — what it says on itself (`offer_refused`; a `y` before
+    /// it was seen whole: `y — see it whole first (v)`) — until it changes (frictions29 #69: a driver's two `y`s
+    /// changed nothing it could read).
+    pub refused: Option<String>,
+    /// The session it's shown in, where that isn't the one it's about (`session`: a bring card stands in front,
+    /// it brings another — frictions29 #70).
+    pub shown_in: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1263,6 +1274,27 @@ fn ms(d: std::time::Duration) -> u64 {
 }
 
 impl Editor {
+    /// Session `l`'s `answer` (`SessionState`): from what it's doing and what waits for you — the first card of
+    /// its, else an edit to review — and its context's share of the window.
+    fn answer_said(&self, l: &crate::session::Session, now_ms: u64) -> Option<String> {
+        l.chat.as_ref()?;
+        let front = l.id == self.session.id;
+        let cards = front.then_some(&self.offers).into_iter().flatten().chain(&l.parked);
+        let card = cards.filter(|o| !o.installing()).map(|o| o.title.clone()).next();
+        let state = match self.doing(l) {
+            crate::session::Doing::Waiting => {
+                format!("blocked: {}", card.unwrap_or_else(|| "an edit to review".into()))
+            }
+            crate::session::Doing::Idle | crate::session::Doing::Done => "ready".into(),
+            _ => "working".into(),
+        };
+        let pct = UsageState::of(&l.usage, now_ms).and_then(|u| u.percent());
+        Some(match pct {
+            Some(p) => format!("{state} · context {} %", p.round() as u64),
+            None => state,
+        })
+    }
+
     /// What a session's Claude is doing, in the state's words.
     fn doing_said(&self, l: &crate::session::Session) -> String {
         match self.doing(l) {
@@ -1286,6 +1318,7 @@ impl Editor {
             branch: l.branch.clone().or_else(|| l.git_branch.clone()),
             root: l.root.display().to_string(),
             doing: self.doing_said(l),
+            answer: self.answer_said(l, now_ms),
             reviewer: crate::reviewer::session_said(self, l),
             reviewer_run: ReviewerState::of(self, l),
             review: crate::reviews::Run::of(self, l, is_front),
@@ -1367,10 +1400,29 @@ impl Editor {
         let quick = self.preflight_quick().is_some();
         let card = |o: &crate::offer::Offer, sid: crate::event::SessionId, up: &'static str| {
             let is_front = up == "front";
-            let (answers, withheld) = o.answers_held(quick);
+            let (mut answers, withheld) = o.answers_held(quick);
+            let whole = is_front && self.offer_seen_whole();
+            // (its `y` waits until it's been seen whole: `v`, what to do first, first — frictions29 #69)
+            if is_front
+                && o.weighty()
+                && !whole
+                && let Some(i) = answers.iter().position(|a| a.0 == 'v')
+            {
+                let v = answers.remove(i);
+                answers.insert(0, v);
+            }
+            let refused =
+                is_front.then(|| self.offer_said_now().map(str::to_string)).flatten().or_else(|| {
+                    let early = self.offer_early.get() == Some((o.id, o.rev));
+                    (is_front && early && !whole).then(|| "y — see it whole first (v)".to_string())
+                });
+            // (a bring card is about the session it brings, wherever it stands — frictions29 #70)
+            let about = o.bring_root().and_then(|r| self.session_at(r)).unwrap_or(sid);
             CardState {
                 id: format!("card#{}", o.id),
-                session: session_id(sid),
+                session: session_id(about),
+                shown_in: (about != sid).then(|| session_id(sid)),
+                refused,
                 whose: if o.claudes() { "claude" } else { "tarae" },
                 kind: o.kind(),
                 title: o.title.clone(),
@@ -1392,7 +1444,7 @@ impl Editor {
                     .get()
                     .filter(|&(id, rev, _)| (id, rev) == (o.id, o.rev))
                     .map(|(.., at)| ms(crate::clock::since(at))),
-                seen_whole: is_front && self.offer_seen_whole(),
+                seen_whole: whole,
                 cut: self.screen.offer_cut.filter(|_| is_front),
                 viewing: is_front && self.offer_viewing(),
                 at: self.screen.offer_card.filter(|_| is_front),
@@ -1478,7 +1530,7 @@ impl UiState {
             .iter()
             .map(|s| {
                 let mut v = json!({ "id": s.id, "name": s.name, "doing": s.doing, "cards": s.cards, "root": s.root,
-                    "billing": s.billing });
+                    "billing": s.billing, "answer": s.answer });
                 if let Some(b) = &s.branch {
                     v["branch"] = json!(b);
                 }
@@ -1537,6 +1589,8 @@ impl UiState {
                     "withheld": c.withheld.iter().map(char::to_string).collect::<Vec<_>>(),
                     "aside": c.aside,
                     "waits": c.waits,
+                    "refused": c.refused,
+                    "shown_in": c.shown_in,
                 });
                 // (none at Claude's level: its `asks` is cut, and the text would be it whole)
                 if !c.text.is_empty() {

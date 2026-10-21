@@ -734,6 +734,12 @@ fn reap(child: &mut Child) {
 pub struct Lines(std::sync::mpsc::Sender<String>);
 
 impl Lines {
+    /// Tests: lines that go to `tx`, no process, no thread (`Editor.claude_lines`).
+    #[cfg(test)]
+    pub fn to(tx: std::sync::mpsc::Sender<String>) -> Lines {
+        Lines(tx)
+    }
+
     pub fn new(mut stdin: std::process::ChildStdin) -> Lines {
         let (tx, rx) = channel::<String>();
         crate::event::thread("tarae-llm-write", move || {

@@ -300,27 +300,41 @@ pub fn taken_out_key(rel: &str, text: &str, now: u32) -> Key {
     key(rel, b'x', &format!("{now}\0{text}"))
 }
 
-/// A line of `rel` (its key `line`) that moved within its change since it was looked at — between the lines
-/// `prev` and `next` now (none: the change's end): a high-risk change of its own at `at` (its line now).
-/// Keyed by the line and its new neighbours (sign `o`): looked at there, it's done; moved again, it's asked
-/// again. `text`: the line, when its document is open.
+/// Lines of `rel` next to each other (each its key `line`) that moved within their change since they were
+/// looked at — each between the lines `prev` and `next` now (none: the change's end) — or (`block`) whose block
+/// changed: a bracket line crossed them. One high-risk change for them all at `at` (the first's line now; frictions29
+/// #74: one asked per line). Keyed by each line and its new neighbours (sign `o`): looked at there, it's done;
+/// moved again, it's asked again. `text`: the first line, when its document is open.
 pub fn moved(
     rel: &str,
     at: usize,
     text: Option<&str>,
-    (line, prev, next): (Key, Option<Key>, Option<Key>),
+    lines: &[(Key, Option<Key>, Option<Key>)],
+    block: bool,
 ) -> Graded {
-    let why = match text {
-        Some(t) => format!("moved since your look: `{}`", t.trim().chars().take(60).collect::<String>()),
-        None => "a line moved since your look".to_string(),
+    let what = match (lines.len(), block) {
+        (1, false) => "moved".to_string(),
+        (1, true) => "its block moved".to_string(),
+        (n, false) => format!("{n} lines moved"),
+        (n, true) => format!("{n} lines' block moved"),
     };
-    let around = format!("{}\0{}\0{}", key_hex(line), key_hex(prev.unwrap_or(0)), key_hex(next.unwrap_or(0)));
+    let why = match text {
+        Some(t) => format!("{what} since your look: `{}`", t.trim().chars().take(60).collect::<String>()),
+        None if lines.len() == 1 && !block => "a line moved since your look".to_string(),
+        None if lines.len() == 1 => "a line's block moved since your look".to_string(),
+        None => format!("{what} since your look"),
+    };
+    let o = |(line, prev, next): &(Key, Option<Key>, Option<Key>)| {
+        let around =
+            format!("{}\0{}\0{}", key_hex(*line), key_hex(prev.unwrap_or(0)), key_hex(next.unwrap_or(0)));
+        key(rel, b'o', &around)
+    };
     Graded {
         grade: Grade::High,
         why,
         at,
-        lines: 1,
-        keys: vec![key(rel, b'o', &around)],
+        lines: lines.len(),
+        keys: lines.iter().map(o).collect(),
         removed: 0,
         added: 0,
         mode: false,

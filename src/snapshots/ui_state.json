@@ -24,11 +24,13 @@
       "id": "card#2",
       "in_sight_ms": 0,
       "kind": "review-end",
+      "refused": null,
       "rev": 0,
       "same_as": null,
       "seen_whole": true,
       "session": "s0",
       "settled": true,
+      "shown_in": null,
       "state": "asking",
       "text": [
         {
@@ -72,11 +74,13 @@
       "id": "card#1",
       "in_sight_ms": null,
       "kind": "change-set",
+      "refused": null,
       "rev": 0,
       "same_as": null,
       "seen_whole": false,
       "session": "s1",
       "settled": false,
+      "shown_in": null,
       "state": "asking",
       "text": [
         {
@@ -209,6 +213,7 @@
   ],
   "sessions": [
     {
+      "answer": null,
       "billing": "subscription",
       "cards": 1,
       "doing": "waiting",
@@ -284,6 +289,7 @@
       }
     },
     {
+      "answer": null,
       "billing": "subscription",
       "cards": 1,
       "doing": "waiting",
@@ -435,5 +441,5 @@
       "where": "waiting"
     }
   ],
-  "v": 9
+  "v": 10
 }

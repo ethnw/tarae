@@ -29,6 +29,19 @@ pub fn open(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
 
 /// A pty asked of the broker at `socket`: the size sent, both ends received.
 pub fn asked(socket: &std::path::Path, rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+    asked_with_node(socket, rows, cols).map(|(m, s, _)| (m, s))
+}
+
+/// The slave of a pair handed in, as the broker that made it named it: its path in /dev and its inode.
+pub type Node = (std::path::PathBuf, u64);
+
+/// `asked`, with the `Node` the broker sent beside the pair (`node_bytes`) — None from one that sent none.
+#[allow(dead_code, reason = "tarae's broker's: the e2e harness and xtask share this file (`#[path]`)")]
+pub fn asked_with_node(
+    socket: &std::path::Path,
+    rows: u16,
+    cols: u16,
+) -> io::Result<(OwnedFd, OwnedFd, Option<Node>)> {
     use std::io::Write as _;
     let mut s = std::os::unix::net::UnixStream::connect(socket)
         .map_err(|e| io::Error::new(e.kind(), format!("the run's pty broker ({}): {e}", socket.display())))?;
@@ -36,11 +49,28 @@ pub fn asked(socket: &std::path::Path, rows: u16, cols: u16) -> io::Result<(Owne
     ask[..2].copy_from_slice(&rows.to_le_bytes());
     ask[2..].copy_from_slice(&cols.to_le_bytes());
     s.write_all(&ask)?;
-    let fds = recv_fds(s.as_raw_fd())?;
+    let (fds, data) = recv_fds(s.as_raw_fd())?;
     match <[OwnedFd; 2]>::try_from(fds) {
-        Ok([master, slave]) => Ok((master, slave)),
+        Ok([master, slave]) => Ok((master, slave, node_of(&data))),
         Err(_) => Err(io::Error::other("the run's pty broker sent no pty")),
     }
+}
+
+/// A `Node` as the broker sends it with the pair: its inode (8 bytes, little-endian), then its path.
+#[allow(dead_code, reason = "tarae's broker's: the e2e harness and xtask share this file (`#[path]`)")]
+pub fn node_bytes((path, ino): &Node) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut out = ino.to_le_bytes().to_vec();
+    out.extend(path.as_os_str().as_bytes());
+    out
+}
+
+/// `node_bytes` read back — None for one byte (a broker that names none) or what isn't one.
+fn node_of(data: &[u8]) -> Option<Node> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let (ino, path) = (data.get(..8)?, data.get(8..).filter(|p| p.starts_with(b"/dev/"))?);
+    let ino = u64::from_le_bytes(ino.try_into().ok()?);
+    Some((std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path)), ino))
 }
 
 /// A new pty made here — `/dev/ptmx` opened (what `open` does outside a sandbox, and the broker for a run).
@@ -64,15 +94,16 @@ pub fn made(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((master, slave))
 }
 
-/// `fds` sent on the unix socket `sock` with one byte (`SCM_RIGHTS`) — the broker's side.
+/// `fds` sent on the unix socket `sock` with `data` (at least one byte, at most `DATA_MAX`; `SCM_RIGHTS`) — the
+/// broker's side.
 #[allow(dead_code, reason = "tarae's broker's: the e2e harness and xtask share this file (`#[path]`)")]
-pub fn send_fds(sock: RawFd, fds: &[RawFd]) -> io::Result<()> {
+pub fn send_fds(sock: RawFd, fds: &[RawFd], data: &[u8]) -> io::Result<()> {
     let bytes = std::mem::size_of_val(fds) as u32;
     // SAFETY: CMSG_SPACE only computes a size.
     let space = unsafe { libc::CMSG_SPACE(bytes) } as usize;
     let mut control = vec![0u8; space];
-    let mut byte = [0u8; 1];
-    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut data = if data.is_empty() { vec![0u8] } else { data[..data.len().min(DATA_MAX)].to_vec() };
+    let mut iov = libc::iovec { iov_base: data.as_mut_ptr().cast(), iov_len: data.len() };
     // SAFETY: a zeroed msghdr pointing at live locals; one control message of `fds.len()` descriptors fills
     // the buffer CMSG_SPACE sized for it.
     unsafe {
@@ -93,15 +124,19 @@ pub fn send_fds(sock: RawFd, fds: &[RawFd]) -> io::Result<()> {
     Ok(())
 }
 
+/// The most bytes a message beside the descriptors carries (`send_fds`).
+const DATA_MAX: usize = 1024;
+
 /// The descriptors one message on `sock` carries (at most 2), each made close-on-exec at once (macOS has no
-/// `MSG_CMSG_CLOEXEC`: until then a program another thread starts could get a copy — a moment, in a run).
-fn recv_fds(sock: RawFd) -> io::Result<Vec<OwnedFd>> {
+/// `MSG_CMSG_CLOEXEC`: until then a program another thread starts could get a copy — a moment, in a run) —
+/// and the bytes beside them.
+fn recv_fds(sock: RawFd) -> io::Result<(Vec<OwnedFd>, Vec<u8>)> {
     let bytes = (2 * std::mem::size_of::<RawFd>()) as u32;
     // SAFETY: CMSG_SPACE only computes a size.
     let space = unsafe { libc::CMSG_SPACE(bytes) } as usize;
     let mut control = vec![0u8; space];
-    let mut byte = [0u8; 1];
-    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut data = vec![0u8; DATA_MAX];
+    let mut iov = libc::iovec { iov_base: data.as_mut_ptr().cast(), iov_len: data.len() };
     let mut out = Vec::new();
     // SAFETY: a zeroed msghdr pointing at live locals; the control messages walked as the kernel filled them,
     // each descriptor owned from here.
@@ -115,16 +150,18 @@ fn recv_fds(sock: RawFd) -> io::Result<Vec<OwnedFd>> {
         let flags = libc::MSG_CMSG_CLOEXEC;
         #[cfg(not(target_os = "linux"))]
         let flags = 0;
-        if libc::recvmsg(sock, &mut msg, flags) == -1 {
+        let got = libc::recvmsg(sock, &mut msg, flags);
+        if got == -1 {
             return Err(io::Error::last_os_error());
         }
+        data.truncate(got as usize);
         let mut c = libc::CMSG_FIRSTHDR(&msg);
         while !c.is_null() {
             if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
-                let data = libc::CMSG_DATA(c).cast::<RawFd>();
+                let fds = libc::CMSG_DATA(c).cast::<RawFd>();
                 let n = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<RawFd>();
                 for i in 0..n {
-                    let fd = std::ptr::read_unaligned(data.add(i));
+                    let fd = std::ptr::read_unaligned(fds.add(i));
                     libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
                     out.push(OwnedFd::from_raw_fd(fd));
                 }
@@ -132,7 +169,7 @@ fn recv_fds(sock: RawFd) -> io::Result<Vec<OwnedFd>> {
             c = libc::CMSG_NXTHDR(&msg, c);
         }
     }
-    Ok(out)
+    Ok((out, data))
 }
 
 fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {

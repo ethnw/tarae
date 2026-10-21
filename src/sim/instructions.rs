@@ -50,7 +50,7 @@ fn run(choices: Choices) -> Vec<String> {
         &mut ed,
         INPUTS,
         |sim, ed| input(sim, ed, &ids, &repo, &mut lines),
-        |ed| held(ed, &roots),
+        |ed| held(ed, &roots, &repo),
         |ed| print(ed, &dir),
     );
     let trace = sim.trace().to_vec();
@@ -68,8 +68,9 @@ fn input(
 ) -> String {
     let c = &mut sim.choices;
     let (sid, wt) = c.pick(ids).clone();
-    // (by arm: the main checkout's line 2, a session's 2, a look 3, `y` 2, `n` 1, a frame 1, a switch 2, time 1)
-    match c.weighted(&[2, 2, 3, 2, 1, 1, 2, 1]) {
+    // (by arm: the main checkout's line 2, a session's 2, a look 3, `y` 2, `n` 1, a frame 1, a switch 2, time 1,
+    // its changes asked for the main checkout's — a bring, frictions29 #79 — 2)
+    match c.weighted(&[2, 2, 3, 2, 1, 1, 2, 1, 2]) {
         0 => {
             *n += 1;
             let at_top = *c.pick(&[true, false]);
@@ -109,6 +110,10 @@ fn input(
             sim.wait(Duration::from_millis(ms));
             format!("{ms} ms pass")
         }
+        8 => {
+            crate::instructions::carry_out(ed, wt);
+            format!("session {sid}: its changes asked for the main checkout's")
+        }
         _ => unreachable!("one arm a weight"),
     }
 }
@@ -120,9 +125,9 @@ fn add(path: &std::path::Path, line: &str, at_top: bool) {
     std::fs::write(path, text).unwrap();
 }
 
-/// No line a session wrote (`mine …`) is gone from its file: the last one each wrote is still there — and at
-/// most one card a file.
-fn held(ed: &Editor, roots: &[PathBuf]) -> Result<(), String> {
+/// No line a session wrote (`mine …`) is gone from its file, nor one the main checkout's had (`main …`) from
+/// its — and at most one card a file and direction.
+fn held(ed: &Editor, roots: &[PathBuf], repo: &std::path::Path) -> Result<(), String> {
     for root in roots {
         let text = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap_or_default();
         let mine = text.lines().filter(|l| l.starts_with("mine ")).count();
@@ -136,12 +141,20 @@ fn held(ed: &Editor, roots: &[PathBuf]) -> Result<(), String> {
         MINE.with(|m| m.borrow_mut().insert(root.clone(), mine));
     }
     let parked = std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked);
-    let mut cards: Vec<(PathBuf, String)> = ed
+    // (and the main checkout's own lines — a session's carried in never takes one away: frictions29 #79)
+    let text = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap_or_default();
+    let mains = text.lines().filter(|l| l.starts_with("main ")).count();
+    let written = MINE.with(|m| m.borrow().get(repo).copied().unwrap_or(0));
+    if mains < written {
+        return Err(format!("the main checkout: {written} lines of its own written, {mains} left:\n{text}"));
+    }
+    MINE.with(|m| m.borrow_mut().insert(repo.to_path_buf(), mains));
+    let mut cards: Vec<(PathBuf, String, bool)> = ed
         .offers
         .iter()
         .chain(parked)
         .filter_map(|o| match &o.what {
-            What::Instructions(b) => Some((b.root.clone(), b.rel.clone())),
+            What::Instructions(b) => Some((b.root.clone(), b.rel.clone(), b.out.is_some())),
             _ => None,
         })
         .collect();

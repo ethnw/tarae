@@ -564,7 +564,7 @@ impl Editor {
             self.offer_finished(a.offer, Err("stopped before it finished".into()));
         }
         crate::tools::run_dropped(self, "the user stopped it");
-        crate::restart::run_dropped(self);
+        crate::restart::run_dropped(self, self.session.task_run.as_ref().map(|r| r.trace.id()));
         crate::rebase::run_dropped(self);
         self.session.task_run = None;
         // (the panel is free: what waits for it starts)
@@ -827,7 +827,7 @@ impl Editor {
             self.session.test_run = None;
         }
         crate::tools::run_dropped(self, "another task took its place");
-        crate::restart::run_dropped(self);
+        crate::restart::run_dropped(self, self.session.task_run.as_ref().map(|r| r.trace.id()));
         crate::rebase::run_dropped(self);
         self.task_generation += 1;
         let generation = self.task_generation;

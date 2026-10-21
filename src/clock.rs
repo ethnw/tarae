@@ -126,7 +126,6 @@ mod tests {
         ("uistate/claude.rs", 3),
         ("uistate/panels.rs", 1),
         ("uistate/watch.rs", 1),
-        ("usage.rs", 1),
         ("worktree.rs", 10),
     ];
 }

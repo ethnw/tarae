@@ -944,10 +944,83 @@ fn snapshot_instructions_card() {
         here: "rule one\nmine\n".into(),
         main: "rule one\nrule two\n".into(),
         left: 1,
+        out: None,
+        ended: false,
     };
     s.ed.push_offer(b.card());
     s.check("instructions_card");
     s.frames_both("instructions_card");
+}
+
+/// frictions36's screens, for their screenshots (only with `TARAE_FRAMES_DIR` set: both themes there, 80×24 and
+/// 160×40; `cargo xtask shot` draws them with `TARAE_SHOT_REPLAY`): 68 a rebase's reloads — one toast a file
+/// (before) and one line (after); 67 a send right after a restart — refused (before) and queued while the chat
+/// says `claude is starting` (after); 79 the bring's card carrying a session's CLAUDE.md changes into main's.
+#[test]
+fn frictions36_frames() {
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    // (toasts frozen at full opacity: fully faded in, seconds before the fade-out)
+    let both = |s: &mut Shot, name: String| {
+        let fresh = Instant::now().checked_sub(Duration::from_millis(500)).unwrap();
+        for t in &mut s.ed.toasts {
+            (t.at, t.shown) = (fresh, true);
+        }
+        s.frames_both(&name);
+    };
+    for (w, h) in [(80, 24), (160, 40)] {
+        let shot = || {
+            let mut s = Shot::new(w, h);
+            s.ed.offer_popups = true;
+            s.file("src/demo.rs", DEMO_RS);
+            s
+        };
+        let mut s = shot();
+        for f in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs"] {
+            s.ed.set_status(format!("uxaudit · src/{f} reloaded from disk · +3 lines"));
+        }
+        s.ed.set_warning("uxaudit · offer_install.txt was deleted on disk — :w to write it back");
+        for f in ["i.rs", "j.rs", "k.rs"] {
+            s.ed.set_status(format!("uxaudit · src/{f} reloaded from disk · +1 lines"));
+        }
+        both(&mut s, format!("68-before-{w}"));
+        let mut s = shot();
+        s.ed.set_warning("uxaudit · offer_install.txt was deleted on disk — :w to write it back");
+        s.ed.set_status("uxaudit · rebase: 112 files reloaded, 1 deleted on disk");
+        both(&mut s, format!("68-after-{w}"));
+        // 67: the chat just restarted, its claude not up yet
+        let chat = |s: &mut Shot, starting: bool| {
+            let mut c = crate::chat::Chat::new();
+            c.note("tarae restarted — same conversation");
+            if starting {
+                c.settings.reading_since(crate::clock::now() - std::time::Duration::from_millis(1200));
+            }
+            s.ed.session.chat = Some(c);
+        };
+        let mut s = shot();
+        chat(&mut s, false);
+        s.ed.set_warning("couldn't reach claude — the chat panel says why (the drafts are kept)");
+        both(&mut s, format!("67-before-{w}"));
+        let mut s = shot();
+        chat(&mut s, true);
+        s.ed.set_status("review queued — claude is starting; its 3 comments go once it's up");
+        both(&mut s, format!("67-after-{w}"));
+        // 79: the bring's card for the session's CLAUDE.md changes
+        let mut s = shot();
+        let b = crate::instructions::Both {
+            root: "/stand-in/feat".into(),
+            rel: "CLAUDE.md".into(),
+            base: Some("rule one\nrule two\n".into()),
+            here: "rule one\nrule two\n- **Viewed marks** are kept in the restore file.\n".into(),
+            main: "rule zero\nrule one\nrule two\n".into(),
+            left: 0,
+            out: Some("/stand-in/main".into()),
+            ended: false,
+        };
+        s.ed.push_offer(b.card());
+        s.frames_both(&format!("79-after-{w}"));
+    }
 }
 
 /// A tall card being read in its buffer (frictions15 #1): the bar over the status line says whose keys they
