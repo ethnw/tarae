@@ -1107,7 +1107,7 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   since Seatbelt can't tell a pty a command made from yours. A command that needs one through tarae's own pty
   code — its tests, `cargo xtask shot` and `scenes`, the e2e suite — asks the run's **pty broker**
   (`TARAE_PTY_SOCK`, a socket in the run's own folder): tarae makes a new pair outside the sandbox and hands
-  both ends in, at most 128 a run (more is refused, and said). Only their ioctls are open to the command, and
+  both ends in, at most 128 a run has open at once (more is refused, and said). Only their ioctls are open to the command, and
   only a terminal's own — its size, its modes, making it a controlling terminal (an ioctl needs a descriptor, and
   a command starts with none of yours; the [threat model](threat-model.md) says what a descriptor passed over a
   socket would reach); no card asks, and Claude's result says how many it made. A command with a socket of

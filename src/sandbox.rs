@@ -5628,7 +5628,7 @@ impl RunEnd {
         let refused = match self.ptys_refused {
             0 => String::new(),
             n => format!(
-                " {} past the {} a run may have were refused",
+                " {} past the {} a run may have open at once were refused",
                 crate::nav::count(n, "ask"),
                 ptys_max()
             ),
@@ -5642,7 +5642,7 @@ impl RunEnd {
     }
 }
 
-/// The ptys a run's broker makes at most (macOS's; elsewhere none is made).
+/// The ptys a run may have open at once from its broker (macOS's; elsewhere none is made).
 fn ptys_max() -> usize {
     #[cfg(not(target_os = "linux"))]
     return ptybroker::PTYS_MAX;
@@ -10958,6 +10958,7 @@ mod tests {
             ("TIOCSETA", libc::TIOCSETA),
             ("TIOCSETAW", libc::TIOCSETAW),
             ("TIOCSETAF", libc::TIOCSETAF),
+            ("TIOCGETD", libc::TIOCGETD),
             ("TIOCGPGRP", libc::TIOCGPGRP),
             ("TIOCSPGRP", libc::TIOCSPGRP),
             ("TIOCFLUSH", libc::TIOCFLUSH),

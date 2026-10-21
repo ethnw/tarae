@@ -310,8 +310,9 @@ pub struct Policy {
 /// The ioctl commands a run may use on a terminal (macOS's numbers, the same on every Mac — written here, not
 /// read from the build's libc, so both systems' policies pin alike: `golden`; checked against libc on macOS):
 /// what a program on a pty asks of it — its size, its modes (raw mode: `TIOCSETA*` — tarae's own e2e and shots
-/// need them), its process group, the bytes waiting, close-on-exec. Not `TIOCSTI` (macOS refuses it anyway —
-/// measured), nor making one (`TIOCPTYGRANT`, `TIOCPTYUNLK`, `TIOCPTYGNAME`: the broker makes it, outside).
+/// need them), its line discipline read (`stty` asks it before anything, friction 47; never set), its process
+/// group, the bytes waiting, close-on-exec. Not `TIOCSTI` (macOS refuses it anyway — measured), nor making one
+/// (`TIOCPTYGRANT`, `TIOCPTYUNLK`, `TIOCPTYGNAME`: the broker makes it, outside).
 pub const TTY_IOCTLS: &[(&str, u64)] = &[
     ("TIOCGWINSZ", 0x4008_7468),
     ("TIOCSWINSZ", 0x8008_7467),
@@ -320,6 +321,7 @@ pub const TTY_IOCTLS: &[(&str, u64)] = &[
     ("TIOCSETA", 0x8048_7414),
     ("TIOCSETAW", 0x8048_7415),
     ("TIOCSETAF", 0x8048_7416),
+    ("TIOCGETD", 0x4004_741a),
     ("TIOCGPGRP", 0x4004_7477),
     ("TIOCSPGRP", 0x8004_7476),
     ("TIOCFLUSH", 0x8004_7410),

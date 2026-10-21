@@ -519,11 +519,12 @@ Kept:
   test: `sandbox::tests::a_run_signals_and_looks_into_only_its_own_processes` ·
   `sandbox::keeper::tests::a_run_reads_no_details_outside_its_session` · `sandbox::keeper::tests::a_run_sees_only_its_sessions_processes` (with a PID namespace)
 - **Other terminals**: a run can't open your tty or another pty. On macOS it can't make one either; the ptys
-  tarae's pty broker hands in (terminals A, 2026-10-19) are new pairs tarae made, at most 128 a run (past it an
-  ask is refused and said: the Mac has ~511), and a run's profile opens only ioctl on terminals
-  (`^/dev/ttys[0-9]+$`, `/dev/ptmx`), **only the commands a program on a pty uses** (`policy::TTY_IOCTLS`: its
-  size, its modes, its process group, the bytes waiting, close-on-exec — Seatbelt narrows `file-ioctl` by
-  `ioctl-command`, measured; anything else, a line discipline's `TIOCGETD` say, refused). An ioctl needs a
+  tarae's pty broker hands in (terminals A, 2026-10-19) are new pairs tarae made, at most 128 a run open at once
+  (past it an ask is refused and said: the Mac has ~511; one closed, both ends, frees its place), and a run's
+  profile opens only ioctl on terminals (`^/dev/ttys[0-9]+$`, `/dev/ptmx`), **only the commands a program on a
+  pty uses** (`policy::TTY_IOCTLS`: its size, its modes, its line discipline read (`stty`), its process group,
+  the bytes waiting, close-on-exec — Seatbelt narrows `file-ioctl` by `ioctl-command`, measured; anything else,
+  setting a line discipline (`TIOCSETD`) say, refused). An ioctl needs a
   descriptor, and a run starts with none of yours (no controlling terminal, stdio pipes). **What that leaves:** a
   descriptor could come in over a unix socket in the project or the run's own folder, if a process of yours
   passed one of your terminals' there: the run could then change its modes or size (raw mode needs the termios

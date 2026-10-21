@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read as _};
 use std::os::fd::AsRawFd as _;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -27,9 +28,10 @@ const SOCKET: &str = "pty.sock";
 /// How long an asker has to say the size it wants — one that says nothing doesn't hold the run's end up.
 const ASK_WITHIN: Duration = Duration::from_secs(1);
 
-/// The ptys a run's broker makes at most — past it an ask is refused (closed with none), counted and said: a
-/// run looping on `pty::open` would take the Mac's ~511 and lock the user out of new terminals (the review of
-/// terminals A; `pty.rs`'s header has it happen once). This repository's whole e2e suite asks 64.
+/// The ptys of a run's open at once at most — past it an ask is refused (closed with none), counted and said: a
+/// run holding what `pty::open` gives would take the Mac's ~511 and lock the user out of new terminals (the review
+/// of terminals A; `pty.rs`'s header has it happen once). One closed (both ends, every copy) frees its place: a
+/// test suite makes hundreds over its life, a few at a time (friction 47).
 pub const PTYS_MAX: usize = 128;
 
 /// The brokers of the runs going on, by run id.
@@ -91,20 +93,23 @@ impl Broker {
         let refused = Arc::new(AtomicUsize::new(0));
         let (m, o, r) = (made.clone(), over.clone(), refused.clone());
         let thread = crate::event::thread("tarae-ptys", move || {
+            let mut open: Vec<(PathBuf, u64)> = Vec::new();
             for conn in listener.incoming() {
                 if o.load(Ordering::SeqCst) {
                     break;
                 }
-                // (past its cap: closed with none — the asker hears "sent no pty"; counted, logged once)
-                if m.load(Ordering::SeqCst) >= cap {
+                // (past its cap of open ones: closed with none — the asker hears "sent no pty"; counted, logged once)
+                open.retain(still_open);
+                if open.len() >= cap {
                     if r.fetch_add(1, Ordering::SeqCst) == 0 {
-                        let said = format!("a run asked for more than {cap} ptys — refused from here");
+                        let said = format!("a run asked for more than {cap} ptys open at once — refused");
                         crate::log::line("sandbox", "warning", &said);
                     }
                     continue;
                 }
                 match conn.map(serve) {
-                    Ok(Ok(())) => {
+                    Ok(Ok(made)) => {
+                        open.push(made);
                         m.fetch_add(1, Ordering::SeqCst);
                     }
                     Ok(Err(e)) | Err(e) => crate::log::line("sandbox", "info", &format!("a pty asked: {e}")),
@@ -124,14 +129,32 @@ impl Broker {
 }
 
 /// One ask: its size read (rows, cols, little-endian), a pty made that size and both ends sent — tarae's own
-/// copies closed as this returns.
-fn serve(mut c: UnixStream) -> io::Result<()> {
+/// copies closed as this returns. The pair's slave as it is (`still_open`): its path and its node's inode.
+fn serve(mut c: UnixStream) -> io::Result<(PathBuf, u64)> {
     c.set_read_timeout(Some(ASK_WITHIN))?;
     let mut ask = [0u8; 4];
     c.read_exact(&mut ask)?;
     let (rows, cols) = (u16::from_le_bytes([ask[0], ask[1]]), u16::from_le_bytes([ask[2], ask[3]]));
     let (master, slave) = crate::pty::made(rows, cols)?;
-    crate::pty::send_fds(c.as_raw_fd(), &[master.as_raw_fd(), slave.as_raw_fd()])
+    let (mut path, s) = ([0u8; libc::PATH_MAX as usize], slave.as_raw_fd());
+    // SAFETY: a zeroed stat is a buffer for fstat to fill.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat fills one stat, F_GETPATH a PATH_MAX buffer with a NUL-terminated path — on our own slave.
+    if unsafe { libc::fstat(s, &mut st) != 0 || libc::fcntl(s, libc::F_GETPATH, path.as_mut_ptr()) != 0 } {
+        return Err(io::Error::last_os_error());
+    }
+    let path = std::ffi::CStr::from_bytes_until_nul(&path).map_err(io::Error::other)?;
+    let made = (PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())), st.st_ino);
+    crate::pty::send_fds(c.as_raw_fd(), &[master.as_raw_fd(), slave.as_raw_fd()])?;
+    Ok(made)
+}
+
+/// Whether a pair the broker made is open still — on either end, in any process: macOS keeps a pty's slave node
+/// in /dev exactly while either end is (measured: gone when both close, kept while a slave outlives its master),
+/// and one made anew under the same name is another node (another inode) — so never a pair of the user's.
+fn still_open((path, ino): &(PathBuf, u64)) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.ino() == *ino)
 }
 
 #[cfg(test)]
@@ -144,9 +167,11 @@ mod tests {
     /// read on the other — and the broker's end says how many it made; after it, nothing answers.
     #[test]
     fn a_runs_broker_hands_in_ptys_and_counts_them() {
-        // (the broker makes them here: where no pty opens — a sandbox without one — skipped, said)
-        if crate::sandbox::no_pty_here(
+        // (the broker makes them here, from `/dev/ptmx` itself: inside a sandbox, where none opens — a pty there
+        // comes from that sandbox's own broker, which `no_pty_here` would find — skipped, said)
+        if crate::sandbox::skipped_inside_for(
             "sandbox::ptybroker::tests::a_runs_broker_hands_in_ptys_and_counts_them",
+            "its broker makes ptys from /dev/ptmx, closed to a run",
         ) {
             return;
         }
@@ -181,13 +206,29 @@ mod tests {
         assert_eq!(end(9_000_002), (1, 0));
         // SAFETY: F_GETFD on a live descriptor.
         assert_ne!(unsafe { libc::fcntl(m.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
-        // The review of terminals A: past its cap a run's asks are refused — none made, each counted
+        // The review of terminals A and friction 47: the cap is on pairs open at once — asked in turn, each closed
+        // before the next, never reached; held, the ask past it refused (none made, counted) until one closes,
+        // both ends: a slave kept past its master still holds its place, and a master kept past its slave (a run
+        // holding only masters would otherwise take the Mac's ~511)
         let capped = run.join("capped");
         std::fs::create_dir(&capped).unwrap();
         start_capped(9_000_003, &capped, 2);
-        let got: Vec<bool> = (0..4).map(|_| crate::pty::asked(&socket(&capped), 24, 80).is_ok()).collect();
-        assert_eq!(got, [true, true, false, false]);
-        assert_eq!(end(9_000_003), (2, 2), "two made, two refused");
+        let ask = || crate::pty::asked(&socket(&capped), 24, 80);
+        assert!((0..5).all(|_| ask().is_ok()), "five in turn, past a cap of two");
+        let mut held: Vec<_> = (0..2).map(|_| ask().unwrap()).collect();
+        assert!(ask().is_err(), "a third while two are open");
+        let (master, slave) = held.pop().unwrap();
+        drop(master);
+        assert!(ask().is_err(), "its slave still open");
+        drop(slave);
+        assert!(ask().is_ok(), "both ends closed: its place free");
+        held.push(ask().unwrap());
+        let (master, slave) = held.pop().unwrap();
+        drop(slave);
+        assert!(ask().is_err(), "its master still open");
+        drop(master);
+        assert!(ask().is_ok(), "both ends closed: its place free again");
+        assert_eq!(end(9_000_003), (10, 3), "ten made, three refused");
     }
 
     /// terminals A, through Seatbelt: a run with no terminals grant gets a pty from its broker and uses it as a
@@ -205,10 +246,10 @@ mod tests {
         let mut p = crate::sandbox::Policy::for_project(&crate::sandbox::tests::env(&root));
         assert!(!p.terminals, "no grant");
         p.run = Some(crate::sandbox::RunDir::new().unwrap());
-        let (said, end) = run_helper(&p, &root);
+        let (said, end) = run_helper(&p, &root, "helper");
         assert_eq!(
             said,
-            "asked=ok size=ok master-size=ok getattr=ok setattr=ok other-ioctl=refused write=ok read=ok ctty=ok \
+            "asked=ok size=ok master-size=ok getattr=ok setattr=ok other-ioctl=refused stty=ok write=ok read=ok ctty=ok \
              sti=refused dev-tty=ok ptmx=refused ttys=refused"
         );
         assert_eq!(end.ptys, 1, "its end says how many");
@@ -217,18 +258,42 @@ mod tests {
         let mut socketed = p.clone();
         socketed.sockets = vec![dir.join("granted.sock")];
         socketed.run = Some(crate::sandbox::RunDir::new().unwrap());
-        let (said, end) = run_helper(&socketed, &root);
+        let (said, end) = run_helper(&socketed, &root, "helper");
         assert_eq!(said, "asked=refused ptmx=refused ttys=refused");
         assert_eq!(end.ptys, 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `helper` as a run in `p` (in `root`), bounded: its `pty:` line and the run's end.
-    fn run_helper(p: &crate::sandbox::Policy, root: &Path) -> (String, crate::sandbox::RunEnd) {
+    /// friction 47, through Seatbelt: a run's cap is on ptys open at once — one asking `PTYS_MAX + 2` in turn,
+    /// each closed before the next (a test suite's way), gets them all; one holding `PTYS_MAX + 1` gets `PTYS_MAX`,
+    /// the last refused and said in its report.
+    #[test]
+    fn a_runs_cap_is_on_its_ptys_open_at_once() {
+        if crate::sandbox::skipped_inside("sandbox::ptybroker::tests::a_runs_cap_is_on_its_ptys_open_at_once")
+        {
+            return;
+        }
+        let dir = crate::sandbox::tests::scratch("ptybroker-many");
+        let root = crate::sandbox::profile_path(&dir);
+        let mut p = crate::sandbox::Policy::for_project(&crate::sandbox::tests::env(&root));
+        p.run = Some(crate::sandbox::RunDir::new().unwrap());
+        let (said, end) = run_helper(&p, &root, "helper_many");
+        assert_eq!(said, format!("in-turn={} held={PTYS_MAX}", PTYS_MAX + 2));
+        assert_eq!((end.ptys, end.ptys_refused), (2 * PTYS_MAX + 2, 1), "made, refused");
+        let report = end.ptys_said().unwrap_or_default();
+        assert!(
+            report.contains(&format!("1 ask past the {PTYS_MAX} a run may have open at once")),
+            "{report}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `helper` (or another of this module's helpers, `name`) as a run in `p` (in `root`), bounded: its `pty:` line
+    /// and the run's end.
+    fn run_helper(p: &crate::sandbox::Policy, root: &Path, name: &str) -> (String, crate::sandbox::RunEnd) {
         let exe = std::env::current_exe().unwrap();
-        let args: Vec<String> = ["--exact", "sandbox::ptybroker::tests::helper", "--ignored", "--nocapture"]
-            .map(String::from)
-            .to_vec();
+        let name = format!("sandbox::ptybroker::tests::{name}");
+        let args: Vec<String> = ["--exact", &name, "--ignored", "--nocapture"].map(String::from).to_vec();
         let mut c = crate::sandbox::command(Some(p), &exe.to_string_lossy(), &args);
         c.current_dir(root).stdin(std::process::Stdio::null());
         let ended = crate::sandbox::after_run(Some(p));
@@ -267,7 +332,8 @@ mod tests {
     fn measure_e2e_through_the_broker() {
         let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
         let llm = crate::llm::LlmConfig { sandbox_localhost: true, ..Default::default() };
-        let here = crate::sandbox::Here::now();
+        // (its runs' folders where a tarae makes them, in its cache — not the test build's temp folder, deeper)
+        let here = crate::sandbox::Here { runs: None, ..crate::sandbox::Here::now() };
         let p = crate::sandbox::run_policy_in(&root, &llm, &[], &here).unwrap();
         assert!(!p.terminals, "no grant");
         // (`TARAE_MEASURE_ARGS`: another cargo command, its words split by spaces — a shot's)
@@ -325,6 +391,18 @@ mod tests {
         }
     }
 
+    /// The run's side of `a_runs_cap_is_on_its_ptys_open_at_once`: `PTYS_MAX + 2` asked in turn, each closed at
+    /// once, then `PTYS_MAX + 1` held — how many of each it got, on its `pty:` line.
+    #[test]
+    #[ignore = "a sandboxed run's side: a_runs_cap_is_on_its_ptys_open_at_once runs it"]
+    fn helper_many() {
+        // SAFETY: an alarm for this process, its default action ending it (the test's watchdog kills at 20 s).
+        unsafe { libc::alarm(15) };
+        let in_turn = (0..PTYS_MAX + 2).filter(|_| crate::pty::open(24, 80).is_ok()).count();
+        let held: Vec<_> = (0..=PTYS_MAX).map(|_| crate::pty::open(24, 80)).collect();
+        println!("pty: in-turn={in_turn} held={}", held.iter().filter(|p| p.is_ok()).count());
+    }
+
     /// The run's side of `a_run_without_the_grant_uses_the_ptys_its_broker_hands_in` (ignored: run there, as a
     /// sandboxed run): what it could do, one word each, on its `pty:` line.
     #[test]
@@ -349,7 +427,8 @@ mod tests {
             // SAFETY: TIOCSWINSZ reads one winsize from a live local — the master's side (the e2e harness resizes so).
             let master_size = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) } == 0;
             said.push(format!("master-size={}", word(master_size)));
-            // (its modes, as raw mode gets and sets them — and an ioctl not in `TTY_IOCTLS`: TIOCGETD)
+            // (its modes, as raw mode gets and sets them — and an ioctl not in `TTY_IOCTLS`: TIOCSETD, its line
+            // discipline set)
             let mut t: libc::termios = unsafe { std::mem::zeroed() };
             // SAFETY: tcgetattr/tcsetattr on a live descriptor with a live termios.
             let get = unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut t) } == 0;
@@ -357,10 +436,16 @@ mod tests {
             // SAFETY: as above.
             let set = unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &t) } == 0;
             said.push(format!("setattr={}", word(set)));
-            let mut disc: libc::c_int = 0;
-            // SAFETY: TIOCGETD fills one int, a live local.
-            let other = unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGETD as _, &mut disc) } == 0;
+            let disc: libc::c_int = 0;
+            // SAFETY: TIOCSETD reads one int, a live local.
+            let other = unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSETD as _, &disc) } == 0;
             said.push(format!("other-ioctl={}", word(other)));
+            // (`stty`, on it: its modes read and said — it asks the line discipline first, then the size)
+            let stty = slave
+                .try_clone()
+                .map(std::process::Stdio::from)
+                .and_then(|tty| std::process::Command::new("/bin/stty").arg("-a").stdin(tty).output());
+            said.push(format!("stty={}", word(stty.is_ok_and(|o| o.status.success()))));
             let (mut s, m) = (std::fs::File::from(slave), std::fs::File::from(master));
             said.push(format!("write={}", word(s.write_all(b"hi\n").is_ok())));
             // (every read waits a second at most — the first measure's probe hung on one)
