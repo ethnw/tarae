@@ -33,10 +33,10 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **Experience, Workbench** | which-key, palette, tutor, start screen, mouse, side panel, git tab, merge conflicts, tests, debugger, built-in terminal |
 | **M6** | Plugins in Rust, compiled to WebAssembly, sandboxed on tarae's own runtime ([plugins.md](plugins.md)) |
 | **Sessions** | Several branches of work at once, each in its own checkout with its own panes, chat, terminal, tests and tasks. A session is brought into its base by fast-forward, or by a rebase whose conflicts its own Claude resolves ([claude-integration.md](claude-integration.md#rebasing-a-session)) |
-| **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, and risk grades mark what a person must look at ([code review](claude-integration.md#code-review)) |
+| **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, or a board of them — one per angle, then a skeptic per group of their claims, only what a skeptic traced pinned as confirmed (`space v C`) — and risk grades mark what a person must look at. Each review is recorded: how long a person spends on each change and what it ended as, never its code ([code review](claude-integration.md#code-review)) |
 | **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0–P5 of the card model are built, and `:granted` lists what Claude may do without asking ([design/cards.md](design/cards.md)) |
-| **Sandbox, macOS** | Claude's commands run under a deny-default Seatbelt profile, as Anthropic's sandbox-runtime: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
-| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
+| **Sandbox, macOS** | Claude's commands run under a deny-default Seatbelt profile, as Anthropic's sandbox-runtime: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable — a file named like a key closed where a grant or a default opened outside the project too; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
+| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. A run changes no file's owner, extended attributes, ACLs or flags; a file's mode and times are still its own, said. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
 | **Repository trust** | A project's risky settings, and a repository's own git config and hooks, wait for a yes before anything of theirs runs |
 | **Queues** | A run waits its turn instead of being refused, and says what it waited for (phases 0, H and 1 of [design/async.md](design/async.md)) |
 | **UI state** | What's on screen as data: `tarae state`, a socket for outside programs, Claude's `ui` tool, ids that are links, pointing at things (phases 1–3 of [design/ui-state.md](design/ui-state.md)) |
@@ -44,6 +44,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **Restart with sessions** | `:restart` brings back every session as it was, with its chat, code review and waiting cards; unsaved edits are kept and offered back after a crash ([features.md](features.md#updating-without-losing-your-place)) |
 | **Language packs** | A language is a folder of data: grammar, queries, servers, tests, debugger, and what its tools need from the sandbox. The core names no language |
 | **Shared rust-analyzer** | One server for a repository's checkouts, swapped in the background as sessions come and go |
+| **Usage** | What each session's Claude spends, from claude's own stream: the chat's last row, `:usage`, `tarae state`. Each turn's requests in order with their calls' tool names (`$state/calls/`, `cargo xtask turns`). A big conversation waiting on you is kept warm by a one-word ping of a fork before its hour's cache goes cold (`llm.keep-warm`, on by default for sessions expected back, your config only) |
 
 The Claude Code IDE protocol (M5) was retired on 2026-10-04, once the chat did all of it inside tarae.
 
@@ -151,13 +152,22 @@ The aim is to state what the sandbox guarantees and show that it holds.
    the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing that forwarding further waits
    for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped that work twice); a run's own
    `setsockopt` is unchanged (its own rights).
-3. **A "must be refused" property suite**, run on several kernels on a schedule: nothing a run does changes the
-   session's rules, and nothing is reached but through tarae's proxy and sockets.
+3. **A "must be refused" property suite** — done on both systems: nothing a run does changes the session's
+   rules, and nothing is reached but through tarae's proxy and sockets. macOS (`df2f70e3`); Linux (`08ec1cb3`), rows
+   21–26 measured against an unsandboxed baseline. Left: running it on several kernels, on a schedule.
 4. **Yama ptrace scope 2** — done (2026-10-18, D-h): Yama asks for `CAP_SYS_PTRACE` in a run's user namespace,
    which tarae owns in the session's, so tier own is served at scope 2 (the tier probe tries it on its keeper's
    run); without namespaces the session stays offline, said with the way out. No capability on tarae, no privileged
    helper (user decision).
 5. **A speed comparison** against a bubblewrap-style sandbox.
+6. **A file's attributes on Linux** (linmeta, found by the speed work's parity checks against srt and Codex):
+   Landlock has no right for them. Part A done (2026-10-18, `dbe7086c`, D-h): the seccomp filter refuses a file's
+   owner, extended attributes, ACLs and inode flags in every tier, the project's files too; its mode and times stay
+   open, said in the report, `tarae state` and the state line; macOS's Seatbelt is pinned to refuse them all outside
+   the write places. Part B, being written outside tarae (`~/Workspace/tarae-linmeta-b`): tarae serves a file's mode
+   and times in tiers own and host, only where the run may write. Tier offline stays a full tier with them open,
+   said (user decision 2026-10-18). Left: an ownership change that changes nothing (`rsync -a`, `install -g` to the
+   primary group) is refused today; nested user namespaces in tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
 
@@ -165,9 +175,12 @@ Done so far, under way, and the order after it (2026-10-17):
 
 - **The compatibility suite** (below): pieces 0–3 done, up to the first macOS table and its findings B1–B7.
   Piece 4 done (`8993751a`): an image per toolchain, a volume per stack, and the first Linux tables, own and host
-  (Ubuntu 24.04, kernel 7.0). Piece 6's first fixes done (`ca5b79bc`, B1–B4 and B8): Python's bytecode,
-  golangci-lint's cache and uv's cache are the project's own run homes, never the user's. The rest of piece 6
-  next.
+  (Ubuntu 24.04, kernel 7.0). Piece 6 done: its first fixes (`ca5b79bc`, B1–B4 and B8: Python's bytecode,
+  golangci-lint's cache and uv's cache are the project's own run homes, never the user's) and the rest
+  (`c646ca83`, B5, B6, B9–B11). B12 done (2026-10-18, `c3e9a605`): pnpm's store on the project's filesystem, where
+  pnpm keeps it when its home is on another, is found and told to a run, read and never written — passed over,
+  said why, wherever another could change it or a run may write it; and a variable's name is no longer taken for a
+  token.
 - **The card model**: P3 done (cardauto pieces 1–4). P4 done: scopes (piece 6, `30a38311`: `s`, this session, on
   every card whose grant may outlive the conversation) and the grant list (piece 7, `951dcdb4`: `:granted`).
   Piece 5 is §9.3's.
@@ -216,9 +229,14 @@ Done so far, under way, and the order after it (2026-10-17):
   - **Injection that travels between agents.** Another checkout of the repository is read unasked, and the
     reviewer's notes reach the author's Claude. A row in the threat model (how it's delivered, how it travels),
     and a mark of where text came from on what's read from another checkout or a reviewer's note.
-  - **A property loop in `caps.rs`**: no change made without a card ever widens what a session may do. Changes
-    that narrow apply at once; widening always asks. Progent's split, without a solver: tarae's grants are sets
-    of paths, ports and hosts.
+  - **A property loop in `caps.rs`** — done (2026-10-18, `57da092c`): no change made without a card or your own
+    config widens what a session may do, and a take-back narrows at once. Progent's split, without a solver:
+    seeded sequences of the real changes (cards' answers, config reloads, chats, sessions, quits, `:restart`) over
+    a scratch project, each step's reach held to one `check` in every `cargo test` (`src/caps/props.rs`). What it
+    found is fixed: a take-back whose store write failed came back, and so did one made before the kept sessions
+    were back; a conversation ended left its answers in the session's `Caps`; a trust taken back was held back
+    only after its write. From its reviews: one writer per store, landing in the order given, with counters rather
+    than clocks between taraes; quitting waits for what's being kept.
   - **C1b (built, 2026-10-17)**: with `llm.sandbox-network` on, `llm.sandbox-hosts` defaults to the packs'
     registries (others asked); `"*"` is any host. It narrows G4.
   - Later: `cargo xtask compat --propose`, a pack-data draft from the refusals a stack met, for a person to
@@ -231,12 +249,34 @@ Done so far, under way, and the order after it (2026-10-17):
     - applying a policy draft without review.
 - Then, in this order (decided 2026-10-15):
   1. **Code mode**: fewer round trips a turn. Each tool call reads the whole conversation again, which is most of a
-     turn's cost (measured 2026-10-14). Research: `target/sb/research-auto-code-mode.md`; a plan first.
-  2. **The review lens** (below).
+     turn's cost (measured 2026-10-14). Research: `target/sb/research-auto-code-mode.md`. The plan is in
+     (`target/sb/codemode-plan.md`: compound answers on tarae's own tools first, a `code` tool on the WebAssembly
+     runtime behind a gate, Anthropic's programmatic tool calling watched), and so is the call-order record it
+     turns on (`86590e44`): each turn's requests in order with their calls' tool names, `$state/calls/`, names and
+     numbers only. **Next** waits on that record's data: `cargo xtask turns` over the user's real turns, held
+     against the plan's gate (requests in runs of 3 or more, turns with a result over 8k tokens).
+  2. **The review lens** (below; the plan is the `reviewlens` session's target/sb/reviewlens-plan.md). R done
+     (2026-10-18, `34b21cf3`): the review record, `$state/reviews/`, a line per change seen — the time a person
+     spent on it (on screen, a key within 20 s), what it ended as, its grade and high rule by name, a keyed id,
+     never code text — summed up by `cargo xtask reviews`; `review.record`, on, your config only. It records from
+     now. **A + E next** (the why on each hunk; build order and groups), once R has a baseline of one to two
+     weeks; then B, C1, F, and D or C2, each measured as the plan orders. The measuring decisions were taken on
+     2026-10-18 (the plan's §4: R first, the record's terms); the lens's own choices in its §7 are still open —
+     where it shows, claims C1 or C0, whether the reviewer sees the claims, who explains a hunk, the reading order,
+     grouped marks, the A/B by day, the keys.
 - **Auto mode** is built only if the card record shows it's worth it: one to two weeks of `$state/cards` after P3
   runs in the user's tarae, each class's residual rate held against D1's bar (at least one card of a class per
   session-hour; then the 300-card safety bar). Likely not built.
-- **Frictions**: batch 24 under way.
+- **Frictions**: batches 24–29 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
+  project asks for itself — Claude's Read on the key's own card, tarae's own tools leave it out — and on macOS a
+  run doesn't read one where a grant or a default opened (the shared temp folders too; its own `$TMPDIR` reads);
+  `cargo xtask linux` proves the tree it mounts is this checkout, and a filter that matched no test fails. Left from
+  it, each its own piece: such names closed to runs outside home, and on Linux outside the project (Landlock only
+  grants); its item 4, the high-risk gate after a whole-file look, back on the list with a property test over
+  looks. **Batch 30 next** (`target/sb/frictions29.md`, items 23–27): the terminals grant asked again for every
+  e2e or scenes run (a grant of new ptys only); a bring queue for several sessions ready at once; a conflict
+  resolution that changes what the commit message says, with nothing asking to update it; a preflight that
+  inherits tarae's environment; a session's CLAUDE.md, copied when it started, never getting later rules.
 
 Small fixes found while using tarae every day:
 
@@ -254,7 +294,10 @@ nothing. Risk marks precise enough to trust (one large review had well over a hu
 cards and marks grouped; fewer wrong cards. This includes the card model's last two phases: **P3**, deciding by
 what the session may do rather than by what a command looks like (done), and **P4**, scopes and a list of grants
 (done — [design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
-evidence panel, "explain this hunk".
+evidence panel, "explain this hunk" — its record (R) is in, the rest as above. The second reviewer is a board now
+(2026-10-18, `1b511766`, `space v C`): one Claude per angle (correctness, tests, security, design), a skeptic per
+group of their claims, and only what a skeptic traced pinned as confirmed — measured outside tarae first, it found
+what the one pass missed.
 
 **A "must work" compatibility suite for the sandbox** (2026-10-15), ahead of §2's items 3–5 in priority. The sandbox
 must not be too strict for an open editor, and this repository, Rust only, never shows what other stacks hit. So
@@ -332,10 +375,15 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
    for one session (event order), a grant's take-back lost when its store write failed and one made before the
    sessions list was restored (a fault, start-up order), tests that fail only under load. FoundationDB's way: every
    source of nondeterminism behind one seeded simulator, the whole editor run under random schedules and faults,
-   any failure replayed from its seed. The pieces:
-   - **The simulated loop**: the jobs (`event.rs`) run one at a time at the simulator's choice, which result lands
-     next and when decided by the seed against a simulated clock, the clock read through one place; a failure
-     replays from its seed and shrinks to a short schedule.
+   any failure replayed from its seed. P1 done (2026-10-18, `7a3f142b`, test builds only): the simulated loop and
+   its first scenario, sessions and their bring cards, which finds the two-bring-cards bug with `b56cdf41`'s fix
+   taken out. Two lints hold what's left of the raw clock reads and sleeps, lists that only shrink, and new code
+   with a job, a card or a timer gets a step in a scenario (the board's line and the review record have theirs).
+   The pieces:
+   - **The simulated loop** — built in P1, but shrinking (P2): the jobs (`event.rs`) run one at a time at the
+     simulator's choice, which result lands next and when decided by the seed against a simulated clock, the
+     clock read through one place (`clock.rs`); unmodelled threads are refused; each seed runs twice and its
+     traces are compared; a failure replays from its seed and shrinks to a short schedule.
    - **Faults at the worker boundary**, seeded: a write fails, a read sees half a file, a process exits early or
      never, a server answers late or out of order, the disk watch fires twice or late.
    - **Scenarios and invariants**: random walks over sessions, cards, chat turns with a fake claude, disk changes
@@ -359,7 +407,10 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
 
 ### 10. The homepage
 
-tarae.sinabro.io. An animation that feels like several agents working at once, and the README's demo, both from
+tarae.sinabro.io. The brand it wears is in (2026-10-18, `ec987191`, [brand/](brand)): the seal — a skein's
+thread carved out of an accent block, unwinding to a cursor, in hanji and meok — over the README's title and on
+the start screen in half-block pixels, and the mascot, a ball of thread painted in ink on hanji, at the README's
+end. An animation that feels like several agents working at once, and the README's demo, both from
 one scripted recording: `cargo xtask shot` extended to record frames, Claude's parts played by the tests' fake
 claude, so it can be recorded again when the UI changes. To do: the recording script, the scenes, the site, the
 domain. The scenes are picked with the user: a chat edit and its card, the end-of-turn review, a commit from the
@@ -370,8 +421,9 @@ git tab, search, a short Kubernetes one.
 
 ## Alongside, not ordered
 
-- **The simulation harness's first piece** (§9.2) may start before §9: the simulated loop and one scenario. From
-  then on new code is tested in it, so the harness grows with what's built instead of being fitted to it after.
+- **The simulation harness's first piece** (§9.2) — done (detsim P1, `7a3f142b`): the simulated loop and one
+  scenario. New code is tested in it from now on, so the harness grows with what's built instead of being fitted
+  to it after.
 - **Linux in real use**, on test machines:
   - The terminal, the clipboard, file watching, Java (jdtls), the Kubernetes plugin, WSL, and working over ssh.
   - Several distributions, kernels and languages, and a large repository. Crash recovery, with no work lost.
@@ -385,9 +437,14 @@ git tab, search, a short Kubernetes one.
   privileges, on macOS too.
 - **A grant scoped to Docker.**
 - **코드멍** (*code-meong*, "code-gazing", as one gazes at a fire): Claude's code typed out character by character
-  instead of appearing at once, maybe in the chat too. A plan first.
+  instead of appearing at once, maybe in the chat too. Now 글타래's P7–P8: the model's edits streamed live, then a
+  reveal only for code that arrives whole (user decision 2026-10-17).
 - **글타래** (*geul-tarae*, "a skein of writing"): a visual pass. Design details that suit ink (meok) and hanji
-  paper, and a way of showing and generating text that suits tarae. A plan first.
+  paper, and a way of showing and generating text that suits tarae (the plan: the `geultarae` session's
+  target/sb/geultarae-plan.md). P0–P3 done: the shots as a scene list (`cargo xtask scenes`, `900833ab`), the
+  audit's fixes (`680f9326`), the chat laying out a message once (`66bebbc5`), and 번짐, the head of what Claude
+  is writing as ink not yet dry (`660435df`). P4–P8 next (its §5): weight and margins, the seal for what's
+  decided, the turn as a thread, live edits, 코드멍's reveal.
 - **Quoting** (인용, user 2026-10-17; `quote` in the docs and commands, as pointing is `point`): select part of
   any text tarae shows and ask about it at once. Code has its selection, and test and preflight output open in a
   buffer (`space x o`, the task panel's `o`); pointing gives a whole element's id, `C-s` the whole screen. Missing:
