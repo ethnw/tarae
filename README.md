@@ -5,6 +5,12 @@
   </picture>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/seal-meok.svg">
+    <img src="docs/brand/seal-hanji.svg" width="64" alt="tarae's seal: a skein's thread unwinding into a cursor">
+  </picture>
+</p>
 <h1 align="center">tarae</h1>
 
 <p align="center">
@@ -55,3 +61,7 @@ macOS or Linux (WSL on Windows), with rustup and a C compiler. Claude features n
 ([MIT](plugin-sdk/LICENSE-MIT), [Apache](plugin-sdk/LICENSE-APACHE)); db's test transcripts hold servers' bytes
 ([NOTICE](plugin-sdk/db/NOTICE)). Helix's query files stay MPL-2.0 ([NOTICE](runtime/queries/NOTICE)).
 Contributions need a signed [CLA](CONTRIBUTING.md#license-and-the-cla).
+
+<p align="center">
+  <img src="docs/brand/mascot.svg" width="120" alt="tarae's mascot in ink on hanji: a ball of thread with a small face, its loose red end a cursor">
+</p>

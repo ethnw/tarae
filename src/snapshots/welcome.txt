@@ -5,25 +5,25 @@
 02
 03
 04
-05
-06
-07
-08
-09                                              t a r a e
-10                                   타래 · Helix keys, Claude inside
-11
-12                                space f  Open a file
-13                                space e  Browse the files
-14                                space /  Search in project
-15                                space l  Chat with Claude
-16                                space ?  Find a command
-17                                :tutor   Learn the keys in 10 minutes
-18                                :q       Quit
-19
-20
-21
-22
-23
+05                                          ▄ ▀▀▀▀▀▀▀▀▀▀     ▄
+06                                             ▄▄▄▄▄▄▄▄
+07                                                ▀▀
+08                                                 ▄
+09                                                 ▀▀▀▀     ▀
+10                                                ▄▄▄▄▄▄
+11                                             ▀▀▀▀▀▀▀▀▀▀▀
+12                                          ▀ ▄▄▄▄▄▄▄▄▄▄▄▄  ▄▀
+13
+14                                              t a r a e
+15                                   타래 · Helix keys, Claude inside
+16
+17                                space f  Open a file
+18                                space e  Browse the files
+19                                space /  Search in project
+20                                space l  Chat with Claude
+21                                space ?  Find a command
+22                                :tutor   Learn the keys in 10 minutes
+23                                :q       Quit
 24
 25
 26
@@ -36,14 +36,14 @@
 02
 03
 04
-05
-06
-07
-08
-09
-10
-11
-12
+05                                           A          AAAAA
+06                                          A            AAAAA
+07                                          A  AAA  AAA  AAAAA
+08                                          A  AA   AAA  AAAAA
+09                                          A  AA        AAA A
+10                                          A  AAA      AAAA A
+11                                          A             AA A
+12                                           A            AA
 13
 14
 15
@@ -67,25 +67,25 @@
 02
 03
 04
-05
-06
-07
-08
-09                                              A A A A A
-10                                   dddd d ddddd ddddd dddddd dddddd
-11
-12                                AAAAA A
-13                                AAAAA A
-14                                AAAAA A
-15                                AAAAA A
-16                                AAAAA A
-17                                AAAAAA
-18                                AA
-19
-20
-21
-22
-23
+05                                          a aaaaaaaaaa     a
+06                                             aaaaaaaa
+07                                                aa
+08                                                 a
+09                                                 aaaa     a
+10                                                aaaaaa
+11                                             aaaaaaaaaaa
+12                                          a aaaaaaaaaaaa  aa
+13
+14                                              A A A A A
+15                                   dddd d ddddd ddddd dddddd dddddd
+16
+17                                AAAAA A
+18                                AAAAA A
+19                                AAAAA A
+20                                AAAAA A
+21                                AAAAA A
+22                                AAAAAA
+23                                AA
 24
 25
 26

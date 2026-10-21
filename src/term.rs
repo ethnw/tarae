@@ -6994,6 +6994,8 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         vec![("타래 · Helix keys, Claude inside".into(), dim)],
         vec![],
     ];
+    // Rows from the top drawn centered: the seal's, then the name and the intro
+    let mut centered = 2;
     // The files last open in this folder first — the most likely next step when there are some
     if let Some(files) = editor.session.restorable.as_ref().filter(|f| !f.is_empty()) {
         let name = files[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -7039,6 +7041,14 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         .unwrap_or(0)
         .min(ew.saturating_sub(4))
         .max(32);
+    // The seal over the name — the first thing to fold: only where everything else fits beside it with a
+    // row of air above it (the footer's two rows, the seal's blank row under it, two rows of slack)
+    if rows.len() + SEAL.len() + 5 <= lay.text_rows && ew >= SEAL[0].chars().count() + 4 {
+        let seal = seal_rows(ui);
+        centered += seal.len();
+        recent_from = recent_from.saturating_add(seal.len());
+        rows.splice(0..0, seal);
+    }
     let top = lay.text_top as usize + lay.text_rows.saturating_sub(rows.len() + 2) / 2;
     let x0 = ox + ew.saturating_sub(block_w) / 2;
     for row in 0..lay.text_rows {
@@ -7047,9 +7057,9 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         apply(out, ui.base)?;
         queue!(out, Spaces(ew))?;
         if let Some(r) = (y >= top).then(|| rows.get(y - top)).flatten() {
-            // First two rows (name, intro) centered, the rest aligned to the block's left
+            // The seal, name and intro centered, the rest aligned to the block's left
             let w: usize = r.iter().map(|(s, _)| s.width()).sum();
-            let x = if y - top < 2 { ox + ew.saturating_sub(w) / 2 } else { x0 };
+            let x = if y - top < centered { ox + ew.saturating_sub(w) / 2 } else { x0 };
             queue!(out, MoveTo(x as u16, y as u16))?;
             let mut used = 0;
             for (k, (s, st)) in r.iter().enumerate() {
@@ -7072,6 +7082,46 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
     apply(out, faint)?;
     queue!(out, Print(foot))?;
     Ok(())
+}
+
+/// tarae's seal (`docs/brand/seal-*.svg`) in half-block pixels, two to a cell: a skein's thread carved out of an
+/// accent block, wound from its heart and running out along the bottom to a cursor. `█` is a cell of accent
+/// (drawn as its background: `█` isn't in every font), `▀`/`▄` half of one; the carving is the ground.
+const SEAL: [&str; 8] = [
+    "▄█▀▀▀▀▀▀▀▀▀▀█████▄",
+    "█  ▄▄▄▄▄▄▄▄  █████",
+    "█  ███▀▀███  █████",
+    "█  ██  ▄███  █████",
+    "█  ██  ▀▀▀▀  ███▀█",
+    "█  ███▄▄▄▄▄▄████ █",
+    "█  ▀▀▀▀▀▀▀▀▀▀▀██ █",
+    "▀█▄▄▄▄▄▄▄▄▄▄▄▄██▄▀",
+];
+
+/// The seal's rows and the blank row under it.
+fn seal_rows(ui: &Ui) -> Vec<Vec<(String, Style)>> {
+    let half = Style { fg: ui.accent.fg, ..ui.base };
+    let full = Style { bg: ui.accent.fg, ..ui.base };
+    let mut rows: Vec<Vec<(String, Style)>> = SEAL
+        .iter()
+        .map(|l| {
+            let mut spans: Vec<(String, Style)> = Vec::new();
+            for c in l.chars() {
+                let (c, st) = match c {
+                    '█' => (' ', full),
+                    ' ' => (' ', ui.base),
+                    c => (c, half),
+                };
+                match spans.last_mut() {
+                    Some((s, last)) if *last == st => s.push(c),
+                    _ => spans.push((c.to_string(), st)),
+                }
+            }
+            spans
+        })
+        .collect();
+    rows.push(vec![]);
+    rows
 }
 
 /// A notification kind's bar color: accent (info) · diff.plus (success) · warning · error.

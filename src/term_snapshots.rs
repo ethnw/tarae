@@ -601,6 +601,13 @@ fn snapshot_welcome() {
     s.check("welcome");
 }
 
+/// Start screen too short for the seal: the seal folds first, every key stays.
+#[test]
+fn snapshot_welcome_short() {
+    let mut s = Shot::new(100, 14);
+    s.check("welcome_short");
+}
+
 /// Which-key card after `space`.
 #[test]
 fn snapshot_which_key() {
