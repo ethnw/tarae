@@ -23,7 +23,7 @@
 20   7 }
 21
 22
-23  ▐ NORMAL ▌  +1  −1                                                         rust   utf-8 LF   11:34
+23  ● normal   +1  −1                                                          rust   utf-8 LF   11:34
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -48,7 +48,7 @@
 20
 21
 22
-23   AAAAAAAA
+23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT  ddddddd aaaaaaaaaaa  f    ddddddddddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -73,7 +73,7 @@
 20   f
 21
 22
-23  a BBBBBB a  gg  ee                                                         dddd   ddddd dd   TTTTT
+23  a TTTTTT   gg  ee                                                          dddd   ddddd dd   TTTTT
 ## legend
 bg: V=ui.selection.primary  A=ui.cursor.primary  1=other  2=other  3=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus

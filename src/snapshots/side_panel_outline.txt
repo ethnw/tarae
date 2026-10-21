@@ -23,7 +23,7 @@
 20                                ▌
 21   enter open  tab git          ▌
 22   esc code  q close            ▌
-23  ▐ OUTLINE ▌                                                                             rust   utf-8 LF   1:1
+23  ● outline                                                                               rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppppp
@@ -48,7 +48,7 @@
 20 ppppppppppppppppppppppppppppppp
 21 ppppppppppppppppppppppppppppppp
 22 ppppppppppppppppppppppppppppppp
-23   AAAAAAAAA
+23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   fffff  TTTTTTT  fff            ddddd  f  ddd  f  TTTTTTT
 01   aaaaaaaaaaaaaaaaaaaaaaaaaaaa   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -73,7 +73,7 @@
 20
 21   DDDDD ffff  DDD fff
 22   DDD ffff  D fffff
-23  a BBBBBBB a                                                                             dddd   ddddd dd   TTT
+23  a TTTTTTT                                                                               dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

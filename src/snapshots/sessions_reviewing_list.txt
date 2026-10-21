@@ -15,7 +15,7 @@
 12                                                                                                    ────────────────────────────────────────────────────────────
 13                                                                                                    › Ask about [scratch]…
 14 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀   space l focus  space L close
-15  ▐ PICKER ▌  enter switch  n new  w keep warm  $ billing  esc close                                                                             utf-8 LF   1:1
+15  ● picker   enter switch  n new  w keep warm  $ billing  esc close                                                                              utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00                                                                                                  ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 01 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -32,7 +32,7 @@
 12 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14                                                                                                  ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-15   AAAAAAAA
+15
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                                                                    dddddd                                                 fffff
 01    fff ffffff ff ffff fff                                                         ffffffff  fff    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -49,7 +49,7 @@
 12                                                                                                    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 13                                                                                                    f fff fffff ffffffffff
 14                                                                                                    DDDDD D fffff  DDDDD D fffff
-15  a BBBBBB a  DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff                                                                             ddddd dd   TTT
+15  a TTTTTT   DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff                                                                              ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
+bg: p=ui.popup  P=ui.menu.selected
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

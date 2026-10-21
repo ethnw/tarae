@@ -326,6 +326,9 @@ pub struct Picker {
     pub closing: Option<crate::document::DocId>,
     /// What it is, as counted (`features::PICKERS`) — never its title, which may name a file.
     pub kind: &'static str,
+    /// The most rows it listed (or items it held) while open: its list card keeps that height — typing never
+    /// makes it shrink and jump (`term::PickerBox`).
+    pub tallest: std::cell::Cell<usize>,
 }
 
 impl Picker {
@@ -381,6 +384,7 @@ impl Picker {
             hints_first: false,
             closing: None,
             kind: "test",
+            tallest: std::cell::Cell::new(0),
         };
         p.refilter();
         p

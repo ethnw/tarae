@@ -619,8 +619,8 @@ fn slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel() {
     assert_eq!((k.region.name(), k.takes), ("slot:terminal".to_string(), Takes::Commands));
     assert_eq!(ed.keys_at().hint(), Some(("i", "type in it")));
     let shown = crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 120, 40).unwrap();
-    let status = shown.lines().find(|l| l.contains(" TERMINAL ")).unwrap_or_default();
-    assert!(status.contains("TERMINAL ▌  i type in it"), "{shown}");
+    let status = shown.lines().find(|l| l.contains("● terminal ")).unwrap_or_default();
+    assert!(status.contains("● terminal   i type in it"), "{shown}");
 }
 
 /// Slip 3: ` W` typed into a chat input that wasn't on screen — minimized while Claude worked. Now the

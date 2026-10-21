@@ -46,10 +46,10 @@
 43
 44     4 more kept for other checkouts — not used here
 45
-46                                                                ────────────────────────────────────
-47   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀     › Ask about demo.rs…
+46   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀     ────────────────────────────────────
+47                                                                › Ask about demo.rs…
 48                                                                space l focus  space L close
-49  ▐ PICKER ▌  d take it back  j k move  esc close                             rust   utf-8 LF   1:1
+49  ● picker   d take it back  j k move  esc close                              rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00                                                              ppppppppppppppppppppppppppppppppppppppp
 01                                                              ppppppppppppppppppppppppppppppppppppppp
@@ -97,10 +97,10 @@
 43   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
 44   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
 45   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-46   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+46                                                              ppppppppppppppppppppppppppppppppppppppp
 47                                                              ppppppppppppppppppppppppppppppppppppppp
 48                                                              ppppppppppppppppppppppppppppppppppppppp
-49   AAAAAAAA
+49
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                                dddddd f f fffffff             fffff
 01                                                                ffffffffffffffffffffffffffffffffffff
@@ -151,7 +151,7 @@
 46                                                                ffffffffffffffffffffffffffffffffffff
 47                                                                f fff fffff ffffffff
 48                                                                DDDDD D fffff  DDDDD D fffff
-49  a BBBBBB a  D ffff ff ffff  D D ffff  DDD fffff                             dddd   ddddd dd   TTT
+49  a TTTTTT   D ffff ff ffff  D D ffff  DDD fffff                              dddd   ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
+bg: p=ui.popup  P=ui.menu.selected
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

@@ -1458,7 +1458,7 @@ mod tests {
         (c.input, c.focused, c.follow.on, c.state) =
             ("half a thought\nmore".into(), false, true, crate::chat::State::Thinking);
         let rows = screen(&mut ed, 160, 24);
-        let status = rows.iter().find(|r| r.contains("NORMAL")).unwrap_or_else(|| panic!("{rows:#?}"));
+        let status = rows.iter().find(|r| r.contains("● normal")).unwrap_or_else(|| panic!("{rows:#?}"));
         assert!(status.contains("unsent half a thought"), "{status}");
         ed.session.chat.as_mut().unwrap().unfolded = true;
         let rows = screen(&mut ed, 160, 24);
@@ -1518,7 +1518,7 @@ mod tests {
         // The status line's chip with no chat up counts them apart
         ed.session.chat = None;
         let rows = screen(&mut ed, 160, 24);
-        let status = rows.iter().find(|r| r.contains("NORMAL")).unwrap_or_else(|| panic!("{rows:#?}"));
+        let status = rows.iter().find(|r| r.contains("● normal")).unwrap_or_else(|| panic!("{rows:#?}"));
         assert!(status.contains("front 1 done") && !status.contains('▲'), "{status}");
         // Looked at: no longer done
         assert!(ed.session_switch(id));

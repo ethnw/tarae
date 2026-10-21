@@ -337,7 +337,7 @@ fn perf_e2e_procs_sampling() {
         let mut t = sb.spawn(&["a.txt"]);
         t.wait_text("one");
         t.send(" T");
-        t.wait_for("the terminal", |s| s.contains("TERMINAL") && (s.contains("$ ") || s.contains("# ")));
+        t.wait_for("the terminal", |s| s.contains("● terminal") && (s.contains("$ ") || s.contains("# ")));
         t.send("\x1c");
         t.wait_for("the code has the keys", |s| s.contains("C-\\ type in it"));
         if open {
@@ -727,7 +727,7 @@ fn perf_e2e_memory_with_a_working_set_open() {
     eprintln!("no file open: {:.1} MB\n{}", mb(empty), heap(&t));
     drop(t);
     let mut t = Term::spawn(&sb, &files, 160, 50);
-    t.wait_text("NORMAL");
+    t.wait_text("● normal");
     settled(&mut t);
     let say = |what: &str, u: Usage, t: &Term| {
         eprintln!("{what}: RSS {:.1} MB, footprint {:.1} MB\n{}", mb(u.rss), mb(u.footprint), heap(t));

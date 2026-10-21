@@ -1,6 +1,6 @@
 # welcome_short · 100x14 · theme meok · cursor hidden
 ## text
-00  tarae
+00
 01                                              t a r a e
 02                                   타래 · Helix keys, Claude inside
 03
@@ -12,8 +12,8 @@
 09                                :tutor   Learn the keys in 10 minutes
 10                                :q       Quit
 11
-12                                          tarae 0.1.0 · meok
-13  ▐ NORMAL ▌                                                                         utf-8 LF   1:1
+12                                      tarae · tarae 0.1.0 · meok
+13  ● normal                                                                           utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -28,22 +28,22 @@
 10
 11
 12
-13   AAAAAAAA
+13
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd
+00
 01                                              A A A A A
 02                                   dddd d ddddd ddddd dddddd dddddd
 03
-04                                AAAAA A
-05                                AAAAA A
-06                                AAAAA A
-07                                AAAAA A
-08                                AAAAA A
-09                                AAAAAA
-10                                AA
+04                                TTTTT T
+05                                TTTTT T
+06                                TTTTT T
+07                                TTTTT T
+08                                TTTTT T
+09                                TTTTTT
+10                                TT
 11
-12                                          fffff fffff f ffff
-13  a BBBBBB a                                                                         ddddd dd   TTT
+12                                      fffff f fffff fffff f ffff
+13  a TTTTTT                                                                           ddddd dd   TTT
 ## legend
-bg: A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
+bg: 
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

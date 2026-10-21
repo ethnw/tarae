@@ -23,7 +23,7 @@
 20  16 echo step 17
 21  17 echo step 18
 22  ▎ Claude wants to run a script   ge to its end · esc goes back    y Install   n Not now   N Never
-23  ▐ CARD ▌                                                                           utf-8 LF   3:1
+23  ● card                                                                             utf-8 LF   3:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -48,7 +48,7 @@
 20
 21
 22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23   AAAAAA
+23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  TTTT T TTTTTT TTTTT TT TTT T TTTTTT
 01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -73,7 +73,7 @@
 20  ff
 21  ff
 22  a BBBBBB BBBBB BB BBB B BBBBBB   dd dd ddd ddd d ddd dddd dddd    A           A ddd ddd   A ddddd
-23  a BBBB a                                                                           ddddd dd   TTT
+23  a TTTT                                                                             ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

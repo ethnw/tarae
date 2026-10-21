@@ -29,7 +29,7 @@
 26                               k  Show docs under cursor          x  Tests …
 27                               l  Chat with Claude                y  Copy to clipboard
 28                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-29  ▐ NORMAL ▌                                                                 rust   utf-8 LF   space
+29  ● normal                                                                   rust   utf-8 LF   space
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -60,7 +60,7 @@
 26                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 28
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -91,7 +91,7 @@
 26                               A                                  A  ddddd d
 27                               A                                  A
 28
-29  a BBBBBB a                                                                 dddd   ddddd dd   AAAAA
+29  a TTTTTT                                                                   dddd   ddddd dd   AAAAA
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

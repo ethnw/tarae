@@ -492,7 +492,7 @@ impl Term {
         let mut term =
             Term { child, master, _slave: slave, out, timeout: sb.timeout(), env: sb.env(), bin: sb.bin() };
         // First frame drawn = raw mode is on — safe to type from here.
-        term.wait_for("the first frame (status line with the mode)", |s| s.status().contains("NORMAL"));
+        term.wait_for("the first frame (status line with the mode)", |s| s.status().contains("● normal"));
         term
     }
 
@@ -787,13 +787,13 @@ impl Term {
 
     /// Leave insert mode and wait until the status line says NORMAL again.
     pub fn normal_mode(&mut self) -> Screen {
-        self.esc("NORMAL mode", |s| s.status().contains("NORMAL"))
+        self.esc("NORMAL mode", |s| s.status().contains("● normal"))
     }
 
     /// Enter insert mode with `i`, type `text`, return to normal mode.
     pub fn insert(&mut self, text: &str) -> Screen {
         self.send("i");
-        self.wait_for("INSERT mode", |s| s.status().contains("INSERT"));
+        self.wait_for("INSERT mode", |s| s.status().contains("● insert"));
         self.send(text);
         let last_line = text.lines().last().unwrap_or_default().to_string();
         self.wait_text(&last_line);

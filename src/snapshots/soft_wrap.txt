@@ -13,7 +13,7 @@
 10
 11
 12
-13  ▐ NORMAL ▌                      markdown   utf-8 LF   3:1
+13  ● normal                        markdown   utf-8 LF   3:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -28,7 +28,7 @@
 10
 11
 12
-13   AAAAAAAA
+13
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  TTTTTTTT
 01   f A AAAAA
@@ -43,7 +43,7 @@
 10
 11
 12
-13  a BBBBBB a                      dddddddd   ddddd dd   TTT
+13  a TTTTTT                        dddddddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

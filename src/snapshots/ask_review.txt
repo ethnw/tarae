@@ -29,7 +29,7 @@
 26
 27
 28
-29  ▐ REVIEW ▌                                               claude ● review   rust   utf-8 LF   17:55
+29  ● review                                                                   rust   utf-8 LF   17:55
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -60,7 +60,7 @@
 26
 27
 28
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT  f    dddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -71,7 +71,7 @@
 06  ff
 07  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
 08  ff
-09    a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd   AAA ddddd dddddddddd
+09    t TTTTTT T TT T T TTTT TT   A dddddd   A dddddd   DDD ddddd dddddddddd
 10  ffE             ggg gggggggg gggggg
 11    g             ggg gggggggg ggggg gg ggggg
 12  ff
@@ -91,7 +91,7 @@
 26
 27
 28
-29  a BBBBBB a                                               AAAAAA A AAAAAA   dddd   ddddd dd   TTTTT
+29  a TTTTTT                                                                   dddd   ddddd dd   TTTTT
 ## legend
-bg: p=ui.popup  A=ui.cursor.primary  1=other  2=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold
+bg: p=ui.popup  1=other  2=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus

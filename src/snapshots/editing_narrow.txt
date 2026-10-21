@@ -14,7 +14,7 @@
 11   2     }                                        ▐
 12   3     counts
 13   4 }
-14  ▐ NORMAL ▌                rust   utf-8 LF   8:8
+14  ● normal                  rust   utf-8 LF   8:8
 ## bg · surface per cell, blank = ui.background
 00
 01     111111111111111111111111111111111111111111111
@@ -30,7 +30,7 @@
 11
 12
 13
-14   AAAAAAAA
+14
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT  f    ddddddddddd
 01   f
@@ -46,7 +46,7 @@
 11   f                                              f
 12   f
 13   f
-14  a BBBBBB a                dddd   ddddd dd   TTT
+14  a TTTTTT                  dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  V=ui.selection.primary  A=ui.cursor.primary  1=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

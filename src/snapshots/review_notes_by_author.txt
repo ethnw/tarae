@@ -29,7 +29,7 @@
 26   space e files  ]u unviewed ▌ 13▎let added_20 = 20;                                                           ▐
 27   space n comment            ▌ 14▎let added_21 = 21;                                                           ▐
 28   space v s send 2 · q end   ▌ 15▎let added_22 = 22;                                                           ▐
-29  ▐ NORMAL ▌  +30                                                                        rust   utf-8 LF   12:1
+29  ● normal   +30                                                                         rust   utf-8 LF   12:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppp
@@ -60,7 +60,7 @@
 26 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 27 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 28 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT
 01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -91,7 +91,7 @@
 26   DDDDD D fffff  DD ffffffff   ffg                                                                             g
 27   DDDDD D fffffff              ffg                                                                             g
 28   DDDDD D D aaaa a f f fff     ffg                                                                             g
-29  a BBBBBB a  ggg                                                                        dddd   ddddd dd   TTTT
+29  a TTTTTT   ggg                                                                         dddd   ddddd dd   TTTT
 ## legend
 bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus  B=bold

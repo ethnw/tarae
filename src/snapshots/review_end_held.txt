@@ -29,7 +29,7 @@
 26   space e files  ]u unviewed ▌
 27   space n comment            ▌                   h Go to them   n Keep reviewing
 28   space v m viewed · q end   ▌                ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-29  ▐ NORMAL ▌  +1                                                                          rust   utf-8 LF   1:1
+29  ● normal   +1                                                                           rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppp
@@ -60,7 +60,7 @@
 26 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 28 ppppppppppppppppppppppppppppp
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT
 01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -91,7 +91,7 @@
 26   DDDDD D fffff  DD ffffffff
 27   DDDDD D fffffff                                A              A dddd ddddddddd
 28   DDDDD D f ffffff f f fff
-29  a BBBBBB a  gg                                                                          dddd   ddddd dd   TTT
+29  a TTTTTT   gg                                                                           dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

@@ -3387,7 +3387,7 @@ mod tests {
         keys(&mut ed, "j");
         let shown = screen(&mut ed, 140, 30).join("\n");
         for s in [
-            "PROCS",
+            "● procs",
             "PID",
             "PROCESS",
             "FOR",

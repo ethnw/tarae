@@ -23,7 +23,7 @@
 20                                ▌
 21   space e files                ▌
 22   space o outline              ▌
-23  ▐ NORMAL ▌                                                                              rust   utf-8 LF   6:5
+23  ● normal                                                                                rust   utf-8 LF   6:5
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppppp
@@ -48,7 +48,7 @@
 20 ppppppppppppppppppppppppppppppp
 21 ppppppppppppppppppppppppppppppp
 22 ppppppppppppppppppppppppppppppp
-23   AAAAAAAA
+23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   fffff  fffffff  TTTT  fff      ddddd  f  ddd  f  TTTTTTT  f    ddddddddddd
 01   ffffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -73,7 +73,7 @@
 20
 21   DDDDD D fffff
 22   DDDDD D fffffff
-23  a BBBBBB a                                                                              dddd   ddddd dd   TTT
+23  a TTTTTT                                                                                dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other  2=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus

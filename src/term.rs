@@ -4911,22 +4911,16 @@ fn draw_review_header(
     let bg = if current { band.or(ui.base.bg) } else { ui.base.bg };
     let base = Style { bg, ..ui.base };
     let line = at + 1;
+    // The one in hand in ink bold, its bar in ink: only the answers it asks for are in the accent (geultarae
+    // decision 8 — the accent is a seal, one mark a region)
+    let strong =
+        base.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     apply(out, base)?;
     queue!(out, Spaces(gutter - 1))?;
-    apply(
-        out,
-        if current { Style { fg: ui.accent.fg, ..base } } else { Style { fg: ui.linenr.fg, ..base } },
-    )?;
+    apply(out, if current { Style { bold: false, ..strong } } else { Style { fg: ui.linenr.fg, ..base } })?;
     queue!(out, Print("▎ "))?;
     let label = format!("Change {} of {n} · line {line}", i + 1);
-    apply(
-        out,
-        if current {
-            Style { bold: true, ..base.patch(Style { fg: ui.accent.fg, ..Style::default() }) }
-        } else {
-            Style { fg: ui.virt.fg, ..base }
-        },
-    )?;
+    apply(out, if current { Style { bold: true, ..strong } } else { Style { fg: ui.virt.fg, ..base } })?;
     queue!(out, Print(&label))?;
     let mut used = gutter + 1 + label.width();
     // What each key takes, said plainly: `y` this change, `a` every one still undecided (it
@@ -4985,7 +4979,10 @@ fn draw_review_header(
             apply(out, st)?;
             queue!(out, Print(&piece))?;
         } else {
-            apply(out, Style { fg: ui.accent.fg, bold: true, ..base })?;
+            // (an answer's key in the accent; going back or on answers nothing: a hint's key, bold dim)
+            let answer = !matches!(key, "esc" | "tab");
+            let fg = if answer { ui.accent.fg } else { ui.virt.fg };
+            apply(out, Style { fg, bold: true, ..base })?;
             queue!(out, Print(format!("{lead}{key}")))?;
             apply(out, Style { fg: ui.virt.fg, ..base })?;
             queue!(out, Print(format!(" {desc}")))?;
@@ -5062,12 +5059,24 @@ impl PickerBox {
         };
         // (a list row kept, however short the screen: the head gives way — `h` is 6 at least)
         let head = head_rows(left - 2).min(h - 5);
+        let full = (h - 4).saturating_sub(head).max(1);
+        // A list card as tall as its rows and a row of air, not the screen: the most it listed or held while
+        // open (typing narrows the rows, a list redone — `:granted`'s `d` — the items: neither makes it jump),
+        // `LIST_MIN` at least. A picker with a preview keeps the screen for the
+        // code it shows; a live search's and a server's lists come and go with each key: they keep it too
+        let list_rows = if preview || p.live || p.requery {
+            full
+        } else {
+            let most = p.tallest.get().max(p.len()).max(p.counts().1);
+            p.tallest.set(most);
+            (most + 1).max(crate::chrome::LIST_MIN).min(full)
+        };
         PickerBox {
             x: mx,
             y: my,
             compact: false,
             head,
-            list_rows: (h - 4).saturating_sub(head).max(1),
+            list_rows,
             list_w: left - 2,
             preview_w: right.saturating_sub(2),
         }
@@ -6082,7 +6091,9 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     let strong =
         ui.base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let (x0, width) = (lay.rail_w, lay.edit_w.saturating_sub(lay.rail_w));
-    if width == 0 || lay.code_hidden() {
+    // (the start screen is a title page: no path bar or rule over an empty buffer — the page takes these rows,
+    // the folder's name is in its colophon: `draw_welcome`)
+    if width == 0 || lay.code_hidden() || editor.welcome() {
         return Ok(());
     }
     let sep = |keep| Seg { text: "  ›  ".into(), style: faint, keep };
@@ -6106,11 +6117,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         left.push(Seg { text: d.clone(), style: dim, keep });
         left.push(sep(keep));
     }
-    if editor.welcome() {
-        left.pop(); // separator after the project
-    } else {
-        left.push(Seg { text: doc.display_name_short(), style: strong, keep: 250 });
-    }
+    left.push(Seg { text: doc.display_name_short(), style: strong, keep: 250 });
     if doc.loading {
         left.push(Seg { text: " …".into(), style: dim, keep: 240 });
     } else if doc.is_modified() {
@@ -6122,7 +6129,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     // (its label on the rule under the bar, where the bar's words start — none hidden)
     let at = (x0 + SIGNS, usize::from(lay.text_top as usize >= crate::chrome::HEAD));
     editor.screen.spots.borrow_mut().push(crate::uistate::point::Spot { of, x: x0, y: 0, w: width, at });
-    if let Some((m, st)) = ui_mark(ui, editor, &pane, ui.base).filter(|_| !editor.welcome()) {
+    if let Some((m, st)) = ui_mark(ui, editor, &pane, ui.base) {
         left.push(Seg { text: format!(" {m}"), style: st, keep: 245 });
     }
     // A review with no room for its rail (the chat beside it, a phone): which of its files this is
@@ -6298,11 +6305,10 @@ fn fit_segments(left: &mut Vec<Seg>, right: &mut Vec<Seg>, width: usize) {
     }
 }
 
-/// tarae statusline: `▐ NORMAL ▌  branch  progress ……… claude · diag · lang · encoding EOL · sel · pos`
-/// Mode = pill (half blocks widen its bg half a cell each side) — where the keys go: the code's mode, or
-/// CHAT, GIT, REVIEW, PICKER, TERMINAL … (`chrome::Keys::label`); the rest dimmed — only mode, diagnostics,
-/// position catch the eye. With the header off, the file name goes here too. Symbols only from common
-/// monospace fonts (● ▲ · … ▐ ▌).
+/// tarae statusline: `● normal  branch  progress ……… claude · diag · lang · encoding EOL · sel · pos`
+/// Mode = a dot and a word — where the keys go: the code's mode, or chat, git, review, picker, terminal …
+/// (`chrome::Keys::label`, lowercased); the rest dimmed — only mode, diagnostics, position catch the eye.
+/// With the header off, the file name goes here too. Symbols only from common monospace fonts (● ▲ · …).
 /// `folded`: the newest notification, when its card found no free place over the code.
 fn draw_statusline(
     editor: &Editor,
@@ -6325,16 +6331,16 @@ fn draw_statusline(
         Mode::Select => "SELECT",
     });
     let mut left = Vec::new();
-    match ui.status_mode.bg.filter(|bg| Some(*bg) != ui.status.bg) {
-        Some(pill) => {
-            let edge = Style { fg: Some(pill), bg: ui.status.bg, ..Style::default() };
-            left.push(Seg { text: " ▐".into(), style: edge, keep: 255 });
-            left.push(Seg { text: format!(" {mode} "), style: ui.status_mode, keep: 255 });
-            left.push(Seg { text: "▌".into(), style: edge, keep: 255 });
-        }
-        None => left.push(Seg { text: format!(" {} ", &mode[..3]), style: ui.status_mode, keep: 255 }),
-    }
-    // (a floating list's keys go right after the pill — laid in at the end, once the room is known)
+    // `● normal`: a dot in the mode's colour (the accent, or the mode's own with `color-modes`), the word in ink
+    // bold — a mark, not a block of colour (geultarae decision 1); its word where a prompt's `:` stands over it
+    let dot = ui.status_mode.bg.filter(|bg| Some(*bg) != ui.status.bg).or(ui.accent.fg);
+    left.push(Seg { text: " ●".into(), style: Style { fg: dot, ..ui.status }, keep: 255 });
+    left.push(Seg {
+        text: format!(" {} ", mode.to_lowercase()),
+        style: Style { bold: true, ..strong },
+        keep: 255,
+    });
+    // (a floating list's keys go right after the mode — laid in at the end, once the room is known)
     let hints_at = left.len();
     // (the terminal with tarae's keys: typing isn't the program's until `i` — a key hint, as the panels' are)
     if let Some((key, what)) = keys.hint() {
@@ -6502,6 +6508,8 @@ fn draw_statusline(
         right.push(gap(215));
     }
     match &editor.session.review {
+        // (the review in front: the mode says it — `● review` on the left — once is enough)
+        Some(r) if r.ready && keys == crate::chrome::Keys::Review => {}
         Some(r) if r.ready => {
             right.push(Seg {
                 text: "claude ● review".into(),
@@ -6994,24 +7002,27 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
     let faint = Style { fg: ui.linenr.fg, ..ui.base };
     let strong =
         ui.base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
-    let key = Style { fg: ui.accent.fg, bold: true, ..ui.base };
+    // (keys as every hint has them, the meanings plain ink: the name is the one accent mark)
+    let key = Style { bold: true, ..strong };
     let home = std::env::var("HOME").unwrap_or_default();
-    // Right of the side panel when it's open
+    // Right of the side panel when it's open; a title page — the header's rows are the page's too (`draw_header`
+    // draws no path bar here)
     let (ox, ew) = (lay.rail_w, lay.edit_w - lay.rail_w);
+    let page = lay.text_top as usize + lay.text_rows;
     let mut rows: Vec<Vec<(String, Style)>> = vec![
         vec![("t a r a e".into(), Style { fg: ui.accent.fg, bold: true, ..ui.base })],
         vec![("타래 · Helix keys, Claude inside".into(), dim)],
         vec![],
     ];
-    // Rows from the top drawn centered: the seal's, then the name and the intro
-    let mut centered = 2;
+    // Rows from the top drawn centered: the name and the intro
+    let centered = 2;
     // The files last open in this folder first — the most likely next step when there are some
     if let Some(files) = editor.session.restorable.as_ref().filter(|f| !f.is_empty()) {
         let name = files[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let more = if files.len() > 1 { format!(" +{}", files.len() - 1) } else { String::new() };
         rows.push(vec![
             (format!("{:<9}", "r"), key),
-            ("Continue where you left off  ".into(), strong),
+            ("Continue where you left off  ".into(), ui.base),
             (format!("{name}{more}"), faint),
         ]);
         rows.push(vec![]);
@@ -7040,7 +7051,7 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
                 Some(rest) if !home.is_empty() => format!("~{rest}"),
                 _ => dir,
             };
-            rows.push(vec![(format!("{:<9}", i + 1), key), (format!("{name}  "), strong), (dir, faint)]);
+            rows.push(vec![(format!("{:<9}", i + 1), key), (format!("{name}  "), ui.base), (dir, faint)]);
         }
     }
     let block_w = rows
@@ -7050,23 +7061,16 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         .unwrap_or(0)
         .min(ew.saturating_sub(4))
         .max(32);
-    // The seal over the name — the first thing to fold: only where everything else fits beside it with a
-    // row of air above it (the footer's two rows, the seal's blank row under it, two rows of slack)
-    if rows.len() + SEAL.len() + 5 <= lay.text_rows && ew >= SEAL[0].chars().count() + 4 {
-        let seal = seal_rows(ui);
-        centered += seal.len();
-        recent_from = recent_from.saturating_add(seal.len());
-        rows.splice(0..0, seal);
-    }
-    let top = lay.text_top as usize + lay.text_rows.saturating_sub(rows.len() + 2) / 2;
+    // A title page set in type: the block with as much air above it as between it and the colophon (the
+    // page's last row)
+    let top = page.saturating_sub(rows.len() + 1) / 2;
     let x0 = ox + ew.saturating_sub(block_w) / 2;
-    for row in 0..lay.text_rows {
-        let y = lay.text_top as usize + row;
+    for y in 0..page {
         queue!(out, MoveTo(ox as u16, y as u16))?;
         apply(out, ui.base)?;
         queue!(out, Spaces(ew))?;
         if let Some(r) = (y >= top).then(|| rows.get(y - top)).flatten() {
-            // The seal, name and intro centered, the rest aligned to the block's left
+            // The name and intro centered, the rest aligned to the block's left
             let w: usize = r.iter().map(|(s, _)| s.width()).sum();
             let x = if y - top < centered { ox + ew.saturating_sub(w) / 2 } else { x0 };
             queue!(out, MoveTo(x as u16, y as u16))?;
@@ -7082,55 +7086,18 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
             }
         }
     }
-    // Bottom center: version · theme
-    let foot = format!("tarae {} · {}", env!("CARGO_PKG_VERSION"), t.name);
-    queue!(
-        out,
-        MoveTo((ox + ew.saturating_sub(foot.width()) / 2) as u16, lay.text_top + lay.text_rows as u16 - 1)
-    )?;
+    // Bottom center, the colophon: the folder · version · theme
+    let folder = editor.session.root.file_name().map(|p| p.to_string_lossy().into_owned());
+    // Tests: a fixed project name (the checkout folder's name varies — worktrees, CI)
+    #[cfg(test)]
+    let folder = folder.map(|_| "tarae".to_string());
+    let folder = folder.map(|f| format!("{} · ", fit_ellipsis(&f, 30))).unwrap_or_default();
+    let foot = format!("{folder}tarae {} · {}", env!("CARGO_PKG_VERSION"), t.name);
+    let foot = fit_left(&foot, ew.saturating_sub(4));
+    queue!(out, MoveTo((ox + ew.saturating_sub(foot.width()) / 2) as u16, page.saturating_sub(1) as u16))?;
     apply(out, faint)?;
     queue!(out, Print(foot))?;
     Ok(())
-}
-
-/// tarae's seal (`docs/brand/seal-*.svg`) in half-block pixels, two to a cell: a skein's thread carved out of an
-/// accent block, wound from its heart and running out along the bottom to a cursor. `█` is a cell of accent
-/// (drawn as its background: `█` isn't in every font), `▀`/`▄` half of one; the carving is the ground.
-const SEAL: [&str; 8] = [
-    "▄█▀▀▀▀▀▀▀▀▀▀█████▄",
-    "█  ▄▄▄▄▄▄▄▄  █████",
-    "█  ███▀▀███  █████",
-    "█  ██  ▄███  █████",
-    "█  ██  ▀▀▀▀  ███▀█",
-    "█  ███▄▄▄▄▄▄████ █",
-    "█  ▀▀▀▀▀▀▀▀▀▀▀██ █",
-    "▀█▄▄▄▄▄▄▄▄▄▄▄▄██▄▀",
-];
-
-/// The seal's rows and the blank row under it.
-fn seal_rows(ui: &Ui) -> Vec<Vec<(String, Style)>> {
-    let half = Style { fg: ui.accent.fg, ..ui.base };
-    let full = Style { bg: ui.accent.fg, ..ui.base };
-    let mut rows: Vec<Vec<(String, Style)>> = SEAL
-        .iter()
-        .map(|l| {
-            let mut spans: Vec<(String, Style)> = Vec::new();
-            for c in l.chars() {
-                let (c, st) = match c {
-                    '█' => (' ', full),
-                    ' ' => (' ', ui.base),
-                    c => (c, half),
-                };
-                match spans.last_mut() {
-                    Some((s, last)) if *last == st => s.push(c),
-                    _ => spans.push((c.to_string(), st)),
-                }
-            }
-            spans
-        })
-        .collect();
-    rows.push(vec![]);
-    rows
 }
 
 /// A notification kind's bar color: accent (info) · diff.plus (success) · warning · error.
@@ -8491,7 +8458,8 @@ fn draw_follow_card(
                 } else {
                     let text = crate::chat::displayed(&m.text);
                     let rendered = crate::markdown::render(text.trim(), &editor.theme, lang.as_deref());
-                    let (mut rows, drawn) = chat_markdown_drawn(&rendered, inner, (faint, dim), ui.base.bg);
+                    let (mut rows, drawn) =
+                        chat_markdown_drawn(&rendered, (inner, inner), (faint, dim), ui.base.bg);
                     // (번짐: the answer being written, its head ink not yet dry)
                     let head = c.msgs.last().is_some_and(|l| std::ptr::eq(l, m));
                     if head && c.state == crate::chat::State::Writing && editor.wet_ink {
@@ -10109,10 +10077,11 @@ fn draw_chat(
     let faint = Style { fg: ui.linenr.fg, ..card };
     let accent = Style { fg: ui.accent.fg, ..card };
     let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
-    use crate::chrome::{GAP, PAD, PAD_R};
+    use crate::chrome::{GAP, MEASURE, PAD, PAD_R};
     let x0 = lay.edit_w;
-    // (text width: the gutter, the padding on both sides)
+    // (text width: the gutter, the padding on both sides — prose keeps a measure in it, the rest margin)
     let w = lay.chat_w.saturating_sub(GAP + PAD + PAD_R).max(8);
+    let mw = w.min(MEASURE);
     // (the whole height, its title on the screen's first row — `chrome.rs`)
     let top = 0;
     let rows = lay.body_h;
@@ -10229,7 +10198,7 @@ fn draw_chat(
                 for part in m.text.split('\n').map(|l| l.trim_end_matches('\r')) {
                     let para = [md::Line::Text { spans: vec![sp(part.to_string(), strong)], indent: 0 }];
                     let rows =
-                        if part.trim().is_empty() { Vec::new() } else { md::wrap(&para, w - 2, faint) };
+                        if part.trim().is_empty() { Vec::new() } else { md::wrap(&para, mw - 2, faint) };
                     if rows.is_empty() {
                         lines.push(plain(vec![sp("▎".into(), accent)]));
                     }
@@ -10243,7 +10212,7 @@ fn draw_chat(
             Role::Assistant => {
                 lines.push(ChatRow::default());
                 let rendered = md::render_reading(&crate::chat::displayed(&m.text), t, lang.as_deref(), read);
-                let (mut rows, drawn) = chat_markdown_drawn(&rendered, w, (faint, dim), ui.base.bg);
+                let (mut rows, drawn) = chat_markdown_drawn(&rendered, (w, mw), (faint, dim), ui.base.bg);
                 let writing = i + 1 == n && c.state == State::Writing;
                 // (번짐: its head ink not yet dry while it's written — laid out again as text comes, dry at the end)
                 if writing && editor.wet_ink {
@@ -10257,7 +10226,7 @@ fn draw_chat(
             // Thinking: an aside — faint bar, italic; finished ones fold to two rows
             Role::Thought => {
                 lines.push(ChatRow::default());
-                let all = thought_rows(&m.text, w - 2, dim, faint, editor);
+                let all = thought_rows(&m.text, mw - 2, dim, faint, editor);
                 let live = i + 1 == n && c.busy();
                 let keep = if live { 8 } else { 2 };
                 // Folded: the first two rows with words (a bold step title and the start of its text)
@@ -10318,7 +10287,7 @@ fn draw_chat(
                     let mut first = true;
                     for part in m.text.split('\n') {
                         let para = [md::Line::Text { spans: vec![sp(part.to_string(), dim)], indent: 0 }];
-                        for l in md::wrap(&para, w.saturating_sub(2).max(1), faint) {
+                        for l in md::wrap(&para, mw.saturating_sub(2).max(1), faint) {
                             let mut row = vec![sp(if first { mark } else { "  " }.into(), dim)];
                             row.extend(l);
                             lines.push(plain(row));
@@ -11059,14 +11028,14 @@ fn chat_markdown(
     styles: (Style, Style),
     well: Option<crossterm::style::Color>,
 ) -> Vec<Vec<crate::markdown::Span>> {
-    chat_markdown_drawn(lines, w, styles, well).0
+    chat_markdown_drawn(lines, (w, w), styles, well).0
 }
 
 /// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what wet ink
-/// leaves alone.
+/// leaves alone. Text wraps at `measure` (≤ `w`), code rows take `w`.
 fn chat_markdown_drawn(
     lines: &[crate::markdown::Line],
-    w: usize,
+    (w, measure): (usize, usize),
     (rule, label): (Style, Style),
     well: Option<crossterm::style::Color>,
 ) -> (Vec<Vec<crate::markdown::Span>>, Vec<crate::markdown::Drawn>) {
@@ -11104,8 +11073,10 @@ fn chat_markdown_drawn(
                     code: true,
                 });
             }
+            // (prose at the measure; a rule or a table as wide as the panel)
             other => {
-                let (rows, d) = md::wrap_drawn(std::slice::from_ref(other), w, rule, label);
+                let width = if matches!(other, Line::Text { .. }) { measure.min(w) } else { w };
+                let (rows, d) = md::wrap_drawn(std::slice::from_ref(other), width, rule, label);
                 out.extend(rows);
                 drawn.extend(d);
             }
@@ -13195,12 +13166,15 @@ mod tests {
             (rows, vt.screen().cursor_position())
         };
         let (rows, _) = draw(&mut ed);
-        assert!(rows[29].contains("NORMAL") && rows[28].contains("some code"), "the code to the status line");
+        assert!(
+            rows[29].contains("● normal") && rows[28].contains("some code"),
+            "the code to the status line"
+        );
         for k in [":", "w", "r"] {
             ed.handle_key(k.parse().unwrap());
         }
         let (rows, cursor) = draw(&mut ed);
-        assert!(rows[29].contains("NORMAL"), "the status line stays in sight: {:?}", rows[29]);
+        assert!(rows[29].contains("● normal"), "the status line stays in sight: {:?}", rows[29]);
         assert!(rows[28].trim().chars().all(|c| c == '▀'), "the card's edge over it: {:?}", rows[28]);
         assert!(rows[27].trim_start().starts_with(":wr"), "the input on its last row: {:?}", rows[27]);
         assert_eq!(cursor, (27, rows[27].find(":wr").unwrap() as u16 + 3), "the cursor after what's typed");
@@ -13223,7 +13197,7 @@ mod tests {
         let (rows, _) = draw(&mut ed);
         assert!(rows[27].contains("some code") && ed.screen.prompt_card.get().is_none());
         // With the side panel up it stays at the screen's bottom left, over the panel's foot: the input
-        // right above the mode pill, its `:` where the pill's label starts
+        // right above the mode, its `:` where the mode's word starts
         let mut side = crate::sidebar::Sidebar::with_files(std::env::temp_dir(), vec!["a.rs".into()]);
         side.focus = false;
         ed.session.sidebar = Some(side);
@@ -13232,7 +13206,7 @@ mod tests {
         assert!(ed.screen.side_w > 2, "the side panel is up");
         assert_eq!(ed.screen.prompt_card.get().map(|r| r.0), Some(1), "a cell in from the screen's left");
         let col = |row: &str, s: &str| row.find(s).map(|b| row[..b].chars().count());
-        assert_eq!(col(&rows[27], ":"), col(&rows[29], "NORMAL"), "{}\n{}", rows[27], rows[29]);
+        assert_eq!(col(&rows[27], ":"), col(&rows[29], "normal"), "{}\n{}", rows[27], rows[29]);
     }
 
     /// What used to sit under the status line is in it: a list's keys after the pill (whole pairs, as many
@@ -13258,7 +13232,7 @@ mod tests {
         ed.handle_key("b".parse().unwrap());
         assert!(ed.picker.is_some(), "the buffers");
         let s = status(&mut ed, 100);
-        assert!(s.contains("PICKER ▌  enter open  C-x close the buffer"), "{s}");
+        assert!(s.contains("● picker   enter open  C-x close the buffer"), "{s}");
         assert!(s.ends_with("1:1"), "the position kept: {s}");
         // Narrow: whole pairs only, the position kept
         let s = status(&mut ed, 40);
@@ -13287,7 +13261,7 @@ mod tests {
         vt.process(&bytes);
         let rows: Vec<String> = vt.screen().rows(0, 100).collect();
         // (where a row's text starts inside the card, from its own left edge: what's drawn beside it — the start
-        // screen's seal — isn't the card's)
+        // screen — isn't the card's)
         let (cx, _, cw, _) = ed.screen.offer_card.expect("the card drawn");
         let start =
             |r: &str| r.chars().skip(cx).take(cw).position(|c| c != ' ' && c != '▎').map_or(0, |i| cx + i);
@@ -14749,7 +14723,7 @@ mod tests {
         // (an answer laid out as the chat lays it out — what's wet, a run at a time, `|` between)
         let wet_of = |md: &str, w: usize| -> String {
             let lines = crate::markdown::render(md, &th, None);
-            let (mut rows, drawn) = chat_markdown_drawn(&lines, w, (rule, label), None);
+            let (mut rows, drawn) = chat_markdown_drawn(&lines, (w, w), (rule, label), None);
             WET_SEEN.with_borrow_mut(Vec::clear);
             wet("test", &mut rows, &drawn, |s| Style { underline: true, ..s });
             for (row, d) in rows.iter().zip(&drawn) {

@@ -29,7 +29,7 @@
 26
 27                                            y Stop it   w What it waits on   n Keep waiting
 28                                         ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -60,7 +60,7 @@
 26                                         ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27                                         ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 28
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -91,7 +91,7 @@
 26
 27                                            A           A dddd dd ddddd dd   A dddd ddddddd
 28
-29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

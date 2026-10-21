@@ -23,7 +23,7 @@
 20   space e files  ]u unviewed ▌  3 }
 21   space n comment            ▌
 22   space v m viewed · q end   ▌
-23  ▐ NORMAL ▌  +2  −1                                                         rust   utf-8 LF   14:1
+23  ● normal   +2  −1                                                          rust   utf-8 LF   14:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppp
@@ -48,7 +48,7 @@
 20 ppppppppppppppppppppppppppppp
 21 ppppppppppppppppppppppppppppp
 22 ppppppppppppppppppppppppppppp
-23   AAAAAAAA
+23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT  f    dddd
 01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -73,7 +73,7 @@
 20   DDDDD D fffff  DD ffffffff    f
 21   DDDDD D fffffff
 22   DDDDD D f ffffff f f fff
-23  a BBBBBB a  gg  ee                                                         dddd   ddddd dd   TTTT
+23  a TTTTTT   gg  ee                                                          dddd   ddddd dd   TTTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

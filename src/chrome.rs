@@ -48,6 +48,11 @@ pub const RULE_MIN_ROWS: u16 = 16;
 /// two look the same).
 pub const PICKER_MX: usize = 2;
 pub const PICKER_MY: usize = 1;
+/// A list card's rows at least — it's as tall as its rows and a row of air, not the screen (geultarae §2.3).
+pub const LIST_MIN: usize = 12;
+/// The chat's measure: its prose wraps at this many cells at most, the rest of a wide panel is margin (code
+/// blocks, rules and the tool rows keep the panel's width — geultarae decision 7).
+pub const MEASURE: usize = 72;
 /// What an unfocused region keeps of its text's contrast against its background (WCAG ratio).
 pub const FADE: f64 = 0.88;
 

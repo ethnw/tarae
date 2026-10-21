@@ -348,7 +348,7 @@ fn starts_shows_the_file_and_quits_restoring_the_terminal() {
     let left_at = rfind(&raw, leave).unwrap();
     assert!(left_at > entered);
     assert!(!contains(&raw[left_at..], b"\x1b[?1049h"));
-    assert!(!t.screen().contains("NORMAL"), "back on the main screen:\n{}", t.screen());
+    assert!(!t.screen().contains("● normal"), "back on the main screen:\n{}", t.screen());
 }
 
 /// Over SSH a copy goes to the user's own clipboard through the terminal (OSC 52), written with tarae's own
@@ -580,7 +580,7 @@ fn which_key_and_command_palette_open_and_close() {
     t.send("save");
     t.wait_for("the query in the palette", |s| s.contains("› save"));
     let s = t.esc("the palette to close", |s| !s.contains("commands") && s.contains("palette test"));
-    assert!(s.status().contains("NORMAL"), "{s}");
+    assert!(s.status().contains("● normal"), "{s}");
     assert!(t.running());
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
@@ -635,7 +635,7 @@ fn side_panel_lists_opens_and_closes() {
     t.wait_for("beta.rs open", |s| s.contains("fn beta"));
     // The code has the keys again: `i` is insert mode
     t.send("i");
-    t.wait_for("INSERT mode", |s| s.status().contains("INSERT"));
+    t.wait_for("INSERT mode", |s| s.status().contains("● insert"));
     t.normal_mode();
     // Back in the panel, `q` closes it
     t.send(" e");
@@ -657,14 +657,14 @@ fn terminal_panel_runs_the_shell_and_gives_the_keys_back() {
     let mut t = sb.spawn(&["t.txt"]);
     t.wait_text("the buffer");
     t.send(" T");
-    t.wait_text("TERMINAL");
+    t.wait_text("● terminal");
     // The shell may still be starting — its line discipline keeps what's typed until it reads
     t.send("echo sum-$((40+2))\r");
     t.wait_text("sum-42");
     assert!(!t.screen().contains("the bufferecho"), "the buffer never saw the keys");
     t.send("\x1c");
     t.send("i");
-    t.wait_for("INSERT mode in the code", |s| s.status().contains("INSERT"));
+    t.wait_for("INSERT mode in the code", |s| s.status().contains("● insert"));
     t.normal_mode();
     t.send(" T");
     t.send("echo again-$((1+1))\r");
@@ -672,7 +672,7 @@ fn terminal_panel_runs_the_shell_and_gives_the_keys_back() {
     t.send("\x1c");
     t.send("\x17j");
     t.send(" T");
-    t.wait_for("the terminal hidden", |s| !s.contains("TERMINAL") && !s.contains("sum-42"));
+    t.wait_for("the terminal hidden", |s| !s.contains("● terminal") && !s.contains("sum-42"));
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
     assert_eq!(sb.read("t.txt"), "the buffer\n");
@@ -687,7 +687,7 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
     let mut t = sb.spawn(&["t.txt"]);
     t.wait_text("the buffer");
     t.send(" T");
-    t.wait_text("TERMINAL");
+    t.wait_text("● terminal");
     t.send("yes flood-line\r");
     t.wait_text("flood-line");
     std::thread::sleep(std::time::Duration::from_secs(1)); // a second of it piling up
@@ -695,7 +695,7 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
     t.send("\x1c");
     t.send("i");
     // (an editor the flood takes never handles them — the bound only has to outlast a slow runner)
-    let inserting = t.poll_for(std::time::Duration::from_secs(5), |s| s.status().contains("INSERT"));
+    let inserting = t.poll_for(std::time::Duration::from_secs(5), |s| s.status().contains("● insert"));
     let took = asked.elapsed();
     eprintln!("flood: keys landed after {took:?}");
     assert!(inserting.is_some(), "keys still not handled after {took:?} of a flood");
@@ -709,7 +709,7 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
 fn a_shell_with_a_job(sb: &Sandbox) -> (Term, i32, i32) {
     let mut t = sb.spawn(&[]);
     t.send(" T");
-    t.wait_text("TERMINAL");
+    t.wait_text("● terminal");
     t.send("echo $$ > shell.pid\r");
     t.send("sh -c 'echo $$ > job.pid; exec sleep 120'\r");
     let pid = |name: &str| {
@@ -938,7 +938,7 @@ fn git_tab_stages_and_commits() {
     // Right away — before the status after the stage is read back (as a quick hand would)
     t.send("c");
     t.wait_for("the message buffer, typing", |s| {
-        s.contains("COMMIT_EDITMSG") && s.status().contains("INSERT")
+        s.contains("COMMIT_EDITMSG") && s.status().contains("● insert")
     });
     t.send("second line");
     t.wait_text("second line");
@@ -1162,7 +1162,7 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     t.esc_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.send(" T");
     // (sh's prompt: `$`, or `#` as root — a container)
-    t.wait_for("the terminal", |s| s.contains("TERMINAL") && (s.contains("$ ") || s.contains("# ")));
+    t.wait_for("the terminal", |s| s.contains("● terminal") && (s.contains("$ ") || s.contains("# ")));
     idle(&mut t, "the terminal");
     t.send("\x1c");
     t.wait_state("the code has the keys", |s| s["keys"]["region"] == "code");
@@ -1265,7 +1265,7 @@ fn a_driver_reads_where_the_keys_go() {
         (Some("slot:terminal"), Some("commands"))
     );
     t.wait_for("the status line says so", |s| {
-        s.status().contains("TERMINAL") && s.status().contains("i type in it")
+        s.status().contains("● terminal") && s.status().contains("i type in it")
     });
     assert!(t.state(&[]).lines().nth(1).unwrap().starts_with("keys → terminal (commands)"));
     drop(t);
@@ -1677,7 +1677,7 @@ fn restart_becomes_the_new_binary_as_you_were() {
 fn edit_big_file(sb: &Sandbox, t: &mut Term) {
     t.wait_text("line number 1");
     t.send("i");
-    t.wait_for("INSERT mode", |s| s.status().contains("INSERT"));
+    t.wait_for("INSERT mode", |s| s.status().contains("● insert"));
     t.send(&format!("{} END ", "x\x13".repeat(1000)));
     t.wait_text("END");
     t.normal_mode();

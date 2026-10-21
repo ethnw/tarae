@@ -601,7 +601,27 @@ fn snapshot_welcome() {
     s.check("welcome");
 }
 
-/// Start screen too short for the seal: the seal folds first, every key stays.
+/// Start screen at 80×24, a title page set in type: no path bar over the empty buffer, no picture — the name, the
+/// line under it, the keys in ink, the folder in the colophon; as much air above the block as between it and the
+/// colophon.
+#[test]
+fn snapshot_welcome_80() {
+    let mut s = Shot::new(80, 24);
+    let shown = screen_text(&mut s);
+    let rows: Vec<&str> = shown.lines().collect();
+    assert!(!rows[0].contains("tarae") && !rows[1].contains('─'), "no path bar, no rule: {shown}");
+    assert!(rows[22].contains("tarae · tarae "), "the folder in the colophon: {shown}");
+    assert!(!shown.contains(['▄', '▀']), "no picture over the name: {shown}");
+    let name = rows.iter().position(|r| r.contains("t a r a e")).unwrap();
+    let quit = rows.iter().position(|r| r.contains("Quit")).unwrap();
+    assert_eq!(rows[name + 1].trim(), "타래 · Helix keys, Claude inside");
+    // (the rows over the name, and those between the last key and the colophon: even)
+    let (above, below) = (name, 22 - 1 - quit);
+    assert!(above.abs_diff(below) <= 1 && above >= 4, "{above} above, {below} below: {shown}");
+    s.check("welcome_80");
+}
+
+/// Start screen on a short screen: every key stays, the air gives way.
 #[test]
 fn snapshot_welcome_short() {
     let mut s = Shot::new(100, 14);
@@ -1386,6 +1406,43 @@ fn snapshot_chat_table() {
     s.ed.session.chat.as_mut().unwrap().msgs =
         vec![msg(Role::User, "표는 어떻게 그릴까?"), msg(Role::Assistant, answer), msg(Role::Note, "3.1s")];
     s.check("chat_table");
+}
+
+/// A wide chat keeps a measure: its prose — the question, the answer, a list — wraps at `MEASURE` cells, the
+/// rest of the panel is margin; a code block runs the panel's width.
+#[test]
+fn snapshot_chat_measure() {
+    use crate::chat::{Msg, Role};
+    use crate::chrome::{GAP, MEASURE, PAD};
+    let (w, h) = (240u16, 30u16);
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l");
+    let msg = |role, text: &str| Msg::new(role, text, "");
+    let question = "why does the map keep the last strand when two have the same name, and is there a way to keep the first?";
+    let answer = "The name is cloned because insert takes the key by value, and the strand moves into the map in the \
+                  same call. Keying by the name alone means a second strand with the same name replaces the first.\n\n\
+                  - entry keeps the first one it was given, and every later strand with the same name is dropped quietly\n\n\
+                  ```rust\n\
+                  let counts: HashMap<String, Vec<Thread>> = threads.into_iter().fold(HashMap::new(), |mut m, t| { m.entry(t.name.clone()).or_default().push(t); m });\n\
+                  ```";
+    s.ed.session.chat.as_mut().unwrap().msgs =
+        vec![msg(Role::User, question), msg(Role::Assistant, answer), msg(Role::Note, "2.0s")];
+    let shown = screen_text(&mut s);
+    let x = s.ed.screen.chat_x.unwrap() + GAP + PAD;
+    let rows: Vec<String> = shown.lines().map(|r| r.chars().skip(x).collect::<String>()).collect();
+    let width = |needle: &str| {
+        let r = rows.iter().find(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle}: {shown}"));
+        r.trim_end().width()
+    };
+    use unicode_width::UnicodeWidthStr;
+    for prose in ["why does the map", "The name is cloned", "entry keeps the first"] {
+        assert!(width(prose) <= MEASURE, "{prose}: {} > {MEASURE}\n{shown}", width(prose));
+    }
+    assert!(width("let counts") > MEASURE + 4, "the code runs wider\n{shown}");
+    s.check("chat_measure");
 }
 
 /// While Claude works in follow mode the panel is minimized to a floating card (the code gets the whole
@@ -5220,15 +5277,15 @@ fn the_panels_follow_one_set_of_rules() {
         let lit =
             rules.iter().map(|&(y, x)| p.screen().cell(y as u16, x as u16).unwrap().fgcolor() == accent);
         let status = p.screen().rows(0, w).nth(end).unwrap_or_default();
-        (lit.collect(), status.split('▌').next().unwrap_or_default().trim().to_string())
+        (lit.collect(), status.split("  ").next().unwrap_or_default().trim().to_string())
     };
-    assert_eq!(keys(&mut s), (vec![false, true, false, false], "▐ NORMAL".into()), "the code");
+    assert_eq!(keys(&mut s), (vec![false, true, false, false], "● normal".into()), "the code");
     s.keys(" l");
-    assert_eq!(keys(&mut s), (vec![false, false, true, false], "▐ CHAT".into()), "the chat");
+    assert_eq!(keys(&mut s), (vec![false, false, true, false], "● chat".into()), "the chat");
     s.keys("<esc><C-w>e");
-    assert_eq!(keys(&mut s), (vec![true, false, false, false], "▐ FILES".into()), "the side panel");
+    assert_eq!(keys(&mut s), (vec![true, false, false, false], "● files".into()), "the side panel");
     s.keys("<esc><C-w>j");
-    assert_eq!(keys(&mut s), (vec![false, false, false, true], "▐ TASK".into()), "the bottom slot");
+    assert_eq!(keys(&mut s), (vec![false, false, false, true], "● task".into()), "the bottom slot");
     // …and what hasn't them, faded: the chat's title, the code's file name (the slot has the keys)
     let ui = Ui::new(&s.ed);
     let p = cells(&s.frame(), w, h);
@@ -5452,7 +5509,10 @@ fn the_picker_floats_with_equal_margins() {
     let cols: Vec<usize> = (0..chat).filter(|&x| (0..end).any(|y| card(y, x))).collect();
     let (top, bottom) = (rows[0], end - 1 - rows[rows.len() - 1]);
     let (left, right) = (cols[0], chat - 1 - cols[cols.len() - 1]);
+    // (a picker with a preview keeps the screen — for the code it shows — however short its list)
     assert_eq!((left, right, top, bottom), (PICKER_MX, PICKER_MX, PICKER_MY, PICKER_MY));
+    let list = s.ed.picker.as_ref().unwrap().len();
+    assert!(list < crate::chrome::LIST_MIN, "a short list: {list}");
     for (y, x) in (0..end).flat_map(|y| (0..chat).map(move |x| (y, x))) {
         if !rows.contains(&y) || !cols.contains(&x) {
             assert_eq!(at(y, x).bgcolor(), ground, "the margin at {y},{x}");
@@ -5463,7 +5523,57 @@ fn the_picker_floats_with_equal_margins() {
     let beside = |r: &str| r.chars().skip(chat).collect::<String>();
     assert!(beside(&screen[0]).contains("claude") && beside(&screen[1]).contains("────"), "{screen:#?}");
     assert!(screen.iter().any(|r| r.contains("› Ask about demo.rs")), "{screen:#?}");
-    assert!(screen[end].contains("▐ PICKER ▌"));
+    assert!(screen[end].contains("● picker "));
+}
+
+/// A list card with no preview, longer than `LIST_MIN`, is as tall as its rows and a row of air — and stays so
+/// while typing narrows it or its items are replaced with fewer (the card never jumps); a live search keeps the
+/// screen's height, as does a picker with a preview (`the_picker_floats_with_equal_margins`).
+#[test]
+fn a_list_card_is_its_own_height_and_keeps_it() {
+    use crate::picker::{Action, Item, Picker};
+    let (w, h) = (100u16, 50u16);
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", DEMO_RS);
+    let item = |i: usize| Item {
+        label: format!("step {i}"),
+        action: Action::Message,
+        hint: String::new(),
+        glyph: None,
+    };
+    let (_, surface, _) = chrome_colors(&s.ed);
+    let card_rows = |s: &mut Shot| {
+        let p = cells(&s.frame(), w, h);
+        let end = s.ed.screen.text_top + s.ed.screen.body_h;
+        // (from its top edge to its bottom one — the selected row is another colour all across)
+        let on: Vec<usize> = (0..end)
+            .filter(|&y| {
+                (0..w).any(|x| {
+                    let c = p.screen().cell(y as u16, x).unwrap();
+                    c.bgcolor() == surface || (["▄", "▀"].contains(&c.contents()) && c.fgcolor() == surface)
+                })
+            })
+            .collect();
+        on.last().map_or(0, |l| l + 1 - on[0])
+    };
+    s.ed.open_picker(Picker::new("steps", (0..20).map(item).collect(), false).without_preview(), None);
+    let tall = card_rows(&mut s);
+    assert_eq!(tall, 20 + 1 + 4, "its rows, a row of air, the edges, input and divider");
+    s.keys("step 1");
+    assert!(s.ed.picker.as_ref().unwrap().len() < 12, "narrowed");
+    assert_eq!(card_rows(&mut s), tall, "typing never makes it shrink (its items are as many)");
+    s.keys("<esc>");
+    // Its items replaced while it's open with fewer (`:granted`'s `d` takes one back): the most it held stays
+    s.ed.open_picker(Picker::new("steps", (0..20).map(item).collect(), false).without_preview(), None);
+    assert_eq!(card_rows(&mut s), tall);
+    s.ed.picker.as_mut().unwrap().set_items((0..15).map(item).collect());
+    assert_eq!(s.ed.picker.as_ref().unwrap().counts(), (15, 15));
+    assert_eq!(card_rows(&mut s), tall, "fewer items never make it shrink");
+    s.keys("<esc>");
+    let mut live = Picker::new("search", (0..20).map(item).collect(), false).without_preview();
+    live.live = true;
+    s.ed.open_picker(live, None);
+    assert!(card_rows(&mut s) > tall, "a live search keeps the screen");
 }
 
 /// The bottom slot's panels are tabs on its title row: a task started while the terminal has the keys is a

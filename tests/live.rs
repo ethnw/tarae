@@ -129,7 +129,7 @@ fn rust_analyzer_diagnoses_completes_and_jumps() {
     // A type error, saved → cargo check's diagnostic at the line end
     t.send("ge");
     t.send("o");
-    t.wait_for("INSERT mode", |s| s.status().contains("INSERT"));
+    t.wait_for("INSERT mode", |s| s.status().contains("● insert"));
     t.send("pub fn bad() -> i32 { \"x\" }");
     t.normal_mode();
     t.command("w");
@@ -137,7 +137,7 @@ fn rust_analyzer_diagnoses_completes_and_jumps() {
 
     // Completion from the server: `util::` offers `same`
     t.send("o");
-    t.wait_for("INSERT mode", |s| s.status().contains("INSERT"));
+    t.wait_for("INSERT mode", |s| s.status().contains("● insert"));
     t.send("fn c() -> i32 { util::sa");
     t.wait_for("rust-analyzer's completion list", |s| s.rows.iter().any(|r| r.contains("same(")));
     t.normal_mode();

@@ -34,7 +34,7 @@ You don't need to know the keys to start:
 - **Mouse** — click to place the cursor, drag to select, alt+click for another cursor, wheel to scroll. In pickers the
   wheel moves the selection and a click opens. (Your terminal's own text selection is usually shift+drag.)
 - **Key hints** — while a completion, a picker or a docs window is open, the keys that operate it show dimmed on the
-  status line, right after the mode pill
+  status line, right after the mode
 - **What you use** — with `features.count` on in your config, `:features` shows which commands, cards, panels,
   pickers and Claude tools you use and which you never do; counted on this machine only, never sent
   ([feature counts](feature-counts.md))
@@ -115,7 +115,7 @@ configs carry over as they are.
 - **Path bar** — `project › folder › file ● › ƒ enclosing_fn`: the function, type, or module around the cursor comes
   from the tree-sitter tree. With several buffers open, the list shows on the right. Turn it off with
   `editor.header = false`
-- **Status line** — mode pill (`▐ NORMAL ▌`, a color per mode) · git branch and `+3 −2` · Claude status (`…` waiting,
+- **Status line** — the mode (`● normal`: the dot in the accent, or a color per mode, the word in ink bold) · git branch and `+3 −2` · Claude status (`…` waiting,
   `● review` ready) · `● errors ▲ warnings` · language, colored by its server's state — dim italic starting, green
   connected (a "ready" toast says so too), red failed or exited, faintest when none is installed · encoding and line
   endings · selection count · position (keys you've started — a count, `g`, `space w` — show in its place until

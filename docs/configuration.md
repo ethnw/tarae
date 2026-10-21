@@ -91,7 +91,7 @@ theme = "default"            # meok · hanji · meok-transparent · hanji-transp
 line-numbers = "relative"
 scrolloff = 5
 tab-width = 4
-color-modes = true           # color the mode pill, cursor, and line number per mode
+color-modes = true           # color the mode's dot, cursor, and line number per mode
 auto-save = "focus"          # "focus" · "idle" · "off"
 
 [editor.cursor]

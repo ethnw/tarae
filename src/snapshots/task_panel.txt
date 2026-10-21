@@ -23,7 +23,7 @@
 20   error[E0308]: mismatched types
 21    --> src/snapshots/fixtures/demo/src/main.rs:1:4
 22   error: could not compile demo
-23  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+23  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -48,7 +48,7 @@
 20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 21 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23   AAAAAAAA
+23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -73,7 +73,7 @@
 20   eeeeeeeeeeeee eeeeeeeeee eeeee
 21
 22   eeeeee eeeee eee eeeeeee eeee
-23  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+23  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold

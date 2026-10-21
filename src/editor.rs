@@ -7222,19 +7222,19 @@ mod tests {
         // (the status line's label names where the keys go — #78: it said CHAT while the card had them)
         // (the status line: the screen's last row)
         let label = |s: &str| s.lines().nth(39).unwrap_or_default().to_string();
-        assert!(label(&draw(&mut ed)).contains(" CHAT "), "{}", label(&draw(&mut ed)));
+        assert!(label(&draw(&mut ed)).contains("● chat "), "{}", label(&draw(&mut ed)));
         feed(&mut ed, "<C-q>");
         assert!(ed.card_keys);
         let s = draw(&mut ed);
         assert!(s.contains("esc goes back, unanswered"));
-        assert!(label(&s).contains(" CARD ") && !label(&s).contains("CHAT"), "{}", label(&s));
+        assert!(label(&s).contains("● card ") && !label(&s).contains("chat"), "{}", label(&s));
         feed(&mut ed, "x");
         // (said on the card, where the eyes are — it was a flash on the status line)
         assert!(draw(&mut ed).contains("x isn't an answer here"), "{:?}", ed.offer_said_now());
         feed(&mut ed, "<esc>");
         assert!(!ed.card_keys && ed.offers.len() == 1 && ed.session.chat.as_ref().unwrap().focused);
         assert_eq!(input(&ed), "my draft y", "back where it was");
-        assert!(label(&draw(&mut ed)).contains(" CHAT "), "the chat's again");
+        assert!(label(&draw(&mut ed)).contains("● chat "), "the chat's again");
         // C-q, y (once the card has been in sight a moment): answered, the keys back in the draft
         feed(&mut ed, "<C-q>");
         draw(&mut ed);
@@ -7478,6 +7478,34 @@ mod tests {
         );
         feed(&mut ed, "n");
         assert_eq!(ed.doc().text.to_string(), "ONE\nTWO\n");
+    }
+
+    /// An edit review in front is said once on the status line — its mode, `● review`; the right-hand
+    /// `claude ● review` only while it waits behind the code's keys.
+    #[test]
+    fn the_review_in_front_is_said_once_on_the_status_line() {
+        let mut ed = editor("one\ntwo\n");
+        let id = ed.doc().id;
+        crate::llm::review_with(&mut ed, id, "grow", vec![(0, 4, "one\n".into(), "uno\n".into())], None);
+        let status = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 140, 0);
+            parser.process(&bytes);
+            parser.screen().rows(0, 140).nth(29).unwrap_or_default()
+        };
+        // In front, with the keys: the mode says it — no `claude ● review` beside
+        let s = status(&mut ed);
+        assert!(s.contains("● review ") && !s.contains("claude ● review"), "{s}");
+        // Left unanswered: the code's mode, and the chip says Claude still waits on it
+        feed(&mut ed, "<esc>");
+        assert!(ed.session.review.is_some());
+        let s = status(&mut ed);
+        assert!(s.contains("● normal ") && s.contains("claude ● review"), "{s}");
+        // Back to it: said once again
+        feed(&mut ed, "<C-q>");
+        let s = status(&mut ed);
+        assert!(s.contains("● review ") && !s.contains("claude ● review"), "{s}");
     }
 
     /// #61, #70: while an edit review waits, the editor's keys still work over it — C-d/C-u and the wheel
@@ -11406,7 +11434,7 @@ mod tests {
         // Narrow: the dropdown — how many wait is the status line's, every session's
         let r = rows(&mut ed, 100);
         assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▸")), "{r:#?}");
-        assert!(r[23].contains("NORMAL ▌  ▲1 waiting"), "{}", r[23]);
+        assert!(r[23].contains("● normal   ▲1 waiting"), "{}", r[23]);
         // A click on a tab: that session, whole
         let r = rows(&mut ed, 200);
         let x = r[tabs].find("fix-login").map(|b| r[tabs][..b].chars().count()).unwrap();
@@ -11414,8 +11442,8 @@ mod tests {
         assert_eq!(ed.session.id, one);
         // No chat there: the chip, then the list from it
         let r = rows(&mut ed, 120);
-        let status = r.iter().position(|r| r.contains("NORMAL")).expect("the status line");
-        assert!(r[status].contains("NORMAL ▌  fix-login-everywhere ▲1 waiting"), "{}", r[status]);
+        let status = r.iter().position(|r| r.contains("● normal")).expect("the status line");
+        assert!(r[status].contains("● normal   fix-login-everywhere ▲1 waiting"), "{}", r[status]);
         let x = r[status].find("fix-login").map(|b| r[status][..b].chars().count()).unwrap();
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
         assert!(ed.picker.as_ref().is_some_and(|p| p.keys), "the list");
@@ -12230,7 +12258,7 @@ mod tests {
         let screen = crate::screen::text(&frame, w, h).unwrap();
         let head = screen.lines().find(|l| l.contains("j k scroll")).unwrap();
         assert!(head.contains(" ok "), "{head}");
-        assert!(screen.lines().any(|l| l.starts_with(" ▐ TASK ▌")), "{screen}");
+        assert!(screen.lines().any(|l| l.starts_with(" ● task ")), "{screen}");
         feed(&mut ed, "<esc>j");
         assert!(!ed.bottom_focus);
         assert_eq!(ed.cursor_line(), 1, "the code's again");

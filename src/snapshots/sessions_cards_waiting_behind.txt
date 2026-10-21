@@ -29,7 +29,7 @@
 26                                  ▎ fix-login · waiting 3 min — Claude      ────────────────────────────────────────────
 27                                    changes 3 files · C-q goes there        › Ask about demo.rs…
 28                                 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀    space l focus  space L close
-29  ▐ NORMAL ▌  ▲2 waiting                                                                          rust   utf-8 LF   1:1
+29  ● normal   ▲2 waiting                                                                           rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 01                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
@@ -60,7 +60,7 @@
 26                                 ppppppppppppppppppppppppppppppppppppppp  ppppppppppppppppppppppppppppppppppppppppppppppp
 27                                 ppppppppppppppppppppppppppppppppppppppp  ppppppppppppppppppppppppppppppppppppppppppppppp
 28                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT                                                 dddddd                                 fffff
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa    ffffffffffffffffffffffffffffffffffffffffffff
@@ -91,7 +91,7 @@
 26                                  w                                         ffffffffffffffffffffffffffffffffffffffffffff
 27                                                                            f fff fffff ffffffff
 28                                                                            DDDDD D fffff  DDDDD D fffff
-29  a BBBBBB a  ww wwwwwww                                                                          dddd   ddddd dd   TTT
+29  a TTTTTT   ww wwwwwww                                                                           dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

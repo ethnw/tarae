@@ -16,7 +16,7 @@
 13                                                                tab for a suggestion
 14                                                                › Explain what this file does
 15                                                                › Where is this used across the pro…
-16                                                                › Why is this diagnostic happening?
+16   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀     › Why is this diagnostic happening?
 17
 18                                                                C-t for another model
 19
@@ -27,9 +27,9 @@
 24
 25
 26                                                                ────────────────────────────────────
-27   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀     › Ask about demo.rs…
+27                                                                › Ask about demo.rs…
 28                                                                space l focus  space L close
-29  ▐ PICKER ▌  j k move  esc close                                             rust   utf-8 LF   1:1
+29  ● picker   j k move  esc close                                              rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00                                                              ppppppppppppppppppppppppppppppppppppppp
 01                                                              ppppppppppppppppppppppppppppppppppppppp
@@ -47,20 +47,20 @@
 13   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
 14   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
 15   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-16   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-17   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-18   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-19   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-20   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-21   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-22   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-23   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-24   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-25   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
-26   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+16                                                              ppppppppppppppppppppppppppppppppppppppp
+17                                                              ppppppppppppppppppppppppppppppppppppppp
+18                                                              ppppppppppppppppppppppppppppppppppppppp
+19                                                              ppppppppppppppppppppppppppppppppppppppp
+20                                                              ppppppppppppppppppppppppppppppppppppppp
+21                                                              ppppppppppppppppppppppppppppppppppppppp
+22                                                              ppppppppppppppppppppppppppppppppppppppp
+23                                                              ppppppppppppppppppppppppppppppppppppppp
+24                                                              ppppppppppppppppppppppppppppppppppppppp
+25                                                              ppppppppppppppppppppppppppppppppppppppp
+26                                                              ppppppppppppppppppppppppppppppppppppppp
 27                                                              ppppppppppppppppppppppppppppppppppppppp
 28                                                              ppppppppppppppppppppppppppppppppppppppp
-29   AAAAAAAA
+29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                                dddddd                         fffff
 01                                                                ffffffffffffffffffffffffffffffffffff
@@ -91,7 +91,7 @@
 26                                                                ffffffffffffffffffffffffffffffffffff
 27                                                                f fff fffff ffffffff
 28                                                                DDDDD D fffff  DDDDD D fffff
-29  a BBBBBB a  D D ffff  DDD fffff                                             dddd   ddddd dd   TTT
+29  a TTTTTT   D D ffff  DDD fffff                                              dddd   ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
+bg: p=ui.popup  P=ui.menu.selected
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

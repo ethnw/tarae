@@ -409,9 +409,9 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
 ### 10. The homepage
 
 tarae.sinabro.io. The brand it wears is in (2026-10-18, `ec987191`, [brand/](brand)): the seal — a skein's
-thread carved out of an accent block, unwinding to a cursor, in hanji and meok — over the README's title and on
-the start screen in half-block pixels, and the mascot, a ball of thread painted in ink on hanji, at the README's
-end. An animation that feels like several agents working at once, and the README's demo, both from
+thread carved out of an accent block, unwinding to a cursor, in hanji and meok — over the README's title (vector
+only: the start screen is set in type, 2026-10-19), and the mascot, a ball of thread painted in ink on hanji, at
+the README's end. An animation that feels like several agents working at once, and the README's demo, both from
 one scripted recording: `cargo xtask shot` extended to record frames, Claude's parts played by the tests' fake
 claude, so it can be recorded again when the UI changes. To do: the recording script, the scenes, the site, the
 domain. The scenes are picked with the user: a chat edit and its card, the end-of-turn review, a commit from the
