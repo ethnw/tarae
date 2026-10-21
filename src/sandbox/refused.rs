@@ -168,11 +168,7 @@ fn in_stand_in_home() {
         && loaded.editor.session_ended.is_empty();
 
     // Build `Here` with fake secret variables in tarae's environment (must be scrubbed from the run)
-    let mut here = Here {
-        tmp: Some(shared_tmp.clone()),
-        runs: Some(runs.clone()),
-        ..Here::now()
-    };
+    let mut here = Here { tmp: Some(shared_tmp.clone()), runs: Some(runs.clone()), ..Here::now() };
     here.env.insert("HOME".into(), home.clone().into_os_string());
     here.env.insert("XDG_CONFIG_HOME".into(), home.join(".config").into_os_string());
     here.env.insert("XDG_STATE_HOME".into(), home.join(".local/state").into_os_string());
@@ -224,17 +220,11 @@ fn in_stand_in_home() {
     let sock_tmp = shared_tmp.join("s.sock");
     let sock_own_root = root.join("own.sock");
     let sock_own_run = own_run.join("own.sock");
-    let _unix_listeners: Vec<UnixListener> = [
-        &sock_other_run,
-        &sock_state,
-        &sock_outside,
-        &sock_tmp,
-        &sock_own_root,
-        &sock_own_run,
-    ]
-    .into_iter()
-    .map(|p| UnixListener::bind(p).unwrap())
-    .collect();
+    let _unix_listeners: Vec<UnixListener> =
+        [&sock_other_run, &sock_state, &sock_outside, &sock_tmp, &sock_own_root, &sock_own_run]
+            .into_iter()
+            .map(|p| UnixListener::bind(p).unwrap())
+            .collect();
 
     // Stand-in processes for row 17: tarae stand-in (outside sandbox) and other session's sandboxed stand-in
     let exe = std::env::current_exe().unwrap();
@@ -406,8 +396,7 @@ fn in_stand_in_home() {
     // 5. 1.2 | make-protected
     let r5_new = got["r5_new"] == "refused" && !root.join("new1/Cargo.toml").exists();
     let r5_case = got["r5_case"] == "refused" && !root.join("new2/CARGO.TOML").exists();
-    let r5_sym =
-        got["r5_sym"] == "refused" && fs::symlink_metadata(root.join("new3/Cargo.toml")).is_err();
+    let r5_sym = got["r5_sym"] == "refused" && fs::symlink_metadata(root.join("new3/Cargo.toml")).is_err();
     let r5_ok = r5_new && r5_case && r5_sym;
     rows.push(Row {
         claim: "1.2",
@@ -452,11 +441,7 @@ fn in_stand_in_home() {
         id: "move-protected-parent",
         expected: Verdict::Refused,
         verdict: if r7_ok { Verdict::Refused } else { Verdict::Allowed },
-        witness: format!(
-            "write-after-move={}, unlink-after-move={}",
-            word(r7_write),
-            word(r7_unlink)
-        ),
+        witness: format!("write-after-move={}, unlink-after-move={}", word(r7_write), word(r7_unlink)),
         detail: got.get("r7_err").cloned().unwrap_or_default(),
         part: None,
         shared_phrase: None,
@@ -545,12 +530,7 @@ fn in_stand_in_home() {
         id: "udp-sendto",
         expected: Verdict::Refused,
         verdict: if r12_ok { Verdict::Refused } else { Verdict::Allowed },
-        witness: format!(
-            "loopback={}, resolver={}, port0={}",
-            word(r12_loop),
-            word(r12_dns),
-            word(r12_zero)
-        ),
+        witness: format!("loopback={}, resolver={}, port0={}", word(r12_loop), word(r12_dns), word(r12_zero)),
         detail: got.get("r12_err").cloned().unwrap_or_default(),
         part: None,
         shared_phrase: None,
@@ -589,9 +569,7 @@ fn in_stand_in_home() {
         verdict: if r14_ok { Verdict::Refused } else { Verdict::Allowed },
         witness: format!(
             "unlisted-host={}, other-proxy-port={}, other-proxy-token={}",
-            proxy_got["r14_unlisted"],
-            proxy_got["r14_other_port"],
-            proxy_got["r14_other_token"]
+            proxy_got["r14_unlisted"], proxy_got["r14_other_port"], proxy_got["r14_other_token"]
         ),
         detail: proxy_got.get("r14_err").cloned().unwrap_or_default(),
         part: None,
@@ -647,9 +625,8 @@ fn in_stand_in_home() {
     });
 
     // 17. 1.6, 1.9 | signal-trace-procargs (direct syscalls only — no lldb)
-    let r17_signals = ["tarae_kill0", "tarae_cont", "other_kill0", "other_cont"]
-        .iter()
-        .all(|k| got[*k] == "refused");
+    let r17_signals =
+        ["tarae_kill0", "tarae_cont", "other_kill0", "other_cont"].iter().all(|k| got[*k] == "refused");
     let r17_procs = [
         "tarae_ptrace",
         "tarae_task",
@@ -805,7 +782,13 @@ fn in_stand_in_home() {
          # claim | id | verdict | witness\n",
     );
     for r in &rows {
-        table.push_str(&format!("{:<8} | {:<30} | {:<8} | {}\n", r.claim, r.id, r.verdict.as_str(), r.witness));
+        table.push_str(&format!(
+            "{:<8} | {:<30} | {:<8} | {}\n",
+            r.claim,
+            r.id,
+            r.verdict.as_str(),
+            r.witness
+        ));
     }
     assert!(wrong.is_empty(), "must-be-refused failures:\n{}\n\n{table}", wrong.join("\n"));
     compare_snapshot("refused_macos", &table);
@@ -965,9 +948,7 @@ fn spawn_stand_in(_exe: &Path, policy: Option<&Policy>, cwd: &Path, marker: &str
 fn spawn_sandboxed_stand_in(_exe: &Path, policy: &Policy, marker: &str) -> SandboxedStandInGuard {
     let args = ["-c".to_string(), "printf 'ready\\n'; sleep 60".to_string(), format!("{marker}-arg")];
     let mut cmd = command(Some(policy), "/bin/sh", &args);
-    cmd.current_dir(&policy.root)
-        .env("TARAE_REFUSED_STAND_IN", format!("{marker}-env"))
-        .stdin(Stdio::null());
+    cmd.current_dir(&policy.root).env("TARAE_REFUSED_STAND_IN", format!("{marker}-env")).stdin(Stdio::null());
     let s = spawn(Some(policy), &cmd).unwrap();
     let pid = s.pid;
     let mut guard = SandboxedStandInGuard { _spawned: s, pid, policy: policy.clone() };
@@ -990,19 +971,13 @@ fn run_helper(exe: &Path, policy: &Policy, mode: &str, cfg_file: &Path) -> (Stri
         .env("TARAE_REFUSED_CFG", cfg_file)
         .stdin(Stdio::null());
     let out = cmd.output().unwrap();
-    let text =
-        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "in_sandbox ({mode}) failed:\n{text}");
     let leaked = text.contains(FAKE_TOKEN);
     (text, leaked)
 }
 
-fn run_proxy_row(
-    exe: &Path,
-    root: &Path,
-    other_root: &Path,
-    here: &Here,
-) -> (HashMap<String, String>, bool) {
+fn run_proxy_row(exe: &Path, root: &Path, other_root: &Path, here: &Here) -> (HashMap<String, String>, bool) {
     let net_llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
     let net_a = run_policy_in(root, &net_llm, &[], here).unwrap();
     let _net_a_cleanup = RunCleanupGuard { policy: net_a.clone() };
@@ -1017,11 +992,14 @@ fn run_proxy_row(
     let (asks, asked) = std::sync::mpsc::channel();
     let session = super::proxy::session_of(root);
     super::proxy::TEST_ASKS.lock().unwrap().push((session, asks));
-    let answer_thread = std::thread::spawn(move || {
-        if let Ok(FromProxy::Ask { run, host, port, .. }) = asked.recv_timeout(Duration::from_secs(10)) {
-            super::proxy::get().send(ToProxy::Answer { session, run, host, port, scope: Scope::Refused });
-        }
-    });
+    let answer_thread = std::thread::Builder::new()
+        .name("tarae-refused-answer".into())
+        .spawn(move || {
+            if let Ok(FromProxy::Ask { run, host, port, .. }) = asked.recv_timeout(Duration::from_secs(10)) {
+                super::proxy::get().send(ToProxy::Answer { session, run, host, port, scope: Scope::Refused });
+            }
+        })
+        .unwrap();
 
     let cfg_file = net_a.run.as_ref().unwrap().path().join("proxy.cfg");
     let cfg_text = format!(
@@ -1082,8 +1060,7 @@ fn in_sandbox() {
     };
     let cfg_path = PathBuf::from(std::env::var_os("TARAE_REFUSED_CFG").unwrap());
     let cfg_text = fs::read_to_string(&cfg_path).unwrap();
-    let cfg: HashMap<&str, &str> =
-        cfg_text.lines().filter_map(|l| l.split_once('=')).collect();
+    let cfg: HashMap<&str, &str> = cfg_text.lines().filter_map(|l| l.split_once('=')).collect();
     match mode.as_str() {
         "main" => sandbox_main(&cfg),
         "move-in" => sandbox_move_in(&cfg),
@@ -1210,10 +1187,7 @@ fn sandbox_main(cfg: &HashMap<&str, &str>) {
     // Row 7: move parent folder `sub` holding `sub/build.rs` -> `sub2`, then try writing/unlinking `build.rs`
     let moved = fs::rename(root.join("sub"), root.join("sub2")).is_ok();
     let target = if moved { root.join("sub2/build.rs") } else { root.join("sub/build.rs") };
-    record_refused(
-        "r7",
-        &[("write", try_write(&target)), ("unlink", fs::remove_file(&target))],
-    );
+    record_refused("r7", &[("write", try_write(&target)), ("unlink", fs::remove_file(&target))]);
     if moved {
         let _ = fs::rename(root.join("sub2"), root.join("sub"));
     }
@@ -1230,9 +1204,8 @@ fn sandbox_main(cfg: &HashMap<&str, &str>) {
         ],
     );
     let direct_git = fs::read_to_string(home.join(".gitconfig"));
-    let copy_git = std::env::var_os("GIT_CONFIG_GLOBAL")
-        .and_then(|p| fs::read_to_string(p).ok())
-        .unwrap_or_default();
+    let copy_git =
+        std::env::var_os("GIT_CONFIG_GLOBAL").and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
     let git_scrubbed = direct_git.is_err() && !copy_git.is_empty() && !copy_git.contains(FAKE_TOKEN);
     emit("r9_gitconfig", if git_scrubbed { "scrubbed" } else { "leaked" });
     let env_leaked = std::env::vars().any(|(k, v)| k.contains(FAKE_TOKEN) || v.contains(FAKE_TOKEN));
@@ -1285,14 +1258,8 @@ fn sandbox_main(cfg: &HashMap<&str, &str>) {
             ("tmp", UnixStream::connect(shared_tmp.join("s.sock")).map(drop)),
         ],
     );
-    emit(
-        "r16_own_root",
-        if UnixStream::connect(root.join("own.sock")).is_ok() { "ok" } else { "refused" },
-    );
-    emit(
-        "r16_own_run",
-        if UnixStream::connect(own_run.join("own.sock")).is_ok() { "ok" } else { "refused" },
-    );
+    emit("r16_own_root", if UnixStream::connect(root.join("own.sock")).is_ok() { "ok" } else { "refused" });
+    emit("r16_own_run", if UnixStream::connect(own_run.join("own.sock")).is_ok() { "ok" } else { "refused" });
 
     // Row 17: process signals, ptrace, task_for_pid, proc_pidinfo, KERN_PROCARGS2, setpriority (no lldb)
     let tarae_pid: libc::pid_t = cfg["TARAE_PID"].parse().unwrap();
@@ -1343,9 +1310,7 @@ fn sandbox_main(cfg: &HashMap<&str, &str>) {
     emit("r20_nested", if nested_refused { "refused" } else { "allowed" });
     emit(
         "r20_err",
-        nested
-            .map(|o| format!("code={:?}", o.status.code()))
-            .unwrap_or_else(|e| format!("err={e}")),
+        nested.map(|o| format!("code={:?}", o.status.code())).unwrap_or_else(|e| format!("err={e}")),
     );
 }
 
@@ -1552,10 +1517,7 @@ fn pid_ptrace(pid: libc::pid_t) -> io::Result<()> {
 fn pid_task_port(pid: libc::pid_t) -> io::Result<()> {
     unsafe extern "C" {
         fn mach_task_self() -> libc::mach_port_t;
-        fn mach_port_deallocate(
-            task: libc::mach_port_t,
-            name: libc::mach_port_t,
-        ) -> libc::kern_return_t;
+        fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
         fn task_for_pid(
             target_tport: libc::mach_port_t,
             pid: libc::c_int,
@@ -1625,10 +1587,7 @@ fn mach_lookup(name: &str) -> io::Result<()> {
             sp: *mut libc::mach_port_t,
         ) -> libc::kern_return_t;
         fn mach_task_self() -> libc::mach_port_t;
-        fn mach_port_deallocate(
-            task: libc::mach_port_t,
-            name: libc::mach_port_t,
-        ) -> libc::kern_return_t;
+        fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
     }
     let c = CString::new(name).unwrap();
     let mut port: libc::mach_port_t = 0;
