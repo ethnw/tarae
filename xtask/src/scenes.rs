@@ -24,7 +24,7 @@ use crate::{Result, root};
 // (`scenes --docs`: the docs' pictures, each from a scene here)
 mod docshots;
 
-const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [--size COLSxROWS] [--transparent] [scene …] | scenes --list | scenes --compare A B";
+const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [--size COLSxROWS] [--transparent] [--bin TARAE] [scene …] | scenes --list | scenes --compare A B";
 
 /// One surface: the stand-in claude's script, the files tarae opens, the keys sent (as `cargo xtask shot`
 /// takes them: `@1` waits a second, `@?text` until `text` is on screen, `@20?text` at most 20 s).
@@ -124,6 +124,56 @@ const SCENES: &[Scene] = &[
             "\r",
             "@?keeps the first",
             "\x06",
+            "@1",
+        ],
+    },
+    // (the panel mid-turn, a stop in it: the answer under way after its read — `C-f` leaves follow, the panel back)
+    Scene {
+        name: "chatthread",
+        claude: "mid",
+        files: MAIN,
+        keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@?entry(first", "\x06", "@1"],
+    },
+    // (the follow card beside the panel: mid-turn, the panel brought back — `esc`, `space l`)
+    Scene {
+        name: "cardpanel",
+        claude: "mid",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?entry(first",
+            "\x1b",
+            " ",
+            "l",
+            "@1",
+        ],
+    },
+    // (the follow card replaying the turn once it's done: `[r` in the code, its newest stop)
+    Scene {
+        name: "cardreplay",
+        claude: "full",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?Change 1 of 1",
+            "@1",
+            "y",
+            "@20?Nothing else",
+            "@1",
+            "\x1b",
+            "[",
+            "r",
+            "@?stop by stop",
             "@1",
         ],
     },
@@ -720,6 +770,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let (mut out, mut names) = (root().join("target/scenes"), Vec::new());
     let mut sizes = SIZES.to_vec();
     let mut transparent = false;
+    let mut bin: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -736,13 +787,19 @@ pub fn run(args: &[String]) -> Result<()> {
             }
             // (the transparent themes: what has no background of its own)
             "--transparent" => transparent = true,
+            // (another build of tarae — main's, for the shots before a change: A/B)
+            "--bin" => bin = Some(PathBuf::from(it.next().ok_or(USAGE)?)),
             n if !n.starts_with('-') => names.push(n.to_string()),
             _ => return Err(USAGE.into()),
         }
     }
     let scenes = chosen(&names)?;
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let bin = shot::build_shot(&root())?;
+    let bin = match bin {
+        Some(b) if b.is_absolute() && b.is_file() => b,
+        Some(b) => return Err(format!("--bin {}: an absolute path to a tarae", b.display())),
+        None => shot::build_shot(&root())?,
+    };
     let me = std::env::current_exe().map_err(|e| format!("this xtask: {e}"))?;
     let mut failed = Vec::new();
     for scene in scenes {

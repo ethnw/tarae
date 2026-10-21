@@ -70,9 +70,9 @@
 05                                                                f DDDDDDD DDD DDDDDDD
 06                                                                f dddd ddddddd dd ddddd ddddddd dddf
 07   f
-08                                                                f ffff   ggggggggggggg  ff fff
-09   f                                                            f ffff   ggggggggggg
-10   f                                                            f ffff   dddddddddd  fffff
+08                                                                d ffff   ggggggggggggg  ff fff
+09   f                                                            d ffff   ggggggggggg
+10   f                                                            d ffff   dddddddddd  fffff
 11   f
 12   f
 13  ff

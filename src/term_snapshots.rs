@@ -2095,15 +2095,15 @@ fn snapshot_chat_run_queued_behind_a_stopped_turns() {
     let mut chat = crate::chat::Chat::new();
     (chat.state, chat.unfolded, chat.focused) = (crate::chat::State::Thinking, true, true);
     chat.msgs.push(Msg::new(Role::User, "now run the tests", ""));
-    let mut m = Msg::new(Role::Tool, "", "");
-    m.look = Some(crate::chat::Look {
+    let look = crate::chat::Look {
         verb: "run",
         what: "cargo test -p tarae".into(),
         pattern: true,
         range: String::new(),
         link: None,
-    });
-    chat.msgs.push(m);
+    };
+    // (its row, with its call's id as claude's stream gives it: the knot in hand)
+    chat.msgs.push(Msg::tool(look, "toolu_r1"));
     let generation = chat.generation();
     s.ed.session.chat = Some(chat);
     let call = crate::tools::Call::of(generation, "r1", json!(1));

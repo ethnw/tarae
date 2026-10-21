@@ -1862,28 +1862,30 @@ fn follow_shows_each_edit_and_replays_the_turn() {
     let mut t = Term::spawn(&sb, &["main.txt"], 120, 40);
     t.send(" l");
     t.send("change it\r");
-    // Live: each stop in order, each within a bound of the one before (they come 0.4 s apart)
+    // Live: each stop in order, each within a bound of the one before (they come 0.4 s apart) — the follow
+    // card's knot rows (글타래 P6): `●` the stop in hand, `▲` every edit; a search's count cut to the row's room
+    // (`1 matching l…` at 120 columns)
     let removed = |s: &Screen, gone: &str| s.rows.iter().any(|r| r.contains('−') && r.contains(gone));
     type Seen = Box<dyn Fn(&Screen) -> bool>;
     let stops: [(&str, Seen); 7] = [
-        ("the read", Box::new(|s| s.contains("● read  main.txt  L1–3"))),
+        ("the read", Box::new(|s| s.contains("● read   main.txt  L1–3"))),
         (
             "edit 1, its line and the one it replaced",
             Box::new(move |s| {
-                s.contains("● edit  edit.txt  L3 ") && s.contains("three") && removed(s, "line 3")
+                s.contains("▲ edit   edit.txt  L3 ") && s.contains("three") && removed(s, "line 3")
             }),
         ),
-        ("edit 2", Box::new(|s| s.contains("● edit  edit.txt  L11–12") && s.contains("added b"))),
+        ("edit 2", Box::new(|s| s.contains("▲ edit   edit.txt  L11–12") && s.contains("added b"))),
         (
             "edit 3, a line gone",
-            Box::new(move |s| s.contains("● edit  edit.txt  L22") && removed(s, "line 20")),
+            Box::new(move |s| s.contains("▲ edit   edit.txt  L22") && removed(s, "line 20")),
         ),
-        ("edit 4", Box::new(|s| s.contains("● edit  edit.txt  L1 ") && s.contains("zero"))),
+        ("edit 4", Box::new(|s| s.contains("▲ edit   edit.txt  L1 ") && s.contains("zero"))),
         (
             "the search, named, with its count",
-            Box::new(|s| s.contains("● search (project)  line 5") && s.contains("1 matching line in 1 file")),
+            Box::new(|s| s.contains("● search (project) line 5  1 matching")),
         ),
-        ("the last read", Box::new(|s| s.contains("● read  lib.txt  L8–9"))),
+        ("the last read", Box::new(|s| s.contains("● read   lib.txt  L8–9"))),
     ];
     // (a stop skipped is never seen whatever the bound — it only has to outlast a slow runner's lag)
     for (what, seen) in &stops {
@@ -1901,11 +1903,12 @@ fn follow_shows_each_edit_and_replays_the_turn() {
         t.send(keys);
         t.wait_for(what, seen);
     };
-    step(&mut t, "[r", "the newest stop", &|s| s.contains("● read  lib.txt  L8–9") && s.contains("7/7"));
+    // (the card's knot in hand reads its stop as it is now: edit 1's `L4`, its chat row the `L3` it was made at)
+    step(&mut t, "[r", "the newest stop", &|s| s.contains("● read   lib.txt  L8–9") && s.contains("7/7"));
     step(&mut t, "[r", "the search", &|s| s.contains("● search (project)") && s.contains("6/7"));
-    step(&mut t, "[r", "edit 4", &|s| s.contains("● edit  edit.txt  L1 ") && s.contains("5/7"));
+    step(&mut t, "[r", "edit 4", &|s| s.contains("▲ edit   edit.txt  L1 ") && s.contains("5/7"));
     step(&mut t, "[r[r[r", "edit 1, a line down since edit 4", &|s| {
-        s.contains("● edit  edit.txt  L4") && s.contains("2/7") && removed(s, "line 3")
+        s.contains("▲ edit   edit.txt  L4") && s.contains("2/7") && removed(s, "line 3")
     });
     step(&mut t, "]r]r]r]r]r]r", "past the newest", &|s| s.contains("that was the newest stop"));
 }

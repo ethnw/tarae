@@ -8458,16 +8458,18 @@ fn draw_ask_stream(
 }
 
 /// Follow mode's one card (U4), in one place — the bottom right of the code (the top right when a note or an
-/// offer holds that corner, or the lines being read run under it): what Claude is doing and its words as a
-/// log; while the panel is minimized, also the question, the plan's step and the keys (a click on it brings
-/// the panel back, on its lookup row goes there). `None`: no room.
+/// offer holds that corner, or the lines being read run under it): what Claude is at, and the turn (글타래 P6 —
+/// `follow_thread`: its stops as knots, `●` the one in hand, its words between them); while the panel is
+/// minimized, also the question, the plan's step and the keys (a click on it brings the panel back, on a knot
+/// goes there). `None`: no room.
 ///
 /// ```text
 ///      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-///        claude › follow                        ▂▅▇      ← minimized only
-///        ▎ does ask get tools too?                       ← 〃
-///        ● reading  src/llm.rs  L230–249      3.2s
+///        claude › follow            ▂▅▇ exploring 3.2s
+///        ▎ does ask get tools too?                       ← minimized only
+///        ◦ read    src/chat.rs  L88–120
 ///        The chat swaps the empty tool list here;
+///        ● read    src/llm.rs  L230–249
 ///        ask never calls it, so it stays tool-less.
 ///        C-c stop  C-f unfollow                          ← minimized only
 ///      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
@@ -8482,7 +8484,7 @@ fn draw_follow_card(
 ) -> io::Result<Option<Rect4>> {
     use crate::chat::Role;
     use crate::markdown::Span;
-    const BODY: usize = 6;
+    const BODY: usize = 7;
     let compact = c.compact();
     // The focused pane (else the editing area — a review in place of the panes)
     let pane = editor.screen.panes.iter().find(|p| p.0 == editor.session.focus);
@@ -8521,63 +8523,12 @@ fn draw_follow_card(
             _ => false,
         }
     });
-    let waiting = |verb: &str| {
-        c.busy()
-            && !replaying
-            && (asks || matches!(verb, "edit" | "write") && editor.session.review.is_some())
-    };
-    let mut sub: Option<Vec<Span>> = None;
     let compacting = crate::compaction::under_way(&editor.session) && !replaying;
-    let mut head: Vec<Span> = match gaze {
-        _ if compacting => vec![
-            Span { text: wave(), style: accent },
-            Span { text: " compacting".into(), style: Style { bold: true, ..dim } },
-        ],
-        Some(g) if waiting(g.look.verb) => vec![
-            Span { text: "● ".into(), style: accent },
-            Span { text: "waiting for your answer".into(), style: Style { bold: true, ..dim } },
-        ],
-        Some(g) => {
-            // The tool by its name (`grep`, `search (project)`, `definition`) — as its chat row says it
-            let verb = match g.look.verb {
-                "failed" => "test failed",
-                v => crate::chat::label(v),
-            };
-            // The target first; the range/folder gets what's left (dropped if that's too little)
-            let room = inner.saturating_sub(2 + verb.len() + 2 + 8);
-            let what =
-                if g.look.pattern { fit_ellipsis(&g.look.what, room) } else { fit_left(&g.look.what, room) };
-            let left = room.saturating_sub(what.width() + 2);
-            // A note's words are in its own card; a range (a search's count) with no room beside the target
-            // gets a row of its own under it
-            let range = match g.look.range.width() {
-                _ if matches!(g.look.verb, "note" | "reply") => String::new(),
-                0 => String::new(),
-                n if n <= left => format!("  {}", g.look.range),
-                _ if left >= 8 => format!("  {}", fit_left(&g.look.range, left)),
-                _ => {
-                    let text = fit_ellipsis(&g.look.range, inner.saturating_sub(2));
-                    sub = Some(vec![Span { text: format!("  {text}"), style: faint }]);
-                    String::new()
-                }
-            };
-            // A failure speaks like the test pane's: `▲` in the error color
-            let glyph = match g.look.verb {
-                "failed" => Span { text: "▲ ".into(), style: Style { fg: ui.error.fg, ..card } },
-                _ => Span { text: "● ".into(), style: accent },
-            };
-            vec![
-                glyph,
-                Span { text: format!("{verb}  "), style: Style { bold: true, ..dim } },
-                Span { text: what, style: if g.look.pattern { string } else { card } },
-                Span { text: range, style: faint },
-            ]
-        }
-        None => vec![
-            Span { text: wave(), style: accent },
-            Span { text: " thinking".into(), style: Style { bold: true, ..dim } },
-        ],
-    };
+    let waiting = c.busy()
+        && !replaying
+        && (asks
+            || gaze.is_some_and(|g| matches!(g.look.verb, "edit" | "write"))
+                && editor.session.review.is_some());
     // Working: how long · a walk-through after the answer, or the replay: which stop (`‹1` turns back)
     let back = c.follow.replay.at.map_or(0, |at| c.follow.replay.position(at).2);
     let secs = match gaze.and_then(|g| g.step) {
@@ -8585,66 +8536,64 @@ fn draw_follow_card(
         Some((k, n)) if replaying || !c.busy() => format!("{k}/{n}"),
         _ => format!("{:>4.1}s", c.started.elapsed().as_secs_f32()),
     };
-    // (minimized, the time goes on the title row — the wave beside "thinking" once)
-    if !compact {
-        let used: usize = head.iter().map(|s| s.text.width()).sum();
-        head.push(Span { text: " ".repeat(inner.saturating_sub(used + secs.len())), style: card });
-        head.push(Span { text: secs.clone(), style: faint });
-    }
-    // Body: this turn's words as a running log — its thinking (italic) and what it said between lookups, the
-    // newest at the bottom. A new thought goes under the last one instead of taking its place (thinking
-    // comes in bursts: a lone "I should" for seconds, the whole thought before it gone, read as flicker)
-    let turn = c.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
-    let why = gaze.and_then(|g| g.why.as_deref()).filter(|w| !w.is_empty());
-    let lang = editor.doc().syntax.as_ref().map(|s| s.lang.name.clone());
-    let body: Vec<Vec<Span>> = match why {
-        // What it's showing, in its words (until it moves on)
-        Some(w) => thought_rows(w, inner, card, faint, editor),
-        None => {
-            let mut body: Vec<Vec<Span>> = Vec::new();
-            let voices =
-                c.msgs[turn..].iter().rev().filter(|m| matches!(m.role, Role::Thought | Role::Assistant));
-            // (newest first, only as far back as the card shows)
-            for m in voices {
-                let mut rows = if m.role == Role::Thought {
-                    thought_rows(&m.text, inner, dim, faint, editor)
-                } else {
-                    let text = crate::chat::displayed(&m.text);
-                    let rendered = crate::markdown::render(text.trim(), &editor.theme, lang.as_deref());
-                    let (mut rows, drawn) =
-                        chat_markdown_drawn(&rendered, (inner, inner), (faint, dim), ui.base.bg);
-                    // (번짐: the answer being written, its head ink not yet dry)
-                    let head = c.msgs.last().is_some_and(|l| std::ptr::eq(l, m));
-                    if head && c.state == crate::chat::State::Writing && editor.wet_ink {
-                        wet_head("follow", &mut rows, &drawn, ui, card);
-                    }
-                    rows
-                };
-                while rows.last().is_some_and(|r| blank(r)) {
-                    rows.pop();
-                }
-                if rows.is_empty() {
-                    continue;
-                }
-                if !body.is_empty() {
-                    rows.push(Vec::new());
-                }
-                rows.append(&mut body);
-                body = rows;
-                if body.len() > BODY {
-                    break;
-                }
-            }
-            body
-        }
+    let sp = |text: &str, style: Style| Span { text: text.into(), style };
+    // The title, in both forms (글타래 P6: the stop that headed the card is the turn's knot `●` now): who and how it
+    // goes — minimized, Claude's commands without a sandbox too (in warning) — then, as the chat's title says it,
+    // what it's at and how long. Narrow, what it's at gives way first, then `› no sandbox` goes shorter
+    let paused = c.follow.paused && c.busy();
+    let badge = if paused { " › paused" } else { " › follow" };
+    let exploring = c.msgs.last().is_some_and(|m| m.role == Role::Tool);
+    let doing: &[&str] = match () {
+        _ if compacting => &[" compacting", ""],
+        _ if waiting => &[" waiting for your answer", " waiting", ""],
+        _ if replaying || !c.busy() => &[""],
+        _ if exploring => &[" exploring", ""],
+        _ if c.state == crate::chat::State::Thinking => &[" thinking", ""],
+        _ => &[" writing", ""],
     };
+    // (waiting on you: the word in the accent — a `●` there read as a second knot beside the one in hand)
+    let mark = match () {
+        _ if waiting => String::new(),
+        _ if compacting || c.busy() && !replaying => wave(),
+        _ => String::new(),
+    };
+    let bares: &[&str] = match compact && crate::tools::unsandboxed(editor) {
+        true => &[" › no sandbox", " › bare", ""],
+        false => &[""],
+    };
+    let left_w = "claude".width() + badge.width();
+    let right_w = |d: &str| mark.width() + d.width() + 1 + secs.width();
+    let (bare, doing) = bares
+        .iter()
+        .flat_map(|b| doing.iter().map(move |d| (*b, *d)))
+        .find(|(b, d)| left_w + b.width() + right_w(d) <= inner)
+        .unwrap_or(("", ""));
+    let warn = editor
+        .theme
+        .try_get("warning")
+        .and_then(|s| s.fg)
+        .map_or(accent, |fg| Style { fg: Some(fg), ..card });
+    let gap = inner.saturating_sub(left_w + bare.width() + right_w(doing));
+    let title = vec![
+        sp("claude", if c.focused { strong } else { dim }),
+        sp(badge, if paused { faint } else { accent }),
+        sp(bare, warn),
+        sp(&" ".repeat(gap), card),
+        sp(&mark, accent),
+        sp(doing, if waiting { accent } else { dim }),
+        sp(" ", card),
+        sp(&secs, faint),
+    ];
+    // The turn of the stop in hand, its knots and words — the newest at the bottom
+    let st = TrailStyles { faint, dim, string, accent, warn };
+    let (turn_rows, hand_row, knots) = follow_thread(c, editor, ui, inner, card, &st, compact);
+    let why = gaze.and_then(|g| g.why.as_deref()).filter(|w| !w.is_empty());
     // A walk-through's stop: how to ask about it, under its words
     // (only once the answer is done — a question can't go while Claude still writes)
     let asking = !c.busy()
         && gaze.is_some_and(|g| g.step.is_some() && why.is_some())
         && crate::follow::stop_here(editor).is_some()
         && !crate::codereview::drafting(editor);
-    let sp = |text: &str, style: Style| Span { text: text.into(), style };
     // Its keys: a stop's question after the turn; minimized, how to stop it or bring the panel back; the
     // replay's pair once there are stops (in the code — the chat's input would take them as letters)
     let stops = c.follow.replay.latest() > 0 && !c.focused;
@@ -8663,30 +8612,10 @@ fn draw_follow_card(
     } else {
         (stops && c.busy()).then(|| vec![sp("[r", key), sp(" replay what it did", faint)])
     };
-    // Minimized, the panel's part above the lookup: who and how it goes, the question, the plan's step
-    let mut top: Vec<Vec<Span>> = Vec::new();
+    // The title; minimized, the panel's part above the turn too: the question, the plan's step
+    let mut top: Vec<Vec<Span>> = vec![title];
     if compact {
-        let badge = if c.follow.paused { " › paused" } else { " › follow" };
-        // Claude's commands without a sandbox: said here too (in warning), where it fits
-        let room = inner.saturating_sub(6 + badge.width() + secs.len() + 1);
-        let bare = match crate::tools::unsandboxed(editor) {
-            true if room >= 13 => " › no sandbox",
-            true if room >= 7 => " › bare",
-            _ => "",
-        };
-        let warn = editor
-            .theme
-            .try_get("warning")
-            .and_then(|s| s.fg)
-            .map_or(accent, |fg| Style { fg: Some(fg), ..card });
-        let gap = inner.saturating_sub(6 + badge.width() + bare.width() + secs.len());
-        top.push(vec![
-            sp("claude", if c.focused { strong } else { dim }),
-            sp(badge, if c.follow.paused { faint } else { accent }),
-            sp(bare, warn),
-            sp(&" ".repeat(gap), card),
-            sp(&secs, faint),
-        ]);
+        let turn = c.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
         let question = c.msgs[..turn]
             .last()
             .filter(|m| m.role == Role::User)
@@ -8697,8 +8626,8 @@ fn draw_follow_card(
             top.push(row);
         }
     }
-    // Its rows but the words (a blank row between the words and the keys)
-    let fixed = top.len() + 1 + usize::from(sub.is_some()) + 2 * usize::from(hint.is_some()) + 2 * pad;
+    // Its rows but the turn's (a blank row between them and the keys)
+    let fixed = top.len() + 2 * usize::from(hint.is_some()) + 2 * pad;
     let width = inner + 4;
     let x0 = (px + pw).saturating_sub(width + 1);
     // The lines being read stay readable: their rows, where their text reaches into the card's columns
@@ -8771,28 +8700,9 @@ fn draw_follow_card(
     };
     let room = gap_end - gap_top;
     let body_max = BODY.min((ph / 2).saturating_sub(fixed)).min(room - fixed).max(1);
-    // The newest rows, no blank row on top; cut mid-way → a row of its own says so (`…`) — put in front of a
-    // row already as wide as the card, it pushed that row's end out (`in the same cal`)
-    let mut from = log_cut(&body, body_max);
-    if from > 0 && body_max > 1 {
-        from = log_cut(&body, body_max - 1);
-    }
-    let mut body = body[from..].to_vec();
-    if from > 0 && body_max > 1 {
-        body.insert(0, vec![Span { text: "…".into(), style: faint }]);
-    } else if from > 0
-        && let Some(row) = body.first_mut()
-    {
-        // (one row only: `…` in front of its end, the row cut on its left so the two fit)
-        let mut cut = spans_left(row, inner.saturating_sub(2));
-        cut.insert(0, Span { text: "… ".into(), style: faint });
-        *row = cut;
-    }
-    let link = if compact { gaze.and_then(|g| g.look.link.clone()) } else { None };
+    let body = turn_window(turn_rows, &knots, hand_row, body_max, replaying, inner, faint);
     let mut rows: Vec<(Vec<Span>, Option<crate::chat::Link>)> = top.into_iter().map(|r| (r, None)).collect();
-    rows.push((head, link));
-    rows.extend(sub.map(|s| (s, None)));
-    rows.extend(body.into_iter().map(|r| (r, None)));
+    rows.extend(body);
     if let Some(h) = hint {
         rows.push((Vec::new(), None));
         rows.push((h, None));
@@ -10353,6 +10263,11 @@ fn draw_chat(
     // The newest tool call is marked while Claude is still at it
     let exploring = c.busy() && c.msgs.last().is_some_and(|m| m.role == Role::Tool);
     let styles = TrailStyles { faint, dim, string, accent, warn: warn_fg };
+    // A stop's row is its knot (글타래 P6, `knot`), the follow card's stop in hand `●`. No line between them
+    // here: tried in the padding left of the text (2026-10-20), its first cell read as an inner border hugging
+    // the panel's edge, the knots perched on it; its second glued the knots to the verbs (`●read`) — the
+    // follow card keeps its thread
+    let hand = c.in_hand();
     // What every message is drawn in — the theme as read, the chat's styles: one of them changed, every message
     // is laid out again. The language a code block with none is coloured as only those that have one
     // (`Laid.lang`)
@@ -10375,7 +10290,7 @@ fn draw_chat(
             Role::User => 0,
             Role::Assistant => u64::from(last && c.state == State::Writing),
             Role::Thought => u64::from(last && c.busy()),
-            Role::Tool => u64::from(last && exploring),
+            Role::Tool => u64::from(m.is_call(hand)),
             // (the replay's stops, and its keys — which the chat's focus changes)
             Role::Note if turn_end(i) => 1 | (u64::from(c.focused) << 1) | ((stops as u64) << 2),
             Role::Note => 0,
@@ -10458,8 +10373,10 @@ fn draw_chat(
             // `◦ read  src/lib.rs  L10–49` — one quiet row per call; a run of them stays together
             Role::Tool => {
                 let Some(look) = &m.look else { return lines };
-                let live = exploring && i + 1 == n;
-                let (spans, ran) = trail_row_at(look, m.ran.as_ref(), live, w, false, &styles);
+                let in_hand = m.is_call(hand);
+                let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
+                let glyph = knot(look, in_hand, &styles);
+                let (spans, ran) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, w, false, &styles);
                 lines.push(ChatRow { spans, link: look.link.clone(), call: Some(m.call.clone()), ran });
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
@@ -11405,22 +11322,75 @@ fn trail_row(
     slim: bool,
     st: &TrailStyles,
 ) -> Vec<crate::markdown::Span> {
-    trail_row_at(look, ran, live, w, slim, st).0
+    trail_row_at(look, ran, knot(look, live, st), &[], w, slim, st).0
+}
+
+/// A stop's knot in a turn (글타래 P6) — the diagrams' marks: `●` the stop in hand (the one the follow card shows),
+/// `▲` a change (in hand too), `◦` every other; the one in hand in the accent, the rest dim.
+fn knot(look: &crate::chat::Look, in_hand: bool, st: &TrailStyles) -> crate::markdown::Span {
+    let glyph = match (look.changes(), in_hand) {
+        (true, _) => "▲",
+        (false, true) => "●",
+        (false, false) => "◦",
+    };
+    crate::markdown::Span { text: glyph.into(), style: if in_hand { st.accent } else { st.dim } }
+}
+
+/// A change's stamps (`Msg.stamps`) as its knot row ends with them — wet only on the row in hand, a cell apart.
+fn knot_stamps(
+    ui: &Ui,
+    stamps: &[crate::stamp::Stamp],
+    in_hand: bool,
+    on: Style,
+) -> Vec<crate::markdown::Span> {
+    let mut out = Vec::new();
+    for (k, s) in stamps.iter().enumerate() {
+        if k > 0 {
+            out.push(crate::markdown::Span { text: " ".into(), style: on });
+        }
+        out.extend(stamp_spans(ui, *s, in_hand, on));
+    }
+    out
 }
 
 /// `trail_row`, and the columns of its trail when where it ran is on it — its verdict, where it ran, what it
-/// warned of: `ok · sandbox ▲1` (a click there says why — cardburden 4b).
+/// warned of: `ok · sandbox ▲1` (a click there says why — cardburden 4b). `knot` leads it; `stamps` (a
+/// change's) end it at the measure's edge — folded when the target would keep under 8 cells.
 fn trail_row_at(
     look: &crate::chat::Look,
     ran: Option<&crate::chat::Ran>,
-    live: bool,
+    knot: crate::markdown::Span,
+    stamps: &[crate::markdown::Span],
     w: usize,
     slim: bool,
     st: &TrailStyles,
 ) -> (Vec<crate::markdown::Span>, Option<(usize, usize)>) {
     use crate::markdown::Span;
     let sp = |text: String, style: Style| Span { text, style };
-    let glyph = if live { sp("●".into(), st.accent) } else { sp("◦".into(), st.faint) };
+    let end = w.min(crate::chrome::MEASURE);
+    let stamps_w: usize = stamps.iter().map(|s| s.text.width()).sum();
+    let verb_w = 2 + crate::chat::label(look.verb).width().max(6);
+    let stamped = stamps_w > 0 && end >= stamps_w + 2 + 1 + verb_w + 8;
+    let w = if stamped { end - stamps_w - 2 } else { w };
+    let (mut row, mark) = trail_spans(look, ran, knot, w, slim, st);
+    if stamped {
+        let used: usize = row.iter().map(|s| s.text.width()).sum();
+        row.push(sp(" ".repeat(end - stamps_w - used), st.faint));
+        row.extend(stamps.iter().cloned());
+    }
+    (row, mark)
+}
+
+fn trail_spans(
+    look: &crate::chat::Look,
+    ran: Option<&crate::chat::Ran>,
+    glyph: crate::markdown::Span,
+    w: usize,
+    slim: bool,
+    st: &TrailStyles,
+) -> (Vec<crate::markdown::Span>, Option<(usize, usize)>) {
+    use crate::markdown::Span;
+    let sp = |text: String, style: Style| Span { text, style };
     let head = if slim { " ".to_string() } else { format!(" {:<6} ", crate::chat::label(look.verb)) };
     let name = match std::path::Path::new(&look.what).file_name() {
         // (only files — a plan's title may have a `/` in it)
@@ -11474,18 +11444,218 @@ fn overlaps(a: Rect4, b: Rect4) -> bool {
 }
 
 /// A row with nothing but spaces.
-/// Where a log shown in `max` rows starts: the newest rows — but a cut paragraph's last row alone says little
-/// (`… filtering logic.`), so the next paragraph starts it then, and never a blank row.
-fn log_cut(body: &[Vec<crate::markdown::Span>], max: usize) -> usize {
-    let mut from = body.len().saturating_sub(max);
-    let rest = |i: usize| body[i..].iter().position(|r| blank(r)).unwrap_or(body.len() - i);
-    if from > 0 && !blank(&body[from - 1]) && rest(from) == 1 && from + 1 < body.len() {
+/// Where a log of `n` rows shown in `max` rows starts: the newest rows — but a cut paragraph's last row alone
+/// says little (`… filtering logic.`), so the next paragraph starts it then, and never a blank row (`blank`).
+fn log_cut_by(n: usize, blank: impl Fn(usize) -> bool, max: usize) -> usize {
+    let mut from = n.saturating_sub(max);
+    let rest = |i: usize| (i..n).position(&blank).unwrap_or(n - i);
+    if from > 0 && !blank(from - 1) && rest(from) == 1 && from + 1 < n {
         from += 1;
     }
-    while from < body.len() && blank(&body[from]) {
+    while from < n && blank(from) {
         from += 1;
     }
     from
+}
+
+/// A row of the follow card's: its spans, where a click on it goes.
+type CardRow = (Vec<crate::markdown::Span>, Option<crate::chat::Link>);
+
+/// The follow card's turn (글타래 P6): the turn of the stop in hand, its knots and words in order, the words at
+/// the card's full width, a row between two voices — and which row is the knot in hand. No line between the knots:
+/// the card shows a stop at a time, so a line would tie nothing a reader needs, and in a card this narrow its two
+/// cells cost the most (the user, 2026-10-20 — as in the chat). Laid out from the newest back only as far as the card can show:
+/// past the knot in hand by a card's rows. A stop that's no call's row (a walk-through's, a failure the editor
+/// went to) is its knot and its words. `links`: its knots go to their places on a click (minimized — the panel's
+/// rows do it otherwise).
+fn follow_thread(
+    c: &crate::chat::Chat,
+    editor: &Editor,
+    ui: &Ui,
+    inner: usize,
+    card: Style,
+    st: &TrailStyles,
+    links: bool,
+) -> (Vec<CardRow>, Option<usize>, Vec<bool>) {
+    use crate::chat::Role;
+    use crate::markdown::Span;
+    const ENOUGH: usize = 8;
+    let gaze = c.follow.shown();
+    let hand = c.in_hand();
+    let at = hand.and_then(|h| c.msgs.iter().rposition(|m| m.is_call(Some(h))));
+    let why = gaze.and_then(|g| g.why.as_deref()).filter(|w| !w.is_empty());
+    // (a stop that's no call's — `follow::point`, a walk-through's: while Claude works `in_hand` still finds its
+    // newest call, the run the failure came from — or one whose call's row is gone)
+    if let (Some(g), Some(why)) = (gaze, why)
+        && (g.call.is_empty() || at.is_none())
+    {
+        // (a failure speaks like the test pane's: `▲` in the error colour)
+        let (look, glyph) = match g.look.verb {
+            "failed" => (
+                crate::chat::Look { verb: "test failed", ..g.look.clone() },
+                Span { text: "▲".into(), style: Style { fg: ui.error.fg, ..card } },
+            ),
+            _ => (g.look.clone(), knot(&g.look, true, st)),
+        };
+        let (row, _) = trail_row_at(&look, None, glyph, &[], inner, false, st);
+        let mut rows = vec![(row, g.look.link.clone().filter(|_| links))];
+        rows.extend(thought_rows(why, inner, card, st.faint, editor).into_iter().map(|r| (r, None)));
+        let knots = (0..rows.len()).map(|i| i == 0).collect();
+        return (rows, Some(0), knots);
+    }
+    // The turn: the knot in hand's, else the latest
+    let start = |k: usize| c.msgs[..k].iter().rposition(|m| m.role == Role::User).map_or(0, |u| u + 1);
+    let (from, to) = match at {
+        Some(k) => {
+            (start(k), c.msgs[k..].iter().position(|m| m.role == Role::User).map_or(c.msgs.len(), |p| k + p))
+        }
+        None => (start(c.msgs.len()), c.msgs.len()),
+    };
+    let turn = &c.msgs[from..to];
+    let lang = editor.doc().syntax.as_ref().map(|s| s.lang.name.clone());
+    // (newest first: each message's rows — whether they're a knot's — then flattened)
+    let mut parts: Vec<(bool, Vec<CardRow>)> = Vec::new();
+    let mut total = 0;
+    // (the rows under the knot in hand, once it's found)
+    let mut below: Option<usize> = None;
+    let mut voice_under = false;
+    for m in turn.iter().rev() {
+        let enough = match (at, below) {
+            (Some(_), Some(b)) => total - b > ENOUGH,
+            (Some(_), None) => false,
+            (None, _) => total > ENOUGH,
+        };
+        if enough {
+            break;
+        }
+        let rows: Vec<CardRow> = match m.role {
+            Role::Tool => {
+                let Some(look) = &m.look else { continue };
+                let in_hand = m.is_call(hand);
+                if in_hand {
+                    below = Some(total);
+                }
+                // (the stop in hand where it is now — its lines moved by later edits, a search's count)
+                let look = gaze.filter(|_| in_hand).map_or(look, |g| &g.look);
+                let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
+                let glyph = knot(look, in_hand, st);
+                let (row, _) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, inner, false, st);
+                voice_under = false;
+                vec![(row, look.link.clone().filter(|_| links))]
+            }
+            // Its thinking (italic) and what it said between stops — a new thought goes under the last one instead
+            // of taking its place (thinking comes in bursts: a lone "I should" for seconds, read as flicker)
+            Role::Thought | Role::Assistant => {
+                let mut rows = if m.role == Role::Thought {
+                    thought_rows(&m.text, inner, st.dim, st.faint, editor)
+                } else {
+                    let text = crate::chat::displayed(&m.text);
+                    let rendered = crate::markdown::render(text.trim(), &editor.theme, lang.as_deref());
+                    let (mut rows, drawn) =
+                        chat_markdown_drawn(&rendered, (inner, inner), (st.faint, st.dim), ui.base.bg);
+                    // (번짐: the answer being written, its head ink not yet dry)
+                    let head = c.msgs.last().is_some_and(|l| std::ptr::eq(l, m));
+                    if head && c.state == crate::chat::State::Writing && editor.wet_ink {
+                        wet_head("follow", &mut rows, &drawn, ui, card);
+                    }
+                    rows
+                };
+                while rows.last().is_some_and(|r| blank(r)) {
+                    rows.pop();
+                }
+                if rows.is_empty() {
+                    continue;
+                }
+                // (two voices: a row apart)
+                if voice_under {
+                    rows.push(Vec::new());
+                }
+                voice_under = true;
+                rows.into_iter().map(|r| (r, None)).collect()
+            }
+            _ => continue,
+        };
+        total += rows.len();
+        parts.push((m.role == Role::Tool, rows));
+    }
+    let knots: Vec<bool> = parts.iter().rev().flat_map(|(k, p)| std::iter::repeat_n(*k, p.len())).collect();
+    let rows: Vec<CardRow> = parts.into_iter().rev().flat_map(|(_, p)| p).collect();
+    let hand_row = below.map(|b| rows.len() - 1 - b);
+    (rows, hand_row, knots)
+}
+
+/// What of the follow card's turn shows in `max` rows. Live: the newest — the knot in hand pinned on top when
+/// the words after it pushed it out, `…` under it (the card always says where Claude is). Stepping through the
+/// replay: the knot in hand with the words before it (its why) and the start of what came after. `knots`: which
+/// rows are a stop's. Cut on top: a
+/// row of its own says so (`…`) — put in front of a row already as wide as the card, it pushed that row's end out
+/// (`in the same cal`); one row only: `…` in front of its end, the row cut on its left so the two fit.
+#[allow(clippy::too_many_arguments)]
+fn turn_window(
+    rows: Vec<CardRow>,
+    knots: &[bool],
+    hand: Option<usize>,
+    max: usize,
+    replaying: bool,
+    inner: usize,
+    faint: Style,
+) -> Vec<CardRow> {
+    use crate::markdown::Span;
+    let n = rows.len();
+    let cut = || (vec![Span { text: "…".into(), style: faint }], None);
+    let bare = |i: usize| blank(&rows[i].0);
+    if let Some(h) = hand.filter(|_| replaying && max >= 3) {
+        let end = (h + 1 + (max - 1) / 2).min(n);
+        let from = end.saturating_sub(max);
+        if from == 0 {
+            return rows[..end].to_vec();
+        }
+        let mut from = (end - (max - 1)).min(h);
+        // (as the live log's cut: a paragraph's last row alone says little — from the next one, or the knot;
+        // never a blank row on top. A paragraph ends at a blank row or a knot)
+        let rest = |i: usize| (i..h).position(|k| bare(k) || knots[k]).unwrap_or(h - i);
+        if from > 0 && from < h && !bare(from - 1) && rest(from) == 1 {
+            from += 1;
+        }
+        while from < h && bare(from) {
+            from += 1;
+        }
+        let mut out = vec![cut()];
+        out.extend(rows[from..end].iter().cloned());
+        return out;
+    }
+    let newest = |m: usize| {
+        let from = log_cut_by(n, bare, m);
+        if from > 0 && m > 1 { log_cut_by(n, bare, m - 1) } else { from }
+    };
+    let from = newest(max);
+    match hand {
+        // (the knot in hand pushed out: pinned on top)
+        Some(h) if h < from && max >= 3 => {
+            let from = log_cut_by(n, bare, max - 2).max(h + 1);
+            let mut out = vec![rows[h].clone(), cut()];
+            out.extend(rows[from..].iter().cloned());
+            out
+        }
+        Some(h) if h < from => {
+            let mut out = vec![rows[h].clone()];
+            out.extend(rows[n.saturating_sub(max - 1).max(h + 1)..].iter().cloned());
+            out
+        }
+        _ if from > 0 && max > 1 => {
+            let mut out = vec![cut()];
+            out.extend(rows[from..].iter().cloned());
+            out
+        }
+        _ if from > 0 => {
+            let mut row = rows[from].clone();
+            let mut kept = spans_left(&row.0, inner.saturating_sub(2));
+            kept.insert(0, Span { text: "… ".into(), style: faint });
+            row.0 = kept;
+            vec![row]
+        }
+        _ => rows,
+    }
 }
 
 fn blank(row: &[crate::markdown::Span]) -> bool {
@@ -13681,6 +13851,8 @@ mod tests {
     fn a_log_cut_skips_a_lone_fragment() {
         let row = |t: &str| vec![crate::markdown::Span { text: t.into(), style: Style::default() }];
         let body: Vec<_> = ["a1", "a2", "a3", "", "b1", "b2", "", "c1"].iter().map(|t| row(t)).collect();
+        let log_cut =
+            |body: &[Vec<crate::markdown::Span>], max| log_cut_by(body.len(), |i| blank(&body[i]), max);
         assert_eq!(log_cut(&body, 8), 0, "all of it fits");
         assert_eq!(log_cut(&body, 6), 4, "a3 alone isn't shown — b starts it");
         assert_eq!(log_cut(&body, 5), 4, "a blank row never tops it");
@@ -15035,6 +15207,236 @@ mod tests {
         assert_eq!(wet_of("這是一個很長的句子", 40), "句子");
         assert_eq!(wet_of("これは長い文です", 40), "です");
         assert_eq!(wet_of("see https://example.com/a/very/long/path/to/somewhere", 80), "to/somewhere");
+    }
+
+    /// A turn of three stops: words, a read, words, an edit (its stamp `y`), a run, the answer and its time.
+    fn threaded_turn() -> Editor {
+        use crate::chat::{Look, Msg, Role};
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str(&"fn main() {}\n".repeat(30));
+        let mut c = crate::chat::Chat::new();
+        let look = |verb: &'static str, what: &str| Look {
+            verb,
+            what: what.into(),
+            pattern: false,
+            range: String::new(),
+            link: None,
+        };
+        c.msgs.push(Msg::new(Role::User, "why does insert clone the name?", ""));
+        c.msgs.push(Msg::new(Role::Assistant, "Opening words.", ""));
+        c.msgs.push(Msg::tool(look("read", "src/main.rs"), "r1"));
+        c.msgs.push(Msg::new(Role::Assistant, "Between the stops.", ""));
+        let mut edit = Msg::tool(look("edit", "src/main.rs"), "e1");
+        edit.stamps = vec![crate::stamp::Stamp('y')];
+        c.msgs.push(edit);
+        c.msgs.push(Msg::tool(look("run", "cargo test"), "x1"));
+        c.msgs.push(Msg::new(Role::Assistant, "Done now.", ""));
+        c.msgs.push(Msg::new(Role::Note, "5.2s", ""));
+        c.unfolded = true;
+        ed.session.chat = Some(c);
+        ed
+    }
+
+    /// The screen at `w`×40.
+    fn screen_at(ed: &mut Editor, w: u16) -> vt100::Parser {
+        let mut buf = Vec::new();
+        render(ed, &mut buf, w, 40).unwrap();
+        let mut vt = vt100::Parser::new(40, w, 0);
+        vt.process(&buf);
+        vt
+    }
+
+    /// 글타래 P6: in the chat a turn's stops are knots, each its row's own first cell — `◦` a stop, `▲` a change
+    /// with the key that decided it, `●` the stop in hand: none at rest, the one replay shows, the newest while it
+    /// works. No line between them (the follow card's thread is its own): the words at the question's column.
+    #[test]
+    fn a_turns_stops_are_knots_in_the_chat() {
+        let mut ed = threaded_turn();
+        let edit = format!("  ▲ edit   src/main.rs{}▐y▌", " ".repeat(21));
+        let turn = |hand: [&str; 2]| {
+            vec![
+                "  ▎ why does insert clone the name?".to_string(),
+                String::new(),
+                "  Opening words.".into(),
+                String::new(),
+                format!("  {} read   src/main.rs", hand[0]),
+                String::new(),
+                "  Between the stops.".into(),
+                String::new(),
+                edit.clone(),
+                format!("  {} run    cargo test", hand[1]),
+                String::new(),
+                "  Done now.".into(),
+                format!("  {}5.2s", " ".repeat(40)),
+            ]
+        };
+        assert_eq!(chat_rows(&mut ed, 120, "5.2s"), turn(["◦", "◦"]), "at rest: no stop in hand");
+        // (replay at the read: its knot in hand)
+        let c = ed.session.chat.as_mut().unwrap();
+        let look = c.msgs[2].look.clone().unwrap();
+        c.follow.replaying =
+            Some(crate::follow::Gaze { call: "r1".into(), ..crate::follow::Gaze::new(look, None, None) });
+        assert_eq!(chat_rows(&mut ed, 120, "5.2s"), turn(["●", "◦"]), "the stop replay shows");
+        // (working, its newest call is where it is)
+        let c = ed.session.chat.as_mut().unwrap();
+        c.follow.replaying = None;
+        c.msgs.truncate(6);
+        c.state = crate::chat::State::Thinking;
+        let rows = chat_rows(&mut ed, 120, "cargo test");
+        assert_eq!(rows.last().unwrap(), "  ● run    cargo test", "{rows:#?}");
+    }
+
+    /// The chat's rows from right after its gutter (its padding, then its text) on, from the question's row to the
+    /// row with `end`.
+    fn chat_rows(ed: &mut Editor, w: u16, end: &str) -> Vec<String> {
+        let vt = screen_at(ed, w);
+        let x = (ed.screen.chat_x.expect("the chat is open") + crate::chrome::GAP) as u16;
+        let rows: Vec<String> = vt.screen().rows(x, w - x).map(|r| r.trim_end().to_string()).collect();
+        let first = rows.iter().position(|r| r.contains("why does insert")).expect("the question");
+        let last = rows.iter().position(|r| r.contains(end)).expect("the end");
+        rows[first..=last].to_vec()
+    }
+
+    /// The follow card's rows: its title, then the rest down to its foot (its edge, its keys and the blank row
+    /// over them — not kept).
+    fn follow_card(ed: &mut Editor, w: u16) -> Vec<String> {
+        const KEYS: [&str; 3] = ["C-c stop", "stop by stop", "space l open the chat"];
+        let vt = screen_at(ed, w);
+        let (x, y, width, h) = ed.screen.thought_card.get().expect("the card is up");
+        let mut card: Vec<String> = vt
+            .screen()
+            .rows(x as u16 + 2, width as u16 - 4)
+            .skip(y)
+            .take(h)
+            .skip_while(|r| !r.contains("claude › follow"))
+            .map(|r| r.trim_end().into())
+            .collect();
+        let foot =
+            |r: &String| r.is_empty() || r.chars().all(|ch| ch == '▀') || KEYS.iter().any(|k| r.contains(k));
+        while card.last().is_some_and(foot) {
+            card.pop();
+        }
+        card
+    }
+
+    /// 글타래 P6: the follow card shows the turn as its knots and words — its title says what Claude is at, the stop
+    /// in hand is its `●`, the words at the card's full width with no line beside them; a long run of words keeps
+    /// that knot pinned on top; replay shows the stop with the words before it; a walk-through's stop is its knot
+    /// and its words.
+    #[test]
+    fn the_follow_card_shows_the_turn_as_knots_and_words() {
+        let mut ed = threaded_turn();
+        let c = ed.session.chat.as_mut().unwrap();
+        c.unfolded = false;
+        c.follow.on = true;
+        c.state = crate::chat::State::Writing;
+        c.msgs.pop();
+        // (where it is: its run, as `follow::on_tool` puts it)
+        let run = c.msgs[5].look.clone().unwrap();
+        c.follow.gaze =
+            Some(crate::follow::Gaze { call: "x1".into(), ..crate::follow::Gaze::new(run, None, None) });
+        assert!(c.compact(), "minimized: follow's card");
+        let card = follow_card(&mut ed, 160);
+        assert!(card[0].contains(" writing ") && card[0].ends_with('s'), "what it's at, how long: {card:#?}");
+        let edit = format!("▲ edit   src/main.rs{}▐y▌", " ".repeat(30));
+        assert_eq!(
+            card[1..],
+            [
+                "▎ why does insert clone the name?",
+                "Opening words.",
+                "◦ read   src/main.rs",
+                "Between the stops.",
+                &edit,
+                "● run    cargo test",
+                "Done now.",
+            ],
+            "the question, then the turn"
+        );
+        // The words at the card's full width: a sentence as wide as the card is one row
+        let inner = ed.screen.thought_card.get().unwrap().2 - 4;
+        let mut wide = String::new();
+        while wide.len() + 4 <= inner {
+            wide.push_str("abc ");
+        }
+        let wide = format!("{}{}", wide, "x".repeat(inner - wide.len()));
+        let c = ed.session.chat.as_mut().unwrap();
+        c.msgs.last_mut().unwrap().text = wide.clone();
+        let card = follow_card(&mut ed, 160);
+        assert_eq!(card.last().unwrap(), &wide, "{card:#?}");
+        // A long run of words: the knot in hand pinned, `…` under it, the newest words
+        let c = ed.session.chat.as_mut().unwrap();
+        let long: Vec<String> = (1..=12).map(|i| format!("Line {i}.")).collect();
+        c.msgs.last_mut().unwrap().text = long.join("\n\n");
+        let card = follow_card(&mut ed, 160);
+        assert_eq!(
+            card[2..],
+            ["● run    cargo test", "…", "Line 10.", "", "Line 11.", "", "Line 12."],
+            "{card:#?}"
+        );
+        // Replay at the read, the turn over: the stop with the words before it and after
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Idle;
+        let look = c.msgs[2].look.clone().unwrap();
+        c.follow.replaying = Some(crate::follow::Gaze {
+            call: "r1".into(),
+            step: Some((1, 3)),
+            ..crate::follow::Gaze::new(look.clone(), None, None)
+        });
+        let card = follow_card(&mut ed, 160);
+        assert!(card[0].ends_with(" 1/3"), "which stop: {card:#?}");
+        // (the turn over, the panel's back: the card beside it, no question)
+        let edit = format!("▲ edit   src/main.rs{}▐y▌", " ".repeat(11));
+        assert_eq!(
+            card[1..],
+            ["Opening words.", "● read   src/main.rs", "Between the stops.", &edit, "◦ run    cargo test"],
+            "{card:#?}"
+        );
+        // Replay at the run, the paragraph before it cut: not its last row alone — from the knot after it
+        let c = ed.session.chat.as_mut().unwrap();
+        c.msgs[3].text =
+            "The words between the stops run on long enough to wrap onto a few of the card's rows.".into();
+        let run = c.msgs[5].look.clone().unwrap();
+        c.follow.replaying = Some(crate::follow::Gaze {
+            call: "x1".into(),
+            step: Some((3, 3)),
+            ..crate::follow::Gaze::new(run, None, None)
+        });
+        let card = follow_card(&mut ed, 160);
+        assert_eq!(
+            card[1..],
+            ["…", &edit, "● run    cargo test", "Line 1.", "", "Line 2."],
+            "no lone fragment on top: {card:#?}"
+        );
+        // A walk-through's stop: no call's — its knot, its words
+        let c = ed.session.chat.as_mut().unwrap();
+        c.follow.replaying = Some(crate::follow::Gaze {
+            why: Some("Where the name is cloned.".into()),
+            step: Some((1, 1)),
+            ..crate::follow::Gaze::new(look, None, None)
+        });
+        let card = follow_card(&mut ed, 160);
+        assert_eq!(card[1..], ["● read   src/main.rs", "Where the name is cloned."], "{card:#?}");
+        // A test's failure the editor went to while Claude still works (`follow::point`, no call's — its run the
+        // newest call): the failure's knot and why, not the turn
+        let c = ed.session.chat.as_mut().unwrap();
+        c.follow.replaying = None;
+        c.msgs.truncate(6);
+        c.state = crate::chat::State::Thinking;
+        let failed = crate::chat::Look {
+            verb: "failed",
+            what: "tests::adds".into(),
+            pattern: false,
+            range: String::new(),
+            link: None,
+        };
+        c.follow.gaze = Some(crate::follow::Gaze {
+            why: Some("left: 4, right: 5".into()),
+            ..crate::follow::Gaze::new(failed, None, None)
+        });
+        let card = follow_card(&mut ed, 160);
+        let rows: Vec<String> =
+            card[2..].iter().map(|r| r.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+        assert_eq!(rows, ["▲ test failed tests::adds", "left: 4, right: 5"], "{card:#?}");
     }
 
     /// What `wet_head` drew wet in a frame of `ed`, by surface.

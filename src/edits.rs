@@ -29,6 +29,8 @@ pub struct Pending {
     pub reason: String,
     /// When it asked — its place in the inbox (`inbox.rs`).
     pub since: std::time::Instant,
+    /// Its call, claimed as it's asked (`chat::claim_call`) — its review's keys stamp that row.
+    pub row: Option<String>,
     /// Whether it changes a name that runs later outside the sandbox where its path really leads (`protected`
     /// — a disk read, worked out on a worker as it's asked): its review says so. None until then — its review
     /// waits for it.
@@ -191,6 +193,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     if !matches!(tool, "Edit" | "Write") {
         return Some(deny(&format!("{tool} isn't available in tarae's chat")));
     }
+    let row = crate::chat::claim_call(ed, tool, &req["input"]);
     let c = ed.session.chat.as_mut()?;
     // Its words right before this call, this turn — taken now, so each queued edit keeps its own
     let reason = reason(c);
@@ -200,6 +203,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         input: req["input"].clone(),
         reason,
         since: std::time::Instant::now(),
+        row,
         protected: None,
     };
     match c.edits.at_end.clone() {
@@ -502,6 +506,7 @@ fn show(ed: &mut Editor, p: Pending) {
         c.focused = false;
         c.follow.keep(doc_id);
     }
+    let row = p.row.clone();
     crate::llm::review_with(
         ed,
         doc_id,
@@ -512,6 +517,7 @@ fn show(ed: &mut Editor, p: Pending) {
         })),
     );
     if let Some(r) = &mut ed.session.review {
+        r.answers = row;
         r.from_chat = from_chat;
         r.reason = reason;
         r.warnings = warnings;

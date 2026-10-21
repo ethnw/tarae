@@ -98,6 +98,7 @@ fn the_inbox_is_every_sessions_waiting_things_oldest_first() {
         input: serde_json::json!({ "file_path": "src/a.rs" }),
         reason: String::new(),
         since: Instant::now() - Duration::from_secs(60),
+        row: None,
         protected: Some(false),
     });
     session(&mut ed, back).chat = Some(chat);
@@ -260,6 +261,7 @@ fn the_order_is_by_each_ones_wait_on_its_own_clock() {
         input: serde_json::json!({ "file_path": "src/a.rs" }),
         reason: String::new(),
         since: Instant::now() - Duration::from_secs(60),
+        row: None,
         protected: Some(false),
     });
     session(&mut ed, back).chat = Some(chat);

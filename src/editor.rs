@@ -7204,12 +7204,13 @@ mod tests {
         feed(&mut ed, "<space>lmake it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let screen = draw(&mut ed);
-        assert!(screen.contains("● waiting for you") && !screen.contains("● run "), "{screen}");
+        // (the card's title says it waits; its run is the knot in hand)
+        assert!(screen.contains(" waiting ") && !screen.contains("exploring"), "{screen}");
         ed.offer_accept();
         settle_for(&mut ed, |ed| ed.session.task_run.is_some());
         let screen = draw(&mut ed);
         // (the card names the tool, as its chat row does)
-        assert!(screen.contains("● run  sleep 1") && !screen.contains("waiting for you"), "{screen}");
+        assert!(screen.contains("● run    sleep 1") && !screen.contains("waiting"), "{screen}");
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -9223,6 +9224,143 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A stand-in claude whose turn is two Edits of `lib`, each a tool call (`e1`, `e2`) and its permission asked
+    /// (`p1`, `p2`) — the second once the first is answered; the first changes two lines apart (two changes in
+    /// its review), the second one.
+    fn two_edit_calls(ed: &mut Editor, dir: &Path, lib: &Path) {
+        edit_calls(ed, dir, lib, false)
+    }
+
+    /// `two_edit_calls`, or (`batch`) both calls in one message, their results only once both are answered — as
+    /// claude sends parallel calls.
+    fn edit_calls(ed: &mut Editor, dir: &Path, lib: &Path, batch: bool) {
+        use serde_json::json;
+        let first = json!({"file_path": lib, "old_string": "line 2\nline 3\nline 4", "new_string": "LINE 2\nline 3\nLINE 4"});
+        let second = json!({"file_path": lib, "old_string": "line 8", "new_string": "LINE 8"});
+        let call = |id: &str, input: &serde_json::Value| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Edit", "input": input}]}});
+        let ask = |id: &str, input: &serde_json::Value| {
+            json!({"type": "control_request", "request_id": id,
+            "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": input}})
+        };
+        let done = |id: &str| json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": "The file has been updated."}]}});
+        let result = json!({"type": "result", "result": "done"});
+        let (c1, a1, c2, a2) =
+            (call("e1", &first), ask("p1", &first), call("e2", &second), ask("p2", &second));
+        let (d1, d2) = (done("e1"), done("e2"));
+        let steps = match batch {
+            false => format!(
+                "'{{\"message\"'*) printf '%s\\n' '{c1}' '{a1}';; *'\"p1\"'*) printf '%s\\n' '{d1}' '{c2}' '{a2}';; \
+                 *'\"p2\"'*) printf '%s\\n' '{d2}' '{result}';;"
+            ),
+            true => format!(
+                "'{{\"message\"'*) printf '%s\\n' '{c1}' '{c2}' '{a1}';; *'\"p1\"'*) printf '%s\\n' '{a2}';; \
+                 *'\"p2\"'*) printf '%s\\n' '{d1}' '{d2}' '{result}';;"
+            ),
+        };
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do printf '%s\\n' \"$line\" >> '{}'; case \"$line\" in {steps} esac; done",
+                dir.join("stdin.log").display()
+            ),
+        ];
+    }
+
+    /// Two Edits of one file in one message, both answered before either's result comes: each row takes its own
+    /// review's keys — the second's never joins the first's.
+    #[test]
+    fn two_edits_of_one_file_in_one_message_are_stamped_each_its_own() {
+        let scratch = crate::scratch::Scratch::new("knot-batch");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let lib = dir.join("lib.rs");
+        std::fs::write(&lib, (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.open(&lib).unwrap();
+        edit_calls(&mut ed, &dir, &lib, true);
+        feed(&mut ed, "<space>ltwo edits please<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        feed(&mut ed, "yy");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        assert_eq!(ed.session.chat.as_ref().unwrap().calls.len(), 2, "both still waiting for their results");
+        feed(&mut ed, "n");
+        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        let c = ed.session.chat.as_ref().unwrap();
+        let stamps = |id: &str| -> String {
+            c.msgs.iter().find(|m| m.call == id).unwrap().stamps.iter().map(|s| s.0).collect()
+        };
+        assert_eq!((stamps("e1"), stamps("e2")), ("y".into(), "n".into()));
+    }
+
+    /// 글타래 P6: a change's knot carries the keys that decided it — `y` and `n` on the edit whose two changes
+    /// were answered so, `n` on the one refused — and replay's `[r` moves the knot in hand along the thread, the
+    /// newest stop first. Unasked (review at the end), or a review closed unanswered: no key, no stamp.
+    #[test]
+    fn a_changes_knot_is_stamped_with_the_keys_that_decided_it() {
+        let scratch = crate::scratch::Scratch::new("knot-stamps");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let lib = dir.join("lib.rs");
+        std::fs::write(&lib, (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.open(&lib).unwrap();
+        two_edit_calls(&mut ed, &dir, &lib);
+        feed(&mut ed, "<space>ltwo edits please<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        assert_eq!(ed.session.review.as_ref().unwrap().hunks.len(), 2, "two changes in its review");
+        // (answered `n`, then `y`: stamped `y` first, whichever came first)
+        feed(&mut ed, "ny");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        feed(&mut ed, "n");
+        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        let stamps = |ed: &Editor, id: &str| -> String {
+            let c = ed.session.chat.as_ref().unwrap();
+            c.msgs.iter().find(|m| m.call == id).unwrap().stamps.iter().map(|s| s.0).collect()
+        };
+        assert_eq!((stamps(&ed, "e1"), stamps(&ed, "e2")), ("yn".into(), "n".into()));
+        let mut out = Vec::new();
+        crate::term::render(&mut ed, &mut out, 120, 40).unwrap();
+        let mut vt = vt100::Parser::new(40, 120, 0);
+        vt.process(&out);
+        let screen = vt.screen().contents();
+        assert!(screen.contains("▐y▌ ▐n▌"), "both keys on the first edit's knot: {screen}");
+        // Replay: the newest stop in hand, then the one before
+        let hand = |ed: &Editor| ed.session.chat.as_ref().unwrap().in_hand().map(str::to_string);
+        assert_eq!(hand(&ed), None, "at rest, none");
+        feed(&mut ed, "<esc>[r");
+        assert_eq!(hand(&ed).as_deref(), Some("e2"));
+        feed(&mut ed, "[r");
+        assert_eq!(hand(&ed).as_deref(), Some("e1"));
+        // Review at the end: written unasked — nobody's key
+        let scratch = crate::scratch::Scratch::new("knot-unasked");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let lib = dir.join("lib.rs");
+        std::fs::write(&lib, (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.config.llm.review_at_end = true;
+        ed.open(&lib).unwrap();
+        two_edit_calls(&mut ed, &dir, &lib);
+        feed(&mut ed, "<space>ltwo edits please<ret>");
+        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert_eq!((stamps(&ed, "e1"), stamps(&ed, "e2")), (String::new(), String::new()), "unasked");
+        // A review closed unanswered (another in its place, the turn stopped): none
+        let scratch = crate::scratch::Scratch::new("knot-closed");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let lib = dir.join("lib.rs");
+        std::fs::write(&lib, (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.open(&lib).unwrap();
+        two_edit_calls(&mut ed, &dir, &lib);
+        feed(&mut ed, "<space>ltwo edits please<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        feed(&mut ed, "y");
+        crate::llm::close_review(&mut ed);
+        assert_eq!(stamps(&ed, "e1"), "", "answered in part, then closed: no key gave it");
+    }
+
     /// A turn's edits across files are one step back: `:undo-turn` takes Claude's changes out (the user's own
     /// edits since stay), removes the file it created, and `:redo-turn` brings it all back. Claude hears of it.
     #[test]
@@ -10421,6 +10559,7 @@ mod tests {
                 input: json!({"file_path": doc, "content": "echo bye\n"}),
                 reason: String::new(),
                 since: std::time::Instant::now(),
+                row: None,
                 protected: Some(false),
             });
             ed.handle_event(Event::Job(Box::new(|_| {})));

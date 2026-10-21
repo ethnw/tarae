@@ -232,6 +232,18 @@ pub struct Look {
     pub link: Option<Link>,
 }
 
+impl Look {
+    /// It changes files — its knot on the turn's thread is `▲` (`term::knot`): an edit, a write, a rename, a
+    /// replace (not its preview).
+    pub fn changes(&self) -> bool {
+        match self.verb {
+            "edit" | "write" | "rename" => true,
+            "replace" => !self.range.ends_with("preview"),
+            _ => false,
+        }
+    }
+}
+
 pub struct Msg {
     pub role: Role,
     pub text: String,
@@ -244,6 +256,9 @@ pub struct Msg {
     pub attached: Option<Link>,
     /// A command's row (`run`): where it ran, and what it warned of — from the run's own record, at its end.
     pub ran: Option<Ran>,
+    /// A change's row (`edit`, `write`, `rename`, `replace`): the keys that decided it, each once, `y` before `n`
+    /// (`stamp_call` — its review's answers, its card's) — none while undecided, unasked or unknown.
+    pub stamps: Vec<crate::stamp::Stamp>,
     /// Goes up with every change to what it shows (`changed`) — a word replaced, a row's verdict — so its rows
     /// are laid out again, even when the text's length stays.
     version: u64,
@@ -306,6 +321,7 @@ impl Msg {
             call: String::new(),
             attached: None,
             ran: None,
+            stamps: Vec::new(),
             version: 0,
             cache: RefCell::new(None),
         }
@@ -318,6 +334,11 @@ impl Msg {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// The call it's the row of (a tool call's), when it's `call`.
+    pub fn is_call(&self, call: Option<&str>) -> bool {
+        self.role == Role::Tool && call.is_some_and(|c| c == self.call)
     }
 
     pub(crate) fn tool(look: Look, call: &str) -> Self {
@@ -449,6 +470,10 @@ pub struct Chat {
     /// Its tool calls this turn whose result hasn't come yet, in the order claude made them (#87: claude
     /// makes them one after another, so what comes after a run card waits on it unseen).
     pub calls: Vec<Called>,
+    /// The calls a change of Claude's has claimed as the one it answers (`claim_call`) — its keys stamp that row —
+    /// and, for tarae's change tools, which: its MCP request's id → the call's (`claim_for`, `row_for`).
+    pub claimed: Vec<String>,
+    pub rows: Vec<(serde_json::Value, String)>,
     /// This turn's UI elements given to Claude (the context's `ui:` line, what was pointed at, its `ui`
     /// calls) · the ones its answer cites · the elements pointed at for the next message, its chips
     /// (`uistate/claude.rs`, `uistate/point.rs`).
@@ -545,6 +570,56 @@ pub fn said_ran(ed: &mut Editor, call: &str) {
         return;
     };
     say_ran(ed, &what, &ran);
+}
+
+/// The call a change of Claude's answers, found once as its request comes (the native Edit's permission request,
+/// tarae's tool call — neither carries the call's id, both its input): the call of `tool` still waiting with that
+/// very `input` that no change has claimed yet (`Chat.claimed`) — two Edits of one file, two renames side by side,
+/// each its own, whatever order they land in (a rename on its server's answer). Equal or nothing: a request
+/// not its call's input byte for byte (a native Edit's with a default filled in, an input a hook reworked — the
+/// chat runs with hooks off, the native Edit only under `llm.edit-tools` both/native) claims none, so a mismatch
+/// leaves no stamp, never a wrong one ("the same file's" would pick between two Edits of it by order).
+pub fn claim_call(ed: &mut Editor, tool: &str, input: &serde_json::Value) -> Option<String> {
+    let c = ed.session.chat.as_mut()?;
+    let id = c
+        .calls
+        .iter()
+        .find(|k| k.name == tool && k.input == *input && !c.claimed.contains(&k.id))?
+        .id
+        .clone();
+    c.claimed.push(id.clone());
+    Some(id)
+}
+
+/// `claim_call` for tarae's change tool's request `mcp_id` (as it comes — its change lands later, maybe after one
+/// asked after it): kept by that id for its landing (`row_for`).
+pub fn claim_for(ed: &mut Editor, tool: &str, input: &serde_json::Value, mcp_id: &serde_json::Value) {
+    if let Some(row) = claim_call(ed, tool, input)
+        && let Some(c) = ed.session.chat.as_mut()
+    {
+        c.rows.push((mcp_id.clone(), row));
+    }
+}
+
+/// The row request `mcp_id` claimed (`claim_for`).
+pub fn row_for(ed: &Editor, mcp_id: &serde_json::Value) -> Option<String> {
+    let c = ed.session.chat.as_ref()?;
+    c.rows.iter().find(|(m, _)| m == mcp_id).map(|(_, row)| row.clone())
+}
+
+/// A change of Claude's was answered by `keys` (its review's, its card's): the row of call `id` — the one it
+/// claimed (`claim_call`) — is stamped with them.
+pub fn stamp_call(ed: &mut Editor, id: &str, keys: &[crate::stamp::Stamp]) {
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id) else { return };
+    for k in keys {
+        if !m.stamps.contains(k) {
+            m.stamps.push(*k);
+        }
+    }
+    // (`y` first, whichever came first)
+    crate::sorting::by_key(&mut m.stamps, |s| s.0 != 'y');
+    m.changed();
 }
 
 /// The command `cmd` Claude asked to run ended: its row (the newest `run` row of that command whose call is
@@ -721,6 +796,8 @@ impl Chat {
             models: Vec::new(),
             model: String::new(),
             calls: Vec::new(),
+            claimed: Vec::new(),
+            rows: Vec::new(),
             given: Vec::new(),
             cited: Vec::new(),
             pointed: Vec::new(),
@@ -762,6 +839,21 @@ impl Chat {
 
     pub fn busy(&self) -> bool {
         self.state != State::Idle
+    }
+
+    /// The call whose stop is in hand — its knot `●`, in the chat and the follow card alike: the
+    /// stop replay shows, else while Claude works where it is (follow's, else its newest call); at rest none.
+    pub fn in_hand(&self) -> Option<&str> {
+        let live = || {
+            let gaze = self.follow.gaze.as_ref().map(|g| g.call.as_str()).filter(|c| !c.is_empty());
+            gaze.or_else(|| self.msgs.last().filter(|m| m.role == Role::Tool).map(|m| m.call.as_str()))
+        };
+        let call = match &self.follow.replaying {
+            Some(g) => Some(g.call.as_str()),
+            None if self.busy() => live(),
+            None => None,
+        };
+        call.filter(|c| !c.is_empty())
     }
 
     /// The last turn's answer: its words since the last message sent, joined.
@@ -1657,6 +1749,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             let stopped = c.stopping;
             c.state = State::Idle;
             c.calls.clear();
+            c.claimed.clear();
+            c.rows.clear();
             // (refused for money on the key, the turn ending on its error — not stopped, not answered after
             // all: said in tarae's words instead — `money_out`)
             let money = c
@@ -1756,6 +1850,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             c.proc = None;
             c.follow.gaze = None;
             c.calls.clear();
+            c.claimed.clear();
+            c.rows.clear();
             // (a refusal for money read in the turn this exit cut off is that turn's alone)
             c.money = None;
             // The conversation is gone from claude (its own cleanup took it, or you deleted it): a fresh one, the
@@ -3973,6 +4069,55 @@ mod tests {
         assert_eq!(refs_in(root, "/abs/p.rs:7")[0].1.path, Path::new("/abs/p.rs"));
         assert_eq!(refs_in(root, "src/lib.rs:12")[0].1.path, root.join("src/lib.rs"), "from the root");
         assert!(refs_in(root, "no refs: 1, v1.2:3").is_empty());
+    }
+
+    /// A row's knot is `▲` for what changes files (`Look::changes`, `term::knot`): an Edit, a Write, tarae's
+    /// edit, rename, replace — not a replace's preview, nor a read, a search or a run. Read off the rows the
+    /// calls really make, so a preview worded otherwise can't pass for a change.
+    #[test]
+    fn the_rows_that_change_files_are_the_changes() {
+        use serde_json::json;
+        let root = Path::new("/proj");
+        let changes = |name: &str, input: serde_json::Value| look(root, name, &input).changes();
+        let replace = json!({"pattern": "a", "replacement": "b", "path": "src"});
+        let preview = json!({"pattern": "a", "replacement": "b", "path": "src", "preview": true});
+        assert!(changes("Edit", json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"})));
+        assert!(changes("Write", json!({"file_path": "a.rs", "content": "y"})));
+        assert!(changes("mcp__tarae__edit", json!({"edits": [{"file_path": "a.rs"}]})));
+        assert!(changes("mcp__tarae__rename", json!({"path": "a.rs", "symbol": "x", "new_name": "y"})));
+        assert!(changes("mcp__tarae__replace", replace));
+        assert!(!changes("mcp__tarae__replace", preview), "a preview changes nothing");
+        assert!(!changes("mcp__tarae__read", json!({"files": ["a.rs"]})));
+        assert!(!changes("mcp__tarae__search", json!({"pattern": "x"})));
+        assert!(!changes("mcp__tarae__run", json!({"command": "cargo test"})));
+    }
+
+    /// A change claims the waiting call of its tool made with its very input (`claim_call`): each call once —
+    /// two made alike go to two changes, a third finds none; another tool's or another input's, none — a native
+    /// Edit's request with a default its call lacked too.
+    #[test]
+    fn a_change_claims_the_call_made_with_its_input_once() {
+        use serde_json::json;
+        let mut ed = editor("");
+        let mut c = Chat::new();
+        let edit = json!({"edits": [{"file_path": "a.rs", "old_string": "x", "new_string": "y"}]});
+        for id in ["t1", "t2"] {
+            c.calls.push(Called { id: id.into(), name: "mcp__tarae__edit".into(), input: edit.clone() });
+        }
+        c.calls.push(Called { id: "r1".into(), name: "mcp__tarae__rename".into(), input: edit.clone() });
+        ed.session.chat = Some(c);
+        let other = json!({"edits": []});
+        assert_eq!(claim_call(&mut ed, "mcp__tarae__edit", &other), None, "another input");
+        assert_eq!(claim_call(&mut ed, "mcp__tarae__edit", &edit).as_deref(), Some("t1"));
+        assert_eq!(claim_call(&mut ed, "mcp__tarae__edit", &edit).as_deref(), Some("t2"), "t1 is taken");
+        assert_eq!(claim_call(&mut ed, "mcp__tarae__edit", &edit), None, "both taken; not the rename's");
+        // (a native Edit's request with a default its call didn't have: none — no stamp, never another's)
+        let call = json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"});
+        let c = ed.session.chat.as_mut().unwrap();
+        c.calls.push(Called { id: "e1".into(), name: "Edit".into(), input: call.clone() });
+        let asked = json!({"file_path": "a.rs", "old_string": "x", "new_string": "y", "replace_all": false});
+        assert_eq!(claim_call(&mut ed, "Edit", &asked), None, "not byte for byte: none");
+        assert_eq!(claim_call(&mut ed, "Edit", &call).as_deref(), Some("e1"));
     }
 
     /// A command's row: the command in a line, ended by how it ended once its result comes.

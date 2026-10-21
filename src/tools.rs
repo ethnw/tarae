@@ -64,6 +64,11 @@ impl Call {
         self.generation
     }
 
+    /// Its MCP request's id.
+    pub(crate) fn mcp_id(&self) -> &Value {
+        &self.id
+    }
+
     /// Its run's id (`run#<id>`), if it's a run's.
     pub(crate) fn run_id(&self) -> Option<u64> {
         self.trace.as_ref().map(crate::trace::RunTrace::id)
@@ -152,6 +157,11 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     | "diagnostics" | "rename" | "replace" | "edit"),
                 ) => {
                     let call = call();
+                    // (a change: its call's row, found now by its input — it may land later than one called after
+                    // it, a rename on its server's answer)
+                    if matches!(name, "rename" | "replace" | "edit") {
+                        crate::chat::claim_for(ed, &format!("mcp__tarae__{name}"), args, &id);
+                    }
                     // (watched while it waits — one silent too long marks its session: `session::Doing::Stuck`)
                     let tool = WATCHED.into_iter().find(|t| *t == name).unwrap_or("tool");
                     let wait = match name {

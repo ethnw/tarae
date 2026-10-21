@@ -394,6 +394,297 @@ fn the_edit_tools_review_quotes_what_you_asked() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Call `n` of `tool` with `args`, as `tools::mcp` makes it: its row claimed by its input as it comes.
+fn asked(ed: &mut Editor, n: u64, tool: &str, args: &Value) -> Call {
+    crate::chat::claim_for(ed, tool, args, &json!(n));
+    Call::test(n)
+}
+
+/// Every review that comes up answered `key` until `done` — pressed again while one's still up: a review takes no
+/// key before it's settled (as `the_edit_tools_review_quotes_what_you_asked` answers it). After a key, what the
+/// main loop does after every event: the next file's review up (`refactor::next`) — no other event may come.
+fn answer_reviews(ed: &mut Editor, key: char, done: impl Fn(&Editor) -> bool) {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done(ed) {
+        assert!(std::time::Instant::now() < end, "the reviews answered `{key}`");
+        if ed.session.review.as_ref().is_some_and(|r| r.ready) {
+            crate::llm::review_key(ed, crate::key::Key::plain(crate::key::Code::Char(key)));
+            crate::refactor::next(ed);
+        }
+        if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+}
+
+/// 글타래 P6: Claude's `edit` answered on its card stamps its call's knot with the card's key — `y` accepts them
+/// all, `n` none; one in its in-buffer review, with the review's key.
+#[test]
+fn an_edit_answered_is_stamped_on_its_knot_with_the_key() {
+    let args = json!({"edits": [
+        {"file_path": "a.rs", "old_string": "one", "new_string": "uno"},
+        {"file_path": "b.rs", "old_string": "two", "new_string": "dos"},
+    ]});
+    let one = json!({"edits": [{"file_path": "a.rs", "old_string": "one", "new_string": "uno"}]});
+    let stamps = |ed: &Editor| -> String {
+        let c = ed.session.chat.as_ref().unwrap();
+        c.msgs.iter().find(|m| m.call == "t1").unwrap().stamps.iter().map(|s| s.0).collect()
+    };
+    for (key, n, args) in [("y", 45, &args), ("n", 46, &args), ("review n", 47, &one)] {
+        let dir = project(&format!("stamped-{n}"), &[("a.rs", "one\n"), ("b.rs", "two\n")]);
+        let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+        // (its call, as claude's stream made it: the call waiting, its row)
+        let c = ed.session.chat.as_mut().unwrap();
+        c.calls.push(crate::chat::Called {
+            id: "t1".into(),
+            name: "mcp__tarae__edit".into(),
+            input: args.clone(),
+        });
+        let look = crate::chat::Look {
+            verb: "edit",
+            what: "a.rs".into(),
+            pattern: false,
+            range: String::new(),
+            link: None,
+        };
+        c.msgs.push(crate::chat::Msg::tool(look, "t1"));
+        let asked = asked(&mut ed, n, "mcp__tarae__edit", args);
+        call(&mut ed, asked, args).unwrap();
+        match key {
+            "review n" => {
+                pump(&mut ed, "the review", |ed| ed.session.review.is_some());
+                assert_eq!(stamps(&ed), "", "undecided: none");
+                answer_reviews(&mut ed, 'n', |ed| ed.session.review.is_none());
+            }
+            _ => {
+                pump(&mut ed, "the card", |ed| change_card(ed).is_some() || answered(n).is_some());
+                assert!(change_card(&ed).is_some(), "the card ({key}): {:?}", answered(n));
+                assert_eq!(stamps(&ed), "", "undecided: none");
+                let (id, whose, _) = change_card(&ed).unwrap();
+                match key {
+                    "y" => crate::refactor::accept_all(&mut ed, id, whose),
+                    _ => crate::refactor::decline_all(&mut ed, whose),
+                }
+            }
+        }
+        assert_eq!(stamps(&ed), key.trim_start_matches("review "), "{key}");
+        // (its files written on a worker before the folder goes)
+        pump(&mut ed, "the answer", |_| answered(n).is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// The keys of a review go only on the call it's for: a review of your own change (a patch) stamps none of
+/// Claude's calls waiting, even one naming that file; and in a batch with a rename waiting first, an edit's keys go
+/// on the edit's row, not the rename's.
+#[test]
+fn a_reviews_keys_go_only_on_the_call_its_for() {
+    use crate::chat::{Called, Look, Msg};
+    let waiting = |ed: &mut Editor, id: &str, name: &str, input: Value| {
+        let c = ed.session.chat.as_mut().unwrap();
+        c.calls.push(Called { id: id.into(), name: name.into(), input });
+        let look =
+            Look { verb: "edit", what: "a.rs".into(), pattern: false, range: String::new(), link: None };
+        c.msgs.push(Msg::tool(look, id));
+    };
+    let stamps = |ed: &Editor, id: &str| -> String {
+        let c = ed.session.chat.as_ref().unwrap();
+        c.msgs.iter().find(|m| m.call == id).unwrap().stamps.iter().map(|s| s.0).collect()
+    };
+    let edit = json!({"edits": [{"file_path": "a.rs", "old_string": "one", "new_string": "uno"}]});
+    // Your own patch, answered `y`, with Claude's edit of the same file waiting
+    let dir = project("own-review", &[("a.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    waiting(&mut ed, "t1", "mcp__tarae__edit", edit.clone());
+    let file = crate::refactor::FileChange {
+        path: dir.join("a.rs"),
+        rel: "a.rs".into(),
+        before: ropey::Rope::from_str("one\n"),
+        after: ropey::Rope::from_str("uno\n"),
+        places: 1,
+        op: Op::Text,
+        protected: false,
+    };
+    crate::refactor::land_yours(
+        &mut ed,
+        "p".into(),
+        "apply p".into(),
+        vec![file],
+        String::new(),
+        String::new(),
+    );
+    // (its card first: `r`, one by one — into its review)
+    pump(&mut ed, "your card", |ed| change_card(ed).is_some() || ed.session.review.is_some());
+    if let Some((id, whose, _)) = change_card(&ed) {
+        crate::refactor::one_by_one(&mut ed, id, whose);
+    }
+    pump(&mut ed, "your review", |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+    answer_reviews(&mut ed, 'y', |ed| ed.session.review.is_none());
+    assert_eq!(stamps(&ed, "t1"), "", "your answer is no key of Claude's call");
+    std::fs::remove_dir_all(&dir).ok();
+    // A batch: a rename waiting first, then the edit — the edit's `n` goes on the edit's row
+    let dir = project("mixed-batch", &[("a.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    waiting(&mut ed, "r1", "mcp__tarae__rename", json!({"path": "b.rs", "symbol": "x", "new_name": "y"}));
+    waiting(&mut ed, "t1", "mcp__tarae__edit", edit.clone());
+    let asked48 = asked(&mut ed, 48, "mcp__tarae__edit", &edit);
+    call(&mut ed, asked48, &edit).unwrap();
+    answer_reviews(&mut ed, 'n', |_| answered(48).is_some());
+    assert_eq!((stamps(&ed, "r1"), stamps(&ed, "t1")), (String::new(), "n".into()));
+    std::fs::remove_dir_all(&dir).ok();
+    // An edit no waiting call was made with (its input another): no stamp — not the rename's either
+    let dir = project("unnamed", &[("a.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    waiting(&mut ed, "r1", "mcp__tarae__rename", json!({"path": "b.rs", "symbol": "x", "new_name": "y"}));
+    let elsewhere = json!({"edits": [{"file_path": "other.rs", "old_string": "one", "new_string": "uno"}]});
+    waiting(&mut ed, "t1", "mcp__tarae__edit", elsewhere);
+    let asked49 = asked(&mut ed, 49, "mcp__tarae__edit", &edit);
+    call(&mut ed, asked49, &edit).unwrap();
+    answer_reviews(&mut ed, 'n', |_| answered(49).is_some());
+    assert_eq!((stamps(&ed, "r1"), stamps(&ed, "t1")), (String::new(), String::new()));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// tarae's `edit` sent as claude sends it (`tools/call` through `tools::mcp`): its call's row is claimed as the
+/// request comes — by its tool's full name and the request's id — and takes its review's key.
+#[test]
+fn a_tool_call_claims_its_row_as_it_comes() {
+    let dir = project("through-mcp", &[("a.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    let edit = json!({"edits": [{"file_path": "a.rs", "old_string": "one", "new_string": "uno"}]});
+    let c = ed.session.chat.as_mut().unwrap();
+    c.calls.push(crate::chat::Called {
+        id: "t1".into(),
+        name: "mcp__tarae__edit".into(),
+        input: edit.clone(),
+    });
+    let look = crate::chat::Look {
+        verb: "edit",
+        what: "a.rs".into(),
+        pattern: false,
+        range: String::new(),
+        link: None,
+    };
+    c.msgs.push(crate::chat::Msg::tool(look, "t1"));
+    let generation = c.generation();
+    let msg = json!({"jsonrpc": "2.0", "id": 61, "method": "tools/call",
+        "params": {"name": "edit", "arguments": edit}});
+    assert!(crate::tools::mcp(&mut ed, generation, "r61", &msg).is_none(), "answered after its review");
+    answer_reviews(&mut ed, 'n', |_| answered(61).is_some());
+    let c = ed.session.chat.as_ref().unwrap();
+    let stamps: String = c.msgs.iter().find(|m| m.call == "t1").unwrap().stamps.iter().map(|s| s.0).collect();
+    assert_eq!(stamps, "n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A change set card's key goes on its own tool's call: a rename's `y` on the rename's row, an edit of the same
+/// file waiting before it left alone. Its `y` is for the files it writes then — one held for your unsaved edits
+/// takes its own review's keys — and it's the key that decided, kept when the write then finds the file changed.
+#[test]
+fn a_cards_key_goes_on_its_own_tools_call() {
+    use crate::chat::{Called, Look, Msg};
+    let waiting = |ed: &mut Editor, id: &str, name: &str, input: Value| {
+        let c = ed.session.chat.as_mut().unwrap();
+        c.calls.push(Called { id: id.into(), name: name.into(), input });
+        let look =
+            Look { verb: "edit", what: "a.rs".into(), pattern: false, range: String::new(), link: None };
+        c.msgs.push(Msg::tool(look, id));
+    };
+    let stamps = |ed: &Editor, id: &str| -> String {
+        let c = ed.session.chat.as_ref().unwrap();
+        c.msgs.iter().find(|m| m.call == id).unwrap().stamps.iter().map(|s| s.0).collect()
+    };
+    let change = |dir: &Path, rel: &str| crate::refactor::FileChange {
+        path: dir.join(rel),
+        rel: rel.into(),
+        before: ropey::Rope::from_str("one\n"),
+        after: ropey::Rope::from_str("uno\n"),
+        places: 1,
+        op: Op::Text,
+        protected: false,
+    };
+    let both = json!({"edits": [
+        {"file_path": "a.rs", "old_string": "one", "new_string": "uno"},
+        {"file_path": "b.rs", "old_string": "one", "new_string": "uno"},
+    ]});
+    // A rename's card, an edit of its first file waiting before it
+    let dir = project("rename-card", &[("a.rs", "one\n"), ("b.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    waiting(&mut ed, "t1", "mcp__tarae__edit", both.clone());
+    let rename = json!({"path": "a.rs", "symbol": "one", "new_name": "uno"});
+    waiting(&mut ed, "r1", "mcp__tarae__rename", rename.clone());
+    let files = vec![change(&dir, "a.rs"), change(&dir, "b.rs")];
+    let asked50 = asked(&mut ed, 50, "mcp__tarae__rename", &rename);
+    crate::refactor::land(&mut ed, asked50, "rename `one` → `uno`".into(), "place", files, String::new());
+    pump(&mut ed, "the card", |ed| change_card(ed).is_some());
+    let (id, whose, _) = change_card(&ed).unwrap();
+    crate::refactor::accept_all(&mut ed, id, whose);
+    assert_eq!((stamps(&ed, "r1"), stamps(&ed, "t1")), ("y".into(), String::new()));
+    pump(&mut ed, "the rename's answer", |_| answered(50).is_some());
+    std::fs::remove_dir_all(&dir).ok();
+    // Two renames side by side, both waiting (their results after both), the one called second asked first and
+    // landing first (parallel calls come in any order; its server answered sooner): each card's key on its own
+    // call's row
+    let dir =
+        project("two-renames", &[("a.rs", "one\n"), ("b.rs", "one\n"), ("c.rs", "one\n"), ("d.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    let (first, second) = (
+        json!({"path": "a.rs", "symbol": "one", "new_name": "uno"}),
+        json!({"path": "c.rs", "symbol": "one", "new_name": "uno"}),
+    );
+    waiting(&mut ed, "r1", "mcp__tarae__rename", first.clone());
+    waiting(&mut ed, "r2", "mcp__tarae__rename", second.clone());
+    let asked54 = asked(&mut ed, 54, "mcp__tarae__rename", &second);
+    let asked53 = asked(&mut ed, 53, "mcp__tarae__rename", &first);
+    let files = vec![change(&dir, "c.rs"), change(&dir, "d.rs")];
+    crate::refactor::land(&mut ed, asked54, "rename c".into(), "place", files, String::new());
+    pump(&mut ed, "the second's card", |ed| change_card(ed).is_some());
+    let (id, whose, _) = change_card(&ed).unwrap();
+    crate::refactor::accept_all(&mut ed, id, whose);
+    pump(&mut ed, "the second's answer", |_| answered(54).is_some());
+    let files = vec![change(&dir, "a.rs"), change(&dir, "b.rs")];
+    crate::refactor::land(&mut ed, asked53, "rename a".into(), "place", files, String::new());
+    pump(&mut ed, "the first's card", |ed| change_card(ed).is_some());
+    ed.offers.clear();
+    crate::refactor::decline_all(&mut ed, whose);
+    pump(&mut ed, "the first's answer", |_| answered(53).is_some());
+    assert_eq!((stamps(&ed, "r1"), stamps(&ed, "r2")), ("n".into(), "y".into()));
+    std::fs::remove_dir_all(&dir).ok();
+    // Every file held for your unsaved edits: the card writes none — their reviews' keys alone
+    let dir = project("held-card", &[("a.rs", "one\n"), ("b.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    for f in ["a.rs", "b.rs"] {
+        ed.open(&dir.join(f)).unwrap();
+        let typed = crate::transaction::Change { from: 3, to: 3, insert: "!".into() };
+        ed.doc_mut().apply(&crate::transaction::Transaction::new(vec![typed]));
+    }
+    waiting(&mut ed, "t1", "mcp__tarae__edit", both.clone());
+    let asked51 = asked(&mut ed, 51, "mcp__tarae__edit", &both);
+    call(&mut ed, asked51, &both).unwrap();
+    pump(&mut ed, "the card", |ed| change_card(ed).is_some());
+    let (id, whose, _) = change_card(&ed).unwrap();
+    crate::refactor::accept_all(&mut ed, id, whose);
+    assert_eq!(stamps(&ed, "t1"), "", "nothing written yet: no key of the card's");
+    answer_reviews(&mut ed, 'n', |_| answered(51).is_some());
+    assert_eq!(stamps(&ed, "t1"), "n", "each file's own review");
+    std::fs::remove_dir_all(&dir).ok();
+    // Its `y`, the file changed on disk since: not written — the key that decided stays
+    let dir = project("changed-card", &[("a.rs", "one\n"), ("b.rs", "one\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    waiting(&mut ed, "t1", "mcp__tarae__edit", both.clone());
+    let asked52 = asked(&mut ed, 52, "mcp__tarae__edit", &both);
+    call(&mut ed, asked52, &both).unwrap();
+    pump(&mut ed, "the card", |ed| change_card(ed).is_some());
+    std::fs::write(dir.join("a.rs"), "changed\n").unwrap();
+    let (id, whose, _) = change_card(&ed).unwrap();
+    crate::refactor::accept_all(&mut ed, id, whose);
+    pump(&mut ed, "the changed file's answer", |_| answered(52).is_some());
+    let a = answered(52).unwrap().unwrap();
+    assert!(a.contains("changed since"), "{a}");
+    assert_eq!(stamps(&ed, "t1"), "y");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A single delete comes up on the card even under review at the end, and `n` leaves the file.
 #[test]
 fn a_lone_delete_is_never_written_unseen() {

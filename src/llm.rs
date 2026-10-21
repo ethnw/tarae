@@ -1288,6 +1288,9 @@ pub struct Review {
     pub from_chat: bool,
     /// Esc gave the keys back to the code, the change unanswered: they're the editor's until `C-q`.
     pub away: bool,
+    /// Claude's call it answers (its id, `chat::claim_call`): that call's row takes the keys that answered it
+    /// (`chat::stamp_call`) — None for your own changes, `space i`'s, or a call not found.
+    pub answers: Option<String>,
 }
 
 /// Called when the review ends (applied?).
@@ -1334,6 +1337,7 @@ impl Review {
             wrap: None,
             from_chat: false,
             away: false,
+            answers: None,
         }
     }
 
@@ -1930,6 +1934,16 @@ fn finish(ed: &mut Editor) {
         for h in rev.hunks.iter_mut().filter(|h| h.decision == Decision::Accept && !h.conflict) {
             h.conflict = !relocate(h, text);
         }
+    }
+    // (Claude's change — a chat's edit, its change set's file: its call's row takes the keys that answered it)
+    if let Some(id) = rev.answers.as_deref() {
+        let keys: Vec<_> = rev
+            .hunks
+            .iter()
+            .filter(|h| h.old != h.new)
+            .filter_map(|h| crate::stamp::Stamp::of(h.decision))
+            .collect();
+        crate::chat::stamp_call(ed, id, &keys);
     }
     let applied = apply_accepted(ed, &rev);
     crate::reviews::edit_ended(ed, &rev, false, applied);

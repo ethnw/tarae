@@ -314,8 +314,10 @@ inside Claude Code; `tarae.log` has the same line.
 Claude isn't limited to that file: it **explores the project itself** (Read, and tarae's own search, read and
 language-server tools — in the project without asking, [outside it only once you say so](#reading-outside-the-project);
 its [edits](#edits) always come to you first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`,
-`◦ search  fn add  in src` — each named as the tool it is),
-the one in progress marked `●`. The other open files are listed in the context, and unsaved ones send their text,
+`◦ search  fn add  in src` — each named as the tool it is), its mark the stop's knot, as the card beside the code
+shows it. The stop in hand — where Claude is while it works, the one replay shows — is `●`
+in the accent; a change is `▲`, and once you've answered it, it carries the key that decided it (`▐y▌`, `▐n▌`,
+both when its changes went both ways). The other open files are listed in the context, and unsaved ones send their text,
 since Claude would otherwise read the stale copy on disk. Answers cite code as `path:line`. Those references are
 underlined, and a click opens them. `C-]` (or `C-g` — zellij takes that one) walks every place the conversation points at, newest first, centering
 each one while the chat keeps the keys.
@@ -351,10 +353,12 @@ the range placed as a whole: left where it is if it's all on screen already, cen
 near the top if it's taller than the screen. Those lines get a faint accent wash. Each edit is shown once it's
 written, review at the end included: its new lines on the review's green wash, the lines it replaced in red
 above them. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
-file`), and the finished answer takes you to its first `path:line`. A card beside the code names the tool and
-what it's on (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Session`) and
-shows what Claude is thinking, as a running log of the turn: a new thought goes under the last one instead of replacing it, so you
-can follow the reasoning at your own pace ([screenshot](screenshots/follow-thinking.png)). Claude's thinking arrives as summaries, and the chat keeps each one as a folded italic aside. While
+file`), and the finished answer takes you to its first `path:line`. A card beside the code says what Claude is at
+and for how long (`thinking 3.2s`) and the turn as the chat shows it: its stops as knots, the one in hand `●` (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Session`), and
+what Claude thinks and says between them, a running log of the turn: a new thought goes under the last one
+instead of replacing it, so you can follow the reasoning at your own pace
+([screenshot](screenshots/follow-thinking.png)). When the words after a stop outgrow the card, its knot stays
+on top, `…` under it, the newest words below. Claude's thinking arrives as summaries, and the chat keeps each one as a folded italic aside. While
 Claude works, the chat minimizes to a small card at the bottom right: your question, its last few lookups
 (each a link) and the keys. The code gets the whole width, and the thought card takes the room above the lines
 being read. The panel comes back with the finished answer, or right away with `space l` or a click on the card.
@@ -370,7 +374,8 @@ working. The next question also turns it back on.
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,
 each note. `[r` and `]r` step back and forward through them at any time, during the turn or after it. The editor
 goes to each stop's lines, an edit shows its changes as the review does (where later edits have moved them), and
-the card says which stop it is (`3/7`) and what Claude said right before it. Stepping past the newest stop
+the card says which stop it is (`3/7`), its knot in hand with what Claude said right before it; the chat's row
+of that stop takes the `●` too. Stepping past the newest stop
 follows Claude again. A click on a tool's row in the chat, or `C-]` there, goes to that call's stop. The last
 eight turns of the chat are kept. The chat's last row says `[r ]r replay its 7 stops`.
 

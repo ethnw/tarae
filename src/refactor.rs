@@ -159,6 +159,9 @@ pub struct Landing {
     note: String,
     /// When it came — its place in the inbox (`inbox.rs`).
     since: std::time::Instant,
+    /// Claude's call it answers, claimed as its request came (`chat::claim_for`) — its card's and reviews' keys
+    /// stamp that row. None: the user's own, or a call not found.
+    row: Option<String>,
 }
 
 /// Lands `files` as Claude's change (see the module's doc) — `call` is answered once every file is done.
@@ -200,6 +203,7 @@ pub fn land_told(
             Ok(format!("nothing to change — {what} leaves every file as it is{}", tail(&note))),
         );
     }
+    let row = crate::chat::row_for(ed, call.mcp_id());
     let at_end = crate::edits::at_end(ed);
     let ask = ed.config.llm.review_ask.clone();
     // Your unsaved edits: disk isn't what you see — the usual review, and it stays in the buffer
@@ -231,6 +235,7 @@ pub fn land_told(
         done: Vec::new(),
         note,
         since: std::time::Instant::now(),
+        row,
     };
     if unseen.is_empty() {
         return queue(ed, l);
@@ -275,6 +280,7 @@ pub fn land_yours(
         done: Vec::new(),
         note: String::new(),
         since: crate::clock::now(),
+        row: None,
     });
     next(ed);
 }
@@ -632,12 +638,18 @@ pub fn accept_all(ed: &mut Editor, id: u64, whose: Whose) {
         .filter_map(|d| d.path.clone())
         .collect();
     let Some(l) = asking(ed, whose) else { return };
+    let row = l.row.clone();
     let (later, now): (Vec<FileChange>, Vec<FileChange>) =
         l.review.drain(..).partition(|f| dirty.contains(&f.path));
     l.reviews = later.len();
     l.review = later.into();
     l.stage = Stage::Writing;
     let (step, what) = (l.step, l.what.clone());
+    // (Claude's call, answered on its card: its row takes the card's key — for the files written now; one with
+    // your unsaved edits comes up in its own review, whose keys it takes)
+    if let Some(row) = row.filter(|_| !now.is_empty()) {
+        crate::chat::stamp_call(ed, &row, &[crate::stamp::Stamp('y')]);
+    }
     // (for `space u`: a deleted file has no text after — undo writes it again; a moved one is gone from its
     // place and made at the new one)
     let mut files = Vec::new();
@@ -711,6 +723,9 @@ pub fn one_by_one(ed: &mut Editor, id: u64, whose: Whose) {
 
 /// `n` on the card (it's gone already): every file left as it was.
 pub fn decline_all(ed: &mut Editor, whose: Whose) {
+    if let Some(row) = asking(ed, whose).and_then(|l| l.row.clone()) {
+        crate::chat::stamp_call(ed, &row, &[crate::stamp::Stamp('n')]);
+    }
     if let Some(l) = asking(ed, whose) {
         let declined: Vec<_> = l.review.drain(..).map(|f| (f.shown(), f.places, Outcome::Declined)).collect();
         l.done.extend(declined);
@@ -811,6 +826,7 @@ fn show(ed: &mut Editor, f: FileChange, whose: Whose, title: String, reason: Str
     let claudes = matches!(whose, Whose::Claude(_));
     let dirty = doc.is_modified() && !doc.unsaved_is_claudes();
     let doc_id = doc.id;
+    let answers = front(ed, whose).and_then(|l| l.row.clone());
     let changes = crate::editdiff::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
     let from_chat = claudes && ed.session.chat.as_ref().is_some_and(|c| c.focused);
@@ -826,6 +842,7 @@ fn show(ed: &mut Editor, f: FileChange, whose: Whose, title: String, reason: Str
         Some(Box::new(move |ed: &mut Editor, applied: bool| reviewed(ed, f, whose, doc_id, dirty, applied))),
     );
     if let Some(r) = &mut ed.session.review {
+        r.answers = answers;
         r.from_chat = from_chat;
         r.reason = reason;
         r.warnings = warnings;
@@ -1818,6 +1835,7 @@ mod tests {
             done: Vec::new(),
             note: String::new(),
             since: std::time::Instant::now(),
+            row: None,
         };
         let q = card(&landing("")).question;
         assert!(!q.contains("matched only"), "Claude's words aren't tarae's: {q}");
