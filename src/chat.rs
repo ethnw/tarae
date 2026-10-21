@@ -2700,6 +2700,7 @@ mod tests {
             said: "Docker: no DOCKER_CONFIG.".into(),
             whose: "tools pack".into(),
             asks: false,
+            start: false,
         };
         let mut m = Msg::tool(look, "c1");
         m.ran = Some(Ran::of(

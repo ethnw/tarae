@@ -343,12 +343,13 @@ say = "▲ looks like two"
 /// Every built-in warning (the packs' `[[claude.warn]]`) fires on its example and not on its safe form — each
 /// asked for (cardburden plan, item 4, with the user's sudo one of 2026-10-08): Docker without its own settings,
 /// another process's details, `rm -r` unchecked, reaching beyond this machine (asked over `a`), history, a
-/// published crate or package, privileges.
+/// published crate or package, privileges — and (piece F) what changes a manifest or a lockfile, or installs
+/// where none records it, said as the run starts.
 #[test]
 fn every_built_in_warning_fires_on_its_example_not_its_safe_form() {
     let w = &crate::sandboxpack::get().warn;
     let j = Judge::default();
-    let cases: [(&str, &str, &str); 9] = [
+    let cases: [(&str, &str, &str); 15] = [
         (
             "docker-own-config",
             "docker run --rm alpine true",
@@ -362,6 +363,12 @@ fn every_built_in_warning_fires_on_its_example_not_its_safe_form() {
         ("cargo-publish", "cargo publish --dry-run", "cargo package"),
         ("npm-publish", "npm publish", "npm pack"),
         ("privileges", "sudo apt install x", "apt list --installed"),
+        ("cargo-manifest", "cargo add serde --features derive", "cargo build"),
+        ("cargo-lockfile", "cargo update -p serde", "cargo tree"),
+        ("npm-manifest", "npm install left-pad", "npm ci"),
+        ("go-manifest", "go get example.com/x@v1.2.0", "go build ./..."),
+        ("python-manifest", "uv add requests", "uv run pytest"),
+        ("pip-install", "python3 -m pip install requests", "pip list"),
     ];
     for (id, fires, safe) in cases {
         assert!(w.iter().any(|w| w.id == id), "{id} is built in");
@@ -377,6 +384,14 @@ fn every_built_in_warning_fires_on_its_example_not_its_safe_form() {
         asks,
         ["cargo-publish", "keychain-dump", "keychain-read", "npm-publish", "outward", "secret-service-read"]
     );
+    // (said as the run starts, with no card: what a manifest tool changes — and none of them asks)
+    let mut start: Vec<&str> = w.iter().filter(|w| w.start).map(|w| w.id.as_str()).collect();
+    start.sort();
+    assert_eq!(
+        start,
+        ["cargo-lockfile", "cargo-manifest", "go-manifest", "npm-manifest", "pip-install", "python-manifest"]
+    );
+    assert!(w.iter().all(|w| !(w.start && w.asks)));
     // The facts' words: what a read goes to, a script changed, a protected file edited
     for (id, facts) in [
         ("reads-outside", Judge { reads: vec!["/etc/hosts".into()], ..Judge::default() }),

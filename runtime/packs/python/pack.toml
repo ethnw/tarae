@@ -219,3 +219,9 @@ is closed — tell the user; llm.sandbox-network lets your commands fetch it, in
 [claude]
 builders = ["pytest", "tox", "nox"]
 said = { rank = 30, tests = "Python (pytest)" }
+# What a run card warns of (`cardwarn.rs`): what changes the manifest or the lockfile, and what installs where no
+# manifest records it — said before it runs, with a card or without (`start`, piece F)
+warn = [
+    { id = "python-manifest", run = ["uv add", "uv remove", "poetry add", "poetry remove", "pdm add", "pdm remove"], start = true, say = "It changes pyproject.toml and its lockfile (uv.lock, poetry.lock, pdm.lock)." },
+    { id = "pip-install", run = ["pip install", "pip3 install", "uv pip install", "python -m pip install", "python3 -m pip install"], start = true, say = "It installs into the Python environment, and no manifest records it: requirements.txt and pyproject.toml stay as they are." },
+]

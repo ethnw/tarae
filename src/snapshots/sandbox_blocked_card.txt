@@ -10,20 +10,20 @@
 07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08   6     let mut counts = HashMap::new();
 09   7     for word in text.split_whitespace() {
-10   8     │   *counts.entry(word).or_inse▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-11   9     }                               ▎ Open the sandbox a little?
-12  10     counts                            Let Claude's commands write in
-13  11 }                                     /private/tmp/tarae-shot-blocked/npm-cache and
-14  12                                       everything in it
-15  13 fn main() {
-16  14     let text = "the quick brown fox   npm was writing …/_cacache/index-v5 in it, in `npm
-17  15     let counts = word_counts(text);   test` — which runs again now with it open, whichever
-18  16     println!("{} distinct words", c   you choose. Claude hears how it ended with your next
-19  17 }                                     message. s lasts until this session ends, A until
-20                                           :granted takes it back.
+10   8     │   *counts.entry(word).or_insert(0) += 1;
+11   9     }
+12  10     counts                  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+13  11 }                            ▎ Open the sandbox a little?
+14  12                                Let Claude's commands write in
+15  13 fn main() {                    /private/tmp/tarae-shot-blocked/npm-cache and everything in it
+16  14     let text = "the quick br
+17  15     let counts = word_counts   npm was writing …/_cacache/index-v5 in it, in `npm test` —
+18  16     println!("{} distinct wo   which runs again now with it open, whichever you choose.
+19  17 }                              Claude hears how it ended with your next message. s lasts
+20                                    until this session ends, A until :granted takes it back.
 21
-22                                           y Once   a This chat   s This session   A Always   n No
-23                                        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+22                                    y Once   a This chat   s This session   A Always here   n No
+23                                 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 24   npm test ▲  │  failed   2.4s                                                    space m c close
 25   ─────────────────────────────────────────────────────────────────────────────────────────────────
 26   npm ERR! code EPERM
@@ -42,18 +42,18 @@
 08
 09
 10
-11                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-12                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-13                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-14                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-15                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+11
+12
+13                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22                                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 23
 24 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 25 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -73,18 +73,18 @@
 08   f
 09   f
 10   f
-11   f                                     a BBBB BBB BBBBBBB B BBBBBBB
+11   f
 12  ff
-13  ff
+13  ff                              a BBBB BBB BBBBBBB B BBBBBBB
 14  ff
 15  ff
-16  ff                gggg ggggg ggggg ggg   ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
-17  ff                                       ddddd d ddddd dddd ddddd ddd dddd dd ddddd ddddddddd
-18  ff              ggg gggggggg gggggg      ddd ddddddd dddddd ddddd ddd dd ddddd dddd dddd dddd
-19  ff                                       dddddddd d ddddd ddddd dddd ddddddd ddddd d ddddd
-20                                           dddddddd ddddd dd ddddd
+16  ff                gggg ggggg gg
+17  ff                                ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd ddddd d
+18  ff              ggg gggggggg gg   ddddd dddd ddddd ddd dddd dd ddddd ddddddddd ddd ddddddd
+19  ff                                dddddd ddddd ddd dd ddddd dddd dddd dddd dddddddd d ddddd
+20                                    ddddd dddd ddddddd ddddd d ddddd dddddddd ddddd dd ddddd
 21
-22                                           A        A dddd dddd   A dddd ddddddd   A dddddd   A dd
+22                                    A        A dddd dddd   A dddd ddddddd   A dddddd dddd   A dd
 23
 24   TTT TTTT e  f  eeeeee   dddd                                                    DDDDD D D fffff
 25   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff

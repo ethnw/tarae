@@ -7075,6 +7075,29 @@ const PEEK_INSET: usize = 2;
 /// window must be (`card_short`).
 const CARD_MIN_INNER: usize = 24;
 
+/// How much wider a card's text may go than its reading width to take back a paragraph's last row.
+const CARD_SLACK: usize = 8;
+
+/// A paragraph of a card's text wrapped to `w`: an indented line (a setting, a command) goes on hanging 4 cells
+/// under its own start — its value never wraps back to the card's edge as if it were a line of its own; a
+/// warning (`▲ …`, `cardwarn.rs`) under its words, past its mark.
+fn card_rows(text: &str, w: usize) -> Vec<String> {
+    let lead = text.len() - text.trim_start_matches(' ').len();
+    let indent = match (lead, text.starts_with("▲ ")) {
+        (0, true) => 2,
+        (0, false) => 0,
+        (lead, _) => lead + 4,
+    };
+    let para = [crate::markdown::Line::Text {
+        spans: vec![crate::markdown::Span { text: text.to_string(), style: Style::default() }],
+        indent,
+    }];
+    crate::markdown::wrap(&para, w, Style::default())
+        .into_iter()
+        .map(|l| l.into_iter().map(|s| s.text).collect::<String>())
+        .collect()
+}
+
 /// What the screen lacks for the card up when this frame couldn't draw it (#201: in a 50-column pane
 /// `:restart`'s card was nowhere, and nothing said one waited): `C-q shows its card` when the chat in hand
 /// takes the whole width (`C-q` gives the card the keys, the chat folds), else the window's size it needs —
@@ -7165,7 +7188,23 @@ impl OfferCard {
         // Its text as wide as its answers' row already makes it (narrow, a host card's five answers were 64
         // cells over text wrapped at 37 — its title cut, its rows doubled)
         let answers_w = buttons_width(&o.answers(editor.preflight_quick().is_some())).min(widest);
-        let max_inner = reading.max(answers_w);
+        let mut max_inner = reading.max(answers_w);
+        // Paragraphs' last rows left a word or two (`proxy`, `run.`): up to `CARD_SLACK` cells wider, never past
+        // `widest`, when that takes rows back — the narrowest as short as the widest (piece F: `y Once` made the
+        // host card's answers row shorter, and its text wrapped to widows)
+        if matches!(o.state, OfferState::Asking) {
+            // (as the card draws them: a diff's line is cut, one row whatever the width)
+            let diffs = o.diff.clone().unwrap_or(0..0);
+            let rows = |w: usize| {
+                let row = |(k, p): (usize, &str)| if diffs.contains(&k) { 1 } else { card_rows(p, w).len() };
+                o.question.split('\n').enumerate().map(row).sum::<usize>()
+            };
+            let most = (max_inner + CARD_SLACK).min(widest);
+            let fewest = rows(most);
+            if most > max_inner && fewest < rows(max_inner) {
+                max_inner = (max_inner + 1..=most).find(|&w| rows(w) == fewest).unwrap_or(most);
+            }
+        }
         // Narrower than a card can be: not drawn — the status line says what it needs (`card_short`, #201)
         if lay.offer_bar.is_none() && reading < CARD_MIN_INNER {
             return None;
@@ -7179,23 +7218,8 @@ impl OfferCard {
         let badge = card_badge(editor.cards_waiting(), title.width(), max_inner);
         // A paragraph wrapped to the card, up to `n` lines (a command to run is shown whole)
         let wrapped = |text: &str, n: usize| -> Vec<(String, bool)> {
-            // An indented line (a setting, a command) goes on hanging 4 cells under its own start — its
-            // value never wraps back to the card's edge as if it were a line of its own; a warning (`▲ …`,
-            // `cardwarn.rs`) under its words, past its mark
-            let lead = text.len() - text.trim_start_matches(' ').len();
-            let indent = match (lead, text.starts_with("▲ ")) {
-                (0, true) => 2,
-                (0, false) => 0,
-                (lead, _) => lead + 4,
-            };
-            let para = [crate::markdown::Line::Text {
-                spans: vec![crate::markdown::Span { text: text.to_string(), style: Style::default() }],
-                indent,
-            }];
-            let mut all: Vec<(String, bool)> = crate::markdown::wrap(&para, max_inner, Style::default())
-                .into_iter()
-                .map(|l| (l.into_iter().map(|s| s.text).collect::<String>(), true))
-                .collect();
+            let mut all: Vec<(String, bool)> =
+                card_rows(text, max_inner).into_iter().map(|r| (r, true)).collect();
             if all.len() > n {
                 all.truncate(n);
                 // (cut: says so)
@@ -7693,7 +7717,7 @@ impl OfferCard {
     /// The card as a bar while its text is read (U8):
     ///
     /// ```text
-    ///  ▎ Run this command?   ge to its end, then y answers                    y Run   a This chat   n No
+    ///  ▎ Run this command?   ge to its end, then y answers                    y Once   a This chat   n No
     /// ```
     fn draw_bar(
         &self,
@@ -11949,6 +11973,7 @@ mod tests {
             said: "Docker: no DOCKER_CONFIG.".into(),
             whose: "tools pack".into(),
             asks: false,
+            start: false,
         };
         let ran = |mark: &str, past: bool, warned: Vec<crate::cardwarn::Warned>| crate::chat::Ran {
             mark: mark.into(),

@@ -6713,7 +6713,10 @@ mod tests {
         let mut parser = vt100::Parser::new(40, 140, 0);
         parser.process(&bytes);
         assert!(
-            parser.screen().contents().contains("y Run   a This chat   s This session   A Always   n No")
+            parser
+                .screen()
+                .contents()
+                .contains("y Once   a This chat   s This session   A Always here   n No")
         );
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
@@ -7769,7 +7772,7 @@ mod tests {
         std::fs::remove_file(&made).ok();
         let log = run_turn(&mut ed, &dir, &command);
         assert!(matches!(ed.offers[0].what, What::NoSandbox { first: false, .. }), "its run's card");
-        assert_eq!(ed.offers[0].answers(false), vec![('y', "Run"), ('s', "This session"), ('n', "No")]);
+        assert_eq!(ed.offers[0].answers(false), vec![('y', "Once"), ('s', "This session"), ('n', "No")]);
         ed.offer_dismiss();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(tool_answer(&log).contains("chose not to run `touch") && !made.exists());

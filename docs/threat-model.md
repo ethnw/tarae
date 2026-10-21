@@ -377,7 +377,10 @@ Kept:
   test: `gitrepo::held::tests::fsmonitor_is_held_on_status_and_snapshots` ·
   `gitrepo::held::tests::a_hooks_path_is_held_on_the_git_tabs_commit` · `gitrepo::held::tests::a_credential_helper_is_held` ·
   `gitrepo::held::tests::a_submodules_own_commands_are_held`
-- Your own git-tab actions ask before running a hook in the checkout that changed since the base.
+- Your own git-tab actions ask before running a hook in the checkout that changed since the base. A `y` is
+  kept for that file's content (its SHA-256, with the trust answers in `trust.json`, shared by the repository's
+  checkouts): a hook rewritten since asks again, byte for byte; `n` keeps nothing. srt asks nothing here: it
+  denies writes to `.git/hooks` and has no rule for a `core.hooksPath` inside the checkout.
   test: `worktree::tests::the_users_git_asks_before_hooks_a_claude_could_have_written` ·
   `worktree::tests::hooks_in_the_checkout_never_run_in_taraes_rebase`
 

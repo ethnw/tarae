@@ -3944,7 +3944,9 @@ mod tests {
 
     /// Review 2026-10-04: the user's own git in a session's checkout whose `core.hooksPath` is inside it. A
     /// hook committed and as the base has it runs as before; one changed since the base, or untracked, is
-    /// asked about first — named and shown, nothing run yet — `n` goes on without hooks, `y` runs them.
+    /// asked about first — named and shown, nothing run yet — `n` goes on without hooks, `y` runs them. Piece F:
+    /// a `y` is kept for what each says (the trust store) — the next action runs them unasked; a rewritten one
+    /// is asked about again, alone; an `n` keeps nothing.
     #[test]
     fn the_users_git_asks_before_hooks_a_claude_could_have_written() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3965,6 +3967,7 @@ mod tests {
         std::fs::remove_file(&marks).unwrap();
         own_settings_trusted(&repo);
         let mut ed = editor(&repo, &dir);
+        ed.trust_path = Some(dir.join("trust.json"));
         let wt = new_session(&mut ed, "feat");
         let amended = |ed: &Editor| ed.messages.iter().filter(|m| m.2.starts_with("Amended")).count();
         let amend = |ed: &mut Editor, n: &str| {
@@ -4026,6 +4029,29 @@ mod tests {
         feed(&mut ed, "y");
         settle_until(&mut ed, |ed| amended(ed) == 3 || says(ed, "amend:"));
         assert_eq!(ran(), "changed\nuntracked\n", "y: they ran — {}", said(&ed));
+        // Kept for what they say: the next amend runs them, no card
+        std::fs::remove_file(&marks).unwrap();
+        amend(&mut ed, "4");
+        settle_until(&mut ed, |ed| amended(ed) == 4 || says(ed, "amend:"));
+        assert!(ed.offers.is_empty(), "a kept yes asks nothing: {}", said(&ed));
+        assert_eq!(ran(), "changed\nuntracked\n", "they ran — {}", said(&ed));
+        // Rewritten: asked about again, that one alone
+        std::fs::remove_file(&marks).unwrap();
+        hook(&wt, "pre-commit", "rewritten");
+        amend(&mut ed, "5");
+        settle_until(&mut ed, |ed| card(ed, "Hooks before the amend").is_some() || says(ed, "amend:"));
+        let q = card(&ed, "Hooks before the amend").unwrap().question.clone();
+        assert!(
+            q.starts_with(
+                "This hook isn't as main has it:\n  .githooks/pre-commit — changed · this amend runs it\nIt runs as you"
+            ),
+            "{q}"
+        );
+        assert!(q.contains("\nA yes is kept for this text — a change asks again."), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'n']);
+        feed(&mut ed, "n");
+        settle_until(&mut ed, |ed| amended(ed) == 5 || says(ed, "amend:"));
+        assert_eq!(ran(), "", "n: without hooks");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

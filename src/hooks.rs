@@ -8,6 +8,10 @@
 //! it's been read): `y` runs the action as usual · `n` runs it with no hooks this time (`gitrepo::NO_HOOKS`) ·
 //! Esc back, unanswered, like every card. Committed hooks the base has as they are run as before; hooks under
 //! `.git` (no Claude writes there) are never asked about. tarae's own steps never run hooks at all.
+//!
+//! A `y` is kept for each file's content (piece F, 2026-10-17): a trust answer in `$state/trust.json` (the
+//! repository's, its checkouts share it — `trust::record`), the file's SHA-256 as the version — so a hook
+//! answered isn't asked about again until it's rewritten. `n` is this time's only.
 
 use std::path::{Path, PathBuf};
 
@@ -53,25 +57,27 @@ pub fn with<'a>(pre: Pre, args: &[&'a str]) -> Vec<&'a str> {
 
 /// A file of the hooks folder the card asks about: where it is (relative to the checkout), how it differs from
 /// the base, whether the action is likely to run it (a hook by its name), and its text when a card can show it
-/// as it is.
+/// as it is, and its content's SHA-256 (what a `y` keeps).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hook {
     pub rel: String,
     pub kind: &'static str,
     pub likely: bool,
     pub text: Option<String>,
+    pub hash: crate::trust::Digest,
 }
 
 /// Files of a hooks folder looked at, at most (and folders deep) — a folder past that is asked about whole.
 const FILES_MAX: usize = 256;
 const DEPTH_MAX: usize = 3;
 
-/// What the card says: the action, against what base, the hooks.
+/// What the card says: the action, against what base, the hooks — of the checkout `top` (where a `y` is kept).
 #[derive(Clone, Debug)]
 pub struct Ask {
     pub what: String,
     pub base: String,
     pub hooks: Vec<Hook>,
+    pub top: PathBuf,
 }
 
 impl Ask {
@@ -80,7 +86,7 @@ impl Ask {
         self.hooks.iter().all(|h| h.text.is_some())
     }
 
-    fn card(&self) -> Offer {
+    pub(crate) fn card(&self) -> Offer {
         let n = self.hooks.len();
         // (short: the card often shares the code's width with the chat)
         // (the checkout tarae started in compares with its last commit — said so, not as `HEAD`)
@@ -97,6 +103,12 @@ impl Ask {
             1 => "\nIt runs as you, unsandboxed — a Claude here can write it.",
             _ => "\nThey run as you, unsandboxed — a Claude here can write them.",
         };
+        if self.runnable() {
+            q += match n {
+                1 => "\nA yes is kept for this text — a change asks again.",
+                _ => "\nA yes is kept for these texts — a change asks again.",
+            };
+        }
         let warning = n + 1..n + 2;
         for h in &self.hooks {
             match &h.text {
@@ -138,8 +150,9 @@ pub struct Wait {
 /// The files of the hooks folder git uses in the checkout `top`, when that folder is inside it, that are
 /// untracked or new or changed since `base` — every file, not only the hooks this action runs (`likely` marks
 /// those): config decides what an action runs, and a hook runs the folder's other files (on a worker). A hooks
-/// folder outside the checkout, or under its git folder: none.
-pub fn unseen(top: &Path, base: &str, likely: &[&str]) -> Vec<Hook> {
+/// folder outside the checkout, or under its git folder: none. One whose content a `y` kept in the trust
+/// store at `store` (`Ask::top`'s file, its SHA-256) isn't asked about.
+pub fn unseen(top: &Path, base: &str, likely: &[&str], store: Option<&Path>) -> Vec<Hook> {
     let path = |args: &[&str]| -> Option<PathBuf> {
         let p = PathBuf::from(git(top, args, None).ok()?.trim());
         Some(std::fs::canonicalize(&p).unwrap_or(p))
@@ -171,12 +184,17 @@ pub fn unseen(top: &Path, base: &str, likely: &[&str]) -> Vec<Hook> {
         }
     }
     crate::sorting::sort(&mut files);
+    let kept = store.map(|s| crate::trust::Store::read(Some(s)));
     let mut out = Vec::new();
     for p in files {
         let Ok(rel) = p.strip_prefix(&top).map(|r| r.to_string_lossy().into_owned()) else { continue };
         let Ok(now) = std::fs::read(&p) else { continue };
         let then = git(top.as_path(), &["show", &format!("{base}:{rel}")], None);
         if then.as_deref().is_ok_and(|t| t.as_bytes() == now.as_slice()) {
+            continue;
+        }
+        let hash = crate::sha256::digest(&now);
+        if kept.as_ref().is_some_and(|k| k.state(&p, hash) == crate::trust::State::Trusted) {
             continue;
         }
         let tracked = git(&top, &["ls-files", "--error-unmatch", "--", &rel], None).is_ok();
@@ -189,7 +207,7 @@ pub fn unseen(top: &Path, base: &str, likely: &[&str]) -> Vec<Hook> {
         // (a hook git runs by its name, at the folder's top)
         let named = p.parent() == Some(dir.as_path())
             && p.file_name().is_some_and(|n| likely.iter().any(|l| n == *l));
-        out.push(Hook { rel, kind, likely: named, text });
+        out.push(Hook { rel, kind, likely: named, text, hash });
     }
     // (the ones this action runs first)
     crate::sorting::by_key(&mut out, |h| !h.likely);
@@ -208,15 +226,16 @@ impl Editor {
         let cwd = self.session.git_status.as_ref().map_or_else(|| self.git_cwd(), |s| s.top.clone());
         // (against the session's base — else what its checkout has committed)
         let base = self.session.base.clone().unwrap_or_else(|| "HEAD".into());
-        let (what, session) = (what.to_string(), self.session.id);
+        let (what, session, store) = (what.to_string(), self.session.id, self.trust_path.clone());
         self.events.jobs().spawn(move || {
+            let top = crate::gitpanel::top_of(&cwd).ok();
             let hooks =
-                crate::gitpanel::top_of(&cwd).map(|top| unseen(&top, &base, names)).unwrap_or_default();
+                top.as_ref().map(|top| unseen(top, &base, names, store.as_deref())).unwrap_or_default();
             move |ed: &mut Editor| {
-                if hooks.is_empty() {
+                let Some(top) = top.filter(|_| !hooks.is_empty()) else {
                     return go(ed, &[]);
-                }
-                let o = Ask { what, base, hooks }.card();
+                };
+                let o = Ask { what, base, hooks, top }.card();
                 let title = o.title.clone();
                 ed.push_offer(o);
                 // (its id — a card of that title up already took this one's text and keeps its id: the action
@@ -232,7 +251,8 @@ impl Editor {
         });
     }
 
-    /// The hooks card answered: `run` — its action as usual; else with no hooks this time.
+    /// The hooks card answered: `run` — each hook's content kept as trusted (on a worker, then its action as
+    /// usual: the next action reads the store after it's written); else with no hooks this time, nothing kept.
     pub(crate) fn hooks_answer(&mut self, card: u64, ask: Ask, run: bool) {
         self.offer_finished(card, Ok(()));
         let Some(i) = self.hook_waits.iter().position(|w| w.card == card) else { return };
@@ -241,7 +261,22 @@ impl Editor {
         if !run {
             self.note(format!("{} without hooks this time", ask.what));
         }
-        self.with_session(w.session, |ed| (w.go)(ed, pre));
+        let go = move |ed: &mut Editor| {
+            ed.with_session(w.session, |ed| (w.go)(ed, pre));
+        };
+        let Some(path) = self.trust_path.clone().filter(|_| run) else { return go(self) };
+        self.events.jobs().spawn(move || {
+            let r: Result<(), String> = ask
+                .hooks
+                .iter()
+                .try_for_each(|h| crate::trust::record(path.clone(), ask.top.join(&h.rel), h.hash, true));
+            move |ed: &mut Editor| {
+                if let Err(e) = r {
+                    ed.set_error(format!("couldn't keep the answer: {e}"));
+                }
+                go(ed)
+            }
+        });
     }
 }
 
@@ -256,6 +291,7 @@ mod tests {
             kind,
             likely,
             text: text.map(str::to_string),
+            hash: [0; 32],
         };
         let ask = Ask {
             what: "commit".into(),
@@ -264,13 +300,15 @@ mod tests {
                 hook("pre-commit", "changed", true, Some("#!/bin/sh\nmake lint\n")),
                 hook("lib.sh", "untracked", false, Some("#!/bin/sh\n")),
             ],
+            top: PathBuf::from("/p"),
         };
         let o = ask.card();
         assert_eq!(o.title, "Hooks before the commit");
         assert!(
             o.question.starts_with(
                 "These 2 hooks aren't as main has them:\n  .githooks/pre-commit — changed · this commit runs it\n  \
-                 .githooks/lib.sh — untracked\nThey run as you, unsandboxed — a Claude here can write them.\n\n"
+                 .githooks/lib.sh — untracked\nThey run as you, unsandboxed — a Claude here can write them.\nA yes \
+                 is kept for these texts — a change asks again.\n\n"
             ),
             "{}",
             o.question
@@ -287,6 +325,6 @@ mod tests {
             ),
             "{q}"
         );
-        assert!(!binary.runnable() && q.contains("only n is offered"));
+        assert!(!binary.runnable() && q.contains("only n is offered") && !q.contains("A yes is kept"));
     }
 }

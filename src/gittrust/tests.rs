@@ -72,7 +72,7 @@ fn the_card_names_what_runs_once_per_repository() {
     );
     assert_eq!(o.decided_lines().collect::<Vec<_>>(), [2, 3]);
     assert!(o.question.contains("They run on every status"), "{}", o.question);
-    assert!(o.question.contains("Kept off until you say yes"));
+    assert!(o.question.contains("Held back until you say yes"));
     assert!(o.weighty(), "y needs the card settled in sight");
     std::fs::remove_dir_all(&dir).ok();
 }

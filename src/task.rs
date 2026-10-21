@@ -656,8 +656,14 @@ impl Editor {
             });
             crate::chat::Ran::of(g, ride.card, ride.reason.as_deref(), warned)
         });
+        // What a warning with `start` says (a manifest tool's changes, piece F): with no card that said it, said
+        // as it starts — one calm toast, its chat row marked from now (`run_done` finds it marked)
+        let at_start = match (&ran, &ride.warned) {
+            (Some(r), None) if r.warned.iter().any(|w| w.start) => Some((task.cmd.clone(), r.clone())),
+            _ => None,
+        };
         self.task_spawn(task, None, policy, feeds, true, &[], trace, None);
-        match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
+        let out = match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 match who {
                     crate::tools::For::Claude(call) => r.chat = Some(call),
@@ -673,7 +679,15 @@ impl Editor {
                 Ok(())
             }
             None => Err(Box::new((who, ride))),
+        };
+        if out.is_ok()
+            && let Some((cmd, ran)) = at_start
+        {
+            let said: Vec<String> = ran.warned.iter().filter(|w| w.start).map(|w| w.line()).collect();
+            self.set_status(format!("{} — {}", traced(&cmd), said.join(" · ")));
+            crate::chat::mark_ran(self, &cmd, ran);
         }
+        out
     }
 
     /// `:restart`'s build (`restart.rs`): not the task `space m m` runs again — the restart waits for its

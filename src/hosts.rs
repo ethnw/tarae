@@ -1,6 +1,6 @@
 //! The egress proxy's questions, on the main loop (`target/sb/step5e-plan.md`). A host a run's rules don't name
 //! is held by tarae's proxy, which asks here (`proxy::FromProxy::Ask`): one card per host in the run's own
-//! session (`What::Host`) — `y` this run · `s` this session · `A` always here · `n` no, for the session. The
+//! session (`What::Host`) — `y` once (this run) · `s` this session · `A` always here · `n` no, for the session. The
 //! answer goes back as `ToProxy::Answer` for the card's own session and run, never the session in front's: a card
 //! parks with its session, so only that session's keys reach it. How a connection came to the proxy (a proxy
 //! variable, a supervisor's swap, a redirect in the session's network) isn't this module's: it sees hosts, runs

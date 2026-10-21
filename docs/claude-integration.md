@@ -615,6 +615,31 @@ that file's text on its card, since what runs is in it, not in the line (a long 
 show whole on a card isn't put to you at all: Claude is told to write it to a script (that goes through your
 review) and run that.
 
+**The answers' words.** Every card says one thing one way:
+
+| Key | Word | Means |
+|---|---|---|
+| `y` | Once | this one run or read, when the card offers more than once |
+| `a` | This chat | the rest of this conversation |
+| `s` | This session | until this session ends (or you quit) |
+| `A` | Always here | in this project, until `:granted` takes it back |
+| `n` | No | refused (Claude is told) |
+| `n` | Not now | an offer that comes again later |
+| `y` · `n` | Trust · Hold back | the project's `.tarae.toml`, its Claude settings, the repository's own git commands |
+
+A card with no choice of how long says what `y` does instead (`Run`, `Install`, `Allow`), and so does an `n`
+that does something of its own (`Skip hooks`, `Leave it`, `Keep waiting`). A socket's `a` names what it keeps
+(`This socket, this chat`, or for Docker's `This command, this chat`), and the API-key card's `A` is `Always`:
+it writes your own config, for every project.
+
+**What a manifest tool changes is said before it runs.** `cargo add`/`remove`, `cargo update`, `npm install`,
+`pnpm add`, `yarn add`, `go get`, `go mod tidy`, `uv add`, `poetry add` and `pip install` say what they change
+(the manifest and the lockfile, or the environment with no manifest recording it), in the warning color under
+the command on a card. With no card, because it runs unasked in the sandbox, it's said as it starts: one toast,
+its chat row marked `▲` from then, and a line in Claude's report. `Cargo.toml` and `package.json` are protected,
+so in the sandbox those tools are refused that write, and the line says so. The words come from the language
+packs (`warn` entries with `start = true`), so a project's `[[cards.warn]]` can add its own.
+
 ![Claude wants to run git commit: a card at the bottom right shows the whole command with y Run and n No, the minimized chat moved to the top right, its row on the command](screenshots/chat-run.png)
 
 ### The sandbox
@@ -766,8 +791,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   project's languages; a registry takes uploads too); `"*"` is every host (`"any"` reads the same); a list
   (`["github.com", "*.crates.io", "api.example.com:8443"]` — `*.` its subdomains, else port 443, or 80 for plain
   http) lets those alone through, the registries not added. A connection to any other host is held up to 20 s
-  while a card asks: `y` this run, `a` this conversation, `s` this session (until you quit), `A` always in this
-  project, `n` refused for this session. `[]` asks for every host. One card per host, in the session of the run that asked — another session's keys never answer
+  while a card asks: `y` once (this run), `a` this conversation, `s` this session (until you quit), `A` always
+  here (in this project), `n` refused for this session. `[]` asks for every host. One card per host, in the session of the run that asked — another session's keys never answer
   it — and it goes when its run ends. At most 8 hosts of a session wait on cards at once; a ninth is refused
   unasked, and the result says so. An answer after the 20 s counts from the tool's next try. "Always" is kept
   in `sandbox.json`; `:granted` lists hosts (always, this session) and `d` on one (or `:sandbox-disallow host
@@ -869,10 +894,10 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   where it fits (a long one that doesn't leaves room to shorter ones after it), and what's shared keeps its first
   items (`processes, signals +2`) before it goes; the tier always shows. Nothing blocked, the list says so. For a write, each folder from the one written in up
   to just below home, so you choose how wide. For a connection, that port on this machine — or that unix
-  socket, the one file, offered `y` this run or `a` this conversation, never kept. Docker's (colima's
-  `docker.sock`) is only ever `y` this run: its card says, in the warning color, that what connects to it can
+  socket, the one file, offered `y` once (this run) or `a` this conversation, never kept. Docker's (colima's
+  `docker.sock`) is only ever `y` once: its card says, in the warning color, that what connects to it can
   start a container that mounts any folder — as much as running outside the sandbox. And, last, running the command once outside the sandbox. A folder's or a port's card offers `y` once,
-  `a` this conversation, `A` always in this project; whichever you pick, the command runs again now with it
+  `a` this conversation, `s` this session, `A` always here (in this project); whichever you pick, the command runs again now with it
   open. "Always" is kept in
   your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), and `:granted` lists it with what Claude may
   read, `d` taking one back. Some places are never offered, only set by hand in `llm.sandbox-write`: home and
@@ -983,7 +1008,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   `ps -o user`), `missing` (`{ env, say }` or `{ wrapper, say }`, `{missing}` in `say`), `unless-part` +
   `unless-all` + `same` (regexes for a checked form: the command's own text, then its guards before it in the
   line or script, in order — the named groups equal in all), `unless-in = "outputs"`, `fact` (`reads-outside`,
-  `script-changed`, `edit-protected`, `outside-sandbox`; `{paths}` with the first), `say`, `asks`.
+  `script-changed`, `edit-protected`, `outside-sandbox`; `{paths}` with the first), `say`, `asks`, `start`
+  (said as the run starts when no card asks: one toast, its chat row, Claude's report).
   `edit-protected` is an edit's: Claude's edit to a file that runs later outside the sandbox (a build script, a
   manifest, a hook — the names its commands can't write, where its path really leads: `..` taken, links
   followed) is always asked, review at the end or not, and says it on the review's header, under the title in
@@ -1220,7 +1246,7 @@ downloaded, Go's module cache, and the project's build folders outside it that i
 those, a card says exactly what would be read: the file, or the folder searched and what
 for. What's read goes to Claude.
 
-- `y` once · `a` this conversation · `A` always, in this project · `n` no
+- `y` once · `a` this conversation · `s` this session · `A` always here (in this project) · `n` no
 - "This conversation" and "always" cover the place: the file, or the folder and everything in it. The
   "always" answers are kept in your own state (`$XDG_STATE_HOME/tarae/sandbox.json`, per project), not in the
   project's files. `:granted` lists them, and `d` on one takes it back

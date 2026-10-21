@@ -14,21 +14,21 @@
 11   9     }
 12  10     counts
 13  11 }
-14  12                                         ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-15  13 fn main() {                              ▎ Claude wants to run
-16  14     let text = "the quick brown fox jump   cargo xtask shot /tmp/words.png ' l' '@?distinct
-17  15     let counts = word_counts(text);        words'
-18  16     println!("{} distinct words", counts
-19  17 }                                          It runs cargo xtask — not a check, a read, or a
-20                                                command allowed in this chat.
+14  12
+15  13 fn main() {                        ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+16  14     let text = "the quick brown fox ▎ Claude wants to run
+17  15     let counts = word_counts(text);   cargo xtask shot /tmp/words.png ' l' '@?distinct words'
+18  16     println!("{} distinct words", c
+19  17 }                                     It runs cargo xtask — not a check, a read, or a command
+20                                           allowed in this chat.
 21
-22                                                a — this exact command again unasked, this chat
+22                                           a — this exact command again unasked, this chat
 23
-24                                                The sandbox is off (llm.sandbox) — it runs with
-25                                                all your permissions.
+24                                           The sandbox is off (llm.sandbox) — it runs with all
+25                                           your permissions.
 26
-27                                                y Run   a This chat   n No
-28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+27                                           y Once   a This chat   n No
+28                                        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -46,19 +46,19 @@
 12
 13
 14
-15                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-24                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-25                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-26                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-27                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15
+16                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 28
 29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
@@ -77,19 +77,19 @@
 12  ff
 13  ff
 14  ff
-15  ff                                          a BBBBBB BBBBB BB BBB
-16  ff                gggg ggggg ggggg ggg gggg
+15  ff
+16  ff                gggg ggggg ggggg ggg a BBBBBB BBBBB BB BBB
 17  ff
 18  ff              ggg gggggggg gggggg
-19  ff                                            dd dddd ddddd ddddd d ddd d dddddd d ddddd dd d
-20                                                ddddddd ddddddd dd dddd ddddd
+19  ff                                       dd dddd ddddd ddddd d ddd d dddddd d ddddd dd d ddddddd
+20                                           ddddddd dd dddd ddddd
 21
-22                                                d d dddd ddddd ddddddd ddddd dddddddd dddd dddd
+22                                           d d dddd ddddd ddddddd ddddd dddddddd dddd dddd
 23
-24                                                ddd ddddddd dd ddd ddddddddddddd d dd dddd dddd
-25                                                ddd dddd dddddddddddd
+24                                           ddd ddddddd dd ddd ddddddddddddd d dd dddd dddd ddd
+25                                           dddd dddddddddddd
 26
-27                                                A       A dddd dddd   A dd
+27                                           A        A dddd dddd   A dd
 28
 29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 ## legend

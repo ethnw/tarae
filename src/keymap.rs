@@ -358,7 +358,7 @@ mod tests {
         (
             "A card",
             "`y` `n`",
-            "Yes · no (some take `a` this chat, `s` this session, `A` always); Esc never answers one",
+            "Yes · no (some take `a` this chat, `s` this session, `A` always here); Esc never answers one",
         ),
         (
             "A card",

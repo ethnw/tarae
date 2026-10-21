@@ -326,7 +326,7 @@ pub fn question(root: &Path, p: &Project) -> String {
             q.push_str(&format!("\n  {k} = {v}"));
         }
     }
-    q.push_str("\n\nIgnored, the rest of the file still applies.");
+    q.push_str("\n\nHeld back, the rest of the file still applies.");
     q
 }
 
@@ -376,7 +376,7 @@ impl crate::editor::Editor {
         }
         match trusted {
             true => self.set_success(format!("Trusted — the project's {n} held-back settings apply")),
-            false => self.set_status("Ignoring them — :project-trust to look again"),
+            false => self.set_status("Held back — :project-trust to look again"),
         }
     }
 

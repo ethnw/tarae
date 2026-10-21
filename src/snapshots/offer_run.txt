@@ -8,27 +8,27 @@
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
 07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   6     let mut counts = HashMap::new();    ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-09   7     for word in text.split_whitespace()  ▎ Claude wants to run — outside the sandbox
-10   8     │   *counts.entry(word).or_insert(0)   git commit -m 'Count words: the words in the text,
-11   9     }                                      counted
-12  10     counts
-13  11 }                                          Splits on whitespace, so "a  b" is two words, and
-14  12                                            keeps the counts in a map from word to how many
-15  13 fn main() {                                times it came, printed after the text.
-16  14     let text = "the quick brown fox jump
-17  15     let counts = word_counts(text);        The tests cover the empty text and repeated
-18  16     println!("{} distinct words", counts   words.'
-19  17 }
-20                                                Its reason: git commit runs the hooks, which sign
-21                                                with the key in your agent
-22
-23                                                Outside the sandbox it runs with all your
-24                                                permissions — your files, your network — this
-25                                                once.
+08   6     let mut counts = HashMap::new();
+09   7     for word in text.split_whitespace() {
+10   8     │   *counts.entry(word).or_insert(0) += 1;
+11   9     }                           ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+12  10     counts                       ▎ Claude wants to run — outside the sandbox
+13  11 }                                  git commit -m 'Count words: the words in the text, counted
+14  12
+15  13 fn main() {                        Splits on whitespace, so "a  b" is two words, and keeps
+16  14     let text = "the quick brown    the counts in a map from word to how many times it came,
+17  15     let counts = word_counts(tex   printed after the text.
+18  16     println!("{} distinct words"
+19  17 }                                  The tests cover the empty text and repeated words.'
+20
+21                                        Its reason: git commit runs the hooks, which sign with the
+22                                        key in your agent
+23
+24                                        Outside the sandbox it runs with all your permissions —
+25                                        your files, your network — this once.
 26
-27                                                y Run   n No
-28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+27                                        y Run   n No
+28                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -40,25 +40,25 @@
 06     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 07
 08
-09                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-10                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-11                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-12                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-13                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-14                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-15                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-24                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-25                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-26                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-27                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+09
+10
+11
+12                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+13                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27                                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 28
 29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
@@ -71,25 +71,25 @@
 06
 07   f
 08   f
-09   f                                          a BBBBBB BBBBB BB BBB B BBBBBBB BBB BBBBBBB
+09   f
 10   f
 11   f
-12  ff
+12  ff                                  a BBBBBB BBBBB BB BBB B BBBBBBB BBB BBBBBBB
 13  ff
 14  ff
 15  ff
-16  ff                gggg ggggg ggggg ggg gggg
+16  ff                gggg ggggg ggggg
 17  ff
 18  ff              ggg gggggggg gggggg
 19  ff
-20                                                ddd ddddddd ddd dddddd dddd ddd dddddd ddddd dddd
-21                                                dddd ddd ddd dd dddd ddddd
-22
-23                                                wwwwwww www wwwwwww ww wwww wwww www wwww
-24                                                wwwwwwwwwww w wwww wwwwww wwww wwwwwww w wwww
-25                                                wwwww
+20
+21                                        ddd ddddddd ddd dddddd dddd ddd dddddd ddddd dddd dddd ddd
+22                                        ddd dd dddd ddddd
+23
+24                                        wwwwwww www wwwwwww ww wwww wwww www wwww wwwwwwwwwww w
+25                                        wwww wwwwww wwww wwwwwww w wwww wwwww
 26
-27                                                A       A dd
+27                                        A       A dd
 28
 29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 ## legend

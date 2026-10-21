@@ -3205,7 +3205,7 @@ pub struct RunCard {
     pub keep: bool,
     /// Claude asked to run it outside the sandbox (`y` runs it so, once).
     pub outside: bool,
-    /// Claude asked to let it connect to this one unix socket (#119): `y` this run, `a` this chat.
+    /// Claude asked to let it connect to this one unix socket (#119): `y` once, `a` this chat.
     pub socket: Option<PathBuf>,
     /// What `a` lets run again without asking for the rest of the chat (`again` — this exact command).
     pub again: Option<Again>,
@@ -3894,7 +3894,16 @@ pub fn run_done(ed: &mut Editor) {
     let known = rules_known(ed, failed);
     let Some(r) = ed.session.task_run.as_mut() else { return };
     let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known, !failed));
-    let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
+    // (what a warning with `start` said as it started — a manifest tool's changes, piece F — Claude reads too)
+    let started: Vec<String> = r
+        .ran
+        .iter()
+        .flat_map(|ran| &ran.warned)
+        .filter(|w| w.start)
+        .map(|w| format!("\n▲ {}", w.line()))
+        .collect();
+    let started = if started.is_empty() { String::new() } else { started.concat() + "\n" };
+    let guard = started + &said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
     // (what blocked a failed run that `also` could open — not a walk up from the project or the run's folder)
     let run_dir = match r.guard.as_ref() {
         Some(Guard::In(p)) => p.run.as_ref().map(|d| d.path().to_path_buf()),
@@ -5149,6 +5158,85 @@ mod tests {
         assert!(super::could_reach_out(&ed, false), "the sandbox off");
     }
 
+    /// Piece F: a warning with `start` (what a manifest tool changes) is said before the run with no card to say
+    /// it — one calm toast as it starts, its chat row marked `▲` from then, a line in Claude's report at its end;
+    /// a warning without it stays on the row and in the log only (D2). (A stand-in entry on `true`, run as
+    /// Claude's outside the sandbox: nothing else runs.)
+    #[test]
+    fn a_start_warning_is_said_as_the_run_starts_with_no_card() {
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("start-warn");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        let entries: toml::Value = toml::from_str(
+            r#"warn = [
+                { id = "stand-in-manifest", run = ["true"], start = true, say = "It changes the stand-in's manifest." },
+                { id = "stand-in-quiet", run = ["true"], say = "Said on its row only." },
+            ]"#,
+        )
+        .unwrap();
+        let mut problems = Vec::new();
+        ed.config.cards_warn = crate::cardwarn::read(&entries["warn"], "test", &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        // Claude's row for its call, as the chat shows it while it waits
+        let mut c = crate::chat::Chat::new();
+        let input = json!({ "command": "true" });
+        c.calls.push(crate::chat::Called { id: "c1".into(), name: "mcp__tarae__run".into(), input });
+        let look = crate::chat::Look {
+            verb: "run",
+            what: "true".into(),
+            pattern: true,
+            range: String::new(),
+            link: None,
+        };
+        c.msgs.push(crate::chat::Msg::tool(look, "c1"));
+        ed.session.chat = Some(c);
+        let task = crate::task::Task { name: "true".into(), cmd: "true".into(), cwd: dir.clone() };
+        let who = super::For::Claude(super::Call::test(41));
+        let toasts = |ed: &crate::editor::Editor| {
+            ed.messages
+                .iter()
+                .filter(|m| m.2.contains("stand-in's manifest"))
+                .map(|m| m.1)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            ed.task_start_for(task, who, Some(crate::sandbox::Guard::Outside), Default::default()).is_ok()
+        );
+        // As it starts: one toast, info, with whose it is; the row marked, both warnings on it
+        assert_eq!(toasts(&ed), [crate::editor::ToastKind::Info]);
+        assert!(
+            ed.messages.iter().any(|m| m.2 == "true — It changes the stand-in's manifest. (test)"),
+            "{:?}",
+            ed.messages
+        );
+        assert!(!ed.messages.iter().any(|m| m.2.contains("Said on its row only")), "no start: not said");
+        let row = |ed: &crate::editor::Editor| ed.session.chat.as_ref().unwrap().msgs[0].ran.clone();
+        assert_eq!(row(&ed).map(|r| r.warned.len()), Some(2), "marked from the start");
+        // Its end: Claude's report says it, and nothing is said again
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let report = || {
+            super::ANSWERED.with(|a| {
+                a.borrow()
+                    .iter()
+                    .find(|(id, _)| *id == json!(41))
+                    .map(|(_, r)| r.clone().unwrap_or_else(|e| e))
+            })
+        };
+        while report().is_none() {
+            assert!(std::time::Instant::now() < end, "answered");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let report = report().unwrap();
+        assert!(report.contains("\n▲ It changes the stand-in's manifest. (test)\n"), "{report}");
+        assert!(!report.contains("Said on its row only"), "{report}");
+        assert_eq!(toasts(&ed).len(), 1, "said once a run");
+        assert_eq!(row(&ed).map(|r| r.warned.len()), Some(2));
+    }
+
     /// P0 of docs/design/cards.md: each answer on a card of Claude's is one `card` line — the session, why
     /// today's rules asked, what the capability model would do instead (`cards::decide`), the answer, and
     /// the time since it was first drawn (or that it never was); one a turn took away is `dropped`.
@@ -5740,7 +5828,7 @@ mod tests {
         assert_eq!(o.title, crate::blocked::GRANT_TITLE);
         assert_eq!(
             o.answers(false),
-            [('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+            [('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always here"), ('n', "No")]
         );
         // `n`: said to Claude, and it sticks — asked again, no card
         ed.offer_dismiss();
@@ -6253,7 +6341,7 @@ mod tests {
         assert!(o.question.contains("2375 Docker API"), "the risky ports named: {}", o.question);
         assert_eq!(
             o.answers(false),
-            [('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+            [('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always here"), ('n', "No")]
         );
         ed.offer_accept();
         let extra = super::ADMITTED.with(|a| a.borrow().last().map(|(_, e)| e.grant.clone()));
@@ -6659,7 +6747,7 @@ mod tests {
         ask(&mut ed, 1, first).unwrap();
         let o = ed.offers.first().expect("its card");
         assert_eq!(o.title, super::SOCKET_RUN_TITLE);
-        assert_eq!(o.answers(false), [('y', "This run"), ('a', "This command, this chat"), ('n', "No")]);
+        assert_eq!(o.answers(false), [('y', "Once"), ('a', "This command, this chat"), ('n', "No")]);
         let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(q.contains("a lets this command connect again for the rest of this chat"), "{q}");
         assert!(q.contains("never another command"), "{q}");
@@ -6710,7 +6798,7 @@ mod tests {
                 run: Box::new(crate::blocked::BlockedRun::of(super::Job::Command(first.into(), dir.clone()))),
             },
         );
-        assert_eq!(card.answers(false), [('y', "This run"), ('n', "No")]);
+        assert_eq!(card.answers(false), [('y', "Once"), ('n', "No")]);
         assert!(!card.lasts());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6743,7 +6831,7 @@ mod tests {
         ask(&mut ed, 1, "true").unwrap();
         let o = ed.offers.first().expect("its card");
         assert_eq!(o.title, super::SOCKET_RUN_TITLE);
-        assert_eq!(o.answers(false), [('y', "This run"), ('a', "This socket, this chat"), ('n', "No")]);
+        assert_eq!(o.answers(false), [('y', "Once"), ('a', "This socket, this chat"), ('n', "No")]);
         let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             q.contains(

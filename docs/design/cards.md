@@ -205,7 +205,7 @@ safety line. It stood in for confined reads.
 
 | Card | When | Scopes offered | Why it stays |
 |---|---|---|---|
-| **Grant** | Claude asks for a capability past the defaults: a read elsewhere (its Read tool, or a run's `also`, §3.5), a write outside, a port, the network | `y` this run · `a` this chat · `s` this session · `A` always here | It's a real widening. It comes once per thing, not once per command. |
+| **Grant** | Claude asks for a capability past the defaults: a read elsewhere (its Read tool, or a run's `also`, §3.5), a write outside, a port, the network | `y` once · `a` this chat · `s` this session · `A` always here | It's a real widening. It comes once per thing, not once per command. |
 | Grant, narrow | a read in a `SECRETS` place, home itself or above it | `y` only | A key can't be un-read. |
 | **Socket** | one unix socket (#119) | `y` · `a` | A server's socket is the server. Docker's is the whole machine. |
 | **Outside the sandbox** | `outside_sandbox` with a reason | `y` only | All the user's permissions. |

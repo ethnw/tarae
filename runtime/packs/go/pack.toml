@@ -219,3 +219,8 @@ copy = "goenv"
 run-allow = ["go build", "go test", "go vet", "gofmt -l"]
 builders = ["go"]
 said = { rank = 20, run = "go build/test/vet", tests = "Go" }
+# What a run card warns of (`cardwarn.rs`): what changes the module's requirements, said before it runs, with a
+# card or without (`start`, piece F)
+warn = [
+    { id = "go-manifest", run = ["go get", "go mod tidy"], start = true, say = "It changes the module's requirements: go.mod and go.sum." },
+]

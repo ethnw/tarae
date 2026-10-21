@@ -229,8 +229,8 @@ pub enum What {
     /// A run of Claude's printing nothing at next to no CPU for minutes (`stuck.rs`, #181): `y` stops it, `w`
     /// shows what its threads wait in (its output), `n` keeps waiting. Gone once it prints or ends.
     Stuck(Box<crate::stuck::Stuck>),
-    /// A host a run's rules don't name, its connection held by tarae's proxy (`hosts.rs`): `y` this run, `s`
-    /// this session, `A` always in this project, `n` refused for this session. Gone with its run.
+    /// A host a run's rules don't name, its connection held by tarae's proxy (`hosts.rs`): `y` once (this run),
+    /// `s` this session, `A` always here (this project), `n` refused for this session. Gone with its run.
     Host(Box<crate::hosts::Ask>),
     /// Containers made on an engine while a stopped run of Claude's went, under names not its own
     /// (`containers.rs`): `y` stops them, by name · `n` leaves them running.
@@ -880,34 +880,46 @@ impl Offer {
             // (one socket past the sandbox — #119; `a` is the socket's, for any command — #182; Docker's,
             // this command's with it, never the socket's — #193)
             W::Run(r) if r.socket.is_some() && self.lasts() => match r.again.is_some() {
-                true => vec![('y', "This run"), ('a', "This command, this chat"), ('n', "No")],
-                false => vec![('y', "This run"), ('a', "This socket, this chat"), ('n', "No")],
+                true => vec![('y', "Once"), ('a', "This command, this chat"), ('n', "No")],
+                false => vec![('y', "Once"), ('a', "This socket, this chat"), ('n', "No")],
             },
-            W::Run(r) if r.socket.is_some() => vec![('y', "This run"), ('n', "No")],
+            W::Run(r) if r.socket.is_some() => vec![('y', "Once"), ('n', "No")],
             W::Run(r) if r.keep => {
-                vec![('y', "Run"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+                vec![
+                    ('y', "Once"),
+                    ('a', "This chat"),
+                    ('s', "This session"),
+                    ('A', "Always here"),
+                    ('n', "No"),
+                ]
             }
             // (this command again for the rest of the chat — the card says which)
-            W::Run(r) if r.again.is_some() => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
+            W::Run(r) if r.again.is_some() => vec![('y', "Once"), ('a', "This chat"), ('n', "No")],
             W::Run(_) => vec![('y', "Run"), ('n', "No")],
             W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
-            W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
+            W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Hold back")],
             W::ClaudeSettings { .. } => vec![('y', "Trust"), ('v', "Details"), ('n', "Hold back")],
-            W::GitTrust(_) => vec![('y', "Let them run"), ('n', "Keep off")],
+            W::GitTrust(_) => vec![('y', "Trust"), ('n', "Hold back")],
             W::NoSandbox { first: true, .. } => {
                 vec![('y', "Ask each time"), ('s', "This session"), ('n', "Don't run them")]
             }
-            W::NoSandbox { .. } => vec![('y', "Run"), ('s', "This session"), ('n', "No")],
+            W::NoSandbox { .. } => vec![('y', "Once"), ('s', "This session"), ('n', "No")],
             W::ProtectedMade { .. } => {
                 vec![('y', "Keep, run"), ('r', "Remove, run"), ('v', "See them"), ('n', "No")]
             }
             W::Read { keep: true, .. } => {
-                vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+                vec![
+                    ('y', "Once"),
+                    ('a', "This chat"),
+                    ('s', "This session"),
+                    ('A', "Always here"),
+                    ('n', "No"),
+                ]
             }
             W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
             // (as the host's own card, the network closed: never kept past a session)
             W::Grant { grant: crate::allow::Grant::Host(..), .. } => {
-                vec![('y', "This run"), ('a', "This chat"), ('s', "This session"), ('n', "No")]
+                vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('n', "No")]
             }
             // (as far as it may be kept: Docker's socket and a key this run's only, another socket this chat's)
             W::Grant { .. } => match self.top() {
@@ -915,13 +927,13 @@ impl Offer {
                     ('y', "Once"),
                     ('a', "This chat"),
                     ('s', "This session"),
-                    ('A', "Always"),
+                    ('A', "Always here"),
                     ('n', "No"),
                 ],
                 Some(crate::allow::Scope::ThisChat) => {
-                    vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
+                    vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
                 }
-                _ => vec![('y', "This run"), ('n', "No")],
+                _ => vec![('y', "Once"), ('n', "No")],
             },
             W::Outside { .. } => vec![('y', "Run"), ('n', "No")],
             W::Preflight { .. } => vec![('y', "Run them"), ('n', "Not now")],
@@ -984,7 +996,7 @@ impl Offer {
                 v.push(('n', "Not now"));
                 v
             }
-            W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Don't")],
+            W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Not now")],
             W::RestartCancel { .. } => vec![('y', "Call it off"), ('n', "Keep it")],
             // (`r`: the notes list of just these — cardburden 6)
             W::NotesStale { .. } => vec![('y', "Close them"), ('r', "One by one"), ('n', "Keep them")],
@@ -1003,20 +1015,16 @@ impl Offer {
             W::LeftRunning { .. } => vec![('y', "Stop them"), ('n', "Let them run")],
             // (`A` only with the network open: cards.md decision 4 — piece C)
             W::Host(a) if a.open => vec![
-                ('y', "This run"),
+                ('y', "Once"),
                 ('a', "This chat"),
                 ('s', "This session"),
                 ('A', "Always here"),
                 ('n', "No"),
             ],
             // (the network closed: the wait and how long a yes lasts are behind `v` — `hosts::details`)
-            W::Host(_) => vec![
-                ('y', "This run"),
-                ('a', "This chat"),
-                ('s', "This session"),
-                ('v', "Details"),
-                ('n', "No"),
-            ],
+            W::Host(_) => {
+                vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('v', "Details"), ('n', "No")]
+            }
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
             W::BillingSwitch { money: true, .. } => vec![('y', "This session"), ('n', "Stay")],
             W::BillingSwitch { .. } => vec![('y', "Switch"), ('n', "Keep it")],
@@ -1370,7 +1378,7 @@ impl crate::editor::Editor {
         }
         // (a value too long to show isn't trusted)
         if matches!(&self.offers[0].what, What::GitTrust(a) if !a.showable()) {
-            return self.offer_refused("a value here is too long to show — only n keeps them off");
+            return self.offer_refused("a value here is too long to show — only n holds them back");
         }
         // (no restore over edits of yours, nor into a file still loading — said on the card, which stays)
         if let What::Recover(f) = &self.offers[0].what

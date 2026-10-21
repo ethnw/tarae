@@ -24,7 +24,9 @@
 //! backreference would say); `unless-in = "outputs"` (every path it names
 //! is in the project below a pack's `outputs` folder: a build's scratch); `fact` (`reads-outside`,
 //! `script-changed`, `edit-protected`, `outside-sandbox`); `asks = true` (`a` on an earlier card doesn't let
-//! it through unasked — D2). `{missing}` and `{paths}` are filled in.
+//! it through unasked — D2); `start = true` (said before the run even with no card: one toast as it starts,
+//! its chat row marked from then, a line in Claude's report — what a manifest tool changes, piece F).
+//! `{missing}` and `{paths}` are filled in.
 //!
 //! Each text an entry puts on a card (`say`, `missing`'s) is one line of words: no control character, no mark of
 //! the card's, at most `SAY_MAX` characters — whose it is, tarae says after it. An id is one entry's: the first
@@ -91,6 +93,8 @@ pub struct Warn {
     pub fact: Option<Fact>,
     pub say: String,
     pub asks: bool,
+    /// Said as the run starts when no card asks (`start`).
+    pub start: bool,
 }
 
 /// The entries of a `warn` list (`[[claude.warn]]`, `[[cards.warn]]`), each checked: a wrong one is left out,
@@ -136,7 +140,7 @@ fn card_words(s: &str, what: &str, max: usize) -> Result<String, String> {
     Ok(s.to_string())
 }
 
-const KEYS: [&str; 12] = [
+const KEYS: [&str; 13] = [
     "id",
     "run",
     "options",
@@ -149,6 +153,7 @@ const KEYS: [&str; 12] = [
     "fact",
     "say",
     "asks",
+    "start",
 ];
 
 fn entry(e: &Value, whose: &str) -> Result<Warn, String> {
@@ -227,8 +232,13 @@ fn entry(e: &Value, whose: &str) -> Result<Warn, String> {
     if say.contains("{paths}") && fact != Some(Fact::ReadsOutside) {
         return Err("`{paths}` is said only with `fact = \"reads-outside\"`".into());
     }
-    let asks =
-        t.get("asks").map(|a| a.as_bool().ok_or("`asks` isn't true or false")).transpose()?.unwrap_or(false);
+    let flag = |k: &str| -> Result<bool, String> {
+        t.get(k)
+            .map(|a| a.as_bool().ok_or(format!("`{k}` isn't true or false")))
+            .transpose()
+            .map(|b| b == Some(true))
+    };
+    let (asks, start) = (flag("asks")?, flag("start")?);
     let options = list("options")?;
     let option_values = list("option-values")?;
     Ok(Warn {
@@ -246,6 +256,7 @@ fn entry(e: &Value, whose: &str) -> Result<Warn, String> {
         fact,
         say,
         asks,
+        start,
     })
 }
 
@@ -267,13 +278,15 @@ pub struct Facts<'a> {
     pub in_outputs: &'a dyn Fn(&str) -> bool,
 }
 
-/// A warning that holds for a command: its id, its words filled in, whose, and whether `a` lets it through.
+/// A warning that holds for a command: its id, its words filled in, whose, whether `a` lets it through, and
+/// whether it's said as the run starts (`start`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Warned {
     pub id: String,
     pub said: String,
     pub whose: String,
     pub asks: bool,
+    pub start: bool,
 }
 
 impl Warned {
@@ -332,7 +345,7 @@ pub fn judge<'w>(warns: impl IntoIterator<Item = &'w Warn>, f: &Facts) -> Vec<Wa
         if let Some(said) = warned
             && !out.iter().any(|o| o.id == w.id)
         {
-            out.push(Warned { id: w.id.clone(), said, whose: w.whose.clone(), asks: w.asks });
+            out.push(Warned { id: w.id.clone(), said, whose: w.whose.clone(), asks: w.asks, start: w.start });
         }
     }
     out

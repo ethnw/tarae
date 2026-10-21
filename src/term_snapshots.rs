@@ -946,6 +946,109 @@ fn snapshot_commit_card() {
     }
 }
 
+/// Piece F: every card whose answer words changed, for its screenshots — only with `TARAE_FRAMES_DIR` set (both
+/// themes there; `cargo xtask shot` draws them with `TARAE_SHOT_REPLAY`). The host card closed and the grant card
+/// (the whole ladder, `A Always here`) are `snapshot_host_card_closed`'s and `snapshot_sandbox_blocked`'s frames.
+#[test]
+fn frames_of_the_answer_words() {
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    let shot = |name: &str, setup: &dyn Fn(&mut Shot)| {
+        let mut s = Shot::new(100, 30);
+        s.ed.offer_popups = true;
+        s.file("src/demo.rs", DEMO_RS);
+        setup(&mut s);
+        assert!(!s.ed.offers.is_empty(), "{name}: a card");
+        s.frames_both(name);
+    };
+    let run = |s: &mut Shot, command: &str| {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": command}}});
+        assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none(), "it waits for the user");
+    };
+    // A manifest tool's card: what it changes under the command, `y Once · a This chat`
+    shot("f_run_manifest", &|s| {
+        s.ed.config.llm.sandbox = false;
+        run(s, "cargo add serde --features derive");
+    });
+    // No sandbox here, asked each time: `y Once · s This session · n No`
+    shot("f_no_sandbox", &|s| {
+        s.ed.sandbox = crate::sandbox::Availability::Missing("not on this system".into());
+        s.ed.session.no_sandbox = Some(crate::tools::NoSandbox::Ask);
+        run(s, "cargo build");
+        s.until("its card", |ed| !ed.offers.is_empty());
+    });
+    // The network open: `y Once … A Always here`
+    shot("f_host_open", &|s| {
+        let a = crate::hosts::Ask {
+            session: s.ed.session.proxy_id(),
+            run: 1,
+            host: "api.example.com".into(),
+            port: 443,
+            process: "curl".into(),
+            label: "curl -sS https://api.example.com/v1/health".into(),
+            users: false,
+            left: false,
+            open: true,
+            hosts: Default::default(),
+            also: Vec::new(),
+        };
+        s.ed.push_offer(crate::hosts::card(a));
+    });
+    // The three trust cards: `y Trust · n Hold back`
+    shot("f_project_trust", &|s| {
+        let q = ".tarae.toml sets what runs commands as you:\n\n  task.release = ./scripts/release.sh\n\nHeld back, \
+                 the rest of the file still applies.";
+        let what = crate::offer::What::ProjectTrust { hash: [0; 32] };
+        let o = crate::offer::Offer::new(crate::trust::TITLE.into(), q, "", "Project settings".into(), what);
+        s.ed.push_offer(o.deciding(2..3));
+    });
+    shot("f_git_trust", &|s| {
+        let ask = crate::gittrust::Ask {
+            config: "/p/.git/config".into(),
+            place: "/p".into(),
+            digest: [0; 32],
+            items: vec![("core.fsmonitor".into(), ".git/fsmonitor.sh".into(), "on every status")],
+            files: Vec::new(),
+            filters: false,
+        };
+        let root = s.ed.session.root.clone();
+        s.ed.push_offer(ask.card(&root));
+    });
+    // The binary the build left: `n Not now`
+    shot("f_restart_same", &|s| {
+        let q = "It was written before main (1085db8) was committed, and the build left it as it was — \
+                 restarting would run the same tarae.\n\neditor.restart-build and editor.restart-binary say what's \
+                 built and run.";
+        let what = crate::offer::What::RestartSame { id: 1 };
+        let o = crate::offer::Offer::new(
+            "~/.cargo/bin/tarae is the binary it was".into(),
+            q,
+            "Restarting…",
+            "Not restarting".into(),
+            what,
+        );
+        s.ed.push_offer(o);
+    });
+    // A hook changed since the base: what a yes keeps
+    shot("f_hooks", &|s| {
+        let ask = crate::hooks::Ask {
+            what: "commit".into(),
+            base: "main".into(),
+            hooks: vec![crate::hooks::Hook {
+                rel: ".githooks/pre-commit".into(),
+                kind: "changed",
+                likely: true,
+                text: Some("#!/bin/sh\ncargo fmt --check\n".into()),
+                hash: [0; 32],
+            }],
+            top: s.ed.session.root.clone(),
+        };
+        s.ed.push_offer(ask.card());
+    });
+}
+
 /// A command Claude wants to run outside the sandbox — the run card P3 keeps — shown whole (a commit message past
 /// four lines too), its reason under it, `y Run` · `n No`.
 #[test]

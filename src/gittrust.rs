@@ -1,5 +1,5 @@
 //! The card for a repository's own git commands (`gitrepo`: its config's command-running keys and the hooks
-//! in its git folder, held on every run of tarae's git until answered): `y` lets them run, `n` keeps them off
+//! in its git folder, held on every run of tarae's git until answered): `y` trusts them, `n` holds them back
 //! and isn't asked again for these values. Answers are kept as `.tarae.toml`'s are (`trust.rs`), by the
 //! repository's config file and a digest of what was found — a key or value changed since asks again.
 //! Asked whenever a resolve finds them unanswered, whichever git call it was for (`gitrepo::set_asker`) —
@@ -84,11 +84,11 @@ impl Ask {
             }
         }
         q += &format!("\n\nThey run {}.", when.join("; "));
-        q += "\nKept off until you say yes: tarae's git runs without them";
+        q += "\nHeld back until you say yes: tarae's git runs without them";
         if self.filters {
             q += " — filtered files show as git stores them (LFS pointers, say)";
         }
-        q += ". n keeps them off and doesn't ask again for these values.";
+        q += ". n doesn't ask again for these values.";
         Offer::new(TITLE.into(), &q, "", "Repository commands".into(), What::GitTrust(Box::new(self.clone())))
             .deciding(2..2 + n)
     }
@@ -147,7 +147,7 @@ impl Editor {
         }
         match trusted {
             true => self.set_success("Trusted — this repository's own git settings run"),
-            false => self.set_status("Kept off — tarae's git runs without them"),
+            false => self.set_status("Held back — tarae's git runs without them"),
         }
     }
 }
