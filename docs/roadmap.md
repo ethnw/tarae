@@ -428,7 +428,8 @@ main that has what it waits for, and the user says go:
   the plan's §2.6), view P3 (`1b988324`). Order from here: design pass 2's D2/D3 (under way) → **P2b** surfaces as
   leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program; part 1 `e6d8891c`: the tree holding every surface, the layout from it, hops of any kind, zoom, the code splits' sizes, `C-w` inside a terminal's program, restart and the state's panes; part 2 `e131542c`: floating panes under the one focus — `At::Float`, the pane under remembered —, the tests panel as two linked panes under one header, `C-w H J K L`/`t`/`w` over every kind, the layout kept across quit and start in `$state/layouts.json`, the divider lit beside the pane with the keys; four panes' key-to-frame 0.48 ms) → **P2c** text surfaces
   as documents (the user, 2026-10-21: the chat's transcript, the run panels' output and later the terminal as
-  buffers under the editor's keys — view mode becomes normal mode on a read-only document) → **P3** panes of their own (the tests panel
+  buffers under the editor's keys — view mode becomes normal mode on a read-only document) — under way in the `panes4`
+  session (step 1, the run panels' output as documents, built and green on 2026-10-21; its shots and docs next, then step 2, the chat's transcript) → **P3** panes of their own (the tests panel
   the first linked group) → **P3b** tabs and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
   terminal → shells across `:restart`. After its own terminal engine, then images at full
@@ -615,6 +616,11 @@ git tab, search, a short Kubernetes one.
   A polish after (`de0b8890`): a floating frame covers its whole rect, a full row of air under Claude's card,
   scrollbar thumbs `▎` beside a line. D4 the contrast test is in; D5 the docs pictures retaken (28 differ; kept once
   the user has seen them); motion (honest only, the note's table) as its own small piece after panes P2b.
+- **Follow leads the cursor to what Claude writes** (the user, 2026-10-21: "커서가 안 따라가고 가만히 있으니까
+  어색한데" — follow moves the cursor for a read but only keeps an edit's head in sight; while the keys are in the
+  chat the code pane shows no cursor): the cursor goes to an edit's first changed line and the writing head (at
+  follow's pace), the first key pauses as today, a Claude mark on the head's line while the keys are in the chat,
+  `● follow` said — under way in the `follow2` session (2026-10-21).
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
