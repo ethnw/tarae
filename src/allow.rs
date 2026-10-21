@@ -42,6 +42,9 @@ pub struct Allowed {
     /// When each was answered (seconds since the epoch) — what `:granted` says. One kept before times were (an
     /// old `sandbox.json`) has its file's time.
     pub granted: BTreeMap<Grant, u64>,
+    /// The key on the card that gave each (`give`: the answer's `Scope::key`, before it was cut to what may be
+    /// kept) — `:granted`'s stamp (`stamp.rs`); one with none here was given by no key it knows, and has none.
+    pub given: BTreeMap<Grant, char>,
 }
 
 /// Now, in seconds since the epoch.
@@ -130,6 +133,16 @@ impl Allowed {
         with.grants() == self.grants()
     }
 
+    /// `g` given by `key` on a card (`Scope::key`) now: added, and the answer recorded — its key with its time,
+    /// the latest answer's when it was there already.
+    pub fn give(&mut self, g: &Grant, key: char) {
+        self.add(g);
+        if self.granted.contains_key(g) {
+            self.granted.insert(g.clone(), now_s());
+            self.given.insert(g.clone(), key);
+        }
+    }
+
     /// `g` answered now — unless a time is there already (read from where it was kept).
     fn stamp(&mut self, g: Grant) {
         self.granted.entry(g).or_insert_with(now_s);
@@ -149,18 +162,39 @@ impl Allowed {
         out
     }
 
-    /// `other`'s added, each with its own time.
+    /// `other`'s added, each with its answer — the latest of the two where both have one (`adopt`).
     pub fn merge(&mut self, other: &Allowed) {
         for g in other.grants() {
-            if let Some(at) = other.granted.get(&g) {
-                self.granted.entry(g.clone()).or_insert(*at);
-            }
+            self.adopt(&g, other.granted.get(&g).copied(), other.given.get(&g).copied());
             self.add(&g);
         }
     }
 
+    /// `g`'s answer from elsewhere — when (`at`) and by which key — taken where it's the latest: none here, or
+    /// one no newer. The latest answer's key wins everywhere (the stamp says which key decided what holds now),
+    /// its time with it; one with no key known leaves none.
+    pub fn adopt(&mut self, g: &Grant, at: Option<u64>, key: Option<char>) {
+        let here = self.granted.get(g).copied();
+        let latest = match (here, at) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(here), Some(at)) => at >= here,
+        };
+        if !latest {
+            return;
+        }
+        if let Some(at) = at {
+            self.granted.insert(g.clone(), at);
+        }
+        match key {
+            Some(key) => self.given.insert(g.clone(), key),
+            None => self.given.remove(g),
+        };
+    }
+
     /// What it holds as kept entries (`sandbox.json`'s, a session's in `$state/sessions`): kind, what, `scope`,
-    /// `granted` — never a socket (a server's socket is the server: this conversation's at most).
+    /// `granted`, the `key` it was given with — never a socket (a server's socket is the server: this
+    /// conversation's at most).
     pub fn entries(&self, scope: &str) -> Vec<Json> {
         let mut out = Vec::new();
         for g in self.grants() {
@@ -171,6 +205,9 @@ impl Allowed {
             }
             if let Some(at) = self.granted.get(&g) {
                 e["granted"] = json!(at);
+            }
+            if let Some(key) = self.given.get(&g) {
+                e["key"] = json!(key.to_string());
             }
             out.push(e);
         }
@@ -189,6 +226,11 @@ impl Allowed {
                 continue;
             };
             a.granted.insert(g.clone(), e["granted"].as_u64().unwrap_or(at));
+            // (one key, a card's: anything else isn't one)
+            let key = e["key"].as_str().and_then(|k| k.parse::<char>().ok()).filter(|k| "yasA".contains(*k));
+            if let Some(key) = key {
+                a.given.insert(g.clone(), key);
+            }
             a.add(&g);
         }
         a
@@ -208,6 +250,7 @@ impl Allowed {
             Grant::Env(n) => self.env.retain(|x| x != n),
         }
         self.granted.remove(g);
+        self.given.remove(g);
     }
 
     /// Takes back a place, a port, a socket or the terminals (as `:granted` lists it).
@@ -215,6 +258,7 @@ impl Allowed {
         self.remove_only(what);
         let left = self.grants();
         self.granted.retain(|g, _| left.contains(g));
+        self.given.retain(|g, _| left.contains(g));
     }
 
     fn remove_only(&mut self, what: &str) {
@@ -432,6 +476,20 @@ pub enum Scope {
     /// taken back — a host's until you quit (`hosts.rs`).
     Session,
     Always,
+}
+
+impl Scope {
+    /// The key a card answers with for it — `y` once, `a` this chat, `s` this session, `A` always here: the one
+    /// table for the cards' answers (`Editor::offer_lasting`) and what a grant records it was given with
+    /// (`Allowed::give`).
+    pub fn key(self) -> char {
+        match self {
+            Scope::Once => 'y',
+            Scope::ThisChat => 'a',
+            Scope::Session => 's',
+            Scope::Always => 'A',
+        }
+    }
 }
 
 /// `sandbox.json`'s form (piece J): a repository's answers — those every checkout uses and each checkout's own —
@@ -699,10 +757,9 @@ impl Store {
                 crate::log::line("sandbox", "warning", &said);
                 continue;
             }
+            // (kept as the checkout's own too: the latest of the two answers — `adopt`)
+            all.adopt(&g, r.shared.granted.get(&g).copied(), r.shared.given.get(&g).copied());
             all.add(&g);
-            if let Some(at) = r.shared.granted.get(&g) {
-                all.granted.insert(g.clone(), *at);
-            }
             shared.push(g);
         }
         Kept { all, shared }
@@ -741,12 +798,18 @@ impl Store {
                 r.shared.take(g);
             }
         }
+        // (each answer where it belongs — a new one, and one answered again: its latest time and key)
         let was = before.grants();
-        for g in now.iter().filter(|g| !was.contains(g)) {
+        for g in &now {
             let to = if here.shared(g) { &mut r.shared } else { &mut *own };
-            to.add(g);
-            if let Some(at) = after.granted.get(g) {
-                to.granted.insert(g.clone(), *at);
+            if !was.contains(g) {
+                // (new here: its answer's own time, not the moment it's added)
+                to.add(g);
+                to.granted.remove(g);
+            }
+            if to.grants().contains(g) {
+                let at = after.granted.get(g).copied().or_else(|| (!was.contains(g)).then(now_s));
+                to.adopt(g, at, after.given.get(g).copied());
             }
         }
         r.checkouts.retain(|_, a| !a.is_empty());
@@ -855,6 +918,8 @@ pub fn write_as_other(path: &Path, project: &Path, remove: &[String], add: &[Gra
 pub struct Change {
     pub remove: Vec<String>,
     pub add: Vec<Grant>,
+    /// The card's key `add` was given with (`Allowed.given`) — None: none known.
+    pub key: Option<char>,
     pub given: u64,
     pub seen: BTreeMap<String, crate::storewrite::Rev>,
 }
@@ -916,7 +981,10 @@ pub fn keep_ordered(
         s.revs.insert(scope.clone(), revs);
         s.change(&here, |a| {
             c.remove.iter().for_each(|w| a.remove(w));
-            added.iter().for_each(|g| a.add(g));
+            added.iter().for_each(|g| match c.key {
+                Some(key) => a.give(g, key),
+                None => a.add(g),
+            });
         });
     })?;
     for (k, r) in made {
@@ -1407,22 +1475,22 @@ pub fn keep_again(ed: &mut crate::editor::Editor, carried: &[Json]) {
 
 /// `grants` for `scope` past once: this conversation's (`Chat.allowed`), this session's (`Session.allowed`,
 /// kept with it), or the project's (kept on a worker, and the conversation's meanwhile) — the session's
-/// `Caps` made again.
-fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope) {
+/// `Caps` made again — each recorded as given by `key`, the card's (`Allowed::give`).
+fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope, key: char) {
     match scope {
         Scope::Once => return,
         Scope::Session => {
-            grants.iter().for_each(|g| ed.session.allowed.add(g));
+            grants.iter().for_each(|g| ed.session.allowed.give(g, key));
             ed.sessions_keep();
         }
         Scope::ThisChat | Scope::Always => {
             if let Some(c) = ed.session.chat.as_mut() {
-                grants.iter().for_each(|g| c.allowed.add(g));
+                grants.iter().for_each(|g| c.allowed.give(g, key));
             }
         }
     }
     if scope == Scope::Always {
-        keep_answer(ed, grants.to_vec());
+        keep_answer(ed, grants.to_vec(), key);
     }
     ed.caps_sync();
 }
@@ -1430,11 +1498,11 @@ fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope) {
 /// An `A`: `grants` kept for the project on a worker — this checkout's take-backs not written yet go in first, the
 /// answer after them; once on disk they're over (a failed one no longer hides what's answered again), but a
 /// take-back of the same name made while this write is under way is its own.
-pub(crate) fn keep_answer(ed: &mut crate::editor::Editor, grants: Vec<Grant>) {
+pub(crate) fn keep_answer(ed: &mut crate::editor::Editor, grants: Vec<Grant>, key: char) {
     let root = ed.session.root.clone();
     let (ids, remove): (Vec<u64>, Vec<String>) = ed.taking_ids(&root).into_iter().unzip();
     let seen = ed.allow_path.as_deref().map(crate::storewrite::seen_now).unwrap_or_default();
-    let c = Change { remove, add: grants, given: crate::storewrite::given(), seen };
+    let c = Change { remove, add: grants, key: Some(key), given: crate::storewrite::given(), seen };
     let ended = ids.clone();
     keep_queued(ed, root, ids, c, move |ed, r| match r {
         Ok(skipped) => {
@@ -1490,7 +1558,7 @@ pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Sc
         return;
     }
     let grants: Vec<Grant> = places.iter().cloned().map(Grant::Read).collect();
-    add_for(ed, &grants, scope);
+    add_for(ed, &grants, scope, scope.key());
     let shown = places.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
     let toast = lasting(ed, scope, &grants).1;
     ed.set_success(format!("Claude may read {shown}{toast}"));
@@ -1503,13 +1571,14 @@ pub fn grant_keys(ed: &mut crate::editor::Editor, keys: &[PathBuf], scope: Scope
     if scope == Scope::Once || keys.is_empty() {
         return;
     }
-    // (no longer than a key may be kept: `Caps::storable`)
+    // (no longer than a key may be kept: `Caps::storable` — given by the card's key all the same)
     let grants: Vec<Grant> = keys.iter().map(|k| Grant::Key(k.clone())).collect();
+    let key = scope.key();
     let scope = grants.iter().map(crate::caps::Caps::storable).fold(scope, Scope::min);
     if scope == Scope::Once {
         return;
     }
-    add_for(ed, &grants, scope);
+    add_for(ed, &grants, scope, key);
     let shown = keys.iter().map(|k| tilde(k)).collect::<Vec<_>>().join(", ");
     let (when, toast) = lasting(ed, scope, &grants);
     // (Claude's read was answered; that its commands may read it too is news to it — as `grant` says)
@@ -1522,12 +1591,13 @@ pub fn grant_keys(ed: &mut crate::editor::Editor, keys: &[PathBuf], scope: Scope
 /// conversation, this session, or always in this project — and Claude hears it with the next message.
 pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
     // (no longer than it may be kept: Docker's socket is as much as the sandbox off — never past one run, #193;
-    // another socket this conversation's at most)
+    // another socket this conversation's at most — given by the card's key all the same)
+    let key = scope.key();
     let scope = scope.min(crate::caps::Caps::storable(g));
     if scope == Scope::Once {
         return;
     }
-    add_for(ed, std::slice::from_ref(g), scope);
+    add_for(ed, std::slice::from_ref(g), scope, key);
     let (when, toast) = lasting(ed, scope, std::slice::from_ref(g));
     ed.session.checkpoints.tell.push(format!("The user let your commands {} — {when}.", g.shown()));
     ed.set_success(format!("Claude's commands may {}{toast}", g.shown()));
@@ -1606,6 +1676,7 @@ impl crate::editor::Editor {
         }
         if let Some((h, p)) = host {
             self.session.hosts.retain(|(sh, sp)| (sh, *sp) != (&h, p));
+            self.session.hosts_given.remove(&(h.clone(), p));
             crate::hosts::taken(&self.session, &h, p);
         }
         // (what comes back with the kept sessions stays taken back — `worktree::SessionStore.taken`)

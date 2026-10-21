@@ -1157,7 +1157,8 @@ mod tests {
         );
         let heading = p.items().iter().any(|i| i.label == "plugins · everywhere");
         assert!(heading);
-        let taken = crate::picker::Action::Granted(Some(crate::granted::Taken::Plugin("demo".into())));
+        let taken =
+            crate::picker::Action::Granted(Some((crate::granted::Taken::Plugin("demo".into()), Some('y'))));
         p.select_where(|a| *a == taken);
         key(&mut ed, "d");
         assert!(!perm::load(Some(&store)).contains_key("demo"), "revoked");

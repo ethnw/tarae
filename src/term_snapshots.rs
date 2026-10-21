@@ -3033,6 +3033,129 @@ fn a_click_in_the_edit_review_takes_a_change_in_hand() {
     assert_eq!(click(&mut s, "Change 1 of 2"), 0, "its head");
 }
 
+/// The stamp on screen row `y` — a key's letter between a stamp's half blocks, `▐y▌` or (carved) `▌y▐` — its
+/// letter's column and cell.
+fn stamp_in(p: &vt100::Parser, y: usize, w: u16) -> Option<(u16, vt100::Cell)> {
+    let at = |x: u16| p.screen().cell(y as u16, x).map(|c| c.contents().to_string()).unwrap_or_default();
+    (1..w.saturating_sub(1)).find_map(|x| {
+        let edges = (at(x - 1), at(x + 1));
+        let stamped = matches!((edges.0.as_str(), edges.1.as_str()), ("▐", "▌") | ("▌", "▐"));
+        let letter = at(x).chars().count() == 1 && at(x).chars().all(|c| c.is_ascii_alphabetic());
+        (stamped && letter).then(|| (x, p.screen().cell(y as u16, x).unwrap().clone()))
+    })
+}
+
+/// 글타래 P5: `y` and `n` stamp a change's head with its stamp — the key that decided it — where its answer was
+/// asked, its letter in the column of the change in hand's keys: `▐y▌ accepted`, `▐n▌ rejected`; dry (its ground
+/// the dim ink, its letter bold in the paper's colour), as the change in hand has the region's accent; none
+/// before. On a transparent theme there's no paper to cut the letter out of: carved, `▌y▐`, the letter in the ink
+/// and nothing painted.
+#[test]
+fn a_decided_change_is_stamped_where_its_answer_was_asked() {
+    let mut s = Shot::new(100, 30);
+    let id = s.file("src/words.rs", DOCS_BASE);
+    let text = Rope::from_str(DOCS_BASE);
+    let hunk = |line: usize, new: &str| {
+        let (from, to) = (text.line_to_byte(line), text.line_to_byte(line + 1));
+        let old = text.byte_slice(from..to).to_string();
+        let (decision, conflict) = (crate::llm::Decision::Undecided, false);
+        crate::llm::Hunk { from, to, old, new: new.into(), decision, conflict }
+    };
+    let hunks = vec![
+        hunk(4, "    text.split(' ').count()\n"),
+        hunk(9, "    text.split(' ').max()\n"),
+        hunk(13, "    let text = \"proposed here\";\n"),
+    ];
+    let mut rev = crate::llm::Review::new(1, id, "three", hunks);
+    (rev.ready, rev.follow) = (true, false);
+    s.ed.session.review = Some(rev);
+    let p = cells(&s.frame(), s.w, s.h);
+    assert!((0..s.h as usize).all(|y| stamp_in(&p, y, s.w).is_none()), "no stamp before a decision");
+    s.keys("yn");
+    let decided: Vec<_> = s.ed.session.review.as_ref().unwrap().hunks.iter().map(|h| h.decision).collect();
+    use crate::llm::Decision::{Accept, Reject, Undecided};
+    assert_eq!(decided, [Accept, Reject, Undecided]);
+    // (from the top again: following, the change in hand took the view)
+    let rev = s.ed.session.review.as_mut().unwrap();
+    (rev.scroll, rev.follow) = (0, false);
+    let ui = Ui::new(&s.ed);
+    let p = cells(&s.frame(), s.w, s.h);
+    let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+    let y = |needle: &str| {
+        rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle}: {rows:#?}"))
+    };
+    assert!(rows[y("Change 1 of 3")].contains("▐y▌ accepted"), "{rows:#?}");
+    assert!(rows[y("Change 2 of 3")].contains("▐n▌ rejected"), "{rows:#?}");
+    let hand = y("Change 3 of 3");
+    assert!(stamp_in(&p, hand, s.w).is_none(), "the change in hand has none: {}", rows[hand]);
+    for at in [y("Change 1 of 3"), y("Change 2 of 3")] {
+        let (_, c) = stamp_in(&p, at, s.w).unwrap();
+        assert_eq!(
+            (c.bgcolor(), c.fgcolor(), c.bold()),
+            (vt_color(ui.virt.fg).unwrap(), vt_color(ui.base.bg).unwrap(), true)
+        );
+    }
+    // (`line 10` and `line 14`: one width — the letter where the keys start)
+    let key =
+        rows[hand].find("y accept").map(|i| unicode_width::UnicodeWidthStr::width(&rows[hand][..i])).unwrap();
+    assert_eq!(stamp_in(&p, y("Change 2 of 3"), s.w).unwrap().0 as usize, key, "{rows:#?}");
+    s.ed.theme = crate::theme::load("meok-transparent").unwrap();
+    let ui = Ui::new(&s.ed);
+    let p = cells(&s.frame(), s.w, s.h);
+    let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+    let at = rows.iter().position(|r| r.contains("Change 1 of 3")).unwrap();
+    assert!(rows[at].contains("▌y▐ accepted"), "carved: {rows:#?}");
+    let (_, c) = stamp_in(&p, at, s.w).unwrap();
+    assert_eq!((c.bgcolor(), c.fgcolor()), (vt100::Color::Default, vt_color(ui.virt.fg).unwrap()));
+}
+
+/// 글타래 P5: `:granted`'s answers end in a stamp, the key each was given with, in one column — in the accent on the
+/// row in hand, beside its bar, dry on the others, and it follows the hand (`j`); a default is nobody's answer
+/// and has none. Every row keeps the stamp's room, so the hints end in one column too.
+#[test]
+fn granteds_answers_are_stamped_the_one_in_hand_in_the_accent() {
+    use crate::granted::Taken;
+    use crate::picker::{Action, Item};
+    let mut s = Shot::new(120, 30);
+    let row = |label: &str, hint: &str, taken| Item {
+        label: label.into(),
+        action: Action::Granted(taken),
+        hint: hint.into(),
+        glyph: Some(("•", "ui.virtual")),
+    };
+    let heading =
+        |label: &str| Item { label: label.into(), action: Action::Heading, hint: String::new(), glyph: None };
+    let items = vec![
+        heading("by default"),
+        row("read /private/tmp", "the temp folders", None),
+        heading(""),
+        heading("this session"),
+        row("run without a sandbox", "you · until you quit", Some((Taken::NoSandbox, Some('s')))),
+        row("run the packs' default steps", "you", Some((Taken::Preflight(Vec::new()), Some('y')))),
+    ];
+    s.ed.granted_open(items, false);
+    let ui = Ui::new(&s.ed);
+    let (accent, dry) = (vt_color(ui.accent.fg).unwrap(), vt_color(ui.virt.fg).unwrap());
+    let look = |s: &mut Shot| {
+        let p = cells(&s.frame(), s.w, s.h);
+        let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+        let y = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap();
+        let (none, a, b) = (y("read /private/tmp"), y("run without"), y("run the packs'"));
+        assert!(stamp_in(&p, none, s.w).is_none(), "a default: {}", rows[none]);
+        let ends = |at: usize, hint: &str| {
+            unicode_width::UnicodeWidthStr::width(&rows[at][..rows[at].find(hint).unwrap() + hint.len()])
+        };
+        assert_eq!(ends(none, "the temp folders"), ends(b, "you"), "the hints in one column: {rows:#?}");
+        let ((xa, ca), (xb, cb)) = (stamp_in(&p, a, s.w).unwrap(), stamp_in(&p, b, s.w).unwrap());
+        assert_eq!(xa, xb, "one column: {rows:#?}");
+        assert_eq!((ca.contents(), cb.contents()), ("s", "y"), "the keys they were given with");
+        (ca.bgcolor(), cb.bgcolor())
+    };
+    assert_eq!(look(&mut s), (accent, dry), "the first answer in hand");
+    s.keys("j");
+    assert_eq!(look(&mut s), (dry, accent), "the hand moved, the accent with it");
+}
+
 /// The first lines of the focused pane's folded doc comments (its view, as drawn).
 fn folded(s: &Shot) -> Vec<usize> {
     let starts = s.ed.view.iter().filter_map(|r| match r {
@@ -3691,6 +3814,123 @@ fn a_turns_rail_says_what_else_differs_from_head() {
         assert!(rows.iter().any(|r| r.contains("demo.rs")), "{rows:#?}");
         assert!(rows.iter().any(|r| r.contains("space u") && r.contains("undo the whole turn")), "{rows:#?}");
     }
+}
+
+/// 글타래 P5, review 5: a turn's file whose buffer was open before the review — diffed against HEAD, which the
+/// turn's commit left empty — is no take-back: no stamp, its `◦` says it's left. Opened through the review
+/// (`space e`, Enter) its diff is the review's, still none; `space v u` taking its change back stamps `u`.
+#[test]
+fn a_buffer_the_review_didnt_open_is_not_taken_back() {
+    use crate::codereview::{Base, CodeReview, File};
+    let scratch = crate::scratch::Scratch::new("turn-open-buffer");
+    let dir = std::fs::canonicalize(scratch.path()).unwrap();
+    let now = "fn tie() {}\nfn untie() {}\n";
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/knot.rs"), now).unwrap();
+    let mut s = Shot::new(160, 30);
+    s.ed.session.root = dir.clone();
+    s.ed.open(&dir.join("src/knot.rs")).unwrap();
+    // (the gutter's diff: against HEAD, the turn's commit — empty)
+    let doc = s.ed.doc_mut();
+    doc.git_base = Some(std::sync::Arc::new(now.to_string()));
+    (doc.git_hunks, doc.git_version) = (Vec::new(), doc.version());
+    let file = |rel: &str| File {
+        rel: rel.into(),
+        path: dir.join(rel),
+        added: 2,
+        removed: 0,
+        new: false,
+        gone: false,
+        binary: false,
+    };
+    let base = Base::Turn { at: 0, question: "tie the knots".into() };
+    s.ed.session.code_review = Some(CodeReview::for_test(base, dir.clone(), vec![file("src/knot.rs")]));
+    let stamp = |s: &mut Shot| {
+        let p = cells(&s.frame(), s.w, s.h);
+        let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+        let y = rows.iter().position(|r| r.contains("knot.rs") && r.contains("+2")).unwrap();
+        (stamp_in(&p, y, s.w).map(|(_, c)| c.contents().to_string()), rows[y].contains('◦'))
+    };
+    assert_eq!(stamp(&mut s), (None, true), "not the review's diff: left, not taken back");
+    s.keys(" e<ret>");
+    let id = s.ed.doc().id;
+    s.until("the review's base", |ed| {
+        let d = ed.doc();
+        d.review_base.is_some() && d.git_version == d.version()
+    });
+    assert!(s.ed.session.code_review.as_ref().unwrap().docs.contains(&id), "the review's own now");
+    assert_eq!(stamp(&mut s), (None, true), "its change there: still left");
+    s.ed.goto_line(0);
+    s.keys(" vu");
+    s.until("the diff again", |ed| {
+        ed.doc().git_version == ed.doc().version() && ed.doc().git_hunks.is_empty()
+    });
+    assert_eq!(stamp(&mut s).0.as_deref(), Some("u"), "taken back");
+}
+
+/// 글타래 P5: a turn's file in `space v t` is stamped once decided, at its row's end, by the key the rail's hints
+/// name — `space v m` keeps it (`m`, in the accent: the file in hand), `space v u` taking its every change back
+/// refuses it (`u`) — and none before, its `◦` saying what's left; dry once the hand is on another file. Every
+/// row of a turn keeps the stamp's room; a review that isn't a turn's has no stamp (viewed is no decision there)
+/// and keeps no room for one.
+#[test]
+fn a_turns_file_is_stamped_once_kept_or_taken_back() {
+    use crate::codereview::{Base, File};
+    let (base, now) = five_and_thirty_added();
+    // demo.rs's row in the rail: its stamp (letter, ground), and the cells from its counts' end to the rail's edge
+    let look = |s: &mut Shot| {
+        let p = cells(&s.frame(), s.w, s.h);
+        let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+        // (the rail's row, not the path bar's)
+        let y = rows.iter().position(|r| r.contains("demo.rs") && r.contains("+30")).unwrap();
+        let end = unicode_width::UnicodeWidthStr::width(&rows[y][..rows[y].find("+30").unwrap() + 3]);
+        let stamp = stamp_in(&p, y, s.w).map(|(_, c)| (c.contents().to_string(), c.bgcolor()));
+        (stamp, s.ed.screen.rail_w - end)
+    };
+    let mut s = review_of(160, 30, &base, &now);
+    s.keys(" vm");
+    let (stamp, head_room) = look(&mut s);
+    assert_eq!(stamp, None, "a review of HEAD: viewed, no stamp");
+    let mut s = review_of(160, 30, &base, &now);
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    r.base = Base::Turn { at: 0, question: "fix it".into() };
+    r.rail_need.take();
+    let ui = Ui::new(&s.ed);
+    let (accent, dry) = (vt_color(ui.accent.fg).unwrap(), vt_color(ui.virt.fg).unwrap());
+    let (stamp, room) = look(&mut s);
+    assert_eq!(stamp, None, "not decided yet");
+    assert_eq!(room, head_room + super::STAMP_W + 1, "a turn's row keeps the stamp's room");
+    // A buffer the review didn't open, its diff another base's and empty (a turn that committed): not taken back
+    let id = s.ed.doc().id;
+    let doc = s.ed.doc_mut();
+    let hunks = std::mem::take(&mut doc.git_hunks);
+    assert_eq!(look(&mut s).0, None, "not the review's diff: no `u`");
+    s.ed.doc_mut().git_hunks = hunks;
+    // (the review's own from here, as `show_at` makes it)
+    s.ed.session.code_review.as_mut().unwrap().docs.push(id);
+    s.keys(" vm");
+    assert_eq!(look(&mut s), (Some(("m".into(), accent)), room), "kept");
+    // (its change, lines 6 to 35, taken back from inside it — its diff worked out again)
+    s.ed.goto_line(10);
+    s.keys(" vu");
+    s.until("the diff again", |ed| ed.doc().git_version == ed.doc().version());
+    assert!(s.ed.doc().git_hunks.is_empty(), "taken back whole");
+    assert_eq!(look(&mut s).0, Some(("u".into(), accent)), "taken back");
+    // Another file in the turn, the rail's hand moved onto it (`space e`, `j`): demo.rs's stamp dries
+    let cwd = std::env::current_dir().unwrap();
+    let other = File {
+        rel: "src/other.rs".into(),
+        path: cwd.join("src/other.rs"),
+        added: 1,
+        removed: 0,
+        new: false,
+        gone: false,
+        binary: false,
+    };
+    s.ed.session.code_review.as_mut().unwrap().files.push(other);
+    s.keys(" ej");
+    assert_eq!(s.ed.session.code_review.as_ref().unwrap().selected, 1, "the hand on other.rs");
+    assert_eq!(look(&mut s).0, Some(("u".into(), dry)), "dry: not the row in hand");
 }
 
 /// Frictions 13, #2: the rail's counts are every line, and what moved is said beside them, faint — on the
@@ -4555,6 +4795,8 @@ fn snapshot_granted() {
     answer(&mut chat, Grant::Read(at("notes")), 12 * 60);
     answer(&mut chat, Grant::Terminals, 20);
     let hosts = vec![("db.example.com".to_string(), 5432)];
+    let listed: Vec<(String, u16, Option<char>)> =
+        hosts.iter().map(|(h, p)| (h.clone(), *p, Some('s'))).collect();
     let caps = |answers: [&Allowed; 3]| {
         let mut c = Caps::granted(&at("tarae"), answers[0], answers[1], answers[2]);
         let d = |what: PathBuf, why| Entry { what, source: Source::Default(why) };
@@ -4603,16 +4845,16 @@ fn snapshot_granted() {
     let mut s = scene(100, 30, full, &hosts);
     s.check("granted_chip");
     s.frames_both("granted_chip");
-    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, &more, now), false);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &listed, &more, now), false);
     s.check("granted_full");
     s.frames_both("granted_full");
     let mut s = scene(100, 50, full, &hosts);
-    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, &more, now), false);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &listed, &more, now), false);
     s.keys("G");
     s.check("granted_full_end");
     s.frames_both("granted_full_end");
     let mut s = scene(60, 24, full, &hosts);
-    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, &more, now), false);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &listed, &more, now), false);
     s.check("granted_narrow");
     s.frames_both("granted_narrow");
     s.keys("G");

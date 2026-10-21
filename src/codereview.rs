@@ -475,6 +475,34 @@ impl CodeReview {
         self.since(ed, f) == Some(Since::default())
     }
 
+    /// A turn's file as you decided it (`stamp.rs`), by the key the rail's hints name for it: every change of it
+    /// taken back (`space v u`, or by hand) — its diff against the turn's base worked out for its text now and
+    /// empty — `u`; marked viewed with nothing since (`m`, `space v m`: in a turn's review, kept) — `m`. None: not
+    /// a turn's review, or nothing decided yet.
+    pub fn stamp(&self, ed: &Editor, f: &File) -> Option<crate::stamp::Stamp> {
+        if !matches!(self.base, Base::Turn { .. }) {
+            return None;
+        }
+        // (its diff the review's: a document the review opened, its base come — `load_base` — not a buffer open
+        // before, still against HEAD, whose diff a turn that committed leaves empty)
+        let back = !(f.new || f.gone || f.binary)
+            && f.added + f.removed > 0
+            && !self.pending.contains(&f.path)
+            && doc_of(ed, f).is_some_and(|d| {
+                self.docs.contains(&d.id)
+                    && d.review_base.is_some()
+                    && d.diff_of.is_none()
+                    && !d.loading
+                    && d.git_base.is_some()
+                    && d.git_version == d.version()
+                    && d.git_hunks.is_empty()
+            });
+        if back {
+            return Some(crate::stamp::Stamp('u'));
+        }
+        self.viewed(ed, f).then_some(crate::stamp::Stamp('m'))
+    }
+
     /// The rail's rows: the files under their folders.
     pub fn rail_rows(&self) -> Vec<crate::filetree::Row> {
         crate::filetree::Tree::build(

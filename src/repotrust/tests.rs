@@ -229,7 +229,7 @@ fn granted_takes_each_part_back_and_what_it_let_run_follows() {
     for kind in [Kind::Tarae, Kind::Claude, Kind::Git] {
         let p = ed.picker.as_mut().unwrap();
         p.select_where(
-            |a| matches!(a, crate::picker::Action::Granted(Some(Taken::Trust(k, _))) if *k == kind),
+            |a| matches!(a, crate::picker::Action::Granted(Some((Taken::Trust(k, _), Some('y')))) if *k == kind),
         );
         ed.handle_event(crate::event::Event::Key(crate::key::Key::plain(crate::key::Code::Char('d'))));
         let (file, hash) = &kept_at[kind as usize];

@@ -223,6 +223,8 @@ pub struct Session {
     /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit), at
     /// their ports — what `:granted` lists and takes back; the proxy holds the answers itself (`hosts.rs`).
     pub hosts: Vec<(String, u16)>,
+    /// The card's key each of `hosts` was given with (`hosts::keep_one`) — `:granted`'s stamp; none: none known.
+    pub hosts_given: std::collections::BTreeMap<(String, u16), char>,
     /// What its Claude may do past the defaults by the user's `s` on a card (this session — every grant but a
     /// host's, `hosts`), kept with it in `$state/sessions` until it ends or `:sandbox-disallow` takes it back.
     pub allowed: crate::allow::Allowed,
@@ -366,6 +368,7 @@ impl Session {
             limit_asked: None,
             compacted: Default::default(),
             hosts: Vec::new(),
+            hosts_given: Default::default(),
             allowed: Default::default(),
             caps: None,
             caps_asked: 0,

@@ -398,6 +398,49 @@ fn each_answer_reaches_as_far_as_its_key() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 글타래 P5: each answer on a host's card records the key that gave it where the host is kept (`:granted`'s stamp)
+/// — `a` with the conversation's answers, `s` with the session's hosts, `A` with the project's — and an `A` cut to
+/// the session's (the network closed: `answer`'s cut) still `A`.
+#[test]
+fn a_hosts_answer_records_the_key_that_gave_it() {
+    let (mut ed, dir, _, run, _) = two("keys-recorded");
+    ed.session.chat = Some(crate::chat::Chat::new());
+    let front = dir.join("front");
+    for (h, k) in
+        [("chat.example.invalid", 'a'), ("session.example.invalid", 's'), ("project.example.invalid", 'A')]
+    {
+        asked(&mut ed, ask(&front, run, h));
+        settled(&mut ed);
+        key(&mut ed, k);
+    }
+    let chat = &ed.session.chat.as_ref().unwrap().allowed.given;
+    assert_eq!(chat.get(&crate::allow::Grant::Host("chat.example.invalid".into(), 443)), Some(&'a'));
+    let session = |h: &str| ed.session.hosts_given.get(&(h.to_string(), 443)).copied();
+    assert_eq!(session("session.example.invalid"), Some('s'));
+    // The project's, read back from `sandbox.json`
+    let path = ed.allow_path.clone().unwrap();
+    let end = Instant::now() + std::time::Duration::from_secs(5);
+    let project = crate::allow::Grant::Host("project.example.invalid".into(), 443);
+    let kept = loop {
+        let k = crate::allow::Store::read(Some(&path)).get(&ed.session.root).given.get(&project).copied();
+        if k.is_some() || Instant::now() > end {
+            break k;
+        }
+        if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+            ed.handle_event(ev);
+        }
+    };
+    assert_eq!(kept, Some('A'));
+    // An `A` on a closed network's card: kept as the session's, given by `A`
+    asked(&mut ed, ask(&front, run, "closed.example.invalid"));
+    let o = ed.offers.iter().find(|o| o.host().is_some_and(|a| a.host == "closed.example.invalid")).unwrap();
+    let (id, a) = (o.id, Ask { open: false, ..o.host().unwrap().clone() });
+    answer(&mut ed, id, a, Scope::Project);
+    assert!(ed.session.hosts.contains(&("closed.example.invalid".to_string(), 443)), "the session's");
+    assert_eq!(ed.session.hosts_given.get(&("closed.example.invalid".to_string(), 443)), Some(&'A'));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A peer session's key never answers it: with the card's session behind, its keys are the front's — a `y`
 /// there tells the proxy nothing. Brought to the front, the card answers for its own session and run.
 #[test]

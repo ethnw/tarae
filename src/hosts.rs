@@ -381,6 +381,8 @@ pub fn answer(ed: &mut Editor, id: u64, a: Ask, scope: Scope) {
     }
     // (Q6: a yes grants the registries the card listed with it; a no is for the host asked alone)
     let also = if scope == Scope::Refused { &[][..] } else { &a.also[..] };
+    // (the key that answered, before an `A` is cut to the session's with the network closed)
+    let key = key_of(scope);
     let scope = if scope == Scope::Project && !a.open { Scope::Session } else { scope };
     // (C2: a no on Claude's command is its `also`'s too — that conversation asks for the host on no card again)
     let ours = ed.session.proxy_id() == a.session;
@@ -392,12 +394,33 @@ pub fn answer(ed: &mut Editor, id: u64, a: Ask, scope: Scope) {
             c.also_refused.push(g);
         }
     }
-    keep(ed, a.session, a.run, &a.host, also, a.port, scope);
+    keep(ed, a.session, a.run, &a.host, also, a.port, (scope, key));
+}
+
+/// The key on a host's card that answers `scope` (`Editor::offer_key`: `y` the run, `a` the conversation, `s`
+/// the session, `A` the project) — what a host kept records it was given with.
+fn key_of(scope: Scope) -> char {
+    match scope {
+        Scope::Run => 'y',
+        Scope::Chat => 'a',
+        Scope::Session => 's',
+        Scope::Project => 'A',
+        Scope::Refused => 'n',
+    }
 }
 
 /// An answer for `host:port` (`session`'s, the proxy's id) and `also` (the registries the card listed, at that
-/// port): to the proxy, kept as far as it reaches, said.
-fn keep(ed: &mut Editor, session: u64, run: u64, host: &str, also: &[String], port: u16, scope: Scope) {
+/// port), given by the card's `key`: to the proxy, kept as far as it reaches with its key (`:granted`'s stamp),
+/// said.
+fn keep(
+    ed: &mut Editor,
+    session: u64,
+    run: u64,
+    host: &str,
+    also: &[String],
+    port: u16,
+    (scope, key): (Scope, char),
+) {
     let (at, mut doing) = (format!("{host}:{port}"), format!("reach {host}:{port}"));
     for h in std::iter::once(host).chain(also.iter().map(String::as_str)) {
         send(ToProxy::Answer { session, run, host: h.into(), port, scope });
@@ -410,7 +433,7 @@ fn keep(ed: &mut Editor, session: u64, run: u64, host: &str, also: &[String], po
         let ours = ed.session.proxy_id() == session;
         if let Some(c) = ed.session.chat.as_mut().filter(|_| ours) {
             for h in std::iter::once(host).chain(also.iter().map(String::as_str)) {
-                c.allowed.add(&crate::allow::Grant::Host(h.into(), port));
+                c.allowed.give(&crate::allow::Grant::Host(h.into(), port), key);
             }
         }
         ed.caps_sync();
@@ -421,9 +444,9 @@ fn keep(ed: &mut Editor, session: u64, run: u64, host: &str, also: &[String], po
         return ed.set_success(format!("Commands may {doing} in this conversation — :granted lists it"));
     }
     for h in also {
-        keep_one(ed, session, h, port, scope);
+        keep_one(ed, session, h, port, (scope, key));
     }
-    keep_one(ed, session, host, port, scope);
+    keep_one(ed, session, host, port, (scope, key));
     match scope {
         Scope::Run => ed.set_success(format!("Commands may {doing} in this run")),
         Scope::Session => {
@@ -455,17 +478,25 @@ fn keep(ed: &mut Editor, session: u64, run: u64, host: &str, also: &[String], po
 
 /// `keep`'s record of one host, as far as `scope` reaches: the session's list (`s`, `n` takes it off) or the
 /// project's (`A`).
-fn keep_one(ed: &mut Editor, session: u64, host: &str, port: u16, scope: Scope) {
+fn keep_one(ed: &mut Editor, session: u64, host: &str, port: u16, (scope, key): (Scope, char)) {
     // (the card's session is the one in front — it parks otherwise; what's kept here is that session's)
     let ours = ed.session.proxy_id() == session;
     let this = |(h, p): &(String, u16)| h == host && *p == port;
     match scope {
-        Scope::Session if ours && !ed.session.hosts.iter().any(this) => {
-            ed.session.hosts.push((host.into(), port));
+        Scope::Session if ours => {
+            if !ed.session.hosts.iter().any(this) {
+                ed.session.hosts.push((host.into(), port));
+            }
+            ed.session.hosts_given.insert((host.into(), port), key);
         }
         // (as a card's other `A`s: a failed take-back of it ends once this is written — `allow::keep_answer`)
-        Scope::Project => crate::allow::keep_answer(ed, vec![crate::allow::Grant::Host(host.into(), port)]),
-        Scope::Refused if ours => ed.session.hosts.retain(|e| !this(e)),
+        Scope::Project => {
+            crate::allow::keep_answer(ed, vec![crate::allow::Grant::Host(host.into(), port)], key)
+        }
+        Scope::Refused if ours => {
+            ed.session.hosts.retain(|e| !this(e));
+            ed.session.hosts_given.remove(&(host.to_string(), port));
+        }
         _ => {}
     }
 }
@@ -494,10 +525,11 @@ pub fn granted(ed: &mut Editor, host: &str, port: u16, scope: crate::allow::Scop
     let also = &with_suggested(host, port)[1..];
     match scope {
         crate::allow::Scope::Once => send(ToProxy::Lifted { session, host: host.into(), port }),
-        crate::allow::Scope::ThisChat => keep(ed, session, 0, host, also, port, Scope::Chat),
-        // (piece C: a host is never kept past a session — `Caps::storable`; always is the setting)
+        crate::allow::Scope::ThisChat => keep(ed, session, 0, host, also, port, (Scope::Chat, scope.key())),
+        // (piece C: a host is never kept past a session — `Caps::storable`; always is the setting — given by the
+        // card's key all the same)
         crate::allow::Scope::Session | crate::allow::Scope::Always => {
-            keep(ed, session, 0, host, also, port, Scope::Session)
+            keep(ed, session, 0, host, also, port, (Scope::Session, scope.key()))
         }
     }
 }

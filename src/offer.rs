@@ -2110,7 +2110,8 @@ impl crate::editor::Editor {
     }
 
     fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
-        self.offer_said(&o, if scope == crate::allow::Scope::Always { 'A' } else { 'a' });
+        // (the key as the grants it gives record it: `Scope::key`, one table)
+        self.offer_said(&o, scope.key());
         self.card_answered(o.id);
         match o.what {
             What::Read { pending, keep, folder } => {

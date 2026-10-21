@@ -57,9 +57,10 @@ pub enum Action {
     Message,
     /// A plain list's group heading (`:granted`'s scopes) — drawn faint, never selected.
     Heading,
-    /// A row of `:granted` (`granted.rs`): an answer `d` takes back, or None — a default, not one to take back.
-    /// Enter does nothing: the list is for reading.
-    Granted(Option<crate::granted::Taken>),
+    /// A row of `:granted` (`granted.rs`): an answer `d` takes back and the card's key it was given with (its
+    /// stamp; None: none known), or None — a default, not one to take back. Enter does nothing: the list is for
+    /// reading.
+    Granted(Option<(crate::granted::Taken, Option<char>)>),
     /// A local branch (`B` in the git tab): Enter switches to it, `C-r` renames, `C-x` deletes. `held` = where
     /// it's checked out when that's another worktree (as shown — switching there is refused).
     Branch {
@@ -134,6 +135,8 @@ pub struct Row {
     /// What the list is about, in a hit's code (`Picker::emphasis` — the name `g r` lists): char ranges of
     /// `label`, past its line number.
     pub spots: Vec<(u32, u32)>,
+    /// The list's stamp column (`Picker::stamps`): None — it has none; `Some(None)` — this row's is empty.
+    pub stamp: Option<Option<crate::stamp::Stamp>>,
 }
 
 /// Matches laid out as a tree while typing, best first — the rest only counted (a tree of all 200k files
@@ -322,6 +325,9 @@ pub struct Picker {
     /// Each row's hint keeps its room and a long label is cut in its middle (`:granted`: a place's start and end,
     /// and where it comes from).
     pub hints_first: bool,
+    /// Its rows end in a column of stamps (`stamp.rs`; `:granted`: your answers) — every row keeps the room, so
+    /// the hints stay in line.
+    pub stamps: bool,
     /// The buffer with unsaved changes `C-x` was pressed on once (the buffer list) — again closes it.
     pub closing: Option<crate::document::DocId>,
     /// What it is, as counted (`features::PICKERS`) — never its title, which may name a file.
@@ -382,6 +388,7 @@ impl Picker {
             made: None,
             keys: false,
             hints_first: false,
+            stamps: false,
             closing: None,
             kind: "test",
             tallest: std::cell::Cell::new(0),
@@ -928,6 +935,7 @@ impl Picker {
                     glyph: item.glyph,
                     tree: (item.action == Action::Heading).then_some((0, Kind::Group)),
                     spots: Vec::new(),
+                    stamp: self.stamps.then(|| item.action.stamp()),
                 })
                 .collect();
         };
@@ -1005,6 +1013,7 @@ impl Picker {
                 glyph: item.and_then(|it| it.glyph),
                 tree: Some((r.depth, r.kind)),
                 spots,
+                stamp: None,
             });
         }
         self.lines = lines;
@@ -1047,6 +1056,14 @@ pub enum Preview {
 }
 
 impl Action {
+    /// What its row was decided as (`stamp.rs`): a `:granted` answer, by its key — a default is nobody's.
+    pub fn stamp(&self) -> Option<crate::stamp::Stamp> {
+        match self {
+            Action::Granted(Some((_, Some(key)))) => Some(crate::stamp::Stamp(*key)),
+            _ => None,
+        }
+    }
+
     /// File to preview and the line to highlight.
     pub fn preview_target(&self) -> Option<(&Path, Option<usize>)> {
         match self {

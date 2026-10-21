@@ -4913,7 +4913,6 @@ fn draw_review_header(
 ) -> io::Result<()> {
     use crate::llm::Decision;
     let n = rev.hunks.len();
-    let (minus_fg, plus_fg) = (ui.diff_minus.fg, ui.diff_plus.fg);
     // Head band is neutral card color — an accent tint (hanji's vermilion) would look like deleted-line red
     let band = card_style(ui, editor, "ui.popup").bg;
     let h = &rev.hunks[i];
@@ -4949,11 +4948,12 @@ fn draw_review_header(
             let v = vec![("", "text changed while waiting — skipped")];
             (v.clone(), v, base.patch(ui.error))
         }
+        // (decided: the word dim after its stamp, the key that decided it)
         (_, Decision::Accept) => {
-            (vec![("", "accepted")], vec![("", "accepted")], Style { fg: plus_fg, ..base })
+            (vec![("", "accepted")], vec![("", "accepted")], Style { fg: ui.virt.fg, ..base })
         }
         (_, Decision::Reject) => {
-            (vec![("", "rejected")], vec![("", "rejected")], Style { fg: minus_fg, ..base })
+            (vec![("", "rejected")], vec![("", "rejected")], Style { fg: ui.virt.fg, ..base })
         }
         _ if current && chat == Some(true) => {
             (vec![("C-q", "answer it — the chat has the keys")], vec![("C-q", "answer it")], base)
@@ -4975,10 +4975,27 @@ fn draw_review_header(
         ),
         _ => (vec![("", "pending")], vec![("", "pending")], Style { fg: ui.linenr.fg, ..base }),
     };
+    // Decided: its stamp where the answer was asked — its letter in the column of the keys — then the word. Dry:
+    // the change in hand (always an undecided one) has the region's accent, in its answer keys
+    let stamp = if h.conflict { None } else { crate::stamp::Stamp::of(h.decision) };
+    let stamp = stamp.filter(|_| used + 2 + STAMP_W <= width);
+    if let Some(stamp) = stamp {
+        apply(out, base)?;
+        queue!(out, Spaces(2))?;
+        for s in stamp_spans(ui, stamp, i == rev.current, base) {
+            apply(out, s.style)?;
+            queue!(out, Print(&s.text))?;
+        }
+        used += 2 + STAMP_W;
+    }
     let room = |v: &Hints, gap: usize| -> usize {
         v.iter().map(|(k, d)| gap + if k.is_empty() { 0 } else { k.width() + 1 } + d.width()).sum()
     };
-    let (status, gap) = if used + room(&full, 3) <= width { (full, 3) } else { (short, 2) };
+    let (status, gap) = match stamp {
+        Some(_) => (full, 1),
+        None if used + room(&full, 3) <= width => (full, 3),
+        None => (short, 2),
+    };
     for (key, desc) in status {
         let lead = " ".repeat(gap);
         let piece = if key.is_empty() { format!("{lead}{desc}") } else { format!("{lead}{key} {desc}") };
@@ -5136,6 +5153,13 @@ fn draw_list_row(
     let matched = Style { fg: ui.accent.fg, bold: true, ..Style::default() };
     let mut used = 0;
     let base = if r.selected && highlight { selected } else { card };
+    // A list with a stamp column (`:granted`): every row keeps its room at the end, a cell before it — the rest
+    // of the row is laid out in what's left. A narrow list gives it back to the labels first
+    let row_w = lw;
+    let lw = match r.stamp {
+        Some(_) if lw >= STAMP_LIST_MIN => lw - STAMP_W - 1,
+        _ => lw,
+    };
     if r.selected {
         apply(out, Style { fg: ui.accent.fg, ..base })?;
         queue!(out, Print("▎ "))?;
@@ -5271,6 +5295,22 @@ fn draw_list_row(
         queue!(out, Print(hint), Print(" "))?;
         apply(out, base)?;
         used = lw;
+    }
+    // The stamp — in the accent on the row in hand, beside its bar; dry on the rest — or its room
+    if lw < row_w {
+        queue!(out, Spaces(lw.saturating_sub(used)))?;
+        match r.stamp.flatten() {
+            Some(stamp) => {
+                for s in stamp_spans(ui, stamp, r.selected, base) {
+                    apply(out, s.style)?;
+                    queue!(out, Print(&s.text))?;
+                }
+                apply(out, base)?;
+            }
+            None => queue!(out, Spaces(STAMP_W))?,
+        }
+        queue!(out, Print(" "))?;
+        used = row_w;
     }
     Ok(used)
 }
@@ -8930,6 +8970,7 @@ fn draw_sidebar(
                         glyph: l.glyph,
                         tree: Some((l.depth, l.kind)),
                         spots: Vec::new(),
+                        stamp: None,
                     };
                     links.push((y, r));
                     // The selected row's name cut short: whole, over the code (drawn after the rest) — with
@@ -9123,6 +9164,9 @@ fn review_rail_need(editor: &Editor, r: &crate::codereview::CodeReview) -> usize
         k => format!(" · {k} moved"),
     };
     need = need.max(format!("{n} files  +{added} −{removed}{moved}").width());
+    // (a turn's rows keep a stamp's room: `draw_review_rail`)
+    let turn = matches!(r.base, crate::codereview::Base::Turn { .. });
+    let stamp_room = if turn { STAMP_W + 1 } else { 0 };
     for t in r.rail_rows() {
         let piece: String = r.files[t.source].rel.chars().skip(t.span.start).take(t.span.len()).collect();
         let guides = tree_guides(t.depth).width();
@@ -9130,13 +9174,12 @@ fn review_rail_need(editor: &Editor, r: &crate::codereview::CodeReview) -> usize
             None => guides + 2 + piece.width() + 1,
             Some(i) => {
                 let f = &r.files[i];
-                2 + guides + piece.width() + rail_grade_w(editor, r, f) + rail_tail(r, f).width()
+                2 + guides + piece.width() + rail_grade_w(editor, r, f) + rail_tail(r, f).width() + stamp_room
             }
         };
         need = need.max(row);
     }
     let st = Style::default();
-    let turn = matches!(r.base, crate::codereview::Base::Turn { .. });
     for (focus, drafts, high) in [(true, 0, false), (false, 0, false), (false, 9, false), (false, 0, true)] {
         for row in review_rail_hints(focus, turn, drafts, high, st, st, st) {
             need = need.max(row.iter().map(|s| s.text.width()).sum());
@@ -9808,18 +9851,28 @@ fn draw_review_rail(
         }
         let tail_w: usize = tail.iter().map(|s| s.text.width()).sum();
         let indent = guides.text.width();
+        // A turn's file decided (`CodeReview::stamp`): kept or taken back — its stamp at the row's end, in place of
+        // its `●`; every row of a turn keeps the stamp's room (measured as the rail opened: `review_rail_need`)
+        let stamp = r.stamp(editor, f);
+        let stamp_room = if turn { STAMP_W + 1 } else { 0 };
         // The file name plain (dimmed once viewed) — its folders are the headings above; cut from the left
         // when the rail is at its widest (the end, its extension, stays)
         // (the row starts in the padding, its bar there)
-        let shown = fit_left(&piece, (w + PAD).saturating_sub(4 + indent + tail_w));
-        let name_st = if seen { Style { fg: ui.virt.fg, ..bg } } else { bg };
+        let shown = fit_left(&piece, (w + PAD).saturating_sub(4 + indent + tail_w + stamp_room));
+        let name_st = if seen || stamp.is_some() { Style { fg: ui.virt.fg, ..bg } } else { bg };
         let mut row = vec![
             sp(if here { "▎ ".into() } else { "  ".into() }, Style { fg: ui.accent.fg, ..bg }),
             sp(guides.text, Style { fg: ui.linenr.fg, ..bg }),
             // (marked, changed since — cardburden 1: its `◦` warned, the header counts them; the rail's width
             // was measured as it opened, so nothing is added to the row)
             sp(
-                if seen { "● ".into() } else { "◦ ".into() },
+                if stamp.is_some() {
+                    "  ".into()
+                } else if seen {
+                    "● ".into()
+                } else {
+                    "◦ ".into()
+                },
                 Style {
                     fg: match (seen, since.is_some()) {
                         (true, _) => ui.diff_plus.fg,
@@ -9832,9 +9885,16 @@ fn draw_review_rail(
             sp(shown.clone(), name_st),
         ];
         let used = 4 + indent + shown.width();
-        // (the counts end at the padding)
-        row.push(sp(" ".repeat((w + PAD).saturating_sub(used + tail_w)), bg));
+        // (the counts end at the padding — or at the stamp's room)
+        row.push(sp(" ".repeat((w + PAD).saturating_sub(used + tail_w + stamp_room)), bg));
         row.extend(tail);
+        if turn {
+            row.push(sp(" ".into(), bg));
+            match stamp {
+                Some(stamp) => row.extend(stamp_spans(ui, stamp, here, bg)),
+                None => row.push(sp(" ".repeat(STAMP_W), bg)),
+            }
+        }
         marks.push((rows.len(), i, 2 + indent));
         rows.push((row, bg, Some(i)));
     }
@@ -11795,6 +11855,32 @@ fn head_rows(h: &crate::picker::Head, lw: usize) -> Vec<HeadRow> {
 /// accent `▎` at its start.
 fn selected_row(ui: &Ui, editor: &Editor, card: Style) -> Style {
     card.patch(editor.theme.try_get("ui.menu.selected").unwrap_or(ui.selection_primary))
+}
+
+/// The cells a stamp takes (`stamp_spans`).
+const STAMP_W: usize = 3;
+/// A list's row narrower than this has no stamp column: what the rows say comes first.
+const STAMP_LIST_MIN: usize = 60;
+
+/// A stamp (`stamp.rs`) stamped on `on`, the one way it's drawn — `STAMP_W` cells, its letter the key that decided.
+/// Where `on` has a colour it's filled, `▐y▌`: the ground in its ink, the letter bold in `on`'s own colour, cut out
+/// of it (음각); where it has none (a transparent theme) there's nothing to cut the letter out of, so it's carved the
+/// other way, `▌y▐`: the letter bold and its frame in the ink, nothing painted (양각). Its ink is the accent when `wet` — the row in hand, where the
+/// accent's bar already is: one mark a region — else the dim (dry).
+fn stamp_spans(ui: &Ui, stamp: crate::stamp::Stamp, wet: bool, on: Style) -> [crate::markdown::Span; 3] {
+    use crate::markdown::Span;
+    let ink = if wet { ui.accent.fg } else { ui.virt.fg };
+    let edge = Style { fg: ink, bg: on.bg, ..Style::default() };
+    let sp = |text: &str, style: Style| Span { text: text.into(), style };
+    let key = stamp.0.to_string();
+    match on.bg {
+        Some(paper) => [
+            sp("▐", edge),
+            sp(&key, Style { fg: Some(paper), bg: ink, bold: true, ..Style::default() }),
+            sp("▌", edge),
+        ],
+        None => [sp("▌", edge), sp(&key, Style { bold: true, ..edge }), sp("▐", edge)],
+    }
 }
 
 /// Pointing's labels (`uistate/point.rs`): two letters on each element that has an id, in the `gw` look

@@ -143,19 +143,22 @@ fn kind_heading(k: Kind) -> &'static str {
     }
 }
 
-/// An answer's row: `d` takes it back.
-fn answer(label: String, hint: String, taken: Taken) -> Item {
-    Item { label, action: Action::Granted(Some(taken)), hint, glyph: Some(("•", "ui.virtual")) }
+/// An answer's row: `d` takes it back; `key` is the card's key it was given with, its stamp (`stamp.rs`) — None:
+/// no key known (kept before keys were), no stamp.
+fn answer(label: String, hint: String, taken: Taken, key: Option<char>) -> Item {
+    Item { label, action: Action::Granted(Some((taken, key))), hint, glyph: Some(("•", "ui.virtual")) }
 }
 
 /// The list's rows: the defaults `caps` found (with why), then Claude's answers with their times — kept for the
 /// checkout (`kept`), this session's, this chat's — each once, under the longest it lasts, newest first; the
 /// session's hosts (the proxy's, until you quit) and its no-sandbox `s` with this session's; then `more`: the trust
-/// answers by kind, the plugins, the preflight told, and what's kept for other checkouts.
+/// answers by kind, the plugins, the preflight told, and what's kept for other checkouts. Each answer with the
+/// key it was given with where one was recorded (Claude's: `Allowed.given`; a host's: with it in `hosts`); the
+/// rest have only one card that gives them, its `y` (a trust, a plugin, the preflight) or `s` (no sandbox).
 pub fn items(
     caps: &Caps,
     [kept, session, chat]: [&Allowed; 3],
-    hosts: &[(String, u16)],
+    hosts: &[(String, u16, Option<char>)],
     more: &More,
     now: u64,
 ) -> Vec<Item> {
@@ -188,7 +191,10 @@ pub fn items(
         let to = if caps.shared.contains(&g) { &mut every } else { &mut own };
         to.add(&g);
         if let Some(at) = kept.granted.get(&g) {
-            to.granted.insert(g, *at);
+            to.granted.insert(g.clone(), *at);
+        }
+        if let Some(key) = kept.given.get(&g) {
+            to.given.insert(g, *key);
         }
     }
     let mut seen: Vec<Grant> = Vec::new();
@@ -201,18 +207,19 @@ pub fn items(
                 continue;
             }
             let at = a.granted.get(&g).copied();
-            rows.push((at.unwrap_or(0), answer(label(&g), when(at, now), Taken::Grant(taken_as(&g)))));
+            let key = a.given.get(&g).copied();
+            rows.push((at.unwrap_or(0), answer(label(&g), when(at, now), Taken::Grant(taken_as(&g)), key)));
             seen.push(g);
         }
         if title == "this session" {
-            for (h, p) in hosts {
+            for (h, p, key) in hosts {
                 let label = format!("reach {h}:{p}");
                 let taken = Taken::Grant(crate::hosts::listed(h, *p));
-                rows.push((0, answer(label, "you · until you quit".into(), taken)));
+                rows.push((0, answer(label, "you · until you quit".into(), taken, *key)));
             }
             if more.no_sandbox {
                 let label = NO_SANDBOX.into();
-                rows.push((0, answer(label, "you · until you quit".into(), Taken::NoSandbox)));
+                rows.push((0, answer(label, "you · until you quit".into(), Taken::NoSandbox, Some('s'))));
             }
         }
         if rows.is_empty() {
@@ -238,19 +245,19 @@ pub fn items(
             hint.push_str(&format!(" · {} versions", t.versions));
         }
         // (the file alone: its heading says what it runs)
-        out.push(answer(t.place.shown(&caps.root), hint, Taken::Trust(t.kind, t.place.clone())));
+        out.push(answer(t.place.shown(&caps.root), hint, Taken::Trust(t.kind, t.place.clone()), Some('y')));
         answered += 1;
     }
     if !more.plugins.is_empty() {
         out.extend([heading(""), heading("plugins · everywhere")]);
         for (name, what) in &more.plugins {
-            out.push(answer(format!("{name}: {what}"), "you".into(), Taken::Plugin(name.clone())));
+            out.push(answer(format!("{name}: {what}"), "you".into(), Taken::Plugin(name.clone()), Some('y')));
         }
         answered += more.plugins.len();
     }
     if !more.preflight.is_empty() {
         out.extend([heading(""), heading(&format!("preflight · {shared}"))]);
-        out.push(answer(PREFLIGHT.into(), "you".into(), Taken::Preflight(more.preflight.clone())));
+        out.push(answer(PREFLIGHT.into(), "you".into(), Taken::Preflight(more.preflight.clone()), Some('y')));
         answered += 1;
     }
     if answered == 0 {
@@ -294,7 +301,13 @@ impl Editor {
     /// The list made again: opened (`again`: only if it's still open — after a `d`).
     fn granted_list(&mut self, again: bool) {
         let basis = self.caps_basis();
-        let hosts = self.session.hosts.clone();
+        let given = &self.session.hosts_given;
+        let hosts: Vec<(String, u16, Option<char>)> = self
+            .session
+            .hosts
+            .iter()
+            .map(|(h, p)| (h.clone(), *p, given.get(&(h.clone(), *p)).copied()))
+            .collect();
         let look = Look {
             root: self.session.root.clone(),
             no_sandbox: self.session.no_sandbox == Some(crate::tools::NoSandbox::Unasked),
@@ -330,7 +343,7 @@ impl Editor {
             None => {
                 // (its kind written out: `features::every_picker_kind_is_listed` reads it from here)
                 let mut p = Picker::of("granted", KIND, Vec::new(), false).without_preview();
-                (p.keys, p.hints_first) = (true, true);
+                (p.keys, p.hints_first, p.stamps) = (true, true, true);
                 p.set_found(items);
                 // (on the first answer: what a key acts on)
                 p.select_where(|a| matches!(a, Action::Granted(Some(_))));
@@ -352,7 +365,7 @@ impl Editor {
         }
         match c {
             'd' => match p.current().map(|i| i.action.clone()) {
-                Some(Action::Granted(Some(taken))) => {
+                Some(Action::Granted(Some((taken, _)))) => {
                     if let Err(e) = self.granted_take(taken) {
                         self.set_error(e);
                     }
@@ -540,13 +553,15 @@ mod tests {
         let at = |l: &str| labels.iter().position(|x| x == l).unwrap_or_else(|| panic!("{l} in {labels:?}"));
         assert!(at(ALWAYS) < at("this session") && at("this session") < at("this chat"), "{labels:?}");
         // The kept one, its write held back: the next run already hasn't it
-        let pick = |ed: &mut Editor, what: String| {
+        // (each with the key it was given with, recorded: its stamp — none for the one written to the store here,
+        // by no card)
+        let pick = |ed: &mut Editor, what: String, key: Option<char>| {
             let p = ed.picker.as_mut().unwrap();
-            let taken = Action::Granted(Some(Taken::Grant(what)));
+            let taken = Action::Granted(Some((Taken::Grant(what), key)));
             p.select_where(|a| *a == taken);
             assert_eq!(p.current().map(|i| &i.action), Some(&taken));
         };
-        pick(&mut ed, shown(&kept));
+        pick(&mut ed, shown(&kept), None);
         {
             // (the store's writes held a moment)
             crate::storewrite::hold(&store, Some(0));
@@ -562,9 +577,9 @@ mod tests {
         assert_eq!(next_run(&ed).llm.sandbox_write, [shown(&chat)]);
         // This session's, this chat's
         until(&mut ed, "the list again", |ed| !rows(ed).iter().any(|r| r.0.contains("kept")));
-        pick(&mut ed, "port 5432".into());
+        pick(&mut ed, "port 5432".into(), Some('s'));
         key(&mut ed, 'd');
-        pick(&mut ed, shown(&chat));
+        pick(&mut ed, shown(&chat), Some('a'));
         key(&mut ed, 'd');
         let w = next_run(&ed);
         assert!(w.llm.sandbox_write.is_empty() && w.llm.sandbox_ports.is_empty() && w.granted.is_empty());
@@ -589,6 +604,101 @@ mod tests {
             !labels.iter().any(|l| [ALWAYS, "this session", "this chat"].contains(&l.as_str())),
             "{labels:?}"
         );
+    }
+
+    /// 글타래 P5: an answer's stamp is the key on the card that gave it, recorded where it landed, never guessed from
+    /// where it's kept: an `A` on a token-like variable — kept only as this session's (`Caps::storable`) — still `A`;
+    /// a host's `s` with the session's hosts; an `A` kept for the project written with its key in `sandbox.json` and
+    /// read back from there alone. One kept with no key (before keys were recorded) has no stamp.
+    #[test]
+    fn each_answer_is_stamped_with_the_key_that_gave_it() {
+        let s = crate::scratch::Scratch::new("granted-keys");
+        let (mut ed, _, store) = editor(&s);
+        crate::allow::grant(&mut ed, &Grant::Env("GITHUB_TOKEN".into()), Scope::Always);
+        crate::allow::grant(&mut ed, &Grant::Port(5432), Scope::Always);
+        crate::hosts::granted(&mut ed, "db.example.invalid", 5432, Scope::Session);
+        until(&mut ed, "kept", |ed| ed.allow_writing == 0 && std::fs::read_to_string(&store).is_ok());
+        let stamps = |ed: &mut Editor| {
+            open(ed);
+            let p = ed.picker.take().unwrap();
+            let answers = p.items().iter().filter(|i| matches!(i.action, Action::Granted(Some(_))));
+            answers.map(|i| (i.label.clone(), i.action.stamp().map(|s| s.0))).collect::<Vec<_>>()
+        };
+        let got = stamps(&mut ed);
+        let of = |got: &[(String, Option<char>)], l: &str| {
+            got.iter().find(|r| r.0 == l).unwrap_or_else(|| panic!("{l} in {got:?}")).1
+        };
+        assert_eq!(of(&got, "have your variable GITHUB_TOKEN"), Some('A'), "kept as the session's: {got:?}");
+        assert_eq!(of(&got, "connect to port 5432"), Some('A'));
+        assert_eq!(of(&got, "reach db.example.invalid:5432"), Some('s'));
+        // (the project's alone: the conversation's copy of the `A` gone — read from `sandbox.json`)
+        ed.session.chat = Some(crate::chat::Chat::new());
+        assert!(std::fs::read_to_string(&store).unwrap().contains("\"key\": \"A\""), "written with its key");
+        assert_eq!(of(&stamps(&mut ed), "connect to port 5432"), Some('A'), "read back");
+        // An entry kept with no key: no stamp
+        fn unkeyed(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    o.remove("key");
+                    o.values_mut().for_each(unkeyed);
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(unkeyed),
+                _ => {}
+            }
+        }
+        let mut kept: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        unkeyed(&mut kept);
+        std::fs::write(&store, kept.to_string()).unwrap();
+        assert_eq!(of(&stamps(&mut ed), "connect to port 5432"), None, "no key, no stamp");
+    }
+
+    /// 글타래 P5: answered again, a grant's stamp is the latest answer's key, with its time — an `a`, then an `A` on
+    /// the same port: `A`, in the conversation's answers and the project's alike.
+    #[test]
+    fn answered_again_a_grant_takes_the_latest_key() {
+        let s = crate::scratch::Scratch::new("granted-again");
+        let (mut ed, _, store) = editor(&s);
+        crate::allow::grant(&mut ed, &Grant::Port(7000), Scope::ThisChat);
+        let chat =
+            |ed: &Editor| ed.session.chat.as_ref().unwrap().allowed.given.get(&Grant::Port(7000)).copied();
+        assert_eq!(chat(&ed), Some('a'));
+        crate::allow::grant(&mut ed, &Grant::Port(7000), Scope::Always);
+        assert_eq!(chat(&ed), Some('A'), "the latest answer's");
+        until(&mut ed, "kept", |ed| ed.allow_writing == 0 && std::fs::read_to_string(&store).is_ok());
+        open(&mut ed);
+        let p = ed.picker.take().unwrap();
+        let stamps: Vec<_> = p.items().iter().filter_map(|i| i.action.stamp()).map(|s| s.0).collect();
+        assert_eq!(stamps, ['A'], "one row, the latest key: {:?}", rows_of(&p));
+    }
+
+    /// 글타래 P5, piece J: in a repository's checkout an `A` kept for every checkout (a port) keeps its key there too —
+    /// written in the repository's shared answers, read back from them; answered again over one kept with no key,
+    /// the latest answer's key.
+    #[test]
+    fn a_shared_answer_keeps_the_key_that_gave_it() {
+        let s = crate::scratch::Scratch::new("granted-repo-keys");
+        let (main, _) = crate::allow::tests::repo_with_worktree(s.path());
+        let store = s.path().join("sandbox.json");
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
+        // (kept already, with no key — before keys were recorded: the answer again writes its key)
+        crate::allow::keep(&store, &main, |a| a.add(&Grant::Port(6379))).unwrap();
+        crate::allow::grant(&mut ed, &Grant::Port(6379), Scope::Always);
+        until(&mut ed, "kept", |ed| ed.allow_writing == 0 && std::fs::read_to_string(&store).is_ok());
+        // (no chat: what's listed is the store's alone)
+        open(&mut ed);
+        let p = ed.picker.take().unwrap();
+        let row = p.items().iter().find(|i| i.label == "connect to port 6379").expect("listed");
+        assert_eq!(row.action.stamp().map(|s| s.0), Some('A'), "{:?}", rows_of(&p));
+        let kept: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        let shared = kept["repositories"].as_object().and_then(|r| r.values().next()).map(|r| &r["shared"]);
+        assert!(shared.is_some_and(|e| e.to_string().contains("\"key\":\"A\"")), "{kept}");
+    }
+
+    fn rows_of(p: &Picker) -> Vec<String> {
+        p.items().iter().map(|i| i.label.clone()).collect()
     }
 
     /// A variable and every port here (piece D): an `A` on a token-like name lasts this session — never in the
@@ -719,13 +829,22 @@ mod tests {
         assert!(at("preflight · this project") < at(PREFLIGHT));
         assert!(listed[at(".githooks/pre-commit")].1.starts_with("you · "), "{listed:?}");
         assert!(!listed.iter().any(|r| r.0 == NONE_PAST));
+        // (each stamped with its one card's key: a trust's and the preflight's `y`, the no-sandbox card's `s`)
+        let p = ed.picker.as_ref().unwrap();
+        let stamp =
+            |l: &str| p.items().iter().find(|i| i.label == l).and_then(|i| i.action.stamp()).map(|s| s.0);
+        let keys = [stamp(".githooks/pre-commit"), stamp(PREFLIGHT), stamp(no_sandbox)];
+        assert_eq!(keys, [Some('y'), Some('y'), Some('s')]);
         // `G` goes to the last row, `g` to the first answer-or-default
         key(&mut ed, 'G');
         let p = ed.picker.as_ref().unwrap();
-        assert!(matches!(p.current().map(|i| &i.action), Some(Action::Granted(Some(Taken::Preflight(_))))));
+        assert!(matches!(
+            p.current().map(|i| &i.action),
+            Some(Action::Granted(Some((Taken::Preflight(_), Some('y')))))
+        ));
         let take = |ed: &mut Editor, f: &dyn Fn(&Taken) -> bool| {
             let p = ed.picker.as_mut().unwrap();
-            p.select_where(|a| matches!(a, Action::Granted(Some(t)) if f(t)));
+            p.select_where(|a| matches!(a, Action::Granted(Some((t, _))) if f(t)));
             key(ed, 'd');
         };
         take(&mut ed, &|t| matches!(t, Taken::NoSandbox));
@@ -797,7 +916,7 @@ mod tests {
         assert_eq!(listed.last().unwrap().0, "1 more kept for other checkouts — not used here");
         let p = ed.picker.as_mut().unwrap();
         p.select_where(
-            |a| matches!(a, Action::Granted(Some(Taken::Grant(w))) if w.contains("tarae-stand-in")),
+            |a| matches!(a, Action::Granted(Some((Taken::Grant(w), _))) if w.contains("tarae-stand-in")),
         );
         key(&mut ed, 'd');
         until(&mut ed, "taken back for every checkout", |_| {

@@ -5129,6 +5129,9 @@ mod tests {
         ed.session.root = state.clone();
         ed.session.allowed.add(&crate::allow::Grant::Write("/t/w".into()));
         ed.session.allowed.add(&crate::allow::Grant::Port(5432));
+        // (an `A` on a token-like variable, cut to the session's: its key kept with it — 글타래 P5)
+        let token = crate::allow::Grant::Env("GITHUB_TOKEN".into());
+        ed.session.allowed.give(&token, 'A');
         let k = Kept::of(&ed.session);
         let v = k.json();
         assert!(
@@ -5152,9 +5155,40 @@ mod tests {
         assert_eq!(ed.session.allowed.write, [PathBuf::from("/t/w")]);
         let w = crate::allow::Grant::Write("/t/w".into());
         assert_eq!(ed.session.allowed.granted.get(&w), k.allowed.granted.get(&w), "its own time");
+        assert_eq!(ed.session.allowed.given.get(&token), Some(&'A'), "its key, through the file and back");
+        assert_eq!(load(&dir, common).sessions[0].allowed.given.get(&token), Some(&'A'));
         // An earlier build's: none
         let old = json!({ "root": "/wt/a", "name": "a" });
         assert!(Kept::from_json(&old).unwrap().allowed.is_empty());
+    }
+
+    /// 글타래 P5: a session restored, each answer the latest of the two — an `s` given since it was kept stays `s`
+    /// over the kept `A` (a token-like variable's, cut to the session's); one given before it was kept takes the kept
+    /// `A`. The key goes with its time.
+    #[test]
+    fn a_restored_sessions_answer_keeps_the_latest_key() {
+        let scratch = crate::scratch::Scratch::new("kept-latest");
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = scratch.to_path_buf();
+        let token = crate::allow::Grant::Env("GITHUB_TOKEN".into());
+        let mut k = Kept::of(&ed.session);
+        k.allowed.give(&token, 'A');
+        k.allowed.granted.insert(token.clone(), 1_000);
+        let answer = |ed: &Editor| {
+            let a = &ed.session.allowed;
+            (a.given.get(&token).copied(), a.granted.get(&token).copied())
+        };
+        // (given since it was kept: newer)
+        ed.session.allowed.give(&token, 's');
+        let now = ed.session.allowed.granted[&token];
+        ed.sessions_back(vec![k.clone()], Vec::new(), None, false);
+        assert_eq!(answer(&ed), (Some('s'), Some(now)), "the latest: given since");
+        // (given before it was kept: older)
+        ed.session.allowed = Default::default();
+        ed.session.allowed.give(&token, 's');
+        ed.session.allowed.granted.insert(token.clone(), 500);
+        ed.sessions_back(vec![k], Vec::new(), None, false);
+        assert_eq!(answer(&ed), (Some('A'), Some(1_000)), "the latest: the kept one");
     }
 
     /// A high-risk change it brings (the Rust pack's `unsafe` — `risk.rs`) holds the bring until a person has

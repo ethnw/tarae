@@ -160,6 +160,7 @@ mod snapshot;
 mod sorting;
 mod spawn;
 mod split;
+mod stamp;
 mod storewrite;
 mod structure;
 mod stuck;

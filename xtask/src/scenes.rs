@@ -1,5 +1,6 @@
 //! `cargo xtask scenes [--out DIR] [scene …]` — tarae's main surfaces as shots, each in both themes (meok and
-//! hanji) at 80×24 and 160×45: `<DIR>/<scene>-<dark|light>-<80|160>.png` (default `target/scenes`); every scene
+//! hanji) at 80×24 and 160×45: `<DIR>/<scene>-<dark|light>-<80|160>.png` (default `target/scenes`; with
+//! `--transparent`, on the transparent themes, `…-transparent.png`); every scene
 //! when none is named, `--list` names them. For a change to the screen: the same scenes before and after, and
 //! `--compare BEFORE AFTER` says which shots differ, pixel for pixel, and where.
 //!
@@ -20,7 +21,7 @@ use serde_json::{Value, json};
 use crate::shot::{self, Setup};
 use crate::{Result, root};
 
-const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [--size COLSxROWS] [scene …] | scenes --list | scenes --compare A B";
+const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [--size COLSxROWS] [--transparent] [scene …] | scenes --list | scenes --compare A B";
 
 /// One surface: the stand-in claude's script, the files tarae opens, the keys sent (as `cargo xtask shot`
 /// takes them: `@1` waits a second, `@?text` until `text` is on screen, `@20?text` at most 20 s).
@@ -46,7 +47,59 @@ const SCENES: &[Scene] = &[
         keys: &["@1", ":", "frobnicate", "\r", "@1", ":", "w", "\r", "@1"],
     },
     Scene { name: "git", claude: "idle", files: MAIN, keys: &["@1", " ", "g", "@?knot.rs", "@1"] },
-    Scene { name: "granted", claude: "idle", files: MAIN, keys: &["@1", ":", "granted", "\r", "@1"] },
+    // (Claude's answers first, each its own key — a read `a` this chat, a host through `also` `s` this session, a
+    // read `A` always — then the list, the hand on its last row (`G`: at 24 rows the defaults fill it), the `a`. The
+    // code zoomed first (`space w z`): at 80 the chat beside it would cut the cards and fold the list's stamps. The
+    // host's card needs the sandbox: run outside one)
+    Scene {
+        name: "granted",
+        claude: "grants",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "read the notes the strands follow",
+            "\r",
+            "@1",
+            "\x1b",
+            "@1",
+            " ",
+            "w",
+            "z",
+            "@20?Claude wants to read",
+            "@1",
+            "\x11",
+            "@1",
+            "a",
+            "@20?Open the sandbox a little",
+            "@1",
+            "\x11",
+            "@1",
+            "s",
+            "@20?Claude wants to read",
+            "@1",
+            "\x11",
+            "@1",
+            "A",
+            "@3",
+            ":",
+            "granted",
+            "\r",
+            "@1",
+            "G",
+            "@1",
+        ],
+    },
+    // (the demo repository's settings trusted on their card — its `.tarae.toml` and a git command of its own — then
+    // the list)
+    Scene {
+        name: "trusted",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@?Trust this", "@1", "y", "@1", ":", "granted", "\r", "@1"],
+    },
     // (the answer stops mid code block: the follow card, then the panel itself — `C-f` leaves follow)
     Scene {
         name: "chatmid",
@@ -84,6 +137,26 @@ const SCENES: &[Scene] = &[
         claude: "full",
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@?Change 1 of 1", "@1"],
+    },
+    // (Claude's edit of three changes: the first accepted, the second refused, the third in hand)
+    Scene {
+        name: "decided",
+        claude: "three",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?Change 1 of 3",
+            "@1",
+            "y",
+            "@1",
+            "n",
+            "@1",
+        ],
     },
     Scene {
         name: "chatdone",
@@ -124,6 +197,39 @@ const SCENES: &[Scene] = &[
             "v",
             "t",
             "@2",
+        ],
+    },
+    // (the same turn of three changes, decided — accepted, refused, accepted — then `space v t` on it, its file
+    // marked viewed: kept)
+    Scene {
+        name: "decidedturn",
+        claude: "three",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?Change 1 of 3",
+            "@1",
+            "y",
+            "@1",
+            "n",
+            "@1",
+            "y",
+            "@20?Nothing else",
+            "@1",
+            "\x1b",
+            " ",
+            "v",
+            "t",
+            "@2",
+            " ",
+            "v",
+            "m",
+            "@1",
         ],
     },
     // (keep-warm, `keepwarm.rs`: a big conversation on the 1h cache marked to be kept warm — the chat's last row says
@@ -324,6 +430,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let (mut out, mut names) = (root().join("target/scenes"), Vec::new());
     let mut sizes = SIZES.to_vec();
+    let mut transparent = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -338,6 +445,8 @@ pub fn run(args: &[String]) -> Result<()> {
                 let (c, r) = s.split_once('x').ok_or(USAGE)?;
                 sizes = vec![(c.parse().map_err(|_| USAGE)?, r.parse().map_err(|_| USAGE)?)];
             }
+            // (the transparent themes: what has no background of its own)
+            "--transparent" => transparent = true,
             n if !n.starts_with('-') => names.push(n.to_string()),
             _ => return Err(USAGE.into()),
         }
@@ -350,8 +459,10 @@ pub fn run(args: &[String]) -> Result<()> {
     for scene in scenes {
         for bg in BACKGROUNDS {
             for &size in &sizes {
-                let file = out.join(format!("{}-{bg}-{}.png", scene.name, size.0));
-                if let Err(e) = one(scene, bg, size, &bin, &me, &file) {
+                // (the transparent themes' apart: `--compare` matches shots by name)
+                let clear = if transparent { "-transparent" } else { "" };
+                let file = out.join(format!("{}-{bg}-{}{clear}.png", scene.name, size.0));
+                if let Err(e) = one(scene, bg, size, transparent, &bin, &me, &file) {
                     eprintln!("{}: {e}", file.display());
                     failed.push(file.display().to_string());
                 }
@@ -378,13 +489,27 @@ fn chosen(names: &[String]) -> Result<Vec<&'static Scene>> {
     names.iter().map(find).collect()
 }
 
-/// One shot of `scene`: its demo crate, config and tarae's state in a fresh folder, removed after.
-fn one(scene: &Scene, bg: &'static str, size: (u16, u16), bin: &Path, me: &Path, out: &Path) -> Result<()> {
+/// One shot of `scene`: its demo crate, config and tarae's state in a fresh folder, removed after — on `bg`'s
+/// transparent theme when `transparent`.
+fn one(
+    scene: &Scene,
+    bg: &'static str,
+    size: (u16, u16),
+    transparent: bool,
+    bin: &Path,
+    me: &Path,
+    out: &Path,
+) -> Result<()> {
     let dir = Fresh::new("tarae-scene")?;
     let demo = dir.0.join("tarae-demo");
-    demo_crate(&demo)?;
+    demo_crate(&demo, scene.name == "trusted")?;
     let config = dir.0.join("xdg");
-    write(&config.join("tarae/config.toml"), &config_toml(me, scene.claude))?;
+    let mut toml = config_toml(me, scene.claude);
+    if transparent {
+        let theme = if bg == "dark" { "meok-transparent" } else { "hanji-transparent" };
+        toml = format!("theme = \"{theme}\"\n{toml}");
+    }
+    write(&config.join("tarae/config.toml"), &toml)?;
     let setup = Setup {
         bin: bin.to_path_buf(),
         files: scene.files.iter().map(|f| f.to_string()).collect(),
@@ -487,9 +612,13 @@ impl Thread {
 }
 "#;
 
-/// The crate's files as committed, then as changed since (`thread.rs` changed, `knot.rs` new).
-fn demo_files(dir: &Path, changed: bool) -> Result<()> {
+/// The crate's files as committed, then as changed since (`thread.rs` changed, `knot.rs` new) — with settings
+/// that wait for trust when `trusted` (a build of its own for `:restart`).
+fn demo_files(dir: &Path, changed: bool, trusted: bool) -> Result<()> {
     if !changed {
+        if trusted {
+            write(&dir.join(".tarae.toml"), "[editor]\nrestart-build = \"cargo build\"\n")?;
+        }
         write(&dir.join("Cargo.toml"), CARGO_TOML)?;
         write(&dir.join(".gitignore"), "target/\nCargo.lock\n")?;
         write(&dir.join("README.md"), "# tarae-demo\n\nA skein of threads.\n")?;
@@ -503,8 +632,8 @@ fn demo_files(dir: &Path, changed: bool) -> Result<()> {
 
 /// The demo crate at `dir`: committed in a repository of its own, then changed. git runs with none of your
 /// settings (no hooks, no signing) and finds no repository above `dir`.
-fn demo_crate(dir: &Path) -> Result<()> {
-    demo_files(dir, false)?;
+fn demo_crate(dir: &Path, trusted: bool) -> Result<()> {
+    demo_files(dir, false, trusted)?;
     let git = |args: &[&str]| -> Result<()> {
         let st = Command::new("git")
             .arg("-C")
@@ -523,17 +652,23 @@ fn demo_crate(dir: &Path) -> Result<()> {
     git(&["init", "-q"])?;
     git(&["add", "-A"])?;
     git(&["commit", "-q", "-m", "A skein of threads"])?;
-    demo_files(dir, true)
+    // (a command of the repository's own, held until trusted — ssh's, which only a push, pull or fetch would run:
+    // the demo has no remote)
+    if trusted {
+        git(&["config", "core.sshCommand", "ssh -o BatchMode=yes"])?;
+    }
+    demo_files(dir, true, trusted)
 }
 
 // ── The stand-in claude ──────────────────────────────────────────────────────
 
 /// Reads tarae's lines from `input` and answers each user message (the line that starts `{"message"` — tarae's
 /// JSON has its keys sorted) with `script`'s turn on `out`, `pause` after each piece of text: `full` explains,
-/// reads and edits (its calls wait for tarae's answers); `mid` stops in the middle of its code block and waits
-/// for tarae to go; `midlist` stops in a list after a quote, on a line in Japanese; `ask` answers `space i` and
-/// stops mid-line; `card` asks to run outside the sandbox; `samebinary` asks it twice, a program rebuilt between;
-/// `searchcard` searches a folder in home with tarae's `search`; `warm` answers on a big conversation's 1h cache, and
+/// reads and edits (its calls wait for tarae's answers), `three` the same with three changes; `mid` stops in the
+/// middle of its code block and waits for tarae to go; `midlist` stops in a list after a quote, on a line in
+/// Japanese; `ask` answers `space i` and stops mid-line; `card` asks to run outside the sandbox; `samebinary` asks
+/// it twice, a program rebuilt between; `searchcard` searches a folder in home with tarae's `search`; `grants` asks
+/// for what `:granted` then lists; `warm` answers on a big conversation's 1h cache, and
 /// `warmfork` as a ping's fork of it; `boardmid` / `boarddone` are a board's members (each by what its message
 /// asks — `board`); `idle` never answers.
 fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Duration) -> io::Result<()> {
@@ -553,13 +688,15 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
         }
         let mut turn = Turn { out: &mut *out, lines: &mut lines, pause };
         match script {
-            "full" => turn.explain(true)?,
-            "mid" => turn.explain(false)?,
+            "full" => turn.explain(true, false)?,
+            "three" => turn.explain(true, true)?,
+            "mid" => turn.explain(false, false)?,
             "midlist" => turn.explain_listed()?,
             "ask" => turn.rewrite()?,
             "card" => turn.ask_outside()?,
             "samebinary" => turn.same_binary()?,
             "searchcard" => turn.search_outside()?,
+            "grants" => turn.grants()?,
             "warm" => turn.warm(false)?,
             "warmfork" => turn.warm(true)?,
             "boardmid" => turn.board(&line, false)?,
@@ -611,7 +748,8 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         Ok(())
     }
 
-    fn explain(&mut self, whole: bool) -> io::Result<()> {
+    /// (`three`: the edit changes the doc comment and the print too — three changes in one review)
+    fn explain(&mut self, whole: bool, three: bool) -> io::Result<()> {
         self.words("Let me look at how the map is filled first.")?;
         self.text("\n\n")?;
         self.call(1, "read", json!({"files": ["src/main.rs:7-14"]}))?;
@@ -633,7 +771,17 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         self.text("\n")?;
         let edit = json!({"file_path": "src/main.rs", "old_string": "    threads.insert(first.name.clone(), first);\n",
             "new_string": "    threads.entry(first.name.clone()).or_insert(first);\n"});
-        self.call(2, "edit", json!({"edits": [edit]}))?;
+        let edits = if three {
+            let doc = json!({"file_path": "src/main.rs", "old_string": "/// 실타래 — 이어진 실 한 가닥.\n",
+                "new_string": "/// 실타래 — 같은 이름은 첫 가닥으로 남는다.\n"});
+            let print = json!({"file_path": "src/main.rs",
+                "old_string": "        println!(\"{name}: {} knots, {} long\", t.knots.len(), t.length());\n",
+                "new_string": "        println!(\"{name}: {} knots\", t.knots.len());\n"});
+            json!([doc, edit, print])
+        } else {
+            json!([edit])
+        };
+        self.call(2, "edit", json!({"edits": edits}))?;
         self.words("Done — **main.rs** now keeps the first strand when a name repeats.")?;
         self.words("Nothing else reads the map, so no other change is needed.")?;
         self.line(json!({"type": "result", "result": "done"}))
@@ -764,6 +912,40 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         self.reads_on()
     }
 
+    /// A permission prompt of claude's for its own tool `tool` (the turn's `n`th): its row in the chat, the ask
+    /// (`can_use_tool`), then tarae's answer waited for — as `call` does for tarae's tools.
+    fn permission(&mut self, n: u64, tool: &str, input: Value) -> io::Result<()> {
+        let used = json!({"type": "tool_use", "id": format!("p{n}"), "name": tool, "input": input});
+        self.line(json!({"type": "assistant", "message": {"id": format!("q{n}"), "content": [used]}}))?;
+        let request = json!({"subtype": "can_use_tool", "tool_name": tool, "input": input});
+        self.line(json!({"type": "control_request", "request_id": format!("r{n}"), "request": request}))?;
+        let id = format!("\"r{n}\"");
+        for l in self.lines.by_ref() {
+            if l?.contains(&id) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// What `:granted` lists, asked for one at a time: a run first (the sandbox looked at — `also` waits for that),
+    /// a read outside the project, a host through `also`, another read. Places under home that aren't there
+    /// (nothing is read: the answer is all), a host that resolves nowhere, `ls` for the runs (one that runs
+    /// without a card).
+    fn grants(&mut self) -> io::Result<()> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        self.words("Let me look at the notes the strands follow, outside the project.")?;
+        self.text("\n")?;
+        self.call(1, "run", json!({"command": "ls"}))?;
+        self.permission(2, "Read", json!({"file_path": format!("{home}/notes/strands.md")}))?;
+        let also = json!({"command": "ls", "also": {"network": "skein.example.invalid"},
+            "reason": "the knots' index is fetched from there"});
+        self.call(3, "run", also)?;
+        self.permission(4, "Read", json!({"file_path": format!("{home}/Sites/skein/knots.css")}))?;
+        self.words("Read them: nothing in the project needs to change.")?;
+        self.line(json!({"type": "result", "result": "done"}))
+    }
+
     fn ask_outside(&mut self) -> io::Result<()> {
         self.words(
             "The tests need the network for the registry, so I will ask to run them outside the sandbox.",
@@ -890,8 +1072,8 @@ mod tests {
     fn the_demo_is_written_in_a_fresh_folder_removed_after() {
         let (a, b) = (Fresh::new("tarae-scenes-test").unwrap(), Fresh::new("tarae-scenes-test").unwrap());
         assert_ne!(a.0, b.0);
-        demo_files(&a.0, false).unwrap();
-        demo_files(&a.0, true).unwrap();
+        demo_files(&a.0, false, false).unwrap();
+        demo_files(&a.0, true, false).unwrap();
         let thread = std::fs::read_to_string(a.0.join("src/thread.rs")).unwrap();
         assert!(thread.contains("at the end of the strand.") && a.0.join("src/knot.rs").is_file());
         let path = a.0.clone();
