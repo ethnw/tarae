@@ -43,6 +43,7 @@ mod shuttle;
 mod stuckstop;
 mod termview;
 mod watchers;
+mod writing;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps
 /// are named by it.

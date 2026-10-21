@@ -104,7 +104,7 @@ pub fn schema() -> Value {
 }
 
 /// Items one call takes at most.
-const ITEMS_MAX: usize = 100;
+pub(crate) const ITEMS_MAX: usize = 100;
 
 /// Lines of `old_string` the closest-lines search compares at most.
 const CLOSEST_LINES: usize = 30;
@@ -463,17 +463,28 @@ fn apply(
 /// can't write — Err when it's outside the project, the project itself, or a file named like a key Claude
 /// hasn't been let read.
 fn place(k: &Known, real_root: &Path, given: &str) -> Result<(PathBuf, String, bool), String> {
-    let abs = crate::chat::resolve(&k.root, given);
+    place_in(&k.root, &k.keys, real_root, given)
+}
+
+/// `place` for `root` and the files named like keys Claude hasn't been let read — also where an edit being written
+/// goes (`writing.rs`). A worker's (it resolves links).
+pub(crate) fn place_in(
+    root: &Path,
+    keys: &crate::reads::Keys,
+    real_root: &Path,
+    given: &str,
+) -> Result<(PathBuf, String, bool), String> {
+    let abs = crate::chat::resolve(root, given);
     let real = crate::paths::inside(real_root, &abs)
         .ok_or_else(|| format!("{given} is outside the project — edit changes files inside it only"))?;
     if real == real_root {
         return Err("that's the project folder itself".into());
     }
     let rel = nav::rel(real_root, &real);
-    if k.keys.shut(&real) {
+    if keys.shut(&real) {
         return Err(crate::reads::key_left_out(&rel));
     }
-    Ok((real, rel, crate::edits::protected(&k.root, &abs)))
+    Ok((real, rel, crate::edits::protected(root, &abs)))
 }
 
 /// A move or delete only of the project's own plain files: not a name Claude's runs can't write, not a link
@@ -532,19 +543,7 @@ fn load(k: &Known, path: &Path) -> Result<Option<String>, String> {
 /// `old` → `new` in `text`: once (it must match once) or every match — exactly, else at the first looser
 /// tier that matches. The text after, how many, and the tier.
 fn replace_in(text: &str, old: &str, new: &str, all: bool) -> Result<(String, usize, Tier), String> {
-    for tier in [Tier::Exact, Tier::Trailing, Tier::Quotes] {
-        let (hay, map) = normalized(text, tier);
-        let (needle, _) = normalized(old, tier);
-        if needle.is_empty() {
-            continue;
-        }
-        let found: Vec<usize> = hay.match_indices(&needle).map(|(at, _)| at).collect();
-        if found.is_empty() {
-            continue;
-        }
-        // Where each match is in the text as it is
-        let spans: Vec<(usize, usize)> =
-            found.iter().map(|&a| (map[a], end_of(text, map[a + needle.len() - 1]))).collect();
+    if let Some((spans, tier)) = matches(text, old) {
         if spans.len() > 1 && !all {
             let lines: Vec<String> =
                 spans.iter().take(AMBIGUOUS_LINES).map(|(a, _)| line_of(text, *a).to_string()).collect();
@@ -563,6 +562,35 @@ fn replace_in(text: &str, old: &str, new: &str, all: bool) -> Result<(String, us
         return Ok((out, spans.len(), tier));
     }
     Err(not_found(text, old, new))
+}
+
+/// Where `old` is in `text` (byte spans in the text as it is), at the first tier it matches at.
+fn matches(text: &str, old: &str) -> Option<(Vec<(usize, usize)>, Tier)> {
+    for tier in [Tier::Exact, Tier::Trailing, Tier::Quotes] {
+        let (hay, map) = normalized(text, tier);
+        let (needle, _) = normalized(old, tier);
+        if needle.is_empty() {
+            continue;
+        }
+        let found: Vec<usize> = hay.match_indices(&needle).map(|(at, _)| at).collect();
+        if found.is_empty() {
+            continue;
+        }
+        return Some((
+            found.iter().map(|&a| (map[a], end_of(text, map[a + needle.len() - 1]))).collect(),
+            tier,
+        ));
+    }
+    None
+}
+
+/// The one place `old` is in `text`, as `call` will find it — None where it's in none or more than one (an edit
+/// being written is drawn where it goes only when that's one place: `writing.rs`).
+pub(crate) fn one_place(text: &str, old: &str) -> Option<(usize, usize)> {
+    match matches(text, old)?.0.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
 }
 
 /// The byte after the character holding byte `at` of `text`.

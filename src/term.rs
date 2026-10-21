@@ -427,6 +427,8 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     editor.screen = crate::editor::Screen {
         panes: Vec::new(),
         pane_docs: Vec::new(),
+        writing_rows: Vec::new(),
+        writing_head: None,
         chat_x: (lay.chat_w > 0).then_some(lay.edit_w),
         chat_laid: Default::default(),
         chat_view: Default::default(),
@@ -499,6 +501,14 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         spots: Default::default(),
     };
     editor.refresh_search(focus_lay.text_rows);
+    // Follow took the editor to an edit being written: its rows where the review will show them (`writing.rs`) —
+    // the topmost item's, the change the review opens on
+    if let Some(line) = editor.doc_mut().writing_align.take() {
+        let line =
+            crate::writing::shown(editor.doc()).and_then(|s| s.blocks.first()).map_or(line, |b| b.first);
+        let above = review_lead(editor, &ui, &lay);
+        editor.align_writing(line, above);
+    }
     // During `/` preview the screen follows the match, not the cursor
     if editor.search_origin.is_none() {
         scroll_to_cursor(editor, &focus_lay);
@@ -581,6 +591,31 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         screen_panes.push((id, r, pl.gutter, view.iter().map(|v| v.origin(left)).collect()));
         pane_docs.push(editor.docs[idx].id);
         if focused {
+            // (an edit being written: its rows of changes and the one being written — the follow card keeps off them)
+            let live = |r: &crate::codeview::Row| match r {
+                crate::codeview::Row::Text { line, edit: Some(e), .. }
+                    if e.mark == crate::codeview::Mark::Taken =>
+                {
+                    Some(*line)
+                }
+                crate::codeview::Row::Other {
+                    at, kind: crate::codeview::OtherKind::Writing { .. }, ..
+                } => Some(*at),
+                _ => None,
+            };
+            let y = |k: usize| pl.text_top as usize + k;
+            editor.screen.writing_rows =
+                view.iter().enumerate().filter(|(_, r)| live(r).is_some()).map(|(k, _)| y(k)).collect();
+            editor.screen.writing_head = view.iter().position(|r| {
+                matches!(
+                    r,
+                    crate::codeview::Row::Other {
+                        kind: crate::codeview::OtherKind::Writing { head: true },
+                        ..
+                    }
+                )
+            });
+            editor.screen.writing_head = editor.screen.writing_head.map(y);
             editor.view = view;
         }
     }
@@ -1076,7 +1111,7 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
     let color = |k: &str| editor.theme.try_get(k).and_then(|s| s.fg);
     Some(match b {
         Badge::None => return None,
-        Badge::Running => (wave(), ui.accent.fg),
+        Badge::Running => (wave(editor), ui.accent.fg),
         Badge::Passed => ("●".into(), color("diff.plus")),
         Badge::Failed => ("▲".into(), ui.error.fg),
         Badge::Warning => ("▲".into(), color("warning")),
@@ -1254,6 +1289,7 @@ fn preflight_of<'a>(editor: &'a Editor, r: &crate::task::Run) -> Option<&'a crat
 /// come faint. Too wide: the times go, then names are cut from the end. Each piece with its step (a click
 /// there scrolls to its output — #72; the gaps between: none).
 fn preflight_row(
+    editor: &Editor,
     p: &crate::preflight::Preflight,
     w: usize,
     card: Style,
@@ -1277,7 +1313,7 @@ fn preflight_row(
             };
             let (glyph, gs, name) = match s.state {
                 State::Waiting => ("◦".to_string(), faint, faint),
-                State::Running => (wave(), accent, Style { bold: true, ..card }),
+                State::Running => (wave(editor), accent, Style { bold: true, ..card }),
                 State::Passed if s.note.is_some() => ("●".into(), Style { fg: warn, ..card }, card),
                 State::Passed => ("●".into(), Style { fg: good, ..card }, card),
                 State::Failed(_) => ("▲".into(), Style { fg: bad, ..card }, Style { bold: true, ..card }),
@@ -1580,7 +1616,7 @@ fn draw_task_panel(
             format!("   step {} of {}", at.max(1), p.steps.len())
         }
         (State::Running, _, None) if wait.is_some() => String::new(),
-        (State::Running, _, None) => format!("   {}", wave()),
+        (State::Running, _, None) => format!("   {}", wave(editor)),
         (_, Some(d), Some(_)) => format!("   {}", crate::preflight::long_duration(d)),
         (_, Some(d), None) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
@@ -1624,7 +1660,7 @@ fn draw_task_panel(
         queue!(out, Spaces(w), MoveTo((x0 + PAD) as u16, body as u16))?;
         let mut chips = editor.screen.task_steps.borrow_mut();
         let mut x = x0 + PAD;
-        for (s, st, k) in preflight_row(p, w, card, ui, (good, bad, warn)) {
+        for (s, st, k) in preflight_row(editor, p, w, card, ui, (good, bad, warn)) {
             apply(out, st)?;
             queue!(out, Print(&s))?;
             if let Some(k) = k {
@@ -2305,7 +2341,7 @@ fn draw_test_panel(
     let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
     let when = match (&r.state, r.took, &wait) {
         (RunState::Running, _, Some(w)) => format!("   {w}"),
-        (RunState::Running, _, None) => format!("   {}", wave()),
+        (RunState::Running, _, None) => format!("   {}", wave(editor)),
         (_, Some(d), _) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
     };
@@ -2644,9 +2680,10 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
         let wraps_here = here.len() > 1
             || mv::line_end(&doc.text, line) - mv::line_start(&doc.text, line) <= crate::wrap::MAX_LINE;
         // Screen rows between the top and the cursor's row: its row in the line, below the removed ones (a cursor
-        // in a folded doc comment is on its first row)
+        // in a folded doc comment is on its first row; on an edit being written, on the row it's writing — kept
+        // in sight as it comes)
         let (line, k) = match m.folded(line) {
-            Some((a, ..)) => (a, m.removed(a)),
+            Some((a, ..)) => (a, m.removed(a) + m.head(a)),
             None if wrap_w.is_some() => (line, crate::wrap::row_of(&here, pos) + m.removed(line)),
             None => (line, m.removed(line)),
         };
@@ -3730,6 +3767,8 @@ fn draw_text(
                 let (mark, from) = match kind {
                     OtherKind::Gone { base } => (Mark::Taken, *base),
                     OtherKind::Edit(e) => (e.mark, None),
+                    // (an edit being written: on the wash its review will have, nothing decided)
+                    OtherKind::Writing { .. } => (Mark::Added { washed: true }, None),
                 };
                 let bg = match mark {
                     Mark::Taken => removed_bg,
@@ -3757,6 +3796,16 @@ fn draw_text(
                     None => (shows.left, usize::MAX, 0),
                 };
                 let paint = other_paint(doc, gone, from, &mut qcursor);
+                // The line being written: its last words wet (번짐 — a function of the stream's head, no clock)
+                let wet_at = match kind {
+                    OtherKind::Writing { head: true } if editor.wet() => wet_from(gone),
+                    _ => None,
+                };
+                if let Some(_w) = wet_at {
+                    #[cfg(test)]
+                    WET_SEEN.with_borrow_mut(|s| s.push(("code", gone[_w..].to_string())));
+                }
+                let wet = wet_ink(base.fg, ui.virt.fg, base.bg.or(ui.tint));
                 apply(out, base)?;
                 queue!(out, Spaces(x0))?;
                 let mut room = lay.text_cols.saturating_sub(x0);
@@ -3771,7 +3820,8 @@ fn draw_text(
                     room -= c.width;
                     let cap = paint.get(c.bytes.start).copied().unwrap_or(u32::MAX);
                     let syn = capture_styles.get(cap as usize).copied().flatten().unwrap_or_default();
-                    apply(out, base.patch(Style { bg: None, ..syn }))?;
+                    let st = base.patch(Style { bg: None, ..syn });
+                    apply(out, if wet_at.is_some_and(|w| c.bytes.start >= w) { wet(st) } else { st })?;
                     match &gone[c.bytes.clone()] {
                         "\t" => queue!(out, Spaces(c.width))?,
                         g if g.chars().next().is_some_and(char::is_control) => {
@@ -4433,11 +4483,24 @@ fn rows_pane(
             }
         }
     };
+    // What Claude is writing (`writing.rs`): a block's rows in place of the lines it replaces — from the top's
+    // skipped rows when the screen starts inside it, as a folded block's
+    let writing = crate::writing::shown(doc);
+    let push_writing = |view: &mut Vec<Row>, b: &crate::writing::Block, line: usize| {
+        let skip = if line == top { top_skip } else { 0 };
+        let room = rows.saturating_sub(view.len());
+        view.extend(b.screen_rows(text, (wrap_w, tab), skip, room));
+    };
     if !folding {
         let mut view = Vec::with_capacity(rows);
         let mut line = top;
         while view.len() < rows && line <= end {
             removed_before(&mut view, line, &mut next);
+            if let Some(b) = writing.and_then(|w| w.at(line)) {
+                push_writing(&mut view, b, line);
+                line = b.last + 1;
+                continue;
+            }
             if line <= max_line {
                 push_line(&mut view, line);
             }
@@ -4459,6 +4522,11 @@ fn rows_pane(
         removed_before(&mut view, line, &mut next);
         if line > max_line {
             break;
+        }
+        if let Some(b) = writing.and_then(|w| w.at(line)) {
+            push_writing(&mut view, b, line);
+            line = b.last + 1;
+            continue;
         }
         match blocks.iter().find(|b| b.start <= line && line <= b.end) {
             Some(&crate::doccomment::Block { start: a, end: b, indent, ref bodies }) => {
@@ -4837,6 +4905,45 @@ fn sentence_starts(text: &str) -> Vec<usize> {
     starts
 }
 
+/// The rows under the edit review's title, `width` wide: what it warns of (cardburden 4b — a file that runs later
+/// outside the sandbox), a row each in the warning color, read first — wrapped, not cut: its end says what to do
+/// (under its words, as a card hangs an indented line); then why, the end of what Claude thought before asking
+/// (its conclusion), two rows at most.
+fn review_heads(
+    editor: &Editor,
+    ui: &Ui,
+    reason: &str,
+    warnings: &[crate::cardwarn::Warned],
+    width: usize,
+) -> (Vec<String>, Vec<Vec<crate::markdown::Span>>) {
+    let dim = Style { fg: ui.virt.fg, ..ui.base };
+    let faint = Style { fg: ui.linenr.fg, ..ui.base };
+    let warned = warnings
+        .iter()
+        .flat_map(|w| hanging(&format!("▲ {}", w.line()), width.saturating_sub(4), 2))
+        .collect();
+    let reason = match reason.is_empty() {
+        true => Vec::new(),
+        false => {
+            let rows_of = |s: &str, w: usize| thought_rows(s, w, dim, faint, editor);
+            reason_rows(reason, width.saturating_sub(7), rows_of, faint)
+        }
+    };
+    (warned, reason)
+}
+
+/// Rows from the top of the code to where the edit review will put the first row of a change Claude is writing
+/// now (`writing.rs`) once it opens: under its title and the rows under it (what Claude said before the call,
+/// a protected file's warning), the change's head a quarter down (`render_frame`'s `rev.scroll`), the change
+/// right under its head.
+fn review_lead(editor: &Editor, ui: &Ui, lay: &Layout) -> usize {
+    let Some(c) = editor.session.chat.as_ref() else { return 0 };
+    let protected = crate::writing::shown(editor.doc()).is_some_and(|w| w.blocks.iter().any(|b| b.protected));
+    let warnings = if protected { crate::edits::warned(editor) } else { Vec::new() };
+    let (warned, reason) = review_heads(editor, ui, &crate::edits::reason(c), &warnings, lay.edit_w);
+    1 + warned.len() + reason.len() + lay.text_rows.saturating_sub(1) / 4 + 1
+}
+
 fn draw_review(
     rev: &Review,
     rows: &[crate::codeview::Row],
@@ -4857,22 +4964,8 @@ fn draw_review(
     let accent = Style { fg: ui.accent.fg, ..ui.base };
     let width = lay.edit_w;
     let code_w = review_code_w(doc, lay);
-    // Why, under the title: the end of what Claude thought before asking (its conclusion), two rows at most
-    let reason: Vec<Vec<crate::markdown::Span>> = if rev.reason.is_empty() {
-        Vec::new()
-    } else {
-        let rows_of = |s: &str, w: usize| thought_rows(s, w, dim, faint, editor);
-        reason_rows(&rev.reason, width.saturating_sub(7), rows_of, faint)
-    };
-    // What it warns of (cardburden 4b — a file that runs later outside the sandbox): a row each, under the title,
-    // in the warning color — above the reason, read first
-    // (wrapped, not cut: its end says what to do — under its words, as a card hangs an indented line)
+    let (warned, reason) = review_heads(editor, ui, &rev.reason, &rev.warnings, width);
     let warn = Style { fg: t.try_get("warning").and_then(|s| s.fg).or(ui.accent.fg), ..ui.base };
-    let warned: Vec<String> = rev
-        .warnings
-        .iter()
-        .flat_map(|w| hanging(&format!("▲ {}", w.line()), width.saturating_sub(4), 2))
-        .collect();
     let title_h = 1 + warned.len() + reason.len();
     let body = lay.text_rows.saturating_sub(title_h);
     // Fixed title
@@ -6723,7 +6816,7 @@ fn draw_statusline(
             right.push(gap(220));
         }
         Some(_) => {
-            right.push(Seg { text: format!("{} claude", wave()), style: accent, keep: 220 });
+            right.push(Seg { text: format!("{} claude", wave(editor)), style: accent, keep: 220 });
             right.push(gap(220));
         }
         None => {}
@@ -7844,7 +7937,7 @@ impl OfferCard {
                 (v, Some(b))
             }
             OfferState::Installing(_) => {
-                (vec![(title, false), (format!("{} {}", wave(), o.working), true)], None)
+                (vec![(title, false), (format!("{} {}", wave(editor), o.working), true)], None)
             }
             OfferState::Failed(why) => {
                 let mut v = vec![(o.failed.clone(), false)];
@@ -8144,7 +8237,7 @@ impl OfferCard {
                 apply(out, Style { fg: peek_bg(*k), bg: ui.base.bg, ..Style::default() })?;
                 queue!(out, MoveTo(px as u16, (py - 1) as u16), Print("▄".repeat(pw)))?;
             }
-            let tail = started.map(|_| format!(" {}", wave())).unwrap_or_default();
+            let tail = started.map(|_| format!(" {}", wave(editor))).unwrap_or_default();
             // (its mark at the right end, before the wave)
             let mark_w = if mark.is_some() { 2 } else { 0 };
             let room = pw.saturating_sub(5 + tail.width() + mark_w);
@@ -8489,10 +8582,11 @@ pub fn duration(s: f32) -> String {
 
 /// Waiting animation: a three-cell equalizer wave (`▂▅▇` …) — only block chars in common monospace fonts.
 /// A step a `TICK` on the animation's clock (`editor::anim_step`): every wave on screen moves together, a
-/// step a frame.
-fn wave() -> String {
+/// step a frame — held still at its first where nothing moves on a clock (`editor.motion`, `Editor::moving`).
+fn wave(editor: &Editor) -> String {
     const W: [char; 10] = ['▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃'];
-    let f = (crate::editor::anim_step() % W.len() as u128) as usize;
+    let step = if editor.moving() { crate::editor::anim_step() } else { 0 };
+    let f = (step % W.len() as u128) as usize;
     (0..3).map(|k| W[(f + k * 3) % W.len()]).collect()
 }
 
@@ -8539,7 +8633,7 @@ fn draw_ask_stream(
         }
     }
     // (번짐: the head of what it writes, ink not yet dry)
-    if !rev.thinking && editor.wet_ink {
+    if !rev.thinking && editor.wet() {
         let drawn = vec![crate::markdown::Drawn { code: true, ..Default::default() }; code.len()];
         wet_head("ask", &mut code, &drawn, ui, card);
     }
@@ -8566,7 +8660,7 @@ fn draw_ask_stream(
     apply(out, card)?;
     queue!(out, Print("  "))?;
     apply(out, Style { fg: ui.accent.fg, ..card })?;
-    queue!(out, Print(wave()))?;
+    queue!(out, Print(wave(editor)))?;
     apply(out, Style { bold: true, ..card })?;
     queue!(out, Print(format!(" claude {phase}")))?;
     let instr = fit_ellipsis(
@@ -8709,7 +8803,7 @@ fn draw_follow_card(
     // (waiting on you: the word in the accent — a `●` there read as a second knot beside the one in hand)
     let mark = match () {
         _ if waiting => String::new(),
-        _ if compacting || c.busy() && !replaying => wave(),
+        _ if compacting || c.busy() && !replaying => wave(editor),
         _ => String::new(),
     };
     let bares: &[&str] = match compact && crate::tools::unsandboxed(editor) {
@@ -8842,9 +8936,12 @@ fn draw_follow_card(
             .or(top)
             .or_else(|| gaps.iter().filter(fits).max_by_key(|g| g.1 - g.0).map(|g| (g.0, g.1, true)))
     };
-    let changes: Vec<usize> = editor.screen.review_rows.borrow().iter().map(|r| r.0).collect();
-    let current: Vec<usize> =
+    // (an edit being written: its rows as a review's changes, the row being written as the change in hand)
+    let mut changes: Vec<usize> = editor.screen.review_rows.borrow().iter().map(|r| r.0).collect();
+    changes.extend(&editor.screen.writing_rows);
+    let mut current: Vec<usize> =
         editor.screen.review_change.get().map_or(Vec::new(), |(a, b)| (a..=b).collect());
+    current.extend(editor.screen.writing_head);
     let and = |a: &[usize], b: &[usize]| -> Vec<usize> { a.iter().chain(b).copied().collect() };
     let Some((gap_top, gap_end, at_bottom)) = place(&and(&read, &changes))
         .or_else(|| place(&and(&read, &current)))
@@ -10440,7 +10537,7 @@ fn draw_chat(
         [card, dim, faint, accent, strong, string, warn_fg],
         ui.base.bg,
         ui.tint,
-        editor.wet_ink,
+        editor.wet(),
     ));
     let lang_hash = hash_of(&lang);
     // (the last turn's end: no question after it and Claude done — its time row offers the replay)
@@ -10512,7 +10609,7 @@ fn draw_chat(
                 let (mut rows, drawn) = chat_markdown_drawn(&rendered, (w, mw), (faint, dim), ui.base.bg);
                 let writing = i + 1 == n && c.state == State::Writing;
                 // (번짐: its head ink not yet dry while it's written — laid out again as text comes, dry at the end)
-                if writing && editor.wet_ink {
+                if writing && editor.wet() {
                     wet_head("chat", &mut rows, &drawn, ui, card);
                 }
                 // (a code well's edge isn't the text's, nor a wrapped row's hanging indent — a list's bullet is)
@@ -10712,10 +10809,10 @@ fn draw_chat(
     // (compacting can take a minute — said for what it is, whatever was going on before it)
     if crate::compaction::under_way(&editor.session) {
         lines.push(Vec::new());
-        lines.push(vec![sp(wave(), accent), sp(" compacting…".into(), dim)]);
+        lines.push(vec![sp(wave(editor), accent), sp(" compacting…".into(), dim)]);
     } else if c.state == State::Thinking && !exploring && !thought_live {
         lines.push(Vec::new());
-        lines.push(vec![sp(wave(), accent), sp(" thinking…".into(), dim)]);
+        lines.push(vec![sp(wave(editor), accent), sp(" thinking…".into(), dim)]);
     }
     // Empty chat: guidance + example questions in the middle
     if c.msgs.is_empty() && !c.busy() {
@@ -10881,7 +10978,7 @@ fn draw_chat(
     let status: Vec<Span> = match c.state {
         // (its claude not up yet: the project's settings read first — frictions29 #67, a send then waits for it)
         State::Idle if let Some(t) = c.settings.waiting_since() => vec![
-            sp(wave(), accent),
+            sp(wave(editor), accent),
             sp(format!(" starting {:>4.1}s", crate::clock::since(t).as_secs_f32()), dim),
         ],
         State::Idle => match crate::models::label(editor) {
@@ -10890,7 +10987,7 @@ fn draw_chat(
             _ => Vec::new(),
         },
         s => vec![
-            sp(wave(), accent),
+            sp(wave(editor), accent),
             sp(
                 format!(
                     " {} {:>4.1}s",
@@ -11970,7 +12067,7 @@ fn follow_thread(
                         chat_markdown_drawn(&rendered, (inner, inner), (st.faint, st.dim), ui.base.bg);
                     // (번짐: the answer being written, its head ink not yet dry)
                     let head = c.msgs.last().is_some_and(|l| std::ptr::eq(l, m));
-                    if head && c.state == crate::chat::State::Writing && editor.wet_ink {
+                    if head && c.state == crate::chat::State::Writing && editor.wet() {
                         wet_head("follow", &mut rows, &drawn, ui, card);
                     }
                     rows
@@ -12084,8 +12181,9 @@ const WET_CELLS: usize = 12;
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: the spans `wet_head` drew wet, by surface (`chat`, `follow`, `ask`) — test frames carry no colour.
-    static WET_SEEN: std::cell::RefCell<Vec<(&'static str, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Tests: the spans `wet_head` drew wet, by surface (`chat`, `follow`, `ask`; `code`: an edit being written) —
+    /// test frames carry no colour.
+    pub(crate) static WET_SEEN: std::cell::RefCell<Vec<(&'static str, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// `wet` as every surface draws it: the dim level is `ui.virtual`'s, the paper the card's ground or `ui.tint`.
@@ -12199,6 +12297,38 @@ fn wet(
         }
         *row = out;
     }
+}
+
+/// Where a line of code being written is wet from (`wet`'s rule on one row — the live edit's head line,
+/// `OtherKind::Writing`): the first byte of its last `WET_WORDS` tokens, at most `WET_CELLS` cells of them, the
+/// spaces between too. None: nothing written on it yet.
+fn wet_from(line: &str) -> Option<usize> {
+    let (mut units, mut cells) = (0, 0);
+    let (mut from, mut prev) = (None, None);
+    for (i, c) in line.char_indices().rev() {
+        let u = unit_of(c, true);
+        if u == Unit::Space {
+            prev = None;
+            continue;
+        }
+        // (a combining mark is its base's: the base decides)
+        if c.width() == Some(0) {
+            continue;
+        }
+        if prev != Some(u) || u == Unit::Alone {
+            units += 1;
+            if units > WET_WORDS {
+                break;
+            }
+        }
+        cells += c.width().unwrap_or(0);
+        if cells > WET_CELLS {
+            break;
+        }
+        prev = Some(u);
+        from = Some(i);
+    }
+    from
 }
 
 /// What a character is to wet ink's units (`wet`): prose is words between spaces; code is tokens — an
@@ -13105,7 +13235,8 @@ fn note_lines(
     if n.waiting {
         out.push(Line::Blank);
         out.push(Line::Text {
-            spans: vec![sp(&wave(), accent), sp(" claude is replying…", dim)], indent: 0
+            spans: vec![sp(&wave(editor), accent), sp(" claude is replying…", dim)],
+            indent: 0,
         });
     }
     out.push(Line::Blank);

@@ -58,6 +58,8 @@ pub struct EditorConfig {
     pub soft_wrap: String,
     /// The hints say a key zellij takes by its twin (`zellij.rs`): "auto" (inside zellij) | "on" | "off".
     pub zellij_hints: String,
+    /// How much moves on screen (`motion.rs`): "full" | "calm" (nothing on a clock) | "none" (no wet ink either).
+    pub motion: String,
     /// The letters zellij takes with `C-` (`zellij::DEFAULT_KEYS` — yours only, `trust::YOURS_ONLY`).
     pub zellij_keys: Vec<char>,
     /// `:w` asks the language server to format first (lsp_editor.rs `format_then_save`).
@@ -145,6 +147,7 @@ impl Default for EditorConfig {
             auto_pairs: true,
             soft_wrap: "always".into(),
             zellij_hints: "auto".into(),
+            motion: "full".into(),
             zellij_keys: crate::zellij::DEFAULT_KEYS.to_vec(),
             format_on_save: true,
             git_blame: true,

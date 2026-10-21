@@ -268,6 +268,14 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@?Change 1 of 1", "@1"],
     },
+    // (글타래 P7: Claude's edit of three changes as it's written — two whole, the third's new line mid-way, its head
+    // wet; nothing applied, no review yet)
+    Scene {
+        name: "writing",
+        claude: "writemid",
+        files: MAIN,
+        keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@20?knots\", t.k", "@1"],
+    },
     // (Claude's edit of three changes: the first accepted, the second refused, the third in hand)
     Scene {
         name: "decided",
@@ -1419,6 +1427,8 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
         match script {
             "full" => turn.explain(true, false)?,
             "three" => turn.explain(true, true)?,
+            // (its three-item edit being written: the third item's new text held mid-line)
+            "writemid" => turn.explain_held(true, true, Some("nots.len());\\n\"}"))?,
             "mid" => turn.explain(false, false)?,
             "midlist" => turn.explain_listed()?,
             "ask" => turn.rewrite()?,
@@ -1480,8 +1490,36 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         Ok(())
     }
 
+    /// A call's input as the model writes it, before the call (`input_json_delta`, tarae draws it as it comes —
+    /// `writing.rs`): `json` (its keys in the order written) a few characters a piece; with `hold`, the pieces
+    /// stop at the first `hold` in it — and wait there until tarae goes (a shot of it being written).
+    fn input(&mut self, n: u64, name: &str, json: &str, hold: Option<&str>) -> io::Result<()> {
+        let block = json!({"type": "tool_use", "id": format!("t{n}"), "name": format!("mcp__tarae__{name}"), "input": {}});
+        self.line(json!({"type": "stream_event", "event": {"type": "content_block_start", "index": 1, "content_block": block}}))?;
+        let end = hold.and_then(|h| json.find(h)).unwrap_or(json.len());
+        let chars: Vec<char> = json[..end].chars().collect();
+        for piece in chars.chunks(12) {
+            let delta = json!({"type": "input_json_delta", "partial_json": piece.iter().collect::<String>()});
+            self.line(json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": delta}}))?;
+            std::thread::sleep(self.pause / 2);
+        }
+        if hold.is_some() {
+            // (an empty piece after a pause, as the stream sends: tarae's reader sends what it holds at a line)
+            std::thread::sleep(Duration::from_millis(60));
+            let delta = json!({"type": "input_json_delta", "partial_json": ""});
+            self.line(json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": delta}}))?;
+            return self.lines.by_ref().try_for_each(|l| l.map(drop));
+        }
+        self.line(json!({"type": "stream_event", "event": {"type": "content_block_stop", "index": 1}}))
+    }
+
     /// (`three`: the edit changes the doc comment and the print too — three changes in one review)
     fn explain(&mut self, whole: bool, three: bool) -> io::Result<()> {
+        self.explain_held(whole, three, None)
+    }
+
+    /// `explain`, its edit's input held at `hold` while it's written (`writemid`).
+    fn explain_held(&mut self, whole: bool, three: bool, hold: Option<&str>) -> io::Result<()> {
         self.words("Let me look at how the map is filled first.")?;
         self.text("\n\n")?;
         self.call(1, "read", json!({"files": ["src/main.rs:7-14"]}))?;
@@ -1501,19 +1539,29 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         self.text("threads.entry(first.name.clone()).or_insert(first);\n```\n\n")?;
         self.words("I will switch it to the entry API so a repeat keeps the first strand.")?;
         self.text("\n")?;
-        let edit = json!({"file_path": "src/main.rs", "old_string": "    threads.insert(first.name.clone(), first);\n",
-            "new_string": "    threads.entry(first.name.clone()).or_insert(first);\n"});
-        let edits = if three {
-            let doc = json!({"file_path": "src/main.rs", "old_string": "/// 실타래 — 이어진 실 한 가닥.\n",
-                "new_string": "/// 실타래 — 같은 이름은 첫 가닥으로 남는다.\n"});
-            let print = json!({"file_path": "src/main.rs",
-                "old_string": "        println!(\"{name}: {} knots, {} long\", t.knots.len(), t.length());\n",
-                "new_string": "        println!(\"{name}: {} knots\", t.knots.len());\n"});
-            json!([doc, edit, print])
-        } else {
-            json!([edit])
+        // (each item's keys in the order the model writes them: what it replaces, then what it writes)
+        let item = |old: &str, new: &str| {
+            let s = |t: &str| Value::from(t).to_string();
+            format!(r#"{{"file_path": "src/main.rs", "old_string": {}, "new_string": {}}}"#, s(old), s(new))
         };
-        self.call(2, "edit", json!({"edits": edits}))?;
+        let edit = item(
+            "    threads.insert(first.name.clone(), first);\n",
+            "    threads.entry(first.name.clone()).or_insert(first);\n",
+        );
+        let items = if three {
+            let doc =
+                item("/// 실타래 — 이어진 실 한 가닥.\n", "/// 실타래 — 같은 이름은 첫 가닥으로 남는다.\n");
+            let print = item(
+                "        println!(\"{name}: {} knots, {} long\", t.knots.len(), t.length());\n",
+                "        println!(\"{name}: {} knots\", t.knots.len());\n",
+            );
+            [doc, edit, print].join(", ")
+        } else {
+            edit
+        };
+        let input = format!(r#"{{"edits": [{items}]}}"#);
+        self.input(2, "edit", &input, hold)?;
+        self.call(2, "edit", serde_json::from_str(&input).map_err(io::Error::other)?)?;
         self.words("Done — **main.rs** now keeps the first strand when a name repeats.")?;
         self.words("Nothing else reads the map, so no other change is needed.")?;
         self.line(json!({"type": "result", "result": "done"}))

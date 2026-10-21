@@ -487,6 +487,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         StreamEv::Thinking
         | StreamEv::Thought(_)
         | StreamEv::Text(_)
+        | StreamEv::Writing(_)
         | StreamEv::Tool { .. }
         | StreamEv::ToolResult { .. }
         | StreamEv::Answered(_)

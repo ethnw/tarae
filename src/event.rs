@@ -543,7 +543,7 @@ mod tests {
         ("dap.rs", 4),
         ("disk.rs", 2),
         ("editor.rs", 1),
-        ("follow.rs", 2),
+        ("follow.rs", 1),
         ("fswatch.rs", 1),
         ("git.rs", 1),
         ("gitmenu.rs", 1),

@@ -284,6 +284,10 @@ pub struct Screen {
     /// The document each of `panes` drew (in their order) — its rows are that one's lines, whatever the pane
     /// shows since (`rows_of`).
     pub pane_docs: Vec<DocId>,
+    /// The focused pane's edit being written (`writing.rs`): its rows of changes on screen and the one being
+    /// written (screen rows) — the follow card keeps off them as off a review's changes.
+    pub writing_rows: Vec<usize>,
+    pub writing_head: Option<usize>,
     /// Column where the chat pane starts.
     pub chat_x: Option<usize>,
     /// The chat's rows as this frame laid them out (`view::Laid`) — its view mode is made of them — and where
@@ -570,6 +574,9 @@ pub struct Editor {
     /// 번짐: the head of text being written drawn as ink not yet dry (`term::wet`) — off in tests, as the
     /// animation is (a test that looks at it turns it on).
     pub wet_ink: bool,
+    /// macOS's Reduce Motion is on (read once at start — `motion::reduce_motion`): `editor.motion = "full"`
+    /// behaves as `calm`.
+    pub reduce_motion: bool,
     /// Diagnostic card closed with Esc on this line (doc, line) — back once the cursor leaves the line.
     pub diag_card_hidden: Option<(DocId, usize)>,
     cmd_loading: std::collections::HashSet<std::path::PathBuf>,
@@ -897,6 +904,7 @@ impl Editor {
             hook_waits: Vec::new(),
             offer_popups: !cfg!(test),
             wet_ink: !cfg!(test),
+            reduce_motion: false,
             diag_card_hidden: None,
             cmd_loading: Default::default(),
             watches: Vec::new(),
@@ -1739,8 +1747,12 @@ impl Editor {
     }
 
     /// The card's opacity 0..1: fades in with its first message (150 ms), out with the last one's time (400 ms).
+    /// Where nothing moves on a clock (`editor.motion`) it's there whole until it goes.
     pub fn toast_alpha(&self) -> f32 {
         let Some(oldest) = self.toasts.iter().map(Toast::age).max() else { return 0.0 };
+        if !self.moving() {
+            return 1.0;
+        }
         let left = self.toasts.iter().map(|t| t.life.saturating_sub(t.age())).max().unwrap_or_default();
         (oldest.as_secs_f32() / TOAST_FADE_IN.as_secs_f32())
             .min(left.as_secs_f32() / TOAST_FADE.as_secs_f32())
@@ -2540,6 +2552,10 @@ impl Editor {
         let running = || self.toasts.iter().filter(|t| !t.waiting());
         let oldest = running().map(Toast::age).max()?;
         let left = running().map(|t| t.life.saturating_sub(t.age())).max();
+        // (nothing moving on a clock: one frame as its time is up, none to fade)
+        if !self.moving() {
+            return Some(left.unwrap_or_default() + std::time::Duration::from_millis(2));
+        }
         let steady = left.unwrap_or_default().saturating_sub(TOAST_FADE);
         let fading_in = oldest < TOAST_FADE_IN;
         Some(if fading_in || steady.is_zero() { TICK } else { steady })
@@ -2560,8 +2576,16 @@ impl Editor {
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
             || (run && slot_drawn)
             || self.offer_busy();
+        // (the wave held still where nothing moves on a clock: a frame a second, for the time waited)
         let next = if waiting && !self.unfocused {
-            Some(step_in(anim_clock().elapsed()))
+            let elapsed = anim_clock().elapsed();
+            Some(match self.moving() {
+                true => step_in(elapsed),
+                false => {
+                    std::time::Duration::from_nanos(1_000_000_000 - u64::from(elapsed.subsec_nanos()))
+                        + std::time::Duration::from_millis(2)
+                }
+            })
         } else {
             self.toast_wake()
         };
@@ -4031,6 +4055,12 @@ impl Editor {
         (a, b): (usize, usize),
     ) -> bool {
         if crate::doccomment::touches_change(doc, a, b) {
+            return false;
+        }
+        // (an edit being written over it or right beside it shows it raw, as the review will — `writing.rs`)
+        if crate::writing::shown(doc)
+            .is_some_and(|w| w.blocks.iter().any(|x| x.first <= b + 1 && x.last + 1 >= a))
+        {
             return false;
         }
         let text = &doc.text;

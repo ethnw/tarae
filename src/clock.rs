@@ -75,7 +75,6 @@ mod tests {
         ("editor.rs", 12),
         ("edits.rs", 1),
         ("features.rs", 3),
-        ("follow.rs", 10),
         ("fswatch.rs", 8),
         ("gitmenu.rs", 1),
         ("gitpanel.rs", 2),

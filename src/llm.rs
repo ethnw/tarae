@@ -776,6 +776,8 @@ pub enum StreamEv {
     Thought(String),
     /// Answer text fragment (batched every 25 ms).
     Text(String),
+    /// An edit's input as it's written (`writing.rs`, batched as text is).
+    Writing(crate::writing::Delta),
     /// A tool call (chat panel — Read·Grep·Glob with its full input).
     Tool { id: String, name: String, input: serde_json::Value },
     /// What a tool returned (its first 4 KB — enough to see where a search landed).
@@ -837,12 +839,15 @@ pub fn pump(
             });
         }
         let send = |ev: StreamEv| route(ev).is_none_or(|apply| tx.send(Event::Job(apply)).is_ok());
-        // Streamed text not yet sent — answer text or (`pending_thought`) thinking summary
+        // Streamed text not yet sent — answer text or (`pending_thought`) thinking summary — and an edit's
+        // input as it's written (`writing`), sent in the same batches
         let mut pending = String::new();
         let mut pending_thought = false;
+        let writing = std::cell::RefCell::new(crate::writing::Reading::default());
         let flush = |pending: &mut String, thought: bool| {
             let t = std::mem::take(pending);
-            t.is_empty() || send(if thought { StreamEv::Thought(t) } else { StreamEv::Text(t) })
+            (t.is_empty() || send(if thought { StreamEv::Thought(t) } else { StreamEv::Text(t) }))
+                && writing.borrow_mut().take().into_iter().all(|d| send(StreamEv::Writing(d)))
         };
         let mut last_flush = Instant::now();
         let mut thinking_sent = false;
@@ -867,6 +872,17 @@ pub fn pump(
                     if !send(StreamEv::Answered(model.clone())) {
                         break;
                     }
+                }
+                // An edit's input: read as it comes, sent at the batch's time — at once when its block ends
+                if writing.borrow_mut().line(&ev) {
+                    let ended = ev["event"]["type"] == "content_block_stop";
+                    if ended || crate::clock::since(last_flush) >= Duration::from_millis(25) {
+                        last_flush = crate::clock::now();
+                        if !flush(&mut pending, pending_thought) {
+                            break;
+                        }
+                    }
+                    continue;
                 }
                 // Tool calls arrive whole in the assistant message — text streamed before them goes first
                 let tools = tool_events(&ev);
@@ -1616,6 +1632,7 @@ fn start(
             | StreamEv::Answered(_)
             | StreamEv::Initialized { .. }
             | StreamEv::Tool { .. }
+            | StreamEv::Writing(_)
             | StreamEv::ToolResult { .. }
             | StreamEv::Control { .. }
             | StreamEv::Compaction(_)
@@ -1650,6 +1667,8 @@ pub fn review_with(
 ) {
     close_review(ed);
     ed.llm_generation += 1;
+    // (what was being written there is this review's now — `writing.rs`)
+    crate::writing::reviewed(ed, doc_id);
     let hunks: Vec<Hunk> = changes
         .into_iter()
         .map(|(from, to, old, new)| Hunk {

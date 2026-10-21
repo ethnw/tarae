@@ -342,6 +342,12 @@ pub struct Document {
     /// An edit of Claude's that follow or replay shows here (`follow::sync_shown` — only while the buffer is
     /// the version it was seen in): its lines on the review's wash, the ones they replaced above them.
     pub shown: Option<Vec<crate::replay::Hunk>>,
+    /// What Claude is writing here, drawn as it's written (`writing::sync`) — only while the buffer is the
+    /// version it was laid out for.
+    pub writing: Option<std::sync::Arc<crate::writing::Shown>>,
+    /// Follow took the editor to what's being written at this line: the next frame puts it where the review
+    /// will (`term::render_frame`).
+    pub writing_align: Option<usize>,
     /// `review_base` parsed whole, for its removed rows' colours (`Editor::base_parse`, on a worker) — until it
     /// lands they're coloured one line at a time. It follows sight as the document's own trees do
     /// (`Editor::trees_follow_sight`: gone with them, parsed again when shown). `base_seq` tells a parse of an
@@ -431,6 +437,8 @@ impl Document {
             review_only: false,
             grammar_held: None,
             shown: None,
+            writing: None,
+            writing_align: None,
         }
     }
 

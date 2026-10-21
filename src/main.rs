@@ -95,6 +95,7 @@ mod markdown;
 mod mcp;
 mod media;
 mod models;
+mod motion;
 mod movement;
 #[cfg(test)]
 mod mutate;
@@ -198,6 +199,7 @@ mod waits;
 mod wasm;
 mod worktree;
 mod wrap;
+mod writing;
 mod zellij;
 
 use std::path::PathBuf;
@@ -417,6 +419,14 @@ fn main() -> Result<()> {
             _ => {}
         });
     }
+    // macOS's Reduce Motion, read once (a worker's — it runs `defaults`): `editor.motion = "full"` as `calm`
+    editor.events.jobs().spawn(|| {
+        let on = motion::reduce_motion();
+        move |ed: &mut editor::Editor| {
+            ed.reduce_motion = on;
+            ed.unchanged = !on;
+        }
+    });
     if !files.is_empty() {
         editor.current = 0;
     }

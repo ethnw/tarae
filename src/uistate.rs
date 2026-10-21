@@ -926,6 +926,40 @@ pub struct SessionState {
     /// What goes with the chat input's next message, in the order added (`Chat::with_state`: shapes, never text)
     /// — the front session's only; Claude's level never (unsent).
     pub with: Vec<Value>,
+    /// The edits its Claude is writing as their input streams (`writing.rs`) — drawn in their buffers, nothing
+    /// applied or decided. Claude's level: its own session's only.
+    pub writing: Vec<WritingState>,
+}
+
+/// An item of an edit Claude is writing (`writing::listed`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WritingState {
+    /// Its tool call.
+    pub call: String,
+    /// Its file, as the call names it.
+    pub file: String,
+    /// The lines (1-based, inclusive) its rows are drawn over — None: not drawn (its place still looked for, in no
+    /// buffer, in no single place, or the buffer changed since).
+    pub lines: Option<(usize, usize)>,
+    /// Its new text is whole: the call waits to be made.
+    pub whole: bool,
+}
+
+impl WritingState {
+    pub fn json(&self) -> Value {
+        json!({"call": self.call, "file": self.file, "lines": self.lines.map(|(a, b)| [a, b]),
+            "state": if self.whole { "written" } else { "writing" }})
+    }
+
+    /// For Claude's level: `src/a.rs L8–12 (writing)`.
+    pub fn text(&self) -> String {
+        let at = match self.lines {
+            Some((a, b)) if a == b => format!(" L{a}"),
+            Some((a, b)) => format!(" L{a}–{b}"),
+            None => " (not drawn)".into(),
+        };
+        format!("{}{at} ({})", self.file, if self.whole { "written" } else { "writing" })
+    }
 }
 
 /// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
@@ -1340,6 +1374,7 @@ impl Editor {
                 (true, Some(c)) => c.with_state(),
                 _ => Vec::new(),
             },
+            writing: crate::writing::listed(l.chat.as_ref(), &self.docs),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1567,6 +1602,9 @@ impl UiState {
                 }
                 if !s.with.is_empty() {
                     v["with"] = json!(s.with);
+                }
+                if !s.writing.is_empty() {
+                    v["writing"] = s.writing.iter().map(WritingState::json).collect();
                 }
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);

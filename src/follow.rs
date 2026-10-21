@@ -253,6 +253,38 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
     }
 }
 
+/// Claude is writing an edit over `lines` of `path` (`writing.rs`): already in sight in the code, nothing moves;
+/// else the editor there, as for a stop — the file opened for it if it isn't — and the next frame puts its rows
+/// where the review will show them (`term::review_lead`: it opens with them where they are, when there's room above
+/// for its title), its head then kept in sight as it's written (`term::scroll_to_cursor`).
+pub fn writing(ed: &mut Editor, path: &Path, lines: Range<usize>) {
+    let start = lines.start;
+    if in_sight(ed, path, &lines) {
+        return;
+    }
+    go_range(ed, path, lines);
+    let following = ed.session.chat.as_ref().is_some_and(|c| c.follow.active()) && !ed.background();
+    let doc = ed.doc_mut();
+    if following && doc.path.as_deref() == Some(path) && !doc.loading {
+        doc.writing_align = Some(start);
+    }
+}
+
+/// What Claude is writing went past what's in sight (`writing::sync`: the line being written isn't on the last
+/// frame): the editor on it, so its head is kept in sight from here (`term::scroll_to_cursor`).
+pub fn writing_head(ed: &mut Editor, path: &Path, lines: Range<usize>) {
+    go_range(ed, path, lines);
+}
+
+/// Whether `lines` of `path` are all in the focused pane as the last frame drew it.
+fn in_sight(ed: &Editor, path: &Path, lines: &Range<usize>) -> bool {
+    let doc = ed.doc();
+    doc.path.as_deref() == Some(path) && {
+        let shown: Vec<usize> = ed.view.iter().map(crate::codeview::Row::line).collect();
+        lines.clone().all(|l| shown.contains(&l)) && !ed.view.is_empty()
+    }
+}
+
 /// An edit to `real` (its real path) was allowed: what the file is now (None: no such file) — its stop's
 /// changes are worked out against it once the edit is written (`on_result`).
 pub fn before_edit(ed: &mut Editor, real: PathBuf, before: Option<String>) {
@@ -462,10 +494,10 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
         range,
         link: Some(crate::chat::Link { path: path.to_path_buf(), line: lines.start }),
     };
-    if paced && f.moved.is_some_and(|t| t.elapsed() < PACE) {
+    if paced && f.moved.is_some_and(|t| crate::clock::since(t) < PACE) {
         return;
     }
-    f.moved = Some(std::time::Instant::now());
+    f.moved = Some(crate::clock::now());
     f.gaze = Some(Gaze::new(look, Some(path.to_path_buf()), Some(lines.clone())));
     go_range(ed, path, lines);
 }
@@ -476,7 +508,7 @@ fn play(ed: &mut Editor) {
     let root = ed.session.root.clone();
     let background = ed.background();
     let Some(f) = follow(ed) else { return };
-    if !f.active() || f.playing.is_some_and(|(until, _)| std::time::Instant::now() < until) {
+    if !f.active() || f.playing.is_some_and(|(until, _)| crate::clock::now() < until) {
         return;
     }
     // A session behind: the tour waits where it is, and goes on when the session is in front (`session_in`)
@@ -526,7 +558,7 @@ fn play(ed: &mut Editor) {
         std::time::Duration::from_secs_f32((said as f32 / 25.0).clamp(2.5, 8.0))
     };
     if let Some(f) = follow(ed) {
-        f.playing = Some((std::time::Instant::now() + dwell, generation));
+        f.playing = Some((crate::clock::now() + dwell, generation));
     }
     // The list (a finished turn's) marks where the tour is
     if let Some(l) = ed.session.qlist.as_mut().filter(|l| l.title == TOUR) {
@@ -568,7 +600,7 @@ pub fn session_in(ed: &mut Editor) {
     // Paused before it went behind: follow takes over again a quiet while from now (coming back is
     // looking — not yanked away at once)
     if let Some(f) = follow(ed).filter(|f| f.paused) {
-        f.last_input = Some(std::time::Instant::now());
+        f.last_input = Some(crate::clock::now());
         arm_resume(ed);
     }
 }
@@ -1043,7 +1075,7 @@ pub fn watch(ed: &mut Editor) {
         }
     }
     if input && f.paused {
-        f.last_input = Some(std::time::Instant::now());
+        f.last_input = Some(crate::clock::now());
         arm_resume(ed);
     }
 }
@@ -1077,12 +1109,12 @@ fn quiet(ed: &Editor) -> Option<std::time::Duration> {
 fn arm_resume(ed: &mut Editor) {
     let Some(wait) = quiet(ed) else { return };
     let Some(f) = follow(ed).filter(|f| !f.resume_armed) else { return };
-    let since = f.last_input.map_or(wait, |t| t.elapsed());
+    let since = f.last_input.map_or(wait, crate::clock::since);
     f.resume_armed = true;
     let left = wait.saturating_sub(since).max(std::time::Duration::from_millis(10));
     let session = ed.session.id;
     ed.events.jobs().spawn(move || {
-        std::thread::sleep(left);
+        crate::event::sleep(left);
         move |ed: &mut Editor| {
             // The session behind now (swapped in for this — `with_session`) or gone: its follow waits for it to
             // come back, and `session_in` arms it again (left armed, no wake-up would ever come for it)
@@ -1112,13 +1144,13 @@ fn resume_due(ed: &mut Editor) {
         ed.unchanged = true;
         return;
     }
-    let quiet_enough = wait.is_some_and(|w| f.last_input.is_none_or(|t| t.elapsed() >= w));
+    let quiet_enough = wait.is_some_and(|w| f.last_input.is_none_or(|t| crate::clock::since(t) >= w));
     if !quiet_enough || !free {
         if !quiet_enough {
             ed.unchanged = true;
         } else if let Some(f) = follow(ed) {
             // (typing, a prompt or a card: looked at again a while later)
-            f.last_input = Some(std::time::Instant::now());
+            f.last_input = Some(crate::clock::now());
         }
         return arm_resume(ed);
     }
@@ -1196,7 +1228,7 @@ fn show_stop(ed: &mut Editor, at: (usize, usize)) {
         f.placed = None;
     }
     if f.paused {
-        f.last_input = Some(std::time::Instant::now());
+        f.last_input = Some(crate::clock::now());
     }
     let why = (!stop.why.is_empty()).then(|| stop.why.clone());
     f.replaying = Some(Gaze {

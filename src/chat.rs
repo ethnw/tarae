@@ -522,6 +522,8 @@ pub struct Chat {
     /// and, for tarae's change tools, which: its MCP request's id → the call's (`claim_for`, `row_for`).
     pub claimed: Vec<String>,
     pub rows: Vec<(serde_json::Value, String)>,
+    /// The edits Claude is writing this turn, as their input streams (`writing.rs`).
+    pub writing: crate::writing::Live,
     /// This turn's UI elements given to Claude (the context's `ui:` line, what was pointed at, its `ui`
     /// calls) · the ones its answer cites · the elements pointed at for the next message, its chips
     /// (`uistate/claude.rs`, `uistate/point.rs`).
@@ -868,6 +870,7 @@ impl Chat {
             calls: Vec::new(),
             claimed: Vec::new(),
             rows: Vec::new(),
+            writing: Default::default(),
             given: Vec::new(),
             cited: Vec::new(),
             pointed: Vec::new(),
@@ -1380,6 +1383,8 @@ pub fn close(ed: &mut Editor) {
     // (a turn under way ends here, cut off: its process goes with the chat, and its exit is never heard)
     ed.session.usage.cut_off(crate::usage::now_ms());
     ed.calls_record();
+    // (nor is its edit being written: its rows go with it — `writing.rs`)
+    crate::writing::over(ed);
     ed.session.chat = None;
     // (what its answers let through goes with it at once — `:granted` and the chat's count too)
     ed.caps_sync();
@@ -1636,6 +1641,8 @@ fn ensure_proc(ed: &mut Editor) {
     llm::pump(child, false, tx, move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
     });
+    // (a process replaced mid-turn: what the last one was writing is never heard of again — `writing.rs`)
+    crate::writing::over(ed);
     // What claude's environment leaves out, once since tarae started (names only)
     if let Some(said) = llm::env_told(ed)
         && let Some(c) = &mut ed.session.chat
@@ -1666,6 +1673,12 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         c.billing.and_then(|b| crate::billing::checked(b, keep_key, crate::billing::Role::Chat, said))
     };
     let log = ed.session.log();
+    // (the turn's or the process's end: nothing is being written — `writing.rs`)
+    if matches!(ev, StreamEv::Done(_) | StreamEv::Exit(_))
+        && ed.session.chat.as_ref().is_some_and(|c| c.generation == generation)
+    {
+        crate::writing::over(ed);
+    }
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation == generation) else { return };
     match ev {
         StreamEv::Thinking => {
@@ -1823,7 +1836,15 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 None => c.msgs.push(Msg::new(Role::Note, said, "")),
             }
         }
+        StreamEv::Writing(d) => {
+            if c.state == State::Idle {
+                return;
+            }
+            crate::writing::on_delta(ed, d);
+        }
         StreamEv::ToolResult { id, text, error } => {
+            crate::writing::answered(ed, &id);
+            let Some(c) = ed.session.chat.as_mut() else { return };
             c.calls.retain(|k| k.id != id);
             ed.session.usage.tally.answered(&id, error, crate::usage::now_ms());
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it

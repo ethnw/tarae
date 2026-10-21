@@ -83,6 +83,7 @@ impl Editor {
             l.compacted = None;
             l.key_source = None;
             l.sandbox = None;
+            l.writing = Vec::new();
             // (its answer's word and context share, never what blocks it: a card's title — the review of
             // frictions36)
             if let Some(a) = l.answer.as_mut().filter(|a| a.starts_with("blocked: ")) {
@@ -204,6 +205,14 @@ impl UiState {
                 _ => " — a finding reaches you when the user sends it (space v s)",
             };
             out.push(format!("reviewer: {}{unsent}", r.text()));
+        }
+        // (its edits being written, where they're drawn: what the user sees of them before the call is made)
+        if let Some(s) = self.sessions.iter().find(|s| s.id == self.front).filter(|s| !s.writing.is_empty()) {
+            let w: Vec<String> = s.writing.iter().map(super::WritingState::text).collect();
+            out.push(format!(
+                "writing (drawn as it comes — not applied, nothing decided): {}",
+                w.join("   ")
+            ));
         }
         // (the notes that went to it, by id: `reply_to` answers one — also once the message that brought it has
         // left its context)

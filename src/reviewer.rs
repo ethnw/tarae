@@ -1044,6 +1044,7 @@ pub(crate) fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         | StreamEv::Money(_)
         | StreamEv::Thought(_)
         | StreamEv::Text(_)
+        | StreamEv::Writing(_)
         | StreamEv::ToolResult { .. }
         | StreamEv::Requesting(_)
         | StreamEv::Answered(_)

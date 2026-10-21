@@ -111,6 +111,17 @@ impl Editor {
         self.set_top_rows(top);
     }
 
+    /// An edit being written over `line` (`writing.rs`): the view so its first row is `above` rows down — where
+    /// the review will show it (`term::review_lead`); its head is kept in sight from there (`term::scroll_to_cursor`).
+    pub fn align_writing(&mut self, line: usize, above: usize) {
+        let last = mv::last_line(&self.doc().text);
+        let m = self.measure(line.min(last));
+        let start = m.shown_as(line.min(last));
+        let top = Self::top_for(&m, start, above.min(self.viewport.0.saturating_sub(1)));
+        drop(m);
+        self.set_top_rows(top);
+    }
+
     /// First and last lines fully on screen, inside the scrolloff margin (a folded doc comment's first line for
     /// one inside it).
     fn inner_lines(&self) -> (usize, usize) {

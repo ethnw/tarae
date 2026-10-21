@@ -50,6 +50,9 @@ pub enum OtherKind {
     /// A line of a change of the edit review: one it proposes — or, when the document no longer holds what the
     /// change replaces (edited while the review waits), one it takes out or keeps, from the text it was asked on.
     Edit(Edit),
+    /// A line of an edit Claude is still writing (`writing.rs`) — drawn as the review will draw it, nothing
+    /// applied; `head`: the line it's writing now, its last words wet.
+    Writing { head: bool },
 }
 
 /// A row of change `hunk` of the edit review, and what the change does to it.
@@ -272,6 +275,9 @@ pub struct Measure<'a> {
     /// looked for once, not for each of its lines a move counts past `near` (each ~400 lines scanned).
     far: std::cell::RefCell<Option<(crate::doccomment::Block, bool)>>,
     folding: bool,
+    /// What Claude is writing here (`writing.rs`): each block's lines drawn as its rows, counted as a folded doc
+    /// comment's are — its rows on its first line, none on the rest (counted once a width: `Block::counts`).
+    writing: Option<&'a crate::writing::Shown>,
 }
 
 /// A document's folded doc comment blocks' row counts (by first line) for one version, code width and tab width
@@ -318,7 +324,22 @@ impl<'a> Measure<'a> {
             near,
             far: Default::default(),
             folding,
+            writing: crate::writing::shown(doc),
         }
+    }
+
+    /// The block being written that holds `l`: (first line, last line, its rows — wrapped as the pane wraps).
+    fn writing(&self, l: usize) -> Option<(usize, usize, usize)> {
+        let b = self.writing?.at(l)?;
+        let n = *b.counts(&self.doc.text, self.wrap, self.tab).last().unwrap_or(&0);
+        Some((b.first, b.last, n))
+    }
+
+    /// The rows above a block's head (the line being written) inside it — where the cursor's row is counted while
+    /// it's on the block (`term::scroll_to_cursor`: follow keeps it in sight); 0 elsewhere.
+    pub fn head(&self, l: usize) -> usize {
+        let Some(b) = self.writing.and_then(|w| w.at(l)).filter(|b| b.first == l) else { return 0 };
+        b.head.map_or(0, |head| b.counts(&self.doc.text, self.wrap, self.tab)[head])
     }
 
     /// Every line near is one row: nothing wraps, no removed rows, no block shows folded (asked of the fold rule
@@ -326,6 +347,7 @@ impl<'a> Measure<'a> {
     pub fn uniform(&self) -> bool {
         let near = |b: &crate::doccomment::Block| b.end >= *self.near.start();
         self.wrap.is_none()
+            && self.writing.is_none()
             && !self.changes.rows()
             && self
                 .blocks
@@ -354,6 +376,10 @@ impl<'a> Measure<'a> {
 
     /// The doc comment block holding `l` when it shows folded: (first line, last line, its rows).
     pub fn folded(&self, l: usize) -> Option<(usize, usize, usize)> {
+        // (lines an edit being written replaces show as its rows, folded doc comment or not)
+        if let Some(w) = self.writing(l) {
+            return Some(w);
+        }
         if !self.folding {
             return None;
         }

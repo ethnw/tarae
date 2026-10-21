@@ -515,6 +515,16 @@ instead (`Claude changes 10 files`, the change, each file's count): `y` accepts 
 one, `v` shows every change in a buffer, `n` declines them all. A build script, manifest or setting among them
 says so on its review.
 
+You watch an edit being written. Once Claude has written what a change replaces and it's in the file once, the
+lines it writes appear there as it writes them, under the lines they replace, on the washes its review will have,
+the last words of the line in progress still wet ([`editor.motion`](reference/settings.md)). Nothing is applied or
+decided and no key is taken: you keep working — the drawing stays while you edit elsewhere in the file and goes
+if you change those lines. Each change of a
+call appears where it goes. When it's out of sight, follow takes you there and places it where the review will
+show it, then keeps the line being written in sight. Once the call is made, the review opens on the same rows.
+This is for tarae's `edit` and, with `llm.edit-tools` set to `both` or `native`, Claude Code's Edit and Write (a
+Write over the whole file); a new file, a move or a delete waits for its card.
+
 Claude edits with tarae's own `edit` tool: exact replacements (Claude Code's Edit fields), several files and
 replacements in one call, new files, moves and deletes — one change you review, or nothing changes and Claude is
 told which part failed and the lines closest to what it meant. An edit that matched only with trailing whitespace
