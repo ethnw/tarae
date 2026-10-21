@@ -437,9 +437,29 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `tab` | `insert_tab` | Insert tab char |
 | `up` | `move_visual_line_up` | Move up (visual line) |
 
+## The run panels' output
+
+A task's output, a preflight's, the tests' failure or output (`C-w j` to the panel, a click) is a read-only document with normal mode's keys — yours too: `[keys.normal]` holds there. What would edit it is put back and said; `C-w` and `:` are the editor's. The panel's own keys go over normal mode's:
+
+### On the output (`[keys.run]`)
+
+| Key | Command | Description |
+|---|---|---|
+| `G` | `view_latest` | To the latest, caught up |
+| `K` | `run_where` | Where Claude's command ran |
+| `o` | `preflight_output` | A preflight step's output |
+| `q` | `wclose` | Close this window or panel |
+| `y` | `view_copy` | Copy, to paste anywhere |
+| `backtab` | `slot_prev` | Previous bottom panel tab |
+| `C-e` | `scroll_down` | Scroll down a line |
+| `C-y` | `scroll_up` | Scroll up a line |
+| `esc` | `view_leave` | Leave view mode |
+| `ret` | `view_take` | Quote it to the chat, or type |
+| `tab` | `slot_next` | Next tab of the bottom panel |
+
 ## View mode
 
-A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel), the run panels' output — a task's, a preflight's, the tests' failure or output (`C-w j` to the panel, a click, the wheel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done; `enter` quotes what's selected to the chat; `space` is its own menu, what it has of the editor's. Its own keys go over them, and each surface's over those.
+A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done; `enter` quotes what's selected to the chat; `space` is its own menu, what it has of the editor's. Its own keys go over them, and each surface's over those.
 
 ### Its own keys (`[keys.view]`)
 
@@ -474,18 +494,6 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `q` | `wclose` | Close this window or panel |
 | `backtab` | `slot_prev` | Previous bottom panel tab |
 | `C-\` | `view_code` | To the code, at once |
-| `tab` | `slot_next` | Next tab of the bottom panel |
-
-### The run panels' — task, preflight, tests (`[keys.view.run]`)
-
-| Key | Command | Description |
-|---|---|---|
-| `K` | `run_where` | Where Claude's command ran |
-| `o` | `preflight_output` | A preflight step's output |
-| `q` | `wclose` | Close this window or panel |
-| `backtab` | `slot_prev` | Previous bottom panel tab |
-| `C-e` | `scroll_down` | Scroll down a line |
-| `C-y` | `scroll_up` | Scroll up a line |
 | `tab` | `slot_next` | Next tab of the bottom panel |
 
 ### The chat's input (`[keys.chat]`)

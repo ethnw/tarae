@@ -547,6 +547,28 @@ impl Shows {
         }
     }
 
+    /// A run panel's output (`rundoc.rs`): plain text on the panel's ground at full strength — its selections,
+    /// search matches and cursors (painted, a cell each) only where it has the keys; no numbers, signs, guides,
+    /// hints or blame. Scrolled sideways by `left` (its lines don't wrap).
+    pub fn output(keys: bool, left: usize) -> Shows {
+        Shows {
+            focused: true,
+            cursor: keys,
+            editing: false,
+            left,
+            changes: Changes::Index,
+            numbers: LineNumber::Absolute,
+            primary: keys,
+            cursors: keys,
+            search: keys,
+            cursorline: None,
+            messages: false,
+            inlay: false,
+            guides: false,
+            blame: false,
+        }
+    }
+
     /// A picker's code preview: the file as the editor shows it — diagnostics, their line-end messages, signs,
     /// indent guides, its change marks as the index's are drawn (never removed lines as rows: the preview is
     /// laid out by lines from where the item opens). Kept apart from a pane: absolute numbers and no selection
@@ -667,11 +689,13 @@ pub struct Source<'a> {
     pub text: &'a Rope,
     /// The parse to colour by — only one with a tree.
     pub syntax: Option<&'a Syntax>,
+    /// The search's matches on it when they're its own (a run panel's output — `rundoc.rs`), else the editor's.
+    pub hits: Option<&'a crate::search::SearchHits>,
 }
 
 impl<'a> Source<'a> {
     pub fn of(doc: &'a Document) -> Source<'a> {
-        Source { doc, text: &doc.text, syntax: doc.syntax.as_ref().filter(|s| s.tree.is_some()) }
+        Source { doc, text: &doc.text, syntax: doc.syntax.as_ref().filter(|s| s.tree.is_some()), hits: None }
     }
 }
 

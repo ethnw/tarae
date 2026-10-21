@@ -407,8 +407,8 @@ main that has what it waits for, and the user says go:
   `llm.screen-terminal`. P3 done (2026-10-21, `1b988324`): the task, preflight and test panels' keys are their view
   mode (`Handler::RunView` for `Bottom`, `[view.run]`: `tab` the slot's panels, `K`, `o`, `enter` runs the waiting run or
   quotes the selection as `<quoted from="task|preflight|test">`), held still while a run prints, `G` catches up;
-  `space` in any view mode opens view mode's own which-key; the search prompt names the view. P4, the mouse, after
-  panes' P2b.
+  `space` in any view mode opens view mode's own which-key; the search prompt names the view (the run panels' half
+  became panes P2c's documents). P4, the mouse, after panes' P2b.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
   `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the
@@ -429,7 +429,10 @@ main that has what it waits for, and the user says go:
   leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program; part 1 `e6d8891c`: the tree holding every surface, the layout from it, hops of any kind, zoom, the code splits' sizes, `C-w` inside a terminal's program, restart and the state's panes; part 2 `e131542c`: floating panes under the one focus — `At::Float`, the pane under remembered —, the tests panel as two linked panes under one header, `C-w H J K L`/`t`/`w` over every kind, the layout kept across quit and start in `$state/layouts.json`, the divider lit beside the pane with the keys; four panes' key-to-frame 0.48 ms) → **P2c** text surfaces
   as documents (the user, 2026-10-21: the chat's transcript, the run panels' output and later the terminal as
   buffers under the editor's keys — view mode becomes normal mode on a read-only document) — under way in the `panes4`
-  session (step 1, the run panels' output as documents, built and green on 2026-10-21; its shots and docs next, then step 2, the chat's transcript) → **P3** panes of their own (the tests panel
+  session: step 1 done (2026-10-21) — the task's, a preflight's and the tests' detail are read-only documents of the
+  session's, following their run, normal mode on them with `[run]` over, edits put back and said, held still while
+  the run prints, `Handler::RunView` and `[view.run]` gone, `rundoc.rs`; key to frame on a 20,000-line output
+  0.30 ms; step 2 next, the chat's transcript → **P3** panes of their own (the tests panel
   the first linked group) → **P3b** tabs and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
   terminal → shells across `:restart`. After its own terminal engine, then images at full

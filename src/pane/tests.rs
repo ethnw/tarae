@@ -225,8 +225,8 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     ed.focus_pane(g.detail);
     frame(&mut ed);
     assert!(
-        ed.session.is_at(At::Slot) && crate::view::has_keys(&ed).is_some(),
-        "the detail: the run's view mode"
+        ed.session.is_at(At::Slot) && crate::rundoc::has_keys(&ed).is_some(),
+        "the detail: the run's output"
     );
     feed(&mut ed, "<C-w>h");
     assert_eq!(ed.session.at, At::List(g.list));
@@ -337,7 +337,7 @@ fn c_w_hops_to_every_kind_of_pane_and_back() {
     assert_eq!((ed.session.at, ed.session.focus), (At::Code, left));
     feed(&mut ed, "<C-w>j");
     assert_eq!(ed.session.at, At::Slot, "below: the slot");
-    assert!(ed.session.view.is_some(), "its view mode");
+    assert!(crate::rundoc::has_keys(&ed).is_some(), "its output");
     feed(&mut ed, "<C-w>l");
     assert_eq!(ed.session.at, At::Chat, "right of the slot: the chat (it runs the body's height)");
     feed(&mut ed, "<C-w>h");

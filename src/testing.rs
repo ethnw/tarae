@@ -268,11 +268,17 @@ pub enum RunState {
     NoTests,
 }
 
+/// The output lines a test run keeps, the oldest going first.
+const OUTPUT_KEPT: usize = 5000;
+
 pub struct TestRun {
     pub target: Target,
     pub state: RunState,
     /// (is stderr, line).
     pub output: Vec<(bool, String)>,
+    /// What `keep` cut from `output` (its oldest lines past `OUTPUT_KEPT`) — the tests' detail replays them
+    /// (`rundoc.rs`).
+    pub trims: crate::task::Trims,
     pub started: Instant,
     pub took: Option<Duration>,
     pid: Option<u32>,
@@ -325,6 +331,15 @@ impl TestRun {
         self.generation
     }
 
+    /// The output cut to its last `OUTPUT_KEPT` lines, the cut recorded (`trims`).
+    pub fn keep(&mut self) {
+        let n = self.output.len();
+        if n > OUTPUT_KEPT {
+            self.output.drain(..n - OUTPUT_KEPT);
+            self.trims.push(crate::task::Trim::Drain(0, n - OUTPUT_KEPT));
+        }
+    }
+
     /// Indices of the failed ones.
     pub fn failures(&self) -> Vec<usize> {
         use crate::test_results::Status;
@@ -373,6 +388,7 @@ impl TestRun {
             target: Target { label: label.into(), cwd: std::env::temp_dir(), how },
             state: RunState::Failed(Some(1)),
             output: output.into_iter().map(|l| (false, l)).collect(),
+            trims: Default::default(),
             started: Instant::now(),
             took: None,
             pid: None,
@@ -531,7 +547,7 @@ impl Editor {
     }
 
     /// The keys to the tests' list (`C-w h` from its detail, `S-tab`, a click on its rows): the slot showing the
-    /// tests, its view mode left.
+    /// tests, its detail's document without them.
     pub fn tests_list_focus(&mut self) {
         if self.session.test_run.as_ref().is_none_or(|r| r.cases.is_empty()) {
             return self.set_status("no results to list yet — the output is all the panel has");
@@ -540,7 +556,7 @@ impl Editor {
         self.procs_unfocus();
         self.plugin_panel_unfocus();
         self.session.at = At::List(self.session.tests.list);
-        crate::view::sync(self);
+        crate::rundoc::sync(self);
     }
 
     /// `enter` on the tests' list: the selected test's place in the code — the code gets the keys (as the side
@@ -763,10 +779,7 @@ impl Editor {
                         r.output.push((err, line));
                     }
                     r.last_output = Instant::now();
-                    let n = r.output.len();
-                    if n > 5000 {
-                        r.output.drain(..n - 5000);
-                    }
+                    r.keep();
                     if let Some(((wait, file, root), port, label)) = attach {
                         ed.dap_generation += 1;
                         let g = ed.dap_generation;
@@ -866,6 +879,7 @@ impl Editor {
             target,
             state: RunState::Running,
             output: Vec::new(),
+            trims: Default::default(),
             started: Instant::now(),
             took: None,
             pid: Some(pid),

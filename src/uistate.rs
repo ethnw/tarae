@@ -70,6 +70,8 @@ pub enum Region {
     Point,
     /// A surface's view mode (`view.rs`): Helix's moves and selections on what it shows.
     View(crate::view::Surface),
+    /// A run panel's output (`rundoc.rs`): normal mode on its read-only document, the panel's keys over it.
+    Output(crate::rundoc::Run),
 }
 
 impl Region {
@@ -92,6 +94,7 @@ impl Region {
             Region::Popup => "popup".into(),
             Region::Point => "point".into(),
             Region::View(s) => format!("view:{}", s.name()),
+            Region::Output(r) => format!("output:{}", r.name()),
         }
     }
 
@@ -119,7 +122,7 @@ impl Region {
             Region::Point => Handler::Point,
             Region::View(crate::view::Surface::Chat) => Handler::ChatView,
             Region::View(crate::view::Surface::Terminal) => Handler::TerminalView,
-            Region::View(_) => Handler::RunView,
+            Region::Output(_) => Handler::Output,
         }
     }
 }
@@ -160,7 +163,7 @@ pub enum Handler {
     Picker,
     ChatView,
     TerminalView,
-    RunView,
+    Output,
     Unfold,
     Chat,
     Rail,
@@ -185,7 +188,7 @@ impl Handler {
             Handler::Picker => "picker",
             Handler::ChatView => "chat-view",
             Handler::TerminalView => "terminal-view",
-            Handler::RunView => "run-view",
+            Handler::Output => "output",
             Handler::Unfold => "chat-minimized",
             Handler::Chat => "chat",
             Handler::Rail => "review",
@@ -409,11 +412,6 @@ impl Editor {
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
         }
-        // `view::key`: a run panel's `[`/`]` gone on to the editor — the key after it is the editor's where it
-        // completes the panel's own (`]x`, `]q`), else the view says it
-        if let Some((s, goes)) = crate::view::run_bracket(self).filter(|_| !modal) {
-            v.push(layer(Region::View(s), Filter::Except(goes)));
-        }
         // `view::key`: a surface's view mode — a prompt it opened (`/`) takes them all; with nothing under way
         // `C-w` and the chat's chords go on (to `chat::key`'s, which takes only those then)
         let viewing = crate::view::has_keys(self).filter(|_| !pending);
@@ -432,6 +430,19 @@ impl Editor {
                 }
             } else {
                 v.push(layer(Region::View(s), Filter::All));
+            }
+        }
+        // `rundoc::key`: a run panel's output — a prompt it opened (`/`) takes them all; with nothing under way `C-w`
+        // and `:` go on (the editor's, as from every panel); a sequence of the editor's under way, not its
+        if let Some((r, o)) = crate::rundoc::keyed(self).filter(|_| !pending) {
+            if self.prompt.is_some() {
+                if o.prompt {
+                    v.push(layer(Region::Prompt, Filter::All));
+                }
+            } else if o.keys.pending.is_empty() && !o.keys.waits() {
+                v.push(layer(Region::Output(r), Filter::Except(crate::rundoc::passed())));
+            } else {
+                v.push(layer(Region::Output(r), Filter::All));
             }
         }
         // `chat::unfold_key`: minimized, what would type brings it back — its own keys (and `C-w` from an
@@ -597,9 +608,13 @@ impl Editor {
             crate::view::has_keys(self).and(self.session.view.as_ref()).filter(|_| self.pending.is_empty());
         let mut pending: Vec<String> = self.count.iter().map(|n| n.to_string()).collect();
         pending.extend(self.pending.iter().map(Key::to_string));
-        // (a view mode's own count and keys, while it has them)
+        // (a view mode's own count and keys, while it has them — a run panel's output's too)
         if let Some(v) = view {
             pending = v.pending_keys();
+        }
+        let output = crate::rundoc::keyed(self).map(|(_, o)| o).filter(|_| self.pending.is_empty());
+        if let Some(o) = output {
+            pending = o.keys.pending_keys();
         }
         KeysTo {
             region,
@@ -607,7 +622,9 @@ impl Editor {
             answers,
             held,
             pending: pending.join(" "),
-            char_next: self.on_next_char.is_some() || view.is_some_and(|v| v.char_next()),
+            char_next: self.on_next_char.is_some()
+                || view.is_some_and(|v| v.char_next())
+                || output.is_some_and(|o| o.keys.char_next()),
             drawn: self.drawn(region),
             under,
             to: self.element_id(region),
@@ -649,8 +666,8 @@ impl Editor {
             Region::Point => self.pointing.is_some(),
             Region::View(crate::view::Surface::Chat) => s.chat_view.get().is_some(),
             Region::View(crate::view::Surface::Terminal) => s.terminal_rows.is_some(),
-            Region::View(crate::view::Surface::Tests) => s.test_panel.get().is_some(),
-            Region::View(_) => s.task_panel.get().is_some(),
+            Region::Output(crate::rundoc::Run::Tests) => s.test_panel.get().is_some(),
+            Region::Output(_) => s.task_panel.get().is_some(),
         }
     }
 
@@ -668,7 +685,7 @@ impl Editor {
             Region::List(_) => format!("pane#{}", self.session.tests.list),
             Region::Rail => "review".into(),
             Region::Unfold | Region::View(crate::view::Surface::Chat) => "chat".into(),
-            Region::View(s) if let Some(slot) = s.slot() => slot_name(slot).into(),
+            Region::Output(r) => slot_name(r.slot()).into(),
             other => other.name(),
         }
     }
@@ -1483,7 +1500,11 @@ impl Editor {
             account: l.usage.account.as_ref().map(|a| (a.organization.clone(), a.plan.clone())),
             billing: l.billing.name(),
             sandbox: l.sandbox.clone(),
-            view: if is_front { crate::view::state(self) } else { None },
+            view: if is_front {
+                crate::view::state(self).or_else(|| crate::rundoc::state(self))
+            } else {
+                None
+            },
             with: match (is_front, self.session.chat.as_ref()) {
                 (true, Some(c)) => c.with_state(),
                 _ => Vec::new(),

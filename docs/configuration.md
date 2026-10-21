@@ -139,6 +139,8 @@ e = "file_picker"                                # tables are sub-menus (space e
 - View mode (the chat's and the terminal's) is normal mode on what they show: `[keys.normal]` spills in (kept to
   what reads), `[keys.view]` goes over it, `[keys.view.chat]` and `[keys.view.terminal]` over that; `[keys.chat]`
   is the chat's input (`esc` → its view mode)
+- A run panel's output (a task's, a preflight's, the tests') is normal mode on a read-only document: the whole of
+  `[keys.normal]` (and `[keys.select]` after `v`) holds there, `[keys.run]` goes over it
 - `[keys.terminal]`: the keys taken from the terminal's program, merged over the default (`"C-\\" =
   "terminal_view"`); every key it doesn't name goes to the program, and `to_program` gives one back:
   ```toml

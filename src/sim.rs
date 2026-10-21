@@ -40,7 +40,7 @@ mod quota;
 mod quotes;
 mod rebasemsg;
 mod reviews;
-mod runview;
+mod rundoc;
 mod sessions;
 mod shuttle;
 mod stuckstop;

@@ -623,6 +623,13 @@ impl Document {
         }
     }
 
+    /// A read-only document's text as it was before a key that edited it (`rundoc.rs`): put back, the step it
+    /// pushed with it — it has no history to undo.
+    pub fn put_back(&mut self, before: Snapshot) {
+        self.restore(before);
+        (self.undo, self.redo) = (Vec::new(), Vec::new());
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(snap) = self.undo.pop() else { return false };
         let cur = self.snapshot();

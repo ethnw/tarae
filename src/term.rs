@@ -368,12 +368,14 @@ fn spawn_input(tx: crate::event::Tx) {
 
 /// One frame: layout → scroll → draw. Callable without a terminal (performance budget test).
 pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
+    // (the run panels' documents as their runs are now: what they printed since the last event)
+    crate::rundoc::sync(editor);
     // Reading an answer moved the editor to what the chat now shows (its links are only known once drawn)
     let mut frame = Vec::with_capacity(1 << 16);
     render_frame(editor, &mut frame, w, h)?;
     // (the chat's view mode asked for before its rows were laid out: made from these, drawn with it)
-    // (and a run panel's view laid out for another height than its panel just drew: kept in sight at it)
-    if crate::follow::reading(editor) | crate::view::wanted(editor) | crate::view::run_resized(editor) {
+    // (and a run panel's output laid out for another size than its panel just drew: its cursor kept in sight)
+    if crate::follow::reading(editor) | crate::view::wanted(editor) | crate::rundoc::resized(editor) {
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
@@ -490,6 +492,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         test_panel: Default::default(),
         tests_list: Default::default(),
         run_rows: Default::default(),
+        run_cols: Default::default(),
         review_change: Default::default(),
         review_rows: Default::default(),
         edges: Default::default(),
@@ -507,6 +510,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     };
     editor.refresh_search(focus_lay.text_rows);
     crate::view::refresh_search(editor);
+    crate::rundoc::refresh_search(editor);
     // Follow took the editor to an edit being written: its rows where the review will show them (`writing.rs`) —
     // the topmost item's, the change the review opens on
     if let Some(line) = editor.doc_mut().writing_align.take() {
@@ -1253,13 +1257,13 @@ fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
         let way_in = prefix && editor.pane_toward(0, 1).is_none();
         return way_in.then(|| ("C-w j".to_string(), "scroll")).into_iter().collect();
     }
-    // Its view mode's — the same pairs as the terminal's head, each key as bound (a remap moves the hint)
-    let Some(s) = crate::view::has_keys(editor).filter(|s| s.run()) else {
+    // Its output's — the same pairs as the terminal's head, each key as bound (a remap moves the hint)
+    let Some(slot) = crate::rundoc::has_keys(editor) else {
         return vec![("esc".into(), "code"), ("C-w z".into(), zoom)];
     };
-    let bound = |name: &str, like: &str| crate::view::bound(editor, s, name, like);
-    let quotes = crate::view::quotes(editor);
-    let closes = s.slot().is_some_and(|slot| editor.q_closes(slot));
+    let bound = |name: &str, like: &str| crate::rundoc::bound(editor, name, like);
+    let quotes = crate::rundoc::quotes(editor);
+    let closes = editor.q_closes(slot);
     [
         (bound("view_take", "ret").filter(|_| quotes), "quote"),
         (bound("view_copy", "y"), "copy"),
@@ -1274,59 +1278,67 @@ fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
     .collect()
 }
 
-/// A run panel's head in its view mode: `● view` in the accent — held still; once its run printed more, said dim
-/// (`G` catches up).
-fn run_view_head(editor: &Editor, ui: &Ui, card: Style, slot: crate::sizes::Slot) -> Vec<(String, Style)> {
-    let Some(v) = crate::view::run_view_of(editor, slot) else { return Vec::new() };
-    let mut head = vec![("   ● view".to_string(), Style { fg: ui.accent.fg, ..card })];
-    if crate::view::run_came(editor, v, v.surface) {
-        head.push((" · output after".into(), Style { fg: ui.virt.fg, ..card }));
+/// A run panel's head while its output has the keys and more came below what's in sight since (`G` catches up):
+/// said dim.
+fn output_head(editor: &Editor, ui: &Ui, card: Style, slot: crate::sizes::Slot) -> Vec<(String, Style)> {
+    let came = crate::rundoc::has_keys(editor) == Some(slot)
+        && editor.session.outputs.get(slot).is_some_and(|o| o.came());
+    match came {
+        true => vec![("   ↓ output after".into(), Style { fg: ui.virt.fg, ..card })],
+        false => Vec::new(),
     }
-    head
 }
 
-/// A run panel's row in its view mode: the document's `line` (`text`, cut to `w` as the output's lines are) in
-/// `base` from (`x`, `y`), its view's search matches, selections and cursors painted over it (`view_paint`), the
-/// cursors recorded where they're drawn (`cursor`: it has the keys).
+/// The first line a run panel shows of its output in `rows` rows: its document's top while it has the keys, else
+/// where the panel is scrolled to (its end, following the run).
+fn output_top(editor: &Editor, slot: crate::sizes::Slot, rows: usize) -> usize {
+    use crate::sizes::Slot;
+    match (crate::rundoc::has_keys(editor) == Some(slot), editor.session.outputs.doc(slot)) {
+        (true, Some(d)) => d.top,
+        _ => match slot {
+            Slot::Test => editor.session.test_run.as_ref().map_or(0, |r| r.detail_top(rows)),
+            _ => editor.session.task_run.as_ref().map_or(0, |r| r.top(rows)),
+        },
+    }
+}
+
+/// A run panel's output (`rundoc.rs`): its document's lines from `top`, `rows` of them at (`x`, `y`), `w` wide, by
+/// the code's drawer on the panel's ground — plain text, coloured as its document is painted; its selections, its
+/// search's matches and its cursors where it has the keys.
 #[allow(clippy::too_many_arguments)]
-fn print_viewed(
+fn draw_output(
     out: &mut impl Write,
     editor: &Editor,
-    v: &crate::view::View,
-    line: usize,
-    text: &str,
-    base: Style,
-    (x, y): (usize, u16),
-    w: usize,
     ui: &Ui,
-    cursor: bool,
+    lay: &Layout,
+    card: Style,
+    slot: crate::sizes::Slot,
+    top: usize,
+    (x, y, w, rows): (usize, usize, usize, usize),
 ) -> io::Result<()> {
-    use crate::markdown::Span;
-    let cut = fit(text, w);
-    let spans = [Span { text: cut.clone(), style: base }];
-    let painted = view_paint(v, line, &spans, ui, cursor);
-    queue!(out, MoveTo(x as u16, y))?;
-    for s in painted.as_deref().unwrap_or(&spans) {
-        apply(out, s.style)?;
-        queue!(out, Print(&s.text))?;
-    }
-    if cursor {
-        let d = v.doc();
-        let ls = mv::line_start(&d.text, line);
-        for r in d.selection().ranges() {
-            let c = r.cursor(&d.text);
-            if mv::line_of(&d.text, c) == line && c - ls <= cut.len() {
-                editor.screen.cursors.borrow_mut().push((x + cut[..c - ls].width(), y as usize));
-            }
-        }
-    }
+    let Some(doc) = editor.session.outputs.doc(slot) else { return Ok(()) };
+    let keys = crate::rundoc::has_keys(editor) == Some(slot);
+    editor.screen.run_cols.set(w);
+    let last = mv::last_line(&doc.text);
+    let view: Vec<crate::codeview::Row> = (top..=last)
+        .take(rows)
+        .map(|line| crate::codeview::Row::Text { line, part: None, edit: None })
+        .collect();
+    let pl = Layout {
+        x0: x,
+        edit_w: x + w,
+        scrollbar: false,
+        text_top: y as u16,
+        text_rows: rows,
+        gutter: 0,
+        text_cols: w,
+        ..lay.clone()
+    };
+    let shows = Shows::output(keys, if keys { doc.left } else { 0 });
+    let hits = editor.session.outputs.get(slot).and_then(|o| o.hits()).filter(|_| keys);
+    let src = Source { hits, ..Source::of(doc) };
+    draw_text(editor, &src, top, &shows, &view, &ui.on(card), &pl, out)?;
     Ok(())
-}
-
-/// A view's document's line `l`, its line break off.
-fn view_line(v: &crate::view::View, l: usize) -> String {
-    let d = v.doc();
-    d.text.byte_slice(mv::line_start(&d.text, l)..mv::line_end(&d.text, l)).to_string()
 }
 
 /// A tab's badge (`chrome::Badge`): its glyph and colour — the wave in the accent while under way, `●` in
@@ -1774,47 +1786,6 @@ fn draw_terminal_panel(
     Ok((show && (cr as usize) < rows).then(|| ((x0 + PAD) as u16 + cc, body as u16 + cr)))
 }
 
-/// A line of a test's or task's output: passing in green, failing (and errors) in red, stderr faint.
-fn output_style(
-    err: bool,
-    l: &str,
-    card: Style,
-    good: Option<crossterm::style::Color>,
-    bad: Option<crossterm::style::Color>,
-    faint: Style,
-) -> Style {
-    let l = l.trim_start();
-    let passing = l.starts_with("test result: ok")
-        || l.starts_with("BUILD SUCCESS")
-        || (l.starts_with("test ") && l.ends_with(" ok"))
-        || l.starts_with("--- PASS")
-        || l.starts_with("ok ")
-        || l == "PASS"
-        || l.starts_with("Finished")
-        || (l.starts_with("===") && l.contains(" passed") && !l.contains(" failed"));
-    let failing = !passing
-        && (l.contains("FAILED")
-            || l.contains("panicked at")
-            || l.starts_with("--- FAIL")
-            || l.starts_with("FAIL")
-            || l.starts_with("E ")
-            || l.starts_with("error")
-            || l.contains(": error")
-            || (l.contains(" failed") && !l.contains(" 0 failed")));
-    let warning = !passing && !failing && (l.starts_with("warning") || l.contains(": warning"));
-    if passing {
-        Style { fg: good, ..card }
-    } else if failing {
-        Style { fg: bad, ..card }
-    } else if warning {
-        Style { fg: None, bold: true, ..card }
-    } else if err {
-        faint
-    } else {
-        card
-    }
-}
-
 /// The build task's panel (below the code, where tests show theirs): the slot's header (its tab names the
 /// task — `slot_header`; here how it ended, what went into the list `● 2  ▲ 1`, the time, the keys); then
 /// its output, the end showing.
@@ -1899,7 +1870,7 @@ fn draw_task_panel(
     let (to_out, rest) = slot_keys.split_at(after_out);
     hints.splice(own..own, rest.iter().map(|(k, d)| (k.as_str(), *d)));
     hints.splice(0..0, to_out.iter().map(|(k, d)| (k.as_str(), *d)));
-    summary.extend(run_view_head(editor, ui, card, crate::sizes::Slot::Task));
+    summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Task));
     let y0 = lay.slot_y();
     let body = slot_header(out, editor, ui, lay, card, &summary, &hints)?;
     // A preflight's steps: the row under the header
@@ -1939,73 +1910,27 @@ fn draw_task_panel(
             faint,
         )?;
     }
-    // (its end, unless scrolled back; the wheel's thumb when it doesn't fit) — in its view mode, its document's
-    // rows from the view's top, the painter on them
+    // Its output, a document (`rundoc.rs`): its end, unless scrolled back — its own top while it has the keys; the
+    // wheel's thumb when it doesn't fit
     editor.screen.task_panel.set(Some((y0, y0 + top - 1 + rows + below, rows)));
     editor.screen.run_rows.set(Some((crate::sizes::Slot::Task, y0 + top, x0 + PAD, rows)));
-    let view = crate::view::run_view_of(editor, crate::sizes::Slot::Task);
-    let view_cursor = editor.cursor_in() == Some(crate::chrome::CursorIn::View);
-    let lines = view.map_or(r.output.len(), |v| v.rows());
-    let start = view.map_or_else(|| r.top(rows), |v| v.doc().top);
+    let lines = r.output.len();
+    let start = output_top(editor, crate::sizes::Slot::Task, rows);
     let bar = (lines > rows).then(|| scroll_thumb(rows, lines, start));
     for i in 0..rows {
-        let y = (y0 + top + i) as u16;
-        queue!(out, MoveTo(x0 as u16, y))?;
+        queue!(out, MoveTo(x0 as u16, (y0 + top + i) as u16))?;
         apply(out, card)?;
-        queue!(out, Spaces(w), MoveTo((x0 + PAD) as u16, y))?;
-        // (a preflight step's heading recedes, its name bold — but where the view's marks are on it)
-        let heading = |l: &str| l.strip_prefix("── ").and_then(|l| l.strip_suffix(" ──")).map(str::to_string);
-        let l = start + i;
-        let got = match view {
-            Some(v) => (l < v.rows()).then(|| (v.err(l), view_line(v, l))),
-            None => r.output.get(l).map(|(e, s)| (*e, s.replace('\t', "  "))),
-        };
-        let marked = view.is_some_and(|v| view_marks(v, l, ui, view_cursor).is_some());
-        match got.as_ref() {
-            Some((err, line)) if view.is_some() && (marked || heading(line).is_none() || steps.is_none()) => {
-                let v = view.expect("in view mode, above");
-                // (nothing printed yet: its command, faint, as without the view)
-                let st = if v.waiting() { faint } else { output_style(*err, line, card, good, bad, faint) };
-                print_viewed(
-                    out,
-                    editor,
-                    v,
-                    l,
-                    line,
-                    st,
-                    (x0 + PAD, y),
-                    w.saturating_sub(4),
-                    ui,
-                    view_cursor,
-                )?;
-            }
-            Some((_, line)) if steps.is_some() && heading(line).is_some() => {
-                let name = fit_ellipsis(&heading(line).unwrap_or_default(), w.saturating_sub(10));
-                apply(out, faint)?;
-                queue!(out, Print("── "))?;
-                apply(out, Style { bold: true, ..dim })?;
-                queue!(out, Print(name))?;
-                apply(out, faint)?;
-                queue!(out, Print(" ──"))?;
-            }
-            Some((err, line)) => {
-                apply(out, output_style(*err, line, card, good, bad, faint))?;
-                queue!(out, Print(fit(line, w.saturating_sub(4))))?;
-            }
-            None if i == 0 && lines == 0 => {
-                // (its first line: a command of several printed whole went down the rows as a staircase)
-                let mut lines = r.task.cmd.lines();
-                let first = lines.next().unwrap_or_default();
-                let cmd = if lines.next().is_some() { format!("{first} …") } else { first.to_string() };
-                apply(out, faint)?;
-                queue!(out, Print(fit_ellipsis(&cmd, w.saturating_sub(4))))?;
-            }
-            None => {}
-        }
-        if bar.as_ref().is_some_and(|b| b.contains(&i)) {
-            apply(out, faint)?;
-            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
-        }
+        queue!(out, Spaces(w))?;
+    }
+    let at = (x0 + PAD, y0 + top, w.saturating_sub(2 * PAD), rows);
+    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at)?;
+    for i in (0..rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
+        apply(out, faint)?;
+        queue!(
+            out,
+            MoveTo((x0 + w).saturating_sub(1) as u16, (y0 + top + i) as u16),
+            Print(thumb_glyph(ui))
+        )?;
     }
     Ok(())
 }
@@ -2631,7 +2556,7 @@ fn draw_test_panel(
     }
     let slot_keys = slot_hints(editor);
     let mut hints: Vec<(&str, &str)> = slot_keys.iter().map(|(k, d)| (k.as_str(), *d)).collect();
-    summary.extend(run_view_head(editor, ui, card, crate::sizes::Slot::Test));
+    summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Test));
     hints.extend_from_slice(match r.state {
         RunState::Running => &[("space x c", "stop")],
         // (most useful first — the ones that don't fit fold away from the end)
@@ -2655,13 +2580,10 @@ fn draw_test_panel(
         let at = (x0, (body + rows + below) as u16);
         sandbox_row(out, at, w, line, "space x s", quiet.as_deref(), card, warn, faint)?;
     }
-    let line_style = |err: bool, l: &str| output_style(err, l, card, good, bad, faint);
-    // In its view mode the detail is its document's rows from the view's top, the painter on them
-    let view = crate::view::run_view_of(editor, crate::sizes::Slot::Test);
-    let view_cursor = editor.cursor_in() == Some(crate::chrome::CursorIn::View);
-    // The wheel's thumb on the card's right edge, when the detail doesn't fit
+    // The detail is a document (`rundoc.rs`): from the window the wheel is at (a message from its top, the output at
+    // its end) — its own top while it has the keys; the wheel's thumb on the card's right edge when it doesn't fit
     let thumb = |detail_rows: usize, top: usize| {
-        let n = view.map_or_else(|| r.detail_len(), |v| v.rows());
+        let n = r.detail_len();
         (n > detail_rows).then(|| scroll_thumb(detail_rows, n, top))
     };
     // No results yet — the whole output (following its end, unless the wheel moved it); a run where no
@@ -2671,7 +2593,7 @@ fn draw_test_panel(
         let out_rows = rows.saturating_sub(note);
         editor.screen.test_panel.set(Some((y0, last, out_rows)));
         editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body + note, x0 + PAD, out_rows)));
-        let start = view.map_or_else(|| r.detail_top(out_rows), |v| v.doc().top);
+        let start = output_top(editor, crate::sizes::Slot::Test, out_rows);
         let bar = thumb(out_rows, start);
         for i in 0..rows {
             let y = (body + i) as u16;
@@ -2682,32 +2604,14 @@ fn draw_test_panel(
                 apply(out, Style { fg: color("warning"), ..card })?;
                 let why = "no test ran — nothing matched it. What the runner did:";
                 queue!(out, Print(fit_ellipsis(why, w.saturating_sub(4))))?;
-                continue;
             }
-            let i = i - note;
-            let l = start + i;
-            match (view, r.output.get(l)) {
-                (Some(v), _) if l < v.rows() => {
-                    let line = view_line(v, l);
-                    let st = if v.waiting() { faint } else { line_style(v.err(l), &line) };
-                    let at = (x0 + PAD, y);
-                    print_viewed(out, editor, v, l, &line, st, at, w.saturating_sub(4), ui, view_cursor)?;
-                }
-                (Some(_), _) => {}
-                (None, Some((err, line))) => {
-                    apply(out, line_style(*err, line))?;
-                    queue!(out, Print(fit(&line.replace('\t', "  "), w.saturating_sub(4))))?;
-                }
-                (None, None) if i == 0 && r.output.is_empty() => {
-                    apply(out, faint)?;
-                    queue!(out, Print(fit_ellipsis(&r.target.argv().join(" "), w.saturating_sub(4))))?;
-                }
-                (None, None) => {}
-            }
-            if bar.as_ref().is_some_and(|b| b.contains(&i)) {
-                apply(out, faint)?;
-                queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
-            }
+        }
+        let at = (x0 + PAD, body + note, w.saturating_sub(2 * PAD), out_rows);
+        draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, start, at)?;
+        for i in (0..out_rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
+            let y = (body + note + i) as u16;
+            apply(out, faint)?;
+            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
         }
         return Ok(());
     }
@@ -2731,46 +2635,16 @@ fn draw_test_panel(
     // (the member with the keys says so in its title — one header over both, the names lit as the frame's are)
     let g = editor.session.tests;
     let list_keys = editor.session.is_at(At::List(g.list));
-    let detail_keys = view.is_some() && editor.session.is_at(At::Slot);
+    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Test);
     let title =
         |keys: bool| if keys { Style { bold: true, ..strong } } else { Style { bold: true, ..faint } };
     let cwd = &r.target.cwd;
     let rel = |p: &std::path::Path| p.strip_prefix(cwd).unwrap_or(p).display().to_string();
     let fails = r.failures();
-    // Right column's lines — the window the wheel is at (a message from its top, the output at its end); in its
-    // view mode, its document's from the view's top
-    let top = view.map_or_else(|| r.detail_top(list_rows), |v| v.doc().top);
+    // Right column: the detail — the failure picked's message, else the output (drawn once the rows are laid)
+    let top = output_top(editor, crate::sizes::Slot::Test, list_rows);
     let bar = thumb(list_rows, top);
     editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body + 1, x0 + right_x + 1, list_rows)));
-    let right: Vec<(String, Style)> = match selected {
-        _ if let Some(v) = view => (top..v.rows().min(top + list_rows))
-            .map(|l| {
-                let line = view_line(v, l);
-                let st = match v.failure() {
-                    true if l == 0 => Style { fg: bad, ..card },
-                    true => card,
-                    false => line_style(v.err(l), &line),
-                };
-                (line, st)
-            })
-            .collect(),
-        Some(c) if c.message.is_empty() => vec![("failed (no message)".into(), faint)],
-        Some(c) => c
-            .message
-            .iter()
-            .enumerate()
-            .skip(top)
-            .take(list_rows)
-            .map(|(i, m)| (m.replace('\t', "  "), if i == 0 { Style { fg: bad, ..card } } else { card }))
-            .collect(),
-        None => r
-            .output
-            .iter()
-            .skip(top)
-            .take(list_rows)
-            .map(|(e, l)| (l.replace('\t', "  "), line_style(*e, l)))
-            .collect(),
-    };
     slot_join(out, ui, lay, card, x0 + left_w)?;
     for i in 0..rows {
         let y = (body + i) as u16;
@@ -2844,36 +2718,14 @@ fn draw_test_panel(
                 Print(" ")
             )?;
         }
-        // Right
-        if let Some((text, st)) = right.get(i - 1) {
-            let x = x0 + right_x + 1;
-            match view {
-                Some(v) => {
-                    let at = (x, y);
-                    print_viewed(
-                        out,
-                        editor,
-                        v,
-                        top + i - 1,
-                        text,
-                        *st,
-                        at,
-                        right_w.saturating_sub(1),
-                        ui,
-                        view_cursor,
-                    )?
-                }
-                None => {
-                    apply(out, *st)?;
-                    queue!(out, MoveTo(x as u16, y), Print(fit(text, right_w.saturating_sub(1))))?;
-                }
-            }
-        }
         if bar.as_ref().is_some_and(|b| b.contains(&(i - 1))) {
             apply(out, faint)?;
             queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
         }
     }
+    // Right: the detail, under its title
+    let at = (x0 + right_x + 1, body + 1, right_w.saturating_sub(1), list_rows);
+    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, top, at)?;
     Ok(())
 }
 
@@ -3266,7 +3118,7 @@ impl Region {
             Keys::Code | Keys::Change => Some(Region::Code),
             Keys::Side(_) | Keys::Review => Some(Region::Side),
             k if k.chat() => Some(Region::Chat),
-            Keys::Slot(_) | Keys::Program | Keys::View(_) => Some(Region::Slot),
+            Keys::Slot(_) | Keys::Program | Keys::View(_) | Keys::Output(_) => Some(Region::Slot),
             Keys::Picker | Keys::Card | Keys::Point | Keys::Chat => None,
         }
     }
@@ -3576,8 +3428,8 @@ fn draw(
     if lay.debug_h > 0 && lay.slot_w > 0 {
         use crate::sizes::Slot;
         let session = &editor.session;
-        // (its panels' view modes have the keys too — the terminal's, the runs')
-        let viewed = matches!(keys, Keys::View(s) if s.slot().is_some());
+        // (its panels' view modes and documents have the keys too — the terminal's, the runs')
+        let viewed = matches!(keys, Keys::View(crate::view::Surface::Terminal) | Keys::Output(_));
         let _fade = Fade::unless(matches!(keys, Keys::Slot(_) | Keys::Program) || viewed, ui);
         let slot = editor.slot();
         let plugin = editor.plugins.as_ref().and_then(|p| p.panel.as_ref());
@@ -3654,7 +3506,8 @@ fn draw(
     }
     // (a view mode's own sequence under way — `g`, `z`, `m` on the conversation — lists its keys too)
     let viewing = crate::view::has_keys(editor).and(editor.session.view.as_ref());
-    if (!editor.pending.is_empty() || viewing.is_some_and(|v| !v.pending().is_empty()))
+    let output = crate::rundoc::keyed(editor).is_some_and(|(_, o)| !o.keys.pending.is_empty());
+    if (!editor.pending.is_empty() || output || viewing.is_some_and(|v| !v.pending().is_empty()))
         && editor.picker.is_none()
     {
         draw_which_key(editor, ui, lay, out)?;
@@ -3933,7 +3786,7 @@ fn draw_text(
     let accent_bg = |t: f32| blend(ui.accent.fg, ui.tint, t);
     let hit_style = Style { bg: accent_bg(0.22), ..Style::default() };
     let hit_current = Style { bg: accent_bg(0.5), bold: true, ..Style::default() };
-    let visible_hits: &[(usize, usize)] = match &editor.search_hits {
+    let visible_hits: &[(usize, usize)] = match src.hits.or(editor.search_hits.as_ref()) {
         Some(h) if shows.search && hit_style.bg.is_some() => {
             let m = &h.matches;
             &m[m.partition_point(|x| x.1 <= vis_from)..m.partition_point(|x| x.0 <= vis_to)]
@@ -4084,7 +3937,7 @@ fn draw_text(
         Some((col, a..b))
     });
     let active_guide_style = Style { fg: ui.virt.fg, ..Style::default() };
-    let signs = lay.gutter - num_w(doc);
+    let signs = lay.gutter.saturating_sub(num_w(doc));
     // The sign column's cell for lines `a..=b` (a folded block's: its lines together) — stopped line ▶ >
     // breakpoint ● > the most severe diagnostic's bar
     let sign_of = |a: usize, b: usize| -> (&str, Style) {
@@ -4310,7 +4163,11 @@ fn draw_text(
         let cut = !first && row == 0;
         // (a line the edit under review takes out is washed across its gutter too, as the lines it proposes are)
         let gut = |st: Style| if taken { Style { bg: line_base.bg, ..st } } else { st };
-        if !first && !cut {
+        // (a plain text's view — a run panel's output — has no gutter: no signs, numbers or marks)
+        let gutter = lay.gutter > 0;
+        if !gutter {
+            // (nothing before its text)
+        } else if !first && !cut {
             // Continuation row of a wrapped line: no sign or number
             apply(out, gut(ui.base))?;
             queue!(out, Spaces(lay.gutter - 1))?;
@@ -4322,7 +4179,7 @@ fn draw_text(
             apply(out, gut(st))?;
             queue!(out, Print(glyph))?;
         }
-        if first || cut {
+        if gutter && (first || cut) {
             apply(out, gut(if cur_shown && line == cur_line { ui.linenr_selected } else { ui.linenr }))?;
             let w = lay.gutter - 1 - signs;
             // (`↑` where there's room for it: digits and arrow one cell each)
@@ -4340,12 +4197,13 @@ fn draw_text(
                 .then_some(("−", Style { fg: ui.diff_minus.fg, bold: true, ..line_base })),
             None => git_marks.get(li).copied().flatten().filter(|(g, _)| last || *g != "▁"),
         };
-        match mark {
+        match mark.filter(|_| gutter) {
             Some((glyph, st)) => {
                 apply(out, st)?;
                 queue!(out, Print(glyph))?;
             }
-            None => queue!(out, Print(" "))?,
+            None if gutter => queue!(out, Print(" "))?,
+            None => apply(out, line_base)?,
         }
         // A wrapped line's row is read from its own start (a long paragraph isn't re-read from its head for
         // each of its rows); the rest from the line's
@@ -7000,8 +6858,9 @@ fn draw_statusline(
     // Where the keys go: the code's mode, or the place that has them (`chrome::Keys`)
     let keys = editor.keys_at();
     // (a prompt a view mode opened — its `/` — stands over that view's word, not the code's mode)
-    let word = match crate::view::prompt_from(editor) {
-        Some(s) if keys == Keys::Code => Keys::View(s),
+    let word = match (crate::view::prompt_from(editor), crate::rundoc::prompt_from(editor)) {
+        (Some(s), _) if keys == Keys::Code => Keys::View(s),
+        (_, Some(r)) if keys == Keys::Code => Keys::Output(r),
         _ => keys,
     };
     let mode = word.label().unwrap_or(match editor.mode {
@@ -7014,6 +6873,14 @@ fn draw_statusline(
     let mode = match view.map(|v| v.mode()) {
         Some(Mode::Select) => format!("{mode} · SELECT"),
         _ => mode.to_string(),
+    };
+    // (a run panel's output: its own mode, then what it's of — `● normal · tests`)
+    let output = crate::rundoc::keyed(editor);
+    let mode = match (word, output) {
+        (Keys::Output(_), Some((_, o))) => {
+            format!("{} · {mode}", if o.keys.mode == Mode::Select { "SELECT" } else { "NORMAL" })
+        }
+        _ => mode,
     };
     let mut left = Vec::new();
     // `● normal`: a dot in the mode's colour (the accent, or the mode's own with `color-modes`), the word in ink
@@ -7042,11 +6909,23 @@ fn draw_statusline(
         // (an ended program takes no typing)
         let typed = bound("view_input", "i").filter(|_| crate::view::typeable(editor));
         let quote = bound("view_take", "ret").filter(|_| crate::view::quotes(editor));
-        // (a run panel's: the user's own run waiting behind Claude's there)
+        let pairs = [(quote, "quote"), (typed, "type"), (bound("view_leave", "esc"), "code")];
+        for (k, what) in pairs.iter().filter_map(|(k, d)| Some((k.as_ref()?, *d))) {
+            left.push(Seg { text: format!("  {k}"), style: Style { bold: true, ..dim }, keep: VIEW_HINTS });
+            left.push(Seg {
+                text: format!(" {what}"),
+                style: Style { fg: ui.linenr.fg, ..ui.status },
+                keep: VIEW_HINTS,
+            });
+        }
+    }
+    // A run panel's output: `enter` quotes a selection, else runs your run waiting behind; the way out — as bound
+    if let Keys::Output(_) = keys {
+        let bound = |name: &str, like: &str| crate::rundoc::bound(editor, name, like);
+        let quote = bound("view_take", "ret").filter(|_| crate::rundoc::quotes(editor));
         let run_now = bound("view_take", "ret")
-            .filter(|_| !crate::view::quotes(editor) && crate::view::run_waits(editor));
-        let pairs =
-            [(quote, "quote"), (run_now, "run now"), (typed, "type"), (bound("view_leave", "esc"), "code")];
+            .filter(|_| !crate::rundoc::quotes(editor) && crate::rundoc::run_waits(editor));
+        let pairs = [(quote, "quote"), (run_now, "run now"), (bound("view_leave", "esc"), "code")];
         for (k, what) in pairs.iter().filter_map(|(k, d)| Some((k.as_ref()?, *d))) {
             left.push(Seg { text: format!("  {k}"), style: Style { bold: true, ..dim }, keep: VIEW_HINTS });
             left.push(Seg {
@@ -7239,8 +7118,10 @@ fn draw_statusline(
         left.push(Seg { text: format!("   {}", fit_ellipsis(step, 32)), style: accent, keep: SHUTTLE_LIT });
     }
 
-    // (in a view mode, where its cursor is on its document — the row and column, the selections)
-    let (at_doc, at_mode) = view.map_or((doc, editor.mode), |v| (v.doc(), v.mode()));
+    // (in a view mode or on a run's output, where its cursor is on its document — the row and column, the
+    // selections)
+    let on_output = output.filter(|_| matches!(keys, Keys::Output(_))).map(|(_, o)| (o.doc(), o.keys.mode));
+    let (at_doc, at_mode) = view.map(|v| (v.doc(), v.mode())).or(on_output).unwrap_or((doc, editor.mode));
     let sel = at_doc.selection();
     let pos = cursor_idx(at_mode, sel.primary(), &at_doc.text);
     let line = mv::line_of(&at_doc.text, pos);
@@ -7311,9 +7192,10 @@ fn draw_statusline(
     }
     // (the search of where the keys are: a view mode's its own — its `/` being typed too —, never the code's)
     let searching = editor.session.view.as_ref().filter(|v| v.prompt).or(view);
-    let (hits, at) = match searching {
-        Some(v) => (v.hits(), v.doc().selection().primary()),
-        None => (editor.search_hits.as_ref(), sel.primary()),
+    let (hits, at) = match (searching, output.filter(|_| matches!(word, Keys::Output(_)))) {
+        (Some(v), _) => (v.hits(), v.doc().selection().primary()),
+        (None, Some((_, o))) => (o.hits(), o.doc().selection().primary()),
+        (None, None) => (editor.search_hits.as_ref(), sel.primary()),
     };
     if let Some(h) = hits {
         let n = h.matches.len();
@@ -9089,14 +8971,15 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
     let view = crate::view::has_keys(editor)
         .zip(editor.session.view.as_ref())
         .filter(|(_, v)| editor.pending.is_empty() && !v.pending().is_empty());
-    let (mut entries, keys) = match view {
-        Some((s, v)) => (editor.keymaps.view_children(s, v.mode(), v.pending()), v.pending()),
-        None => (editor.keymaps.children(editor.mode, &editor.pending), editor.pending.as_slice()),
+    // (a run panel's output's own sequence: normal mode's with `[run]` over it)
+    let output = crate::rundoc::keyed(editor)
+        .map(|(_, o)| &o.keys)
+        .filter(|k| editor.pending.is_empty() && !k.pending.is_empty());
+    let (entries, keys) = match (view, output) {
+        (Some((s, v)), _) => (editor.keymaps.view_children(s, v.mode(), v.pending()), v.pending()),
+        (None, Some(k)) => (editor.keymaps.run_children(k.mode, &k.pending), k.pending.as_slice()),
+        (None, None) => (editor.keymaps.children(editor.mode, &editor.pending), editor.pending.as_slice()),
     };
-    // (a run panel's `]` gone on to the editor: only what it reaches from there — the rest is said)
-    if let Some((_, goes)) = crate::view::run_bracket(editor) {
-        entries.retain(|(k, ..)| goes.contains(k));
-    }
     if entries.is_empty() {
         return Ok(());
     }
@@ -16523,6 +16406,48 @@ mod tests {
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
     }
 
+    /// Panes P2c: the task panel's output a document of the 20,000 lines a run keeps, the keys in it — moves, a search,
+    /// a selection, `G` — while the run prints 100 lines before each (appended to the document, trimmed as the run
+    /// keeps them, the trims replayed on it) within a frame.
+    #[test]
+    fn perf_budget_key_to_frame_on_a_runs_output() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_on_a_runs_output") {
+            return;
+        }
+        use crate::task::{Run, Task};
+        let budget = frame_budget();
+        let keys =
+            ["j", "C-d", "/", "4", "2", "ret", "n", "x", "x", "esc", "g", "g", "G", "k", "C-u", "w", "e"];
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = Rope::from_str("fn main() {}\n");
+            let mut r =
+                Run::for_test(Task { name: "t".into(), cmd: "cargo test".into(), cwd: std::env::temp_dir() });
+            for i in 0..20_000 {
+                r.push_line(i % 9 == 0, format!("test module_{i}::case_{i} ... ok"), i % 2_000 == 0);
+            }
+            ed.session.task_run = Some(r);
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 160, 48).unwrap();
+            ed.bottom_take_keys();
+            render(&mut ed, &mut buf, 160, 48).unwrap();
+            let mut n = 20_000;
+            keys.iter()
+                .map(|k| {
+                    let r = ed.session.task_run.as_mut().unwrap();
+                    for _ in 0..100 {
+                        n += 1;
+                        r.push_line(false, format!("test more_{n} ... ok"), false);
+                    }
+                    r.keep(500);
+                    key_to_frame(&mut ed, &mut buf, k, 160, 48)
+                })
+                .collect()
+        });
+        measured("key_to_frame_on_a_runs_output", worst, budget);
+        assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
+    }
+
     /// The same keys in a 6.6 MB file with unsaved-buffer recovery on (`recovery.rs`), each as a whole event
     /// (its after-event work tells the keeper what changed): within the frame budget while the keeper writes
     /// copies of the whole file on its thread. And what a copy of it costs there — never on the main loop.
@@ -17990,13 +17915,13 @@ mod tests {
         ed.session.task_run = Some(r);
         draw(&mut ed);
         ed.bottom_take_keys();
-        let rows = crate::view::run_rows(&ed, crate::view::Surface::Task);
+        let rows = crate::rundoc::rows(&ed, crate::sizes::Slot::Task);
         let top = |ed: &Editor| ed.session.task_run.as_ref().unwrap().top(rows);
         let half = (rows / 2).max(1);
-        // (its view mode: the code's moves — `gg` the start, the page keys move its cursor half its rows or all of
-        // them, as in the code; `C-e`/`C-y` the view a row, as every output panel's)
+        // (normal mode on its output: the code's moves — `gg` the start, the page keys move its cursor half its rows
+        // or all of them, as in the code; `C-e`/`C-y` the view a row, as every output panel's)
         let line = |ed: &Editor| {
-            let d = ed.session.view.as_ref().expect("its view mode").doc();
+            let d = ed.session.outputs.doc(crate::sizes::Slot::Task).expect("its output");
             crate::movement::line_of(&d.text, d.selection().primary().cursor(&d.text))
         };
         for (keys, at, view) in [

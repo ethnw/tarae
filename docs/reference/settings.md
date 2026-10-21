@@ -130,6 +130,7 @@ These are read alongside the settings above; see the [configuration guide](../co
 | Table | What it holds |
 |---|---|
 | `[keys.normal]` · `[keys.select]` · `[keys.insert]` | Key bindings on top of the [default keymap](keymap.md) |
+| `[keys.run]` | A run panel's output's own keys, over normal mode's |
 | `[keys.view]` · `[keys.view.chat]` · `[keys.view.terminal]` · `[keys.chat]` | View mode's keys and the chat input's, on top of the defaults |
 | `[keys.terminal]` | Keys taken from the terminal's program, on top of the defaults (`C-\` → its view mode); a key bound to `to_program` goes back to the program |
 | `[lsp.<name>]` | A language server: `command`, `args`, `except` (features it's not asked for) |

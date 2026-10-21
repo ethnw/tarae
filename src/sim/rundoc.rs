@@ -1,11 +1,12 @@
-//! The run panels' view mode, simulated (view P3): a task printing at random, now and then replaced by another run
-//! (a new generation), the keys of its view mode (`C-w j`, `k`, `gg`, `G`, `x`, `y` — its copy a job — `esc`, `q`,
-//! `tab`, `enter`, a search), the wheel over its rows, frames at two sizes, time passing. After every step: a view
-//! is a run panel's only while that panel has tarae's keys and shows the run it was made of; held still — the same
-//! view's document never changes, whatever the run printed; its cursor in its rows, the run's scroll its top; the
-//! panel's keys never without their view mode; and after a frame, the rows drawn are the document's.
+//! The run panels' output as documents, simulated (panes P2c): a task printing at random — now and then a long burst
+//! its run trims (`Run::keep`), now and then replaced by another run (a new generation) — normal mode's keys on its
+//! document and the panel's over them (`C-w j`, moves, `gg`, `G`, `x`, `v`, `y` — its copy a job — an edit's keys,
+//! `u`, `esc`, `q`, `tab`, `enter`, a search), the wheel over its rows, frames at two sizes, time passing. After
+//! every step: the document is the run's lines, line for line — nothing a key typed or deleted stays; never left
+//! swapped in; while it has the keys its cursor is in its rows and the run's scroll is its top, and a print never
+//! moves what's in sight; after a frame, the rows drawn are the document's.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use super::{Choices, Sim};
@@ -23,17 +24,21 @@ const LIMIT: Duration = Duration::from_secs(60);
 const W: u16 = 100;
 
 #[test]
-fn the_run_panels_view_mode() {
-    super::seeds("the_run_panels_view_mode", SEEDS, run);
+fn the_run_panels_output_documents() {
+    super::seeds("the_run_panels_output_documents", SEEDS, run);
 }
 
-/// What the scenario keeps between steps: lines printed, runs made, the view's document as last checked (its id —
-/// another when it's made again — and its text's hash), and the frame's height when the last step drew one.
+/// What's in sight of an output: its document, top, cursor, and the text of its lines in sight (up to a count of
+/// lines — what a print adds below them, room left, comes into sight).
+type Sight = (crate::document::DocId, usize, usize, String);
+
+/// What the scenario keeps between steps: lines printed, runs made, what was in sight before a print while the
+/// output had the keys (and its lines then), and the frame's height when the last step drew one.
 #[derive(Default)]
 struct World {
     printed: Cell<usize>,
     runs: Cell<u64>,
-    seen: Cell<Option<(crate::document::DocId, u64)>>,
+    before: RefCell<Option<(Sight, usize)>>,
     framed: Cell<Option<u16>>,
 }
 
@@ -43,7 +48,7 @@ fn task(n: u64) -> crate::task::Run {
 }
 
 fn run(choices: Choices) -> Vec<String> {
-    let mut sim = Sim::new("the_run_panels_view_mode", choices, LIMIT);
+    let mut sim = Sim::new("the_run_panels_output_documents", choices, LIMIT);
     let mut ed = Editor::new(crate::config::Config::default());
     ed.docs[0].text = ropey::Rope::from_str("fn main() {}\n");
     ed.session.task_run = Some(task(0));
@@ -64,14 +69,26 @@ fn run(choices: Choices) -> Vec<String> {
     trace
 }
 
+/// What's in sight of the task panel's output while it has the keys, of its first `upto` lines — and its lines.
+fn in_sight(ed: &Editor, upto: Option<usize>) -> Option<(Sight, usize)> {
+    crate::rundoc::has_keys(ed).filter(|&s| s == Slot::Task)?;
+    let d = ed.session.outputs.doc(Slot::Task)?;
+    let lines = crate::movement::last_line(&d.text) + 1;
+    let rows = crate::rundoc::rows(ed, Slot::Task);
+    let end = (d.top + rows).min(upto.unwrap_or(lines));
+    let text: String = (d.top..end).filter_map(|l| d.text.get_line(l)).map(|l| l.to_string()).collect();
+    Some(((d.id, d.top, d.selection().primary().head, text), lines))
+}
+
 fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
     world.framed.set(None);
     let c = &mut sim.choices;
-    // (by arm: the run prints 4, a key 6, the wheel 2, a frame 2, another run 1, time passing 1)
-    match c.weighted(&[4, 6, 2, 2, 1, 1]) {
+    // (by arm: the run prints 4, a key 6, the wheel 2, a frame 2, another run 1, time passing 1, a burst 1)
+    match c.weighted(&[4, 6, 2, 2, 1, 1, 1]) {
         0 => {
             let Some(r) = ed.session.task_run.as_mut() else { return "(no run)".into() };
             let lines = *c.pick(&[1, 3, 12]);
+            let empty = r.output.is_empty();
             for _ in 0..lines {
                 world.printed.set(world.printed.get() + 1);
                 r.push_line(
@@ -80,6 +97,8 @@ fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
                     false,
                 );
             }
+            // (what's in sight held still — but its first lines: the command it showed goes)
+            *world.before.borrow_mut() = in_sight(ed, None).filter(|_| !empty);
             ed.focus_sync();
             format!("the run prints {lines} lines")
         }
@@ -98,9 +117,15 @@ fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
                 "<tab>",
                 "<ret>",
                 "/out 1<ret>",
+                "n",
                 "<C-e>",
-                "<up>",
+                "<C-d>",
+                "vjj",
+                "xd",
+                "u",
                 "i",
+                "ox",
+                "<C-w>k",
             ]);
             let mut chars = keys.chars();
             while let Some(ch) = chars.next() {
@@ -136,54 +161,67 @@ fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
             ed.focus_sync();
             "another run takes the panel".into()
         }
-        _ => {
+        5 => {
             let ms = *c.pick(&[100, 2000]);
             sim.wait(Duration::from_millis(ms));
             "time passes".into()
+        }
+        _ => {
+            // (past what a step keeps: the run trims its output, a marker line saying what went)
+            let Some(r) = ed.session.task_run.as_mut() else { return "(no run)".into() };
+            for _ in 0..1800 {
+                world.printed.set(world.printed.get() + 1);
+                r.push_line(false, format!("burst {}", world.printed.get()), false);
+            }
+            r.keep(0);
+            ed.focus_sync();
+            "the run prints 1800 lines, kept as it keeps them".into()
         }
     }
 }
 
 fn held(ed: &Editor, world: &World) -> Result<(), String> {
-    let front = ed.session.is_at(crate::session::At::Slot) && ed.slot() == Some(Slot::Task);
-    let Some(v) = crate::view::run_view_of(ed, Slot::Task) else {
-        // (tarae's keys on the panel are its view mode — never without it, once the keys were looked at)
-        if front && ed.session.task_run.is_some() && ed.prompt.is_none() && ed.picker.is_none() {
-            return Err("the task panel has the keys, no view mode".into());
-        }
-        return Ok(());
-    };
-    if !front {
-        return Err("a run panel's view without its panel's keys".into());
+    if crate::rundoc::swapped(ed) {
+        return Err("an output left swapped in".into());
     }
-    let d = v.doc();
-    let hash = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        d.text.to_string().hash(&mut h);
-        h.finish()
+    let Some(r) = ed.session.task_run.as_ref() else {
+        return match ed.session.outputs.doc(Slot::Task) {
+            Some(_) => Err("an output with no run".into()),
+            None => Ok(()),
+        };
     };
-    if let Some((id, was)) = world.seen.get()
-        && id == d.id
-        && was != hash
+    let d = ed.session.outputs.doc(Slot::Task).ok_or("a run with no output")?;
+    // The run's lines, line for line — nothing a key typed or deleted stays (read-only)
+    let want: String = match r.output.is_empty() {
+        true => "cargo check\n".into(),
+        false => r.output.iter().map(|(_, l)| format!("{l}\n")).collect(),
+    };
+    if d.text != want.as_str() {
+        return Err(format!("the output's {} lines aren't the run's {}", d.text.len_lines(), r.output.len()));
+    }
+    if let Some((before, lines)) = world.before.borrow_mut().take()
+        && let Some((now, _)) = in_sight(ed, Some(lines))
+        && before != now
     {
-        return Err("the view's document changed under it".into());
+        return Err(format!("a print moved what's in sight: top {} → {}", before.1, now.1));
     }
-    world.seen.set(Some((d.id, hash)));
+    if crate::rundoc::has_keys(ed) != Some(Slot::Task) {
+        return Ok(());
+    }
     let last = crate::movement::last_line(&d.text);
     let line = crate::movement::line_of(&d.text, d.selection().primary().cursor(&d.text));
-    let rows = crate::view::run_rows(ed, v.surface);
+    let rows = crate::rundoc::rows(ed, Slot::Task);
     if d.top > last || line < d.top || line >= d.top + rows {
         return Err(format!("the cursor's line {line} out of its rows from {} ({rows})", d.top));
     }
-    // (the run's scroll is the view's top — what `o` reads as the step in view, where it's left)
-    let r = ed.session.task_run.as_ref().ok_or("a view with no run")?;
+    // (the run's scroll is the document's top — what `o` reads as the step in view, where it's left)
     if r.top(rows) != d.top.min(r.output.len().saturating_sub(rows)) {
-        return Err(format!("the run's top {}, the view's {}", r.top(rows), d.top));
+        return Err(format!("the run's top {}, the document's {}", r.top(rows), d.top));
     }
     // (after a frame: the rows drawn are the document's, from its top)
     if let (Some(h), Some((frame, w, fh))) = (world.framed.get(), ed.last_frame.as_ref())
         && *fh == h
+        && d.left == 0
     {
         let screen = crate::screen::text(frame, *w, *fh).unwrap_or_default();
         let (_, y, x, rows) = ed.screen.run_rows.get().ok_or("drawn, its rows not recorded")?;
@@ -203,15 +241,14 @@ fn held(ed: &Editor, world: &World) -> Result<(), String> {
 
 fn print(ed: &Editor) -> String {
     let keys = ed.keys_to().region.name();
-    let view = crate::view::run_view_of(ed, Slot::Task).map(|v| {
-        let d = v.doc();
+    let doc = ed.session.outputs.doc(Slot::Task).map(|d| {
         let line = crate::movement::line_of(&d.text, d.selection().primary().cursor(&d.text));
-        format!("view at {}/{} from {}", line + 1, v.rows(), d.top)
+        format!("output at {}/{} from {}", line + 1, crate::movement::last_line(&d.text) + 1, d.top)
     });
     let r = ed.session.task_run.as_ref();
     format!(
         "keys {keys} · {} · run {} of {} lines",
-        view.unwrap_or_else(|| "no view".into()),
+        doc.unwrap_or_else(|| "no output".into()),
         r.map_or(0, |r| r.generation()),
         r.map_or(0, |r| r.output.len())
     )

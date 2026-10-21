@@ -167,6 +167,7 @@ fn from(ed: &Editor, region: Region) -> Vec<String> {
             bound(km.view(Surface::Terminal, Mode::Normal), "view_code", "C-\\"),
         ],
         Region::View(s) => vec![leave(s)],
+        Region::Output(_) => crate::rundoc::bound(ed, "view_leave", "esc").into_iter().collect(),
         Region::Code if !ed.pending.is_empty() => vec!["esc".into()],
         Region::Code if ed.mode == Mode::Insert => vec![bound(&km.insert, "normal_mode", "esc")],
         Region::Code if ed.mode == Mode::Select => vec![bound(&km.select, "normal_mode", "esc")],

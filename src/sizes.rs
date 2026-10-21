@@ -277,7 +277,8 @@ impl crate::editor::Editor {
             Region::Rail => crate::codereview::close_asked(self),
             Region::Slot(Slot::Plugin) => self.set_status("a plugin's panel closes by its own keys"),
             Region::Slot(s) | Region::List(s) => self.slot_close(s),
-            Region::View(s) if let Some(slot) = s.slot() => self.slot_close(slot),
+            Region::View(crate::view::Surface::Terminal) => self.slot_close(Slot::Terminal),
+            Region::Output(r) => self.slot_close(r.slot()),
             Region::Chat | Region::Unfold | Region::View(crate::view::Surface::Chat) => {
                 self.set_status("C-w q closes panels — space L closes the chat")
             }
@@ -621,8 +622,10 @@ impl crate::editor::Editor {
             Some(Slot::Procs) => self.procs_click(None),
             Some(_) => {
                 self.session.at = At::Slot;
-                // (the terminal's: its view mode, at once — what has the keys is said before the next key)
+                // (the terminal's: its view mode, at once — what has the keys is said before the next key; a run
+                // panel's output, its cursor landed in sight)
                 crate::view::sync(self);
+                crate::rundoc::sync(self);
             }
         }
     }
@@ -701,8 +704,10 @@ impl crate::editor::Editor {
         if self.procs_up() && self.session.program_has_keys() {
             self.procs_close();
         }
-        // (a view whose surface lost the keys ends; the terminal given tarae's keys is in its view mode)
+        // (a view whose surface lost the keys ends; the terminal given tarae's keys is in its view mode; the run
+        // panels' documents follow their runs, the keys coming or going taken in)
         crate::view::sync(self);
+        crate::rundoc::sync(self);
         if self.session.zoom.is_some() && self.zoomed().is_none() {
             self.session.zoom = None;
         }
@@ -778,7 +783,7 @@ mod tests {
         let k: crate::key::Key = "K".parse().unwrap();
         let said = |ed: &crate::editor::Editor| ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
         ed.handle_key(k);
-        assert_eq!(crate::uistate::TOOK.get(), Some(crate::uistate::Handler::RunView));
+        assert_eq!(crate::uistate::TOOK.get(), Some(crate::uistate::Handler::Output));
         assert!(said(&ed).contains("this run isn't one"), "{}", said(&ed));
         let r = ed.session.task_run.as_mut().unwrap();
         r.by_claude = true;

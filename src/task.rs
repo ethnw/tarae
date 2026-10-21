@@ -276,8 +276,9 @@ pub struct Run {
     pub output: Vec<(bool, String)>,
     /// Every line's bytes it printed, a newline each — what was cut from `output` too.
     pub output_bytes: usize,
-    /// How many times `keep` took lines out of `output` — a line's index before one isn't its index after.
-    trimmed: u64,
+    /// What `keep` did to `output`'s lines, in order — a line's index before one isn't its index after; the run
+    /// panel's document replays them (`rundoc.rs`), so what you read stays where it is.
+    trims: Trims,
     pub started: Instant,
     pub took: Option<Duration>,
     pid: Option<u32>,
@@ -344,9 +345,13 @@ impl Run {
         self.generation
     }
 
-    /// How many times lines were taken out of its output (`keep`): a view made of it before reads other indices.
-    pub fn trimmed(&self) -> u64 {
-        self.trimmed
+    /// What `keep` did to its output's lines, in order (`Trim`).
+    pub fn trims(&self) -> &Trims {
+        &self.trims
+    }
+
+    pub fn trims_mut(&mut self) -> &mut Trims {
+        &mut self.trims
     }
 
     /// Its process, while it runs (`:procs`).
@@ -394,26 +399,78 @@ impl Run {
                 None => {
                     let at = self.section + STEP_HEAD;
                     self.output.insert(at, (false, String::new()));
+                    self.trims.push(Trim::Insert(at));
                     (at, 0)
                 }
             };
             let from = marker + 1;
             self.output.drain(from..from + excess);
-            self.trimmed += 1;
+            self.trims.push(Trim::Drain(from, from + excess));
             self.cut = Some((marker, before + excess));
             self.output[marker].1 = format!("… {} lines not kept …", before + excess);
+            self.trims.push(Trim::Set(marker, self.output[marker].1.clone()));
             self.scroll = self.scroll.map(|t| if t >= from + excess { t - excess } else { t.min(from) });
         }
         let n = self.output.len();
         if n > OUTPUT_KEPT {
             let k = n - OUTPUT_KEPT;
             self.output.drain(..k);
-            self.trimmed += 1;
+            self.trims.push(Trim::Drain(0, k));
             self.section = self.section.saturating_sub(k);
             self.cut = self.cut.and_then(|(m, d)| (m >= k).then_some((m - k, d)));
             self.scroll = self.scroll.map(|t| t.saturating_sub(k));
         }
     }
+}
+
+/// What a run did to its output's lines (`Run::keep`, `TestRun::keep`), in order: counted from its start, held only
+/// until the document following it has replayed them (`rundoc::follow` forgets them then) — a run that prints for
+/// hours keeps none of its old ones.
+#[derive(Clone, Debug, Default)]
+pub struct Trims {
+    log: Vec<Trim>,
+    /// How many were forgotten before `log`'s first.
+    gone: usize,
+}
+
+impl Trims {
+    pub fn push(&mut self, t: Trim) {
+        self.log.push(t);
+    }
+
+    /// How many there have been since the run started.
+    pub fn count(&self) -> usize {
+        self.gone + self.log.len()
+    }
+
+    /// How many are held (not yet forgotten).
+    #[cfg(test)]
+    pub fn held(&self) -> usize {
+        self.log.len()
+    }
+
+    /// Those after the first `n` — None: some of them were forgotten already.
+    pub fn since(&self, n: usize) -> Option<&[Trim]> {
+        self.log.get(n.checked_sub(self.gone)?..)
+    }
+
+    /// The first `n` forgotten: what follows the run has them.
+    pub fn forget(&mut self, n: usize) {
+        let k = n.saturating_sub(self.gone).min(self.log.len());
+        self.log.drain(..k);
+        self.gone += k;
+    }
+}
+
+/// A change `Run::keep` made to its output's lines, at the indices they had then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Trim {
+    /// An empty line put in at this index — what was cut says itself there (`Set`).
+    Insert(usize),
+    /// The lines `from..to` taken out.
+    Drain(usize, usize),
+    /// The line at this index says this now.
+    Set(usize, String),
 }
 
 /// An install run's card, tool, and what goes on after it.
@@ -438,7 +495,7 @@ impl Run {
             task,
             state: State::Passed,
             output: Vec::new(),
-            trimmed: 0,
+            trims: Trims::default(),
             output_bytes: 0,
             started: Instant::now(),
             took: None,
@@ -478,7 +535,7 @@ impl Run {
         self
     }
 
-    /// As the `n`th run spawned (a run that replaces another — `sim/runview.rs`).
+    /// As the `n`th run spawned (a run that replaces another — `sim/rundoc.rs`).
     pub fn of_generation(mut self, n: u64) -> Run {
         self.generation = n;
         self
@@ -1028,7 +1085,7 @@ impl Editor {
             task,
             state: State::Running,
             output: Vec::new(),
-            trimmed: 0,
+            trims: Trims::default(),
             output_bytes: 0,
             started: Instant::now(),
             took: None,

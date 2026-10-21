@@ -160,7 +160,8 @@ impl crate::editor::Editor {
             out.push(Floating::Card(o.id));
         }
         let viewing = crate::view::has_keys(self).and(self.session.view.as_ref());
-        if (!self.pending.is_empty() || viewing.is_some_and(|v| !v.pending().is_empty()))
+        let output = crate::rundoc::keyed(self).is_some_and(|(_, o)| !o.keys.pending.is_empty());
+        if (!self.pending.is_empty() || output || viewing.is_some_and(|v| !v.pending().is_empty()))
             && self.picker.is_none()
         {
             out.push(Floating::WhichKey);

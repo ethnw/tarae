@@ -911,7 +911,8 @@ pub fn show(cfg: &EditorConfig) -> String {
 const KEY_TABLES: &str = "\n# Keys — tables of your own, each merged over the default keymap (:config-open; the reference: \
 docs/reference/keymap.md)\n\
 # [keys.normal] [keys.select] [keys.insert] — the code's modes\n\
-# [keys.view] [keys.view.chat] [keys.view.terminal] — view mode; [keys.chat] — the chat's input\n\
+# [keys.run] — a run panel's output, over normal mode's; [keys.view] [keys.view.chat] [keys.view.terminal] — view \
+mode; [keys.chat] — the chat's input\n\
 # [keys.terminal] — keys taken from the terminal's program (C-\\ = terminal_view); one bound to to_program goes \
 back to it, e.g. \"C-\\\\\" = \"to_program\"\n";
 
@@ -991,6 +992,7 @@ mod tests {
              | Table | What it holds |\n|---|---|\n\
              | `[keys.normal]` · `[keys.select]` · `[keys.insert]` | Key bindings on top of the \
              [default keymap](keymap.md) |\n\
+             | `[keys.run]` | A run panel's output's own keys, over normal mode's |\n\
              | `[keys.view]` · `[keys.view.chat]` · `[keys.view.terminal]` · `[keys.chat]` | View mode's keys and the \
              chat input's, on top of the defaults |\n\
              | `[keys.terminal]` | Keys taken from the terminal's program, on top of the defaults (`C-\\` → its \

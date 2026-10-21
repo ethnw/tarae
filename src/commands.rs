@@ -2413,7 +2413,10 @@ fn window_keys(cx: &mut Context) {
     }
 }
 fn view_leave(cx: &mut Context) {
-    crate::view::leave_key(cx.editor);
+    match crate::rundoc::swapped(cx.editor) {
+        true => crate::rundoc::leave_key(cx.editor),
+        false => crate::view::leave_key(cx.editor),
+    }
 }
 /// The terminal's `C-\` in its view mode: to the code whatever is selected — the round's next stop, one key
 /// (`esc` collapses a selection first, the reader's two steps).
@@ -2424,30 +2427,35 @@ fn view_input(cx: &mut Context) {
     crate::view::ask(cx.editor, crate::view::After::Input);
 }
 /// View mode's `enter`: what's selected to the chat as quotes (`quote.rs`), the input with the keys; nothing
-/// selected, the surface's own — the chat's input, the terminal's program (`view_input`).
+/// selected, the surface's own — the chat's input, the terminal's program (`view_input`); on a run panel's output,
+/// your run waiting behind there, else the chat's input.
 fn view_take(cx: &mut Context) {
     let take = crate::view::wide(cx.editor.doc());
+    if crate::rundoc::swapped(cx.editor) {
+        use crate::rundoc::After;
+        return crate::rundoc::ask(cx.editor, if take { After::Take } else { After::Enter });
+    }
     crate::view::ask(cx.editor, if take { crate::view::After::Take } else { crate::view::After::Enter });
 }
-/// A run panel's `K` (`[view.run]`): where Claude's command in it ran, and why.
+/// A run panel's `K` (`[run]`): where Claude's command in it ran, and why.
 fn run_where(cx: &mut Context) {
-    match crate::view::swapped(cx.editor) {
-        true => crate::view::ask(cx.editor, crate::view::After::Where),
-        false => cx.editor.set_status("K says where Claude's command ran — on the task panel, C-w j"),
-    }
+    crate::rundoc::run_where(cx.editor);
 }
-/// A run panel's `o` (`[view.run]`): a preflight step's whole output in a buffer (`:preflight-output`).
+/// A run panel's `o` (`[run]`): a preflight step's whole output in a buffer (`:preflight-output`).
 fn preflight_output(cx: &mut Context) {
-    if crate::view::swapped(cx.editor) {
-        return crate::view::ask(cx.editor, crate::view::After::Output);
-    }
     if let Err(e) = cx.editor.preflight_output("") {
         cx.editor.set_status(e);
     }
 }
 /// `space >` · `:quote`: the code's selection to the chat as quotes, the input with the keys; nothing selected,
-/// the chat's view mode. In a view mode (its `space >`): its selection, as `enter` quotes it; none, the chat's view.
+/// the chat's view mode. In a view mode (its `space >`) or on a run panel's output: its selection, as `enter` quotes
+/// it; none, the chat's view.
 fn quote(cx: &mut Context) {
+    if crate::rundoc::swapped(cx.editor) {
+        use crate::rundoc::After;
+        let take = crate::view::wide(cx.editor.doc());
+        return crate::rundoc::ask(cx.editor, if take { After::Take } else { After::ChatView });
+    }
     if crate::view::swapped(cx.editor) {
         let take = crate::view::wide(cx.editor.doc());
         let after = if take { crate::view::After::Take } else { crate::view::After::ChatView };
@@ -2466,6 +2474,9 @@ fn view_copy(cx: &mut Context) {
 fn view_latest(cx: &mut Context) {
     match cx.count {
         Some(_) => goto_line(cx),
+        None if crate::rundoc::swapped(cx.editor) => {
+            crate::rundoc::ask(cx.editor, crate::rundoc::After::Latest)
+        }
         None => crate::view::ask(cx.editor, crate::view::After::Latest),
     }
 }

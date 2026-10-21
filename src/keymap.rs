@@ -243,6 +243,10 @@ pub struct Keymaps {
     /// The keys taken from the terminal's program (`[terminal]`) — `C-\` → its view mode; every other key is the
     /// program's. A user's `[keys.terminal]` merges over it as every table does; `to_program` gives one back.
     pub terminal: Node,
+    /// A run panel's own keys over normal mode on its output (`[run]`, `rundoc.rs`) — and what its keys are looked
+    /// up in: `normal` and `select` with it on top (`runs`).
+    run: Node,
+    runs: (Node, Node),
 }
 
 const DEFAULT_KEYS: &str = include_str!("default_keys.toml");
@@ -295,6 +299,8 @@ impl Keymaps {
             views: Vec::new(),
             chat: part("chat", warnings),
             terminal: part("terminal", warnings),
+            run: part("run", warnings),
+            runs: Default::default(),
         };
         km.build_views();
         km
@@ -341,6 +347,11 @@ impl Keymaps {
                 (table, normal, select)
             })
             .collect();
+        // (an output is normal mode on its document: the whole of normal and select, the panel's rows on top)
+        let (mut normal, mut select) = (self.normal.clone(), self.select.clone());
+        normal.merge(self.run.clone());
+        select.merge(self.run.clone());
+        self.runs = (normal, select);
     }
 
     /// Merges the user's `[keys]` table. As in helix, `keys.normal` does not spill into select. View mode is
@@ -354,6 +365,7 @@ impl Keymaps {
             ("insert", &mut self.insert),
             ("chat", &mut self.chat),
             ("terminal", &mut self.terminal),
+            ("run", &mut self.run),
         ] {
             if let Some(toml::Value::Table(t)) = keys.get(mode) {
                 node.merge(Node::from_toml(t, &format!("keys.{mode}"), warnings));
@@ -410,6 +422,36 @@ impl Keymaps {
             Some(KeyTrie::Leaf(cmds)) if !is_to_program(cmds) => Some(cmds),
             _ => None,
         }
+    }
+
+    /// An output's keys (`rundoc.rs`): normal mode's, or select's (its `v`), with `[run]` on top.
+    fn run_table(&self, mode: Mode) -> &Node {
+        if mode == Mode::Select { &self.runs.1 } else { &self.runs.0 }
+    }
+
+    /// `lookup` in an output's table.
+    pub fn run_lookup(&self, mode: Mode, keys: &[Key]) -> Lookup<'_> {
+        match self.run_table(mode).search(keys) {
+            Some(KeyTrie::Leaf(cmds)) => Lookup::Matched(cmds),
+            Some(KeyTrie::Node(_)) => Lookup::Pending,
+            None => Lookup::NotFound,
+        }
+    }
+
+    /// `children` in an output's table (which-key).
+    pub fn run_children(&self, mode: Mode, keys: &[Key]) -> Vec<(Key, String, bool)> {
+        Self::children_of(self.run_table(mode), keys)
+    }
+
+    /// The keys bound to `name` on an output, as a hint names them.
+    pub fn run_keys_for(&self, name: &str) -> Vec<String> {
+        self.runs.0.keys_for(name)
+    }
+
+    /// `name` is a command of the window table (`C-w`'s, wherever yours put it) — the editor's from any pane.
+    pub fn in_window_table(&self, name: &str) -> bool {
+        let Some(prefix) = self.window_prefix() else { return false };
+        matches!(self.normal.map.get(&prefix), Some(KeyTrie::Node(n)) if !n.keys_for(name).is_empty())
     }
 
     /// `lookup` in a view mode's table.
@@ -787,20 +829,23 @@ mod tests {
         node_tables(&mut out, &km.insert, &mut Vec::new(), "## Insert mode");
 
         out.push_str(
+            "\n## The run panels' output\n\nA task's output, a preflight's, the tests' failure or output (`C-w j` \
+             to the panel, a click) is a read-only document with normal mode's keys — yours too: `[keys.normal]` \
+             holds there. What would edit it is put back and said; `C-w` and `:` are the editor's. The panel's own \
+             keys go over normal mode's:\n",
+        );
+        node_tables(&mut out, &km.run, &mut Vec::new(), "### On the output (`[keys.run]`)");
+
+        out.push_str(
             "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input), the \
-             terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel), the run panels' output \
-             — a task's, a preflight's, the tests' failure or output (`C-w j` to the panel, a click, the wheel). \
-             Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), \
-             the rest is said, not done; `enter` quotes what's selected to the chat; `space` is its own menu, what \
-             it has of the editor's. Its own keys go over them, and each surface's over those.\n",
+             terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel). Normal mode's moves, \
+             selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not \
+             done; `enter` quotes what's selected to the chat; `space` is its own menu, what it has of the \
+             editor's. Its own keys go over them, and each surface's over those.\n",
         );
         node_tables(&mut out, &km.view, &mut Vec::new(), "### Its own keys (`[keys.view]`)");
         for (name, node) in &km.view_on {
-            let title = match *name {
-                "run" => "### The run panels' — task, preflight, tests (`[keys.view.run]`)".to_string(),
-                name => format!("### The {name}'s (`[keys.view.{name}]`)"),
-            };
-            node_tables(&mut out, node, &mut Vec::new(), &title);
+            node_tables(&mut out, node, &mut Vec::new(), &format!("### The {name}'s (`[keys.view.{name}]`)"));
         }
         node_tables(&mut out, &km.chat, &mut Vec::new(), "### The chat's input (`[keys.chat]`)");
         node_tables(

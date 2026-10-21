@@ -492,32 +492,44 @@ const SCENES: &[Scene] = &[
         task_panel(ed);
         ed.session.slot_front = Some(Slot::Task);
     }),
-    ("the task panel in view mode, by C-w j", |ed| {
+    // (panes P2c: a run panel's output — normal mode on its document, the panel's keys over it)
+    ("the task panel's output, by C-w j", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
     }),
-    ("the task panel in view mode, a row selected", |ed| {
+    ("the task panel's output, a row selected", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
         feed(ed, &["x"]);
     }),
-    ("the task panel in view mode, its search prompt", |ed| {
+    ("the task panel's output, select mode", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        feed(ed, &["v"]);
+    }),
+    ("the task panel's output, its search prompt", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
         feed(ed, &["/"]);
     }),
-    ("the task panel in view mode, space under way", |ed| {
+    // (`:` is the editor's: its prompt over the output, the code's)
+    ("the task panel's output, the command line from it", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        feed(ed, &[":"]);
+    }),
+    ("the task panel's output, space under way", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
         feed(ed, &[" "]);
     }),
-    // (`]` gone on to the editor: `]x`/`]q` are its, the rest the view says)
-    ("the task panel in view mode, ] under way", |ed| {
+    // (`]` its own sequence: `]x`/`]q` run on the editor once it ends, the rest on the output)
+    ("the task panel's output, ] under way", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
         feed(ed, &["]"]);
     }),
-    ("a preflight in view mode", |ed| {
+    ("a preflight's output", |ed| {
         task_panel(ed);
         let steps = [crate::preflight::Step {
             name: "fmt".into(),
@@ -530,7 +542,7 @@ const SCENES: &[Scene] = &[
         ed.session.preflight = Some(p);
         ed.bottom_take_keys();
     }),
-    ("the test panel in view mode", |ed| {
+    ("the test panel's output", |ed| {
         ed.session.test_run = Some(crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]));
         ed.bottom_take_keys();
     }),
@@ -548,7 +560,7 @@ const SCENES: &[Scene] = &[
         frame(ed);
         ed.tests_list_focus();
     }),
-    ("a card over the task panel's view mode", |ed| {
+    ("a card over the task panel's output", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
         light_card(ed);
@@ -896,8 +908,8 @@ fn no_key_is_refused_in_silence() {
     }
     let quiet = |k: &str, name: &str| match k {
         "<esc>" | "<C-w>" => true,
-        // (view mode's copy: said once the clipboard has it — its job's toast)
-        "y" => name.contains("view mode") && !name.contains("prompt"),
+        // (view mode's copy, an output's: said once the clipboard has it — its job's toast)
+        "y" => (name.contains("view mode") || name.contains("output")) && !name.contains("prompt"),
         // (`x` again on the conversation's last row: no row below to take — `j` at a list's end)
         "x" => name.contains("a row selected"),
         "j" | "<C-d>" => [
@@ -912,6 +924,7 @@ fn no_key_is_refused_in_silence() {
             "command line",
             "review",
             "view mode",
+            "output",
         ]
         .iter()
         .any(|p| name.contains(p)),

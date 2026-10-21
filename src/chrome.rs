@@ -121,6 +121,8 @@ pub enum Keys {
     Point,
     /// A surface's view mode (`view.rs`).
     View(crate::view::Surface),
+    /// A run panel's output, normal mode on its document (`rundoc.rs`) — the status line says its mode and name.
+    Output(crate::rundoc::Run),
 }
 
 impl Keys {
@@ -148,9 +150,9 @@ impl Keys {
             Keys::Point => "POINT",
             Keys::View(crate::view::Surface::Chat) => "VIEW · CHAT",
             Keys::View(crate::view::Surface::Terminal) => "VIEW · TERMINAL",
-            Keys::View(crate::view::Surface::Task) => "VIEW · TASK",
-            Keys::View(crate::view::Surface::Preflight) => "VIEW · PREFLIGHT",
-            Keys::View(crate::view::Surface::Tests) => "VIEW · TESTS",
+            Keys::Output(crate::rundoc::Run::Task) => "TASK",
+            Keys::Output(crate::rundoc::Run::Preflight) => "PREFLIGHT",
+            Keys::Output(crate::rundoc::Run::Tests) => "TESTS",
         })
     }
 
@@ -183,7 +185,7 @@ pub enum CursorIn {
     Code,
     /// The chat's input caret.
     Input,
-    /// A view mode's cursors (`view.rs`), painted on its rows.
+    /// A view mode's cursors (`view.rs`), painted on its rows — a run panel's output's, by the code's drawer.
     View,
     /// The terminal's program's cursor.
     Program,
@@ -207,7 +209,7 @@ impl Editor {
         Some(match region {
             R::Code => CursorIn::Code,
             R::Chat => CursorIn::Input,
-            R::View(_) => CursorIn::View,
+            R::View(_) | R::Output(_) => CursorIn::View,
             R::Program => CursorIn::Program,
             R::Prompt => CursorIn::Prompt,
             R::Picker => CursorIn::Picker,
@@ -243,6 +245,7 @@ impl Editor {
             R::Program => Keys::Program,
             R::Point => Keys::Point,
             R::View(s) => Keys::View(s),
+            R::Output(r) => Keys::Output(r),
             R::Code | R::Prompt | R::NextCard | R::Popup => Keys::Code,
         }
     }

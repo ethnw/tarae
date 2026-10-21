@@ -120,9 +120,10 @@ side git · 4 rows · in hand git:src/term.rs
   - `to`: the element id that takes the next key.
   - `region`: `code` · `prompt` · `picker` · `chat` · `view:chat` (the chat's view mode — `view.rs`, its
     handler `chat-view`, V 8) · `view:terminal` (the terminal's — tarae's keys on its panel, its handler
-    `terminal-view`; there's no `slot:terminal`) · `view:task` · `view:preflight` · `view:tests` (the run panels' —
-    tarae's keys on them, their handler `run-view`; no `slot:task` or `slot:tests`, and the `slot` handler went) ·
-    `side:<tab>` · `review` · `edit-review` · `slot:<panel>` (`:procs`, a plugin's) · `terminal-program` · `card`. In a view mode `pending` and `char_next` are its own
+    `terminal-view`; there's no `slot:terminal`) · `output:task` · `output:preflight` · `output:tests` (panes P2c,
+    `rundoc.rs`: a run panel's output as a read-only document, normal mode on it with `[run]` over — their handler
+    `output`; no `slot:task` or `slot:tests`) · `side:<tab>` · `review` · `edit-review` · `slot:<panel>` (`:procs`,
+    a plugin's) · `terminal-program` · `card`. In a view mode or on an output `pending` and `char_next` are its own
     (its count, `g`, `f`).
   - `takes`:
     - `commands`: normal mode, panels.
@@ -145,8 +146,8 @@ side git · 4 rows · in hand git:src/term.rs
 
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
-- **`sessions[].view`** (V 8, the front session's only) — a surface's view mode: `surface` (`chat` · `terminal` ·
-  `task` · `preflight` · `tests`),
+- **`sessions[].view`** (V 8, the front session's only) — a surface's view mode (`chat` · `terminal`), or a run's
+  output with the keys (`task` · `preflight` · `tests` — `rundoc::state`, the same shape): `surface`,
   the cursor's `line` of `lines`, `selections`, `selects` (wider than a character), `mode` (`normal` · `select`),
   `held` (something came since it was made — the terminal's: its program's output waiting). Shapes, never text; Claude's level never has it.
 - **`sessions[].with`** (the front session's only; absent when empty) — what goes with the chat input's next
@@ -261,7 +262,7 @@ side git · 4 rows · in hand git:src/term.rs
     Panes P2b: a floating pane with the keys — a card (held, or taking its answers), the picker, a prompt,
     which-key — is `at` itself (`At::Float(pane id)`), the docked pane it rose over `Session.under`, the keys' again
     once it goes (`Editor::float_sync`, every key and event); the tests' list is `At::List(pane id)`, its detail the
-    slot's view mode.
+    slot's output document (`At::Slot`, P2c).
   - `panes` (per session, panes P2b): every leaf of its tree in the tree's order — `{id: pane#N, shows:
     code:src/a.rs | side | rail | slot | chat, rect, at}` (rects the front's, as the last frame laid them out), the
     tests' two members after the slot while it shows them (`tests:list`, `tests:detail` — the slot's keys the

@@ -127,6 +127,84 @@ const SCENES: &[Scene] = &[
         keys: &["@1", ":", "frobnicate", "\r", "@1", ":", "w", "\r", "@1"],
     },
     Scene { name: "git", claude: "idle", files: MAIN, keys: &["@1", " ", "g", "@?knot.rs", "@1"] },
+    // (the run panels' output with the keys: a task's, two lines of it selected — its settings trusted first)
+    Scene {
+        name: "output-task",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task check",
+            "\r",
+            "@20?generated 2 warnings",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "k",
+            "k",
+            "k",
+            "x",
+            "x",
+            "@1",
+        ],
+    },
+    // (a run still printing, held still under the keys: `k` — what came since is said in its head)
+    Scene {
+        name: "output-live",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task watch",
+            "\r",
+            "@20?knot 12 tied",
+            "\x17",
+            "j",
+            "@1",
+            "k",
+            "k",
+            "@2",
+        ],
+    },
+    // (a preflight's, its first step's heading at the top: `gg`)
+    Scene {
+        name: "output-preflight",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "preflight",
+            "\r",
+            "@30?test result",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "g",
+            "g",
+            "@1",
+        ],
+    },
+    // (the tests' failure, searched: `/left`, `n` — a real `cargo test` of the demo's)
+    Scene {
+        name: "output-tests",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "x", "f", "@90?right: 8", "@1", "\x17", "j", "@1", "/", "left", "\r", "n", "@1"],
+    },
     // (Claude's answers first, each its own key — a read `a` this chat, a host through `also` `s` this session, a
     // read `A` always — then the list, the hand on its last row (`G`: at 24 rows the defaults fill it), the `a`. The
     // code zoomed first (`space w z`): at 80 the chat beside it would cut the cards and fold the list's stamps. The
@@ -1268,7 +1346,7 @@ fn one(
 ) -> Result<()> {
     let dir = Fresh::new("tarae-scene")?;
     let demo = dir.0.join("tarae-demo");
-    demo_crate(&demo, scene.name == "trusted")?;
+    demo_crate_with(&demo, scene.name == "trusted", &run_files(scene.name))?;
     let config = dir.0.join("xdg");
     let mut toml = config_toml(me, scene.claude);
     if transparent {
@@ -1413,7 +1491,15 @@ fn demo_files(dir: &Path, changed: bool, trusted: bool) -> Result<()> {
 /// The demo crate at `dir`: committed in a repository of its own, then changed. git runs with none of your
 /// settings (no hooks, no signing) and finds no repository above `dir`.
 fn demo_crate(dir: &Path, trusted: bool) -> Result<()> {
+    demo_crate_with(dir, trusted, &[])
+}
+
+/// `demo_crate` with `extra` files committed beside its own (over them where named alike).
+fn demo_crate_with(dir: &Path, trusted: bool, extra: &[(&str, String)]) -> Result<()> {
     demo_files(dir, false, trusted)?;
+    for (path, text) in extra {
+        write(&dir.join(path), text)?;
+    }
     let git = |args: &[&str]| -> Result<()> {
         let st = Command::new("git")
             .arg("-C")
@@ -1438,6 +1524,81 @@ fn demo_crate(dir: &Path, trusted: bool) -> Result<()> {
         git(&["config", "core.sshCommand", "ssh -o BatchMode=yes"])?;
     }
     demo_files(dir, true, trusted)
+}
+
+/// A failing test and one that passes, below `main` (`cargo test` on the bin): the tests panel's failure.
+const MAIN_TESTS: &str = r#"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn length_sums_the_knots() {
+        let t = Thread { name: "실".into(), knots: vec![1, 2, 3] };
+        assert_eq!(t.length(), 6);
+    }
+
+    #[test]
+    fn a_tied_knot_lengthens_it() {
+        let mut t = Thread { name: "실".into(), knots: vec![1, 2] };
+        t.tie(4);
+        println!("knots after the tie: {:?}", t.knots);
+        assert_eq!(t.length(), 8, "the knot at 4 adds its gap");
+    }
+}
+"#;
+
+/// A check as a compiler prints it — warnings and their places on stderr, then a passing end.
+const CHECK_SH: &str = r#"echo '    Checking tarae-demo v0.1.0'
+echo 'warning: method `tie` is never used' >&2
+echo '  --> src/thread.rs:15:12' >&2
+echo '   |' >&2
+echo '15 |     pub fn tie(&mut self, at: u32) {' >&2
+echo '   |            ^^^' >&2
+echo '   = note: `#[warn(dead_code)]` on by default' >&2
+echo 'warning: unused variable: `first`' >&2
+echo '  --> src/main.rs:8:9' >&2
+echo "warning: \`tarae-demo\` (bin \"tarae-demo\") generated 2 warnings" >&2
+echo '    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s'
+"#;
+
+/// The run scenes' own files: a task (`output-task`), a preflight of three steps (`output-preflight`) — both in
+/// a `.tarae.toml` trusted on its card — or a failing test (`output-tests`, its build in the demo's own folder,
+/// never cargo's shared one).
+fn run_files(scene: &str) -> Vec<(&'static str, String)> {
+    match scene {
+        "output-task" => vec![
+            (".tarae.toml", "[task.check]\ncmd = \"sh check.sh\"\n".into()),
+            ("check.sh", CHECK_SH.into()),
+        ],
+        // (a run still printing: a line every 0.2 s for a minute)
+        "output-live" => vec![
+            (".tarae.toml", "[task.watch]\ncmd = \"sh watch.sh\"\n".into()),
+            (
+                "watch.sh",
+                "i=0\nwhile [ $i -lt 300 ]; do echo \"knot $i tied\"; i=$((i+1)); sleep 0.2; done\n".into(),
+            ),
+        ],
+        "output-preflight" => vec![
+            (
+                ".tarae.toml",
+                "[preflight]\nsteps = [\n  { name = \"fmt\", cmd = \"sh fmt.sh\" },\n  { name = \"clippy\", cmd = \"sh check.sh\" },\n  { name = \"test\", cmd = \"sh test.sh\" },\n]\n"
+                    .into(),
+            ),
+            ("fmt.sh", "echo 'Diff in src/thread.rs:8:'\necho '-    /// Ties a knot.'\necho '+    /// Ties a knot at the end.'\nexit 0\n".into()),
+            ("check.sh", CHECK_SH.into()),
+            (
+                "test.sh",
+                "echo 'running 2 tests'\necho 'test tests::length_sums_the_knots ... ok'\necho 'test tests::a_tied_knot_lengthens_it ... FAILED'\necho\necho \"thread 'tests::a_tied_knot_lengthens_it' panicked at src/main.rs:30:9:\"\necho 'assertion `left == right` failed: the knot at 4 adds its gap'\necho '  left: 7'\necho ' right: 8'\necho\necho 'test result: FAILED. 1 passed; 1 failed; 0 ignored'\nexit 101\n"
+                    .into(),
+            ),
+        ],
+        "output-tests" => vec![
+            ("src/main.rs", format!("{MAIN_RS}{MAIN_TESTS}")),
+            (".cargo/config.toml", "[build]\nbuild-dir = \"target/build\"\n".into()),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 // ── The stand-in claude ──────────────────────────────────────────────────────

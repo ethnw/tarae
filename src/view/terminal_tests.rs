@@ -366,13 +366,9 @@ fn tab_steps_to_the_slots_other_tab_and_back() {
     print(&mut ed, "\r\nwhile-on-the-task\r\n$ ");
     feed(&mut ed, "<tab>");
     assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));
-    assert_eq!(region(&ed), "view:task", "the task panel's view mode");
+    assert_eq!(region(&ed), "output:task", "the task panel's output");
     let t = ed.session.terminal.as_ref().unwrap();
-    let task = ed.session.view.as_ref().map(|v| v.surface);
-    assert!(
-        task == Some(crate::view::Surface::Task) && !t.holding(),
-        "the terminal's view gone, nothing held"
-    );
+    assert!(ed.session.view.is_none() && !t.holding(), "the terminal's view gone, nothing held");
     assert!(t.parser.screen().contents().contains("while-on-the-task"), "what came taken in");
     feed(&mut ed, "<S-tab>");
     assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));

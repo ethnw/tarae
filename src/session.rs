@@ -128,6 +128,8 @@ pub struct Session {
     /// A surface's view mode (`view.rs`) — the chat's conversation held still under a cursor; ended when its
     /// surface loses the keys or the session goes behind.
     pub view: Option<crate::view::View>,
+    /// The run panels' output as documents (`rundoc.rs`): the task panel's and the tests' — following their runs.
+    pub outputs: crate::rundoc::Outputs,
     /// A terminal is being started (on a worker) · what it printed and its exit code, if they came before
     /// it was in place.
     pub terminal_starting: bool,
@@ -368,6 +370,7 @@ impl Session {
             side_last: crate::sidebar::Mode::Files,
             terminal: None,
             view: None,
+            outputs: Default::default(),
             terminal_run: 0,
             terminal_starting: false,
             terminal_early: Default::default(),

@@ -379,9 +379,10 @@ opens it too, at the row under the pointer; rolled back down to the end with not
 keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …) work in it as in the input; `C-d`
 `C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it (kept to what reads), and `[keys.view]`,
 `[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound. The terminal has the same
-view mode, `C-\` from its program, and so do the run panels — a task's output, a preflight's, the tests' failure —
-with the keys on them ([features](features.md)): one set of keys to read any of them. `space` there is view mode's
-own menu: `space >` quotes, `space l` the chat, `space I` the inbox, `space ?` the palette.
+view mode, `C-\` from its program; the run panels' output — a task's, a preflight's, the tests' failure — is a
+read-only document with the code's normal mode on it once the keys are there ([features](features.md)): one set of
+keys to read any of them, `enter` quoting a selection from each. `space` in a view mode is its own menu: `space >`
+quotes, `space l` the chat, `space I` the inbox, `space ?` the palette; on a run's output it's the editor's.
 
 ### Quoting what you read
 

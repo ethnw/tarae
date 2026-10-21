@@ -395,17 +395,23 @@ tab = "slot_next"
 S-tab = "slot_prev"
 q = "wclose"
 
-# The run panels — the task's output, a preflight's, the tests' detail: their view mode's own on top of [view] —
-# the slot's other tabs, where Claude's command ran, a preflight step's whole output, `q` closes the panel once its
-# run has ended (`enter` with nothing selected runs your run waiting behind, else goes to the chat's input)
-[view.run]
+# The run panels — the task's output, a preflight's, the tests' detail — are read-only documents with normal mode's
+# keys (your [keys.normal] too); these on top: the slot's other tabs, where Claude's command ran, a preflight step's
+# whole output, `G` caught up, `y` a copy to paste anywhere, `enter` quotes a selection (nothing selected: your run
+# waiting behind, else the chat's input), `esc` collapses a selection then goes to the code, `q` closes the panel
+# once its run has ended
+[run]
 tab = "slot_next"
 S-tab = "slot_prev"
-# (a row, as on every output panel — the chat's view keeps its `C-y`, its last code block)
+# (a row, as on every output panel)
 C-e = "scroll_down"
 C-y = "scroll_up"
 K = "run_where"
 o = "preflight_output"
+G = "view_latest"
+y = "view_copy"
+ret = "view_take"
+esc = "view_leave"
 q = "wclose"
 
 # The chat's input: what its keys run before they're typed

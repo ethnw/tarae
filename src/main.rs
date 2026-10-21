@@ -137,6 +137,7 @@ mod restore;
 mod reviewer;
 mod reviews;
 mod risk;
+mod rundoc;
 mod runhomes;
 mod runtime;
 mod sandbox;
