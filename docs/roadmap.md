@@ -179,9 +179,9 @@ The aim is to state what the sandbox guarantees and show that it holds.
    per command, found by a fresh breadth-first walk each run capped at 20,000 entries — what no run writes first,
    by descriptors beneath each place (no link followed, no other filesystem entered, places on NFS/FUSE skipped
    by type), the folders not reached named in the report; a hidden key a run can't remove is named too. Built
-   outside, imported into the `sandboxa` session, six reviewer rounds; committed on its branch (`332df00a`,
-   2026-10-21) and held for the outside session's tier-own pass (the user run reaches its cases, both break-onces
-   fail as meant; the whole filters last). Left: the child's skipped keys reported back before `exec` (a protocol
+   outside, imported into the `sandboxa` session, six reviewer rounds; landed 2026-10-21 (`d6033711`) after the
+   outside session's four tier-own runs (the two-deep test as a user, both break-onces caught — three of the
+   runs found the test's own fixture and assertions wanting, never the sandbox). Left: the child's skipped keys reported back before `exec` (a protocol
    change — the report says "if still there"); nested user namespaces in tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
