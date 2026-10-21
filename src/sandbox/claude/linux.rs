@@ -413,7 +413,7 @@ pub fn main() -> ! {
     };
     let root = std::env::current_dir().unwrap_or_else(|e| fail(e.to_string()));
     let os = crate::sandbox::Os::HOST;
-    if let Err(e) = crate::claudehome::make(os, None) {
+    if let Err(e) = crate::claudehome::make(os, true, None) {
         fail(e)
     }
     let p = super::for_chat(&root, writes, program)
@@ -422,6 +422,7 @@ pub fn main() -> ! {
         command: program.clone(),
         args: rest.to_vec(),
         keep_env_key: true,
+        claude_sandbox: true,
         ..Default::default()
     };
     let sub = crate::billing::Credential::Subscription;

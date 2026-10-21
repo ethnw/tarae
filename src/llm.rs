@@ -119,7 +119,9 @@ pub struct LlmConfig {
     /// Chat: Claude's commands run in a sandbox (`sandbox.rs`) — writes in the project, temp and the
     /// toolchain's folders; no network but this machine.
     pub sandbox: bool,
-    /// Chat: its claude itself under a files-only profile (`sandbox::claude`, macOS) — your config only.
+    /// Chat: its claude itself under a files-only profile (`sandbox::claude`: Seatbelt, Landlock) — your config
+    /// only; on by default on macOS only (`sandbox::claude::on_by_default`). On Linux it also gives every claude
+    /// tarae's own folder and login (`claudehome.rs`).
     pub claude_sandbox: bool,
     pub sandbox_network: bool,
     /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`) — None: any host (`"any"`);
@@ -176,7 +178,7 @@ impl Default for LlmConfig {
             run_allow: Vec::new(),
             review_ask: Vec::new(),
             sandbox: true,
-            claude_sandbox: true,
+            claude_sandbox: crate::sandbox::claude::on_by_default(crate::sandbox::Os::HOST),
             sandbox_network: false,
             sandbox_hosts: None,
             sandbox_upstream: Default::default(),
@@ -332,9 +334,11 @@ pub fn command(
         "a test started the real claude — give llm.command a stand-in (`sh -c 'cat > /dev/null'`)"
     );
     let args = crate::billing::args(&cfg.args, cred).map_err(SpawnError::Billing)?;
-    // On Linux claude's folder is tarae's (`claudehome.rs`): made through no link, the user source off
+    // On Linux with claude confined its folder is tarae's (`claudehome.rs`): made through no link, the user source
+    // off — for every claude, so all share one login; by default your own
     let (args, folder) =
-        crate::claudehome::for_claude(crate::sandbox::Os::HOST, given, &args).map_err(SpawnError::Folder)?;
+        crate::claudehome::for_claude(crate::sandbox::Os::HOST, cfg.claude_sandbox, given, &args)
+            .map_err(SpawnError::Folder)?;
     // (under `sandbox-exec` a missing program is its exec failing, not the spawn: said as the spawn's, so a
     // missing claude still says how to install it — `spawn_failed`)
     if confine.is_some() && !program_there(&cfg.command, dir, given) {
@@ -609,23 +613,22 @@ pub fn env_told(ed: &mut Editor) -> Option<String> {
 }
 
 /// What a claude that failed with `error` for want of a login is told, when tarae left a key out, or where tarae's
-/// claudes keep a login of their own (Linux: `:claude-login`, once) — None: not a login failure, or neither.
+/// claudes keep a login of their own (Linux with claude confined: `:claude-login`, once) — None: not a login
+/// failure, or neither.
 pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
     if !crate::claudehome::NOT_LOGGED_IN.iter().any(|l| error.contains(l)) {
         return None;
     }
     let var = crate::claudehome::var_in(ed.claude_env.as_ref());
-    let place = crate::claudehome::Place::of(crate::sandbox::Os::HOST, &var).ok().flatten();
+    let confined = ed.config.llm.claude_sandbox;
+    let place = crate::claudehome::Place::of(crate::sandbox::Os::HOST, confined, &var).ok().flatten();
     let own = crate::claudehome::login_hint(error, place.as_ref(), &mut ed.claude_login_told);
     let env = ClaudeEnv::as_read(ed.claude_env.as_ref(), ed.config.llm.keep_env_key);
     let keys = env.keys();
     if keys.is_empty() {
         return own;
     }
-    let how = match place {
-        Some(_) => "Or log in for tarae: :claude-login.",
-        None => "Or log in: run `claude` in a terminal, then /login.",
-    };
+    let how = crate::claudehome::how_to_log_in(place.as_ref());
     Some(format!(
         "Claude has no login of its own, and tarae didn't pass on {} from its environment ({}). {how}",
         keys.join(" and "),
@@ -2308,6 +2311,8 @@ pub(crate) mod tests {
         let root = scratch.to_path_buf();
         let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
         ed.claude_env = Some(Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into())]));
+        // (claude unconfined — Linux's default: your own login, on either system)
+        ed.config.llm.claude_sandbox = false;
         // (a stand-in claude with no login: each message answered as Claude Code does under `-p`)
         let failed = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
         ed.config.llm.command = "sh".into();
@@ -2347,6 +2352,7 @@ pub(crate) mod tests {
             "{hint}"
         );
         assert!(!hint.contains("zq7"), "names only: {hint}");
+        assert!(hint.ends_with("Or log in: run `claude` in a terminal, then /login."), "yours: {hint}");
         assert_eq!(login_hint(&mut ed, "Overloaded"), None, "not a login failure");
         ed.config.llm.keep_env_key = true;
         assert_eq!(

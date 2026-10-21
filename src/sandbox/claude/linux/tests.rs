@@ -105,7 +105,7 @@ impl Fixture {
     /// claude's folders as tarae makes them for it (`claudehome::Place`).
     fn place(&self) -> Place {
         let here = self.here();
-        Place::of(Os::Linux, &|n| here.var(n)).unwrap().unwrap()
+        Place::of(Os::Linux, true, &|n| here.var(n)).unwrap().unwrap()
     }
 
     /// tarae's state (kept), and git's config folder (its credentials kept).

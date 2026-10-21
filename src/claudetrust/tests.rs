@@ -13,6 +13,20 @@ fn keys(scan: &Scan) -> Vec<(Kind, &str)> {
     scan.items.iter().map(|i| (i.kind, i.key.as_str())).collect()
 }
 
+/// Your own Claude settings are a hold-back's baseline wherever claude loads them — its folder yours (macOS; Linux
+/// unconfined, the default) — and not where it's tarae's (Linux, claude confined: no user source).
+#[test]
+fn your_claude_settings_are_the_baseline_where_claude_loads_them() {
+    let mut ed = Editor::new(crate::config::Config::default());
+    let yours = std::path::PathBuf::from("/home/stand-in/.claude/settings.json");
+    ed.claude_user_settings = Some(yours.clone());
+    for confined in [false, true] {
+        ed.config.llm.claude_sandbox = confined;
+        let apart = crate::claudehome::apart(crate::sandbox::Os::HOST, confined);
+        assert_eq!(Places::of(&ed).user, (!apart).then(|| yours.clone()), "confined: {confined}");
+    }
+}
+
 /// A repository's file can run a command as you (`apiKeyHelper` and its kin), set claude's environment and
 /// turn plugins on — each held, by name. Hooks it sets are only shown: the chat's own `--settings` has them off
 /// already. A plugin it turns *off* isn't asked about (off is what holding back does).
@@ -503,8 +517,9 @@ fn the_chats_claude_starts_only_as_the_card_answers() {
     // (not on `RESTORED`: empty, whatever tarae's environment holds — the test gives one that has it)
     assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "");
     assert_eq!(settings["disableAllHooks"], true);
-    // (f22 i: claude's transcript cleanup kept off where it loads the user source)
-    let keep = (crate::sandbox::Os::HOST == crate::sandbox::Os::Mac).then_some(36_500);
+    // (f22 i: claude's transcript cleanup kept off where it loads the user source — its folder yours, not tarae's)
+    let apart = crate::claudehome::apart(crate::sandbox::Os::HOST, ed.config.llm.claude_sandbox);
+    let keep = (!apart).then_some(36_500);
     assert_eq!(settings["cleanupPeriodDays"].as_u64(), keep);
     let argv = std::fs::read_to_string(root.join("argv")).unwrap();
     let theirs: Vec<&str> = argv.lines().filter(|l| l.contains("theirs-zq7")).collect();

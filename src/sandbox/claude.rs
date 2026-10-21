@@ -20,6 +20,16 @@ use super::{
     user_temp, vars_in,
 };
 
+/// Whether claude itself is confined unless your config says (`llm.claude-sandbox`'s default) on `os`: on macOS,
+/// where Seatbelt keeps it and it still logs in from the keychain as your own claude. Not on Linux (user decision
+/// 2026-10-16): Landlock can't let it refresh `~/.claude/.credentials.json` without all of `~/.claude` (settings,
+/// `CLAUDE.md`, hooks), so confined it needs a folder and a login of its own (`claudehome.rs`) — opt-in. As Claude
+/// Code's and Codex's own sandboxes, the default confines the commands (Claude's runs, the keeper), not the agent;
+/// its edits stay reviewed.
+pub fn on_by_default(os: super::Os) -> bool {
+    os == super::Os::Mac
+}
+
 /// Claude's own folders in home, written (V1b): its settings, conversations, sessions and plugins' marks, and its
 /// program's version locks.
 const OWN_DIRS: [&str; 2] = [".claude", ".local/state/claude"];
@@ -118,7 +128,8 @@ impl Profile {
     pub fn new(root: &Path, home: &Path, writes_project: bool, here: &Here, tag: &str) -> Profile {
         let (root, home) = (profile_path(root), profile_path(home));
         let vars = vars_in(&home, here);
-        let place = crate::claudehome::Place::of(here.os, &|n| here.var(n)).ok().flatten();
+        // (a profile is made only for a claude confined)
+        let place = crate::claudehome::Place::of(here.os, true, &|n| here.var(n)).ok().flatten();
         let own: Vec<PathBuf> = match place {
             Some(_) => Vec::new(),
             None => CLAUDES.iter().chain(&[KEYCHAINS]).map(|c| profile_path(&home.join(c))).collect(),

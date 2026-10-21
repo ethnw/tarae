@@ -172,14 +172,15 @@ pub(crate) const CHAT_SETTINGS: &str =
 const KEEP_TRANSCRIPTS_DAYS: u64 = 36_500;
 
 /// `settings` (the chat's `--settings`) with `cleanupPeriodDays` = `KEEP_TRANSCRIPTS_DAYS` where claude loads
-/// the user source (`sources`, on `os`): on Linux tarae leaves it out (`claudehome::sources`), and claude then
-/// skips its cleanup (it says so) — a value given there would turn it on.
-fn keep_transcripts(settings: &str, sources: &str, os: crate::sandbox::Os) -> String {
+/// the user source (`sources`) and its folder is yours (not `apart`): where it's tarae's (Linux, claude confined)
+/// tarae leaves the source out (`claudehome::sources`), and claude then skips its cleanup (it says so) — a value
+/// given there would turn it on.
+fn keep_transcripts(settings: &str, sources: &str, apart: bool) -> String {
     let user = sources.split(',').any(|s| s.trim() == "user");
     let Ok(serde_json::Value::Object(mut json)) = serde_json::from_str(settings) else {
         return settings.into();
     };
-    if os != crate::sandbox::Os::Mac || !user {
+    if apart || !user {
         return settings.into();
     }
     json.insert("cleanupPeriodDays".into(), KEEP_TRANSCRIPTS_DAYS.into());
@@ -1124,7 +1125,8 @@ fn ensure_proc(ed: &mut Editor) {
         // CLAUDE.md files and settings as `claude` loads them — but hooks don't run, and edits always come
         // here as a review (an `ask` rule and the default mode outrank any allow rule or accept-edits mode)
         args = llm::with_flag(&args, "--setting-sources", &sources);
-        let settings = keep_transcripts(&settings, &sources, crate::sandbox::Os::HOST);
+        let apart = crate::claudehome::apart(crate::sandbox::Os::HOST, ed.config.llm.claude_sandbox);
+        let settings = keep_transcripts(&settings, &sources, apart);
         args = llm::with_flag(&args, "--settings", &settings);
         args = llm::with_flag(&args, "--permission-mode", "default");
     }
@@ -1216,16 +1218,17 @@ fn limits_note(arm: crate::edittool::Arm, said: &mut (bool, bool)) -> Option<Str
 /// made on a worker — the chat starts once it is (`gate_opened`). Each process gets a tag of its own, and on Linux
 /// rules of its own, made for its start.
 fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox::claude::Profile>> {
-    // On Linux claude's own folder first (`claudehome.rs`), made on a worker — it starts once it is
+    // On Linux with claude confined its own folder first (`claudehome.rs`), made on a worker — it starts once it is
     let os = crate::sandbox::Os::HOST;
-    if !crate::claudehome::ready(os, ed.claude_env.as_ref()) {
+    let off = !ed.config.llm.claude_sandbox;
+    if !crate::claudehome::ready(os, !off, ed.claude_env.as_ref()) {
         let given = ed.claude_env.clone();
         let c = ed.session.chat.as_mut()?;
         if !c.confine.making {
             c.confine.making = true;
             ed.events.jobs().spawn(move || {
                 // (a failure is the spawn's to say)
-                let _ = crate::claudehome::make(os, given.as_ref());
+                let _ = crate::claudehome::make(os, !off, given.as_ref());
                 move |ed: &mut Editor| {
                     if let Some(c) = ed.session.chat.as_mut() {
                         c.confine.making = false;
@@ -1237,12 +1240,13 @@ fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox:
         return None;
     }
     let wanted = ed.claude_confine && (cfg!(target_os = "macos") || cfg!(target_os = "linux"));
-    let off = !ed.config.llm.claude_sandbox;
     let root = ed.session.root.clone();
     let command = ed.config.llm.command.clone();
     let c = ed.session.chat.as_mut()?;
     if !wanted || off {
-        if wanted && !c.confine.said {
+        // (said where you turned it off: on Linux off is the default — user decision 2026-10-16 — and a note in
+        // every chat would say what the docs do)
+        if wanted && crate::sandbox::claude::on_by_default(os) && !c.confine.said {
             c.confine.said = true;
             c.note("claude itself runs unconfined, as you: llm.claude-sandbox is off");
         }
@@ -1675,8 +1679,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             c.calls.clear();
             // (a refusal for money read in the turn this exit cut off is that turn's alone)
             c.money = None;
-            // The conversation is gone from claude (on Linux, one from before tarae's claudes had a folder of their
-            // own — `claudehome.rs`): a fresh one, the rows still shown, said once — and a message sent to the
+            // The conversation is gone from claude (on Linux, one from the other folder after `llm.claude-sandbox`
+            // changed — yours or tarae's, `claudehome.rs`): a fresh one, the rows still shown, said once — and a message sent to the
             // process that couldn't resume goes again, to the new one
             if err.contains("No conversation found") && c.resume.is_some() {
                 c.resume = None;
@@ -3214,21 +3218,22 @@ mod tests {
         assert_eq!(said(&ed), 2, "anything else: said");
     }
 
-    /// f22 i: where claude loads your user settings (macOS), the chat's `--settings` keeps every conversation
-    /// from its cleanup (`cleanupPeriodDays`, never 0); the rest of them as they were. Without the user source —
-    /// Linux, or left out — nothing is added: claude skips its cleanup there, and a value would turn it on.
+    /// f22 i: where claude loads your user settings (its folder yours), the chat's `--settings` keeps every
+    /// conversation from its cleanup (`cleanupPeriodDays`, never 0); the rest of them as they were. Without the user
+    /// source — Linux with claude confined, or left out — nothing is added: claude skips its cleanup there, and a
+    /// value would turn it on.
     #[test]
     fn the_chat_keeps_claude_from_cleaning_up_transcripts() {
-        use crate::sandbox::Os;
         let base = CHAT_SETTINGS;
-        let mac: serde_json::Value =
-            serde_json::from_str(&keep_transcripts(base, crate::claudetrust::SOURCES, Os::Mac)).unwrap();
-        assert_eq!(mac["cleanupPeriodDays"], 36_500);
-        assert_eq!(mac["disableAllHooks"], true);
-        assert_eq!(mac["permissions"]["ask"], serde_json::json!(["Edit", "Write"]));
-        assert_eq!(keep_transcripts(base, crate::claudetrust::SOURCES, Os::Linux), base);
-        assert_eq!(keep_transcripts(base, "project,local", Os::Mac), base);
-        assert_eq!(keep_transcripts("not json", "user", Os::Mac), "not json");
+        let yours: serde_json::Value =
+            serde_json::from_str(&keep_transcripts(base, crate::claudetrust::SOURCES, false)).unwrap();
+        assert_eq!(yours["cleanupPeriodDays"], 36_500);
+        assert_eq!(yours["disableAllHooks"], true);
+        assert_eq!(yours["permissions"]["ask"], serde_json::json!(["Edit", "Write"]));
+        // (claude's folder tarae's — Linux, claude confined: the user source is left out)
+        assert_eq!(keep_transcripts(base, crate::claudetrust::SOURCES, true), base);
+        assert_eq!(keep_transcripts(base, "project,local", false), base);
+        assert_eq!(keep_transcripts("not json", "user", false), "not json");
     }
 
     /// A message sent while claude's own profile is made (on a worker, before claude starts) waits and goes once
@@ -3239,7 +3244,7 @@ mod tests {
         let mut ed = editor("");
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        ed.claude_confine = true;
+        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
         open(&mut ed);
         ed.session.chat.as_mut().unwrap().input = "hi there".into();
         send(&mut ed);
@@ -3306,7 +3311,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The chat's claude unconfined by your setting says so, once a chat (macOS and Linux: elsewhere it never is).
+    /// The chat's claude unconfined by your setting says so, once a chat, where it's confined by default (macOS;
+    /// elsewhere it never is) — on Linux, off by default, unsaid. Either way no profile, no rules.
     #[test]
     fn claude_unconfined_by_the_setting_is_said() {
         let mut ed = editor("");
@@ -3318,8 +3324,8 @@ mod tests {
         let c = ed.session.chat.as_ref().unwrap();
         let said =
             c.msgs.iter().filter(|m| m.role == Role::Note && m.text.contains("llm.claude-sandbox is off"));
-        assert_eq!(said.count(), usize::from(cfg!(any(target_os = "macos", target_os = "linux"))));
-        assert!(c.confined().is_none());
+        assert_eq!(said.count(), usize::from(cfg!(target_os = "macos")));
+        assert!(c.confined().is_none() && c.confine.made.is_none(), "no profile made");
     }
 
     /// Linux's profile (claude's folder tarae's) holds rules made from what was there — home's entries, the
@@ -3330,12 +3336,12 @@ mod tests {
         let mut ed = editor("");
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        ed.claude_confine = true;
+        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
         open(&mut ed);
         settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
         let root = ed.session.root.clone();
         let home = |n: &str| (n == "HOME").then(|| "/home/stand-in".to_string());
-        let linux = crate::claudehome::Place::of(crate::sandbox::Os::Linux, &home).unwrap();
+        let linux = crate::claudehome::Place::of(crate::sandbox::Os::Linux, true, &home).unwrap();
         assert!(linux.is_some());
         for (place, kept) in [(linux, false), (None, true)] {
             let p = crate::sandbox::claude::Profile {
@@ -3381,7 +3387,7 @@ mod tests {
         let mut ed = editor("");
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        ed.claude_confine = true;
+        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
         ed.session.root = dir.clone();
         open(&mut ed);
         settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));

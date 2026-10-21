@@ -8,13 +8,14 @@ Claude Code login as it is. You need [Claude Code](https://claude.com/claude-cod
 logged in — where `claude` isn't found, the chat says how to install it and log in, as Claude Code's own setup
 docs do.
 
-**On Linux, tarae's claude has a login of its own.** Every claude tarae starts keeps its state in a folder of
-tarae's (`~/.local/state/tarae/claude`, as `CLAUDE_CONFIG_DIR`), not your `~/.claude` — so a sandbox can close
-your own Claude Code's settings, hooks and login to it. Log in once with `:claude-login` (Claude Code's own
-`claude auth login`, in the terminal panel); the chat says so when claude isn't logged in. Its conversations are
-apart from your own `claude`'s, and your user settings and `~/.claude/CLAUDE.md` don't apply to it (a project's
-`CLAUDE.md` and `.claude/settings.json` still do). macOS uses your Claude Code login as it is. The claude
-program itself runs in a sandbox of its own on both: [what it keeps](#the-claude-program-itself).
+tarae uses your Claude Code folder and login as they are, on macOS and Linux. Claude's commands run in a sandbox
+and its edits come to you for review; on macOS the claude program itself runs in a sandbox of its own too. On
+Linux that's opt-in (`llm.claude-sandbox = true`): there every claude tarae starts keeps its state in a folder of
+tarae's (`~/.local/state/tarae/claude`, as `CLAUDE_CONFIG_DIR`), not your `~/.claude` — Landlock can't let claude
+write your login without opening all of `~/.claude` (settings, hooks, `CLAUDE.md`) — so it has a login of its own:
+`:claude-login` once (Claude Code's own `claude auth login`, in the terminal panel), its conversations apart from
+your own `claude`'s, your user settings and `~/.claude/CLAUDE.md` not applied (a project's `CLAUDE.md` and
+`.claude/settings.json` still are). [What it keeps](#the-claude-program-itself).
 
 - [Select → instruct → diff](#select--instruct--diff)
 - [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [running commands](#running-commands), [notes](#notes)
@@ -1202,18 +1203,26 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 
 ### The claude program itself
 
-The `claude` program the chat talks to (and the reviewer's) runs in a sandbox of its own too — files only: its
+On macOS the `claude` program the chat talks to (and the reviewer's) runs in a sandbox of its own too — on Linux
+only with `llm.claude-sandbox = true` (below) — files only: its
 network, the programs it starts and the system's services are as they are, since it needs your login and
 Anthropic. It reads none of the places that hold keys (the list in [the sandbox](#the-sandbox)), no file named
 like a key, and nothing of tarae's state but the log; it writes only its own folders, the temp folders and the
 devices — the project only with `llm.edit-tools` "both" or "native" (Claude Code's Edit and Write), never `.git`
 nor a protected name there. So a bug in claude's own code can't write what runs later or read `~/.ssh`. What it's
 refused is said in the chat. `llm.claude-sandbox = false` (your own config only) runs it unconfined, said in the
-chat. macOS keeps it with Seatbelt; on Linux:
+chat. macOS keeps it with Seatbelt.
+
+**On Linux it's off by default**: claude runs as you, on your own `~/.claude` and login — as Claude Code's and
+Codex's own sandboxes, tarae confines the commands, not the agent. So a bug in claude's own code (or a hostile
+claude program) can write what you can. Landlock only grants: claude refreshes its login in
+`~/.claude/.credentials.json`, and a write there opens all of `~/.claude`; confined, claude needs a login of its
+own. With `llm.claude-sandbox = true` (your own config only; a conversation from before continues as a new one):
 
 - **One login for tarae.** claude's folder is tarae's (`~/.local/state/tarae/claude`, above): `:claude-login`
   once, its conversations apart from yours, your user settings and `~/.claude/CLAUDE.md` not loaded — its own
-  folder is written whole by it, so nothing there is loaded as settings either.
+  folder is written whole by it, so nothing there is loaded as settings either. Turned off again, claude is back on
+  yours and that folder stays, for the next time.
 - **What's kept from it.** Landlock (the kernel's, as for Claude's commands) closes your `~/.claude` and
   `~/.claude.json`, tarae's state (but claude's own folder and the log), the places that hold keys, and the files
   named like keys at your home's top and anywhere in the project. It writes its folder,

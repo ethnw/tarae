@@ -1,7 +1,10 @@
-//! Claude's own folder on Linux (V1 Linux, decision (a), 2026-10-15): every claude tarae starts there — the chat,
-//! the reviewer, an ask, a commit draft — gets `CLAUDE_CONFIG_DIR` = `<tarae's state>/claude`, one per user, and
-//! loads no user settings (`--setting-sources` without `user`). macOS is unchanged (its login is a keychain item,
-//! `~/.claude` is claude's as it is — `sandbox::claude`).
+//! Claude's own folder on Linux with claude confined (V1 Linux, decision (a), 2026-10-15; opt-in since 2026-10-16:
+//! `llm.claude-sandbox = true`): every claude tarae starts there — the chat, the reviewer, an ask, a commit draft,
+//! the prewarm — gets `CLAUDE_CONFIG_DIR` = `<tarae's state>/claude`, one per user, and loads no user settings
+//! (`--setting-sources` without `user`). By default on Linux (`sandbox::claude::on_by_default`), and always on
+//! macOS (its login is a keychain item, `~/.claude` is claude's as it is — `sandbox::claude`), every claude uses
+//! your own folder and login: no variable, the user source as it is. Turned off, `$state/claude` stays where it is,
+//! used again once it's on.
 //!
 //! Why: Landlock only grants, and a right on a folder holds for everything below it. claude writes `.claude.json`
 //! by a temp file renamed over it and a lock folder beside it, so whatever folder holds that file becomes claude's
@@ -35,6 +38,12 @@ const FOLDER: &str = "claude";
 /// "Failed to authenticate…", "Please run /login · API Error: 401…").
 pub const NOT_LOGGED_IN: [&str; 3] = ["Not logged in", "Please run /login", "Failed to authenticate"];
 
+/// Whether claude's folder is tarae's on `os` with claude itself `confined` (`llm.claude-sandbox`): Linux with it
+/// on. Else your own, as your own claude has it.
+pub fn apart(os: Os, confined: bool) -> bool {
+    os == Os::Linux && confined
+}
+
 /// Claude's folders on Linux, for one home.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
@@ -46,10 +55,11 @@ pub struct Place {
 }
 
 impl Place {
-    /// On `os`, from the variables as `var` gives them (set and not empty): Ok(None) on macOS; Err with no absolute
-    /// state folder — claude doesn't start then (not with your `~/.claude` in its place).
-    pub fn of(os: Os, var: &dyn Fn(&str) -> Option<String>) -> Result<Option<Place>, String> {
-        if os == Os::Mac {
+    /// On `os` with claude `confined`, from the variables as `var` gives them (set and not empty): Ok(None) where
+    /// it isn't `apart` — macOS, Linux unconfined; Err with no absolute state folder — claude doesn't start then
+    /// (not with your `~/.claude` in its place).
+    pub fn of(os: Os, confined: bool, var: &dyn Fn(&str) -> Option<String>) -> Result<Option<Place>, String> {
+        if !apart(os, confined) {
             return Ok(None);
         }
         let var = |n: &str| var(n).filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -150,8 +160,9 @@ fn made_list() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<Path
 }
 
 /// Claude's folders for `given` made (`Place::made`) and the outcome kept — a worker's: a few calls on the disk.
-pub fn make(os: Os, given: Option<&crate::llm::Env>) -> Result<(), String> {
-    match Place::of(os, &var_in(given)) {
+/// Nothing to make where claude's folder is yours (`apart`).
+pub fn make(os: Os, confined: bool, given: Option<&crate::llm::Env>) -> Result<(), String> {
+    match Place::of(os, confined, &var_in(given)) {
         Ok(Some(p)) => made_kept(&p),
         _ => Ok(()),
     }
@@ -164,9 +175,9 @@ fn made_kept(p: &Place) -> Result<(), String> {
 }
 
 /// Whether a claude for `given` can start without waiting: its folder made (or its failure kept, for the spawn to
-/// say) — macOS, or no place to make it in (the spawn says so), nothing to wait for. A lookup.
-pub fn ready(os: Os, given: Option<&crate::llm::Env>) -> bool {
-    match Place::of(os, &var_in(given)) {
+/// say) — your own folder (`apart`), or no place to make it in (the spawn says so), nothing to wait for. A lookup.
+pub fn ready(os: Os, confined: bool, given: Option<&crate::llm::Env>) -> bool {
+    match Place::of(os, confined, &var_in(given)) {
         Ok(Some(p)) => test_home_made(&p) || made_list().contains_key(&p.dir()),
         _ => true,
     }
@@ -191,13 +202,14 @@ pub fn after_made(
     ed: &mut Editor,
     then: impl FnOnce(&mut Editor) -> Result<(), String> + Send + 'static,
 ) -> bool {
-    if ready(Os::HOST, ed.claude_env.as_ref()) {
+    let confined = ed.config.llm.claude_sandbox;
+    if ready(Os::HOST, confined, ed.claude_env.as_ref()) {
         return false;
     }
     let given = ed.claude_env.clone();
     ed.events.jobs().spawn(move || {
         // (a failure is the spawn's to say, when `then` starts it)
-        let _ = make(Os::HOST, given.as_ref());
+        let _ = make(Os::HOST, confined, given.as_ref());
         move |ed: &mut Editor| {
             if let Err(e) = then(ed) {
                 ed.set_error(e);
@@ -207,15 +219,17 @@ pub fn after_made(
     true
 }
 
-/// What a claude tarae starts on `os` gets: `args` with the user source off, and `CLAUDE_CONFIG_DIR` — as a worker
-/// made it before (`make`; the callers wait for it: `ready`), only read here. Not made: Err, and nothing is made
-/// here; made but failed: its Err, said once — the next start makes it again. macOS: `args` as they are, no folder.
+/// What a claude tarae starts on `os` with claude `confined` gets where its folder is tarae's (`apart`): `args`
+/// with the user source off, and `CLAUDE_CONFIG_DIR` — as a worker made it before (`make`; the callers wait for
+/// it: `ready`), only read here. Not made: Err, and nothing is made here; made but failed: its Err, said once — the
+/// next start makes it again. Elsewhere (macOS, Linux unconfined): `args` as they are, no folder.
 pub fn for_claude(
     os: Os,
+    confined: bool,
     given: Option<&crate::llm::Env>,
     args: &[String],
 ) -> Result<(Vec<String>, Option<PathBuf>), String> {
-    let place = Place::of(os, &var_in(given))?;
+    let place = Place::of(os, confined, &var_in(given))?;
     if let Some(p) = &place {
         test_home_made(p);
         let mut made = made_list();
@@ -234,11 +248,11 @@ pub fn for_claude(
 
 /// `:claude-login` — Claude Code's own login, `claude auth login` (`claude --help` → `auth`, "Manage
 /// authentication" → `login`, "Sign in to your Anthropic account"; a subscription by default) by `llm.command`, in
-/// the terminal panel (it opens a browser and may ask for a code), as you, outside the sandbox. On Linux with
-/// tarae's folder (`CLAUDE_CONFIG_DIR`, made first through no link): the login every claude tarae starts uses. On
-/// macOS your own claude's login, as `claude` in a terminal.
+/// the terminal panel (it opens a browser and may ask for a code), as you, outside the sandbox. Where claude's
+/// folder is tarae's (`apart`: Linux, claude confined) with it (`CLAUDE_CONFIG_DIR`, made first through no link):
+/// the login every claude tarae starts uses. Elsewhere your own claude's login, as `claude` in a terminal.
 pub fn login(ed: &mut Editor) -> Result<(), String> {
-    let place = Place::of(Os::HOST, &var_in(ed.claude_env.as_ref()))?;
+    let place = Place::of(Os::HOST, ed.config.llm.claude_sandbox, &var_in(ed.claude_env.as_ref()))?;
     let (argv, env) = login_command(&ed.config.llm.command, place.as_ref());
     ed.events.jobs().spawn(move || {
         let made = place.as_ref().map_or(Ok(()), made_kept);
@@ -263,17 +277,27 @@ fn login_command(command: &str, place: Option<&Place>) -> (Vec<String>, Vec<(Str
 }
 
 /// What the chat says when a claude failed with `error` for want of a login, where tarae's claudes keep their own
-/// (`place`) — once since tarae started (`told`, set here). None: not a login failure, macOS, or said already.
+/// (`place`) — once since tarae started (`told`, set here). None: not a login failure, claude's folder yours
+/// (claude's own words say `/login`, as your own claude's do), or said already.
 pub fn login_hint(error: &str, place: Option<&Place>, told: &mut bool) -> Option<String> {
     if place.is_none() || *told || !NOT_LOGGED_IN.iter().any(|l| error.contains(l)) {
         return None;
     }
     *told = true;
-    Some(
-        "claude has no login for tarae yet — on Linux tarae's claudes keep a login of their own, apart from your \
-         ~/.claude: :claude-login logs in, once"
-            .into(),
-    )
+    Some(OWN_LOGIN.into())
+}
+
+/// Why a confined claude on Linux has a login of its own, and how it gets one.
+pub const OWN_LOGIN: &str = "tarae keeps this claude away from your ~/.claude — Landlock can't let it write your \
+     login without all of it — so it has a login of its own: :claude-login, once";
+
+/// How to log in where tarae left a key out (`llm::login_hint`): `:claude-login` where claude's folder is tarae's
+/// (`place`), else as your own claude (`claude`, then `/login`).
+pub fn how_to_log_in(place: Option<&Place>) -> &'static str {
+    match place {
+        Some(_) => "Or log in for tarae: :claude-login.",
+        None => "Or log in: run `claude` in a terminal, then /login.",
+    }
 }
 
 #[cfg(test)]

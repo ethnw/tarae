@@ -446,7 +446,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.claude-sandbox",
         kind: Kind::Bool,
-        doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. A new chat process starts with it. Only your own config sets it",
+        doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. Off on Linux unless you turn it on: there it can't write your login without all of ~/.claude, so every claude tarae starts then keeps a folder and login of its own (~/.local/state/tarae/claude, :claude-login once) and loads no user settings; off, claude runs as you, on your own login — Claude's commands stay sandboxed and its edits reviewed. A new chat process starts with it. Only your own config sets it",
         get: |c| Value::from(c.llm.claude_sandbox),
         set: |c, v| c.llm.claude_sandbox = b(v),
     },
@@ -811,9 +811,22 @@ pub(crate) fn md_code(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The defaults on `os` — `EditorConfig::default`'s but those that differ by system.
+    fn defaults_on(os: crate::sandbox::Os) -> EditorConfig {
+        let mut c = EditorConfig::default();
+        c.llm.claude_sandbox = crate::sandbox::claude::on_by_default(os);
+        c
+    }
+
     /// `docs/reference/settings.md` — one table per config section, straight from `SETTINGS`.
     fn reference() -> String {
-        let defaults = EditorConfig::default();
+        use crate::sandbox::Os;
+        let (mac, linux) = (defaults_on(Os::Mac), defaults_on(Os::Linux));
+        // (this system's are the real defaults)
+        let (here, real) = (defaults_on(Os::HOST), EditorConfig::default());
+        for s in SETTINGS {
+            assert_eq!((s.get)(&here).to_string(), (s.get)(&real).to_string(), "{}", s.path);
+        }
         let mut out = String::from(
             "<!-- Generated from src/settings.rs — do not edit; regenerate with \
              `TARAE_BLESS=1 cargo test settings_reference`. -->\n\
@@ -844,7 +857,11 @@ mod tests {
                 Kind::Ports { max } => format!("list of ports (at most {max})"),
                 Kind::Hosts => md_code("\"any\"") + " or a list of hosts",
             };
-            let default = md_code(&(s.get)(&defaults).to_string());
+            let (on_mac, on_linux) = ((s.get)(&mac).to_string(), (s.get)(&linux).to_string());
+            let default = match on_mac == on_linux {
+                true => md_code(&on_mac),
+                false => format!("{} macOS · {} Linux", md_code(&on_mac), md_code(&on_linux)),
+            };
             out.push_str(&format!("| {} | {kind} | {default} | {} |\n", md_code(s.path), md_cell(s.doc)));
         }
         out.push_str(
