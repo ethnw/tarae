@@ -244,7 +244,6 @@ Done so far, under way, and the order after it (2026-10-17):
     permissions it declares.
   - Not taken:
     - micro-VMs — another threat model, and no Firecracker on macOS;
-    - a proxy that injects credentials — it needs TLS interception, and tarae's proxy never decrypts;
     - warming a run before the call arrives — not until `timing` shows hundreds of milliseconds;
     - applying a policy draft without review.
 - Then, in this order (decided 2026-10-15):
@@ -276,7 +275,9 @@ Done so far, under way, and the order after it (2026-10-17):
   looks. **Batch 30 next** (`target/sb/frictions29.md`, items 23–27): the terminals grant asked again for every
   e2e or scenes run (a grant of new ptys only); a bring queue for several sessions ready at once; a conflict
   resolution that changes what the commit message says, with nothing asking to update it; a preflight that
-  inherits tarae's environment; a session's CLAUDE.md, copied when it started, never getting later rules.
+  inherits tarae's environment; a session's CLAUDE.md, copied when it started, never getting later rules. Its item
+  12, the web tool: not built — measured first; if needed, tarae's `read` takes an https URL (GET, text, `select`),
+  not a new tool; Claude Code's WebSearch stays held back.
 
 Small fixes found while using tarae every day:
 
@@ -512,6 +513,19 @@ git tab, search, a short Kubernetes one.
 - **A memory comparison with other editors** (Helix, Neovim with an AI plugin, Zed, VS Code). Method agreed
   2026-10-03: the same scenario; the editor alone and its whole process tree; measured numbers only; a one-off
   script.
+- **TLS termination in the egress proxy** (user, 2026-10-19), a sandbox piece of its own, a plan first. It was
+  "not taken" while it meant TLS interception no one else did; Anthropic's sandbox-runtime now has it as an
+  experimental feature (srt `626a596`, its README's "TLS termination": `network.tlsTerminate` — HTTPS CONNECTs
+  terminated in-process with a per-run CA put in the run's trust bundle (`SSL_CERT_FILE`, `GIT_SSL_CAINFO`, …),
+  each decrypted request through `filterRequest`, credential hooks such as sigv4, `excludeDomains` for pinning
+  clients and mTLS, `refuseOpaqueTunnels`, `requireHostMatch`).
+  - What it would give: rules by method and path, not only host (GET only for a docs host, a grant for one
+    repository's path); a run never holding a token — the proxy adds it on the way out, so `tokens.rs`'s
+    token-free copies could go.
+  - What it costs: each tool's trust variable as pack data; clients that take no CA from the environment, or pin,
+    excluded and so held at the host level only; tarae's proxy holding plaintext and tokens; TLS and certificate
+    minting in Rust.
+  - Not part of it: TPROXY — that was routing, gone since 2026-10-17; every tier goes out by the proxy variable.
 - **Raw TCP to an address**: user-written `ip:port` / `cidr:port` rules in `llm.sandbox-hosts` (never a card), for
   a LAN database or a container's or VM's IP. Waiting for the user's call.
 - **Open from the keeper's work**: `go get` sometimes takes 36–40 s in the sandbox (cause unknown);
