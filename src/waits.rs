@@ -97,6 +97,11 @@ pub struct Waiting {
     pub cpu: Option<f32>,
     /// When the stuck card last asked about it — it asks again only after as long again.
     pub stuck_asked: Option<Instant>,
+    /// The processes of its tree at work at the last look — (pid, start), `procs::at_work`.
+    pub at_work: Vec<(u32, u64)>,
+    /// When a look last found a process in its tree newer than any before — work that prints nothing here
+    /// (frictions34 39: each scene's tarae under `| tail`) moves on as a line of output does.
+    pub moved: Option<Instant>,
     /// When the time limit its own command set ends it (`timeout 2700 …` — `stuck::limit`): the stuck card
     /// doesn't ask before then (cardburden 5: the breaks run, its own 45 minutes, asked at 10).
     pub limit_at: Option<Instant>,
@@ -167,6 +172,8 @@ impl Waiting {
             (Some(_), Some(since)) => now.saturating_duration_since(since) >= SILENT,
             (Some(_), None) => false,
         };
+        // (a process new in its tree lately: it's at work, printing or not)
+        let idle = idle && !self.moved.is_some_and(|m| now.saturating_duration_since(m) < SILENT);
         let half = self
             .limit_at
             .and_then(|at| at.checked_duration_since(started))
@@ -196,6 +203,22 @@ impl Waiting {
             true => _ = self.idle.get_or_insert(now),
             false => self.idle = None,
         }
+    }
+
+    /// A look at `now` found `at_work` in its tree (`procs::at_work`): one the last look didn't is progress
+    /// (`moved`) — started since, or at work only now, whenever it started; the first one too: a run's root (`sh`)
+    /// never does `procs::WORKED`, so its first worker (`sleep 900; cargo test | tail`'s cargo) is its first sign
+    /// of work.
+    pub fn saw(&mut self, at_work: Vec<(u32, u64)>, now: Instant) {
+        if at_work.iter().any(|p| !self.at_work.contains(p)) {
+            self.moved = Some(now);
+        }
+        self.at_work = at_work;
+    }
+
+    /// Its last sign of work: the later of `last` (its last line) and a new process a look saw (`moved`).
+    pub fn progress(&self, last: Instant) -> Instant {
+        self.moved.map_or(last, |m| m.max(last))
     }
 
     /// How long a running run has printed nothing, when it has also used next to no CPU for `after` or

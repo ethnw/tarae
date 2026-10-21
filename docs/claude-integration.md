@@ -141,6 +141,17 @@ reader where a thread waits; `sample <pid>` in a terminal shows its stacks). Not
 run (its panel and output stay, and Claude hears how it ended), `w` shows those lines in its panel, `n` keeps
 waiting and asks again after as long again. If the run prints or ends, the card goes away.
 
+A run's output is a pipe, so a filter at its end (`2>&1 | tail -15`, `| grep FAIL`, `| head`, `| sed …`) holds
+what it writes in its buffer, and lines may show only when the run ends — unless the line asks it for its lines
+as they come (`grep --line-buffered`, `sed -u`, `stdbuf -oL` before it). Where the output is held, no line may
+show the run's work: there a process new in its tree since the last look that has done some work of its own (a
+scene's tarae after another, a test binary after the build — not a `sleep`) counts as a line would, so the run
+isn't asked about while it's still at work, and a card already up goes when new work starts. Everywhere else
+lines are the only sign, so a hung poll loop (`until kubectl get pod x; do sleep 5; done`) is asked about as any
+quiet run. The card's `No output for` counts from its last line, and it says what a filter does to the output:
+`Its output goes through grep: what it lets through may show only when the run ends`, or, asked for its lines,
+`… only what it lets through shows`.
+
 Quiet isn't always stuck, so some runs are asked later. A run under a time limit its own command sets
 (`timeout 2700 sh breaks.sh`, `gtimeout -k 30 45m …` — the programs are the tools pack's `time-limits`, found
 after `NAME=value` and other wrappers, a `-k` grace added) isn't asked before that limit is up: it ends by then,
@@ -1888,7 +1899,13 @@ its base up to it, fast-forward only. When the base has moved since the session 
   (no `s`). A run in the task panel: the rebase waits its turn behind it (a `queued` row there). A rebase
   already stopped there: its card, to go on or abort. Should git refuse anyway, its own `error:` lines are said
 - Clean: a card offers to bring it now (`y`), to run the quick [`:preflight`](configuration.md#checks-before-a-push-preflight) first and bring it once that
-  passes (`p` — the card names its steps; the `full = true` ones wait for `:preflight-full`, before publishing), or not now (`n`)
+  passes (`p` — the card names its steps; the `full = true` ones wait for `:preflight-full`, before publishing), or not now (`n`).
+  If that preflight fails, the card comes back saying so in the warning colour — the first test that failed and
+  the first line of why (`The quick preflight failed — worktree::tests::x: panicked at src/worktree.rs:3920:9: …`)
+  — and `v` opens the failed step's whole output, whatever has run in the task panel since (on a card cut to fit,
+  its text with that first failure's lines after it; read to its end, `v` again opens the whole output)
+- A conflict where the session's chat has no Claude running yet (none started since tarae did): the ask goes as
+  soon as one starts. One that can't start leaves the rebase stopped and waiting on you — the inbox lists it
 - A conflict: the rebase stops, and the session's own Claude is asked in its chat to resolve the files. It's
   sent the files and both sides (what the commit being replayed changed, and what the base changed since that
   commit's parent), and told not to run git or commit. When its turn ends with no conflict markers left in

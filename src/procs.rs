@@ -902,6 +902,8 @@ pub struct Row {
     program: String,
     pub up: Option<Duration>,
     pub cpu: Option<f32>,
+    /// Its CPU time so far (user + system) — what it has done, whenever a look samples it.
+    worked: Duration,
     pub rss: u64,
     pub footprint: Option<u64>,
     pub zombie: bool,
@@ -966,6 +968,7 @@ pub fn rows(
         program: os.name.clone(),
         up: (os.started > 0).then(|| Duration::from_secs(now.saturating_sub(os.started))),
         cpu: pct.get(&os.pid).copied().flatten(),
+        worked: os.cpu,
         rss: os.rss,
         footprint: os.footprint,
         zombie: os.zombie,
@@ -986,6 +989,7 @@ pub fn rows(
         program: title.to_string(),
         up: None,
         cpu: None,
+        worked: Duration::ZERO,
         rss: 0,
         footprint: None,
         zombie: false,
@@ -1124,6 +1128,7 @@ pub fn with_queued(rows: &mut Vec<Row>, queued: &[(SessionId, u64, String, Strin
             program: String::new(),
             up: None,
             cpu: None,
+            worked: Duration::ZERO,
             rss: 0,
             footprint: None,
             zombie: false,
@@ -1150,6 +1155,28 @@ pub fn summed(rows: &[Row], pids: &[u32]) -> Option<(f32, u64)> {
         }
     }
     sum
+}
+
+/// The CPU time a process new in a run's tree must have used to count as its work going on (`at_work`): a
+/// scene's tarae, a test binary use far more; a polling loop's `sleep 2`, its `nc -z` or a refused `curl` far less
+/// (frictions34 39 a's review: every `sleep` of `until nc -z db 5432; do sleep 2; done` was a new process).
+pub const WORKED: Duration = Duration::from_millis(200);
+
+/// The processes of `pids` and their trees among tarae's children that have done some work (`WORKED` of CPU
+/// time), each as (pid, when it started — epoch seconds: which process, pids are reused). One that comes and goes
+/// between two looks isn't seen; one that reaches `WORKED` at a later look is in that look's.
+pub fn at_work(rows: &[Row], pids: &[u32]) -> Vec<(u32, u64)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for r in rows {
+        if r.depth == 0 {
+            inside = r.kind != Kind::Tarae && pids.contains(&r.pid);
+        }
+        if inside && r.worked >= WORKED {
+            out.push((r.pid, r.started));
+        }
+    }
+    out
 }
 
 // ── Claude's tool ────────────────────────────────────────────────────────
@@ -2564,6 +2591,7 @@ pub(crate) mod tests {
             program: format!("prog{pid}"),
             up: Some(Duration::from_secs(up)),
             cpu: Some(cpu),
+            worked: Duration::ZERO,
             rss: mb * MB,
             footprint: Some(mb * MB),
             zombie: false,

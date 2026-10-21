@@ -361,6 +361,39 @@ fn under_review_at_the_end_a_delete_still_waits_on_the_card() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions34 43: the review of an `edit` is titled with what the user asked, as the native Edit's is — not
+/// `edit a.rs` (that stays the answer's and a card's); with nothing asked yet, the change itself.
+#[test]
+fn the_edit_tools_review_quotes_what_you_asked() {
+    let dir = project("asked", &[("a.rs", "fn hi() {}\n"), ("b.rs", "fn bye() {}\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    let title = |ed: &Editor| ed.session.review.as_ref().map(|r| r.instruction.clone());
+    let c = ed.session.chat.as_mut().unwrap();
+    c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "tidy the greeting\nand keep it short", ""));
+    let args = json!({"edits": [{"file_path": "a.rs", "old_string": "fn hi()", "new_string": "fn hello()"}]});
+    call(&mut ed, Call::test(43), &args).unwrap();
+    pump(&mut ed, "the review", |ed| ed.session.review.is_some());
+    assert_eq!(title(&ed).as_deref(), Some("tidy the greeting"));
+    // (the answer still names the change, not what was asked: `n`, and Claude hears `edit a.rs`)
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while answered(43).is_none() {
+        assert!(std::time::Instant::now() < end, "the answer");
+        crate::llm::review_key(&mut ed, crate::key::Key::plain(crate::key::Code::Char('n')));
+        if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+    let a = answered(43).unwrap().unwrap();
+    assert!(a.contains("edit a.rs") && !a.contains("tidy the greeting"), "{a}");
+    // (a chat where nothing was asked yet)
+    let mut ed = chat_for(&dir, &dir.join("stdin2.log"));
+    let args = json!({"edits": [{"file_path": "b.rs", "old_string": "fn bye()", "new_string": "fn ciao()"}]});
+    call(&mut ed, Call::test(44), &args).unwrap();
+    pump(&mut ed, "the other review", |ed| ed.session.review.is_some());
+    assert_eq!(title(&ed).as_deref(), Some("edit b.rs"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A single delete comes up on the card even under review at the end, and `n` leaves the file.
 #[test]
 fn a_lone_delete_is_never_written_unseen() {

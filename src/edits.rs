@@ -269,6 +269,13 @@ pub fn protected(root: &Path, path: &Path) -> bool {
     }
 }
 
+/// What the user asked last — its first line: the title of the edit tools' reviews, whichever tool made the
+/// change (frictions34 43: tarae's `edit` said `edit a.rs`); Claude's words go under it (`reason`).
+pub fn asked(c: &crate::chat::Chat) -> Option<String> {
+    let m = c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User)?;
+    Some(m.text.lines().next().unwrap_or_default().to_string())
+}
+
 /// Why Claude makes the change it's calling for now (its review shows it): its words right before this call
 /// (after the call's own row), not ones from before earlier calls — else the plan's step in hand.
 pub fn reason(c: &crate::chat::Chat) -> String {
@@ -482,8 +489,7 @@ fn show(ed: &mut Editor, p: Pending) {
         .session
         .chat
         .as_ref()
-        .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
-        .map(|m| m.text.lines().next().unwrap_or_default().to_string())
+        .and_then(asked)
         .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.session.root, &path)));
     let (mut reason, since) = (p.reason.clone(), p.since);
     if let Some(note) = (!existed).then(|| folder_outside(&ed.session.root, &path)).flatten() {

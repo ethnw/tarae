@@ -163,17 +163,17 @@ The aim is to state what the sandbox guarantees and show that it holds.
    Landlock has no right for them. Part A done (2026-10-18, `dbe7086c`, D-h): the seccomp filter refuses a file's
    owner, extended attributes, ACLs and inode flags in every tier, the project's files too; its mode and times stay
    open, said in the report, `tarae state` and the state line; macOS's Seatbelt is pinned to refuse them all outside
-   the write places. Part B, being written outside tarae (`~/Workspace/tarae-linmeta-b`): tarae serves a file's mode
-   and times in tiers own and host, only where the run may write. Tier offline stays a full tier with them open,
-   said (user decision 2026-10-18). Its round 3 is under way, a session of its own: Gemini's tree, where tarae's
-   board found seven high — owner calls go back to refused (the user's D-h covered mode and times only),
-   `/dev/shm` was opened too widely, and a link's times re-resolved its parent. Left: an ownership change that
-   changes nothing (`rsync -a`, `install -g` to the primary group) is refused today; nested user namespaces in
-   tier own are a piece of their own.
+   the write places. Part B done (2026-10-19, `df088ee2`): in tiers own and host a run's mode and times calls are
+   tarae's — the path read once and opened by the kernel from the run's root, decided on tarae's own descriptor and
+   changed on it, let only where the run may write (or on a descriptor it holds open for writing, or one that names
+   no file); a path through `/proc`, a descriptor's name in `/dev` or a magic link refused and said, never emulated.
+   Owner calls stay refused. Tier offline stays a full tier with mode and times open, said (user decision
+   2026-10-18). Left: an ownership change that changes nothing (`rsync -a`, `install -g` to the primary group) is
+   refused today; nested user namespaces in tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
 
-Done so far, under way, and the order after it (2026-10-17):
+Done so far, under way, and the order after it (2026-10-17, brought up to 2026-10-20):
 
 - **The compatibility suite** (below): pieces 0–3 done, up to the first macOS table and its findings B1–B7.
   Piece 4 done (`8993751a`): an image per toolchain, a volume per stack, and the first Linux tables, own and host
@@ -268,7 +268,7 @@ Done so far, under way, and the order after it (2026-10-17):
 - **Auto mode** is built only if the card record shows it's worth it: one to two weeks of `$state/cards` after P3
   runs in the user's tarae, each class's residual rate held against D1's bar (at least one card of a class per
   session-hour; then the 300-card safety bar). Likely not built.
-- **Frictions**: batches 24–30 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
+- **Frictions**: batches 24–34 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
   project asks for itself — Claude's Read on the key's own card, tarae's own tools leave it out — and on macOS a
   run doesn't read one where a grant or a default opened (the shared temp folders too; its own `$TMPDIR` reads);
   `cargo xtask linux` proves the tree it mounts is this checkout, and a filter that matched no test fails. Left from
@@ -278,12 +278,22 @@ Done so far, under way, and the order after it (2026-10-17):
   ones — a host card outlives its run (`y` is for the next run), `C-q` brings the card's keys with it, review notes
   and replies wait for the turn's end, a landing grades the other bring cards again, a failed preflight names the
   tools' variables it ran with, and what a card, a report or the inbox said too little of; the terminals asked
-  again after a `y` take none of the turn's `ALSO_MAX`. **Batch 31 under way** (frictions31, a session of its
-  own): frictions30's order 3–4 and a new item 28, the terminals' A (the ptys tarae makes and hands to a run)
-  measured first. frictions29's item 12, the web tool: not built — measured first; if needed, tarae's `read`
-  takes an https URL (GET, text, `select`), not a new tool; Claude Code's WebSearch stays held back.
+  again after a `y` take none of the turn's `ALSO_MAX`. Batch 31 (`61e590a4`): a resolved conflict's commit
+  message, instruction files that follow main's, which account a chat runs on, `]u` past a viewed file. The
+  terminals' A (`5a68b5ca`): a sandboxed run's ptys come from tarae's broker, no card. Batch 32 (`bd5c6ab0`): a
+  rebuilt program is never "script unchanged", a read's no holds for the turn, a search's card names its pattern,
+  the board asks before it spends. Batch 33 (2026-10-19, `523fdef3`): a stop ends what left its run's group, the
+  bring queue, short e2e sockets. Batch 34 (2026-10-20, `target/sb/frictions34-plan.md`): where a filter holds a
+  run's output, the stuck card counts a new process at work in its tree as progress, and it says what the filter
+  does to the output; a stopped rebase reaches a chat whose Claude hasn't started, or waits in the inbox; a failed
+  preflight's bring card comes back naming the test and its panic, `v` its output; the edit tools' reviews are
+  titled with what you asked (a rename's and a replace's keep their own); `:restart` keeps the symbols with
+  cargo's build-dir apart. frictions29's item 12, the web tool: not built — measured
+  first; if needed, tarae's `read` takes an https URL (GET, text, `select`), not a new tool; Claude Code's
+  WebSearch stays held back.
 
-- **`:session-apply`** — under way (sessapply, a session of its own).
+- **`:session-apply`** — done (2026-10-19, `a525a775`): an outside tree's change — a patch, `--base <rev>` for
+  where it was made — brought in as one reviewed change set, never written unseen.
 
 Small fixes found while using tarae every day:
 
@@ -328,9 +338,41 @@ let it send keys too, in a way that can't land somewhere it didn't mean:
 
 The person at the keyboard already has the same guards: a card ignores keys typed as it appears, `y` counts only
 after the text was in sight, and no key changes state in silence. This was "guarded keys", phase 4 of
-[design/ui-state.md](design/ui-state.md), dropped there and now back under its new name. Phase 1 is built
-(2026-10-19: the protocol and its guards — [design/ui-state.md](design/ui-state.md#shuttle-keys)); weighty
-answers with proof the card was read (`read`) come next, then the zellij scripts move over.
+[design/ui-state.md](design/ui-state.md), dropped there and now back under its new name. Phase 1 is done
+(2026-10-19, `aebf0bfd`: the protocol and its guards — [design/ui-state.md](design/ui-state.md#shuttle-keys)):
+`tarae keys` types over the UI socket, each step's `expect` checked in the job that hands its keys on; the grant
+card is for the connecting process alone (`--for <pid>` widens it, said); a shuttle answers light cards and a
+weighty card's `n`/`v` only, nothing that widens trust. Before it, watchers hear what a batch that drew nothing
+changed (`41910769`). Weighty answers with proof the card was read (`read`) come next, then the zellij scripts
+move over.
+
+**Then, before the remote split** — plans decided 2026-10-19, each built only once its checkout is rebased on a
+main that has what it waits for, and the user says go:
+
+- **Reviews in the background** (bgreview, `target/sb/bgreview-plan.md` in its checkout): `space v c` (the
+  reviewer) and `space v C` (the board) no longer take the session's screen. They read a snapshot of the tree in a
+  reading copy of their own, findings land on the lines as they are now ("changed since read" when they moved),
+  and a status-line segment says one is reading and when it's done. P1 + P2 built in its checkout (2026-10-20),
+  not in main yet; P3, a review started by itself at a turn's end (`review.auto = "turn"`, off by default, your
+  config only), is its own PR once P1–P2 have been used.
+- **View mode, then quoting** (the quoteplan checkout's `target/sb/quote-plan.md`): every surface — the chat's
+  transcript, the terminal panel, the task, preflight and test panels — gets a view mode, one rule: a cursor on
+  its rows as read-only text, Helix's keys, to read, search and copy. Then quoting (인용): select part of any of
+  them and ask about it, a chip over the input like pointing's, sent with where it came from, cut to a limit and
+  said so; `C-s` follows `llm.screen-terminal`. Phases: P1 view mode for the chat and the terminal, P2 quoting, P3
+  the run panels, P4 the mouse.
+- **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
+  zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
+  `:restart`. After view mode (both touch the terminal panel). It brings tarae's own terminal engine (a workspace
+  crate, in place of `vt100`, measured against a baseline taken first) and a terminal that understands the shell
+  while the shell stays yours. Order: several terminals → the engine → reflow → the shell understood → focus as
+  one value → surfaces as leaves → panes of their own → `tarae` verbs → output for Claude → another session
+  beside → the floating terminal → shells across `:restart`.
+- **Orchestra, Part I** (the orchestra checkout's `target/sb/orchestra-plan.md`): a session's Claude starts
+  sessions of its own and steers them through session tools that act on the editor's model, never on the screen —
+  nothing switches the front session or types into an input you can see. P1 children (start them on a card, send
+  to them, read their reports, news told once), P2 watching (wakes, cost per child), P3 reviews and proposals.
+  P1 after bgreview lands (P3 builds on its start); what stays yours — cards, brings, ends — stays yours.
 
 ### 5. A remote split
 
@@ -343,6 +385,11 @@ its plan. Two interfaces:
 - **A web client**: the thin client built to WebAssembly, in a browser. The same screen, not a GUI.
 
 The egress proxy is designed to live with the runs, wherever they are.
+
+After it, **Orchestra, Part II** (the same plan, §§10–16): the parent session's Claude as the improver — a
+fixed procedure; a library of lessons in the project's `.tarae/`, the only thing that grows; card delegation
+written down as your rules, off unless a rule names a card (never a bring); checks the parent can't loosen; safety
+kept outside the loop. After Part I's P1–P3 and this split.
 
 ### 6. Working together
 
@@ -456,18 +503,13 @@ git tab, search, a short Kubernetes one.
   audit's fixes (`680f9326`), the chat laying out a message once (`66bebbc5`), 번짐, the head of what Claude
   is writing as ink not yet dry (`660435df`), and weight and margins (2026-10-19, `0ceac0aa`): `● normal` for the
   solid pill, the start screen a title page set in type with no seal, the edit review's head in ink, the chat's
-  prose at a 72-cell measure, list cards their own height. P5–P8 next (its §5): the seal for what's decided, the
-  turn as a thread, live edits, 코드멍's reveal.
-- **Quoting** (인용, user 2026-10-17; `quote` in the docs and commands, as pointing is `point`): select part of
-  any text tarae shows and ask about it at once. Code has its selection, and test and preflight output open in a
-  buffer (`space x o`, the task panel's `o`); pointing gives a whole element's id, `C-s` the whole screen. Missing:
-  the chat's transcript (a line of an answer, a code block), the terminal panel (its screen and scrollback — what
-  the screen holds, never keys typed) and the run panels as drawn (task, test, preflight; a plain task's output
-  has no buffer). How is the plan's: Helix's selection keys in a read-only view of that surface, a mouse drag, or
-  both; the quote is a chip over the input like pointing's and a screen's, Backspace takes it off. What goes: the
-  text with where it came from (`<quoted from="terminal" …>`), cut to a limit and said so; Claude's level rules
-  hold (nothing unsent, other sessions never). The terminal's rows follow `llm.screen-terminal` (off → not
-  quotable); a quote is the user's act, never a card. A plan first; each new screen element after its shots.
+  prose at a 72-cell measure, list cards their own height. P5 done (2026-10-19, `25a2c4c2`): what you decided is
+  stamped with the key that decided it (`▐y▌ accepted` in the edit review, `m`/`u` on a turn's files, `:granted`'s
+  answers by their key). P6–P8 next (its §5): the turn as a thread, live edits, 코드멍's reveal.
+- **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
+  naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
+  and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
+  isn't said yet (frictions29 39 b), next.
 
 ## Later
 

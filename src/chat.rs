@@ -1207,10 +1207,11 @@ pub fn reset(ed: &mut Editor) {
 }
 
 /// The project's Claude settings are read (`claudetrust.rs`): its claude starts — held back while their card
-/// waits — and a message that waited for the read goes.
+/// waits — and a message that waited for the read goes, and a stopped rebase's ask (`rebase::chat_ready`).
 pub(crate) fn gate_opened(ed: &mut Editor) {
     ensure_proc(ed);
     send_queued(ed);
+    crate::rebase::chat_ready(ed);
 }
 
 /// The project's Claude settings as answered now need another claude than the one running (`claudetrust.rs`):

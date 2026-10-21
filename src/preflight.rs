@@ -215,6 +215,9 @@ pub struct Preflight {
     pub left_out: usize,
     /// The run's key (`key`): a marker without it is a step's own output.
     key: String,
+    /// Its run's output, kept once it failed — `:preflight-output` reads it after another run took the task
+    /// panel (frictions34 42).
+    pub kept: Vec<(bool, String)>,
 }
 
 impl Preflight {
@@ -233,7 +236,16 @@ impl Preflight {
             })
             .collect();
         let (title, left_out) = (set.title(all), all.len() - ours.len());
-        Preflight { generation, steps, started: Instant::now(), took: None, title, left_out, key }
+        Preflight {
+            generation,
+            steps,
+            started: Instant::now(),
+            took: None,
+            title,
+            left_out,
+            key,
+            kept: Vec::new(),
+        }
     }
 
     /// What a marker line of this run's says after its key — None for any other line, a marker with another
@@ -372,11 +384,34 @@ impl Preflight {
         }
     }
 
+    /// The output `which` asks for (`step_for`; `top` the panel's line in view) out of `output`: its buffer's
+    /// title (`quick preflight · test`) and lines.
+    pub fn step_text(
+        &self,
+        which: &str,
+        top: Option<usize>,
+        output: &[(bool, String)],
+    ) -> Result<(String, Vec<String>), String> {
+        let k = self.step_for(which, top, output).ok_or_else(|| match which.trim() {
+            "" => "no step has printed anything yet".to_string(),
+            w => format!(
+                "no step {w} — {}",
+                self.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        })?;
+        let name = &self.steps[k].name;
+        let lines = self.output_of(k, output).ok_or(format!("{name} hasn't printed anything yet"))?;
+        Ok((format!("{} · {name}", self.title), lines))
+    }
+
     /// What its end says, the set named: a quick one passed points at the full one; a failure, at `]q` when
-    /// the run put `places` in the list.
-    pub fn said(&self, places: usize) -> String {
+    /// the run put `places` in the list, and the first test that failed (`failure`, in `output`).
+    pub fn said(&self, places: usize, output: &[(bool, String)]) -> String {
         let mut out = format!("{}: {}", self.title, self.summary());
         if !self.passed() {
+            if let Some(f) = self.step_text("", None, output).ok().and_then(|(_, l)| failure(&l)) {
+                out.push_str(&format!(" — {f}"));
+            }
             if places > 0 {
                 out.push_str(" — ]q goes to the first");
             }
@@ -388,6 +423,71 @@ impl Preflight {
             ));
         }
         out
+    }
+}
+
+/// The first test that failed in a step's `lines`, and the first line of why (frictions34 42: 2745 passed, 1
+/// failed, and its name was in no toast): `worktree::tests::x: panicked at src/worktree.rs:12:5: msg` — cargo
+/// test's `test x ... FAILED` / `---- x stdout ----` and the panic under it (`panicked at …:` with its message
+/// on the next line), Go's `--- FAIL: TestX` and its first `file_test.go:12: msg` line. None: no test named.
+pub fn failure(lines: &[String]) -> Option<String> {
+    let (test, block) = first_failed(lines)?;
+    let rest = &block[1..];
+    let why = rest.iter().position(|l| l.contains("panicked at ")).map(|p| {
+        let l = rest[p].trim_end();
+        let place = &l[l.find("panicked at ").unwrap_or(0)..];
+        let message = rest.get(p + 1).map(|m| m.trim()).filter(|m| !m.is_empty());
+        match (place.strip_suffix(':'), message) {
+            // (`panicked at src/a.rs:3:5:`, the message under it)
+            (Some(place), Some(m)) => format!("{place}: {m}"),
+            (Some(place), None) => place.to_string(),
+            (None, _) => place.to_string(),
+        }
+    });
+    // (Go: the line under `--- FAIL` that says where, `    a_test.go:12: msg`)
+    let why = why.or_else(|| {
+        let next = rest.first()?.trim();
+        next.split_once(':').is_some_and(|(file, _)| file.ends_with(".go")).then(|| next.to_string())
+    });
+    Some(match why {
+        Some(w) => format!("{test}: {w}"),
+        None => test,
+    })
+}
+
+/// The first test that failed in `lines` (`failure`) and its block: the line naming it (its own `---- x stdout
+/// ----` when there is one — cargo lists the failures after every test's line), then its lines up to the next.
+fn first_failed(lines: &[String]) -> Option<(String, &[String])> {
+    let named = |l: &str| {
+        let l = l.trim();
+        l.strip_prefix("test ")
+            .and_then(|r| r.strip_suffix(" ... FAILED"))
+            .or_else(|| l.strip_prefix("---- ").and_then(|r| r.strip_suffix(" stdout ----")))
+            .or_else(|| l.strip_prefix("--- FAIL: ").map(|r| r.split(' ').next().unwrap_or(r)))
+            .map(str::to_string)
+    };
+    let test = lines.iter().find_map(|l| named(l))?;
+    let block = format!("---- {test} stdout ----");
+    let from = lines
+        .iter()
+        .position(|l| l.trim() == block)
+        .or_else(|| lines.iter().position(|l| named(l).as_deref() == Some(test.as_str())))?;
+    let rest = &lines[from + 1..];
+    let end = rest.iter().position(|l| l.starts_with("---- ") || l.trim_start().starts_with("--- FAIL"));
+    let end = from + 1 + end.unwrap_or(rest.len());
+    Some((test, &lines[from..end]))
+}
+
+/// At most this many lines of the first failure's block on a cut card's view (`failure_block`).
+const FAILURE_SHOWN: usize = 20;
+
+/// What a cut bring card's `v` shows of a failed step's `lines` (the review of frictions34 42: its `y` waits until
+/// that view is read to its end, and the whole of a `cargo test` is thousands of lines): the first failure's block,
+/// its first `FAILURE_SHOWN` lines — none found, the output's last ones.
+pub fn failure_block(lines: &[String]) -> Vec<String> {
+    match first_failed(lines) {
+        Some((_, block)) => block.iter().take(FAILURE_SHOWN).cloned().collect(),
+        None => lines[lines.len().saturating_sub(FAILURE_SHOWN)..].to_vec(),
     }
 }
 
@@ -493,39 +593,39 @@ impl Editor {
     /// failed step's output was hard to reach — the panel is a few rows, and the `▲ test` that was clicked
     /// was the test panel's tab).
     pub fn preflight_output(&mut self, which: &str) -> Result<(), String> {
+        let p = self.session.preflight.as_ref();
         let run =
-            self.session.task_run.as_ref().ok_or("no preflight in the task panel — :preflight runs one")?;
-        let p = self
-            .session
-            .preflight
-            .as_ref()
-            .filter(|p| p.generation == run.generation())
-            .ok_or("the task panel's run isn't a preflight")?;
-        let k = p.step_for(which, run.scroll, &run.output).ok_or_else(|| match which.trim() {
-            "" => "no step has printed anything yet".to_string(),
-            w => format!(
-                "no step {w} — {}",
-                p.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-        })?;
-        let name = p.steps[k].name.clone();
-        let lines = p.output_of(k, &run.output).ok_or(format!("{name} hasn't printed anything yet"))?;
-        let title = format!("{} · {name}", p.title);
+            self.session.task_run.as_ref().filter(|r| p.is_some_and(|p| p.generation == r.generation()));
+        let (title, lines) = match (p, run) {
+            (Some(p), Some(run)) => p.step_text(which, run.scroll, &run.output)?,
+            // (frictions34 42: a failed one's, kept after another run took the panel)
+            (Some(p), None) if !p.kept.is_empty() => p.step_text(which, None, &p.kept)?,
+            _ if self.session.task_run.is_some() => {
+                return Err("the task panel's run isn't a preflight".into());
+            }
+            _ => return Err("no preflight in the task panel — :preflight runs one".into()),
+        };
+        self.output_buffer(&title, &lines);
+        Ok(())
+    }
+
+    /// `lines` in a buffer of its own titled `title` (an earlier one of that title gives way), at the failure
+    /// when it says where — the last `error`/`FAILED`/`panicked` line.
+    pub(crate) fn output_buffer(&mut self, title: &str, lines: &[String]) {
         let mut text = lines.join("\n");
         text.push('\n');
         // One buffer per step: an earlier one gives way to this output
         let old: Vec<_> = self
             .docs
             .iter()
-            .filter(|d| d.throwaway && d.title.as_deref() == Some(title.as_str()))
+            .filter(|d| d.throwaway && d.title.as_deref() == Some(title))
             .map(|d| d.id)
             .collect();
         for id in old {
             self.close_doc(id);
         }
-        self.open_virtual(&title, &text);
+        self.open_virtual(title, &text);
         self.bottom_focus = false;
-        // (on the failure, when it says where: the last `error`/`FAILED`/`panicked` line)
         let at = lines
             .iter()
             .rposition(|l| l.contains("FAILED") || l.contains("panicked") || l.starts_with("error"));
@@ -535,7 +635,6 @@ impl Editor {
             doc.set_selection(crate::selection::Selection::point(at));
             self.align_view(crate::viewalign::Place::Center);
         }
-        Ok(())
     }
 
     /// `:preflight` (`set` quick) / `:preflight-full` — the project's steps (else the packs' defaults,
@@ -784,8 +883,14 @@ impl Editor {
             return false;
         };
         p.finish();
-        let places = self.session.task_run.as_ref().map_or(0, |r| r.found.0 + r.found.1);
-        let (said, passed, title) = (p.said(places), p.passed(), p.title);
+        let run = self.session.task_run.as_ref().filter(|r| r.generation() == generation);
+        let places = run.map_or(0, |r| r.found.0 + r.found.1);
+        let output = run.map_or(&[][..], |r| r.output.as_slice());
+        let (said, passed, title) = (p.said(places, output), p.passed(), p.title);
+        // (a failed one's output outlives the panel's next run — frictions34 42)
+        if !passed {
+            p.kept = output.to_vec();
+        }
         if passed {
             self.set_success(said);
         } else {
@@ -980,19 +1085,83 @@ mod tests {
             p
         };
         assert_eq!(
-            ran(Set::Quick, &all, &[0, 0]).said(0),
+            ran(Set::Quick, &all, &[0, 0]).said(0, &[]),
             "quick preflight: all 2 passed · 1m 02s — the full set (2 more steps) runs before publish: \
              :preflight-full"
         );
         assert_eq!(
-            ran(Set::Quick, &all, &[0, 1]).said(3),
+            ran(Set::Quick, &all, &[0, 1]).said(3, &[]),
             "quick preflight: 1 of 2 passed — test failed · 1m 02s — ]q goes to the first"
         );
-        assert_eq!(ran(Set::Full, &all, &[0, 0, 0, 0]).said(0), "full preflight: all 4 passed · 1m 02s");
+        assert_eq!(ran(Set::Full, &all, &[0, 0, 0, 0]).said(0, &[]), "full preflight: all 4 passed · 1m 02s");
         let one = [step("fmt", "")];
-        assert_eq!(ran(Set::Quick, &one, &[0]).said(0), "preflight: all 1 passed · 1m 02s");
+        assert_eq!(ran(Set::Quick, &one, &[0]).said(0, &[]), "preflight: all 1 passed · 1m 02s");
         let p = Preflight::new(1, &all[..3], Set::Quick, KEY.into());
         assert_eq!((p.steps.len(), p.left_out), (2, 1));
+        // (frictions34 42: the first test that failed, from the failed step's output)
+        let output: Vec<(bool, String)> = [
+            "── fmt ──",
+            "── test ──",
+            "test a ... FAILED",
+            "---- a stdout ----",
+            "thread 'a' panicked at x.rs:1:2:",
+            "no",
+        ]
+        .map(|l| (false, l.to_string()))
+        .into();
+        assert_eq!(
+            ran(Set::Quick, &all, &[0, 1]).said(0, &output),
+            "quick preflight: 1 of 2 passed — test failed · 1m 02s — a: panicked at x.rs:1:2: no"
+        );
+    }
+
+    /// frictions34 42: the first test that failed is named with the first line of why — cargo test's (its own
+    /// block's panic, not the next test's; the message on the line under `panicked at …:`, or the old form on
+    /// one line), Go's (`--- FAIL` and the place under it); a failure that names no test: None.
+    #[test]
+    fn the_first_failure_is_named_with_its_panic() {
+        let lines = |s: &str| s.lines().map(String::from).collect::<Vec<_>>();
+        let cargo = lines(
+            "running 3 tests\ntest worktree::tests::b ... FAILED\ntest worktree::tests::a ... FAILED\n\
+             test c ... ok\n\nfailures:\n\n---- worktree::tests::a stdout ----\n\
+             thread 'worktree::tests::a' (1) panicked at src/worktree.rs:9:5:\nnot this one\n\n\
+             ---- worktree::tests::b stdout ----\nsome output\n\
+             thread 'worktree::tests::b' (2) panicked at src/worktree.rs:3920:9:\n\
+             assertion failed: card(&ed).is_some()\nnote: run with `RUST_BACKTRACE=1`\n",
+        );
+        assert_eq!(
+            failure(&cargo).as_deref(),
+            Some(
+                "worktree::tests::b: panicked at src/worktree.rs:3920:9: assertion failed: card(&ed).is_some()"
+            )
+        );
+        let old =
+            lines("test a ... FAILED\n---- a stdout ----\nthread 'a' panicked at 'boom', src/a.rs:3:5\n");
+        assert_eq!(failure(&old).as_deref(), Some("a: panicked at 'boom', src/a.rs:3:5"));
+        let timed_out = lines(
+            "test a ... FAILED\n---- a stdout ----\n---- b stdout ----\nthread 'b' panicked at b.rs:1:1:\nx",
+        );
+        assert_eq!(failure(&timed_out).as_deref(), Some("a"), "not b's panic");
+        let go = lines(
+            "=== RUN   TestParse\n--- FAIL: TestParse (0.00s)\n    parse_test.go:12: got 3, want 4\nFAIL\n",
+        );
+        assert_eq!(failure(&go).as_deref(), Some("TestParse: parse_test.go:12: got 3, want 4"));
+        assert_eq!(failure(&lines("error[E0308]: mismatched types\n --> src/a.rs:1:1")), None);
+        // (a cut card's view: that failure's block, at most `FAILURE_SHOWN` lines; none found, the end)
+        let block = failure_block(&cargo);
+        assert_eq!(block[0], "---- worktree::tests::b stdout ----");
+        assert!(
+            block.iter().any(|l| l.contains("assertion failed"))
+                && !block.iter().any(|l| l.contains("not this one"))
+        );
+        let long: Vec<String> = (0..100)
+            .map(|i| format!("line {i}"))
+            .chain(["---- t stdout ----".into()])
+            .chain((0..50).map(|i| format!("t {i}")))
+            .collect();
+        assert_eq!(failure_block(&long).len(), FAILURE_SHOWN);
+        let none = lines("a\nb\nc");
+        assert_eq!(failure_block(&none), none);
     }
 
     /// Whatever a step prints, its lines are read without a panic — a marker naming no step, one past the last,

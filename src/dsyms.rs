@@ -80,11 +80,11 @@ pub fn keep(bin: &Path) -> Result<Option<Kept>, String> {
     if std::fs::symlink_metadata(&beside).is_err() {
         return Ok(None);
     }
-    let target = target_dir(bin)
-        .ok_or_else(|| format!("{} isn't a cargo build's (no target folder around it)", bin.display()))?;
     let said = |e: std::io::Error, p: &Path| format!("{}: {e}", p.display());
     // (a link to a build-dir's dSYM that's gone: said)
     let real = std::fs::canonicalize(&beside).map_err(|e| said(e, &beside))?;
+    let target = target_dir(bin, &real)
+        .ok_or_else(|| format!("{} isn't a cargo build's (no target folder around it)", bin.display()))?;
     let id = uuid(bin)?;
     let dwarf = real.join("Contents/Resources/DWARF");
     let file = std::fs::read_dir(&dwarf)
@@ -137,13 +137,23 @@ fn rename_in(part: &Path, kept: &Path) -> Result<(), String> {
 
 /// The target folder `bin` was built into, when it's a cargo build's: its folder a profile folder (cargo's
 /// `.cargo-lock` in it) in a target folder (cargo's `CACHEDIR.TAG`) — `target/<profile>` or
-/// `target/<triple>/<profile>`.
-fn target_dir(bin: &Path) -> Option<&Path> {
+/// `target/<triple>/<profile>`. With `build.build-dir` apart, cargo may tag only the build-dir (frictions34 46:
+/// the main checkout's `target/` had none): then `dsym`, the dSYM's real path, says it — `<build-dir>/[<triple>/]
+/// <profile>/deps/…`, the build-dir tagged and the folders under it the ones above `bin`.
+fn target_dir<'a>(bin: &'a Path, dsym: &Path) -> Option<&'a Path> {
     let profile = bin.parent()?;
     if !profile.join(".cargo-lock").is_file() {
         return None;
     }
-    profile.ancestors().skip(1).take(2).find(|d| d.join("CACHEDIR.TAG").is_file())
+    let tagged = |d: &Path| d.join("CACHEDIR.TAG").is_file();
+    if let Some(t) = profile.ancestors().skip(1).take(2).find(|d| tagged(d)) {
+        return Some(t);
+    }
+    let built = dsym.parent().filter(|d| d.file_name().is_some_and(|n| n == "deps"))?.parent()?;
+    (1..=2).find_map(|up| {
+        let (ours, theirs) = (profile.ancestors().nth(up)?, built.ancestors().nth(up)?);
+        (tagged(theirs) && profile.strip_prefix(ours).ok() == built.strip_prefix(theirs).ok()).then_some(ours)
+    })
 }
 
 /// The kept dSYMs in `dir` past the newest `keep` (by mtime) removed — never `now`, the one just kept, which
@@ -427,6 +437,36 @@ mod tests {
         std::fs::write(home.join("bin/.cargo-lock"), "").unwrap();
         assert!(keep(&home.join("bin/tarae")).is_err_and(|e| e.contains("isn't a cargo build's")));
         assert_eq!(names(&home.join("dsyms")), theirs);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions34 46: with `build.build-dir` apart, cargo tagged the build-dir and not the main checkout's
+    /// `target/` — the dSYM it links to says it's a cargo build's (`<build-dir>/release/deps/…`, the build-dir
+    /// tagged), and it's kept under `target/dsyms`. The build-dir untagged, or the dSYM another profile's: not
+    /// one, nothing made.
+    #[test]
+    fn a_build_dirs_tag_marks_the_target_folder_around_the_binary() {
+        let dir = temp("build-dir");
+        let made = build(&dir, A, A);
+        std::fs::remove_file(dir.join("target/CACHEDIR.TAG")).unwrap();
+        let bin = dir.join("target/release/tarae");
+        let untagged = keep(&bin).unwrap_err();
+        assert!(untagged.contains("isn't a cargo build's"), "{untagged}");
+        std::fs::write(dir.join("build/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n")
+            .unwrap();
+        let k = keep(&bin).unwrap().expect("kept");
+        assert_eq!(k.at, dir.join(format!("target/dsyms/{A_SAID}.dSYM")));
+        assert!(!dir.join("build/dsyms").exists(), "nothing in the build-dir");
+
+        // (its dSYM a debug build's: not this release folder's)
+        let debug = dir.join("build/debug/deps/tarae-171a287377bc2e94.dSYM");
+        std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        std::fs::rename(&made, &debug).unwrap();
+        std::fs::remove_file(dir.join("target/release/tarae.dSYM")).unwrap();
+        std::os::unix::fs::symlink(&debug, dir.join("target/release/tarae.dSYM")).unwrap();
+        std::fs::remove_dir_all(dir.join("target/dsyms")).unwrap();
+        assert!(keep(&bin).is_err_and(|e| e.contains("isn't a cargo build's")));
+        assert!(!dir.join("target/dsyms").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

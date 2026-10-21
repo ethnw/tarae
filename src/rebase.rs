@@ -103,6 +103,28 @@ impl Moved {
         )
     }
 
+    /// The bring card once the preflight its `p` ran (`title`) failed: what failed first, in the warning colour,
+    /// and `failed` — the failed step's output (its buffer's title, its lines) — behind `v`.
+    pub fn failed_card(
+        &self,
+        quick: Option<Vec<String>>,
+        title: &str,
+        failed: Option<(String, Vec<String>)>,
+    ) -> Offer {
+        let first = failed.as_ref().and_then(|(_, lines)| crate::preflight::failure(lines));
+        let mut card = self.bring_card(quick, false);
+        let said = match (first, failed.is_some()) {
+            (Some(f), _) => format!("The {title} failed — {f}. v shows its output."),
+            (None, true) => format!("The {title} failed — v shows its output."),
+            (None, false) => format!("The {title} failed — the task panel says why."),
+        };
+        let at = card.question.lines().count() + 1;
+        card.question.push_str(&format!("\n\n{said}"));
+        let mut card = card.warning(at..at + 1);
+        card.output = failed;
+        card
+    }
+
     /// The card for a session with nothing to bring, behind its base (`ahead` 0, #186): move it up to its
     /// base's tip — a fast-forward in its checkout.
     pub fn up_card(&self) -> Offer {
@@ -654,6 +676,13 @@ fn poll(ed: &Editor, root: PathBuf, generation: u64, dir: Option<PathBuf>) {
     });
 }
 
+/// The session's chat has its claude now (`chat::gate_opened`): an ask that waited for it to start goes.
+pub fn chat_ready(ed: &mut Editor) {
+    if let Some(a) = ed.session.rebase.as_mut().and_then(|r| r.waiting.take()) {
+        ed.rebase_ask(a);
+    }
+}
+
 /// The session's Claude was asked, and its turn ended (`chat.rs`): an ask that waited for it goes now;
 /// else, while the rebase is stopped at what it was asked about, its files are looked at for markers.
 pub fn turn_over(ed: &mut Editor) {
@@ -1028,12 +1057,25 @@ impl Editor {
             r.waiting = Some(a);
             return self.set_status(format!("conflicts in {files} — Claude is asked once its turn ends"));
         }
-        r.asked = true;
-        match crate::chat::submit(self, &a.question, Some(a.about), Some(a.chip)) {
-            true => self.set_status(format!(
-                "conflicts in {files} — Claude is resolving them; you review them before the rebase goes on"
-            )),
-            false => self.set_warning(format!(
+        let sent = crate::chat::submit(self, &a.question, Some(a.about.clone()), Some(a.chip.clone()));
+        // (frictions34 41: a chat whose claude isn't running — none started since tarae did — starts it once the
+        // project's Claude settings are read, which the send began — only that first read sets `waiting`, and its
+        // end opens the gate: the ask goes then, `chat_ready`)
+        let starting = !sent && self.session.chat.as_ref().is_some_and(|c| c.settings.waiting());
+        let Some(r) = self.session.rebase.as_mut() else { return };
+        match (sent, starting) {
+            (true, _) => {
+                r.asked = true;
+                self.set_status(format!(
+                    "conflicts in {files} — Claude is resolving them; you review them before the rebase goes on"
+                ))
+            }
+            (false, true) => {
+                r.waiting = Some(a);
+                self.set_status(format!("conflicts in {files} — Claude is asked once it starts"))
+            }
+            // (not asked: it waits on you — the inbox lists it, its card goes on or aborts)
+            (false, false) => self.set_warning(format!(
                 "conflicts in {files} — couldn't reach Claude (the chat says why); resolve them, then \
                  :rebase-continue"
             )),
@@ -1597,12 +1639,23 @@ impl Editor {
         });
     }
 
+    /// The bring card `m` again after its `p`'s preflight (`title`) failed (frictions34 42: a toast said it, and
+    /// the output went with the task panel's next run): the first test that failed and why, in the warning
+    /// colour, and `v` for the failed step's output (`Offer.output` — kept on the card, whatever runs next).
+    fn rebase_bring_failed(&mut self, m: Moved, title: &str) {
+        let failed = self.session.preflight.as_ref().and_then(|p| p.step_text("", None, &p.kept).ok());
+        let card = m.failed_card(self.preflight_quick(), title, failed);
+        let (sid, root, base) = (self.session.id, m.root.clone(), m.base.clone());
+        crate::codereview::push_bring_card(self, sid, card, root, base);
+    }
+
     /// `p` on the bring card: the quick preflight in its session, and the bring once it passes (the full one
     /// is for before publishing).
     pub fn rebase_preflight_then_bring(&mut self, m: Moved) {
         let Some(id) = self.session_at(&m.root) else { return };
         self.with_session(id, |ed| {
             ed.session.bring_after_preflight = true;
+            ed.session.bring_card_after = Some(Box::new(m));
             if let Err(e) = ed.preflight_start(crate::preflight::Set::Quick) {
                 ed.session.bring_after_preflight = false;
                 ed.set_error(e);
@@ -1610,8 +1663,11 @@ impl Editor {
         });
     }
 
-    /// The preflight (`title`: which set) ended, `passed` or not: a bring waiting for it goes on, or doesn't.
+    /// The preflight (`title`: which set) ended, `passed` or not: a bring waiting for it goes on, or doesn't —
+    /// one its card's `p` asked for gets the card back, saying what failed.
     pub(crate) fn rebase_preflight_done(&mut self, passed: bool, title: &str) {
+        // (taken whatever happens: one left from a preflight that didn't start isn't the next one's)
+        let card = self.session.bring_card_after.take();
         if !std::mem::take(&mut self.session.bring_after_preflight) {
             return;
         }
@@ -1623,6 +1679,9 @@ impl Editor {
                 return;
             }
         } else if !passed {
+            if let Some(m) = card {
+                return self.rebase_bring_failed(*m, title);
+            }
             return self.set_warning(format!("{name} not brought — the {title} didn't pass"));
         }
         if let Err(e) = self.session_bring_now(&id.to_string()) {

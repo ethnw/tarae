@@ -699,3 +699,161 @@ fn a_stuck_card_goes_when_its_run_prints() {
     ed.session.task_run = None;
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `sample`, with a child `name` of the run's `pid` that started at `started` (epoch seconds; the rest started at
+/// 1) and has used `worked` of CPU time.
+fn sample_with_child(pid: u32, name: &str, started: u64, worked: Duration) -> Sample {
+    sample_with_children(pid, &[(name, started, worked)])
+}
+
+/// `sample`, with children of the run's `pid` (pids `pid + 100_000` on): name, start, CPU time.
+fn sample_with_children(pid: u32, kids: &[(&str, u64, Duration)]) -> Sample {
+    let me = std::process::id();
+    let os = |pid, ppid, name: &str, started, cpu| Os {
+        pid,
+        ppid,
+        name: name.into(),
+        started,
+        cpu,
+        ..Default::default()
+    };
+    let none = Duration::ZERO;
+    let mut procs = vec![(os(me, 1, "tarae", 1, none), Some(1.0)), (os(pid, me, "sh", 1, none), Some(0.0))];
+    for (i, (name, started, worked)) in kids.iter().enumerate() {
+        procs.push((os(pid + 100_000 + i as u32, pid, name, *started, *worked), Some(0.0)));
+    }
+    Sample::of(procs)
+}
+
+/// A run of Claude's started as `cmd`, quiet and idle for 11 minutes, as the looks before saw it.
+fn quiet_run(dir: &std::path::Path, cmd: &str) -> (Editor, u32) {
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.session.root = dir.to_path_buf();
+    let task = crate::task::Task { name: "scenes".into(), cmd: cmd.into(), cwd: dir.to_path_buf() };
+    assert!(ed.task_start_for(task, crate::tools::For::User("s".into()), None, Default::default()).is_ok());
+    let ago = Instant::now().checked_sub(MIN * 11).unwrap();
+    let r = ed.session.task_run.as_mut().unwrap();
+    (r.by_claude, r.last_output, r.wait.idle) = (true, ago, Some(ago));
+    let pid = r.pid().unwrap();
+    (ed, pid)
+}
+
+/// frictions34 39 a: a run whose work is a child after another (a scene's tarae each) prints nothing behind a
+/// filter and reads 0% CPU between them — a process new in its tree since the last look that has done some work
+/// is progress, as a line is: no card. Once none has come for the setting's minutes, it's asked about as before —
+/// the card saying how long since its last line (20 min), not since that process.
+#[test]
+fn a_new_process_in_the_runs_tree_is_progress() {
+    let dir = crate::scratch::Scratch::new("stuck-progress");
+    let (mut ed, pid) = quiet_run(dir.path(), "sleep 30 2>&1 | tail -15");
+    ed.session.task_run.as_mut().unwrap().last_output = Instant::now().checked_sub(MIN * 20).unwrap();
+    ed.procs_sampled(sample_with_child(pid, "tarae", 2, Duration::from_secs(3)));
+    let w = &ed.session.task_run.as_ref().unwrap().wait;
+    assert!(w.moved.is_some() && w.at_work == [(pid + 100_000, 2)], "a new child seen");
+    assert!(!w.worth_a_look(Instant::now(), Instant::now()), "not for the inbox either");
+    // (the stuck card would come on a job — none was started)
+    ed.handle_event(crate::event::Event::Resize);
+    assert!(ed.offers.iter().all(|o| o.stuck().is_none()), "working: not asked");
+    // Nothing new for 11 minutes: asked
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.wait.moved = Instant::now().checked_sub(MIN * 11);
+    ed.procs_sampled(sample_with_child(pid, "tarae", 2, Duration::from_secs(3)));
+    settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
+    let q = &ed.offers.iter().find(|o| o.stuck().is_some()).unwrap().question;
+    assert!(q.starts_with("No output for 20 min, 0% CPU"), "since its last line: {q}");
+    // New work while the card is up (the next scene's tarae): the card goes, as it does on a line
+    ed.procs_sampled(sample_with_child(pid, "tarae", 3, Duration::from_secs(1)));
+    ed.handle_event(crate::event::Event::Resize);
+    assert!(ed.offers.iter().all(|o| o.stuck().is_none()), "at work again: {:?}", ed.offers);
+    ed.session.task_run = None;
+}
+
+/// frictions34 39 a's second review: a process at work the last look didn't see is progress whenever it started —
+/// one older than the newest seen that does its work only now, one started in the same second as another (starts
+/// are whole seconds) — and one already seen isn't, again.
+#[test]
+fn a_late_or_same_second_worker_is_progress() {
+    let dir = crate::scratch::Scratch::new("stuck-late");
+    let (mut ed, pid) = quiet_run(dir.path(), "sleep 30 | tail -5");
+    let (busy, idle) = (Duration::from_secs(3), Duration::from_millis(5));
+    let moved = |ed: &mut Editor| ed.session.task_run.as_mut().unwrap().wait.moved.take().is_some();
+    ed.procs_sampled(sample_with_children(pid, &[("cargo", 5, busy), ("rustc", 2, idle)]));
+    assert!(moved(&mut ed), "the first at work");
+    ed.procs_sampled(sample_with_children(pid, &[("cargo", 5, busy), ("rustc", 2, idle)]));
+    assert!(!moved(&mut ed), "nothing new");
+    ed.procs_sampled(sample_with_children(pid, &[("cargo", 5, busy), ("rustc", 2, busy)]));
+    assert!(moved(&mut ed), "started earlier, at work only now");
+    let three = [("cargo", 5, busy), ("rustc", 2, busy), ("rustc", 5, busy)];
+    ed.procs_sampled(sample_with_children(pid, &three));
+    assert!(moved(&mut ed), "started in the same second as cargo");
+    ed.session.task_run = None;
+}
+
+/// frictions34 39 a's review: a run hung in a polling loop (`until nc -z db 5432; do sleep 2; done`) starts a new
+/// `sleep` before every look — behind a `tail` too, a process that has done next to no work isn't progress, and
+/// it's asked about.
+#[test]
+fn a_polling_loops_new_sleeps_are_no_progress() {
+    let dir = crate::scratch::Scratch::new("stuck-polling");
+    let (mut ed, pid) = quiet_run(dir.path(), "sleep 30 | tail -5");
+    ed.procs_sampled(sample_with_child(pid, "sleep", 2, Duration::from_millis(1)));
+    assert!(ed.session.task_run.as_ref().unwrap().wait.moved.is_none(), "a sleep is no work");
+    settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
+    ed.session.task_run = None;
+}
+
+/// frictions34 39 a's third review: a polling loop around something heavier (`until kubectl get pod x; do sleep
+/// 5; done`) has a step at work at every look. Its output not held, lines are the only sign of work, as before
+/// 39 a: its hung wait is asked about. Behind a `| tail`, a new process at work is progress — lines can't show
+/// it — and it isn't (the residual: a heavy poll loop behind a holding filter goes unasked).
+#[test]
+fn a_heavy_poller_is_asked_about_unless_its_output_is_held() {
+    let dir = crate::scratch::Scratch::new("stuck-heavy-poller");
+    let (mut ed, pid) = quiet_run(dir.path(), "sleep 30");
+    ed.procs_sampled(sample_with_child(pid, "kubectl", 2, Duration::from_millis(800)));
+    assert!(ed.session.task_run.as_ref().unwrap().wait.moved.is_none(), "lines are the only sign");
+    settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
+    ed.session.task_run = None;
+
+    let (mut ed, pid) = quiet_run(dir.path(), "sleep 30 2>&1 | tail -15");
+    ed.procs_sampled(sample_with_child(pid, "kubectl", 2, Duration::from_millis(800)));
+    assert!(
+        ed.session.task_run.as_ref().unwrap().wait.moved.is_some(),
+        "held: a process at work is progress"
+    );
+    ed.handle_event(crate::event::Event::Resize);
+    assert!(ed.offers.iter().all(|o| o.stuck().is_none()), "not asked");
+    ed.session.task_run = None;
+}
+
+/// frictions34 39 a: what the card can't see, it says — a command whose output goes through a filter that holds
+/// what it writes into the run's pipe (`tail`, `grep` alike), one wording with the filter's name; one asked for
+/// its lines as they come (`grep --line-buffered`) lets only part of the output through.
+#[test]
+fn a_filtered_runs_card_says_why_nothing_shows() {
+    let dir = crate::scratch::Scratch::new("stuck-filtered");
+    let card = |cmd: &str| {
+        let (mut ed, pid) = quiet_run(dir.path(), cmd);
+        ed.procs_sampled(sample(pid, 0.0));
+        settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
+        let q = ed.offers.iter().find(|o| o.stuck().is_some()).unwrap().question.clone();
+        ed.session.task_run = None;
+        q
+    };
+    let q = card("sleep 30 2>&1 | tail -15");
+    assert!(
+        q.starts_with(
+            "No output for 11 min, 0% CPU — Claude's command sleep 30 2>&1 | tail -15 in the task panel. Its \
+             output goes through tail: what it lets through may show only when the run ends. Claude's turn \
+             waits on it"
+        ),
+        "{q}"
+    );
+    let q = card("sleep 30 2>&1 | grep FAIL");
+    assert!(
+        q.contains("Its output goes through grep: what it lets through may show only when the run ends."),
+        "{q}"
+    );
+    let q = card("sleep 30 2>&1 | grep --line-buffered FAIL");
+    assert!(q.contains("Its output goes through grep: only what it lets through shows."), "{q}");
+}

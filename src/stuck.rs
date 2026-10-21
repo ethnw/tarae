@@ -97,15 +97,25 @@ pub fn look(ed: &mut Editor, rows: &[Row], now: Instant) {
     let mut due: Vec<(SessionId, Stuck)> = Vec::new();
     for l in std::iter::once(&mut ed.session).chain(&mut ed.sessions) {
         for slot in [Slot::Task, Slot::Test] {
+            // (its output held by a filter — `| tail`, `| grep`, in the run's pipe: no line may show its work)
+            let held = slot == Slot::Task
+                && l.task_run.as_ref().is_some_and(|r| crate::readonly::held_by(&r.task.cmd).is_some());
             let Some((pid, run, last, wait, reach, away)) = running(l, slot) else { continue };
             if let Some((pct, _)) = crate::procs::summed(rows, &[pid]) {
                 wait.looked(pct, now);
             }
+            // (frictions34 39 a: where its output is held, a process new in its tree since the last look is work
+            // going on; elsewhere lines are the only sign — a poll loop's steps aren't progress)
+            if held {
+                wait.saw(crate::procs::at_work(rows, &[pid]), now);
+            }
             // (granted a daemon's socket, outside the sandbox, or found connected outside: its work may go on
             // there — asked later)
             let after = if away || wait.connected { outside } else { after };
-            if let Some(quiet) = wait.stuck_for(last, now, after) {
+            if wait.stuck_for(wait.progress(last), now, after).is_some() {
                 wait.stuck_asked = Some(now);
+                // (what the card says is the time since its last line — not since its last new process)
+                let quiet = now.saturating_duration_since(last);
                 let cpu = wait.cpu.unwrap_or(0.0);
                 due.push((l.id, Stuck { slot, run, pid, asked: now, quiet, cpu, at: 0, reach }));
             }
@@ -349,7 +359,9 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
     let label = match s.slot {
         Slot::Task => {
             let Some(r) = ed.session.task_run.as_mut().filter(|r| {
-                r.state == crate::task::State::Running && r.trace.id() == s.run && still(r.last_output)
+                r.state == crate::task::State::Running
+                    && r.trace.id() == s.run
+                    && still(r.wait.progress(r.last_output))
             }) else {
                 return;
             };
@@ -357,11 +369,13 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
             for line in std::iter::once(head).chain(lines.iter().cloned()) {
                 r.push_line(false, line, false);
             }
-            format!("Claude's command {} in the task panel", crate::task::traced(&r.task.cmd))
+            task_label(&r.task.cmd)
         }
         _ => {
             let Some(r) = ed.session.test_run.as_mut().filter(|r| {
-                r.state == crate::testing::RunState::Running && r.trace.id() == s.run && still(r.last_output)
+                r.state == crate::testing::RunState::Running
+                    && r.trace.id() == s.run
+                    && still(r.wait.progress(r.last_output))
             }) else {
                 return;
             };
@@ -376,6 +390,20 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
     ed.push_offer(o);
 }
 
+/// The card's label for Claude's command `cmd` in the task panel (`card`'s `label`) — and what it can't see, said
+/// (frictions34 39): a filter holds what it writes into the run's pipe, or one asked for its lines lets only part
+/// of the output through.
+pub fn task_label(cmd: &str) -> String {
+    let held = match (crate::readonly::held_by(cmd), crate::readonly::filtered_by(cmd)) {
+        (Some(f), _) => {
+            format!(". Its output goes through {f}: what it lets through may show only when the run ends")
+        }
+        (None, Some(f)) => format!(". Its output goes through {f}: only what it lets through shows"),
+        (None, None) => String::new(),
+    };
+    format!("Claude's command {} in the task panel{held}", crate::task::traced(cmd))
+}
+
 /// The waits of the run `s` is about, while it's still that run.
 fn run_wait<'a>(ed: &'a mut Editor, s: &Stuck) -> Option<&'a mut crate::waits::Waiting> {
     match s.slot {
@@ -384,8 +412,8 @@ fn run_wait<'a>(ed: &'a mut Editor, s: &Stuck) -> Option<&'a mut crate::waits::W
     }
 }
 
-/// The card about run `s` (`label`: which it is and where), its threads' `lines`, what its tree is connected
-/// to outside itself (`peers`). Connected, or granted a daemon's socket (`s.reach`), it may be working there —
+/// The card about run `s` (`label`: which it is and where — and a filter holding its output back), its
+/// threads' `lines`, what its tree is connected to outside itself (`peers`). Connected, or granted a daemon's socket (`s.reach`), it may be working there —
 /// said, and `Quiet:` rather than `Stuck?`. Let reach only the network, or no sandbox around it, with nothing
 /// connected: still `Stuck?` (#181 — cargo hung under qemu, outside a sandbox too), the reach a note.
 pub fn card(s: Stuck, label: &str, lines: &[String], peers: &[String]) -> crate::offer::Offer {
@@ -543,7 +571,8 @@ pub fn keep_waiting(ed: &mut Editor, s: &Stuck) {
     ed.set_status(format!("kept waiting — asked again after {after} more min of nothing; {stop} stops it"));
 }
 
-/// Every event: a stuck card whose run printed since, or ended, goes — in every session.
+/// Every event: a stuck card whose run printed since, started new work (`Waiting::progress`), or ended, goes —
+/// in every session.
 pub fn sync(ed: &mut Editor) {
     let any = |o: &crate::offer::Offer| o.stuck().is_some();
     let behind: Vec<SessionId> =
@@ -560,15 +589,16 @@ pub fn sync(ed: &mut Editor) {
 fn drop_gone(ed: &mut Editor) {
     let mut live = Vec::new();
     for slot in [Slot::Task, Slot::Test] {
-        if let Some((_, run, last, ..)) = running(&mut ed.session, slot) {
-            live.push((run, last));
+        // (a new process at work since is as good as a line)
+        if let Some((_, run, last, wait, ..)) = running(&mut ed.session, slot) {
+            live.push((run, wait.progress(last)));
         }
     }
     let gone = |w: &crate::offer::What| match w {
         crate::offer::What::Stuck(s) => !live.iter().any(|(run, last)| *run == s.run && *last <= s.asked),
         _ => false,
     };
-    ed.drop_cards_for(gone, "dropped — its run printed, or ended");
+    ed.drop_cards_for(gone, "dropped — its run printed, started new work, or ended");
 }
 
 #[cfg(test)]

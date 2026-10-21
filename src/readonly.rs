@@ -78,6 +78,54 @@ pub fn filtered_by(line: &str) -> Option<String> {
     names.iter().all(|n| FILTERS.contains(&n.as_str())).then(|| names[0].clone())
 }
 
+/// The first filter after `line`'s command that holds what it writes (`cargo test 2>&1 | tee log | grep FAIL`:
+/// `grep`), when what follows it only filters or copies (`FILTERS`, `tee`) — what shows is the last stage's. A run's
+/// output is a pipe, so every filter tarae knows writes into one, and holds it in its buffer: stdio's full
+/// buffering off a terminal, and BSD tail ignores `-f` on a pipe (measured, frictions34 39 a: `(echo a; sleep 2;
+/// echo b) | tail -f`, and `| tail -n +1`, gave both lines at 2 s). Not one the line asks for its output a line at
+/// a time (`stage`). None: no filter holds, or a program after it may print on its own.
+pub fn held_by(line: &str) -> Option<String> {
+    let stages = piped(line)?;
+    let after: Vec<(String, bool)> = stages.get(1..)?.iter().map(|w| stage(w)).collect::<Option<_>>()?;
+    let at = after.iter().position(|(n, lines)| FILTERS.contains(&n.as_str()) && !lines)?;
+    after[at + 1..]
+        .iter()
+        .all(|(n, _)| FILTERS.contains(&n.as_str()) || n == "tee")
+        .then(|| after[at].0.clone())
+}
+
+/// A stage after a pipeline's command, for `held_by`: its program (past a `stdbuf`), and whether the line asks it
+/// for its output a line at a time — only as the programs' own docs name it: grep(1) `--line-buffered` (GNU and
+/// BSD; rg(1) the same), GNU sed(1) `-u`/`--unbuffered`, BSD sed(1) `-l` (GNU's `-l N` is a line length — read
+/// as line-buffered all the same, the side that asks), coreutils stdbuf(1) `-oL`/`-o0` (`-o L`, `--output=L`).
+fn stage(w: &[Word]) -> Option<(String, bool)> {
+    let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+    let base = |s: &str| s.rsplit('/').next().unwrap_or(s).to_string();
+    let first = base(words.first()?);
+    if first == "stdbuf" {
+        let (mut i, mut lines) = (1, false);
+        while let Some(o) = words.get(i).filter(|o| o.starts_with('-')) {
+            let mode = match o.strip_prefix("--output=").or_else(|| o.strip_prefix("-o")) {
+                Some("") => {
+                    i += 1;
+                    words.get(i).copied()
+                }
+                m => m,
+            };
+            lines |= matches!(mode, Some("L" | "0"));
+            i += 1;
+        }
+        return Some((base(words.get(i)?), lines));
+    }
+    let opts = &words[1..];
+    let lines = match first.as_str() {
+        "grep" | "egrep" | "rg" => opts.contains(&"--line-buffered"),
+        "sed" => opts.iter().any(|o| matches!(*o, "-u" | "--unbuffered" | "-l")),
+        _ => false,
+    };
+    Some((first, lines))
+}
+
 /// The parts of `line` before its first single `|` — what runs, not what only filters its output (`cargo
 /// test x 2>&1 | tail`: `cargo test x`) — a command's leading `NAME=value` words kept. None as `parse`.
 pub fn before_pipe(line: &str) -> Option<Vec<Part>> {
@@ -1511,6 +1559,59 @@ fn wild_match(pat: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// frictions34 39 a: a run's output is a pipe, so every filter tarae knows holds what it writes — the first
+    /// one named, wherever it stands, a `tee` before or after it as well; a `tail` that follows or starts from a
+    /// line too (measured: BSD tail ignores `-f` on a pipe, and both gave their lines at the end). Not one the
+    /// line asks for its output a line at a time, as its docs name it; a program after the filter may print on its
+    /// own.
+    #[test]
+    fn every_filter_holds_its_output_unless_asked_for_lines() {
+        assert_eq!(held_by("cargo test 2>&1 | tail -15").as_deref(), Some("tail"));
+        assert_eq!(held_by("cargo test 2>&1 | grep -v warn | tail -n 5").as_deref(), Some("grep"));
+        assert_eq!(held_by("cargo test | sort | uniq -c").as_deref(), Some("sort"));
+        assert_eq!(held_by("cargo test | tee log | tail").as_deref(), Some("tail"));
+        assert_eq!(held_by("cargo test | tail | tee last.log").as_deref(), Some("tail"));
+        assert_eq!(held_by("cargo test 2>&1 | grep -E 'FAIL|result'").as_deref(), Some("grep"));
+        assert_eq!(held_by("cargo test | head -40").as_deref(), Some("head"));
+        assert_eq!(held_by("cargo test | sed -n 1,40p").as_deref(), Some("sed"));
+        for tail in [
+            "tail -n +2",
+            "tail -n+2",
+            "tail --lines=+2",
+            "tail +2",
+            "tail -f",
+            "tail -F",
+            "tail -fn 5",
+            "tail --follow=name",
+        ] {
+            assert_eq!(held_by(&format!("cargo test | {tail}")).as_deref(), Some("tail"), "{tail}");
+        }
+        // (asked for its lines as they come: not held — one after it still is)
+        for lines in [
+            "grep --line-buffered FAIL",
+            "rg --line-buffered FAIL",
+            "sed -u s/a/b/",
+            "sed --unbuffered s/a/b/",
+            "sed -l s/a/b/",
+            "stdbuf -oL grep FAIL",
+            "stdbuf -o0 cut -c1-80",
+            "stdbuf -o L sed s/a/b/",
+            "stdbuf --output=L tr a b",
+        ] {
+            assert_eq!(held_by(&format!("cargo test | {lines}")), None, "{lines}");
+        }
+        assert_eq!(held_by("cargo test | grep --line-buffered FAIL | tail -5").as_deref(), Some("tail"));
+        assert_eq!(held_by("cargo test | stdbuf -oL grep FAIL | head").as_deref(), Some("head"));
+        assert_eq!(
+            held_by("cargo test | stdbuf -o4096 grep FAIL").as_deref(),
+            Some("grep"),
+            "a size isn't lines"
+        );
+        assert_eq!(held_by("cargo test | tail | xargs echo"), None, "xargs may print on its own");
+        assert_eq!(held_by("cargo test | tee log"), None, "no filter");
+        assert_eq!(held_by("cargo test"), None);
+    }
 
     /// No pattern may set a name that makes the command run another program or load code — by name, by
     /// prefix, or by suffix (cargo's per-target runners and linkers) — while plain ones stay settable.

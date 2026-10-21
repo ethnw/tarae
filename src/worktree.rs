@@ -3857,6 +3857,84 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// frictions34 42: the preflight a bring card's `p` ran fails — the card is back, naming the first test that
+    /// failed and why, and `v` opens the failed step's output (the card's own copy) after another run took the
+    /// task panel; `:preflight-output` reads the kept one too. Nothing is brought.
+    #[test]
+    fn a_failed_preflight_brings_its_card_back_with_its_output() {
+        let (repo, dir) = place("rebase-preflight-fails");
+        let mut ed = editor(&repo, &dir);
+        let script = dir.join("tests.sh");
+        std::fs::write(
+            &script,
+            "printf 'running 2 tests\\ntest a ... ok\\ntest b ... FAILED\\n\\nfailures:\\n\\n---- b stdout ----\\n'\n\
+             printf \"thread 'b' panicked at src/b.rs:3:9:\\nboom\\n\"\nexit 101\n",
+        )
+        .unwrap();
+        ed.config.preflight = vec![crate::preflight::Step {
+            name: "test".into(),
+            cmd: format!("sh '{}'", script.display()),
+            note: None,
+            from: ".tarae.toml".into(),
+            full: false,
+        }];
+        let (wt, _) = moved_apart(&mut ed, &repo, true);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        feed(&mut ed, "p");
+        settle_until(&mut ed, |ed| card(ed, "Bring feat into main").is_some() || says(ed, "not brought"));
+        let q = card(&ed, "Bring feat into main").unwrap_or_else(|| panic!("{}", said(&ed))).question.clone();
+        assert!(
+            q.ends_with("\n\nThe preflight failed — b: panicked at src/b.rs:3:9: boom. v shows its output."),
+            "{q}"
+        );
+        assert!(says(&ed, "preflight: 0 of 1 passed — test failed"), "{}", said(&ed));
+        assert_ne!(git_in(&repo, &["rev-parse", "main"]), git_in(&wt, &["rev-parse", "HEAD"]), "not brought");
+        // Another run takes the task panel
+        let task = crate::task::Task { name: "other".into(), cmd: "echo other".into(), cwd: wt.clone() };
+        assert!(
+            ed.task_start_for(task, crate::tools::For::User("o".into()), None, Default::default()).is_ok()
+        );
+        settle_until(&mut ed, |ed| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        // Cut to fit a short screen: `v` is the card's text with the output after it (the review of 42: it was
+        // the card's text alone)
+        let mut out = Vec::new();
+        crate::term::render(&mut ed, &mut out, 112, 16).unwrap();
+        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        out.clear();
+        crate::term::render(&mut ed, &mut out, 112, 16).unwrap();
+        assert!(!ed.offer_seen_whole(), "cut at 16 rows");
+        let drawn: Vec<char> = ed.screen.offer_buttons.iter().map(|b| b.3).collect();
+        let mut vt = vt100::Parser::new(16, 112, 0);
+        vt.process(&out);
+        assert!(drawn.contains(&'v'), "{drawn:?}\n{}", vt.screen().contents());
+        feed(&mut ed, "v");
+        let title = format!("{}Bring feat into main", crate::offer::CARD_VIEW);
+        assert_eq!(ed.doc().title.as_deref(), Some(title.as_str()));
+        let text = ed.doc().text.to_string();
+        assert!(text.contains("v shows its output."), "{text}");
+        // (its first failure only — `y` waits until this is read to its end: the review of 42)
+        let head =
+            "── preflight · test: its first failure — v again shows all 9 lines ──\n---- b stdout ----\n";
+        assert!(text.contains(head) && text.contains("panicked at src/b.rs:3:9:\nboom"), "{text}");
+        assert!(!text.contains("running 2 tests"), "not the whole output: {text}");
+        ed.close_doc(ed.doc().id);
+        // Whole: `v` is the output alone
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'v', 'n']);
+        feed(&mut ed, "v");
+        assert_eq!(ed.doc().title.as_deref(), Some("preflight · test"));
+        assert!(ed.doc().text.to_string().contains("panicked at src/b.rs:3:9:\nboom"), "{}", ed.doc().text);
+        assert!(card(&ed, "Bring feat into main").is_some(), "the card stays");
+        ed.close_doc(ed.doc().id);
+        assert_eq!(ed.preflight_output(""), Ok(()));
+        assert_eq!(ed.doc().title.as_deref(), Some("preflight · test"), "the kept output");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Roadmap #3, a conflict: the rebase stops at commit 1 of 2; the session's own Claude is asked in its
     /// chat (the file, both sides, no git, no commit); its turn ends with the markers gone, so the review
     /// shows the file against the commit being replayed and the card offers to go on. Meanwhile the session
@@ -4274,6 +4352,48 @@ mod tests {
         assert_eq!(ed.session.id, feat, "C-q: there");
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("feat: conflicts resolved"));
         assert!(ed.card_keys, "C-q: with the keys");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions34 41: a session whose chat has no claude running (none started since tarae did, as after a
+    /// restart) — one starts only once the project's Claude settings are read (the gate, off in the other
+    /// tests) — is asked to resolve the conflict once it starts, and the rebase goes on as before. A claude that
+    /// can't start leaves the rebase waiting on you: the inbox lists it.
+    #[test]
+    fn a_conflict_reaches_a_chat_that_never_had_a_turn() {
+        let (repo, dir) = place("rebase-fresh-chat");
+        let (log, answer) = (dir.join("claude.log"), dir.join("answer.txt"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &log, &format!("cp '{}' a.txt;", answer.display()));
+        // (its chat open, no claude in it: the session's started while none could)
+        ed.config.llm.command = dir.join("no-claude-yet").display().to_string();
+        moved_apart(&mut ed, &repo, false);
+        ed.config.llm.command = "sh".into();
+        ed.claude_settings_gate = true;
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some()
+                || says(ed, "rebase feat:")
+                || says(ed, "couldn't reach Claude")
+        });
+        assert!(card(&ed, "feat: conflicts resolved").is_some(), "{}", said(&ed));
+        let heard = std::fs::read_to_string(&log).unwrap();
+        assert!(heard.contains("Rebasing feat onto main stopped at commit 1 of 2 ("), "{heard}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let (repo, dir) = place("rebase-no-claude");
+        let mut ed = editor(&repo, &dir);
+        ed.claude_settings_gate = true;
+        ed.config.llm.command = dir.join("no-claude-here").display().to_string();
+        moved_apart(&mut ed, &repo, false);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| says(ed, "couldn't reach Claude") || says(ed, "rebase feat:"));
+        assert!(says(&ed, "conflicts in a.txt — couldn't reach Claude"), "{}", said(&ed));
+        let waits = ed.inbox().into_iter().find(|e| e.kind == "rebase");
+        assert!(waits.is_some_and(|e| e.asks.starts_with("feat: ")), "{:?}", ed.inbox());
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

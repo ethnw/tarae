@@ -99,8 +99,8 @@ const DOCS: &[DocShot] = &[
     row("follow-ask.png", None, S),
     row("m4-chat-hanji.png", None, S).light(),
     row("chat-plan.png", None, S),
-    // (`review` would do, but its head quotes the edit tool's `what`, not what was asked — a piece of its own)
-    row("chat-edit.png", None, S),
+    // (its head quotes what was asked, as every review of Claude's change does — frictions34 43)
+    row("chat-edit.png", Some("review"), S),
     row("chat-edit-why.png", None, S),
     row("chat-turn-review.png", None, (200, 36)),
     row("chat-review-at-end.png", None, S),

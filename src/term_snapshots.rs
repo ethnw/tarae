@@ -843,6 +843,74 @@ fn snapshot_offer_quiet() {
     s.frames_both("offer_quiet");
 }
 
+/// frictions34's screens, for their screenshots (only with `TARAE_FRAMES_DIR` set: both themes there, 100×30;
+/// `target/sb/frictions34-shots.sh` draws them): the stuck card on a run whose output goes through `tail` — before,
+/// and once it says why nothing shows (39 a); a failed preflight that a bring card's `p` ran — before, a toast;
+/// after, the card back naming what failed first, `v` its output (42).
+#[test]
+fn frames_of_frictions34() {
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    let shot = || {
+        let mut s = Shot::new(100, 30);
+        s.ed.offer_popups = true;
+        s.file("src/demo.rs", DEMO_RS);
+        s
+    };
+    let cmd = "cargo xtask scenes --out target/sb/shots/after shuttlecard shuttle 2>&1 | tail -15";
+    let lines = [
+        "pid 4242 · sh -c cargo xtask scenes --out target/sb/shots/after … · 1 thread",
+        "  sh — sleeping in do_wait · 0.01 s CPU",
+        "pid 4243 · tail -15 · 1 thread",
+        "  tail — sleeping in pipe_read · 0.00 s CPU",
+    ]
+    .map(String::from);
+    // (before: the label as it was, no word of the filter; after: as `stuck::ask` makes it)
+    let labels = [format!("Claude's command {cmd} in the task panel"), crate::stuck::task_label(cmd)];
+    for (name, label) in ["f34_stuck_before", "f34_stuck_after"].into_iter().zip(labels) {
+        let mut s = shot();
+        let stuck = crate::stuck::Stuck {
+            slot: crate::sizes::Slot::Task,
+            run: 1,
+            pid: 4242,
+            asked: std::time::Instant::now(),
+            quiet: std::time::Duration::from_secs(10 * 60),
+            cpu: 0.0,
+            at: 0,
+            reach: None,
+        };
+        s.ed.push_offer(crate::stuck::card(stuck, &label, &lines, &[]));
+        s.frames_both(name);
+    }
+    let mut s = shot();
+    s.ed.set_warning("linmetab not brought — the quick preflight didn't pass");
+    s.frames_both("f34_bring_before");
+    let m = crate::rebase::Moved {
+        root: PathBuf::from("/Users/me/src/tarae-linmetab"),
+        name: "linmetab".into(),
+        branch: "linmetab".into(),
+        base: "main".into(),
+        moved: 0,
+        ahead: 3,
+    };
+    let output = [
+        "running 2746 tests",
+        "test worktree::tests::a_new_sessions_bring_card_runs_the_projects_quick_set ... FAILED",
+        "failures:",
+        "---- worktree::tests::a_new_sessions_bring_card_runs_the_projects_quick_set stdout ----",
+        "thread 'worktree::tests::a_new_sessions_bring_card_runs_the_projects_quick_set' panicked at src/worktree.rs:3920:9:",
+        "the quick set ran: 25 waits of 10 s",
+    ]
+    .map(String::from)
+    .to_vec();
+    let mut s = shot();
+    let quick = Some(vec!["fmt".into(), "clippy".into(), "test".into()]);
+    let failed = Some(("quick preflight · test".to_string(), output));
+    s.ed.push_offer(m.failed_card(quick, "quick preflight", failed));
+    s.frames_both("f34_bring_after");
+}
+
 /// frictions29 #25: a rebase's resolved card, Claude saying the commit's message no longer holds — `m` among its
 /// answers, the line saying what it does.
 #[test]

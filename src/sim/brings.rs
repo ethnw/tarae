@@ -59,8 +59,8 @@ fn input(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)])
     let c = &mut sim.choices;
     let (name, root) = c.pick(names).clone();
     // (by arm: a bring asked 4, one brought 2, a commit 2, a frame 1, time passing 1, the queue asked 1, the
-    // queue's task stood in for 3)
-    match c.weighted(&[4, 2, 2, 1, 1, 1, 3]) {
+    // queue's task stood in for 3, a bring card's failed preflight 1)
+    match c.weighted(&[4, 2, 2, 1, 1, 1, 3, 1]) {
         0 => match ed.session_bring(&name) {
             Ok(()) => format!(":session-bring {name}"),
             Err(e) => format!(":session-bring {name}: {e}"),
@@ -86,11 +86,35 @@ fn input(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)])
             format!("{ms} ms pass")
         }
         5 => queue_asked(sim, ed, names),
-        _ => {
+        6 => {
             let passes = *c.pick(&[true, false]);
             stand_in(ed, names, passes)
         }
+        _ => preflight_failed(ed, &name, &root),
     }
+}
+
+/// A session's bring card answered `p` (the card gone, as its `p` takes it), the preflight it ran stood in for and
+/// failing (no task is modelled): the card is back saying so (frictions34 42) — one bring card a session still,
+/// whatever was asked meanwhile.
+fn preflight_failed(ed: &mut Editor, name: &str, root: &std::path::Path) -> String {
+    let Ok((id, _)) = ed.session_named(name) else { return format!("({name}: no session)") };
+    if ed.bring_queue_at(id).is_some() {
+        return format!("({name} is the queue's)");
+    }
+    let m = crate::rebase::Moved {
+        root: root.to_path_buf(),
+        name: name.into(),
+        branch: name.into(),
+        base: "main".into(),
+        moved: 0,
+        ahead: 1,
+    };
+    ed.with_session(id, |ed| {
+        (ed.session.bring_after_preflight, ed.session.bring_card_after) = (true, Some(Box::new(m)));
+        ed.rebase_preflight_done(false, "quick preflight");
+    });
+    format!("{name}'s bring card: p, its preflight failed")
 }
 
 /// `space W`'s `m` on each session, `B`, and the card's `y` once it's drawn and settled.

@@ -209,6 +209,9 @@ publish. The panel's tab and the summary say which ran (`quick preflight: all 3 
 more steps) runs before publish: :preflight-full`). A project that marks no step has one set: both commands run
 every step, as before.
 
+A failed preflight names the first test that failed, and why, in its summary, and keeps its output:
+`:preflight-output` (`o` in the task panel) still shows it after another run has taken the panel.
+
 Where the steps come from:
 
 - **The project's** `[preflight]` in `.tarae.toml` — run once you've trusted the project. (In your own config

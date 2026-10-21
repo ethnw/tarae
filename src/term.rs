@@ -13785,6 +13785,7 @@ mod tests {
                 like: Vec::new(),
                 came: 0,
                 yours: false,
+                output: None,
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);

@@ -73,6 +73,9 @@ pub struct Offer {
     /// The user's own (`Offer::rank`, #205): a kind a command of theirs asks for, made by the input the user
     /// gave last (`Queue.asked` — the key, or a job it started; nothing typed since).
     pub yours: bool,
+    /// What its `v` opens in a buffer of its own, the card staying up: (title, lines) — a failed preflight's
+    /// output on the bring card it stopped (frictions34 42).
+    pub output: Option<(String, Vec<String>)>,
 }
 
 /// Where a card stands among the ones up (`Editor::offer_place`): the lower first, arrival order within.
@@ -348,6 +351,8 @@ pub enum Act {
     AcceptLike,
     StaleList,
     MadeView,
+    /// `v` on a card with an output (`Offer.output`): in a buffer, the card staying.
+    Output,
     AcceptBy(char),
     Dismiss,
     Never,
@@ -560,6 +565,7 @@ impl Offer {
             like: Vec::new(),
             came: 0,
             yours: false,
+            output: None,
         }
     }
 
@@ -907,6 +913,7 @@ impl Offer {
             'r' if matches!(self.what, What::NotesStale { .. }) => A::StaleList,
             // (the card stays while it's read)
             'v' if self.made() => A::MadeView,
+            'v' if self.output.is_some() => A::Output,
             // (its detail, kept off the card — it stands beside the work while Claude runs held back)
             'v' if matches!(self.what, What::ClaudeSettings { .. } | What::RepoTrust { .. }) => A::View,
             'v' if self.host_details().is_some() || self.read_details().is_some() => A::View,
@@ -1243,7 +1250,10 @@ impl Offer {
             // (`p` runs the quick set when the project has two — the card names its steps)
             W::Rebased(_) => {
                 let p = if quick { "Quick preflight, then bring" } else { "Preflight, then bring" };
-                vec![('y', "Bring"), ('p', p), ('n', "Not now")]
+                match self.output.is_some() {
+                    true => vec![('y', "Bring"), ('p', p), ('v', "Its output"), ('n', "Not now")],
+                    false => vec![('y', "Bring"), ('p', p), ('n', "Not now")],
+                }
             }
             // (abort throws the resolution away: a capital, as removing does)
             W::RebaseResolved { message: true, .. } => {
@@ -1592,6 +1602,11 @@ impl crate::editor::Editor {
             Act::AcceptLike => self.offer_accept_like(),
             Act::StaleList => crate::notes::stale_list(self),
             Act::MadeView => crate::tools::made_view(self),
+            Act::Output => {
+                if let Some((title, lines)) = self.offers.first().and_then(|o| o.output.clone()) {
+                    self.output_buffer(&title, &lines);
+                }
+            }
             Act::AcceptBy(c) => self.offer_accept_by(c),
             Act::Dismiss => self.offer_dismiss(),
             Act::Never => self.offer_never(),
@@ -2126,7 +2141,7 @@ impl crate::editor::Editor {
     }
 
     /// `v` on the front card: a change set's every change, the names a protected-made card is about, the Claude
-    /// settings card's detail, else its whole text.
+    /// settings card's detail, a cut card's text with its output after it, else its whole text.
     pub fn offer_view(&mut self) {
         if self.offers.first().is_some_and(Offer::made) && self.offer_seen_whole() {
             return crate::tools::made_view(self);
@@ -2147,6 +2162,16 @@ impl crate::editor::Editor {
         }
         if let Some(What::Instructions(b)) = self.offers.first().map(|o| &o.what) {
             let more = b.view_text();
+            return self.offer_view_with(more);
+        }
+        // (cut to fit, a card with an output: its text, then that output's first failure — not all of it: `y` waits
+        // until this is read to its end; once it is, `v` is the whole output, `Act::Output`)
+        if let Some((title, lines)) = self.offers.first().and_then(|o| o.output.as_ref()) {
+            let more = format!(
+                "\n── {title}: its first failure — v again shows all {} ──\n{}",
+                crate::nav::count(lines.len(), "line"),
+                crate::preflight::failure_block(lines).join("\n")
+            );
             return self.offer_view_with(more);
         }
         match self.offers.first().and_then(Offer::change_set) {

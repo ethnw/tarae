@@ -416,7 +416,9 @@ that checkout's commit, a card says so rather than restarting into the same tara
 On macOS, once a restart goes ahead (not on one turned down at a card), a cargo build's binary with a
 `tarae.dSYM` beside it (tarae's own release build) has that dSYM kept under its UUID in its target folder's
 `dsyms/`, the newest five, so the tarae you're running can still be symbolized after the next build (the status
-line says `keeping its symbols` meanwhile). The new tarae's log says where they went, with its pid — or why
+line says `keeping its symbols` meanwhile). With cargo's `build.build-dir` set apart, the target folder may carry
+no `CACHEDIR.TAG` of its own; the dSYM's link into the build-dir (tagged, the same profile folder) says it's a
+cargo build's all the same. The new tarae's log says where they went, with its pid — or why
 they couldn't be kept, and the restart goes on. A binary elsewhere (`~/bin/tarae`) keeps nothing. On
 disk that's at most five dSYMs of ~70 MB per target folder — clones of the build's at first, their own space
 once a build replaces it; a session's checkout's go with the checkout.

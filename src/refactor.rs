@@ -139,8 +139,11 @@ pub struct Landing {
     /// What was read for it (the user's own: `read ~/x.patch · 515 B · 2 files`) — on the card in one row, its
     /// end kept; whole in `v`'s view. Empty for Claude's.
     read: String,
-    /// For the review's title and the answer (``rename `a` → `b` ``).
+    /// For the card and the answer (``rename `a` → `b` ``).
     what: String,
+    /// Its reviews' title: what the user asked, for Claude's `edit` (`edits::asked` — as the native Edit's
+    /// review says it); else `what` (a rename's, a replace's).
+    title: String,
     /// What a place is called in the answer (`place`, `match`).
     noun: &'static str,
     /// Claude's words before the call (the review shows them).
@@ -184,6 +187,10 @@ pub fn land_told(
 ) {
     let Some(c) = ed.session.chat.as_ref() else { return answer(ed, call, Err("the chat is gone".into())) };
     let (generation, reason) = (c.generation(), crate::edits::reason(c));
+    // (the edit tool's own title, `edit a.rs`, says nothing: what you asked heads its review, as the native
+    // Edit's — a rename's or a replace's says what the change is, and keeps it)
+    let asked = crate::edits::asked(c).filter(|a| noun == "change" && !a.trim().is_empty());
+    let title = asked.unwrap_or_else(|| what.clone());
     let files: Vec<FileChange> =
         files.into_iter().filter(|f| f.before != f.after || f.op != Op::Text).collect();
     if files.is_empty() {
@@ -215,6 +222,7 @@ pub fn land_told(
         step: None,
         read: String::new(),
         what,
+        title,
         noun,
         reason,
         told,
@@ -257,6 +265,7 @@ pub fn land_yours(
         by,
         step: None,
         read,
+        title: what.clone(),
         what,
         noun: "change",
         reason: String::new(),
@@ -447,8 +456,8 @@ fn next_of(ed: &mut Editor, whose: Whose) {
         Some(f) => {
             let n = l.reviews - l.review.len();
             let title = match l.reviews {
-                1 => l.what.clone(),
-                of => format!("{} · {n} of {of}", l.what),
+                1 => l.title.clone(),
+                of => format!("{} · {n} of {of}", l.title),
             };
             // (Claude's words, then what tarae tells of how it was worked out)
             let reason = [l.reason.as_str(), l.told.as_str()]
@@ -1729,6 +1738,56 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// frictions34 43: the user's words head the review of an edit (the tool's own `edit a.rs` says nothing), and
+    /// a rename's keeps its own title, which says what the change is. (The files are the test's own.)
+    #[test]
+    fn an_edits_review_is_titled_by_what_you_asked_a_renames_by_the_rename() {
+        let scratch = crate::scratch::Scratch::new("refactor-titles");
+        let dir = scratch.to_path_buf();
+        std::fs::write(dir.join("a.rs"), "fn alpha() {}\n").unwrap();
+        let file = || FileChange {
+            path: dir.join("a.rs"),
+            rel: "a.rs".into(),
+            before: Rope::from_str("fn alpha() {}\n"),
+            after: Rope::from_str("fn beta() {}\n"),
+            places: 1,
+            op: Op::Text,
+            protected: false,
+        };
+        let title = |what: &str, noun: &'static str, told: Option<&str>| {
+            let mut ed = Editor::new(crate::config::Config::default());
+            ed.session.root = dir.clone();
+            ed.config.llm.command = "sh".into();
+            ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+            crate::chat::open(&mut ed);
+            let said = crate::chat::Msg::new(crate::chat::Role::User, "call it beta\nplease", "");
+            ed.session.chat.as_mut().unwrap().msgs.push(said);
+            match told {
+                Some(t) => land_told(
+                    &mut ed,
+                    Call::test(1),
+                    what.into(),
+                    noun,
+                    vec![file()],
+                    String::new(),
+                    t.into(),
+                ),
+                None => land(&mut ed, Call::test(1), what.into(), noun, vec![file()], String::new()),
+            }
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while ed.session.review.is_none() {
+                assert!(std::time::Instant::now() < end, "{what}'s review");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+            ed.session.review.as_ref().unwrap().instruction.clone()
+        };
+        assert_eq!(title("edit a.rs", "change", Some("")), "call it beta");
+        assert_eq!(title("rename `alpha` → `beta`", "place", None), "rename `alpha` → `beta`");
+        assert_eq!(title("replace `alpha` → `beta`", "match", None), "replace `alpha` → `beta`");
+    }
+
     /// The card says what tarae told (an edit that matched loosely) and nothing of Claude's words as if tarae
     /// said it — Claude's lines are only the review's reason, even one that reads like tarae's.
     #[test]
@@ -1750,6 +1809,7 @@ mod tests {
             step: None,
             read: String::new(),
             what: "edit 2 files".into(),
+            title: "edit 2 files".into(),
             noun: "change",
             reason: "edits[0] (x.rs) matched only with trailing whitespace ignored — check it".into(),
             told: told.into(),
