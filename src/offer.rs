@@ -183,6 +183,9 @@ pub enum What {
     /// `y` accepts them all, `r` reviews them one by one (not with `ops` — a move or delete among them, which
     /// no buffer shows), `v` shows every change, `n` declines them all. `generation` = its chat's.
     ChangeSet { generation: u64, ops: bool },
+    /// Claude's `commit` (`committool.rs`): `y` commits exactly the tree the card shows on the HEAD it names, no
+    /// hooks, `v` shows the whole diff, `n` tells Claude no.
+    Commit(Box<crate::committool::Commit>),
     /// Ending a code review with files not viewed (`codereview.rs`, #10): `y` ends it, `n` keeps reviewing.
     /// Its session's, and that review's (`started`) only — #159.
     ReviewEnd { session: crate::event::SessionId, started: Instant },
@@ -276,6 +279,7 @@ pub const KINDS: &[&str] = &[
     "session-end",
     "close-reviewed",
     "change-set",
+    "commit",
     "review-end",
     "rebase",
     "rebase-held",
@@ -354,6 +358,7 @@ impl What {
             | What::Read { .. }
             | What::Screen { .. }
             | What::ChangeSet { .. }
+            | What::Commit(_)
             | What::NotesStale { .. }
             | What::NotesClose { .. }
             | What::Stuck(_)
@@ -579,6 +584,7 @@ impl Offer {
                 | What::SessionNew(_)
                 | What::SessionEnd(_)
                 | What::ChangeSet { .. }
+                | What::Commit(_)
                 | What::Rebase(_)
                 | What::RebaseHeld(_)
                 | What::Rebased(_)
@@ -795,6 +801,7 @@ impl Offer {
                     | What::Read { .. }
                     | What::Screen { .. }
                     | What::ChangeSet { .. }
+                    | What::Commit(_)
             )
             || matches!(&self.what, What::ProtectedMade { then, .. } if then.call().is_some())
     }
@@ -990,6 +997,7 @@ impl Offer {
             W::ChangeSet { .. } => {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
+            W::Commit(_) => vec![('y', "Commit"), ('v', "See the diff"), ('n', "Don't")],
             W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
             W::LeftRunning { runs } if runs.len() == 1 => vec![('y', "Stop it"), ('n', "Let it run")],
             W::LeftRunning { .. } => vec![('y', "Stop them"), ('n', "Let them run")],
@@ -1048,6 +1056,7 @@ impl Offer {
             W::SessionEnd(_) => "session-end",
             W::CloseReviewed { .. } => "close-reviewed",
             W::ChangeSet { .. } => "change-set",
+            W::Commit(_) => "commit",
             W::ReviewEnd { .. } => "review-end",
             W::Rebase(_) => "rebase",
             W::RebaseHeld(_) => "rebase-held",
@@ -1433,6 +1442,7 @@ impl crate::editor::Editor {
                 self.close_reviewed(doc, force);
             }
             What::ChangeSet { generation, .. } => crate::refactor::accept_all(self, id, generation),
+            What::Commit(c) => crate::committool::answer(self, id, *c, true),
             What::ReviewEnd { session, started } => {
                 self.offer_finished(id, Ok(()));
                 crate::codereview::close_answered(self, session, started);
@@ -1802,6 +1812,10 @@ impl crate::editor::Editor {
         if let Some(more) = self.offers.first().and_then(Offer::host_details) {
             return self.offer_view_with(more);
         }
+        if let Some(What::Commit(c)) = self.offers.first().map(|o| &o.what) {
+            let more = crate::committool::view_text(&c.ask);
+            return self.offer_view_with(more);
+        }
         match self.offers.first().and_then(Offer::change_set) {
             Some(generation) => crate::refactor::view_all(self, generation),
             None => self.offer_view_all(),
@@ -2015,6 +2029,7 @@ impl crate::editor::Editor {
                 self.set_status("kept open — Claude's change still waits for y or n")
             }
             What::ChangeSet { generation, .. } => crate::refactor::decline_all(self, generation),
+            What::Commit(c) => crate::committool::answer(self, o.id, *c, false),
             What::ReviewEnd { .. } => self.set_status("still reviewing — space v m marks a file viewed"),
             What::Rebase(m) => {
                 self.set_status(format!("Not rebased — {} as it is, nothing brought", m.branch))

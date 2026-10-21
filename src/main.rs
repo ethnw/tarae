@@ -27,6 +27,7 @@ mod codereview;
 mod codeview;
 mod commands;
 mod comment;
+mod committool;
 mod compaction;
 #[cfg(test)]
 mod compat;

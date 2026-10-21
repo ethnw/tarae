@@ -156,6 +156,8 @@ pub enum Why {
     Read,
     /// Claude's `screen`.
     Screen,
+    /// Claude's `commit`.
+    Commit,
     /// The user opening what the sandbox blocked (`blocked.rs`).
     Blocked,
     /// A host a run's rules don't name, held by tarae's proxy (`hosts.rs`).
@@ -191,6 +193,7 @@ impl Why {
             Why::ProtectedMade => "protected-made".into(),
             Why::Read => "read".into(),
             Why::Screen => "screen".into(),
+            Why::Commit => "commit".into(),
             Why::Blocked => "blocked".into(),
             Why::Host => "host".into(),
             Why::Asks(ids) => format!("asks:{ids}"),
@@ -228,6 +231,7 @@ impl Why {
             | Why::ProtectedMade
             | Why::Read
             | Why::Screen
+            | Why::Commit
             | Why::Blocked
             | Why::Also
             | Why::Host
@@ -284,6 +288,8 @@ pub enum Request {
     Read(Class),
     /// Claude's `screen`.
     Screen,
+    /// Claude's `commit`: its message and the diff of the paths it names.
+    Commit,
     /// The sandbox opened for what it blocked: a place to read, a folder to write in, a port — or one socket.
     Grant(crate::allow::Grant),
     /// A host reached through tarae's proxy (`host:port`).
@@ -305,6 +311,8 @@ pub enum Decision {
     /// A command that publishes or reaches beyond this machine, where it could (D4) — asked each time.
     Outward,
     Screen,
+    /// A commit: asked each time, the diff on the card.
+    Commit,
     /// A host past the session's (the proxy holds it).
     Host,
     /// tarae's own question: asked as today, the model has nothing to say of it.
@@ -326,6 +334,7 @@ impl Decision {
             Decision::NoSandbox => "no-sandbox",
             Decision::Outward => "outward",
             Decision::Screen => "screen",
+            Decision::Commit => "commit",
             Decision::Host => "host",
             Decision::Own => "own",
         }
@@ -351,6 +360,7 @@ pub fn decide(r: &Request, caps: &crate::caps::Caps) -> Decision {
         Request::Run { reads: c, .. } => reads(c),
         Request::Read(c) => reads(std::slice::from_ref(c)),
         Request::Screen => Decision::Screen,
+        Request::Commit => Decision::Commit,
         Request::Grant(crate::allow::Grant::Read(_) | crate::allow::Grant::Key(_)) => {
             Decision::Grant(Verb::Read)
         }

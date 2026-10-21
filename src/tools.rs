@@ -130,6 +130,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 crate::procs::tool_schema(),
                 crate::uistate::claude::tool_schema(),
                 crate::gittool::schema(),
+                crate::committool::schema(),
             ];
             if arm.tarae() {
                 tools.push(crate::edittool::schema());
@@ -162,6 +163,10 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     return None;
                 }
                 Some("git") => match crate::gittool::call(ed, call(), args) {
+                    Ok(()) => return None,
+                    Err(e) => Err(e),
+                },
+                Some("commit") => match crate::committool::call(ed, call(), args) {
                     Ok(()) => return None,
                     Err(e) => Err(e),
                 },
@@ -233,6 +238,7 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
         "procs" => ("The editor's processes", Some("readOnlyHint")),
         "ui" => ("What's on screen, by id", Some("readOnlyHint")),
         "git" => ("Read the repository", Some("readOnlyHint")),
+        "commit" => ("Commit files", Some("destructiveHint")),
         _ => return schema,
     };
     let mut a = json!({ "title": title });
@@ -624,6 +630,7 @@ pub fn turn_over(ed: &mut Editor) -> Vec<Left> {
             || matches!(w, What::Grant { run, .. } if run.claude.is_some())
     });
     crate::seeing::turn_over(ed);
+    crate::committool::turn_over(ed);
     crate::refactor::turn_over(ed);
     left
 }

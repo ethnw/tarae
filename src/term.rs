@@ -7219,7 +7219,11 @@ impl OfferCard {
                 let warning = o.warning.clone().unwrap_or(0..0);
                 let diffs = o.diff.clone().unwrap_or(0..0);
                 for (k, part) in o.question.split('\n').enumerate() {
-                    let mut rows = wrapped(part, most);
+                    // (a diff's line is code: cut to the card, never wrapped — only prose wraps)
+                    let mut rows = match diffs.contains(&k) {
+                        true => vec![(crate::cut::fit(part, max_inner), true)],
+                        false => wrapped(part, most),
+                    };
                     if decided.contains(&k) {
                         rows.iter_mut().for_each(|r| r.1 = false);
                     }
@@ -8019,7 +8023,7 @@ fn draw_follow_card(
     let asks = editor.offers.iter().any(|o| {
         use crate::offer::What;
         match &o.what {
-            What::Run(_) | What::NoSandbox { .. } | What::Screen { .. } => true,
+            What::Run(_) | What::NoSandbox { .. } | What::Screen { .. } | What::Commit(_) => true,
             What::ProtectedMade { then, .. } => then.call().is_some(),
             // (not one the user's pointing raised — `reads::point`)
             What::Read { pending, .. } => pending.own.is_none(),

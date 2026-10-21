@@ -907,6 +907,45 @@ fn snapshot_host_card_closed() {
     }
 }
 
+/// Piece H: Claude's `commit` card — the message at full strength, the branch and the files with their counts (a
+/// protected name and a key file in the warning colour), the diff's start in its colours, what stays staged, a
+/// partly staged file said; `y Commit` · `v See the diff` · `n Don't` — made by `committool::card` itself, at 100
+/// columns and narrow.
+#[test]
+fn snapshot_commit_card() {
+    use crate::committool::{Ask, Commit, File};
+    let file = |shown: &str, lines, status, warn| File { shown: shown.into(), lines, status, warn };
+    let ask = Ask {
+        root: PathBuf::from("/p"),
+        top: PathBuf::from("/p"),
+        parent: Some("1a2b3c4d5e6f".into()),
+        branch: Some("main".into()),
+        tree: "0".repeat(40),
+        message: "Parse the lockfile once per build\n\nThe second read was the slow half of every check.\n".into(),
+        paths: vec!["src/lock.rs".into(), "src/check.rs".into(), "Cargo.toml".into()],
+        files: vec![
+            file("Cargo.toml", Some((1, 1)), 'M', Some(crate::committool::PROTECTED.0)),
+            file("src/check.rs", Some((3, 9)), 'M', None),
+            file("src/lock.rs", Some((24, 0)), 'A', None),
+        ],
+        patch: "diff --git a/src/check.rs b/src/check.rs\n--- a/src/check.rs\n+++ b/src/check.rs\n@@ -12,9 +12,3 @@ pub fn check(root: &Path) -> Result<()> {\n-    let text = std::fs::read_to_string(root.join(\"Cargo.lock\"))?;\n-    let lock = parse(&text)?;\n+    let lock = crate::lock::once(root)?;\n     for p in lock.packages() {\n-        let again = parse(&std::fs::read_to_string(root.join(\"Cargo.lock\"))?)?;\n-        verify(p, &again)?;\n+        verify(p, lock)?;\n     }\n".into(),
+        staged: vec!["README.md".into()],
+        partial: vec!["src/check.rs".into()],
+        unsaved: Vec::new(),
+    };
+    for (w, name) in [(100, "commit_card"), (64, "commit_card_narrow")] {
+        let mut s = Shot::new(w, 32);
+        s.ed.offer_popups = true;
+        s.file("src/demo.rs", DEMO_RS);
+        s.ed.push_offer(crate::committool::card(Commit {
+            call: crate::tools::Call::test(1),
+            ask: ask.clone(),
+        }));
+        s.check(name);
+        s.frames_both(name);
+    }
+}
+
 /// A command Claude wants to run outside the sandbox — the run card P3 keeps — shown whole (a commit message past
 /// four lines too), its reason under it, `y Run` · `n No`.
 #[test]

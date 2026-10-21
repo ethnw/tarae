@@ -1465,6 +1465,33 @@ subject lines, how they explain, the trailers they use). The draft streams in an
 review. Take it (`a`), edit it, and `:w` commits. In a message you already opened, `:commit-draft` asks for one.
 When amending, Claude reads the whole commit and proposes a new version of the message.
 
+### Claude commits, on a card
+
+Claude can ask to commit with its `commit` tool. It names the files and writes the message. A card shows the
+message, the branch, each file with its line counts, and the first lines of the diff. `v` opens the whole diff;
+`y` commits; `n` tells Claude no and changes nothing.
+
+- **Only the files named go in**, as they were on disk when the card came up. A change written after that isn't
+  in the commit, it stays a change. New and deleted files can be named. Anything else you staged stays staged,
+  exactly as it was. A named file you staged part of goes in whole, and the card says so; so does one with
+  unsaved changes in a buffer (what's on disk goes in).
+- **A protected name** (`Cargo.toml`, a `Makefile`, `.github`, …: what a build or a tool runs later, outside the
+  sandbox) **or a key file** is in the warning colour on its row.
+- **Refused, with the reason:** a folder; a path outside the project or the checkout; anything in `.git`; a file
+  inside another repository; an ignored untracked file; a file with no change from HEAD; an empty message.
+  Also refused while a rebase, a merge, a cherry-pick or a revert is under way, or the index has conflicts.
+  If HEAD or its branch moved between the card and `y`, nothing is committed.
+- **It's tarae's own git, plumbing only.** No hook runs (`core.hooksPath=/dev/null`), so neither yours nor any
+  Claude could have planted. Nothing is pushed or amended. The author is your git identity, and no trailer is
+  added. The commit is signed when your `commit.gpgSign` says so. If signing fails, git's error is on the toast
+  and in Claude's answer, and nothing is committed. The reflog says `commit (claude): <subject>`.
+
+The other agents work differently. Claude Code adds a trailer to its commits by default (`attribution.commit`);
+that it commits with its shell (`git commit`), staging files by name and never pushing or amending unasked, is
+from memory, not checked against its docs. Codex's default sandbox keeps `.git` read-only, so a commit asks to leave the
+sandbox. Zed's agent has no git tool, only its terminal. Aider commits each of its own edits, with `--no-verify`
+by default.
+
 ## Code review
 
 ![A code review: the changed files in a rail on the left, the file being read with its removed lines in place in red and the added ones on a green wash, and a draft comment at its line](screenshots/review.png)

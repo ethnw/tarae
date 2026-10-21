@@ -187,6 +187,7 @@ pub const PICKERS: &[&str] = &[
 /// own the chat may have (`llm.edit-tools`). Any other name is counted as `other` — a name is the model's
 /// output, never kept as it came.
 pub const CLAUDE_TOOLS: &[&str] = &[
+    "commit",
     "definition",
     "diagnostics",
     "edit",

@@ -190,8 +190,9 @@ Done so far, under way, and the order after it (2026-10-17):
     last turn's failed run; the card says so. Open: Gradle's card before the first run.
   - **F** (to be re-judged, 2026-10-17): words and memory — a hook's yes remembered (a rewritten hook asks again), one vocabulary for the
     answer rows, manifest tools (`cargo add`) said before they run, the docs.
-  - **H** (to be re-judged, 2026-10-17): Claude's `commit {message, paths}` tool. The card shows the message and the diff; `y` commits through
-    tarae's own git with no hooks, `n` does nothing; it never pushes.
+  - **H** — done: Claude's `commit {message, paths}` tool (`committool.rs`). The card shows the message and the diff of
+    exactly those paths; `y` commits them through tarae's own git, plumbing and no hooks, what else is staged left
+    as it was; `n` does nothing; it never pushes or amends.
   - **E** (to be re-judged, 2026-10-17): one list — settings and trust answers join `:granted`, each taken back with `d`.
   - **I** (to be re-judged, 2026-10-17): one trust card when tarae's, Claude's and git's wait together as the repository opens; a later change
     asks only about its own part.

@@ -56,6 +56,7 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 | run a command outside the sandbox | `outside_sandbox` + a reason → a card, `y`/`n` only | you, every time |
 | see the screen | `screen` → a card | you |
 | use git | tarae's `git` tool: reads only, an option allowlist | `gittool.rs` |
+| commit | tarae's `commit` tool → a card with the message and the diff of the files it names; no hooks, no push | you |
 
 ---
 
@@ -367,6 +368,10 @@ Kept:
   `editor::tests::a_claude_run_cant_leave_git_without_its_refs`
 - Claude's `git` tool runs reads only, from an option allowlist, key files kept out on git's side.
   test: `gittool::tests::only_reads_pass_and_only_the_options_listed`
+- Claude's `commit` commits only on your `y`, and only the paths it names, as the card showed them. What else is
+  staged stays staged. No hook runs, not even in a trusted repository, and nothing is pushed or amended.
+  test: `committool::tests::only_the_named_paths_go_in_and_what_else_is_staged_stays` ·
+  `committool::tests::what_cant_be_committed_refuses_the_call_named`
 - Git that tarae runs itself never runs a repository's own commands (hooks, `core.fsmonitor`, filters,
   `diff.external`, `core.sshCommand`, credential helpers, …) until you trust them on a card — one test per key.
   test: `gitrepo::held::tests::fsmonitor_is_held_on_status_and_snapshots` ·

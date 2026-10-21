@@ -233,6 +233,7 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
             | "mcp__tarae__procs"
             | "mcp__tarae__ui"
             | "mcp__tarae__git"
+            | "mcp__tarae__commit"
     ) {
         let in_file = matches!(name, "Edit" | "Write").then(|| look.link.as_ref().map(|l| l.path.clone()));
         f.replay.add(crate::replay::Stop {
