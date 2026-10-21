@@ -228,8 +228,12 @@ pub struct Document {
     /// since (`edits::taken_up`): nobody asked to work in it, so no grammar or server is offered for it until
     /// then (#208: an install card for a `.sh` Claude wrote came up mid-turn, in front of the turn's own).
     pub claudes_only: bool,
-    /// Its grammar's offer held back while `claudes_only` (`load_language`): the language — offered when the
-    /// user takes it up (`edits::taken_up`).
+    /// Opened by a code review (`codereview::show`) and not taken up since: as `claudes_only`, no grammar or
+    /// server offered for it until then — while the review is up only an edit takes it up (frictions25 R7: an
+    /// install card for a `.sh` the review opened came up mid-review).
+    pub review_only: bool,
+    /// Its grammar's offer held back while `claudes_only` or `review_only` (`load_language`): the language —
+    /// offered when the user takes it up (`edits::taken_up`).
     pub grammar_held: Option<&'static crate::syntax::LangSpec>,
     /// An edit of Claude's that follow or replay shows here (`follow::sync_shown` — only while the buffer is
     /// the version it was seen in): its lines on the review's wash, the ones they replaced above them.
@@ -318,6 +322,7 @@ impl Document {
             seen: None,
             aside: false,
             claudes_only: false,
+            review_only: false,
             grammar_held: None,
             shown: None,
         }

@@ -285,6 +285,8 @@ commands! {
         goto_prev_change_part => "Previous change (each small one)",
         goto_next_review_file => "Next file of the review",
         goto_prev_review_file => "Previous file of the review",
+        goto_next_unviewed_file => "Next file not viewed",
+        goto_prev_unviewed_file => "Previous file not viewed",
         goto_next_high_change => "Next high-risk change",
         goto_prev_high_change => "Previous high-risk change",
         diagnostics_picker => "Diagnostics",
@@ -1794,6 +1796,14 @@ fn goto_next_review_file(cx: &mut Context) {
 
 fn goto_prev_review_file(cx: &mut Context) {
     crate::codereview::step_file(cx.editor, false);
+}
+
+fn goto_next_unviewed_file(cx: &mut Context) {
+    crate::codereview::step_unviewed(cx.editor, true);
+}
+
+fn goto_prev_unviewed_file(cx: &mut Context) {
+    crate::codereview::step_unviewed(cx.editor, false);
 }
 
 fn goto_next_high_change(cx: &mut Context) {

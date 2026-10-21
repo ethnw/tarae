@@ -11,6 +11,7 @@
           "key": "n"
         }
       ],
+      "aside": false,
       "asks": "End the review?",
       "at": [
         71,
@@ -19,6 +20,7 @@
         10
       ],
       "cut": 0,
+      "held": null,
       "id": "card#2",
       "in_sight_ms": 0,
       "kind": "review-end",
@@ -60,9 +62,11 @@
           "key": "n"
         }
       ],
+      "aside": false,
       "asks": "Claude changes 2 files · Claude renames `x`.",
       "at": null,
       "cut": null,
+      "held": null,
       "id": "card#1",
       "in_sight_ms": null,
       "kind": "change-set",

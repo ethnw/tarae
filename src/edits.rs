@@ -649,14 +649,23 @@ pub fn before_input(ed: &Editor) -> Before {
 pub fn taken_up(ed: &mut Editor, before: Before) {
     let Before(Some((session, id, version, sel))) = before else { return };
     let d = ed.doc();
-    if !(d.aside || d.claudes_only) || ed.session.review.is_some() {
+    if !(d.aside || d.claudes_only || d.review_only) || ed.session.review.is_some() {
         return;
     }
     let switched = d.id != id && ed.session.id == session && ed.docs.iter().any(|d| d.id == id);
-    if switched || (d.id == id && (d.version() != version || *d.selection() != sel)) {
+    let edited = d.id == id && d.version() != version;
+    // (one only a code review opened, while it's up: reading it is going there and moving in it — an edit
+    // takes it up; after the review, as any other — frictions25 R7)
+    let reading = d.review_only && !d.aside && !d.claudes_only && ed.session.code_review.is_some();
+    let took = match reading {
+        true => edited,
+        false => switched || edited || (d.id == id && *d.selection() != sel),
+    };
+    if took {
         let d = ed.doc_mut();
         d.aside = false;
-        if std::mem::take(&mut d.claudes_only) {
+        let review = std::mem::take(&mut d.review_only);
+        if std::mem::take(&mut d.claudes_only) || review {
             // (a load still under way offers as for any file now — it isn't Claude's only any more)
             let (here, held) = (d.id, d.grammar_held.take());
             if let Some(spec) = held {

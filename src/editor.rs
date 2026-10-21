@@ -26,6 +26,15 @@ use crate::typed;
 /// so async would only add flicker.
 const ASYNC_LOAD_BYTES: u64 = 1 << 20;
 
+/// Who opens a file (`Editor::open_as`): you, Claude's turn (`claudes_only`) or a code review (`review_only`) —
+/// for the last two no grammar or server is offered until you take the file up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opener {
+    You,
+    Claude,
+    Review,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -1054,16 +1063,22 @@ impl Editor {
 
     /// Opens a file (a relative path is from the root). If already open, switches to that buffer.
     pub fn open(&mut self, path: &Path) -> Result<()> {
-        self.open_as(path, false)
+        self.open_as(path, Opener::You)
     }
 
     /// `open` for Claude's turn (follow, replay): a file not open yet is `claudes_only` — no grammar or
     /// server offered for it until the user takes it up (#208).
     pub fn open_for_claude(&mut self, path: &Path) -> Result<()> {
-        self.open_as(path, true)
+        self.open_as(path, Opener::Claude)
     }
 
-    fn open_as(&mut self, path: &Path, claudes: bool) -> Result<()> {
+    /// `open` for a code review's file: one not open yet is `review_only` — no grammar or server offered for
+    /// it until the user takes it up (frictions25 R7).
+    pub fn open_for_review(&mut self, path: &Path) -> Result<()> {
+        self.open_as(path, Opener::Review)
+    }
+
+    fn open_as(&mut self, path: &Path, by: Opener) -> Result<()> {
         let path = self.path_of(path);
         let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path))?;
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
@@ -1093,7 +1108,8 @@ impl Editor {
             });
             Document::placeholder(id, &path)
         };
-        doc.claudes_only = claudes;
+        doc.claudes_only = by == Opener::Claude;
+        doc.review_only = by == Opener::Review;
         self.add_doc(doc);
         self.restore.opened = true;
         self.restore_position(self.current);
@@ -2023,8 +2039,7 @@ impl Editor {
                 _ => 0,
             };
             if by != 0 {
-                r.scroll = r.scroll.saturating_add_signed(by);
-                return;
+                return r.scroll_by(by);
             }
         }
         if m.kind == K::Down && on_rail {
@@ -2953,8 +2968,8 @@ impl Editor {
                 let Some(doc) = ed.docs.iter_mut().find(|d| d.id == id) else { return };
                 match result {
                     Ok(lang) => doc.syntax = Some(syntax::Syntax::new(lang)),
-                    // (only Claude's turn opened it: offered once the user takes it up — #208)
-                    Err(e) if e.starts_with("no grammar") && doc.claudes_only => {
+                    // (only Claude's turn or a review opened it: offered once the user takes it up — #208)
+                    Err(e) if e.starts_with("no grammar") && (doc.claudes_only || doc.review_only) => {
                         doc.grammar_held = Some(spec)
                     }
                     // Grammar not downloaded yet — offer to download it (once per language until quit)

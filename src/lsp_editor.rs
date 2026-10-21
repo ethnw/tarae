@@ -553,9 +553,10 @@ impl Editor {
                         .into_iter()
                         .map(|s| s.command)
                         .collect();
-                    // (only Claude's turn opened it: nothing said or offered until the user takes it up — #208)
-                    let claudes_only = self.docs.iter().any(|d| d.id == id && d.claudes_only);
-                    if !tried.is_empty() && !claudes_only && self.lsp.missing.insert(spec.name.clone()) {
+                    // (only Claude's turn or a review opened it: nothing said or offered until the user takes it
+                    // up — #208, frictions25 R7)
+                    let held = self.docs.iter().any(|d| d.id == id && (d.claudes_only || d.review_only));
+                    if !tried.is_empty() && !held && self.lsp.missing.insert(spec.name.clone()) {
                         let msg = format!(
                             "no language server for {} — tried {} (not on PATH)",
                             spec.name,
@@ -3524,6 +3525,64 @@ mod tests {
         assert!(!ed.lsp.missing.contains("rust"), "only Claude's turn opened it: nothing said");
         ed.handle_event(crate::event::Event::Key("l".parse().unwrap()));
         assert!(!ed.doc().claudes_only, "moved in it: yours");
+        assert!(ed.lsp.missing.contains("rust"), "and now its server is missed, said and offered");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions25 R7: a file only a code review opened gets no word of a missing server — no install card
+    /// mid-review. Read (gone to with `]F`, moved in) it stays the review's; an edit makes it yours, and the
+    /// server is missed, said and offered as for any file you open.
+    #[test]
+    fn a_file_only_the_review_opened_offers_no_server_until_you_edit_it() {
+        let dir = crate::scratch::Scratch::new("review-held-offers").into_path();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "x"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\nfn two() {}\n").unwrap();
+        // (rust's server one that's never here — no real one starts)
+        let cfg = "[lsp.gone]\ncommand = \"tarae-test-no-such-server\"\n[lang.rust]\nlsp = [\"gone\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(ed) {
+                let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
+                ed.handle_event(ev.expect("an event before the timeout"));
+            }
+        };
+        let on = |name: &'static str| {
+            move |ed: &Editor| {
+                let d = ed.doc();
+                ed.session.code_review.is_some()
+                    && d.path.as_ref().is_some_and(|p| p.ends_with(name))
+                    && d.review_base.is_some()
+                    && d.git_version == d.version()
+            }
+        };
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle(&mut ed, &on("a.txt"));
+        let key = |ed: &mut Editor, k: &str| ed.handle_event(crate::event::Event::Key(k.parse().unwrap()));
+        key(&mut ed, "]");
+        key(&mut ed, "F");
+        settle(&mut ed, &on("main.rs"));
+        assert!(ed.doc().review_only, "opened by the review");
+        assert!(!ed.lsp.missing.contains("rust"), "only the review opened it: nothing said or offered");
+        key(&mut ed, "j");
+        assert!(ed.doc().review_only && !ed.lsp.missing.contains("rust"), "read, it's still the review's");
+        for k in ["o", "x", "esc"] {
+            key(&mut ed, k);
+        }
+        assert!(!ed.doc().review_only, "edited: yours");
         assert!(ed.lsp.missing.contains("rust"), "and now its server is missed, said and offered");
         std::fs::remove_dir_all(&dir).ok();
     }

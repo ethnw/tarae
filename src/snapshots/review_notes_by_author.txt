@@ -1,96 +1,96 @@
-# review_notes_by_author · 112x30 · theme meok · cursor 13:32
+# review_notes_by_author · 112x30 · theme meok · cursor 13:34
 ## text
-00   review       uncommitted ▌ tarae  ›  src  ›  demo.rs
-01   ──────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────────
-02   1 file  +30              ▌ 11 let line_1 = 1;                                                                ▐
-03   0 of 1 viewed            ▌ 10 let line_2 = 2;                                                                ▐
-04                            ▌  9 let line_3 = 3;                                                                ▐
-05     src/                   ▌  8 let line_4 = 4;                                                                ▐
-06 ▎ │ ◦ demo.rs  • +30 ¶1 r1 ▌  7 let line_5 = 5;                                                                ▐
-07                            ▌  6▎let added_1 = 1;                                                               ▐
-08                            ▌  5▎let added_2 = 2;                                                               ▐
-09                            ▌  4▎let added_3 = 3;                                                               ▐
-10                            ▌  3▎let added_4 = 4;                                                               ▐
-11                            ▌  2▎let added_5 = 5;                                                               ▐
-12                            ▌  1▎let added_6 = 6;                                                               ▐
-13                            ▌ 12▎let added_7 = 7;   ¶ reviewer · This value is never checked before use.  +1    ▐
-14                            ▌  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄                            ▐
-15                            ▌    ¶ reviewer · not sent yet                                                      ▐
-16                            ▌      This value is never checked before use.                                      ▐
-17                            ▌                                                                                   ▐
-18                            ▌    ¶ author                                                                       ▐
-19                            ▌      It is — two lines up.                                                        ▐
-20                            ▌                                                                                   ▐
-21                            ▌    space n reply  space v s send the review  ]n next                              ▐
-22                            ▌  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                            ▐
-23                            ▌ 10▎let added_17 = 17;                                                             ▐
-24                            ▌ 11▎let added_18 = 18;   ¶ draft · Name this better.                               ▐
-25   ]g hunk  ]F file         ▌ 12▎let added_19 = 19;                                                             ▐
-26   space e files            ▌ 13▎let added_20 = 20;                                                             ▐
-27   space n comment          ▌ 14▎let added_21 = 21;                                                             ▐
-28   space v s send 2 · q end ▌ 15▎let added_22 = 22;                                                             ▐
+00   review         uncommitted ▌ tarae  ›  src  ›  demo.rs
+01   ────────────────────────── ▌ ────────────────────────────────────────────────────────────────────────────────
+02   1 file  +30                ▌ 11 let line_1 = 1;                                                              ▐
+03   0 of 1 viewed · 1 unviewed ▌ 10 let line_2 = 2;                                                              ▐
+04                              ▌  9 let line_3 = 3;                                                              ▐
+05     src/                     ▌  8 let line_4 = 4;                                                              ▐
+06 ▎ │ ◦ demo.rs    • +30 ¶1 r1 ▌  7 let line_5 = 5;                                                              ▐
+07                              ▌  6▎let added_1 = 1;                                                             ▐
+08                              ▌  5▎let added_2 = 2;                                                             ▐
+09                              ▌  4▎let added_3 = 3;                                                             ▐
+10                              ▌  3▎let added_4 = 4;                                                             ▐
+11                              ▌  2▎let added_5 = 5;                                                             ▐
+12                              ▌  1▎let added_6 = 6;                                                             ▐
+13                              ▌ 12▎let added_7 = 7;   ¶ reviewer · This value is never checked before use.  +1  ▐
+14                              ▌  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄                          ▐
+15                              ▌    ¶ reviewer · not sent yet                                                    ▐
+16                              ▌      This value is never checked before use.                                    ▐
+17                              ▌                                                                                 ▐
+18                              ▌    ¶ author                                                                     ▐
+19                              ▌      It is — two lines up.                                                      ▐
+20                              ▌                                                                                 ▐
+21                              ▌    space n reply  space v s send the review  ]n next                            ▐
+22                              ▌  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                          ▐
+23                              ▌ 10▎let added_17 = 17;                                                           ▐
+24                              ▌ 11▎let added_18 = 18;   ¶ draft · Name this better.                             ▐
+25   ]g hunk  ]F file           ▌ 12▎let added_19 = 19;                                                           ▐
+26   space e files  ]u unviewed ▌ 13▎let added_20 = 20;                                                           ▐
+27   space n comment            ▌ 14▎let added_21 = 21;                                                           ▐
+28   space v s send 2 · q end   ▌ 15▎let added_22 = 22;                                                           ▐
 29  ▐ NORMAL ▌  +30                                                                        rust   utf-8 LF   12:1
 ## bg · surface per cell, blank = ui.background
-00 ppppppppppppppppppppppppppp
-01 ppppppppppppppppppppppppppp
-02 ppppppppppppppppppppppppppp
-03 ppppppppppppppppppppppppppp
-04 ppppppppppppppppppppppppppp
-05 ppppppppppppppppppppppppppp
-06 PPPPPPPPPPPPPPPPPPPPPPPPPPp
-07 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-08 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-09 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-10 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-11 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-12 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-13 ppppppppppppppppppppppppppp     A222222222222222222222222222222222222222222222222222222222222222222222222222222
-14 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-15 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-16 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-17 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-18 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-19 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-20 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-21 ppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp1111111111111111111111111111
-22 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-23 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-24 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-25 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-26 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-27 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
-28 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+00 ppppppppppppppppppppppppppppp
+01 ppppppppppppppppppppppppppppp
+02 ppppppppppppppppppppppppppppp
+03 ppppppppppppppppppppppppppppp
+04 ppppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppppp
+06 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp
+07 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+08 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+09 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+10 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+11 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+12 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+13 ppppppppppppppppppppppppppppp     A2222222222222222222222222222222222222222222222222222222222222222222222222222
+14 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+15 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+16 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+17 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+18 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+19 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+20 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+21 ppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppppppppppppppppp11111111111111111111111111
+22 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+23 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+24 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+25 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+26 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+27 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+28 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   TTTTTT       fffffffffff   ddddd  f  ddd  f  TTTTTTT
-01   ffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   d dddd  ggg                ff                                                                                f
-03   f ff f ffffff              ff                                                                                f
-04                               f                                                                                f
-05     dddf                      f                                                                                g
-06 a f f ttttttt  w ggg aa       f                                                                                g
-07                               fg                                                                               g
-08                               fg                                                                               g
-09                               fg                                                                               g
-10                               fg                                                                               g
-11                               fg                                                                               g
-12                               fg                                                                               g
-13                              AAg                                                                         ff    g
+00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT
+01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   d dddd  ggg                  ff                                                                              f
+03   f ff f ffffff d d dddddddd   ff                                                                              f
+04                                 f                                                                              f
+05     dddf                        f                                                                              g
+06 a f f ttttttt    w ggg aa       f                                                                              g
+07                                 fg                                                                             g
+08                                 fg                                                                             g
+09                                 fg                                                                             g
+10                                 fg                                                                             g
+11                                 fg                                                                             g
+12                                 fg                                                                             g
+13                                AAg                                                                         ff  g
 14                                                                                                                g
-15                                   BBBBBBBB f fff ffff fff                                                      g
+15                                     BBBBBBBB f fff ffff fff                                                    g
 16                                                                                                                g
 17                                                                                                                g
-18                                 a AAAAAA                                                                       g
+18                                   a AAAAAA                                                                     g
 19                                                                                                                g
 20                                                                                                                g
-21                                 DDDDD D fffff  DDDDD D D ffff fff ffffff  DD ffff                              g
+21                                   DDDDD D fffff  DDDDD D D ffff fff ffffff  DD ffff                            g
 22                                                                                                                g
-23                              ffg                                                                               g
-24                              ffg                     a                                                         g
-25   DD ffff  DD ffff           ffg                                                                               g
-26   DDDDD D fffff              ffg                                                                               g
-27   DDDDD D fffffff            ffg                                                                               g
-28   DDDDD D D aaaa a f f fff   ffg                                                                               g
+23                                ffg                                                                             g
+24                                ffg                     a                                                       g
+25   DD ffff  DD ffff             ffg                                                                             g
+26   DDDDD D fffff  DD ffffffff   ffg                                                                             g
+27   DDDDD D fffffff              ffg                                                                             g
+28   DDDDD D D aaaa a f f fff     ffg                                                                             g
 29  a BBBBBB a  ggg                                                                        dddd   ddddd dd   TTTT
 ## legend
 bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other

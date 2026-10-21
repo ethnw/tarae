@@ -1,75 +1,75 @@
-# review_end_held · 112x30 · theme meok · cursor 2:32
+# review_end_held · 112x30 · theme meok · cursor 2:34
 ## text
-00   review       uncommitted ▌ tarae  ›  src  ›  demo.rs
-01   ──────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────────
-02   1 file  +1               ▌  1 let line_1 = 1;
-03   0 of 1 viewed            ▌  1 let line_2 = 2;
-04   ▲ 1 high to look at      ▌  2 let line_3 = 3;
-05                            ▌  3 let line_4 = 4;
-06     src/                   ▌  4 let line_5 = 5;
-07 ▎ │ ◦ demo.rs        ▲1 +1 ▌  5▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
-08                            ▌
-09                            ▌
-10                            ▌
-11                            ▌                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-12                            ▌                       ▎ End tarae's review?
-13                            ▌                         tarae's review · uncommitted · 0 of 1 viewed
-14                            ▌
-15                            ▌                         1 file not viewed
-16                            ▌
-17                            ▌                           src/demo.rs
-18                            ▌
-19                            ▌                         1 high-risk change not looked at — it ends once each has
-20                            ▌                         had a look (h goes to them, ]h the next, space v h on
-21                            ▌                         each):
-22                            ▌                           src/demo.rs:6
-23                            ▌
-24                            ▌                         Drafts stay. Opened again, its marks are kept: a file
-25   ]g hunk  ]F file         ▌                         changed since asks only for its lines since.
-26   space e files            ▌
-27   space n comment          ▌                         h Go to them   n Keep reviewing
-28   space v m viewed · q end ▌                      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+00   review         uncommitted ▌ tarae  ›  src  ›  demo.rs
+01   ────────────────────────── ▌ ────────────────────────────────────────────────────────────────────────────────
+02   1 file  +1                 ▌  1 let line_1 = 1;
+03   0 of 1 viewed · 1 unviewed ▌  1 let line_2 = 2;
+04   ▲ 1 high to look at        ▌  2 let line_3 = 3;
+05                              ▌  3 let line_4 = 4;
+06     src/                     ▌  4 let line_5 = 5;
+07 ▎ │ ◦ demo.rs          ▲1 +1 ▌  5▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
+08                              ▌
+09                              ▌
+10                              ▌
+11                              ▌                    ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+12                              ▌                     ▎ End tarae's review?
+13                              ▌                       tarae's review · uncommitted · 0 of 1 viewed
+14                              ▌
+15                              ▌                       1 file not viewed
+16                              ▌
+17                              ▌                         src/demo.rs
+18                              ▌
+19                              ▌                       1 high-risk change not looked at — it ends once each has
+20                              ▌                       had a look (h goes to them, ]h the next, space v h on
+21                              ▌                       each):
+22                              ▌                         src/demo.rs:6
+23                              ▌
+24                              ▌                       Drafts stay. Opened again, its marks are kept: a file
+25   ]g hunk  ]F file           ▌                       changed since asks only for its lines since.
+26   space e files  ]u unviewed ▌
+27   space n comment            ▌                       h Go to them   n Keep reviewing
+28   space v m viewed · q end   ▌                    ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 29  ▐ NORMAL ▌  +1                                                                          rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
-00 ppppppppppppppppppppppppppp
-01 ppppppppppppppppppppppppppp
-02 ppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-03 ppppppppppppppppppppppppppp
-04 ppppppppppppppppppppppppppp
-05 ppppppppppppppppppppppppppp
-06 ppppppppppppppppppppppppppp
-07 PPPPPPPPPPPPPPPPPPPPPPPPPPp     11111111111111111111111111111111111111111111111111111111111111111111111111111111
-08 ppppppppppppppppppppppppppp
-09 ppppppppppppppppppppppppppp
-10 ppppppppppppppppppppppppppp
-11 ppppppppppppppppppppppppppp
-12 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-13 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-14 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-15 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-24 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-25 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-26 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-27 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-28 ppppppppppppppppppppppppppp
+00 ppppppppppppppppppppppppppppp
+01 ppppppppppppppppppppppppppppp
+02 ppppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03 ppppppppppppppppppppppppppppp
+04 ppppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppppp
+06 ppppppppppppppppppppppppppppp
+07 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp     111111111111111111111111111111111111111111111111111111111111111111111111111111
+08 ppppppppppppppppppppppppppppp
+09 ppppppppppppppppppppppppppppp
+10 ppppppppppppppppppppppppppppp
+11 ppppppppppppppppppppppppppppp
+12 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+13 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27 ppppppppppppppppppppppppppppp                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+28 ppppppppppppppppppppppppppppp
 29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   TTTTTT       fffffffffff   ddddd  f  ddd  f  TTTTTTT
-01   ffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   d dddd  gg                  A
-03   f ff f ffffff               f
-04   e e eeee ee eeee ee         f
-05                               f
-06     dddf                      f
-07 a f f ttttttt        ee gg    fg                                 e
+00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT
+01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   d dddd  gg                    A
+03   f ff f ffffff d d dddddddd    f
+04   e e eeee ee eeee ee           f
+05                                 f
+06     dddf                        f
+07 a f f ttttttt          ee gg    fg                                 e
 08
 09
 10
@@ -88,7 +88,7 @@
 23
 24                                                      dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd
 25   DD ffff  DD ffff                                   ddddddd ddddd dddd dddd ddd ddd ddddd dddddd
-26   DDDDD D fffff
+26   DDDDD D fffff  DD ffffffff
 27   DDDDD D fffffff                                    A              A dddd ddddddddd
 28   DDDDD D f ffffff f f fff
 29  a BBBBBB a  gg                                                                          dddd   ddddd dd   TTT

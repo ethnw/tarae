@@ -46,6 +46,43 @@ fn light_card(ed: &mut Editor) {
     ed.push_offer(o);
 }
 
+/// frictions25 R8: a card whose yes is held (high-risk changes no one has looked at) says why on its state line
+/// — not only in its text — and the JSON has it; a card stepped aside says so, and who answers it.
+#[test]
+fn a_held_cards_line_says_why_its_yes_is_missing() {
+    let mut ed = editor();
+    let mut o = Offer::new(
+        "End the review?".into(),
+        "1 high-risk change not looked at.",
+        "",
+        String::new(),
+        What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+    );
+    o.held = Some(crate::codereview::held_said(1));
+    ed.push_offer(o);
+    frame(&mut ed);
+    let s = ed.ui_state();
+    let line = s.text().lines().find(|l| l.starts_with("card#")).unwrap().to_string();
+    let keys: Vec<String> = s.json()["cards"][0]["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["key"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!keys.contains(&"y".to_string()), "no yes among its answers: {keys:?}");
+    assert!(
+        line.contains(" · y held: 1 high-risk change not looked at — space v h on each, in a review"),
+        "{line}"
+    );
+    assert!(!line.contains("aside"), "{line}");
+    assert_eq!(s.json()["cards"][0]["held"], crate::codereview::held_said(1));
+    // Stepped aside for what its `h` went to: said
+    ed.offers[0].aside = true;
+    frame(&mut ed);
+    let line = ed.ui_state().text().lines().find(|l| l.starts_with("card#")).unwrap().to_string();
+    assert!(line.contains(" · aside, C-q answers it"), "{line}");
+}
+
 /// A light card up here, and an older one waiting in a session behind (`C-q` goes to that one first —
 /// `inbox.rs`).
 fn older_card_behind(ed: &mut Editor) {

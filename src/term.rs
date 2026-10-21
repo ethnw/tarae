@@ -501,10 +501,10 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     if lay.rail_w > 0
         && editor.review_rail_up()
         && let Some((marked, room)) =
-            editor.session.code_review.as_ref().map(|r| (r.marked(editor), review_rail_room(&lay, editor, r)))
+            editor.session.code_review.as_ref().map(|r| (r.marked(editor), review_rail_list(&lay, editor, r)))
         && let Some(r) = editor.session.code_review.as_mut()
     {
-        r.fit(marked, room);
+        r.fit(marked, room.1, room.0);
     }
     if let Some(p) = editor.picker.as_mut() {
         let pb = PickerBox::new(&lay, p);
@@ -696,9 +696,20 @@ impl Layout {
         let review = editor.review_rail_up() && !wide;
         let chat_open = editor.chat_panel(w as usize);
         let side_open = !review && editor.session.sidebar.is_some();
+        // (the review's rail is the side panel there: an automatic chat narrows beside it — `sizes::chat_beside`)
+        let rail = match editor.session.code_review.as_ref() {
+            Some(r) if review && chat_open => Some(review_rail_natural(editor, r)),
+            _ => None,
+        };
         let widths = match zoom {
             None if wide => crate::sizes::Widths { chat: 0, side: 0 },
-            None => crate::sizes::widths(w as usize, chat_open, side_open, editor.sizes),
+            None => match rail {
+                Some(side) => crate::sizes::Widths {
+                    chat: crate::sizes::chat_beside(w as usize, side, editor.sizes),
+                    side: 0,
+                },
+                None => crate::sizes::widths(w as usize, chat_open, side_open, editor.sizes),
+            },
             Some(Zoom::Chat) => crate::sizes::Widths { chat: w as usize, side: 0 },
             Some(Zoom::Side) => crate::sizes::Widths { chat: 0, side: w as usize },
             Some(_) => crate::sizes::Widths { chat: 0, side: 0 },
@@ -8637,9 +8648,7 @@ fn put_gutter(out: &mut impl Write, (glyph, style): (&str, Style)) -> io::Result
 ///   space n comment
 ///   space v s send 2 · q end
 /// ```
-/// The review rail's rows above its files (title, rule, counts, viewed, a blank) and the key hints under
-/// them (a blank and four rows).
-const RAIL_HEAD: usize = 5;
+/// The review rail's key hints under its files: a blank and four rows.
 const RAIL_HINTS: usize = 5;
 
 /// The review rail's width bounds, and the columns the code keeps beside it.
@@ -8658,9 +8667,14 @@ fn review_rail_w(
     edit_w: usize,
     code_min: usize,
 ) -> usize {
+    review_rail_natural(editor, r).min(edit_w.saturating_sub(code_min))
+}
+
+/// The review rail's width with room for it: what its rows need, between `REVIEW_RAIL_MIN` and `_MAX`.
+fn review_rail_natural(editor: &Editor, r: &crate::codereview::CodeReview) -> usize {
     use crate::chrome::{GAP, PAD, PAD_R};
     let need = *r.rail_need.get_or_init(|| review_rail_need(editor, r));
-    (need + PAD + PAD_R + GAP).clamp(REVIEW_RAIL_MIN, REVIEW_RAIL_MAX).min(edit_w.saturating_sub(code_min))
+    (need + PAD + PAD_R + GAP).clamp(REVIEW_RAIL_MIN, REVIEW_RAIL_MAX)
 }
 
 /// The cells the review rail's widest row takes (inside its padding).
@@ -8790,14 +8804,14 @@ fn review_rail_hints(
         vec![
             hint(&[("j k", "files"), ("enter", "open")]),
             hint(&[("m", "viewed, on to the next")]),
-            hint(&[("esc", "back to the code")]),
+            hint(&[("u", "next unviewed"), ("esc", "code")]),
             walk(),
         ]
     } else if turn && drafts == 0 {
         // Claude's turn: what to do with its changes — one back, all back, or keep them
         vec![
             walk(),
-            hint(&[("space n", "comment")]),
+            hint(&[("space n", "comment"), ("]u", "unviewed")]),
             hint(&[("space u", "undo the whole turn")]),
             vec![sp("space v", key), sp(" u undo · q keep", faint)],
         ]
@@ -8811,20 +8825,109 @@ fn review_rail_hints(
         } else {
             vec![sp("space v", key), sp(" m viewed · q end", faint)]
         };
-        vec![walk(), hint(&[("space e", "files")]), hint(&[("space n", "comment")]), send]
+        vec![walk(), hint(&[("space e", "files"), ("]u", "unviewed")]), hint(&[("space n", "comment")]), send]
     }
 }
 
-/// Rows the review rail has for its files (a turn's has its question under the head; files outside the
-/// checkout, a row saying so; the risk rows — `rail_risk`).
-fn review_rail_room(lay: &Layout, editor: &Editor, r: &crate::codereview::CodeReview) -> usize {
-    let question = usize::from(matches!(r.base, crate::codereview::Base::Turn { .. }));
-    let outside = usize::from(r.files.iter().any(|f| r.outside(f)));
-    // (its text's width, as `draw_review_rail` has it)
+/// The review rail's text width (inside its padding).
+fn rail_text_w(lay: &Layout) -> usize {
     use crate::chrome::{GAP, PAD, PAD_R};
-    let w = lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1);
-    let (risk, beyond) = (rail_risk(editor, r, w).len(), rail_beyond(r, w).len());
-    lay.body_h.saturating_sub(RAIL_HEAD + question + beyond + outside + risk + RAIL_HINTS + 1).max(1)
+    lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1)
+}
+
+/// Where the review rail's files are: the row of the first one (under its head — `rail_head` — and the `↑ N
+/// more` row) and how many rows they have (above `↓ N more` and the keys).
+fn review_rail_list(lay: &Layout, editor: &Editor, r: &crate::codereview::CodeReview) -> (usize, usize) {
+    let top = rail_head(editor, r, rail_text_w(lay)).len() + 1;
+    (top, lay.body_h.saturating_sub(top + 1 + RAIL_HINTS).max(1))
+}
+
+/// The review rail's head, a row a list of toned pieces already cut to `w`: the title (its rule drawn on the
+/// second row, empty here), a turn's question and HEAD moves, what a turn's review leaves out, the counts, how
+/// many are viewed, changed since, outside the checkout, and the risk rows (`rail_risk`). One list for drawing
+/// it and for counting the rows it leaves the files (`review_rail_list`) — frictions25 R1: two rows it drew
+/// and didn't count cut the keys.
+fn rail_head(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Vec<Vec<(Tone, String)>> {
+    let mut rows = Vec::new();
+    let label = r.base.label();
+    let head_room = w.saturating_sub(6);
+    rows.push(vec![
+        (Tone::Strong, "review".to_string()),
+        (Tone::Faint, pad_left(&fit_left(&label, head_room.saturating_sub(2)), head_room)),
+    ]);
+    rows.push(Vec::new());
+    // Claude's turn: what it was asked, under the head
+    if let crate::codereview::Base::Turn { question, at } = &r.base {
+        let q = format!("“{}”", question.lines().next().unwrap_or_default());
+        rows.push(vec![(Tone::Dim, fit_ellipsis(&q, w))]);
+        // (HEAD moved in its runs: what came with it isn't in the files below — #225. One row: the
+        // sentence, else `HEAD → id (kind)`, else `HEAD → id` — the id at the dim level, findable)
+        for h in editor.session.checkpoints.list.get(*at).map_or(&[][..], |c| &c.head[..]) {
+            let line = head_moved_row(h, w);
+            rows.push(match line.split_once(h.short.as_str()) {
+                Some((a, b)) => {
+                    vec![
+                        (Tone::Faint, a.to_string()),
+                        (Tone::Dim, h.short.clone()),
+                        (Tone::Faint, b.to_string()),
+                    ]
+                }
+                None => vec![(Tone::Faint, line)],
+            });
+        }
+    }
+    // …and what it leaves out: the files that differ from HEAD besides its own, and the key for them all
+    for (text, k) in rail_beyond(r, w) {
+        rows.push(vec![(Tone::Warn, text), (Tone::Key, k)]);
+    }
+    let (added, removed): (usize, usize) =
+        r.files.iter().fold((0, 0), |(a, b), f| (a + f.added, b + f.removed));
+    let n = r.files.len();
+    let mut summary = vec![(Tone::Dim, format!("{n} file{}", if n == 1 { "" } else { "s" }))];
+    if added > 0 {
+        summary.push((Tone::Plus, format!("  +{added}")));
+    }
+    if removed > 0 {
+        summary.push((Tone::Minus, format!(" −{removed}")));
+    }
+    if r.moved_total() > 0 {
+        summary.push((Tone::Faint, fit_ellipsis(&format!(" · {} moved", r.moved_total()), w)));
+    }
+    rows.push(summary);
+    // How many are viewed, and how many aren't yet (`]u` goes to them — changed since viewed among them): the
+    // second folded first where the rail is narrow
+    let viewed = r.files.iter().filter(|f| r.viewed(editor, f)).count();
+    let said = format!("{viewed} of {n} viewed");
+    let left = format!(" · {} unviewed", n - viewed);
+    rows.push(match viewed < n && said.width() + left.width() <= w {
+        true => vec![(Tone::Faint, said), (Tone::Dim, left)],
+        false => vec![(Tone::Faint, said)],
+    });
+    // Marked viewed, changed since (cardburden 1): what's left of each is its new lines — their `◦` warned
+    let since =
+        r.files.iter().filter(|f| r.since(editor, f).is_some_and(|s| s != Default::default())).count();
+    if since > 0 {
+        rows.push(vec![(Tone::Warn, fit_ellipsis(&format!("{since} changed since viewed"), w))]);
+    }
+    // Files outside the checkout (a turn's temp files): said, they're not part of what's committed (#145)
+    let outside = r.files.iter().filter(|f| r.outside(f)).count();
+    if outside > 0 {
+        rows.push(vec![(Tone::Warn, fit_ellipsis(&format!("{outside} outside, not committed"), w))]);
+    }
+    // What's high-risk and left to look at, and the reviewer
+    for row in rail_risk(editor, r, w) {
+        let mut left = w;
+        let row = row
+            .into_iter()
+            .map(|(tone, text)| {
+                let text = fit_ellipsis(&text, left);
+                left = left.saturating_sub(text.width());
+                (tone, text)
+            })
+            .collect();
+        rows.push(row);
+    }
+    rows
 }
 
 /// A turn's review's rows about the files it leaves out (`CodeReview.beyond`): `9 more differ from HEAD ·
@@ -8847,6 +8950,10 @@ enum Tone {
     Dim,
     Accent,
     Reviewer,
+    Strong,
+    Plus,
+    Minus,
+    Key,
 }
 
 /// How long the reviewer has read, as the rail says it: `7s`, `1m 20s` — whole seconds, a frame each
@@ -8935,102 +9042,35 @@ fn draw_review_rail(
     use crate::chrome::{GAP, PAD, PAD_R};
     let selected = selected_row(ui, editor, card);
     let key = Style { bold: true, ..dim };
-    let w = lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1);
+    let w = rail_text_w(lay);
     let sp = |text: String, style: Style| Span { text, style };
     // A file's drafts waiting to go: yours, and the reviewer's findings (`rail_drafts`)
     let drafts_in = |f: &crate::codereview::File| rail_drafts(editor, f);
     let reviewer_fg = reviewer_style(editor, ui).fg;
     let drafts: usize = editor.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
-    let (added, removed): (usize, usize) =
-        r.files.iter().fold((0, 0), |(a, b), f| (a + f.added, b + f.removed));
-    let n = r.files.len();
-    let viewed = r.files.iter().filter(|f| r.viewed(editor, f)).count();
-    // Head: the title, and its rule (drawn in the loop below — the accent while the rail has the keys)
-    let mut rows: Vec<(Vec<Span>, Style, Option<usize>)> = Vec::new();
-    let label = r.base.label();
-    let head_room = w.saturating_sub(6);
-    rows.push((
-        vec![
-            sp("review".into(), strong),
-            sp(pad_left(&fit_left(&label, head_room.saturating_sub(2)), head_room), faint),
-        ],
-        card,
-        None,
-    ));
-    rows.push((Vec::new(), card, None));
-    // Claude's turn: what it was asked, under the head
-    let turn = match &r.base {
-        crate::codereview::Base::Turn { question, at } => {
-            let q = format!("“{}”", question.lines().next().unwrap_or_default());
-            rows.push((vec![sp(fit_ellipsis(&q, w), dim)], card, None));
-            // (HEAD moved in its runs: what came with it isn't in the files below — #225. One row: the
-            // sentence, else `HEAD → id (kind)`, else `HEAD → id` — the id at the dim level, findable)
-            for h in editor.session.checkpoints.list.get(*at).map_or(&[][..], |c| &c.head[..]) {
-                let line = head_moved_row(h, w);
-                let row = match line.split_once(h.short.as_str()) {
-                    Some((a, b)) => {
-                        vec![sp(a.to_string(), faint), sp(h.short.clone(), dim), sp(b.to_string(), faint)]
-                    }
-                    None => vec![sp(line, faint)],
-                };
-                rows.push((row, card, None));
-            }
-            true
-        }
-        _ => false,
-    };
-    // …and what it leaves out: the files that differ from HEAD besides its own, and the key for them all
-    for (text, k) in rail_beyond(r, w) {
-        rows.push((vec![sp(text, Style { fg: warn_fg, ..card }), sp(k, key)], card, None));
-    }
-    let mut summary = vec![sp(format!("{n} file{}", if n == 1 { "" } else { "s" }), dim)];
-    if added > 0 {
-        summary.push(sp(format!("  +{added}"), plus));
-    }
-    if removed > 0 {
-        summary.push(sp(format!(" −{removed}"), minus));
-    }
-    if r.moved_total() > 0 {
-        summary.push(sp(fit_ellipsis(&format!(" · {} moved", r.moved_total()), w), faint));
-    }
-    rows.push((summary, card, None));
-    rows.push((vec![sp(format!("{viewed} of {n} viewed"), faint)], card, None));
-    // Marked viewed, changed since (cardburden 1): what's left of each is its new lines — their `◦` warned
-    let since =
-        r.files.iter().filter(|f| r.since(editor, f).is_some_and(|s| s != Default::default())).count();
-    if since > 0 {
-        let said = format!("{since} changed since viewed");
-        rows.push((vec![sp(fit_ellipsis(&said, w), Style { fg: warn_fg, ..card })], card, None));
-    }
-    // Files outside the checkout (a turn's temp files): said, they're not part of what's committed (#145)
-    let outside = r.files.iter().filter(|f| r.outside(f)).count();
-    if outside > 0 {
-        let said = format!("{outside} outside, not committed");
-        rows.push((vec![sp(fit_ellipsis(&said, w), Style { fg: warn_fg, ..card })], card, None));
-    }
-    // What's high-risk and left to look at, and the reviewer (`rail_risk`)
+    // Head: the title, and its rule (drawn in the loop below — the accent while the rail has the keys), the
+    // counts, and what's high-risk and left to look at, and the reviewer (`rail_head`)
     let high_fg = editor.theme.try_get("error").and_then(|s| s.fg).or(warn_fg);
-    for row in rail_risk(editor, r, w) {
-        let mut left = w;
-        let mut spans = Vec::new();
-        for (tone, text) in row {
-            let st = match tone {
-                Tone::High => Style { fg: high_fg, ..card },
-                Tone::Warn => Style { fg: warn_fg, ..card },
-                Tone::Faint => faint,
-                Tone::Dim => dim,
-                Tone::Accent => accent,
-                Tone::Reviewer => Style { fg: reviewer_fg, bold: true, ..card },
-            };
-            let text = fit_ellipsis(&text, left);
-            left = left.saturating_sub(text.width());
-            spans.push(sp(text, st));
-        }
-        rows.push((spans, card, None));
-    }
+    let toned = |tone: Tone| match tone {
+        Tone::High => Style { fg: high_fg, ..card },
+        Tone::Warn => Style { fg: warn_fg, ..card },
+        Tone::Faint => faint,
+        Tone::Dim => dim,
+        Tone::Accent => accent,
+        Tone::Reviewer => Style { fg: reviewer_fg, bold: true, ..card },
+        Tone::Strong => strong,
+        Tone::Plus => plus,
+        Tone::Minus => minus,
+        Tone::Key => key,
+    };
+    let mut rows: Vec<(Vec<Span>, Style, Option<usize>)> = rail_head(editor, r, w)
+        .into_iter()
+        .map(|row| (row.into_iter().map(|(tone, text)| sp(text, toned(tone))).collect(), card, None))
+        .collect();
+    let turn = matches!(r.base, crate::codereview::Base::Turn { .. });
     // Files under their folders (filetree.rs, in the review's order) — from its scroll (`CodeReview::fit`),
     // the files out of sight counted in the blank rows around them
-    let room = review_rail_room(lay, editor, r);
+    let (_, room) = review_rail_list(lay, editor, r);
     let tree = r.rail_rows();
     let files_in = |rows: &[crate::filetree::Row]| rows.iter().filter(|t| t.item.is_some()).count();
     let more = |k: usize, arrow: &str| {

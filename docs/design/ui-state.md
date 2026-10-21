@@ -187,6 +187,9 @@ side git · 4 rows · in hand git:src/term.rs
   - `same_as` (cardburden 3): a run card the same as one answered before since tarae started (`sinceyes.rs`)
     — `{ card, answer, at, unchanged }`: that card's id, its answer (`y` `a` `A` `n`) and when, and whether
     nothing changed since; `null` otherwise.
+  - `held` (frictions25 R8): why its yes isn't among its answers (`Offer.held` — high-risk changes no one has
+    looked at), `null` when it isn't held; the text form says it on the card's line, `y held: …`. `aside`: it
+    stepped aside for what its `h` went to (`Offer.aside`) — `aside, C-q answers it` on the line.
   - `text` (cardburden 5, full level only): the card's text whole, `[{ line, role }]` — `role` as the card draws
     the line: `warning` (what yes risks, the warning colour: `Offer.warning` and the data's `warnings`) over
     `diff` (what changed since a `y`, `sinceyes`) over `decided` (`decided_lines`, full strength) — the rest

@@ -1056,6 +1056,11 @@ pub struct CardState {
     pub text: Vec<(String, &'static str)>,
     /// The warnings it says (`cardwarn.rs`), by id.
     pub warnings: Vec<String>,
+    /// Its yes held, and why (`Offer.held`: high-risk changes no one has looked at) — why `y` isn't among its
+    /// answers (frictions25 R8: a bring card offered `h n`, the reason only in its text).
+    pub held: Option<String>,
+    /// It stepped aside for what its `h` went to (`Offer.aside`): its letters are the code's, `C-q` answers it.
+    pub aside: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1229,6 +1234,8 @@ impl Editor {
                 },
                 text: text(o),
                 warnings: o.asked.as_ref().map(|a| a.warn.clone()).unwrap_or_default(),
+                held: o.held.clone(),
+                aside: o.aside,
             }
         };
         let mut cards: Vec<CardState> = self
@@ -1358,6 +1365,7 @@ impl UiState {
                         "card": format!("card#{}", s.card), "answer": s.answer.to_string(), "at": s.at,
                         "unchanged": s.unchanged,
                     })),
+                    "held": c.held, "aside": c.aside,
                 });
                 // (none at Claude's level: its `asks` is cut, and the text would be it whole)
                 if !c.text.is_empty() {
@@ -1508,6 +1516,13 @@ impl UiState {
             line += &format!(" · {}", c.up);
             if !answers.is_empty() {
                 line += &format!(" · {}", answers.join(" · "));
+            }
+            // (why `y` isn't among them — and a card stepped aside: its letters the code's)
+            if let Some(why) = &c.held {
+                line += &format!(" · y held: {why}");
+            }
+            if c.aside {
+                line += " · aside, C-q answers it";
             }
             if c.state != "asking" {
                 line += &format!(" · {}", c.state);

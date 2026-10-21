@@ -10,6 +10,8 @@
 //! Beside each other (140 columns: side panel 32 + chat 56 left the code 52): an automatic chat narrows to
 //! leave the code `CODE_ROOM` (down to `CHAT_MIN`); if the code would still have less than `CODE_MIN`, the side
 //! panel gives way, whole (it comes back when there's room — its keys go back to the code meanwhile).
+//! Beside the code review's rail an automatic chat narrows further, to leave the code `REVIEW_CODE_ROOM`
+//! (`chat_beside`).
 //!
 //! `C-w z` fills the screen with what has the keys — the code (its pane alone), the bottom slot, the chat, the
 //! side panel — and back (`Zoom`); it ends when the keys go elsewhere. The bottom slot takes the keys with
@@ -35,6 +37,8 @@ pub const SIDE_MORE: usize = 12;
 /// gives way.
 pub const CODE_ROOM: usize = 60;
 pub const CODE_MIN: usize = 48;
+/// The code beside the review's rail: an automatic chat narrows to leave it this much (`chat_beside`).
+pub const REVIEW_CODE_ROOM: usize = 100;
 /// The bottom slot: at least this many rows, and the code keeps `BOTTOM_CODE` above it.
 pub const BOTTOM_MIN: usize = 3;
 pub const BOTTOM_CODE: usize = 4;
@@ -99,6 +103,19 @@ pub fn save(path: &Path, sizes: Sizes, seq: u64) {
 pub struct Widths {
     pub chat: usize,
     pub side: usize,
+}
+
+/// The chat's width beside a panel `side` columns wide that keeps its own width — the code review's rail
+/// (frictions25 R6: beside it the chat kept its 2/5 and the code read ~45 columns, wrapping): as beside the side
+/// panel, an automatic chat narrows to leave the code its room — a review's, `REVIEW_CODE_ROOM`: reading the
+/// code is what a review is for — down to `CHAT_MIN`; one you set stays, and so does a chat taking the whole
+/// width.
+pub fn chat_beside(total: usize, side: usize, kept: Sizes) -> usize {
+    let chat = widths(total, true, false, kept).chat;
+    if kept.chat.is_some() || chat >= total {
+        return chat;
+    }
+    total.saturating_sub(side + REVIEW_CODE_ROOM).max(CHAT_MIN).min(chat)
 }
 
 /// How wide the chat (`chat_open`: shown as a panel) and the side panel (`side_open`) are — kept sizes
@@ -696,6 +713,21 @@ mod tests {
             "narrow: the chat takes it all"
         );
         assert_eq!(widths(200, false, true, AUTO), Widths { chat: 0, side: 32 + 12 });
+    }
+
+    /// frictions25 R6: beside the review's rail (36 columns here) an automatic chat narrows to leave the code a
+    /// review's room (100), down to its least — at 160 the code had 60 beside a 64-column chat; on a wide
+    /// screen it's the chat's 2/5 again; a width you set, or a chat taking the whole width, stays.
+    #[test]
+    fn beside_the_review_rail_the_chat_leaves_the_code_its_room() {
+        assert_eq!(widths(160, true, false, AUTO).chat, 64, "as it was beside the rail");
+        assert_eq!(chat_beside(160, 36, AUTO), CHAT_MIN, "160: the code 88");
+        assert_eq!(chat_beside(140, 36, AUTO), CHAT_MIN);
+        assert_eq!(chat_beside(200, 36, AUTO), 64, "200: the code keeps 100");
+        assert_eq!(chat_beside(260, 36, AUTO), CHAT_AUTO_MAX, "wide: no wider than without the rail");
+        let kept = Sizes { chat: Some(70), side: None, bottom: None };
+        assert_eq!(chat_beside(160, 36, kept), 70, "yours stays");
+        assert_eq!(chat_beside(70, 36, AUTO), 70, "narrow: the chat takes it all, as without the rail");
     }
 
     /// A kept size is shown as it is where it fits, clamped where it doesn't — the kept value itself isn't

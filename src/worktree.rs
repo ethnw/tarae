@@ -1897,13 +1897,17 @@ impl Editor {
         };
         self.step(self.events.shared_jobs(), "session", said, work, move |ed, result| {
             match result {
-                Bringing::Brought(b) => ed.set_success(format!(
-                    "Brought {} of {} into {} — now at {}",
-                    commits(b.count),
-                    b.branch,
-                    b.base,
-                    b.tip
-                )),
+                Bringing::Brought(b) => {
+                    ed.set_success(format!(
+                        "Brought {} of {} into {} — now at {}",
+                        commits(b.count),
+                        b.branch,
+                        b.base,
+                        b.tip
+                    ));
+                    // (its review since the base is of nothing now: it ends, said — frictions25 R5)
+                    ed.with_session(id, crate::codereview::base_reached);
+                }
                 Bringing::Moved(m) => ed.push_offer(m.card()),
                 // (nothing of its own, behind: moved up instead — #186)
                 Bringing::Ready(m) if m.ahead == 0 => ed.push_offer(m.up_card()),

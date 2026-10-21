@@ -101,6 +101,12 @@ pub struct CodeReview {
     /// The rail's first file row shown (the wheel moves it) · the file it last scrolled to (`fit`).
     pub scroll: usize,
     shown: Option<usize>,
+    /// The screen row the rail's files started on at the last frame (`fit`): its head grown or shrunk since,
+    /// the list moves the other way, so the file under the pointer stays there — and how far past the list's
+    /// end that took it (frictions25 R2: the reviewer's verdict came in, every file went down two rows, and
+    /// the next click opened the file above the one aimed at).
+    top: Option<usize>,
+    past: usize,
     /// The git tab is in front of the rail (`space g` during a review; `space g`/Esc there gives the
     /// column back — `Editor::review_rail_up`).
     pub behind: bool,
@@ -181,6 +187,8 @@ impl CodeReview {
             selected: 0,
             scroll: 0,
             shown: None,
+            top: None,
+            past: 0,
             behind: false,
             rail_need: Default::default(),
             wide: false,
@@ -486,16 +494,27 @@ impl CodeReview {
         if self.focus { Some(self.selected) } else { self.in_hand(ed) }
     }
 
-    /// Before drawing `room` rows of the rail: scroll only when the marked file changed and is out of
-    /// sight — just into view while the rail has the keys, else centered — so a click doesn't slide the
-    /// list under the pointer, and the wheel's scroll stays.
-    pub fn fit(&mut self, marked: Option<usize>, room: usize) {
+    /// Before drawing `room` rows of the rail, its files from screen row `top`: scroll only when the marked
+    /// file changed and is out of sight — just into view while the rail has the keys, else centered — so a
+    /// click doesn't slide the list under the pointer, and the wheel's scroll stays. Its head grown or shrunk
+    /// (a row said, the reviewer's verdict), a list longer than its rows moves the other way: each file stays
+    /// on its row (one that fits them all moves down with the head — none hidden to keep it still).
+    pub fn fit(&mut self, marked: Option<usize>, room: usize, top: usize) {
         let rows = self.rail_rows();
+        let end = rows.len().saturating_sub(room);
+        if let Some(was) = self.top.replace(top)
+            && was != top
+            && rows.len() > room
+        {
+            self.scroll = (self.scroll + top).saturating_sub(was);
+            self.past = self.scroll.saturating_sub(end);
+        }
         if marked != self.shown {
             self.shown = marked;
             if let Some(at) = marked.and_then(|m| rows.iter().position(|t| t.item == Some(m)))
                 && !(self.scroll..self.scroll + room).contains(&at)
             {
+                self.past = 0;
                 self.scroll = match (self.focus, at < self.scroll) {
                     (true, true) => at,
                     (true, false) => at + 1 - room,
@@ -503,7 +522,14 @@ impl CodeReview {
                 };
             }
         }
-        self.scroll = self.scroll.min(rows.len().saturating_sub(room));
+        self.scroll = self.scroll.min(end + self.past);
+    }
+
+    /// The wheel, or a click on `↑ N more` / `↓ N more`: the rail scrolled by `by` rows (`fit` keeps it in the
+    /// list).
+    pub fn scroll_by(&mut self, by: isize) {
+        self.past = 0;
+        self.scroll = self.scroll.saturating_add_signed(by);
     }
 
     /// Which file the current document is.
@@ -1575,6 +1601,14 @@ fn mark(ed: &mut Editor, i: usize) {
     }
 }
 
+/// The file at `path` marked viewed when it had a line it no longer has — changed since viewed (tests: a
+/// review made by `CodeReview::for_test` has no counts, so how much isn't known: `unsure`).
+#[cfg(test)]
+pub fn mark_for_test(ed: &mut Editor, path: &Path) {
+    let mark = Viewed::new(Default::default(), vec![("a line taken out since".into(), 1)], None);
+    ed.session.viewed.insert(path.to_path_buf(), mark);
+}
+
 /// A file's base just came: the marks waiting for it.
 fn marks_due(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.as_ref() else { return };
@@ -1690,6 +1724,38 @@ fn changed(root: &Path, base: &Base) -> Result<Vec<File>, String> {
     crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     files.dedup_by(|a, b| a.rel == b.rel);
     Ok(files)
+}
+
+/// A review since a branch whose branch has caught up (frictions25 R5: brought in, `review since main` stayed
+/// up over a checkout main now equals, 19 files of nothing): on a worker, whether the branch has HEAD's every
+/// commit and nothing differs from its tip — then the review ends, saying why (drafts stay notes). A bring's
+/// session asks after it brought; a checkout's own HEAD moving asks too.
+pub fn base_reached(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let Base::Branch { name, .. } = &r.base else { return };
+    let (root, name, started) = (r.root.clone(), name.clone(), r.started);
+    ed.events.jobs().spawn(move || {
+        let reached = git(&root, &["merge-base", "--is-ancestor", "HEAD", &name]).is_ok()
+            && git(&root, &["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")])
+                .map(|tip| Base::Branch { name: name.clone(), commit: tip.trim().to_string() })
+                .and_then(|tip| changed(&root, &tip))
+                .is_ok_and(|files| files.is_empty());
+        move |ed: &mut Editor| {
+            // (still that review — one ended or begun meanwhile stays)
+            if !reached || ed.session.code_review.as_ref().is_none_or(|r| r.started != started) {
+                return ed.unchanged = true;
+            }
+            let drafts = ed.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
+            close(ed);
+            let kept = match drafts {
+                0 => String::new(),
+                n => format!(" — {} kept", crate::nav::count(n, "draft")),
+            };
+            ed.set_status(format!(
+                "review since {name} ended: {name} has all of it now, nothing differs from its tip{kept}"
+            ));
+        }
+    });
 }
 
 /// The working tree's patch against `rev`. (`diff-index`, not `diff`: over a file whose stat changed, `diff`
@@ -2054,6 +2120,8 @@ fn open_at(
         selected: 0,
         scroll: 0,
         shown: None,
+        top: None,
+        past: 0,
         behind: false,
         rail_need: Default::default(),
         wide: false,
@@ -3104,7 +3172,8 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
             None => ed.open_virtual(&title, ""),
         }
     } else {
-        if let Err(e) = ed.open(&f.path) {
+        // (one not open yet: no grammar or server offered for it while the review reads it — R7)
+        if let Err(e) = ed.open_for_review(&f.path) {
             return ed.set_error(format!("{e:#}"));
         }
         ed.doc().id
@@ -3778,6 +3847,48 @@ pub fn step_file(ed: &mut Editor, forward: bool) {
     ed.note(format!("{rel} — file {} of {n}", j + 1));
 }
 
+/// `]u` / `[u`: the review's next (previous) file not viewed — changed since viewed among them — in the rail's
+/// order from the file in hand, round the end (a binary one opens in its buffer). None left: said.
+pub fn step_unviewed(ed: &mut Editor, forward: bool) {
+    let Some(r) = &ed.session.code_review else {
+        return ed.set_status("no review here — space v v starts one");
+    };
+    let order = r.rail_order();
+    let n = order.len();
+    let left = order.iter().filter(|&&i| !r.viewed(ed, &r.files[i])).count();
+    if left == 0 {
+        return ed.set_status(format!("all {} viewed", crate::nav::count(n, "file")));
+    }
+    let at = r.in_hand(ed).and_then(|i| order.iter().position(|&k| k == i));
+    let Some(j) = unviewed_from(ed, r, &order, at, forward) else { return };
+    if r.in_hand(ed) == Some(j) {
+        return ed.set_status("this is the one file not viewed");
+    }
+    let rel = r.files[j].rel.clone();
+    show(ed, j, false);
+    ed.note(format!("{rel} — {} not viewed", crate::nav::count(left, "file")));
+}
+
+/// The first file not viewed after (before) the rail's row `at` in `order`, round the end — `at` itself last.
+fn unviewed_from(
+    ed: &Editor,
+    r: &CodeReview,
+    order: &[usize],
+    at: Option<usize>,
+    forward: bool,
+) -> Option<usize> {
+    let n = order.len();
+    (1..=n)
+        .map(|k| match (at, forward) {
+            (Some(a), true) => (a + k) % n,
+            (Some(a), false) => (a + n - k) % n,
+            (None, true) => k - 1,
+            (None, false) => n - k,
+        })
+        .map(|p| order[p])
+        .find(|&i| !r.viewed(ed, &r.files[i]))
+}
+
 /// `space v m`: marks the current file viewed (again: unmarks).
 pub fn toggle_viewed(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.as_ref() else {
@@ -3935,6 +4046,20 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
             }
         }
         (Code::Esc | Code::Char('q'), false) => r.focus = false,
+        // (the next file not viewed, selected — enter opens it; `U` the one before)
+        (Code::Char(c @ ('u' | 'U')), false) => {
+            let selected = r.selected;
+            let r = ed.session.code_review.as_ref().expect("checked");
+            match unviewed_from(ed, r, &order, Some(at), c == 'u') {
+                Some(i) if i != selected => {
+                    let rel = r.files[i].rel.clone();
+                    ed.session.code_review.as_mut().expect("checked").selected = i;
+                    ed.note(format!("{rel} — not viewed yet"));
+                }
+                Some(_) => ed.set_status("this is the one file not viewed"),
+                None => ed.set_status("every file is viewed"),
+            }
+        }
         _ => ed.key_unused(key, "the review's file list", "enter opens a file, esc goes to the code"),
     }
     true
@@ -4555,6 +4680,152 @@ mod tests {
         assert!(ed.session.code_review.as_ref().is_some_and(|r| r.focus), "the rail has the keys");
         let pending = ed.features.pending();
         assert!(pending.iter().any(|(k, c)| k == "panel:files" && c.n == 1), "{pending:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions25 R3: `]u` goes to the next file not viewed in the rail's order — past the viewed ones, round
+    /// the end — `[u` back; the rail's own `u` selects it; all viewed, it says so and stays.
+    #[test]
+    fn bracket_u_walks_the_files_not_viewed() {
+        let files = [
+            ("a.txt", "a\n", "a2\n"),
+            ("b.txt", "b\n", "b2\n"),
+            ("c.txt", "c\n", "c2\n"),
+            ("d.txt", "d\n", "d2\n"),
+        ];
+        let (mut ed, dir) = reviewing("unviewed", &files);
+        let rel = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.in_hand(ed).map(|i| r.files[i].rel.clone()).unwrap_or_default()
+        };
+        let open = |ed: &mut Editor, at: &str| {
+            settle_until(ed, |ed| landed(ed) && ed.doc().path.as_ref().is_some_and(|p| p.ends_with(at)));
+        };
+        assert_eq!(rel(&ed), "a.txt");
+        // b and c viewed: from a, ]u goes to d
+        for f in ["b.txt", "c.txt"] {
+            ed.open(&dir.join(f)).unwrap();
+            let i = ed.session.code_review.as_ref().unwrap().files.iter().position(|x| x.rel == f).unwrap();
+            show(&mut ed, i, false);
+            open(&mut ed, f);
+            feed(&mut ed, "<space>vm");
+        }
+        show(&mut ed, 0, false);
+        open(&mut ed, "a.txt");
+        feed(&mut ed, "]u");
+        open(&mut ed, "d.txt");
+        assert_eq!(rel(&ed), "d.txt", "past the viewed ones");
+        // …round the end, back to a; [u from a goes back round to d
+        feed(&mut ed, "]u");
+        open(&mut ed, "a.txt");
+        assert_eq!(rel(&ed), "a.txt", "round the end");
+        feed(&mut ed, "[u");
+        open(&mut ed, "d.txt");
+        assert_eq!(rel(&ed), "d.txt");
+        // The rail's `u`: selected, not opened
+        feed(&mut ed, "<space>e");
+        feed(&mut ed, "u");
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert_eq!(r.files[r.selected].rel, "a.txt", "the rail's u selects the next not viewed");
+        assert_eq!(rel(&ed), "d.txt", "and opens nothing");
+        feed(&mut ed, "<esc>");
+        // All viewed: said, nowhere to go
+        feed(&mut ed, "<space>vm");
+        show(&mut ed, 0, false);
+        open(&mut ed, "a.txt");
+        feed(&mut ed, "<space>vm");
+        feed(&mut ed, "]u");
+        assert_eq!(rel(&ed), "a.txt");
+        assert!(ed.toasts.iter().any(|t| t.text == "all 4 files viewed"), "said");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions25 R4: binary files (changed, new, deleted) and a deleted text file, each marked with `space v m`
+    /// — a binary's mark is its blob's key, a deleted one's its removed lines' — keep their marks when the
+    /// review ends and starts again (a mark lost in use was R2's misclick taking it back).
+    #[test]
+    fn binary_and_deleted_files_keep_their_marks_when_the_review_starts_again() {
+        let dir = crate::scratch::Scratch::new("review-marks-again").into_path();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        for (p, t) in [("a.rs", "one\n"), ("b.bin", "x\0y"), ("c.bin", "c\0c"), ("d.rs", "gone\n")] {
+            std::fs::write(dir.join(p), t).unwrap();
+        }
+        run(&["add", "."]);
+        run(&["commit", "-qm", "x"]);
+        std::fs::write(dir.join("a.rs"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("b.bin"), "x\0z").unwrap();
+        std::fs::write(dir.join("n.bin"), "n\0n").unwrap();
+        std::fs::remove_file(dir.join("c.bin")).unwrap();
+        std::fs::remove_file(dir.join("d.rs")).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        let viewed = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.files.iter().map(|f| (f.rel.clone(), r.viewed(ed, f))).collect::<Vec<_>>()
+        };
+        let n = ed.session.code_review.as_ref().unwrap().files.len();
+        assert_eq!(n, 5, "{:?}", viewed(&ed));
+        for i in 0..n {
+            show(&mut ed, i, false);
+            settle_until(&mut ed, |ed| {
+                let r = ed.session.code_review.as_ref().unwrap();
+                let d = ed.doc();
+                r.in_hand(ed) == Some(i)
+                    && (r.files[i].binary || d.review_base.is_some() && d.git_version == d.version())
+            });
+            feed(&mut ed, "<space>vm");
+        }
+        let marked = viewed(&ed);
+        assert!(marked.iter().all(|f| f.1), "every file marked: {marked:?}");
+        feed(&mut ed, "<space>vq");
+        assert!(ed.session.code_review.is_none(), "all viewed: it ends without a card");
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        assert_eq!(viewed(&ed), marked, "the same marks, the review started again");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions25 R5: a review since `main` stays while main lacks what the checkout has; once main is brought
+    /// up to it (a fast-forward, as a bring makes) and nothing differs from its tip, the review ends, saying why.
+    #[test]
+    fn a_review_since_a_branch_that_caught_up_ends_saying_why() {
+        let dir = crate::scratch::Scratch::new("review-caught-up").into_path();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "work"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&["commit", "-qam", "work"]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        // main behind: the review stays
+        base_reached(&mut ed);
+        while let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(500)) {
+            ed.handle_event(ev);
+        }
+        assert!(ed.session.code_review.is_some(), "main lacks the work: still a review");
+        // main brought up to the checkout: it ends, said
+        run(&["branch", "-f", "main", "HEAD"]);
+        base_reached(&mut ed);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_none());
+        let said = ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        assert!(
+            said.iter().any(|t| t.starts_with("review since main ended: main has all of it now")),
+            "{said:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

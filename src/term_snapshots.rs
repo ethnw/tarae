@@ -3328,6 +3328,114 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions25 R1/R2: netgrant's review — its 50 files (3248e87f's) in folders, 14 with lines moved, scrolled
+/// into the middle — at two sizes: every row drawn with a file's name clicks that file; then the head grows
+/// (the reviewer's row and its verdict, a file changed since viewed — a row the rail used to leave uncounted)
+/// and each file stays on its row, the keys whole at the bottom: a click on the row aimed at before opens the
+/// same file, and `space v m` marks that one.
+#[test]
+fn every_rail_row_clicks_the_file_drawn_on_it_while_its_head_grows() {
+    use crate::codereview::{Base, CodeReview, File};
+    use crate::event::{Mouse, MouseKind};
+    let scratch = crate::scratch::Scratch::new("rail-netgrant");
+    let dir = scratch.to_path_buf();
+    let rels = "compat/go.toml compat/java-gradle.toml compat/java-maven.toml compat/node-npm.toml \
+        compat/node-pnpm.toml compat/python-pip.toml compat/python-uv.toml compat/rust.toml docs/design/cards.md \
+        docs/threat-model.md runtime/packs/go/pack.toml runtime/packs/javascript/pack.toml \
+        runtime/packs/python/pack.toml runtime/packs/rust/pack.toml src/allow.rs src/blocked.rs src/caps.rs \
+        src/cards.rs src/chat.rs src/compat.rs src/config.rs src/editor.rs src/hosts.rs src/hosts/tests.rs \
+        src/offer.rs src/sandbox.rs src/sandbox/golden.rs src/sandbox/guarantees.rs src/sandbox/keeper.rs \
+        src/sandbox/linux.rs src/sandbox/policy.rs src/sandbox/proxy.rs src/sandbox/proxy/egress.rs \
+        src/sandbox/proxy/macos_tests.rs src/sandbox/proxy/tests.rs src/sandboxpack.rs src/sandboxpack/tests.rs \
+        src/session.rs src/snapshots/host_closed.txt src/snapshots/host_closed_narrow.txt \
+        src/snapshots/sandbox_blocked_card.txt src/snapshots/sandbox_landlock.txt src/snapshots/sandbox_policy.txt \
+        src/snapshots/sandbox_report.txt src/snapshots/ui_state.json src/term.rs src/term_snapshots.rs \
+        src/tools.rs src/uistate/tests.rs xtask/src/compat.rs";
+    let files: Vec<File> = rels
+        .split_whitespace()
+        .map(|rel| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x\n").unwrap();
+            File { path, rel: rel.into(), added: 120, removed: 340, new: false, gone: false, binary: false }
+        })
+        .collect();
+    assert_eq!(files.len(), 50);
+    for (w, h) in [(160, 30), (200, 40)] {
+        let mut s = Shot::new(w, h);
+        s.ed.session.root = dir.clone();
+        s.ed.open(&files[0].path).unwrap();
+        let mut r = CodeReview::for_test(Base::Head, dir.clone(), files.clone());
+        for f in files.iter().step_by(3).take(14) {
+            r.moved.insert(f.path.clone(), 123);
+        }
+        let (of, root) = (r.started, r.root.clone());
+        s.ed.session.code_review = Some(r);
+        // (in the middle: src/compat.rs's neighbours, hosts/ among them)
+        crate::codereview::show(&mut s.ed, 21, false);
+        let screen = |s: &mut Shot| -> Vec<String> {
+            let mut p = vt100::Parser::new(s.h, s.w, 0);
+            p.process(&s.frame());
+            p.screen().rows(0, s.w).collect()
+        };
+        let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
+        // Each row the rail clicks to a file shows that file's name (cut from the left, its end stays)
+        let check = |rows: &[String], rail: &[(usize, usize)], at: &str| {
+            assert!(rail.len() > 10, "{at}: rows of files\n{}", rows.join("\n"));
+            for &(y, i) in rail {
+                let drawn = rows[y].split("◦ ").nth(1).and_then(|t| t.split(' ').next()).unwrap_or_default();
+                let drawn = drawn.trim_start_matches('…');
+                assert!(
+                    !drawn.is_empty() && files[i].rel.ends_with(drawn),
+                    "{w}×{h} {at}: row {y} clicks {}\n{}",
+                    files[i].rel,
+                    rows.join("\n")
+                );
+            }
+            // (the keys whole at the bottom, over the status line)
+            assert!(rows[h as usize - 2].contains("q end"), "{w}×{h} {at}: the keys\n{}", rows.join("\n"));
+        };
+        let rows = screen(&mut s);
+        let before = rail(&s);
+        check(&rows, &before, "as it opened");
+        // The head grows by three rows: the reviewer done, its verdict, and a file changed since viewed
+        s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
+            of,
+            root.clone(),
+            crate::reviewer::State::Done,
+            Vec::new(),
+            "Two risks.",
+        ));
+        let changed = files[5].path.clone();
+        crate::codereview::mark_for_test(&mut s.ed, &changed);
+        let rows = screen(&mut s);
+        let after = rail(&s);
+        check(&rows, &after, "its head grown");
+        assert!(rows.iter().any(|r| r.contains("changed since viewed")), "{}", rows.join("\n"));
+        // The row aimed at as it opened still holds its file
+        let (y, i) = before[before.len() / 2];
+        assert!(after.contains(&(y, i)), "{w}×{h}: row {y} kept {}: {before:?} → {after:?}", files[i].rel);
+        s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: 12, y: y as u16, alt: false });
+        s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: 12, y: y as u16, alt: false });
+        assert_eq!(s.ed.doc().path.as_deref(), Some(files[i].path.as_path()));
+        screen(&mut s);
+        assert!(rail(&s).contains(&(y, i)), "opened, it stays where it was clicked");
+        s.keys("<space>vm");
+        let viewed = |s: &Shot, k: usize| {
+            let r = s.ed.session.code_review.as_ref().unwrap();
+            r.viewed(&s.ed, &r.files[k])
+        };
+        assert!(viewed(&s, i), "{w}×{h}: space v m marked the file clicked, {}", files[i].rel);
+        // (R3: the head says how many are left)
+        let rows = screen(&mut s);
+        assert!(rows.iter().any(|r| r.contains("1 of 50 viewed · 49 unviewed")), "{}", rows.join("\n"));
+        // …and the head shrinks again: still there
+        s.ed.session.reviewer = None;
+        screen(&mut s);
+        assert!(rail(&s).contains(&(y, i)), "{w}×{h}: the head shrunk, row {y} kept {}", files[i].rel);
+    }
+}
+
 /// #179: a turn's review of 80 files in folders (~78 met), beside the chat, at heights from small to tall:
 /// the rail's rows stay inside it — its counts (`N of 80 viewed`) at the top and its keys at the bottom
 /// always in sight, the files between them counted above and below (`↑ a more` · shown · `↓ b more` = 80);

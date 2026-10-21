@@ -1635,9 +1635,10 @@ of repeating itself, and the log says where.
 |---|---|
 | `space v v` / `:review [branch]` | Start (against HEAD / since a branch) |
 | `]g` / `[g` | Next / previous change, across files |
+| `]u` / `[u` | Next / previous file not viewed yet (changed since viewed too) — the rail's head counts them |
 | `space n` | Draft a comment (or a reply) on this line |
 | `space v m` | Mark this file viewed (again: not viewed) |
-| `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, Esc back |
+| `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, `u` the next not viewed, Esc back |
 | click on a file's `◦` | Open it and mark it viewed |
 | `space v u` | Take the change at the cursor back |
 | `space v z` | Read wide: the rail and the chat give the code their columns (again: back) |

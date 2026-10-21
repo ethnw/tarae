@@ -93,6 +93,8 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
                         ed.session.in_log.named(ed.session.label());
                         if moved {
                             ed.git_reload_bases_in(&dir);
+                            // (moved into the branch a review is since: that review may be of nothing now)
+                            crate::codereview::base_reached(ed);
                         }
                     }
                 };

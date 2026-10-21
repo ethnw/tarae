@@ -137,6 +137,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `[ r` | `replay_prev` | Claude's previous stop (replay) |
 | `[ t` | `goto_prev_class` | Previous type |
 | `[ T` | `goto_prev_test` | Previous test |
+| `[ u` | `goto_prev_unviewed_file` | Previous file not viewed |
 | `[ x` | `goto_prev_test_failure` | Previous failed test |
 | `[ space` | `add_newline_above` | Add a blank line above |
 
@@ -159,6 +160,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `] r` | `replay_next` | Claude's next stop (replay) |
 | `] t` | `goto_next_class` | Next type |
 | `] T` | `goto_next_test` | Next test |
+| `] u` | `goto_next_unviewed_file` | Next file not viewed |
 | `] x` | `goto_next_test_failure` | Next failed test |
 | `] space` | `add_newline_below` | Add a blank line below |
 
