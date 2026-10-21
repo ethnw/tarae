@@ -588,6 +588,14 @@ git tab, search, a short Kubernetes one.
   taken; the review opens on the same rows), `editor.motion` full · calm · none with macOS's Reduce Motion read once
   at start; a stream batch with live rows in a big file 0.3 ms, a native Write over 5,000 lines 1.4 ms (was 8).
   P8, 코드멍's reveal, is dropped — an invented delay, and a key eaten to end it.
+- **Design pass 2 — 선명함과 구조** (the user, 2026-10-21: tarae looked dull and without structure beside Helix with
+  ayu_evolve; the plan `target/sb/design2-plan.md`, the designer's note `target/sb/design2-D1-note.md`). D1 done
+  (`9ad62527` + `45a51568`): meok and hanji take ayu's hues fitted to ink and paper (keywords orange, types blue,
+  strings green, constants magenta; the accent stays the seal's coral/vermilion; ink a step darker, `#0c0e12`;
+  comments upright and readable, doc comments on the ground with the bar only; every text/ground pair at its floor,
+  pinned by `builtin_themes_clear_their_contrast_floors`). Next: the 붓 mock (수묵화's 농담 — values to the ends,
+  one heavy stroke `▌` or a thin `│` on the surface with the keys, 여백), then D2 edges + D3 frames with names, D4,
+  D5; motion (honest only, the note's table) after.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
