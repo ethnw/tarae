@@ -524,9 +524,10 @@ git tab, search, a short Kubernetes one.
   surface stays and `esc close` where it goes, line numbers absolute by default. Landed: piece 1, those words and
   keys (`c885086e`, 2026-10-21); piece 2, a card never taking the keys mid-typing (one quiet second after the last
   key, said as `▲1 waiting · C-q` and in the state; test and shot drivers run with it off) and hints where none
-  were — pickers, prompts, the rail's rows, the bottom panels' way in (`62491cdf`). Built, in review: pieces 4 and
-  6 — scrolling alike (one `list_move` table for every list and output panel, `C-e`/`C-y`, `S-PageUp` over the
-  terminal's history) and Helix's picker keys (`C-v`/`C-s` split, `C-t` preview, `A-ret`). Then 5, the first hour
+  were — pickers, prompts, the rail's rows, the bottom panels' way in (`62491cdf`). Landed too (`8f453a08`): pieces 4 and
+  6 — scrolling alike (one `list_move` table for every list and output panel, `C-e`/`C-y`, the selection following
+  into sight, `S-PageUp` over the terminal's history) and Helix's picker keys (`C-v`/`C-s` split, `C-t` preview,
+  `A-ret`). Under way: 5, the first hour
   (the tutor, which-key and the palette as a first-timer meets them — what was the first-use check), and 7, keys
   inside zellij. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
   grants, viewed marks lost on a review's re-open, moved-brace re-flags, the reviewer re-reading whole, ten keys
