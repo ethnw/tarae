@@ -75,6 +75,7 @@ mod indent;
 mod install;
 mod java;
 mod jumplist;
+mod keepwarm;
 mod key;
 mod keymap;
 mod labels;

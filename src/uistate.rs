@@ -925,9 +925,22 @@ pub struct UsageState {
     pub window: Option<u64>,
     pub last_turn: Option<crate::usage::Turn>,
     pub totals: crate::usage::Totals,
+    /// The pings that keep it warm (`keepwarm::Said::json`): the setting, the mark, the next, this stretch's.
+    pub keep_warm: Value,
 }
 
 impl UsageState {
+    /// Session `s`'s, at `now_ms`.
+    pub fn of_session(
+        s: &crate::session::Session,
+        cfg: &crate::llm::LlmConfig,
+        limits: &crate::limits::Limits,
+        now_ms: u64,
+    ) -> Option<UsageState> {
+        let warm = crate::keepwarm::said(s, cfg, limits, now_ms).json(cfg.keep_warm, s.warm.marked);
+        Some(UsageState { keep_warm: warm, ..UsageState::of(&s.usage, now_ms)? })
+    }
+
     pub fn of(u: &crate::usage::Usage, now_ms: u64) -> Option<UsageState> {
         use crate::usage::Cache;
         if !u.reported() {
@@ -947,6 +960,7 @@ impl UsageState {
             window,
             last_turn: u.last_turn().cloned(),
             totals: u.totals(),
+            keep_warm: Value::Null,
         })
     }
 
@@ -986,7 +1000,7 @@ impl UsageState {
             "cache": self.cache, "seconds_left": self.seconds_left, "ttl": self.ttl,
             "context": { "tokens": self.context, "window": self.window,
                          "percent": self.percent().map(|p| (p * 10.0).round() / 10.0) },
-            "last_turn": last, "totals": totals,
+            "last_turn": last, "totals": totals, "keep_warm": self.keep_warm,
         })
     }
 
@@ -1130,7 +1144,7 @@ impl Editor {
             rebasing: l.rebase.as_ref().map(|r| r.said()),
             reloaded: l.reloaded,
             front: is_front,
-            usage: UsageState::of(&l.usage, now_ms),
+            usage: UsageState::of_session(l, &self.config.llm, &self.limits, now_ms),
             compacted: Some(l.compacted.clone()).filter(|c| c.count > 0),
             key_source: l.usage.key_source.clone(),
             billing: l.billing.name(),

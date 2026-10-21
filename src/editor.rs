@@ -5106,7 +5106,8 @@ mod tests {
         assert!(s.text().contains("usage s0: cache warm 60m (1h) · context 4% of 200k"), "{}", s.text());
         assert!(s.text().contains("total $0.018 in 1 turn · ≈ API price"), "{}", s.text());
         // The session list: its total, said as what it is
-        let shown = crate::worktree::Shown::claude_of(&ed.session.usage, crate::usage::now_ms());
+        let shown =
+            crate::worktree::Shown::claude_of(&ed.session.usage, &Default::default(), crate::usage::now_ms());
         assert_eq!(shown.map(|s| s.1).as_deref(), Some("≈ API $0.018"));
     }
 

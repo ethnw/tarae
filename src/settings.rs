@@ -434,6 +434,27 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "llm.keep-warm",
+        kind: Kind::Enum(&["expected", "marked", "off"]),
+        doc: "Chat: a big conversation waiting on you gets a one-word ping 5 minutes before its prompt cache goes cold, so its next turn reads the cache instead of writing it all again (a ping costs about a tenth of that) — \"expected\" (the default, on its own — at most llm.keep-warm-max pings a wait): while a review, a card, a rebase or a run of its waits, or you marked it (:keep-warm); \"marked\": only marked; \"off\": never. Each ping is said on the chat's last row and in :usage. Only your own config sets it",
+        get: |c| Value::from(c.llm.keep_warm.name()),
+        set: |c, v| c.llm.keep_warm = crate::keepwarm::Mode::parse(s(v)).unwrap_or_default(),
+    },
+    Setting {
+        path: "llm.keep-warm-min-tokens",
+        kind: Kind::Int { min: 1000, max: 10_000_000 },
+        doc: "Chat: the smallest conversation (tokens of context) llm.keep-warm keeps warm. Only your own config sets it",
+        get: |c| Value::from(c.llm.keep_warm_min_tokens as i64),
+        set: |c, v| c.llm.keep_warm_min_tokens = n(v) as u64,
+    },
+    Setting {
+        path: "llm.keep-warm-max",
+        kind: Kind::Int { min: 1, max: 24 },
+        doc: "Chat: pings at most while a conversation waits (each keeps it warm about another hour); a turn starts the count again. Only your own config sets it",
+        get: |c| Value::from(c.llm.keep_warm_max as i64),
+        set: |c, v| c.llm.keep_warm_max = n(v) as u32,
+    },
+    Setting {
         path: "llm.chat-settings",
         kind: Kind::Bool,
         doc: "Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask)",

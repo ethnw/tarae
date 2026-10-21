@@ -505,6 +505,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:messages` |  | The notifications since tarae started, newest first |
 | `:inbox` |  | What waits for your answer, every session's, oldest first |
 | `:usage` |  | What Claude's turns cost here and today, and its cache |
+| `:keep-warm` |  | Keep this session's Claude cache warm while it waits (on/off/now) |
 | `:features` |  | Which features you use, and which never (features.count) |
 | `:features-reset` |  | Empty the feature counts (a card asks first) |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |

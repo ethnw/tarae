@@ -112,30 +112,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             sandbox_look(ed);
             // (the edit tools its process was started with — `Chat.edit_tools`)
             let arm = ed.session.chat.as_ref().map_or(ed.config.llm.edit_tools, |c| c.edit_tools);
-            let mut tools = vec![
-                crate::notes::tool_schema(),
-                run_tests_schema(),
-                run_schema(),
-                crate::plan::tool_schema(),
-                crate::seeing::tool_schema(),
-                crate::nav::references_schema(),
-                crate::nav::search_schema(),
-                crate::readtool::schema(),
-                crate::nav::symbols_schema(),
-                crate::nav::definition_schema(),
-                crate::nav::hover_schema(),
-                crate::nav::diagnostics_schema(),
-                crate::refactor::rename_schema(),
-                crate::refactor::replace_schema(),
-                crate::procs::tool_schema(),
-                crate::uistate::claude::tool_schema(),
-                crate::gittool::schema(),
-                crate::committool::schema(),
-            ];
-            if arm.tarae() {
-                tools.push(crate::edittool::schema());
-            }
-            Ok(json!({ "tools": tools.into_iter().map(annotated).collect::<Vec<_>>() }))
+            Ok(list(arm))
         }
         "tools/call" => {
             // (side by side with another call still unanswered? — `calls.rs`; `sized` sees it answered)
@@ -214,6 +191,35 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
         Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": crate::mcp::finish(rev, method, r) }),
         Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": e }),
     })
+}
+
+/// `tools/list`'s answer for a chat process started with edit tools `arm` — the same to the byte for a ping that
+/// keeps its cache warm (`keepwarm.rs`: the tools come first in the cache's prefix).
+pub fn list(arm: crate::edittool::Arm) -> Value {
+    let mut tools = vec![
+        crate::notes::tool_schema(),
+        run_tests_schema(),
+        run_schema(),
+        crate::plan::tool_schema(),
+        crate::seeing::tool_schema(),
+        crate::nav::references_schema(),
+        crate::nav::search_schema(),
+        crate::readtool::schema(),
+        crate::nav::symbols_schema(),
+        crate::nav::definition_schema(),
+        crate::nav::hover_schema(),
+        crate::nav::diagnostics_schema(),
+        crate::refactor::rename_schema(),
+        crate::refactor::replace_schema(),
+        crate::procs::tool_schema(),
+        crate::uistate::claude::tool_schema(),
+        crate::gittool::schema(),
+        crate::committool::schema(),
+    ];
+    if arm.tarae() {
+        tools.push(crate::edittool::schema());
+    }
+    json!({ "tools": tools.into_iter().map(annotated).collect::<Vec<_>>() })
 }
 
 /// A tool's schema with its annotations: a title, and whether it only reads or may change things the

@@ -59,9 +59,13 @@ pub const RISKY: [&str; 23] = [
 /// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
 /// trusted or not (said): they decide whose credentials Claude uses and who pays, what Claude's chat edits
 /// with (`llm.edit-tools`), whether what you use is counted (`features.count`) and whether your cards are kept
-/// (`llm.card-record`) — a project never does.
-pub const YOURS_ONLY: [&str; 6] = [
+/// (`llm.card-record`) and whether pings spend your usage to keep a conversation warm (`llm.keep-warm*`) — a
+/// project never does.
+pub const YOURS_ONLY: [&str; 9] = [
     "llm.card-record",
+    "llm.keep-warm",
+    "llm.keep-warm-min-tokens",
+    "llm.keep-warm-max",
     "llm.environment-key",
     "llm.billing",
     "llm.reviewer-billing",

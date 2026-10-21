@@ -529,6 +529,32 @@ pub fn ready(ed: &mut Editor, base: &str) -> Option<(String, String)> {
     Some(start)
 }
 
+/// Before a ping forks the chat's claude (`keepwarm.rs`): the project's settings read again now, on a worker, and
+/// `then` told whether they're what the gate last saw and the chat's claude was started as they hold now — a fork
+/// is a new claude reading the files as they are, and a key added since isn't held by the chat's `--settings`.
+/// The gate off (no project settings read, or tests'): they hold. None: no chat (closed, or closed meanwhile).
+pub fn still_holds(ed: &mut Editor, then: impl FnOnce(&mut Editor, Option<bool>) + Send + 'static) {
+    if ed.session.chat.is_none() {
+        return then(ed, None);
+    }
+    if !ed.claude_settings_gate || !ed.config.llm.chat_settings {
+        return then(ed, Some(true));
+    }
+    let Some(id) = ed.session.chat.as_ref().map(|c| c.settings.id) else { return then(ed, None) };
+    let places = Places::of(ed);
+    ed.events.jobs().spawn(move || {
+        let seen = places.look();
+        move |ed: &mut Editor| {
+            let c = ed.session.chat.as_ref().filter(|c| c.settings.id == id);
+            let holds = c.map(|c| {
+                let now = settings(crate::chat::CHAT_SETTINGS, &seen);
+                c.settings.seen.as_ref() == Some(&seen) && c.settings.started.as_ref() == Some(&now)
+            });
+            then(ed, holds)
+        }
+    });
+}
+
 /// Reads the project's settings on a worker — the chat's gate gets them.
 fn read(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_mut() else { return };

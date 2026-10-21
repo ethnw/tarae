@@ -196,6 +196,8 @@ pub struct Session {
     pub reloaded: usize,
     /// What its Claude's turns cost and how warm its cache is (`usage.rs`).
     pub usage: crate::usage::Usage,
+    /// Its conversation kept warm while it waits: marked by you, the ping under way (`keepwarm.rs`).
+    pub warm: crate::keepwarm::Warm,
     /// Who pays for its Claude — the chat's, the ask's, the reviewer's unless `llm.reviewer-billing` says
     /// (`billing.rs`): `llm.billing` when it's made, kept with it (`worktree::Kept`), `:session-billing` switches it.
     pub billing: crate::billing::Billing,
@@ -342,6 +344,7 @@ impl Session {
             looked_orders: Default::default(),
             reloaded: 0,
             usage: Default::default(),
+            warm: Default::default(),
             billing: Default::default(),
             billing_next: None,
             limit_asked: None,

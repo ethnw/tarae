@@ -9873,11 +9873,14 @@ fn draw_chat(
     let tabs_h = if editor.sessions.is_empty() { 0 } else { 2 };
     // ── What the conversation costs, under it all (once something was reported)
     let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
+    let now_ms = crate::usage::now_ms();
+    let warm = crate::keepwarm::said(&editor.session, &editor.config.llm, &editor.limits, now_ms);
     let usage_row = usage_spans(
         &editor.session.usage,
+        &warm,
         &editor.limits,
         editor.session.billing,
-        crate::usage::now_ms(),
+        now_ms,
         w,
         [accent, dim, faint, warn_fg],
     );
@@ -10554,12 +10557,15 @@ fn draw_chat(
 /// The chat's usage row: `● warm until 14:32  weekly 93 % · resets Tue 10:00  ctx 4% of 200k  turn ≈ API $0.0011
 /// read 8.2k write 75 in 10 out 30` — the widest form that fits in `w`, folding the split first, then the context
 /// and the cost, then the weekly window's reset (the cache stays; both said by the clock, so true however long
-/// nothing redraws). The weekly window shows while claude runs on the plan (`limits::on_plan`), from claude's
+/// nothing redraws). A ping that keeps it warm is said with the cache (`keepwarm.rs`) — ahead, `· keeps warm
+/// 14:27`, and after, `kept warm 14:27 · ≈$0.12` — a group of its own, folded last but the cache (its next
+/// first, to `kept ≈$0.12` last); a narrower row never shows a group a wider one doesn't. The weekly window shows while claude runs on the plan (`limits::on_plan`), from claude's
 /// start — before any turn. An API session's row starts with `api` (dim: a state, not something asking — D5),
 /// always there, never folded. None: nothing reported in this conversation yet, nor any limit, on the plan.
 /// Styles: accent, dim, faint, warning.
 fn usage_spans(
     u: &crate::usage::Usage,
+    warm: &crate::keepwarm::Said,
     limits: &crate::limits::Limits,
     billing: crate::billing::Billing,
     now_ms: u64,
@@ -10588,6 +10594,44 @@ fn usage_spans(
         }
         Cache::Cold { .. } => vec![sp("◦ ".into(), faint), sp("cold".into(), dim)],
         Cache::NotReported => vec![sp("cache not reported".into(), faint)],
+    };
+    // (the pings that keep it warm, while it is — `keepwarm.rs`: 2 what they kept and the next · 1 what they kept,
+    // else the next · 0 short, `kept ≈$0.09`; their cost an API estimate as the turn's, `≈`)
+    let warm_now = matches!(u.cache(now_ms), Cache::Warm { .. }) && reported;
+    let keep = |level: u8| -> Vec<Span> {
+        if !warm_now {
+            return Vec::new();
+        }
+        let mut v = Vec::new();
+        if let Some(last) = warm.kept.last() {
+            let n = warm.kept.len();
+            let costs: Option<f64> = warm.kept.iter().map(|k| k.cost).sum();
+            let cost = |v: &mut Vec<Span>| match costs {
+                Some(c) => v.extend([sp("≈".into(), faint), sp(dollars(c), dim)]),
+                None => v.push(sp("cost not reported".into(), faint)),
+            };
+            if level == 0 {
+                v.push(sp("kept ".into(), faint));
+                if n > 1 {
+                    v.push(sp(format!("×{n} "), dim));
+                }
+                cost(&mut v);
+                return v;
+            }
+            v.extend([sp("kept warm ".into(), faint), sp(until(last.at_ms), dim)]);
+            if n > 1 {
+                v.push(sp(format!(" ×{n}"), dim));
+            }
+            v.push(sp(" · ".into(), faint));
+            cost(&mut v);
+        }
+        if let Some(at) = warm.next_at.filter(|_| level > 1 || warm.kept.is_empty()) {
+            if !v.is_empty() {
+                v.push(sp(" · ".into(), faint));
+            }
+            v.extend([sp("keeps warm ".into(), faint), sp(until(at), dim)]);
+        }
+        v
     };
     // (the plan's weekly window: `weekly 93 % · resets Tue 10:00`, in the warning colour near its limit)
     let limit = |long: bool| -> Vec<Span> {
@@ -10619,10 +10663,16 @@ fn usage_spans(
             None => Vec::new(),
         }
     };
-    // (the API price by claude's own table, not what a subscription pays — #161: said so, `≈`)
+    // (the API price by claude's own table, not what a subscription pays — #161: said so, `≈`. Beside a ping's cost
+    // it says it's the turn's, short too: `turn ≈$1.81` — the word goes only with the number)
+    let pinged = warm_now && !warm.kept.is_empty();
     let cost = |long: bool| -> Vec<Span> {
         let Some(t) = turn else { return Vec::new() };
-        let label = if long { "turn ≈ API " } else { "≈" };
+        let label = match (long, pinged) {
+            (true, _) => "turn ≈ API ",
+            (false, true) => "turn ≈",
+            (false, false) => "≈",
+        };
         match t.cost {
             Some(c) => vec![sp(label.into(), faint), sp(dollars(c), dim)],
             None if long => vec![sp("cost not reported".into(), faint)],
@@ -10650,23 +10700,28 @@ fn usage_spans(
     // (the split's words go last — its letters are the hardest to read. Then, near the limit, the turn's cost and
     // the context give way before the weekly window's reset — when it's back is what matters then; else the reset
     // goes first)
+    // (each row narrower holds no group the one before didn't: one order of folds. The pings' group stays to the
+    // last but the cache — a ping is never silent — its next first, its time and form last)
     let urgent = weekly.is_some_and(crate::limits::pressing);
-    let mut tiers: Vec<[Option<Vec<Span>>; 5]> = vec![
-        [Some(cache(true)), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
-        [Some(cache(false)), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
-        [Some(cache(false)), Some(limit(true)), Some(context(false)), Some(cost(false)), Some(split(true))],
-        [Some(cache(false)), Some(limit(true)), Some(context(false)), Some(cost(false)), Some(split(false))],
-        [Some(cache(false)), Some(limit(true)), Some(context(false)), Some(cost(false)), None],
+    let (c, k) = (|| Some(cache(true)), |level: u8| Some(keep(level)));
+    let mut tiers: Vec<[Option<Vec<Span>>; 6]> = vec![
+        [c(), k(2), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
+        [c(), k(1), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
+        [c(), k(1), Some(limit(true)), Some(context(false)), Some(cost(false)), Some(split(true))],
+        [c(), k(1), Some(limit(true)), Some(context(false)), Some(cost(false)), Some(split(false))],
+        [c(), k(1), Some(limit(true)), Some(context(false)), Some(cost(false)), None],
     ];
     if urgent {
-        tiers.push([Some(cache(false)), Some(limit(true)), Some(context(false)), None, None]);
-        tiers.push([Some(cache(false)), Some(limit(true)), None, None, None]);
+        tiers.push([c(), k(1), Some(limit(true)), Some(context(false)), None, None]);
+        tiers.push([c(), k(1), Some(limit(true)), None, None, None]);
     } else {
-        tiers.push([Some(cache(false)), Some(limit(false)), Some(context(false)), Some(cost(false)), None]);
-        tiers.push([Some(cache(false)), Some(limit(false)), None, Some(cost(false)), None]);
+        tiers.push([c(), k(1), Some(limit(false)), Some(context(false)), Some(cost(false)), None]);
+        tiers.push([c(), k(1), Some(limit(false)), None, Some(cost(false)), None]);
     }
-    tiers.push([Some(cache(false)), Some(limit(false)), None, None, None]);
-    tiers.push([Some(cache(false)), None, None, None, None]);
+    tiers.push([c(), k(1), Some(limit(false)), None, None, None]);
+    tiers.push([c(), k(1), None, None, None, None]);
+    tiers.push([c(), k(0), None, None, None, None]);
+    tiers.push([c(), None, None, None, None, None]);
     let width = |v: &[Span]| v.iter().map(|s| s.text.width()).sum::<usize>();
     for tier in tiers {
         let groups: Vec<Vec<Span>> =
@@ -10684,6 +10739,18 @@ fn usage_spans(
         }
     }
     Some(Vec::new())
+}
+
+/// Tests: the chat's usage row for `ed`'s session at width `w`, with `warm`'s pings.
+#[cfg(test)]
+pub(crate) fn usage_row_for_test(
+    ed: &Editor,
+    warm: &crate::keepwarm::Said,
+    w: usize,
+) -> Vec<crate::markdown::Span> {
+    let now = crate::usage::now_ms();
+    usage_spans(&ed.session.usage, warm, &ed.limits, ed.session.billing, now, w, [Style::default(); 4])
+        .unwrap_or_default()
 }
 
 /// Answer markdown → rows. Code blocks as a "well" of editor bg (sunk a tone inside the card) — text and
@@ -12177,9 +12244,13 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         match p.current().map(|i| &i.action) {
             None => hints(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
             // (`$`: who pays for its Claude — every session, the one tarae started in too)
-            Some(Action::Session(0)) => {
-                hints(&[("enter", "switch"), ("n", "new"), ("$", "billing"), ("esc", "close")])
-            }
+            Some(Action::Session(0)) => hints(&[
+                ("enter", "switch"),
+                ("n", "new"),
+                ("w", "keep warm"),
+                ("$", "billing"),
+                ("esc", "close"),
+            ]),
             // (`x`: only on a session whose own build folder was measured — what it would drop, #219)
             Some(Action::Session(id))
                 if *id != editor.session.id && editor.session_store.build_dirs.contains_key(id) =>
@@ -12190,6 +12261,7 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
                     ("d", "end"),
                     ("b", "bring into its base"),
                     ("x", "drop its build"),
+                    ("w", "keep warm"),
                     ("$", "billing"),
                     ("esc", "close"),
                 ])
@@ -12199,6 +12271,7 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
                 ("n", "new"),
                 ("d", "end"),
                 ("b", "bring into its base"),
+                ("w", "keep warm"),
                 ("$", "billing"),
                 ("esc", "close"),
             ]),
@@ -12552,7 +12625,7 @@ mod tests {
         use crate::billing::Billing;
         let (u, limits) = (crate::usage::Usage::default(), crate::limits::Limits::default());
         let text = |b, w| {
-            let spans = usage_spans(&u, &limits, b, 0, w, [Style::default(); 4]);
+            let spans = usage_spans(&u, &Default::default(), &limits, b, 0, w, [Style::default(); 4]);
             spans.map(|v| v.into_iter().map(|s| s.text).collect::<String>())
         };
         assert_eq!(text(Billing::Api, 80).as_deref(), Some("api"));

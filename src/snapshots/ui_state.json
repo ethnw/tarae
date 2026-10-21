@@ -323,6 +323,12 @@
           "tokens": 12012,
           "window": 200000
         },
+        "keep_warm": {
+          "kept": [],
+          "marked": false,
+          "mode": "expected",
+          "next_at": null
+        },
         "last_turn": {
           "at_ms": 1791100000000,
           "cache_read": 9000,

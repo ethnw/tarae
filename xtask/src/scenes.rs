@@ -126,6 +126,56 @@ const SCENES: &[Scene] = &[
             "@2",
         ],
     },
+    // (keep-warm, `keepwarm.rs`: a big conversation on the 1h cache marked to be kept warm — the chat's last row says
+    // the ping ahead; then one asked for now — the row says what it kept and cost, its toast too)
+    Scene {
+        name: "warmnext",
+        claude: "warm",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "how is the map filled?",
+            "\r",
+            "@?ready for your review",
+            "@1",
+            "\x1b",
+            "@1",
+            ":",
+            "keep-warm",
+            "\r",
+            "@?will be kept warm",
+            "@1",
+        ],
+    },
+    Scene {
+        name: "warmkept",
+        claude: "warm",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "how is the map filled?",
+            "\r",
+            "@?ready for your review",
+            "@1",
+            "\x1b",
+            "@1",
+            ":",
+            "keep-warm",
+            "\r",
+            "@?will be kept warm",
+            ":",
+            "keep-warm now",
+            "\r",
+            "@?cache kept warm: read",
+            "@1",
+        ],
+    },
     // (a run outside the sandbox: its card)
     Scene {
         name: "card",
@@ -189,6 +239,9 @@ const BACKGROUNDS: [&str; 2] = ["dark", "light"];
 pub fn run(args: &[String]) -> Result<()> {
     if args.first().is_some_and(|a| a == "--claude") {
         let script = args.get(1).ok_or(USAGE)?;
+        // (a ping's fork of the conversation — `keepwarm.rs` — answers as one)
+        let fork = args.iter().any(|a| a == "--fork-session");
+        let script = if fork && script == "warm" { "warmfork" } else { script.as_str() };
         let stdin = io::stdin();
         let pause = Duration::from_millis(40);
         return claude(script, stdin.lock(), &mut io::stdout().lock(), pause)
@@ -395,11 +448,21 @@ fn demo_crate(dir: &Path) -> Result<()> {
 /// JSON has its keys sorted) with `script`'s turn on `out`, `pause` after each piece of text: `full` explains,
 /// reads and edits (its calls wait for tarae's answers); `mid` stops in the middle of its code block and waits
 /// for tarae to go; `midlist` stops in a list after a quote, on a line in Japanese; `ask` answers `space i` and
-/// stops mid-line; `card` asks to run outside the sandbox; `idle` never answers.
+/// stops mid-line; `card` asks to run outside the sandbox; `warm` answers on a big conversation's 1h cache, and
+/// `warmfork` as a ping's fork of it; `idle` never answers.
 fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Duration) -> io::Result<()> {
     let mut lines = input.lines();
     while let Some(line) = lines.next() {
-        if !line?.starts_with("{\"message\"") {
+        let line = line?;
+        // (a ping's fork sends its message once `initialize`'s answer names the credential: answered for it)
+        if script == "warmfork" && line.contains("\"tarae-init\"") {
+            let account = json!({"models": [], "account": {"apiKeySource": "none"}});
+            let response = json!({"subtype": "success", "request_id": "tarae-init", "response": account});
+            writeln!(out, "{}", json!({"type": "control_response", "response": response}))?;
+            out.flush()?;
+            continue;
+        }
+        if !line.starts_with("{\"message\"") {
             continue;
         }
         let mut turn = Turn { out: &mut *out, lines: &mut lines, pause };
@@ -409,6 +472,8 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "midlist" => turn.explain_listed()?,
             "ask" => turn.rewrite()?,
             "card" => turn.ask_outside()?,
+            "warm" => turn.warm(false)?,
+            "warmfork" => turn.warm(true)?,
             _ => {}
         }
     }
@@ -510,6 +575,35 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         }
         std::thread::sleep(Duration::from_secs(60));
         Ok(())
+    }
+
+    /// A turn of a big conversation (`warm`): its init, a request that wrote 181k tokens to the 1h cache, a short
+    /// answer, its result — or (`fork`) a ping's fork of it: the request read them, its total its own (`modelUsage`
+    /// counting its request alone, as a fork's does while the chat's claude runs).
+    fn warm(&mut self, fork: bool) -> io::Result<()> {
+        let id = if fork { "fork-demo" } else { "conv-demo" };
+        self.line(
+            json!({"type": "system", "subtype": "init", "session_id": id, "model": "claude-opus-5-5"}),
+        )?;
+        self.line(json!({"type": "system", "subtype": "status", "status": "requesting"}))?;
+        let (read, write, output) = if fork { (181_200, 410, 4) } else { (0, 181_200, 120) };
+        let usage = json!({"input_tokens": 3, "cache_read_input_tokens": read, "cache_creation_input_tokens": write,
+            "cache_creation": {"ephemeral_1h_input_tokens": write}, "output_tokens": output});
+        let message = json!({"id": format!("{id}-1"), "model": "claude-opus-5-5", "usage": usage});
+        self.line(json!({"type": "stream_event", "event": {"type": "message_start", "message": message}}))?;
+        match fork {
+            true => self.text("ok")?,
+            false => self.words(
+                "The map is filled in one pass over the strands; the change is ready for your review.",
+            )?,
+        }
+        let model = json!({"claude-opus-5-5": {"inputTokens": 3, "cacheReadInputTokens": read,
+            "cacheCreationInputTokens": write, "outputTokens": output, "contextWindow": 1_000_000}});
+        let cost = if fork { 0.0911 } else { 1.8125 };
+        self.line(
+            json!({"type": "result", "result": "ok", "session_id": id, "total_cost_usd": cost, "usage": usage,
+            "modelUsage": model}),
+        )
     }
 
     fn ask_outside(&mut self) -> io::Result<()> {

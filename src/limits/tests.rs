@@ -493,6 +493,7 @@ fn near_the_limit_the_reset_outlasts_the_turns_cost() {
             counts,
             total_cost: Some(0.018),
             models,
+            alone: None,
             ms: None,
             at_ms: now,
         });

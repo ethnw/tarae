@@ -998,6 +998,94 @@ fn chat_prompt_tokens_with_a_toast_up() {
     eprintln!("TOKENS first request's prompt: {:?}", p.first());
 }
 
+/// Keep-warm (`keepwarm.rs`): a ping of a fork of the conversation reads the cache the chat's turn wrote — its
+/// request's cache read is at least 95 % of the chat's last prompt, so the fork's prefix (tools, system prompt,
+/// history) is the chat's to the byte. Asked for now (`:keep-warm now`) rather than waited for 55 minutes; the
+/// state says it, at its own cost (the fork's total less the chat's).
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn a_ping_reads_the_chats_cache() {
+    if !have("claude") {
+        return;
+    }
+    let (sb, out) = teed_chat("keep-warm");
+    sb.write("notes.txt", "alpha\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    chat_turn(&mut t, "Reply with the single word ok. Use no tools.");
+    let results = |stream: &str| -> Vec<serde_json::Value> {
+        let lines = stream.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
+        lines.filter(|v| v["type"] == "result").collect()
+    };
+    let chat = std::fs::read_to_string(&out).unwrap_or_default();
+    let prompt = *prompts(&chat).last().expect("the chat's requests in its stream");
+    let conv = results(&chat).last().expect("the chat's result")["session_id"].clone();
+    t.send("\x1b");
+    t.wait_for("back in the editor", |s| !s.contains("enter send"));
+    t.command("keep-warm now");
+    let stream = wait_file_until(&out, "had the fork's result", LIVE_TIMEOUT, |s| {
+        results(s).iter().any(|r| r["session_id"] != conv)
+    });
+    let fork = results(&stream).into_iter().find(|r| r["session_id"] != conv).unwrap();
+    let n = |k: &str| fork["usage"][k].as_u64().unwrap_or(0);
+    let (read, write) = (n("cache_read_input_tokens"), n("cache_creation_input_tokens"));
+    let chat_total = results(&chat).last().unwrap()["total_cost_usd"].clone();
+    eprintln!(
+        "KEEPWARM chat prompt {prompt} total {chat_total}, fork read {read} wrote {write} total {} usage {}",
+        fork["total_cost_usd"], fork["modelUsage"]
+    );
+    assert!(read * 100 >= prompt * 95, "the fork read {read} of the chat's {prompt} (wrote {write})");
+    let kept = |s: &serde_json::Value| {
+        let sessions = s["sessions"].as_array().cloned().unwrap_or_default();
+        sessions.into_iter().find_map(|x| x["usage"]["keep_warm"]["kept"].as_array()?.first().cloned())
+    };
+    let state = t.wait_state("the state says it", |s| kept(s).is_some());
+    let k = kept(&state).unwrap();
+    eprintln!("KEEPWARM kept {k}");
+    assert_eq!((k["why"].as_str(), k["cache_read"].as_u64()), (Some("asked"), Some(read)));
+    let (own, total) = (k["cost"].as_f64().expect("its cost"), fork["total_cost_usd"].as_f64().unwrap());
+    // (the chat's process runs: claude restores none of the conversation's cost into the fork's total)
+    assert!(own > 0.0 && (own - total).abs() < 1e-12, "its own cost {own}, the fork's total {total}");
+}
+
+/// Keep-warm while a turn waits on you (reviewer note 1): Claude's edit waits for its review, its turn unfinished —
+/// the transcript ends in a `tool_use` with no result, and no request goes until it's answered. A fork of that reads
+/// the cache the turn's last request wrote: at least 95 % of that request's prompt.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn a_ping_of_a_turn_waiting_on_a_review_reads_its_cache() {
+    if !have("claude") {
+        return;
+    }
+    let (sb, out) = teed_chat("keep-warm-waiting");
+    sb.write("notes.txt", "alpha\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    t.send(" l");
+    t.wait_for("the chat, focused", |s| s.contains("enter send"));
+    t.send("With your edit tool, change alpha to beta in notes.txt. Do nothing else.\r");
+    t.wait_state("its edit waiting for review, with the keys", |s| s.to_string().contains("\"edit-review\""));
+    let lines = |stream: &str| -> Vec<serde_json::Value> {
+        stream.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect()
+    };
+    let chat = std::fs::read_to_string(&out).unwrap_or_default();
+    let prompt = *prompts(&chat).last().expect("the chat's requests in its stream");
+    let init = lines(&chat).into_iter().find(|v| v["type"] == "system" && v["subtype"] == "init");
+    let conv = init.expect("the chat's init")["session_id"].clone();
+    t.command("keep-warm now");
+    let fork_result =
+        |s: &str| lines(s).into_iter().find(|v| v["type"] == "result" && v["session_id"] != conv);
+    let stream = wait_file_until(&out, "had the fork's result", LIVE_TIMEOUT, |s| fork_result(s).is_some());
+    let fork = fork_result(&stream).unwrap();
+    let n = |k: &str| fork["usage"][k].as_u64().unwrap_or(0);
+    let (read, write) = (n("cache_read_input_tokens"), n("cache_creation_input_tokens"));
+    eprintln!(
+        "KEEPWARM waiting: chat's last prompt {prompt}, fork read {read} wrote {write} out {} — {} {}",
+        n("output_tokens"),
+        fork["subtype"],
+        fork["result"]
+    );
+    assert!(read * 100 >= prompt * 95, "the fork read {read} of the chat's {prompt} (wrote {write})");
+}
+
 /// Token cost of one `ui` call: the second request's prompt less the first's is the call and its answer.
 #[test]
 #[ignore = "live: run with `cargo live` (uses Claude)"]

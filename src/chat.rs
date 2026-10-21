@@ -449,6 +449,12 @@ pub struct Chat {
     /// The edit tools its claude was started with (`llm.edit-tools`): what `tools/list` lists — a `:set` since
     /// takes effect with the next chat process.
     pub edit_tools: crate::edittool::Arm,
+    /// The command line its claude was last started with — its config and the arguments after them: a ping that
+    /// keeps the conversation's cache warm forks it with the same (`keepwarm::command`).
+    pub launched: Option<(llm::LlmConfig, Vec<String>)>,
+    /// The model and effort its claude runs on now (`llm.model`, `llm.effort`'s form): as started, then as `:model`
+    /// and `:effort` switched this chat — they save the setting for all, but switch only the chat in front.
+    pub runs_on: (Option<String>, String),
     /// What its conversation ran on before a switch of billing, model or effort since the last message went
     /// (`switchcost.rs`) — the line over the input says what the next one costs; sending clears it.
     pub switched: Option<crate::switchcost::Setup>,
@@ -637,6 +643,8 @@ impl Chat {
             settings: Default::default(),
             billing: None,
             edit_tools: crate::edittool::Arm::Tarae,
+            launched: None,
+            runs_on: (None, String::new()),
             switched: None,
             money: None,
         }
@@ -1206,6 +1214,8 @@ fn ensure_proc(ed: &mut Editor) {
         }
     };
     c.billing = Some(billing);
+    c.runs_on = (cfg.model.clone(), cfg.effort.clone());
+    c.launched = Some((cfg, extra.iter().map(|s| s.to_string()).collect()));
     let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     // tarae's MCP server (the note tool) — registered before anything else is said
     let _ = stdin.send(llm::initialize_message(&["tarae"]));

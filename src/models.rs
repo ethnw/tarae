@@ -162,14 +162,19 @@ pub fn set(ed: &mut Editor, value: &str) -> Result<(), String> {
     ed.switching();
     save(ed, "llm.model", if value == "default" { "" } else { &value })?;
     crate::chat::request(ed, json!({ "subtype": "set_model", "model": value }));
-    // (what answers is known again from the next answer — until then the title says what was asked for)
+    // (what answers is known again from the next answer — until then the title says what was asked for; what it
+    // runs on now is this chat's — a ping that keeps it warm forks on it, `keepwarm.rs`)
     if let Some(c) = ed.session.chat.as_mut() {
         c.model.clear();
+        c.runs_on.0 = Some(value.clone()).filter(|v| v != "default");
     }
     // An effort the new model doesn't take goes (it'd be refused)
     let effort = ed.config.llm.effort.clone();
     if m.is_some_and(|m| !m.resolved.is_empty() && !effort.is_empty() && !m.efforts.contains(&effort)) {
         save(ed, "llm.effort", "")?;
+        if let Some(c) = ed.session.chat.as_mut() {
+            c.runs_on.1.clear();
+        }
     }
     let name = label(ed).or_else(|| m.map(|m| m.name.clone())).unwrap_or(value);
     let cost = ed.switched_said();
@@ -188,6 +193,9 @@ pub fn set_effort(ed: &mut Editor, level: &str) -> Result<(), String> {
         ed,
         json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } }),
     );
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.runs_on.1 = level.to_string();
+    }
     let what = if level.is_empty() { "the model's default".to_string() } else { level.to_string() };
     let cost = ed.switched_said();
     ed.set_success(format!("Effort: {what}{cost}"));

@@ -409,6 +409,19 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::edits::at_end_toggle(editor, want);
             Ok(())
         }
+        "keep-warm" => {
+            // (on · off · nothing: flip)
+            let arg = rest.trim();
+            if arg == "now" {
+                return crate::keepwarm::now(editor);
+            }
+            let want = ["off", "on"].iter().position(|w| *w == arg).map(|i| i == 1);
+            if want.is_none() && !arg.is_empty() {
+                return Err(format!("keep-warm: on, off or now, not {arg}"));
+            }
+            crate::keepwarm::mark(editor, want);
+            Ok(())
+        }
         "note-close" => crate::notes::close_here(editor),
         "chat-resume" => {
             match rest.split_whitespace().next() {

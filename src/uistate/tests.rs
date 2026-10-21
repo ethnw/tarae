@@ -888,6 +888,7 @@ fn usage_turn(u: &mut crate::usage::Usage) {
         counts: Counts::of(&usage),
         total_cost: Some(0.0213),
         models: vec![(model, Some(200_000))],
+        alone: None,
         ms: Some(4200),
         at_ms: 1_791_100_000_000,
     });
