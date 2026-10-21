@@ -12965,7 +12965,11 @@ mod tests {
         let mut vt = vt100::Parser::new(30, 100, 0);
         vt.process(&bytes);
         let rows: Vec<String> = vt.screen().rows(0, 100).collect();
-        let start = |r: &str| r.chars().position(|c| c != ' ' && c != '▎').unwrap_or(0);
+        // (where a row's text starts inside the card, from its own left edge: what's drawn beside it — the start
+        // screen's seal — isn't the card's)
+        let (cx, _, cw, _) = ed.screen.offer_card.expect("the card drawn");
+        let start =
+            |r: &str| r.chars().skip(cx).take(cw).position(|c| c != ' ' && c != '▎').map_or(0, |i| cx + i);
         let at = rows.iter().position(|r| r.contains("editor.restart-binary")).expect("the setting");
         let key = rows[at].find("editor.restart-binary").map(|b| rows[at][..b].chars().count()).unwrap();
         assert_eq!(start(&rows[at + 1]), key + 4, "hangs under it:\n{}\n{}", rows[at], rows[at + 1]);
