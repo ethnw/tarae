@@ -540,7 +540,10 @@ Built as below (`uistate/panels.rs`, `uistate/watch.rs`), with these choices:
   id when it starts.
 - **The gone ring holds cards** (how each went: `answered y`, `dropped — its turn ended`, `lost`, else `gone`).
   A run that ended stays in `runs` until another takes its panel.
-- **Every event goes out after the frame that showed it** (explicit ones too), stamped with that frame.
+- **Every event goes out at the end of the batch of events it came in** (explicit ones too): after the frame
+  that showed it, stamped with that frame — or, when the batch drew none (a card parked in a session behind),
+  at once, stamped with the last frame drawn (`uistate::undrawn`; watchlate, 2026-10-19: told only after
+  frames, a grant card behind was heard 20 minutes late, at the person's next key).
 - **A panel under a picker lists no rows** (`covered_by_picker`): the side panel's and the rail's rows were
   drawn, then covered — the snapshot test caught the state listing them.
 - `tarae state --watch [kinds]` prints the `said` lines (`--json`: the events); a watch's first line is

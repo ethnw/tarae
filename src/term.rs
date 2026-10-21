@@ -201,7 +201,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
         if whole {
             screen.invalidate();
         }
-        draw = editor.frame_due(unchanged);
+        draw = batch_done(editor, unchanged);
     }
     // (quitting waited for them already — this covers any other way out)
     editor.flush_saves();
@@ -236,8 +236,18 @@ pub(crate) fn handle_batch(editor: &mut Editor, ev: Event, until: std::time::Ins
     (unchanged, whole)
 }
 
+/// After a batch of events (`unchanged`: every one said it changed nothing on screen): whether a frame is drawn
+/// — and when none is, the UI state's watchers hear what changed all the same (`uistate::undrawn`).
+pub(crate) fn batch_done(editor: &mut Editor, unchanged: bool) -> bool {
+    let draw = editor.frame_due(unchanged);
+    if !draw {
+        crate::uistate::undrawn(editor);
+    }
+    draw
+}
+
 /// Handles `ev` — whether it said it changed nothing on screen.
-fn handle_noting(editor: &mut Editor, ev: crate::event::Event) -> bool {
+pub(crate) fn handle_noting(editor: &mut Editor, ev: crate::event::Event) -> bool {
     editor.unchanged = false;
     editor.handle_event(ev);
     std::mem::take(&mut editor.unchanged)

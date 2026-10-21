@@ -1929,6 +1929,16 @@ impl ReviewReport {
     }
 }
 
+/// A batch of events that drew no frame (`term::batch_done`): while someone watches, what changed is told now —
+/// a card parked in a session behind, one gone there, a turn begun there, a run's step (watchlate: a grant card
+/// was heard 20 minutes late, at the person's next key's frame). Nobody watching: a branch, and nothing woken.
+/// Snapshots asked wait for a frame (`frame_owed` draws one for them).
+pub fn undrawn(ed: &mut Editor) {
+    if ed.ui_watch.watching() {
+        watch::after_frame(ed);
+    }
+}
+
 /// After each frame (`term::render`): the gone ring and the watchers (`watch.rs`), then the snapshots waiting
 /// for it. Nobody asking — a branch each.
 pub fn after_frame(ed: &mut Editor) {

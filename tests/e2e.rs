@@ -1149,7 +1149,9 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     let held = connected(&sock);
     idle(&mut t, "a file, a driver connected");
     drop(held);
-    // …and one watching: told only of changes, after frames drawn anyway — none while idle
+    // …and one watching: told only of changes, at the end of batches of events handled anyway (drawn or not)
+    // — none while idle (`procs` too: a look's changes since one from before it came aren't its — an earlier
+    // scene's gits ending were, 4 runs in 5, once the fix sent them at once: watchlate)
     let watching = t.watch("");
     idle(&mut t, "a file, a watcher connected");
     assert_eq!(watching.events().len(), 1, "only its `watching` line: {:#?}", watching.events());
@@ -1171,6 +1173,12 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     t.send(" l");
     t.wait_text("Ask about");
     idle(&mut t, "the chat");
+    // (watchlate: watchers are told after batches that drew nothing too — with the most going on, nothing
+    // changing still sends no line and draws no frame)
+    let watching = t.watch("");
+    idle(&mut t, "the chat, a watcher connected");
+    assert_eq!(watching.events().len(), 1, "only its `watching` line: {:#?}", watching.events());
+    drop(watching);
     drop(t);
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("two");

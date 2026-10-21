@@ -1342,6 +1342,12 @@ fn ensure_proc(ed: &mut Editor) {
     crate::limits::ask_chat(ed);
 }
 
+/// `on_event` for other modules' tests: an event of chat process `generation`'s stream, as `llm::pump` sends it.
+#[cfg(test)]
+pub(crate) fn stream_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
+    on_event(ed, generation, ev)
+}
+
 fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
     // (a failure for want of a login, with a key tarae left out: said with it, and what passes it)
     let login_hint = match &ev {

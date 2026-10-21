@@ -497,13 +497,22 @@ pub struct Sample {
     /// This tarae is a screenshot's (`TARAE_SHOT_NO_DISK`, which only `cargo xtask shot` sets): `disk_check` says
     /// nothing of the host's free space.
     pub shot: bool,
+    /// When it was taken.
+    pub at: Instant,
 }
 
 impl Sample {
     /// A look of these processes, as the sampling thread sends one (tests).
     #[cfg(test)]
     pub fn of(procs: Vec<(Os, Option<f32>)>) -> Sample {
-        Sample { procs, took: Duration::ZERO, usual: None, free: Vec::new(), shot: false }
+        Sample {
+            procs,
+            took: Duration::ZERO,
+            usual: None,
+            free: Vec::new(),
+            shot: false,
+            at: crate::clock::now(),
+        }
     }
 }
 
@@ -608,7 +617,7 @@ impl Sampler {
             .collect();
         self.prev = procs.iter().map(|(o, _)| ((o.pid, o.started), o.cpu)).collect();
         self.at = Some(t0);
-        Sample { procs, took: t0.elapsed(), usual: None, free: Vec::new(), shot: false }
+        Sample { procs, took: t0.elapsed(), usual: None, free: Vec::new(), shot: false, at: t0 }
     }
 }
 
@@ -1325,6 +1334,8 @@ pub struct Procs {
     /// What the last look cost · when it was (the UI state says how long ago — #143).
     pub took: Option<Duration>,
     pub looked: Option<Instant>,
+    /// When the last look was taken (its sample's time): what the next one's changes are since.
+    sampled: Option<Instant>,
     pub checks: Vec<Check>,
     /// cpu ≥ `BUSY_PCT` since · the most it took so far in its first `SETTLE` (and whether that's kept) ·
     /// servers serving no file since · zombies seen last look.
@@ -1693,6 +1704,14 @@ impl Editor {
         self.procs_took_keys();
     }
 
+    /// A watcher of `procs` came (`ui_watch_add`): a look now — what it's told is since a look after it came
+    /// (`ui_said_since`), so its first is a look away, not two. No sampling thread (tests): nothing.
+    pub(crate) fn procs_look_watched(&mut self) {
+        if let Some(tx) = &self.procs.wake {
+            let _ = tx.send(Wake::Now);
+        }
+    }
+
     pub(crate) fn procs_wake(&mut self, w: Wake) {
         let open = matches!(w, Wake::Open(true) | Wake::Now);
         if let Some(tx) = &self.procs.wake {
@@ -1923,6 +1942,7 @@ impl Editor {
         }
         self.procs.rows = rows;
         self.procs.took = Some(s.took);
+        self.procs.sampled = Some(s.at);
         self.procs.looked = Some(Instant::now());
         if learned {
             self.procs_keep_usual();
@@ -1964,8 +1984,10 @@ impl Editor {
         }
         said.extend(found.iter().map(|c| format!("▲ {c}")));
         said.extend(over.iter().map(|c| format!("no longer: {c}")));
-        self.ui_said(serde_json::json!({ "event": "procs", "started": started, "ended": ended,
-            "found": found, "over": over, "said": format!("procs — {}", said.join(" · ")) }));
+        // (since the look before: a watcher that came after it isn't told — it may be from before it watched)
+        let ev = serde_json::json!({ "event": "procs", "started": started, "ended": ended,
+            "found": found, "over": over, "said": format!("procs — {}", said.join(" · ")) });
+        self.ui_said_since(ev, self.procs.sampled);
     }
 
     /// The status line's mark isn't what was drawn last.
@@ -2349,6 +2371,7 @@ mod tests {
             usual: None,
             free: Vec::new(),
             shot: false,
+            at: crate::clock::now(),
         }
     }
 
@@ -2377,7 +2400,8 @@ mod tests {
     }
 
     /// #143: what `:procs` lists is in the UI state (JSON and text) as of its last look, and a watcher of
-    /// `procs` hears what a look found changed — a process started, one ended — and nothing when nothing did.
+    /// `procs` hears what a look found changed — a process started, one ended — and nothing when nothing did;
+    /// nor what a look found changed since a look from before it came (watchlate: an earlier scene's gits).
     #[test]
     fn procs_are_in_the_state_and_a_watcher_hears_what_changed() {
         let mut ed = Editor::new(crate::config::Config::default());
@@ -2398,29 +2422,33 @@ mod tests {
         let text = s.text();
         assert!(text.contains("procs: 2 processes · 20 MB"), "{text}");
         assert!(text.contains("\n  50001 sleep · cpu 1.0% · 10 MB\n"), "{text}");
-        // A watcher of procs: the next look's changes, said once
+        // A watcher of procs: the look after it came says what changed since one from before — not told
         let (tx, rx) = std::sync::mpsc::sync_channel(crate::uistate::watch::UNREAD);
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         ed.ui_watch_add(crate::uistate::watch::Watcher { tx, kinds: vec!["procs".into()], overflowed: flag });
         let gone = Os { zombie: true, ..os(50_002, me, "cargo") };
         ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone.clone()]));
         crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
-        let e: Vec<serde_json::Value> = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert_eq!(
-            (e[0]["started"][0].as_str(), e[0]["ended"][0].as_str()),
-            (Some("cargo (50002)"), Some("sleep (50001)"))
-        );
-        assert_eq!(e[0]["said"], "procs — started: cargo (50002) · ended: sleep (50001)");
+        let e: Vec<String> = rx.try_iter().collect();
+        assert!(e.is_empty(), "from before it came: {e:?}");
         assert!(ed.ui_state().text().contains("50002 cargo · cpu 1.0% · 10 MB · ended, not reaped"));
-        // Still unreaped at the next look: the check that found it, said
-        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone.clone()]));
+        // The next look's changes, said once — one started, and the unreaped one still there: the check that
+        // found it
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone.clone(), os(50_003, me, "sleep")]));
         crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
         let e: Vec<serde_json::Value> = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
         assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(
+            (e[0]["started"][0].as_str(), e[0]["ended"].as_array().map(Vec::len)),
+            (Some("sleep (50003)"), Some(0))
+        );
         assert!(e[0]["found"][0].as_str().unwrap().starts_with("cargo (pid 50002) ended"), "{e:?}");
+        assert!(
+            e[0]["said"].as_str().unwrap().starts_with("procs — started: sleep (50003) · ▲ cargo"),
+            "{e:?}"
+        );
         // Nothing new: nothing said
-        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone]));
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone, os(50_003, me, "sleep")]));
         crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
         let e: Vec<String> = rx.try_iter().collect();
         assert!(e.is_empty(), "{e:?}");
@@ -2843,6 +2871,7 @@ mod tests {
             usual: None,
             free: Vec::new(),
             shot: false,
+            at: crate::clock::now(),
         };
         let k = |pid, kind, title: &str, session| Known {
             pid,

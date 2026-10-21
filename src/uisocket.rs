@@ -185,8 +185,8 @@ const KINDS: [&str; 11] = [
     "keys", "cards", "sessions", "reviewer", "review", "turns", "runs", "toasts", "usage", "procs", "sandbox",
 ];
 
-/// `{"watch":["keys","cards",…]}`: this connection is told what changes, a JSON line an event, from the frame
-/// after it's registered on (`uistate/watch.rs`). It ends when the reader goes — or reads too slowly: then its
+/// `{"watch":["keys","cards",…]}`: this connection is told what changes, a JSON line an event, from the batch
+/// of events it's registered in on (`uistate/watch.rs`). It ends when the reader goes — or reads too slowly: then its
 /// last line says so.
 fn watch(mut out: UnixStream, kinds: &Value, line: &[u32], tx: &crate::event::Tx) {
     let kinds: Vec<String> = match kinds {
@@ -212,7 +212,7 @@ fn watch(mut out: UnixStream, kinds: &Value, line: &[u32], tx: &crate::event::Tx
         let at = (ed.frames, ed.input_seq);
         ed.ui_watch_add(crate::uistate::watch::Watcher { tx: events, kinds: asked, overflowed: flag });
         let _ = ok.send(Ok(at));
-        // (no frame for it: what it's told comes with the frames drawn anyway)
+        // (no frame for it: what it's told comes at the end of each batch of events, drawn or not)
         ed.unchanged = true;
     };
     if tx.send(crate::event::Event::Job(Box::new(job))).is_err() {

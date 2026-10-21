@@ -1948,6 +1948,63 @@ fn perf_ui_state_busy_scene() {
     frame(&mut ed);
 }
 
+/// A session behind streaming its answer while someone watches (watchlate: watchers are told after a batch that
+/// draws nothing too, the whole state built and diffed): what one quiet batch costs — a word of the answer, as
+/// the main loop takes it (`Event::For` → the chat's stream → `term::batch_done`), ~40 a second at
+/// `llm::pump`'s 25 ms — with no watcher, with one of every kind, and a frame of the same scene beside them.
+/// The busy scene, median of 200. For `cargo perf`. (2026-10-19, M-series, perf profile: 1.8 µs alone, 10.1
+/// watched, a frame 85.6.) Its budget is a frame's worth: past it, build only what the watchers' kinds need.
+#[test]
+fn perf_ui_state_quiet_batch_watched() {
+    if crate::test_results::unoptimized("uistate::tests::perf_ui_state_quiet_batch_watched") {
+        return;
+    }
+    let mut ed = busy_scene();
+    let behind = ed.sessions.iter().find(|l| l.name == "fix-login").unwrap().id;
+    let generation = {
+        let mut c = crate::chat::Chat::new();
+        // (a turn under way: its words come in)
+        c.state = crate::chat::State::Thinking;
+        let g = c.generation();
+        ed.session_by_id(behind).unwrap().chat = Some(c);
+        g
+    };
+    frame(&mut ed);
+    let batch = move |ed: &mut Editor| {
+        let word = move |ed: &mut Editor| {
+            crate::chat::stream_event(ed, generation, crate::llm::StreamEv::Text("word ".into()))
+        };
+        let unchanged = crate::term::handle_noting(ed, crate::event::Event::For(behind, Box::new(word)));
+        assert!(!crate::term::batch_done(ed, unchanged), "a word behind draws nothing");
+    };
+    let median = |ed: &mut Editor, f: &dyn Fn(&mut Editor)| {
+        f(ed);
+        let mut v: Vec<Duration> = (0..200)
+            .map(|_| {
+                let t = Instant::now();
+                f(ed);
+                t.elapsed()
+            })
+            .collect();
+        v.sort();
+        v[v.len() / 2].as_secs_f64() * 1e6
+    };
+    let alone = median(&mut ed, &batch);
+    let (tx, rx) = std::sync::mpsc::sync_channel(watch::UNREAD);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ed.ui_watch_add(watch::Watcher { tx, kinds: Vec::new(), overflowed: flag });
+    let watched = median(&mut ed, &batch);
+    let told = rx.try_iter().count();
+    assert_eq!(told, 0, "a word behind changes nothing a watcher hears");
+    let drawn = median(&mut ed, &|ed: &mut Editor| frame(ed));
+    let lines = [
+        format!("PERF ui_state_quiet_batch_us {alone:.1} budget=20 noise=5"),
+        format!("PERF ui_state_quiet_batch_watched_us {watched:.1} budget=85 noise=5"),
+        format!("PERF ui_state_busy_scene_frame_us {drawn:.1} budget=5000 noise=5"),
+    ];
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), (lines.join("\n") + "\n").as_bytes());
+}
+
 /// What a `ui` call costs Claude on the busy scene (3 sessions, 3 cards, an edit's review, a task, toasts):
 /// its answer within the design's ~1.5 KB, the context's line a fraction of it — and nothing of the other
 /// sessions' cards in either.

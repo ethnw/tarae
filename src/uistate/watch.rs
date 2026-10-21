@@ -1,12 +1,13 @@
 //! Watching the UI state (phase 2): a driver connected with `{"watch":[…]}` gets an event a line as things
-//! change, instead of asking again and again. After each frame, a small summary — where the keys go, the
+//! change, instead of asking again and again. After each frame — and after each batch of events that drew none
+//! (`uistate::undrawn`: a card parked behind draws nothing) — a small summary — where the keys go, the
 //! cards (id, rev, where they are), what each session is doing, the toasts — is compared with the last one
 //! sent, and what changed goes out (`keys`, `card-up`, `session`, `toast`); what a diff can't tell is said
 //! where it happens (`card-gone` and how, `turn`, `run` — every step of a run's trace —, `sandbox`). Each carries
 //! `frame`, `input` and `said`, one line in plain words.
 //!
 //! Nobody watching: one branch a frame (and the gone ring's few ids). A watcher never wakes tarae or makes
-//! it draw — events go out after frames drawn anyway. A watcher that doesn't read is let go after `UNREAD`
+//! it draw — events go out after the batches of events handled anyway. A watcher that doesn't read is let go after `UNREAD`
 //! events, told so on its last line.
 //!
 //! The gone ring (`Editor::ui_gone`): the last `GONE_KEPT` cards that went, and how — answered `y`, `n`,
@@ -48,12 +49,14 @@ struct Summary {
     toasts: Vec<(String, &'static str, String)>,
 }
 
-/// The editor's watchers, what was last sent, and what was said since (explicit events, before their frame).
+/// The editor's watchers (each with when it came), what was last sent, and what was said since (explicit
+/// events, before their batch's end — each with the time what it tells of began, when that's earlier: a
+/// look's diff).
 #[derive(Default)]
 pub struct Watch {
-    pub watchers: Vec<Watcher>,
+    watchers: Vec<(Watcher, std::time::Instant)>,
     last: Option<Summary>,
-    pending: Vec<Value>,
+    pending: Vec<(Value, Option<std::time::Instant>)>,
 }
 
 /// A card that went: its id, title, how, and when — and whose session it was (Claude's level lists only its
@@ -185,31 +188,27 @@ impl Editor {
         self.ui_card_how.insert(id, how.into());
     }
 
-    /// An event only the code that made it can tell (`turn`): kept for the next frame's watchers.
+    /// An event only the code that made it can tell (`turn`): kept for the watchers, told at the batch's end.
     pub(crate) fn ui_said(&mut self, ev: Value) {
+        self.ui_said_since(ev, None);
+    }
+
+    /// `ui_said` for an event about what changed since `from` (a `:procs` look's, since the look before): told
+    /// only to the watchers there since then — a watcher hears nothing of before it came (`uisocket::watch`).
+    pub(crate) fn ui_said_since(&mut self, ev: Value, from: Option<std::time::Instant>) {
         if self.ui_watch.watching() {
-            self.ui_watch.pending.push(ev);
+            self.ui_watch.pending.push((ev, from));
         }
     }
 
     /// Every frame: the cards that went since the last one go to the gone ring, with how (said where they
     /// went, else just `gone`) — and to watchers as `card-gone`.
     fn cards_sync(&mut self) {
-        let front = self.session.id;
-        let all = || {
-            std::iter::once(&self.session)
-                .chain(&self.sessions)
-                .flat_map(|l| l.parked.iter().map(move |o| (o, l.id)))
-                .chain(self.offers.iter().map(|o| (o, front)))
-                .map(|(o, l)| (o.id, o.title.as_str(), l))
-        };
-        let same = self.ui_cards_seen.len() == all().count()
-            && all().all(|(id, ..)| self.ui_cards_seen.iter().any(|s| s.0 == id));
-        if same {
+        if self.cards_same() {
             return;
         }
         let now: Vec<(u64, String, crate::event::SessionId)> =
-            all().map(|(id, t, l)| (id, t.to_string(), l)).collect();
+            self.cards_all().map(|(id, t, l)| (id, t.to_string(), l)).collect();
         let went: Vec<(u64, String, crate::event::SessionId)> =
             self.ui_cards_seen.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)).cloned().collect();
         self.ui_cards_seen = now;
@@ -235,12 +234,32 @@ impl Editor {
         self.ui_card_how.retain(|id, _| ids.contains(id));
     }
 
-    /// A connection watches (`uisocket.rs`): from the frame after this on, it's told what changes.
+    /// Every card, up or parked: (id, title, its session).
+    fn cards_all(&self) -> impl Iterator<Item = (u64, &str, crate::event::SessionId)> {
+        let front = self.session.id;
+        std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .flat_map(|l| l.parked.iter().map(move |o| (o, l.id)))
+            .chain(self.offers.iter().map(move |o| (o, front)))
+            .map(|(o, l)| (o.id, o.title.as_str(), l))
+    }
+
+    /// Whether the cards are the ones `cards_sync` saw last.
+    fn cards_same(&self) -> bool {
+        self.ui_cards_seen.len() == self.cards_all().count()
+            && self.cards_all().all(|(id, ..)| self.ui_cards_seen.iter().any(|s| s.0 == id))
+    }
+
+    /// A connection watches (`uisocket.rs`): from this batch's end on, it's told what changes.
     pub fn ui_watch_add(&mut self, w: Watcher) {
         if self.ui_watch.watchers.is_empty() {
             self.ui_watch.last = Some(summary(&self.ui_state()));
         }
-        self.ui_watch.watchers.push(w);
+        // (its `procs` start from a look after it came: one now, so the first isn't two looks away)
+        if w.kinds.is_empty() || w.kinds.iter().any(|k| k == "procs") {
+            self.procs_look_watched();
+        }
+        self.ui_watch.watchers.push((w, crate::clock::now()));
         crate::trace::watched(true);
     }
 }
@@ -322,7 +341,8 @@ pub fn limits(ed: &mut Editor) {
     ed.ui_said(json!({ "event": "limits", "limits": ed.limits.json(now), "said": said.join("   ") }));
 }
 
-/// After each frame (`uistate::after_frame`): the gone ring; then, while someone watches, what changed.
+/// After each frame (`uistate::after_frame`) and each batch that drew none while someone watches
+/// (`uistate::undrawn`): the gone ring; then, while someone watches, what changed.
 pub fn after_frame(ed: &mut Editor) {
     ed.cards_sync();
     if !ed.ui_watch.watching() {
@@ -339,23 +359,24 @@ pub fn after_frame(ed: &mut Editor) {
     let mut said = std::mem::take(&mut ed.ui_watch.pending);
     for s in crate::trace::steps_taken() {
         let took = s.since.as_millis() as u64;
-        said.push(json!({
+        let ev = json!({
             "event": "run", "id": format!("run#{}", s.id), "what": s.what, "step": s.step, "ended": s.ended,
             "since_ms": took, "said": format!("run#{} {} — {}", s.id, s.what, s.step),
-        }));
+        });
+        said.push((ev, None));
     }
-    said.append(&mut events);
+    said.extend(events.drain(..).map(|ev| (ev, None)));
     if said.is_empty() {
         return;
     }
-    for ev in &mut said {
+    for (ev, _) in &mut said {
         ev["frame"] = json!(state.frame);
         ev["input"] = json!(state.input);
     }
-    ed.ui_watch.watchers.retain(|w| {
-        for ev in &said {
+    ed.ui_watch.watchers.retain(|(w, came)| {
+        for (ev, from) in &said {
             let kind = kind_of(ev["event"].as_str().unwrap_or_default());
-            if !w.kinds.is_empty() && !w.kinds.iter().any(|k| k == kind) {
+            if !w.kinds.is_empty() && !w.kinds.iter().any(|k| k == kind) || from.is_some_and(|f| f < *came) {
                 continue;
             }
             match w.tx.try_send(ev.to_string()) {
@@ -373,6 +394,24 @@ pub fn after_frame(ed: &mut Editor) {
         ed.ui_watch.last = None;
         crate::trace::watched(false);
     }
+}
+
+/// What a watcher hasn't been told yet that it would be at the next frame — said, changed, a card come or gone;
+/// None when nobody watches (the simulation's check, `sim/watchers.rs`).
+#[cfg(test)]
+pub(crate) fn owed(ed: &Editor) -> Option<String> {
+    if !ed.ui_watch.watching() {
+        return None;
+    }
+    if let Some((ev, _)) = ed.ui_watch.pending.first() {
+        return Some(format!("said, not sent: {}", ev["said"]));
+    }
+    if !ed.cards_same() {
+        return Some("the cards changed, not synced".into());
+    }
+    let now = summary(&ed.ui_state());
+    let changed = ed.ui_watch.last.as_ref().map(|old| diff(old, &now)).unwrap_or_default();
+    changed.first().map(|ev| format!("changed, not sent: {}", ev["said"]))
 }
 
 /// The gone ring's newest, for the state (`gone`).

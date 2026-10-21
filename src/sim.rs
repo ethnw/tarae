@@ -30,6 +30,7 @@ mod brings;
 mod hosts;
 mod reviews;
 mod sessions;
+mod watchers;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps
 /// are named by it.
@@ -404,6 +405,9 @@ pub struct Sim {
     deadline: Instant,
     /// Steps taken, inputs among them.
     pub steps: usize,
+    /// Results land as the main loop takes them — a batch of one, then a frame of this size when one is due
+    /// (`Sim::batch`); None: `handle_event` alone, the scenario draws its own frames.
+    pub frames: Option<(u16, u16)>,
 }
 
 impl Sim {
@@ -416,7 +420,18 @@ impl Sim {
             *c.borrow_mut() = Some((h.clone(), Role::Driver));
         });
         let deadline = Instant::now() + limit;
-        Sim { h, choices, trace: Vec::new(), name: name.into(), deadline, steps: 0 }
+        Sim { h, choices, trace: Vec::new(), name: name.into(), deadline, steps: 0, frames: None }
+    }
+
+    /// `ev` handled as the main loop handles a batch of it alone (`term::event_loop`): then a frame, when one
+    /// is due (`term::batch_done`) — at `frames`' size, else none.
+    pub fn batch(&self, ed: &mut Editor, ev: Event) {
+        let unchanged = crate::term::handle_noting(ed, ev);
+        if crate::term::batch_done(ed, unchanged)
+            && let Some((w, h)) = self.frames
+        {
+            crate::term::render(ed, &mut Vec::new(), w, h).unwrap();
+        }
     }
 
     pub fn trace(&self) -> &[String] {
@@ -470,7 +485,11 @@ impl Sim {
                 Next::Land(from) => {
                     let (site, ev) =
                         self.h.lock().inbox.get_mut(&from).and_then(VecDeque::pop_front).unwrap();
-                    if let Err(p) = caught(|| ed.handle_event(ev)) {
+                    let land = |ed: &mut Editor| match self.frames {
+                        Some(_) => self.batch(ed, ev),
+                        None => ed.handle_event(ev),
+                    };
+                    if let Err(p) = caught(|| land(ed)) {
                         self.trace.push(format!("lands from {site}"));
                         self.fail_now(format!("a result from {site} panicked as it landed: {p}"));
                     }
