@@ -1269,7 +1269,7 @@ wait for your trust. It isn't given `SSH_AUTH_SOCK` and doesn't update itself (`
 
 ### Reading outside the project
 
-Claude reads the project freely: its Read (and tarae's `search` and `read`) go through without asking wherever the path really
+Claude reads the project freely: tarae's `search` and `read` go through without asking wherever the path really
 leads into the project (links followed). So do the repository's other checkouts (the main one and each
 session's — as git's own files say, both ways: an entry under `.git/worktrees` whose folder doesn't name it
 back is no checkout), the temp folders (`/tmp`, your `$TMPDIR`), the toolchains' sources, the crates cargo
@@ -1332,11 +1332,26 @@ Claude reads and searches through tarae itself — no process, no sandbox to sta
   lines), `src/a.rs:run_search` or `src/a.rs:Editor::open` (a function, type or module by name, from its syntax
   tree), or a file whole. A file over 16 KB asked whole comes as its outline with line numbers, and says how to
   ask for its text.
+  - **An image** (PNG, JPEG, GIF, WebP, told by its bytes, not its name) comes as a picture Claude sees. One
+    within 2000×2000 and 3.75 MB goes as it is; a bigger one is scaled to fit and, past 3.75 MB still, written
+    smaller step by step, as Claude Code's own Read does (a PNG compressed hardest, then JPEG at quality 80, 60,
+    40, 20, then at most 1000 wide). Its heading says its size, how it was sent and what it costs: one token
+    for each 28×28 square, about 3.3k for a Retina screenshot. It's decoded and scaled inside tarae, by
+    memory-safe code (the `image` crate) — no outside program — and one that would take more than 256 MB once
+    decoded, or more than 20,000 pixels a side, is refused before it's decoded, said so: a small file can
+    claim a huge picture. One that doesn't decode whole (cut short, broken) isn't sent either: the API would
+    refuse it, and it would stay in the conversation. One answer's pictures come to 10 MB at most (the API takes
+    a request of about 32 MB, the conversation included) — one past that is said in its place, to ask for in
+    another call; a picture's file over 100 MB isn't read at all.
+  - **A PDF** says its pages aren't read yet — a later piece. (It can't go as a document: Claude Code saves a
+    PDF an MCP tool hands it to a file and gives the model only that file's name — measured, 2.1.302.)
+  - `.ipynb` notebooks are text: their JSON, as any file.
 
 They run in tarae, outside every sandbox, so they keep Read's rules themselves: a file named like a key, or a
 place outside the project and the places above, asks on the same card as Read — a link in the project to a
-place outside is asked about as that place — and the call goes on once you answer. Neither the prompt nor
-`read` sends Claude to its own Read before an Edit: Claude Code 2.1.296 with the current model edits a file it
+place outside is asked about as that place — and the call goes on once you answer. With these, the chat has no tool of Claude Code's (`--tools ""`; Edit and Write with
+`llm.edit-tools` "both" or "native"), which takes about 1.1k tokens off every request. Neither the prompt nor
+`read` sends Claude to a read before an Edit: Claude Code 2.1.296 with the current model edits a file it
 hasn't read. That depends on the model and the CLI — older models needed the Read first. `run`'s description
 sends reading and searching here, and `:usage`
 counts the runs that only read text, by program.

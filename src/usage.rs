@@ -788,16 +788,21 @@ impl Usage {
         });
     }
 
-    /// A result of tarae's tool `tool` went to session `session`'s conversation: `sent` bytes — of `output`, a
-    /// run's whole output. One `tokens` log line, and counted for `:usage`.
+    /// A result of tarae's tool `tool` went to session `session`'s conversation: `sent` bytes (a picture as its
+    /// tokens' worth — `tools::parts_len`) — of `output`, a run's whole output; `pictures` among it. One `tokens`
+    /// log line, and counted for `:usage`.
     pub fn tool_result(
         &mut self,
         session: &crate::log::Session,
         tool: &str,
         sent: usize,
         output: Option<usize>,
+        pictures: usize,
     ) {
-        let extra = output.map(|o| format!(" output={o}")).unwrap_or_default();
+        let mut extra = output.map(|o| format!(" output={o}")).unwrap_or_default();
+        if pictures > 0 {
+            extra.push_str(&format!(" pictures={pictures}"));
+        }
         size_line(session, &format!("tool={tool}"), sent, &extra);
         if let Some(c) = &mut self.conv {
             let (calls, bytes) = c.tool_results.entry(tool.to_string()).or_default();
@@ -810,7 +815,7 @@ impl Usage {
 // ── Sizes ───────────────────────────────────────────────────────────────────
 
 /// Bytes a token is, about (English and code) — sizes said before claude counts them.
-const BYTES_PER_TOKEN: usize = 4;
+pub const BYTES_PER_TOKEN: usize = 4;
 
 /// The `tokens` log line for `bytes` of `what` (`tool=search`, `message`) sent to session `session`'s
 /// conversation, `extra` after. Sizes only, never content.

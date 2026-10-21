@@ -2629,3 +2629,320 @@ fn claude_drafts_the_commit_message() {
     let subject = String::from_utf8_lossy(&log.stdout).trim().to_string();
     assert!(!subject.is_empty() && subject != "base", "a drafted subject: {subject:?}");
 }
+
+// ── What an MCP tool's answer can hand the model (readimg, 2026-10-20) ─────────
+
+/// Standard base64 (the probe's stand-in answers).
+fn base64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::new();
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            s.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    s
+}
+
+/// A grey PNG of `word` in a 5×7 dot font, each dot `scale` pixels (letters A E L N R T only).
+fn png_of(word: &str, scale: usize) -> Vec<u8> {
+    let glyph = |c: char| -> [u8; 7] {
+        match c {
+            'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+            'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+            'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+            'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+            'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+            'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+            _ => panic!("no glyph for {c}"),
+        }
+    };
+    let cols = word.len() * 6 + 3;
+    let (w, h) = (cols * scale, 11 * scale);
+    let mut raw = Vec::with_capacity((w + 1) * h);
+    for y in 0..h {
+        raw.push(0);
+        for x in 0..w {
+            let (cx, cy) = (x / scale, y / scale);
+            let ink = (2..9).contains(&cy)
+                && cx >= 2
+                && (cx - 2) % 6 < 5
+                && word
+                    .chars()
+                    .nth((cx - 2) / 6)
+                    .is_some_and(|c| glyph(c)[cy - 2] >> (4 - (cx - 2) % 6) & 1 == 1);
+            raw.push(if ink { 0 } else { 255 });
+        }
+    }
+    fn crc(b: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &x in b {
+            c ^= x as u32;
+            for _ in 0..8 {
+                c = if c & 1 == 1 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8], data: &[u8]| {
+        out.extend((data.len() as u32).to_be_bytes());
+        let body = [kind, data].concat();
+        out.extend(&body);
+        out.extend(crc(&body).to_be_bytes());
+    };
+    let mut ihdr = (w as u32).to_be_bytes().to_vec();
+    ihdr.extend((h as u32).to_be_bytes());
+    ihdr.extend([8, 0, 0, 0, 0]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6));
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// A PDF of one page per word, each in Helvetica, big.
+fn pdf_of(words: &[&str]) -> Vec<u8> {
+    let n = words.len();
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    for (i, w) in words.iter().enumerate() {
+        let text = format!("BT /F1 48 Tf 40 300 Td ({w}) Tj ET");
+        objs.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>",
+            5 + 2 * i
+        ));
+        objs.push(format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len()));
+    }
+    let mut out = String::from("%PDF-1.4\n");
+    let mut at = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        at.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
+    for a in at {
+        out.push_str(&format!("{a:010} 00000 n \n"));
+    }
+    out.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1));
+    out.into_bytes()
+}
+
+/// One turn of a bare `claude -p` (no built-in tool) whose one tool, the SDK MCP server `probe`'s `look`,
+/// answers `content`: the turn's last words, the tool result as claude handed it on (base64 cut), and the
+/// prompt of the request after the tool's answer.
+fn probe_turn(dir: &Path, content: serde_json::Value) -> (String, String, u64) {
+    use serde_json::json;
+    use std::io::{BufRead, Write};
+    let mut child = Command::new("claude")
+        .args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+            "--no-session-persistence",
+            "--allowedTools",
+            "mcp__probe__look",
+        ])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("claude");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut send = |v: serde_json::Value| writeln!(stdin, "{v}").unwrap();
+    send(json!({"type": "control_request", "request_id": "init",
+                "request": {"subtype": "initialize", "sdkMcpServers": ["probe"]}}));
+    send(json!({"type": "user", "message": {"role": "user", "content":
+        "Call the look tool once. Then reply with only the word its answer shows, in capital letters — or \
+         NONE if what came back was no picture or document you could see."}}));
+    let lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let (mut said, mut handed, mut after) = (String::new(), String::new(), 0);
+    let mut answered = false;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line.unwrap()) else { continue };
+        match v["type"].as_str() {
+            Some("control_request") => {
+                let (req, rid) = (&v["request"], v["request_id"].clone());
+                let msg = &req["message"];
+                let result = match msg["method"].as_str().unwrap_or_default() {
+                    "initialize" => json!({"protocolVersion": msg["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}}, "serverInfo": {"name": "probe", "version": "0"}}),
+                    "tools/list" => json!({"tools": [{"name": "look", "description": "Shows a file.",
+                        "inputSchema": {"type": "object", "properties": {}}}]}),
+                    "tools/call" => {
+                        answered = true;
+                        json!({"content": content})
+                    }
+                    _ => json!({}),
+                };
+                let id = msg.get("id").cloned().unwrap_or(json!(0));
+                let response = if req["subtype"] == "mcp_message" {
+                    json!({"mcp_response": {"jsonrpc": "2.0", "id": id, "result": result}})
+                } else {
+                    json!({})
+                };
+                send(json!({"type": "control_response",
+                    "response": {"subtype": "success", "request_id": rid, "response": response}}));
+            }
+            Some("user") if answered && handed.is_empty() => {
+                let mut s = v["message"]["content"].to_string();
+                // (the base64 cut: what kind of block it became is what's asked)
+                while let Some(i) = s.find("\"data\":\"").or_else(|| s.find("\"blob\":\"")) {
+                    let start = i + 8;
+                    let end = s[start..].find('"').map_or(s.len(), |e| start + e);
+                    s.replace_range(i..end + 1, &format!("<{} b64 bytes>", end - start));
+                }
+                handed = s;
+            }
+            Some("assistant") if answered => {
+                let u = &v["message"]["usage"];
+                let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                after = after
+                    .max(n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
+            }
+            Some("result") => {
+                said = v["result"].as_str().unwrap_or_default().trim().to_string();
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    (said, handed, after)
+}
+
+/// One turn of a bare `claude -p` in `dir` with Claude Code's `tools` (allowed up front): its whole stream.
+fn bare_turn(dir: &Path, tools: &str, ask: &str) -> String {
+    use std::io::{BufRead, Write};
+    let mut child = Command::new("claude")
+        .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
+        .args(["--tools", tools, "--allowedTools", tools, "--strict-mcp-config", "--setting-sources", ""])
+        .arg("--no-session-persistence")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("claude");
+    let mut stdin = child.stdin.take().unwrap();
+    let msg = serde_json::json!({"type": "user", "message": {"role": "user", "content": ask}});
+    writeln!(stdin, "{msg}").unwrap();
+    let mut stream = String::new();
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        stream.push_str(&line);
+        stream.push('\n');
+        if line.contains("\"type\":\"result\"") {
+            break;
+        }
+    }
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    stream
+}
+
+/// A stream's last answer (its result line's text).
+fn result_of(stream: &str) -> String {
+    let mut lines = stream.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
+    let r = lines.rfind(|v| v["type"] == "result");
+    r.and_then(|v| v["result"].as_str().map(String::from)).unwrap_or_default()
+}
+
+/// readimg's A/B: a turn that reads a screenshot — a Retina one, 2072×1316, so both scale it — with Claude Code's
+/// Read (a bare `claude -p --tools Read`: what the chat had) and with tarae's `read` (the chat as it is now, no
+/// tool of Claude Code's). Each: what the picture cost (the biggest step from one request's prompt to the next —
+/// the read's answer) and whether the answer names the title it shows. And the fixed part Read's definition took
+/// from every request (a one-word turn with and without it).
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_reads_a_screenshot_ab() {
+    if !have("claude") {
+        return;
+    }
+    let ask = "Read shots/screen.png (a screenshot of an editor). Reply with the big spaced-out title word it \
+               shows, joined up in lowercase, then one sentence on what the screen offers.";
+    let shot = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screenshots/ux-welcome.png");
+    let place = |sb: &Sandbox| {
+        std::fs::create_dir_all(sb.file("shots")).unwrap();
+        let img = image::open(&shot).unwrap();
+        let big = img.resize_exact(img.width() * 2, img.height() * 2, image::imageops::FilterType::Lanczos3);
+        big.save(sb.file("shots/screen.png")).unwrap();
+    };
+    let step = |p: &[u64]| p.windows(2).map(|w| w[1].saturating_sub(w[0])).max().unwrap_or(0);
+    // Before: Claude Code's Read
+    let sb = Sandbox::live("shot-read");
+    place(&sb);
+    let before = bare_turn(&sb.work(), "Read", ask);
+    let (bp, said_before) = (prompts(&before), result_of(&before));
+    // The fixed part: Read's definition in every request
+    let with_read = prompts(&bare_turn(&sb.work(), "Read", "Reply with the single word ok."));
+    let without = prompts(&bare_turn(&sb.work(), "", "Reply with the single word ok."));
+    // After: tarae's chat, its read
+    let (sb, out) = teed_chat("shot-tarae");
+    place(&sb);
+    let mut t = sb.spawn(&[]);
+    let (cards, capped) = ab_turn(&mut t, ask, &out);
+    let after = std::fs::read_to_string(&out).unwrap_or_default();
+    let (ap, said_after) = (prompts(&after), result_of(&after));
+    let tools: Vec<String> = after
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["type"] == "assistant")
+        .flat_map(|v| v["message"]["content"].as_array().cloned().unwrap_or_default())
+        .filter(|c| c["type"] == "tool_use")
+        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    eprintln!("AB before (Read): requests {bp:?} · the picture's step {} · said {said_before:?}", step(&bp));
+    eprintln!(
+        "AB after (read): requests {ap:?} · the picture's step {} · tools {tools:?} · cards {cards} · capped {capped} · said {said_after:?}",
+        step(&ap)
+    );
+    eprintln!("AB fixed part: one-word turn's prompt with Read {with_read:?}, without {without:?}");
+    let named = |s: &str| s.to_lowercase().contains("tarae");
+    assert!(named(&said_before) && named(&said_after), "both name the title");
+    assert!(tools.iter().any(|t| t == "mcp__tarae__read") && !tools.iter().any(|t| t == "Read"));
+}
+
+/// Step 1 of readimg, measured before any code: which MCP content blocks this Claude Code hands the model as
+/// something it sees. A word only the file carries; the model asked for it. Printed, not asserted — the
+/// answer is what decides `read`'s design (`readimg.rs`).
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn mcp_image_and_pdf_reach_the_model() {
+    use serde_json::json;
+    if !have("claude") {
+        return;
+    }
+    let sb = Sandbox::live("mcp-media");
+    let png = base64(&png_of("LANTERN", 8));
+    let pdf = base64(&pdf_of(&["HARBOR"]));
+    let probes = [
+        ("text alone (the control)", json!([{"type": "text", "text": "(a file)"}])),
+        ("image/png", json!([{"type": "image", "data": png, "mimeType": "image/png"}])),
+        (
+            "resource application/pdf",
+            json!([{"type": "resource", "resource":
+            {"uri": "file:///probe/word.pdf", "mimeType": "application/pdf", "blob": pdf}}]),
+        ),
+        ("image application/pdf", json!([{"type": "image", "data": pdf, "mimeType": "application/pdf"}])),
+    ];
+    for (what, content) in probes {
+        let (said, handed, after) = probe_turn(&sb.work(), content);
+        eprintln!("PROBE {what}: said {said:?} · prompt after the tool {after} · handed {handed}");
+    }
+}

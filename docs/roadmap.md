@@ -34,6 +34,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **M6** | Plugins in Rust, compiled to WebAssembly, sandboxed on tarae's own runtime ([plugins.md](plugins.md)) |
 | **Sessions** | Several branches of work at once, each in its own checkout with its own panes, chat, terminal, tests and tasks. A session is brought into its base by fast-forward, or by a rebase whose conflicts its own Claude resolves ([claude-integration.md](claude-integration.md#rebasing-a-session)) |
 | **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, or a board of them — one per angle, then a skeptic per group of their claims, only what a skeptic traced pinned as confirmed (`space v C`) — and risk grades mark what a person must look at. Each review is recorded: how long a person spends on each change and what it ended as, never its code ([code review](claude-integration.md#code-review)) |
+| **Reviews in the background** | `space v c` (the reviewer) and `space v C` (the board) no longer take the session's screen: they read a snapshot of the changes through tarae's own `read` and `search` (no reading copy), findings land on the lines as they are now, and the status line says one is reading. Against Claude Code's tools: the same bugs found, −57 % tokens, −39 % $ (bgreview P1 + P2, `7f6b8834`, 2026-10-20) |
 | **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0–P5 of the card model are built, and `:granted` lists what Claude may do without asking ([design/cards.md](design/cards.md)) |
 | **Sandbox, macOS** | Claude's commands run under a deny-default Seatbelt profile, as Anthropic's sandbox-runtime: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable — a file named like a key closed where a grant or a default opened outside the project too; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
 | **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. A run changes no file's owner, extended attributes, ACLs or flags; a file's mode and times are still its own, said. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
@@ -349,12 +350,16 @@ move over.
 **Then, before the remote split** — plans decided 2026-10-19, each built only once its checkout is rebased on a
 main that has what it waits for, and the user says go:
 
-- **Reviews in the background** (bgreview, `target/sb/bgreview-plan.md` in its checkout): `space v c` (the
-  reviewer) and `space v C` (the board) no longer take the session's screen. They read a snapshot of the tree in a
-  reading copy of their own, findings land on the lines as they are now ("changed since read" when they moved),
-  and a status-line segment says one is reading and when it's done. P1 + P2 built in its checkout (2026-10-20),
-  not in main yet; P3, a review started by itself at a turn's end (`review.auto = "turn"`, off by default, your
-  config only), is its own PR once P1–P2 have been used.
+- **Images in `read`** (readimg): tarae's `read` sends an image as a picture, decoded and scaled in-process by
+  memory-safe code (the `image` crate, as Claude Code's Read scales), so the chat runs with no tool of Claude
+  Code's (`--tools ""`; Edit and Write only with `llm.edit-tools` "both"/"native"). Built in its checkout
+  (2026-10-20), not in main yet.
+- **PDFs in `read`**, later (user, 2026-10-20): its own piece, starting from readimg's measurement (tests/live.rs
+  `mcp_image_and_pdf_reach_the_model`: a PDF an MCP tool hands Claude Code never reaches the model — it's saved
+  to a file, the model told its name), so pages go as pictures or text. Options to weigh then, measured: poppler
+  in tarae's sandbox (deny-default, reads listed, nothing of home), or a pure-Rust renderer in-process.
+- **A review started by itself** (bgreview P3, `target/sb/bgreview-plan.md`): at a turn's end
+  (`review.auto = "turn"`, off by default, your config only) — its own PR once P1–P2 (done) have been used.
 - **View mode, then quoting** (the quoteplan checkout's `target/sb/quote-plan.md`): every surface — the chat's
   transcript, the terminal panel, the task, preflight and test panels — gets a view mode, one rule: a cursor on
   its rows as read-only text, Helix's keys, to read, search and copy. Then quoting (인용): select part of any of
@@ -367,12 +372,14 @@ main that has what it waits for, and the user says go:
   crate, in place of `vt100`, measured against a baseline taken first) and a terminal that understands the shell
   while the shell stays yours. Order: several terminals → the engine → reflow → the shell understood → focus as
   one value → surfaces as leaves → panes of their own → `tarae` verbs → output for Claude → another session
-  beside → the floating terminal → shells across `:restart`.
+  beside → the floating terminal → shells across `:restart`. After its own terminal engine, then images at full
+  resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
+  elsewhere (user, 2026-10-20).
 - **Orchestra, Part I** (the orchestra checkout's `target/sb/orchestra-plan.md`): a session's Claude starts
   sessions of its own and steers them through session tools that act on the editor's model, never on the screen —
   nothing switches the front session or types into an input you can see. P1 children (start them on a card, send
   to them, read their reports, news told once), P2 watching (wakes, cost per child), P3 reviews and proposals.
-  P1 after bgreview lands (P3 builds on its start); what stays yours — cards, brings, ends — stays yours.
+  P1 builds on bgreview (landed; P3 builds on its start); what stays yours — cards, brings, ends — stays yours.
 
 ### 5. A remote split
 
@@ -493,10 +500,13 @@ git tab, search, a short Kubernetes one.
 - **A memory card and panel**: what Claude remembers for the project, in Claude Code's own format.
 - **The run-flow panel**: one run's processes, writes, connections and refusals, from sources that need no
   privileges, on macOS too.
+- **Image view, half-block** (user, 2026-10-20): a picture drawn with `▀` cells in any truecolor terminal (a
+  `.png` opened, the picker's preview, a thumbnail on the chat's tool row, markdown's pictures), on `media.rs`'s
+  decode and scale; small, any time between the big pieces.
 - **A grant scoped to Docker.**
 - **코드멍** (*code-meong*, "code-gazing", as one gazes at a fire): Claude's code typed out character by character
-  instead of appearing at once, maybe in the chat too. Now 글타래's P7–P8: the model's edits streamed live, then a
-  reveal only for code that arrives whole (user decision 2026-10-17).
+  instead of appearing at once, maybe in the chat too. Now 글타래's P7: the model's edits streamed live. The reveal
+  for code that arrives whole (P8) is dropped (user, 2026-10-20): an invented delay, and a key eaten to end it.
 - **글타래** (*geul-tarae*, "a skein of writing"): a visual pass. Design details that suit ink (meok) and hanji
   paper, and a way of showing and generating text that suits tarae (the plan: the `geultarae` session's
   target/sb/geultarae-plan.md). P0–P4 done: the shots as a scene list (`cargo xtask scenes`, `900833ab`), the
@@ -505,7 +515,9 @@ git tab, search, a short Kubernetes one.
   solid pill, the start screen a title page set in type with no seal, the edit review's head in ink, the chat's
   prose at a 72-cell measure, list cards their own height. P5 done (2026-10-19, `25a2c4c2`): what you decided is
   stamped with the key that decided it (`▐y▌ accepted` in the edit review, `m`/`u` on a turn's files, `:granted`'s
-  answers by their key). P6–P8 next (its §5): the turn as a thread, live edits, 코드멍's reveal.
+  answers by their key). Next (user, 2026-10-20; its §5): P6, the turn as a thread, before view mode; P7, live
+  edits, after the measurement, with `editor.motion` folded in. P8, 코드멍's reveal, is dropped — an invented delay,
+  and a key eaten to end it.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out

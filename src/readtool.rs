@@ -4,14 +4,17 @@
 //! (`reads::Gate`): what Read would ask about (outside the project and its allowed places, a file named like a
 //! key) it asks on the same card, and runs again once let through. A big file asked whole comes as its outline
 //! with line numbers (Zed's rule), saying how to ask for the text — not a page cut short. What it read is
-//! what Claude saw of those files (`Edits.seen` — an `edit` of one changed since says so).
+//! what Claude saw of those files (`Edits.seen` — an `edit` of one changed since says so). An image comes as a
+//! picture (`media.rs`, readimg 2026-10-20) — so the chat needs no Read of Claude Code's; a PDF says its pages
+//! aren't read yet.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::editor::Editor;
-use crate::tools::{Call, answer};
+use crate::media::Kind;
+use crate::tools::{Call, Part, answer};
 
 /// A file asked whole bigger than this (bytes) comes as its outline.
 const WHOLE_MAX: usize = 16 * 1024;
@@ -28,6 +31,9 @@ const OUTLINE_MAX: usize = 300;
 /// A file whole asked of one without an outline: its first lines.
 const HEAD_LINES: usize = 100;
 
+/// Pictures in one answer at most.
+const IMAGES_MAX: usize = 20;
+
 /// The tool's schema. (It no longer sends Claude to Read before an Edit: Claude Code 2.1.296 with this model
 /// edits a file it hasn't read — tests/live.rs `chat_edit_then_native_edit`; older models needed the Read.)
 pub fn schema() -> Value {
@@ -37,8 +43,8 @@ pub fn schema() -> Value {
     and ranges in one call: `src/a.rs:10-40,90-120`, `src/a.rs:-30` (its last 30 lines), `src/a.rs:run_search` \
     or `src/a.rs:Editor::open` (a function, type or module by name, from its syntax tree), or a path alone (the \
     whole file — over 16 KB it comes as its outline with line numbers; then ask for ranges or names). Lines \
-    come numbered (`12: …`). Ask for enough in one call to skip another turn. Outside the project it asks the \
-    user, as Read does.",
+    come numbered (`12: …`). An image (PNG, JPEG, GIF, WebP) comes as a picture. Ask for enough in one \
+    call to skip another turn. Outside the project it asks the user, as Read does.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -149,11 +155,11 @@ fn go(ed: &mut Editor, call: Call, items: Vec<Item>, args: Value, granted: Vec<P
             .collect();
         let r = read(&root, &items, &gate, &unsaved);
         move |ed: &mut Editor| match r {
-            Ok(Ok(text)) => {
+            Ok(Ok(parts)) => {
                 for (p, s) in stamps {
                     crate::edittool::saw(ed, &p, s);
                 }
-                answer(ed, call, Ok(text))
+                crate::tools::answer_parts(ed, call, Ok(parts))
             }
             Ok(Err(ask)) => {
                 let then = crate::reads::Then { call, tool: "read", args, granted };
@@ -164,14 +170,13 @@ fn go(ed: &mut Editor, call: Call, items: Vec<Item>, args: Value, granted: Vec<P
     });
 }
 
-/// The answer: each item's lines under its heading (`== path:a-b (of N lines)`), or what's said instead —
-/// Ok(Err): a file Read would ask about, the card's question (the whole call waits on it). A worker's.
-fn read(
-    root: &Path,
-    items: &[Item],
-    gate: &crate::reads::Gate,
-    unsaved: &[PathBuf],
-) -> Result<Result<String, Box<crate::reads::Ask>>, String> {
+/// What a read answers: its text, pictures among it — Ok(Err): a file Read would ask about, the card's question
+/// (the whole call waits on it).
+type Answer = Result<Result<Vec<Part>, Box<crate::reads::Ask>>, String>;
+
+/// The answer: each item's lines under its heading (`== path:a-b (of N lines)`), an image's picture after its
+/// own, or what's said instead. A worker's.
+fn read(root: &Path, items: &[Item], gate: &crate::reads::Gate, unsaved: &[PathBuf]) -> Answer {
     read_between(root, items, gate, unsaved, &|| {})
 }
 
@@ -191,7 +196,7 @@ fn read_between(
     gate: &crate::reads::Gate,
     unsaved: &[PathBuf],
     between: &dyn Fn(),
-) -> Result<Result<String, Box<crate::reads::Ask>>, String> {
+) -> Answer {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     // Every item opened and judged before any is read: one card, then the whole answer. What's judged is what
     // was opened — the descriptor's own path (`paths::open_read`), and it's read from that descriptor: a
@@ -228,8 +233,8 @@ fn read_between(
         found.push(f);
     }
     between();
-    let mut out = String::new();
-    let mut left = LINES_MAX;
+    let (mut out, mut parts) = (String::new(), Vec::new());
+    let (mut left, mut images) = (LINES_MAX, Room { pictures: IMAGES_MAX, bytes: crate::media::ANSWER_MAX });
     let mut dirty = Vec::new();
     for (it, f) in items.iter().zip(found) {
         let o = match f {
@@ -247,7 +252,17 @@ fn read_between(
         if unsaved.contains(&o.real) {
             dirty.push(shown.clone());
         }
-        out.push_str(&section(o, &shown, it, &mut left));
+        for p in section(o, &shown, it, &mut left, &mut images) {
+            match p {
+                Part::Text(t) => out.push_str(&t),
+                Part::Image(i) => {
+                    if !out.is_empty() {
+                        parts.push(Part::Text(std::mem::take(&mut out)));
+                    }
+                    parts.push(Part::Image(i));
+                }
+            }
+        }
     }
     if !dirty.is_empty() {
         out.push_str(&format!(
@@ -255,18 +270,101 @@ fn read_between(
             dirty.join(", ")
         ));
     }
-    Ok(Ok(out.trim_end().to_string()))
+    let out = out.trim_end();
+    if !out.is_empty() || parts.is_empty() {
+        parts.push(Part::Text(out.to_string()));
+    }
+    Ok(Ok(parts))
 }
 
-/// One item's part of the answer, read from its opened file, at most `left` lines of text (taken from it).
-fn section(mut o: crate::paths::Opened, shown: &str, it: &Item, left: &mut usize) -> String {
+/// What's left of an answer's room for pictures: how many, and their bytes as sent (`media::ANSWER_MAX`).
+struct Room {
+    pictures: usize,
+    bytes: usize,
+}
+
+/// One item's part of the answer, read from its opened file, at most `left` lines of text and what's left of
+/// `room` for pictures (taken from them).
+fn section(
+    mut o: crate::paths::Opened,
+    shown: &str,
+    it: &Item,
+    left: &mut usize,
+    room: &mut Room,
+) -> Vec<Part> {
     use std::io::Read;
+    // Its first bytes say what it is: a picture or a PDF past `FILE_MAX` is said before the rest is read
     let mut bytes = Vec::new();
+    if let Err(e) = (&mut o.file).take(64).read_to_end(&mut bytes) {
+        return vec![Part::Text(format!("== {shown}: {e}\n"))];
+    }
+    // (a PDF by its name too: one with bytes before its `%PDF-` is still no text to show)
+    let pdf = Path::new(shown).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    let kind = crate::media::kind(&bytes).or(pdf.then_some(Kind::Pdf));
+    if let Some(k) = kind.filter(|k| *k != Kind::Pdf && o.meta.len() > crate::media::FILE_MAX) {
+        let mb = crate::media::FILE_MAX / (1024 * 1024);
+        return vec![Part::Text(format!("== {shown}: a {} file over {mb} MB — not read\n", k.said()))];
+    }
+    if kind == Some(Kind::Pdf) {
+        return pictures(Kind::Pdf, Vec::new(), shown, it, room);
+    }
     if let Err(e) = o.file.read_to_end(&mut bytes) {
-        return format!("== {shown}: {e}\n");
+        return vec![Part::Text(format!("== {shown}: {e}\n"))];
+    }
+    if let Some(kind) = kind {
+        return pictures(kind, bytes, shown, it, room);
     }
     let (real, stamp) = (o.real.as_path(), crate::testcode::stamp_of(&o.meta));
-    section_of(&bytes, &|text| crate::outlines::of_text(real, stamp, text), shown, it, left)
+    let text = section_of(&bytes, &|text| crate::outlines::of_text(real, stamp, text), shown, it, left);
+    vec![Part::Text(text)]
+}
+
+/// An image's part: its heading — what it is, how it's sent, what it costs — then the picture, while `room` has
+/// it (taken from it). A PDF's: that its pages aren't read yet (readimg left PDFs to a later piece).
+fn pictures(kind: Kind, bytes: Vec<u8>, shown: &str, it: &Item, room: &mut Room) -> Vec<Part> {
+    use crate::media::Sent;
+    let said = |s: String| vec![Part::Text(s)];
+    let k = kind.said();
+    if kind == Kind::Pdf {
+        return said(format!("== {shown}: a PDF — its pages aren't read yet (only images are)\n"));
+    }
+    if room.pictures == 0 {
+        return said(format!(
+            "== {shown}: not sent — {IMAGES_MAX} pictures an answer at most; ask for it in another call\n"
+        ));
+    }
+    let (img, (w, h), sent) = match crate::media::for_model(kind, bytes) {
+        Ok(i) => i,
+        Err(e) => return said(format!("== {shown}: a {k} image — {e}\n")),
+    };
+    if img.sent_len() > room.bytes {
+        let mb = crate::media::ANSWER_MAX / (1024 * 1024);
+        return said(format!(
+            "== {shown}: a {k} image, {w}×{h} — not sent: this answer's pictures come to {mb} MB at most; ask \
+             for it in another call\n"
+        ));
+    }
+    room.pictures -= 1;
+    room.bytes -= img.sent_len();
+    let to = match (img.w, img.h) == (w, h) {
+        true => "written again".to_string(),
+        false => format!("scaled to {}×{}", img.w, img.h),
+    };
+    let how = match sent {
+        Sent::AsIs => "sent as it is".to_string(),
+        Sent::Png { best: false } => format!("sent {to} as PNG"),
+        Sent::Png { best: true } => format!("sent {to} as PNG, compressed hardest"),
+        Sent::Jpeg(q) => format!("sent {to} as JPEG at quality {q}"),
+    };
+    let whole = match it.want {
+        Want::Whole => "",
+        _ => " — the whole picture: ranges are for text",
+    };
+    let tokens = crate::usage::tokens(img.tokens());
+    vec![
+        Part::Text(format!("== {shown}: a {k} image, {w}×{h}, {how} (≈ {tokens} tokens){whole}\n")),
+        Part::Image(img),
+    ]
 }
 
 /// A file's outline, or why there's none.
@@ -486,9 +584,9 @@ mod tests {
         (real(&dir), real(&outside), base)
     }
 
-    fn text(r: Result<Result<String, Box<crate::reads::Ask>>, String>) -> String {
+    fn text(r: Answer) -> String {
         match r {
-            Ok(Ok(t)) => t,
+            Ok(Ok(parts)) => crate::tools::said(&parts),
             Ok(Err(ask)) => panic!("asks the user about {}", ask.at_said()),
             Err(e) => panic!("{e}"),
         }
@@ -559,6 +657,107 @@ mod tests {
         let let_through = crate::reads::Gate::for_test(&dir).granting(o.clone());
         let t = text(read(&dir, &items(&["src/link.txt"]), &let_through, &[]));
         assert!(t.ends_with("1: outside marker"), "{t}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// The pictures of an answer, and its text with each as `[image/png w×h]`.
+    fn pictures_of(r: Answer) -> (Vec<crate::media::Image>, String) {
+        let parts = match r {
+            Ok(Ok(parts)) => parts,
+            Ok(Err(ask)) => panic!("asks the user about {}", ask.at_said()),
+            Err(e) => panic!("{e}"),
+        };
+        let images = parts.iter().filter_map(|p| if let Part::Image(i) = p { Some(i.clone()) } else { None });
+        (images.collect(), crate::tools::said(&parts))
+    }
+
+    /// readimg: an image in the project comes as a picture after its heading — its kind, size, how it's sent and
+    /// what it costs — beside text read in the same call; a range of one is the whole picture, said so.
+    #[test]
+    fn an_image_is_read_as_a_picture() {
+        let (dir, _, base) = places("image");
+        std::fs::create_dir_all(dir.join("shots")).unwrap();
+        let png = crate::media::tests::png(400, 300);
+        std::fs::write(dir.join("shots/screen.png"), &png).unwrap();
+        let gate = crate::reads::Gate::for_test(&dir);
+        let (images, t) = pictures_of(read(&dir, &items(&["shots/screen.png", "src/a.rs:1"]), &gate, &[]));
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].mime, &images[0].bytes), ("image/png", &png), "sent as it is");
+        assert_eq!(
+            t,
+            "== shots/screen.png: a PNG image, 400×300, sent as it is (≈ 165 tokens)\n\n[image/png 400×300]\n\
+             == src/a.rs:1-1 (of 9 lines)\n1: struct Thing;"
+        );
+        let (_, t) = pictures_of(read(&dir, &items(&["shots/screen.png:1-5"]), &gate, &[]));
+        assert!(t.contains("the whole picture: ranges are for text"), "{t}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// readimg: a big picture comes scaled to fit, how said; a PDF says its pages aren't read yet — never its
+    /// bytes as text; a decompression bomb is refused, said in its place, the rest of the call read.
+    #[test]
+    fn a_big_image_is_scaled_a_pdf_and_a_bomb_said() {
+        let (dir, _, base) = places("big-image");
+        std::fs::write(dir.join("wide.png"), crate::media::tests::png(3000, 1500)).unwrap();
+        std::fs::write(dir.join("paper.pdf"), "%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n").unwrap();
+        std::fs::write(dir.join("bomb.png"), crate::media::tests::bomb(15_000, 15_000)).unwrap();
+        let gate = crate::reads::Gate::for_test(&dir);
+        let specs = ["wide.png", "paper.pdf", "bomb.png", "src/a.rs:1"];
+        let (images, t) = pictures_of(read(&dir, &items(&specs), &gate, &[]));
+        assert_eq!(images.len(), 1, "{t}");
+        assert_eq!((images[0].w, images[0].h, images[0].mime), (2000, 1000, "image/png"));
+        assert!(
+            t.starts_with(
+                "== wide.png: a PNG image, 3000×1500, sent scaled to 2000×1000 as PNG (≈ 2.6k tokens)\n"
+            ),
+            "{t}"
+        );
+        assert!(t.contains("\n== paper.pdf: a PDF — its pages aren't read yet (only images are)\n"), "{t}");
+        assert!(!t.contains("Catalog"), "no PDF bytes as text: {t}");
+        assert!(t.contains("\n== bomb.png: a PNG image — too big to decode here (at most 20000 pixels a side, 256 MB decoded) — not sent\n"), "{t}");
+        assert!(t.ends_with("1: struct Thing;"), "{t}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// readimg: what one answer's pictures come to has a cap (`media::ANSWER_MAX`), the request's limit in mind —
+    /// the picture past it said in its place, to ask for in another call; and a picture's file past `FILE_MAX` is
+    /// said from its size and first bytes (a sparse file: nothing else of it there to read).
+    #[test]
+    fn an_answers_pictures_have_a_cap_and_a_huge_file_isnt_read() {
+        let (dir, _, base) = places("picture-cap");
+        // (noise that won't compress: each about 3.6 MB, 4.8 MB as sent)
+        let shot = crate::media::tests::noise(1100, 1100);
+        assert!(shot.len() <= crate::media::RAW_MAX && shot.len() > 3_000_000);
+        std::fs::write(dir.join("shot.png"), &shot).unwrap();
+        let huge = std::fs::File::create(dir.join("huge.png")).unwrap();
+        std::io::Write::write_all(&mut &huge, &crate::media::tests::png(4, 4)).unwrap();
+        huge.set_len(crate::media::FILE_MAX + 1).unwrap();
+        let gate = crate::reads::Gate::for_test(&dir);
+        let specs = ["shot.png", "shot.png", "shot.png", "huge.png"];
+        let (images, t) = pictures_of(read(&dir, &items(&specs), &gate, &[]));
+        assert_eq!(images.len(), 2, "{t}");
+        assert!(images.iter().map(|i| i.sent_len()).sum::<usize>() <= crate::media::ANSWER_MAX);
+        assert!(
+            t.contains("\n== shot.png: a PNG image, 1100×1100 — not sent: this answer's pictures come to 10 MB at most; ask for it in another call\n"),
+            "{t}"
+        );
+        assert!(t.ends_with("== huge.png: a PNG file over 100 MB — not read"), "{t}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// readimg: a picture named like a key is a key — asked on Read's card, nothing of it read before.
+    #[test]
+    fn a_key_named_image_asks_first() {
+        let (dir, _, base) = places("key-image");
+        std::fs::write(dir.join("id_rsa"), crate::media::tests::png(4, 4)).unwrap();
+        let gate = crate::reads::Gate::for_test(&dir);
+        match read(&dir, &items(&["src/a.rs:1", "id_rsa"]), &gate, &[]) {
+            Ok(Err(ask)) => assert_eq!(ask.at_said(), dir.join("id_rsa").display().to_string()),
+            other => panic!(
+                "read unasked: {:?}",
+                other.map(|r| r.map(|p| crate::tools::said(&p)).map_err(|a| a.at_said()))
+            ),
+        }
         std::fs::remove_dir_all(&base).unwrap();
     }
 

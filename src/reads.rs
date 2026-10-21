@@ -530,7 +530,7 @@ impl Keys {
 
 /// What tarae's tools say of a file `Keys` keeps out (`shown`: its path as the answer names it).
 pub fn key_left_out(shown: &str) -> String {
-    format!("{shown} is named like a key — tarae's tools leave it out; Read asks the user for it")
+    format!("{shown} is named like a key — tarae's tools leave it out; read asks the user for it on its card")
 }
 
 /// The text a place in such a file shows instead of its line.

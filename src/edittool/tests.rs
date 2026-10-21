@@ -306,7 +306,7 @@ fn the_edit_tools_take_effect_with_the_next_chat() {
     };
     crate::chat::open(&mut ed);
     pump(&mut ed, "the chat's claude", |_| tools_arg(&dir).is_some());
-    assert_eq!(tools_arg(&dir).as_deref(), Some("Read"), "no Edit or Write");
+    assert_eq!(tools_arg(&dir).as_deref(), Some(""), "no tool of Claude Code's: no Edit or Write, no Read");
     assert!(listed(&mut ed).iter().any(|t| t == "edit"));
     crate::typed::execute(&mut ed, "set llm.edit-tools native").unwrap();
     assert_eq!(ed.config.llm.edit_tools, Arm::Native);
@@ -314,7 +314,7 @@ fn the_edit_tools_take_effect_with_the_next_chat() {
     std::fs::remove_file(dir.join("argv")).unwrap();
     crate::chat::reset(&mut ed);
     pump(&mut ed, "the next chat's claude", |_| tools_arg(&dir).is_some());
-    assert_eq!(tools_arg(&dir).as_deref(), Some("Read,Edit,Write"));
+    assert_eq!(tools_arg(&dir).as_deref(), Some("Edit,Write"));
     assert!(!listed(&mut ed).iter().any(|t| t == "edit"), "native: no edit");
     std::fs::remove_dir_all(&dir).ok();
 }

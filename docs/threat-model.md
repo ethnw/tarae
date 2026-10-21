@@ -40,7 +40,7 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 ```
  you ──▶ tarae (trusted: your process, not confined)
           ├─ the claude process  (as you, like any program of yours; network open)
-          │     tools: Claude Code's Read (each call asks tarae) · tarae's own tools (in tarae)
+          │     tools: tarae's own (in tarae) — none of Claude Code's (but Edit/Write when enabled)
           │     starts by itself: git, security (its login), sh (system facts)
           ├─ Claude's runs        (sandboxed: Seatbelt on macOS; keeper + Landlock + seccomp + supervisor on Linux)
           ├─ tarae's own git, language servers, debug adapters (as you; git's repository commands held)
@@ -49,7 +49,7 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 
 | Claude wants to… | It goes through | Kept by |
 |---|---|---|
-| read a file in the project | Claude Code's Read → `can_use_tool` → `reads.rs` | key-named files ask |
+| read a file in the project | tarae's `read`/`search` → `reads::Gate` (an image or a PDF's pages as pictures: `media.rs`) | key-named files ask |
 | read outside the project | the same → a card (`y`/`a`/`A`/`n`) | home, above it, key folders: once only |
 | change a file | tarae's `edit`/`rename`/`replace` (or Edit/Write when enabled) → the review | you |
 | run a command | tarae's `run`/`run_tests` → the sandbox | the kernel, and tarae's supervisor and proxy |
@@ -697,21 +697,29 @@ Kept:
   (team memory). The memory folder is the repository's, shared by every checkout; what's there is another tool's
   notes, and memory a tarae claude wrote would be obeyed later by your own Claude Code.
   test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`
-- **Its tools**: Claude Code's `Read` only (plus `Edit`, `Write` with `llm.edit-tools` "both"/"native"), and
-  tarae's own tools in-process. No Bash, no WebFetch or WebSearch, no Grep or Glob, no Task.
+- **Its tools**: tarae's own, in-process — none of Claude Code's (`--tools ""`), but `Edit` and `Write` with
+  `llm.edit-tools` "both"/"native". No Read (tarae's `read` reads images too), no Bash, no
+  WebFetch or WebSearch, no Grep or Glob, no Task.
   test: `chat::tests::each_edit_arm_says_its_own_tools`
 - **Only tarae's MCP server** (`--strict-mcp-config`: a project's `.mcp.json` doesn't connect); `Skill` denied;
   hooks off (`disableAllHooks`).
   test: `claudetrust::tests::the_chat_asks_for_only_tarae_s_own_mcp_servers` ·
   `claudetrust::tests::a_project_skill_cant_pre_approve_tools_in_the_chat` ·
   `claudetrust::tests::chat_settings_l6_checks_are_what_tarae_passes`
-- **Every Read asks tarae** (Read isn't in `--allowedTools`; claude sends `can_use_tool`). Inside the project it's
-  allowed, but a key-named file; outside, a card says what's read; home, above it and key folders only once.
+- **Every read is tarae's** (`read`, `search`: `reads::Gate`, the rule Claude Code's Read had through
+  `can_use_tool`). Inside the project it's allowed, but a key-named file — a picture named like one too;
+  outside, a card says what's read; home, above it and key folders only once. An image's bytes — anyone's: a
+  cloned repository's, one Claude downloaded — are parsed only by memory-safe code, in-process (the `image`
+  crate, on a worker), never by an outside program, and a picture past the decoding limits (256 MB decoded,
+  20,000 pixels a side) is refused before it's decoded — a decompression bomb, said; a PDF isn't parsed at all
+  (its pages aren't read yet).
   Claude's `note` pins on the project's files only (a note's lines reach Claude on your reply): a path outside
   gets one answer whether or not it's there.
   test: `editor::tests::claudes_reads_outside_the_project_ask_first` · `reads::tests::inside_or_allowed_goes_without_asking` ·
   `chat::tests::a_key_named_file_reaches_claude_only_when_the_user_lets_it` · `reads::tests::a_link_to_a_key_file_is_the_key_file` ·
-  `notes::tests::a_note_outside_the_project_is_refused_alike`
+  `notes::tests::a_note_outside_the_project_is_refused_alike` · `readtool::tests::what_read_would_ask_about_asks` ·
+  `media::tests::a_decompression_bomb_is_refused_said` ·
+  `readtool::tests::a_key_named_image_asks_first`
 - **`references` and `definition` read a place's line by the opened file's real path**: inside the project, or
   outside where Read would go unasked; else `(outside the project — not read)` — a link in the project leading out
   isn't inside, an open buffer of such a file neither.

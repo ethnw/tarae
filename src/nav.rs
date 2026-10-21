@@ -3022,7 +3022,11 @@ mod tests {
         let nowhere = run_search(&dir, None, &q("nowhere", Output::Count), &[], &shut);
         assert_eq!(only_there.unwrap().replace("fake-token", "nowhere"), nowhere.unwrap(), "not counted");
         let named = run_search(&dir, Some(".env"), &q("alpha", Output::Lines), &[], &shut).unwrap_err();
-        assert!(named.contains(".env is named like a key") && named.contains("Read asks"), "{named}");
+        assert!(
+            named.contains(".env is named like a key")
+                && named.contains("read asks the user for it on its card"),
+            "{named}"
+        );
         // (one outside the project too — said, no card: a yes on one searched nothing, review N2)
         let beside = crate::scratch::Scratch::new("nav-keys-outside");
         let key = beside.join("id_ed25519");

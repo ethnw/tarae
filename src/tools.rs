@@ -182,7 +182,8 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 }
                 other => Err(format!("no tool {}", other.unwrap_or_default())),
             };
-            sized(ed, tool, &r, None);
+            let (Ok(text) | Err(text)) = &r;
+            sized(ed, tool, text.len(), None, 0);
             Ok(content(r))
         }
         m => crate::mcp::common(m, msg, rev, json!({ "tools": {} })).ok_or_else(|| crate::mcp::not_found(m)),
@@ -255,12 +256,12 @@ pub(crate) fn annotated(mut schema: Value) -> Value {
     schema
 }
 
-/// A result of `tool` going to the chat of `ed.session`: its size logged and counted — `output`, a run's whole
-/// output beside it.
-fn sized(ed: &mut Editor, tool: &str, r: &Result<String, String>, output: Option<usize>) {
-    let (Ok(text) | Err(text)) = r;
+/// A result of `tool` going to the chat of `ed.session`: its size (`len` bytes of text, a picture as its tokens'
+/// worth — `parts_len`) logged and counted, with how many `pictures` it carries — `output`, a run's whole output
+/// beside it.
+fn sized(ed: &mut Editor, tool: &str, len: usize, output: Option<usize>, pictures: usize) {
     let session = ed.session.log();
-    ed.session.usage.tool_result(&session, tool, text.len(), output);
+    ed.session.usage.tool_result(&session, tool, len, output, pictures);
     ed.session.usage.tally.mcp_answered();
 }
 
@@ -270,6 +271,57 @@ pub(crate) fn content(r: Result<String, String>) -> Value {
         Ok(t) => json!({ "content": [{ "type": "text", "text": t }] }),
         Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
     }
+}
+
+/// A part of an answer beyond text: a picture the model sees (`read` of an image — `media.rs`). Claude Code hands an MCP `image` block on as an image (measured, readimg).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    Text(String),
+    Image(crate::media::Image),
+}
+
+/// Parts as MCP content, in their order.
+fn content_parts(r: Result<Vec<Part>, String>) -> Value {
+    match r {
+        Ok(parts) => {
+            let blocks: Vec<Value> = parts
+                .iter()
+                .map(|p| match p {
+                    Part::Text(t) => json!({ "type": "text", "text": t }),
+                    Part::Image(i) => json!({ "type": "image",
+                        "data": crate::sandbox::proxy::parse::base64(&i.bytes), "mimeType": i.mime }),
+                })
+                .collect();
+            json!({ "content": blocks })
+        }
+        Err(e) => content(Err(e)),
+    }
+}
+
+/// Parts as text, an image as `[image/png 2000×1250]` — what the tests read.
+#[cfg(test)]
+pub(crate) fn said(parts: &[Part]) -> String {
+    let said = parts.iter().map(|p| match p {
+        Part::Text(t) => t.clone(),
+        Part::Image(i) => format!("[{} {}×{}]", i.mime, i.w, i.h),
+    });
+    said.collect::<Vec<_>>().join("\n")
+}
+
+/// What the parts weigh in the conversation, as bytes of text (what `usage` counts and estimates tokens from): a
+/// picture as its tokens (`Image::tokens`) at `usage::BYTES_PER_TOKEN` — never its base64, which the model doesn't
+/// read as text (a 4.8 MB picture costs ~3k tokens, not 1.2M).
+fn parts_len(parts: &[Part]) -> usize {
+    let len = |p: &Part| match p {
+        Part::Text(t) => t.len(),
+        Part::Image(i) => i.tokens() as usize * crate::usage::BYTES_PER_TOKEN,
+    };
+    parts.iter().map(len).sum()
+}
+
+/// How many pictures the parts carry.
+fn pictures(parts: &[Part]) -> usize {
+    parts.iter().filter(|p| matches!(p, Part::Image(_))).count()
 }
 
 #[cfg(test)]
@@ -312,8 +364,20 @@ impl Call {
 /// Answers a call that waited — only to the process that made it, in whichever session it is. A run's
 /// trace ends here unless its run's end said how (not run: why).
 pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
+    answer_parts(ed, call, r.map(|t| vec![Part::Text(t)]));
+}
+
+/// (tests: the answer to `call` kept in `ANSWERED`, its pictures as `said` has them)
+#[cfg(test)]
+fn answered(call: &Call, r: &Result<Vec<Part>, String>) {
+    let r = r.as_ref().map(|p| said(p)).map_err(Clone::clone);
+    ANSWERED.with(|a| a.borrow_mut().push((call.id.clone(), r)));
+}
+
+/// `answer` with pictures among its text.
+pub fn answer_parts(ed: &mut Editor, call: Call, r: Result<Vec<Part>, String>) {
     #[cfg(test)]
-    ANSWERED.with(|a| a.borrow_mut().push((call.id.clone(), r.clone())));
+    answered(&call, &r);
     if let Some(t) = &call.trace {
         match &r {
             Ok(_) => t.end("answered"),
@@ -327,7 +391,7 @@ pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
 /// while another session behind is swapped in, from the main loop next (never a swap inside a swap). That
 /// next turn is the owner's own event (`Event::For`, swapped in for it, so delivered at once), so it's one
 /// hop, never a loop.
-fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
+fn deliver(ed: &mut Editor, call: Call, r: Result<Vec<Part>, String>) {
     let owner = std::iter::once(&ed.session)
         .chain(&ed.sessions)
         .find(|l| l.chat.as_ref().is_some_and(|c| c.generation() == call.generation))
@@ -337,7 +401,8 @@ fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
         None => {}
         Some(session) if session == ed.session.id => {
             ed.session.tool_waits.retain(|w| !w.is(call.generation, &call.id));
-            sized(ed, &call.tool, &r, call.output);
+            let (len, pictures) = r.as_ref().map_or_else(|e| (e.len(), 0), |p| (parts_len(p), pictures(p)));
+            sized(ed, &call.tool, len, call.output, pictures);
             let response = response(&call, r);
             crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
         }
@@ -353,8 +418,8 @@ fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
 }
 
 /// A waited call's answer, in its request's revision.
-fn response(call: &Call, r: Result<String, String>) -> Value {
-    let result = crate::mcp::finish(call.rev, "tools/call", content(r));
+fn response(call: &Call, r: Result<Vec<Part>, String>) -> Value {
+    let result = crate::mcp::finish(call.rev, "tools/call", content_parts(r));
     json!({ "jsonrpc": "2.0", "id": call.id, "result": result })
 }
 
@@ -5151,12 +5216,47 @@ mod tests {
 
         // A waited call answers in its request's revision
         let mut late = super::Call::test(9);
-        assert!(super::response(&late, Ok("done".into()))["result"].get("resultType").is_none());
+        let done = || Ok(vec![super::Part::Text("done".into())]);
+        assert!(super::response(&late, done())["result"].get("resultType").is_none());
         late.rev = Rev::Stateless;
-        let r = super::response(&late, Ok("done".into()));
+        let r = super::response(&late, done());
         assert_eq!(r["result"]["resultType"], "complete", "{r}");
         assert_eq!(r["result"]["content"][0]["text"], "done");
         assert_eq!(r["id"], 9);
+    }
+
+    /// readimg: a picture goes on the wire as MCP's `image` block — `data` standard base64, padded, and its
+    /// `mimeType` — in its place among the text (what Claude Code hands the model as an image, measured); and
+    /// `parts_len` counts it as sent.
+    #[test]
+    fn a_picture_is_an_mcp_image_block_on_the_wire() {
+        let bytes = vec![0x00, 0x01, 0x02, 0xFD, 0xFE, 0xFF, 0x07];
+        let img = crate::media::Image { mime: "image/png", bytes, w: 1, h: 1 };
+        let parts = vec![
+            super::Part::Text("== a.png".into()),
+            super::Part::Image(img),
+            super::Part::Text("end".into()),
+        ];
+        // (a picture weighs its tokens' worth, never its base64: 1×1 is one patch)
+        assert_eq!((super::parts_len(&parts), super::pictures(&parts)), (8 + 4 + 3, 1));
+        let shot = crate::media::Image { mime: "image/png", bytes: vec![0; 3_600_000], w: 2000, h: 1250 };
+        let one = [super::Part::Image(shot)];
+        assert_eq!(
+            super::parts_len(&one),
+            72 * 45 * 4,
+            "a screenshot: ~3.2k tokens, not its 4.8 MB of base64"
+        );
+        let r = super::response(&super::Call::test(4), Ok(parts));
+        assert_eq!(
+            r["result"]["content"],
+            serde_json::json!([
+                { "type": "text", "text": "== a.png" },
+                { "type": "image", "data": "AAEC/f7/Bw==", "mimeType": "image/png" },
+                { "type": "text", "text": "end" },
+            ]),
+            "{r}"
+        );
+        assert!(r["result"].get("isError").is_none());
     }
 
     /// Which MCP revision the installed claude speaks to tarae's tools server — with no user message, so no

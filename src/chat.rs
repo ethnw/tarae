@@ -6,10 +6,9 @@
 //!   only the first time that version is sent (not resent every time), and only around the cursor if large.
 //! - Answers are drawn as they stream; stop (`C-c`) is an interrupt control request — process, memory stay.
 //! - A code block in the answer: `C-r` applies it to the selection (via the review diff), `C-y` copies it.
-//! - Claude explores the project itself with read-only tools (Read, tarae's search and read — it can't
-//!   write). Each call is one dim row (`◦ read  src/lib.rs  L10–49`); it and every `path:line` in an answer
-//!   is a link —
-//!   click it, or `C-]` (`C-g`) walks them newest first. Open files are listed in the context; unsaved ones carry
+//! - Claude explores the project itself with tarae's read-only tools (search, read — images too — and the
+//!   language server's; it can't write with them). Each call is one dim row (`◦ read  src/lib.rs  L10–49`); it
+//!   and every `path:line` in an answer is a link — click it, or `C-]` (`C-g`) walks them newest first. Open files are listed in the context; unsaved ones carry
 //!   their text (disk is stale for them).
 //! - It reads your CLAUDE.md files and Claude Code settings like `claude` (`llm.chat-settings`) — with hooks off
 //!   and an `ask` rule so edits always come here first (measured: a project `allow` or hooks would otherwise apply).
@@ -59,7 +58,7 @@ mean is on their screen but not in the context (a panel, a card, a message, the 
 screen tool shows you their screen as text — they're asked first, and it only looks. For the processes the \
 editor runs (language servers, your chat, commands, tests, the terminal — pid, parent, age, CPU, memory, \
 command line, folder), use the procs tool, not ps, pgrep or lsof through run. Files marked unsaved differ from disk — trust the \
-text given in the context over what Read returns. When you point at code, cite it as path:line (relative to the \
+text given in the context over what read returns. When you point at code, cite it as path:line (relative to the \
 project root) — the user can jump there; their editor follows you, showing the code you read and the code you \
 cite. When you explain how code works, walk the user through it in the order of the flow: right before you \
 explain each piece, put a line <show at=\"path:start-end\">what this code does in the flow, one short \
@@ -124,7 +123,7 @@ pub(crate) fn system_for(arm: crate::edittool::Arm) -> String {
         s.push_str(&format!(
             " tarae's own log, {}, says what the language servers are doing (starting, indexing, ready, \
              exited, what they printed) and every message the editor showed the user — the place to look when \
-             a server seems slow or something failed; Read or grep it without asking.",
+             a server seems slow or something failed; read or search it without asking.",
             log.display()
         ));
     }
@@ -138,10 +137,12 @@ pub(crate) fn system_for(arm: crate::edittool::Arm) -> String {
 /// `search` and `read` do what they did — 54 exploration turns on three builds called Grep never and Glob 3
 /// times, and leaving them out takes 1,570 tokens off every request (tests/live.rs `chat_tools_ab`, 2026-10-13).
 /// Edit and Write only with `llm.edit-tools` "both" or "native" — by default (`tarae`) tarae's `edit` makes every
-/// change and `Read` is Claude Code's only tool (`edit` is `ALLOWED`'s, listed by `tools::mcp` when the chat's
-/// process has it). The A/B that decided it: tests/live.rs `chat_edit_ab`, 2026-10-13.
+/// change (`edit` is `ALLOWED`'s, listed by `tools::mcp` when the chat's process has it; the A/B that decided it:
+/// tests/live.rs `chat_edit_ab`, 2026-10-13) and the chat has no tool of Claude Code's at all. No Read in any arm:
+/// tarae's `read` reads images too (readimg, 2026-10-20 — `media.rs`; the A/B: tests/live.rs
+/// `chat_reads_a_screenshot_ab`).
 fn tools(arm: crate::edittool::Arm) -> &'static str {
-    if arm.native() { "Read,Edit,Write" } else { "Read" }
+    if arm.native() { "Edit,Write" } else { "" }
 }
 /// Not Read: allowed by name it reads anywhere unasked (measured — `reads.rs` answers it).
 /// (`screen` asks the user itself — `seeing.rs`)
@@ -4193,7 +4194,7 @@ mod tests {
         assert!(!read.contains("Before an Edit") && !read.contains("own read"), "{read}");
         assert_eq!(
             (tools(Arm::Native), tools(Arm::Both), tools(Arm::Tarae)),
-            ("Read,Edit,Write", "Read,Edit,Write", "Read")
+            ("Edit,Write", "Edit,Write", "")
         );
         assert!(ALLOWED.split(',').any(|t| t == "mcp__tarae__edit"));
     }
