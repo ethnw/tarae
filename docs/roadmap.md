@@ -325,8 +325,28 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
 1. **The bar**: no test that fails only under load or only sometimes; every test green three runs in a row on
    macOS and on every supported kernel (§2's set); a set period of building tarae with tarae with no new serious
    bug.
-2. **Bug hunting**: tests that vary what tests usually hold still — the order state changes in, the screen's
-   width, the load — and the property loops widened with real output.
+2. **Bug hunting: deterministic simulation testing**, built in-house — no commercial service (user decision
+   2026-10-18; the plan: `target/sb/detsim-plan.md`). AI made writing code easier, not checking that it works, and
+   the bugs left are about *when*: a kill sent to a pid already reaped and someone else's (timing), two bring cards
+   for one session (event order), a grant's take-back lost when its store write failed and one made before the
+   sessions list was restored (a fault, start-up order), tests that fail only under load. FoundationDB's way: every
+   source of nondeterminism behind one seeded simulator, the whole editor run under random schedules and faults,
+   any failure replayed from its seed. The pieces:
+   - **The simulated loop**: the jobs (`event.rs`) run one at a time at the simulator's choice, which result lands
+     next and when decided by the seed against a simulated clock, the clock read through one place; a failure
+     replays from its seed and shrinks to a short schedule.
+   - **Faults at the worker boundary**, seeded: a write fails, a read sees half a file, a process exits early or
+     never, a server answers late or out of order, the disk watch fires twice or late.
+   - **Scenarios and invariants**: random walks over sessions, cards, chat turns with a fake claude, disk changes
+     and restarts, checked after every step — one bring card a session, every call asked is answered, the inbox is
+     the cards, `Caps` never wider without a card, `tarae state` agrees with the frame, undo restores.
+   - **The threads that stay real**: the few lock-and-channel pieces (`llm::kill`'s) under the same scheduler;
+     Linux's keeper and supervisor perturbed by seed at their interception points, many runs on the test VMs.
+   - **How it runs**: a fixed set of seeds in every `cargo test`, many on a schedule on the VMs; a seed that found
+     a bug joins the fixed set.
+
+   Alongside it, the rest of what tests hold still: the screen's width, the load, and the property loops widened
+   with real output.
 3. **Less code**: what the card model's P3 replaced goes (its piece 5: the parser's gates, ~2,200 lines), and
    whatever else the hunt finds unused. The binary with it: back under the old budgets (12 MB, 17 MB bundled —
    raised to 13 / 18 on 2026-10-15 at 11.98 / 17.07, from 8.7 / 12.5 on 2026-10-04) or a reason why not.
@@ -349,6 +369,8 @@ git tab, search, a short Kubernetes one.
 
 ## Alongside, not ordered
 
+- **The simulation harness's first piece** (§9.2) may start before §9: the simulated loop and one scenario. From
+  then on new code is tested in it, so the harness grows with what's built instead of being fitted to it after.
 - **Linux in real use**, on test machines:
   - The terminal, the clipboard, file watching, Java (jdtls), the Kubernetes plugin, WSL, and working over ssh.
   - Several distributions, kernels and languages, and a large repository. Crash recovery, with no work lost.
