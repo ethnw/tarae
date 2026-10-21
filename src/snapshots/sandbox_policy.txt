@@ -21,7 +21,7 @@ profile:
 (allow file-write* (require-all (subpath (param "ROOT"))))
 (allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")))
 (deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
-(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")) (subpath (param "R20")) (subpath (param "R21")) (subpath (param "R22")) (subpath (param "R23")))
 (allow file-read-data (require-all (subpath (param "HOME")) (regex #"/Library/Preferences/(ByHost/)?\.GlobalPreferences[^/]*\.plist$")))
 (deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
 (deny file-read-data file-read-xattr (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]|\.[eE][nN][vV]\.[^/]*|[^/]*\.[eE][nN][vV]|[^/]*\.[pP][eE][mM]|[^/]*\.[kK][eE][yY]|[^/]*\.[pP]12|[^/]*\.[pP][fF][xX]|[^/]*\.[jJ][kK][sS]|[^/]*\.[kK][eE][yY][sS][tT][oO][rR][eE]|[^/]*\.[kK][dD][bB][xX]|[iI][dD]_[rR][sS][aA][^/]*|[iI][dD]_[dD][sS][aA][^/]*|[iI][dD]_[eE][cC][dD][sS][aA][^/]*|[iI][dD]_[eE][dD]25519[^/]*|\.[nN][eE][tT][rR][cC]|\.[nN][pP][mM][rR][cC])$") (regex #"^$ROOT-PARTS/(.*/)?(\.[pP][yY][pP][iI][rR][cC]|\.[pP][gG][pP][aA][sS][sS]|\.[gG][iI][tT]-[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[jJ][sS][oO][nN]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[tT][oO][mM][lL]|[sS][eE][cC][rR][eE][tT][sS]\.[jJ][sS][oO][nN]|[sS][eE][cC][rR][eE][tT][sS]\.[yY][aA][mM][lL])$") (regex #"^$ROOT-PARTS/(.*/)?([sS][eE][cC][rR][eE][tT][sS]\.[yY][mM][lL]|[^/]*\.[sS][eE][cC][rR][eE][tT])$")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]\.[eE][xX][aA][mM][pP][lL][eE]|\.[eE][nN][vV]\.[sS][aA][mM][pP][lL][eE]|[^/]*\.[pP][uU][bB])$") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/")))) (with message "$TAG"))
@@ -72,12 +72,14 @@ params:
     $STATE/tarae.log
   R:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -85,8 +87,10 @@ params:
     $HOME/.rustup
     $HOME/Library/Application Support/go
     $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Caches/pnpm
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -159,12 +163,14 @@ reads.home:
     $HOME
 reads.allow:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -172,8 +178,10 @@ reads.allow:
     $HOME/.rustup
     $HOME/Library/Application Support/go
     $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Caches/pnpm
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -223,6 +231,7 @@ copies.told:
     $HOME/.cargo/config.toml
 run env:
     CARGO_NET_RETRY=0
+    COREPACK_DEFAULT_TO_LATEST=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
@@ -230,8 +239,11 @@ run env:
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
     MAVEN_ARGS=-s $RUN/maven-settings.xml
+    MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
+    RUFF_CACHE_DIR=$RUN/ruff
     UV_CACHE_DIR=$RUN/uv
     UV_HTTP_RETRIES=0
     npm_config_audit=false
@@ -261,7 +273,7 @@ profile:
 (allow file-write* (require-all (subpath (param "ROOT"))))
 (allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")))
 (deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
-(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")) (subpath (param "R20")) (subpath (param "R21")))
 (allow file-read-data (require-all (subpath (param "HOME")) (regex #"/Library/Preferences/(ByHost/)?\.GlobalPreferences[^/]*\.plist$")))
 (deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
 (deny file-read-data file-read-xattr (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]|\.[eE][nN][vV]\.[^/]*|[^/]*\.[eE][nN][vV]|[^/]*\.[pP][eE][mM]|[^/]*\.[kK][eE][yY]|[^/]*\.[pP]12|[^/]*\.[pP][fF][xX]|[^/]*\.[jJ][kK][sS]|[^/]*\.[kK][eE][yY][sS][tT][oO][rR][eE]|[^/]*\.[kK][dD][bB][xX]|[iI][dD]_[rR][sS][aA][^/]*|[iI][dD]_[dD][sS][aA][^/]*|[iI][dD]_[eE][cC][dD][sS][aA][^/]*|[iI][dD]_[eE][dD]25519[^/]*|\.[nN][eE][tT][rR][cC]|\.[nN][pP][mM][rR][cC])$") (regex #"^$ROOT-PARTS/(.*/)?(\.[pP][yY][pP][iI][rR][cC]|\.[pP][gG][pP][aA][sS][sS]|\.[gG][iI][tT]-[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[jJ][sS][oO][nN]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[tT][oO][mM][lL]|[sS][eE][cC][rR][eE][tT][sS]\.[jJ][sS][oO][nN]|[sS][eE][cC][rR][eE][tT][sS]\.[yY][aA][mM][lL])$") (regex #"^$ROOT-PARTS/(.*/)?([sS][eE][cC][rR][eE][tT][sS]\.[yY][mM][lL]|[^/]*\.[sS][eE][cC][rR][eE][tT])$")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]\.[eE][xX][aA][mM][pP][lL][eE]|\.[eE][nN][vV]\.[sS][aA][mM][pP][lL][eE]|[^/]*\.[pP][uU][bB])$") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/")))) (with message "$TAG"))
@@ -311,10 +323,12 @@ params:
     $STATE/tarae.log
   R:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -322,8 +336,10 @@ params:
     $HOME/.rustup
     $HOME/Library/Application Support/go
     $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Caches/pnpm
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -397,10 +413,12 @@ reads.home:
     $HOME
 reads.allow:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -408,8 +426,10 @@ reads.allow:
     $HOME/.rustup
     $HOME/Library/Application Support/go
     $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Caches/pnpm
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -461,14 +481,18 @@ copies.left_out:
 copies.told:
 run env:
     CARGO_NET_RETRY=0
+    COREPACK_DEFAULT_TO_LATEST=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
     GRADLE_OPTS=-Xmx1g -Dorg.gradle.daemon=false
     GRADLE_USER_HOME=$RUN/gradle
     MAVEN_ARGS=-s $RUN/maven-settings.xml
+    MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
+    RUFF_CACHE_DIR=$RUN/ruff
     UV_CACHE_DIR=$RUN/uv
     UV_HTTP_RETRIES=0
     npm_config_audit=false
@@ -499,7 +523,7 @@ profile:
 (allow file-write* (require-all (subpath (param "ROOT"))))
 (allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (subpath (param "W7")))
 (deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
-(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (subpath (param "W7")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (subpath (param "W7")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")) (subpath (param "R20")) (subpath (param "R21")) (subpath (param "R22")) (subpath (param "R23")))
 (allow file-read-data (require-all (subpath (param "HOME")) (regex #"/Library/Preferences/(ByHost/)?\.GlobalPreferences[^/]*\.plist$")))
 (deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
 (deny file-read-data file-read-xattr (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]|\.[eE][nN][vV]\.[^/]*|[^/]*\.[eE][nN][vV]|[^/]*\.[pP][eE][mM]|[^/]*\.[kK][eE][yY]|[^/]*\.[pP]12|[^/]*\.[pP][fF][xX]|[^/]*\.[jJ][kK][sS]|[^/]*\.[kK][eE][yY][sS][tT][oO][rR][eE]|[^/]*\.[kK][dD][bB][xX]|[iI][dD]_[rR][sS][aA][^/]*|[iI][dD]_[dD][sS][aA][^/]*|[iI][dD]_[eE][cC][dD][sS][aA][^/]*|[iI][dD]_[eE][dD]25519[^/]*|\.[nN][eE][tT][rR][cC]|\.[nN][pP][mM][rR][cC])$") (regex #"^$ROOT-PARTS/(.*/)?(\.[pP][yY][pP][iI][rR][cC]|\.[pP][gG][pP][aA][sS][sS]|\.[gG][iI][tT]-[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[jJ][sS][oO][nN]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[tT][oO][mM][lL]|[sS][eE][cC][rR][eE][tT][sS]\.[jJ][sS][oO][nN]|[sS][eE][cC][rR][eE][tT][sS]\.[yY][aA][mM][lL])$") (regex #"^$ROOT-PARTS/(.*/)?([sS][eE][cC][rR][eE][tT][sS]\.[yY][mM][lL]|[^/]*\.[sS][eE][cC][rR][eE][tT])$")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]\.[eE][xX][aA][mM][pP][lL][eE]|\.[eE][nN][vV]\.[sS][aA][mM][pP][lL][eE]|[^/]*\.[pP][uU][bB])$") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/")))) (with message "$TAG"))
@@ -545,12 +569,14 @@ params:
     $STATE/tarae.log
   R:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -558,8 +584,10 @@ params:
     $HOME/.rustup
     $HOME/Library/Application Support/go
     $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Caches/pnpm
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -635,12 +663,14 @@ reads.home:
     $HOME
 reads.allow:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -648,8 +678,10 @@ reads.allow:
     $HOME/.rustup
     $HOME/Library/Application Support/go
     $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Caches/pnpm
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -698,6 +730,7 @@ copies.left_out:
 copies.told:
     $HOME/.cargo/config.toml
 run env:
+    COREPACK_DEFAULT_TO_LATEST=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
@@ -705,8 +738,11 @@ run env:
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
     MAVEN_ARGS=-s $RUN/maven-settings.xml
+    MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
+    RUFF_CACHE_DIR=$RUN/ruff
     UV_CACHE_DIR=$RUN/uv
     npm_config_logs_dir=$RUN
 tool homes:
@@ -747,7 +783,7 @@ profile:
 (allow file-write* (require-all (subpath (param "ROOT"))))
 (allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")))
 (deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
-(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")) (subpath (param "R20")) (subpath (param "R21")) (subpath (param "R22")))
 (allow file-read-data (require-all (subpath (param "HOME")) (regex #"/Library/Preferences/(ByHost/)?\.GlobalPreferences[^/]*\.plist$")))
 (deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
 (deny file-read-data file-read-xattr (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]|\.[eE][nN][vV]\.[^/]*|[^/]*\.[eE][nN][vV]|[^/]*\.[pP][eE][mM]|[^/]*\.[kK][eE][yY]|[^/]*\.[pP]12|[^/]*\.[pP][fF][xX]|[^/]*\.[jJ][kK][sS]|[^/]*\.[kK][eE][yY][sS][tT][oO][rR][eE]|[^/]*\.[kK][dD][bB][xX]|[iI][dD]_[rR][sS][aA][^/]*|[iI][dD]_[dD][sS][aA][^/]*|[iI][dD]_[eE][cC][dD][sS][aA][^/]*|[iI][dD]_[eE][dD]25519[^/]*|\.[nN][eE][tT][rR][cC]|\.[nN][pP][mM][rR][cC])$") (regex #"^$ROOT-PARTS/(.*/)?(\.[pP][yY][pP][iI][rR][cC]|\.[pP][gG][pP][aA][sS][sS]|\.[gG][iI][tT]-[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[jJ][sS][oO][nN]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[tT][oO][mM][lL]|[sS][eE][cC][rR][eE][tT][sS]\.[jJ][sS][oO][nN]|[sS][eE][cC][rR][eE][tT][sS]\.[yY][aA][mM][lL])$") (regex #"^$ROOT-PARTS/(.*/)?([sS][eE][cC][rR][eE][tT][sS]\.[yY][mM][lL]|[^/]*\.[sS][eE][cC][rR][eE][tT])$")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]\.[eE][xX][aA][mM][pP][lL][eE]|\.[eE][nN][vV]\.[sS][aA][mM][pP][lL][eE]|[^/]*\.[pP][uU][bB])$") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/")))) (with message "$TAG"))
@@ -797,6 +833,7 @@ params:
     $STATE/tarae.log
   R:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/go
@@ -804,6 +841,7 @@ params:
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -812,6 +850,7 @@ params:
     $HOME/Library/Application Support/pip/pip.conf
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -884,6 +923,7 @@ reads.home:
     $HOME
 reads.allow:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/go
@@ -891,6 +931,7 @@ reads.allow:
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -899,6 +940,7 @@ reads.allow:
     $HOME/Library/Application Support/pip/pip.conf
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -948,6 +990,7 @@ copies.told:
     $HOME/.cargo/config.toml
 run env:
     CARGO_NET_RETRY=0
+    COREPACK_DEFAULT_TO_LATEST=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
@@ -955,8 +998,11 @@ run env:
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
     MAVEN_ARGS=-s $RUN/maven-settings.xml
+    MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
+    RUFF_CACHE_DIR=$RUN/ruff
     UV_CACHE_DIR=$RUN/uv
     UV_HTTP_RETRIES=0
     npm_config_audit=false
@@ -986,7 +1032,7 @@ profile:
 (allow file-write* (require-all (subpath (param "ROOT"))))
 (allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")))
 (deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
-(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")) (subpath (param "R20")))
 (allow file-read-data (require-all (subpath (param "HOME")) (regex #"/Library/Preferences/(ByHost/)?\.GlobalPreferences[^/]*\.plist$")))
 (deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
 (deny file-read-data file-read-xattr (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]|\.[eE][nN][vV]\.[^/]*|[^/]*\.[eE][nN][vV]|[^/]*\.[pP][eE][mM]|[^/]*\.[kK][eE][yY]|[^/]*\.[pP]12|[^/]*\.[pP][fF][xX]|[^/]*\.[jJ][kK][sS]|[^/]*\.[kK][eE][yY][sS][tT][oO][rR][eE]|[^/]*\.[kK][dD][bB][xX]|[iI][dD]_[rR][sS][aA][^/]*|[iI][dD]_[dD][sS][aA][^/]*|[iI][dD]_[eE][cC][dD][sS][aA][^/]*|[iI][dD]_[eE][dD]25519[^/]*|\.[nN][eE][tT][rR][cC]|\.[nN][pP][mM][rR][cC])$") (regex #"^$ROOT-PARTS/(.*/)?(\.[pP][yY][pP][iI][rR][cC]|\.[pP][gG][pP][aA][sS][sS]|\.[gG][iI][tT]-[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[jJ][sS][oO][nN]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[tT][oO][mM][lL]|[sS][eE][cC][rR][eE][tT][sS]\.[jJ][sS][oO][nN]|[sS][eE][cC][rR][eE][tT][sS]\.[yY][aA][mM][lL])$") (regex #"^$ROOT-PARTS/(.*/)?([sS][eE][cC][rR][eE][tT][sS]\.[yY][mM][lL]|[^/]*\.[sS][eE][cC][rR][eE][tT])$")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]\.[eE][xX][aA][mM][pP][lL][eE]|\.[eE][nN][vV]\.[sS][aA][mM][pP][lL][eE]|[^/]*\.[pP][uU][bB])$") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/")))) (with message "$TAG"))
@@ -1035,11 +1081,13 @@ params:
     $STATE/tarae.log
   R:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/go
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -1048,6 +1096,7 @@ params:
     $HOME/Library/Application Support/pip/pip.conf
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -1121,11 +1170,13 @@ reads.home:
     $HOME
 reads.allow:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/go
     $HOME/.config/pip/pip.conf
     $HOME/.gitconfig
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -1134,6 +1185,7 @@ reads.allow:
     $HOME/Library/Application Support/pip/pip.conf
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -1185,14 +1237,18 @@ copies.left_out:
 copies.told:
 run env:
     CARGO_NET_RETRY=0
+    COREPACK_DEFAULT_TO_LATEST=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
     GRADLE_OPTS=-Xmx1g -Dorg.gradle.daemon=false
     GRADLE_USER_HOME=$RUN/gradle
     MAVEN_ARGS=-s $RUN/maven-settings.xml
+    MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
+    RUFF_CACHE_DIR=$RUN/ruff
     UV_CACHE_DIR=$RUN/uv
     UV_HTTP_RETRIES=0
     npm_config_audit=false
@@ -1222,7 +1278,7 @@ profile:
 (allow file-write* (require-all (subpath (param "ROOT"))))
 (allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (subpath (param "W7")))
 (deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
-(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (subpath (param "W7")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (subpath (param "W7")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")) (subpath (param "R20")) (subpath (param "R21")) (subpath (param "R22")))
 (allow file-read-data (require-all (subpath (param "HOME")) (regex #"/Library/Preferences/(ByHost/)?\.GlobalPreferences[^/]*\.plist$")))
 (deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|__[pP][yY][cC][aA][cC][hH][eE]__|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[cC][aA][rR][gG][oO]|\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
 (deny file-read-data file-read-xattr (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]|\.[eE][nN][vV]\.[^/]*|[^/]*\.[eE][nN][vV]|[^/]*\.[pP][eE][mM]|[^/]*\.[kK][eE][yY]|[^/]*\.[pP]12|[^/]*\.[pP][fF][xX]|[^/]*\.[jJ][kK][sS]|[^/]*\.[kK][eE][yY][sS][tT][oO][rR][eE]|[^/]*\.[kK][dD][bB][xX]|[iI][dD]_[rR][sS][aA][^/]*|[iI][dD]_[dD][sS][aA][^/]*|[iI][dD]_[eE][cC][dD][sS][aA][^/]*|[iI][dD]_[eE][dD]25519[^/]*|\.[nN][eE][tT][rR][cC]|\.[nN][pP][mM][rR][cC])$") (regex #"^$ROOT-PARTS/(.*/)?(\.[pP][yY][pP][iI][rR][cC]|\.[pP][gG][pP][aA][sS][sS]|\.[gG][iI][tT]-[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[jJ][sS][oO][nN]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL][sS]\.[tT][oO][mM][lL]|[sS][eE][cC][rR][eE][tT][sS]\.[jJ][sS][oO][nN]|[sS][eE][cC][rR][eE][tT][sS]\.[yY][aA][mM][lL])$") (regex #"^$ROOT-PARTS/(.*/)?([sS][eE][cC][rR][eE][tT][sS]\.[yY][mM][lL]|[^/]*\.[sS][eE][cC][rR][eE][tT])$")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(\.[eE][nN][vV]\.[eE][xX][aA][mM][pP][lL][eE]|\.[eE][nN][vV]\.[sS][aA][mM][pP][lL][eE]|[^/]*\.[pP][uU][bB])$") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/")))) (with message "$TAG"))
@@ -1268,6 +1324,7 @@ params:
     $STATE/tarae.log
   R:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/go
@@ -1275,6 +1332,7 @@ params:
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -1283,6 +1341,7 @@ params:
     $HOME/Library/Application Support/pip/pip.conf
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -1358,6 +1417,7 @@ reads.home:
     $HOME
 reads.allow:
     $HOME/.CFUserTextEncoding
+    $HOME/.cache/pnpm
     $HOME/.cargo
     $HOME/.config/git
     $HOME/.config/go
@@ -1365,6 +1425,7 @@ reads.allow:
     $HOME/.gitconfig
     $HOME/.gradle/caches/modules-2
     $HOME/.gradle/wrapper/dists
+    $HOME/.local/share/pnpm
     $HOME/.m2/repository
     $HOME/.m2/wrapper
     $HOME/.npm
@@ -1373,6 +1434,7 @@ reads.allow:
     $HOME/Library/Application Support/pip/pip.conf
     $HOME/Library/Fonts
     $HOME/Library/Java/JavaVirtualMachines
+    $HOME/Library/pnpm
     $HOME/go
     $HOME/go/pkg/mod
     $HOME/work/.cargo/config
@@ -1421,6 +1483,7 @@ copies.left_out:
 copies.told:
     $HOME/.cargo/config.toml
 run env:
+    COREPACK_DEFAULT_TO_LATEST=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
@@ -1428,8 +1491,11 @@ run env:
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
     MAVEN_ARGS=-s $RUN/maven-settings.xml
+    MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
+    RUFF_CACHE_DIR=$RUN/ruff
     UV_CACHE_DIR=$RUN/uv
     npm_config_logs_dir=$RUN
 tool homes:

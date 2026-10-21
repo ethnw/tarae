@@ -12,7 +12,7 @@
 //!
 //! `[sandbox]`:
 //! - `homes.<name> = { env, else }`: a tool's home — `env` when it's set to an absolute path, else `else`
-//!   (`~/…`); `{<name>}` in the places below. A place that is a home alone counts only where it's there.
+//!   (`~/…`, or `{xdg-cache}/…`); `{<name>}` in the places below. A place that is a home alone counts only where it's there.
 //! - `reads`: places in home a run reads, whole. `reads-above`: files a run reads in every folder between the
 //!   project and home (`.cargo/config.toml`).
 //! - `kept`: places a run never reads, whatever is granted — at a home's default place and where its variable
@@ -33,12 +33,13 @@
 //! - `run-home.<name> = { env, keep, when, make, link, set, append, daemon, fresh, said }`: a home of the
 //!   run's own for the tool named, made in the run's folder (`{run}/<name>`) — or, `keep`, kept across the
 //!   project's runs in tarae's cache folder (`run-homes/<name>/<the project's>`) where it has one of `when` —
-//!   `env` pointing at it: folders made in it, links from it into the tool's home (read only), variables `set`
+//!   `env` pointing at it (or none, where `{home}` in what's appended does): folders made in it, links from it into the tool's home (read only), variables `set`
 //!   (`{ value, if }`: when `if` is there) and `append`ed to the run's own (`{home}`: this home's folder);
 //!   `daemon = { make, append }` (kept ones): the tool leaves a daemon serving later runs from it — kept per
 //!   project *and policy* where tarae ends what runs leave (Linux; elsewhere the run's own), and that made and
-//!   appended then; `fresh = { append }`: appended only to a home of the run's own; `said` what Claude reads
-//!   when a write in the user's home of the tool was kept.
+//!   appended then; `fresh = { append }`: appended only to a home of the run's own; `files = { path = text }`:
+//!   files in it that are tarae's whole, written at every run (a few settings, `FILE_TEXT_MAX`); `said` what
+//!   Claude reads when a write in the user's home of the tool was kept.
 //!   `proxy = { file, lines }`: a file in the home that's tarae's whole, written for a run with a proxy URL
 //!   (`sandbox::Policy::proxy_url`) and removed for one without — `{proxy.<value>}` in its lines
 //!   (`proxy::URL_VALUES`; a line whose value is empty for the run is left out). A run whose URL is its own
@@ -92,7 +93,9 @@
 //!
 //! A place is written from home (`~/…`) or a variable — `{<home>}`, `{user-config}` (macOS's `~/Library/
 //! Application Support`, else `$XDG_CONFIG_HOME` or `~/.config`), `{user-cache}` (`~/Library/Caches`, else
-//! `$XDG_CACHE_HOME` or `~/.cache`), `{xdg-config}` (`$XDG_CONFIG_HOME` or `~/.config`, anywhere), `{run}` —
+//! `$XDG_CACHE_HOME` or `~/.cache`), `{xdg-config}` (`$XDG_CONFIG_HOME` or `~/.config`, anywhere), `{xdg-cache}`
+//! (`$XDG_CACHE_HOME` or `~/.cache`, anywhere), `{xdg-data}` (`$XDG_DATA_HOME` or `~/.local/share`, anywhere),
+//! `{run}` —
 //! with no `..`. A built-in pack's entry that widens past what the core allows — home itself or above it,
 //! keys (`allow::SECRETS`), Claude's or tarae's own, a write where `allow::NEVER_WRITE` is, a variable
 //! `ENV_NEVER` names, a lone program that runs what follows it — is left out and logged
@@ -223,6 +226,7 @@ pub struct BuildsSaid {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunHome {
     pub name: String,
+    /// The variable pointing the tool at it — empty: none, what's appended names it (`{home}`).
     pub env: String,
     pub keep: bool,
     pub when: Vec<String>,
@@ -239,8 +243,14 @@ pub struct RunHome {
     pub fresh: Vec<(String, String)>,
     /// A file in it that's tarae's whole, its lines for a run with a proxy URL (`proxy`).
     pub proxy: Option<ProxyLines>,
+    /// Files in it that are tarae's whole — (a path of plain names, its text) — written at every run, a kept
+    /// home's too (`files`: Gradle's init script).
+    pub files: Vec<(String, String)>,
     pub said: String,
 }
+
+/// The longest text a run home's `files` entry holds (a few settings, not a program).
+const FILE_TEXT_MAX: usize = 4096;
 
 /// A connect refused as a program's own output says it (`refused-connect`): a pattern, or a table of `line`,
 /// `when` and `process`.
@@ -475,7 +485,7 @@ impl Packs {
             let daemon = r.daemon.iter().flat_map(|d| &d.append);
             let appended = r.append.iter().chain(daemon).chain(&r.fresh).map(|(k, _)| k.as_str());
             let set = r.set.iter().map(|(k, ..)| k.as_str()).chain(appended);
-            std::iter::once(r.env.as_str()).chain(set)
+            std::iter::once(r.env.as_str()).filter(|e| !e.is_empty()).chain(set)
         });
         let proxy = self.proxy.env.iter().chain(&self.proxy.append);
         let proxy = proxy.chain(self.proxy.files.iter().flat_map(|f| &f.append));
@@ -612,8 +622,10 @@ fn read_key_of(
                 if !plain_word(&env) || env.contains(['.', '-', '+']) || NOT_A_HOME.contains(&env.as_str()) {
                     return Err(format!("`homes.{name}`: `{env}` isn't a variable a home may come from"));
                 }
-                if !default.starts_with("~/") {
-                    return Err(format!("`homes.{name}`: `else` is a place from home (`~/…`)"));
+                if !default.starts_with("~/") && !default.starts_with("{xdg-cache}/") {
+                    return Err(format!(
+                        "`homes.{name}`: `else` is a place from home (`~/…`, `{{xdg-cache}}/…`)"
+                    ));
                 }
                 check_place(&default, Kind::Read, &[])?;
                 if out.homes.iter().any(|o| o.name == name) || CORE_VARS.contains(&name.as_str()) {
@@ -1028,13 +1040,17 @@ fn proxy_file(name: &str, f: &Value) -> Result<ProxyLines, String> {
 }
 
 fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
-    let keys = ["env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "proxy", "said"];
+    let keys =
+        ["env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "proxy", "files", "said"];
     known(h, &keys, &format!("`run-home.{name}`"))?;
     if !plain_word(name) {
         return Err(format!("`run-home.{name}`: a home's name is a folder's"));
     }
-    let env = need(h, "env", &format!("`run-home.{name}`"))?;
-    check_var(&env)?;
+    // (none: a tool no variable points at a folder, given its home in what's appended — pytest's `-o cache_dir=`)
+    let env = string(h, "env")?.unwrap_or_default();
+    if !env.is_empty() {
+        check_var(&env)?;
+    }
     let keep = h.get("keep").map_or(Ok(false), |k| k.as_bool().ok_or("`keep` isn't true or false"))?;
     let mut r = RunHome { name: name.to_string(), env, keep, ..Default::default() };
     r.when = list_in(h, "when")?;
@@ -1095,7 +1111,21 @@ fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
         let lines = proxy_lines(&list_in(p, "lines")?, &what)?;
         r.proxy = Some(ProxyLines { file, lines, append: Vec::new() });
     }
+    for (k, v) in h.get("files").and_then(Value::as_table).into_iter().flatten() {
+        let text = v.as_str().ok_or(format!("`run-home.{name}.files.{k}` isn't a string"))?;
+        if !plain(k) {
+            return Err(format!("`run-home.{name}.files`: `{k}` isn't a path of plain names"));
+        }
+        if text.len() > FILE_TEXT_MAX {
+            return Err(format!("`run-home.{name}.files.{k}`: past {FILE_TEXT_MAX} bytes"));
+        }
+        r.files.push((k.clone(), text.to_string()));
+    }
     r.said = string(h, "said")?.unwrap_or_default();
+    let named = r.append.iter().chain(&r.fresh).chain(r.daemon.iter().flat_map(|d| &d.append));
+    if r.env.is_empty() && !named.into_iter().any(|(_, v)| v.contains("{home}")) {
+        return Err(format!("`run-home.{name}`: no `env`, and nothing appended names `{{home}}`"));
+    }
     Ok(r)
 }
 
@@ -1163,7 +1193,8 @@ fn pairs(v: &Value, what: &str) -> Result<Vec<(String, String)>, String> {
 
 /// The core's own variables (`Vars`, and a run home's `{home}` in what it appends) — no home may take one's
 /// name.
-const CORE_VARS: [&str; 5] = ["user-config", "user-cache", "xdg-config", "run", "home"];
+const CORE_VARS: [&str; 7] =
+    ["user-config", "user-cache", "xdg-config", "xdg-cache", "xdg-data", "run", "home"];
 
 /// Variables no tool's home comes from: they'd make it home, the folders on `PATH`, or the temp folders.
 const NOT_A_HOME: [&str; 4] = ["HOME", "PATH", "TMPDIR", "PWD"];
@@ -1259,7 +1290,15 @@ fn leads(p: &str, homes: &[Home]) -> Option<Vec<String>> {
         "user-config" => both("Library/Application Support", ".config"),
         "user-cache" => both("Library/Caches", ".cache"),
         "xdg-config" => vec![".config".into()],
-        name => vec![homes.iter().find(|h| h.name == name)?.default.strip_prefix("~/")?.to_string()],
+        "xdg-cache" => vec![".cache".into()],
+        "xdg-data" => vec![".local/share".into()],
+        name => {
+            let d = &homes.iter().find(|h| h.name == name)?.default;
+            match d.strip_prefix("{xdg-cache}/") {
+                Some(rest) => vec![format!(".cache/{rest}")],
+                None => vec![d.strip_prefix("~/")?.to_string()],
+            }
+        }
     })
 }
 
@@ -1342,6 +1381,10 @@ pub struct Vars {
     pub user_config: PathBuf,
     pub user_cache: PathBuf,
     pub xdg_config: PathBuf,
+    /// `$XDG_CACHE_HOME` or `~/.cache`, on every system (corepack's home and pnpm's cache follow it).
+    pub xdg_cache: PathBuf,
+    /// `$XDG_DATA_HOME` or `~/.local/share`, on every system (pnpm's home follows it).
+    pub xdg_data: PathBuf,
     pub run: Option<PathBuf>,
     /// Where the tools' shared caches are (`caches`): a home's `dirs` where the home is and at its default, an
     /// asked one's `places` both ways and where its `var` points — never written but through the caches rule.
@@ -1362,10 +1405,17 @@ impl Vars {
     /// For `home` (as it's set), the variables as `var` gives them (set and not empty), on `os`.
     pub fn new(t: &Packs, home: &Path, var: &dyn Fn(&str) -> Option<PathBuf>, os: Os) -> Vars {
         let abs = |name: &str| var(name).filter(|p| p.is_absolute());
-        let at = |p: &str| match p.strip_prefix("~/") {
-            Some(rest) => home.join(rest),
-            None => PathBuf::from(p),
+        let xdg_cache = abs("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache"));
+        let xdg_data = abs("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+        // (a home's `else` from `{xdg-cache}`: where it is with the variable as set — and its default, the variable
+        // unset, refused all the same, as a moved home's default is)
+        let from = |p: &str, cache: &Path| match (p.strip_prefix("~/"), p.strip_prefix("{xdg-cache}/")) {
+            (Some(rest), _) => home.join(rest),
+            (_, Some(rest)) => cache.join(rest),
+            _ => PathBuf::from(p),
         };
+        let unmoved = home.join(".cache");
+        let at = |p: &str| from(p, &xdg_cache);
         // (a list home's entries: the first is where the tool puts its places)
         let entries = |h: &Home| -> Vec<PathBuf> {
             let v = var(&h.env);
@@ -1378,14 +1428,14 @@ impl Vars {
         let homes = t
             .homes
             .iter()
-            .map(|h| (h.name.clone(), first(h).unwrap_or_else(|| at(&h.default)), at(&h.default)))
+            .map(|h| (h.name.clone(), first(h).unwrap_or_else(|| at(&h.default)), from(&h.default, &unmoved)))
             .collect();
         let listed = t.homes.iter().filter(|h| h.list).flat_map(|h| entries(h).into_iter().skip(1));
         let listed = listed.filter(|p| p.is_absolute()).collect();
         let xdg_config = abs("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
         let (user_config, user_cache) = match os {
             Os::Mac => (home.join("Library/Application Support"), home.join("Library/Caches")),
-            Os::Linux => (xdg_config.clone(), abs("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache"))),
+            Os::Linux => (xdg_config.clone(), xdg_cache.clone()),
         };
         let mut v = Vars {
             home: home.to_path_buf(),
@@ -1394,6 +1444,8 @@ impl Vars {
             user_config,
             user_cache,
             xdg_config,
+            xdg_cache,
+            xdg_data,
             run: None,
             caches: Vec::new(),
         };
@@ -1432,6 +1484,8 @@ impl Vars {
             "user-config" => self.user_config.clone(),
             "user-cache" => self.user_cache.clone(),
             "xdg-config" => self.xdg_config.clone(),
+            "xdg-cache" => self.xdg_cache.clone(),
+            "xdg-data" => self.xdg_data.clone(),
             "run" => self.run.clone()?,
             name => {
                 let (at, def) = self.home_of(name)?;

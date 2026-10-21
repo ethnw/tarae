@@ -694,7 +694,7 @@ impl Keeper {
             id
         };
         req.id = id;
-        if let Err(e) = channel::send(self.chan.as_fd(), &Msg::Run(req), fds) {
+        if let Err(e) = channel::send(self.chan.as_fd(), &Msg::Run(Box::new(req)), fds) {
             lock(&self.state).runs.remove(&id);
             return Err(e);
         }
@@ -791,7 +791,7 @@ impl Keeper {
     ) -> io::Result<(Started, Option<Arc<OwnedFd>>)> {
         let Asks { no_userns, ptys, covers } = asks;
         // (only a keeper in a user namespace can give its run a mount namespace of its own)
-        let covers = covers.filter(|c| !c.keys.is_empty());
+        let covers = covers.filter(|c| !c.keys.is_empty() || !c.seals.is_empty());
         // (the break-once: the mounts skipped, the rules left whole — 7d's key tests fail where keys are mounted over)
         #[cfg(test)]
         let covers = covers.filter(|_| std::env::var_os("TARAE_TEST_NO_COVERS").is_none());
@@ -832,15 +832,24 @@ impl Keeper {
             held: self.ns.pid,
             no_userns,
             ptys,
-            shut: covers.and_then(|c| c.shut.as_ref()).map(|s| channel::Covered {
-                dev: s.dev,
-                ino: s.ino,
-                path: bytes(s.path.as_os_str()),
-            }),
+            shut: covers
+                .filter(|c| !c.keys.is_empty())
+                .and_then(|c| c.shut.as_ref())
+                .map(|s| channel::Covered { dev: s.dev, ino: s.ino, path: bytes(s.path.as_os_str()) }),
             covers: covers
                 .iter()
                 .flat_map(|c| &c.keys)
                 .map(|k| channel::Covered { dev: k.dev, ino: k.ino, path: bytes(k.path.as_os_str()) })
+                .collect(),
+            seals: covers
+                .iter()
+                .flat_map(|c| &c.seals)
+                .map(|s| channel::Covered { dev: s.dev, ino: s.ino, path: bytes(s.path.as_os_str()) })
+                .collect(),
+            pins: covers
+                .iter()
+                .flat_map(|c| &c.pins)
+                .map(|s| channel::Covered { dev: s.dev, ino: s.ino, path: bytes(s.path.as_os_str()) })
                 .collect(),
         };
         let stdin = open_null(libc::O_RDONLY)?;
@@ -1540,7 +1549,7 @@ pub fn main() -> ! {
         if polled[0].revents != 0 {
             match channel::recv(k.chan.as_fd(), &mut buf) {
                 Ok(Some((Ok(Msg::End), _))) | Ok(None) | Err(_) => k.end_all(me),
-                Ok(Some((Ok(Msg::Run(run)), fds))) => k.start(run, fds),
+                Ok(Some((Ok(Msg::Run(run)), fds))) => k.start(*run, fds),
                 Ok(Some((Ok(Msg::Signal { id, sig }), _))) => k.signal(id, sig),
                 Ok(Some((Ok(Msg::AskUsage), _))) => {
                     let (rss_kb, pss_kb) = own_usage();
@@ -1927,12 +1936,15 @@ struct Exec {
     leak: bool,
 }
 
-/// What a run's child needs to hide the files named like keys (7d, `linux::Covers`; `cover`): the shut file, each
-/// file and what it was (device, inode), its own user namespace's id maps (the keeper's ids, the user's — D5) and
-/// the last capability to drop.
+/// What a run's child needs to hide the files named like keys (7d, `linux::Covers`; `cover`) and seal the project's
+/// protected entries (B9): the shut file (with keys only), each file and what it was (device, inode), each sealed
+/// entry and what it was, its own user namespace's id maps (the keeper's ids, the user's — D5) and the last
+/// capability to drop.
 struct Covering {
-    shut: (CString, u64, u64),
+    shut: Option<(CString, u64, u64)>,
     keys: Vec<(CString, u64, u64)>,
+    seals: Vec<(CString, u64, u64)>,
+    pins: Vec<(CString, u64, u64)>,
     uid_map: CString,
     gid_map: CString,
     last_cap: libc::c_ulong,
@@ -1940,8 +1952,16 @@ struct Covering {
 
 impl Covering {
     fn of(run: &channel::Run) -> Option<Covering> {
-        let shut = run.shut.as_ref().filter(|_| !run.covers.is_empty())?;
+        if run.covers.is_empty() && run.seals.is_empty() {
+            return None;
+        }
         let c = |s: &[u8]| CString::new(s).unwrap_or_default();
+        // (keys need the shut file — `channel::valid_run` holds a run to it)
+        let shut = match (&run.shut, run.covers.is_empty()) {
+            (Some(s), false) => Some((c(&s.path), s.dev, s.ino)),
+            (None, true) => None,
+            _ => return None,
+        };
         // SAFETY: plain calls.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
@@ -1949,8 +1969,10 @@ impl Covering {
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(63);
         Some(Covering {
-            shut: (c(&shut.path), shut.dev, shut.ino),
+            shut,
             keys: run.covers.iter().map(|k| (c(&k.path), k.dev, k.ino)).collect(),
+            seals: run.seals.iter().map(|s| (c(&s.path), s.dev, s.ino)).collect(),
+            pins: run.pins.iter().map(|s| (c(&s.path), s.dev, s.ino)).collect(),
             uid_map: c(format!("{uid} {uid} 1\n").as_bytes()),
             gid_map: c(format!("{gid} {gid} 1\n").as_bytes()),
             last_cap,
@@ -1978,7 +2000,79 @@ const OPEN_TREE_CLOEXEC: libc::c_uint = libc::O_CLOEXEC as libc::c_uint;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x04;
 const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
 
-/// 7d: a run's child hides `c`'s files named like keys — in a user and mount namespace of its own (`unshare`: it
+/// `open_tree`'s and `mount_setattr`'s: the whole tree under it, its mounts too.
+const AT_RECURSIVE: libc::c_uint = 0x8000;
+
+/// B9: the protected entry at `path` (a real path) bound read-only over itself in the run's mount namespace —
+/// opened through no link and checked to be what tarae found (device, inode; a file or a folder, else `ESTALE`), a
+/// copy of its mount there (its whole tree), read-only, no set-user-ID nor devices — programs still run from it
+/// (`./gradlew`) — moved onto what it opened. Written, it's refused (EROFS); renamed or removed, refused (EBUSY: a
+/// mount point); linked, refused (EXDEV). Not `read_only`: a folder on the way to one (`Covers::pins`), bound over
+/// itself as it is — a mount point, so renamed or removed, refused (EBUSY), and written as before. Err: an errno.
+///
+/// # Safety
+/// A run's child's, in its own user and mount namespace (`cover`): raw calls on `path`.
+unsafe fn seal(path: &std::ffi::CStr, dev: u64, ino: u64, read_only: bool) -> Result<(), i32> {
+    // SAFETY: raw calls on this process, `path` and buffers on the stack; each descriptor closed.
+    unsafe {
+        let mut how: libc::open_how = std::mem::zeroed();
+        how.flags = (libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64;
+        how.resolve = libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+        let size = std::mem::size_of::<libc::open_how>();
+        let at = libc::syscall(libc::SYS_openat2, libc::AT_FDCWD, path.as_ptr(), &raw const how, size);
+        if at < 0 {
+            return Err(errno());
+        }
+        let at = at as libc::c_int;
+        let mut st: libc::stat = std::mem::zeroed();
+        let same = libc::fstat(at, &mut st) == 0
+            && (st.st_mode & libc::S_IFMT == libc::S_IFDIR
+                || read_only && st.st_mode & libc::S_IFMT == libc::S_IFREG)
+            && (st.st_dev as u64, st.st_ino as u64) == (dev, ino);
+        if !same {
+            libc::close(at);
+            return Err(libc::ESTALE);
+        }
+        let empty = c"".as_ptr();
+        let flags = OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE | libc::AT_EMPTY_PATH as libc::c_uint;
+        let tree = libc::syscall(libc::SYS_open_tree, at, empty, flags);
+        if tree < 0 {
+            let e = errno();
+            libc::close(at);
+            return Err(e);
+        }
+        let tree = tree as libc::c_int;
+        let attr = MountAttr {
+            attr_set: MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: 0,
+        };
+        let size = std::mem::size_of::<MountAttr>();
+        let set_flags = libc::AT_EMPTY_PATH as libc::c_uint | AT_RECURSIVE;
+        let set = !read_only
+            || libc::syscall(libc::SYS_mount_setattr, tree, empty, set_flags, &raw const attr, size) == 0;
+        let done = set
+            && libc::syscall(
+                libc::SYS_move_mount,
+                tree,
+                empty,
+                at,
+                empty,
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ) == 0;
+        let e = errno();
+        libc::close(tree);
+        libc::close(at);
+        match done {
+            true => Ok(()),
+            false => Err(e),
+        }
+    }
+}
+
+/// 7d: a run's child hides `c`'s files named like keys — and seals the project's protected entries (`seal`, B9)
+/// — in a user and mount namespace of its own (`unshare`: it
 /// holds every capability there, the keeper none), its ids mapped to themselves; each key opened through no link
 /// (`openat2`) and checked to be the file tarae found (device, inode; a regular file) — moved or swapped since, it
 /// fails (`ESTALE`); a copy of the shut file's mount (opened through no link, the file tarae checked — else
@@ -2016,6 +2110,15 @@ unsafe fn cover(c: &Covering) -> Result<(), i32> {
                 return Err(e);
             }
         }
+        // (B9: each protected entry bound read-only over itself — a copy of its own mount at it, its whole tree, so
+        // the project around it is one rule; first, so a key inside one is covered in what the run sees. Before
+        // them the folders on the way, each bound over itself, outermost first: they can't be moved away with one)
+        for (path, dev, ino) in &c.pins {
+            seal(path, *dev, *ino, false)?;
+        }
+        for (path, dev, ino) in &c.seals {
+            seal(path, *dev, *ino, true)?;
+        }
         for (path, dev, ino) in &c.keys {
             let mut how: libc::open_how = std::mem::zeroed();
             how.flags = (libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64;
@@ -2036,7 +2139,10 @@ unsafe fn cover(c: &Covering) -> Result<(), i32> {
             }
             // (the shut file through no link, and only the one tarae checked — swapped since, it fails as a key does)
             let flags = OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | libc::AT_SYMLINK_NOFOLLOW as libc::c_uint;
-            let (shut_at, shut_dev, shut_ino) = &c.shut;
+            let Some((shut_at, shut_dev, shut_ino)) = &c.shut else {
+                libc::close(key);
+                return Err(libc::EINVAL);
+            };
             let tree = libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, shut_at.as_ptr(), flags);
             if tree < 0 {
                 let e = errno();

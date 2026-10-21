@@ -38,9 +38,30 @@ const TEST: [&str; 5] = ["test", "--profile", "compat-tests", "--bin", "tarae"];
 
 /// The one Linux build of a round: `cargo xtask linux`'s arguments, the binary kept in the checkout's target
 /// volume for every stack's `test --kept` (each container's fresh clone would otherwise build the crate again),
-/// on two jobs — the VM is shared (11.7 GiB, a test cluster beside it).
-const KEEP: [&str; 8] =
-    ["--env", "CARGO_BUILD_JOBS=2", "test", "--keep", "--profile", "compat-tests", "--bin", "tarae"];
+/// on `jobs` (`jobs_for`).
+fn keep(jobs: u64) -> [String; 8] {
+    let jobs = format!("CARGO_BUILD_JOBS={jobs}");
+    ["--env", &jobs, "test", "--keep", "--profile", "compat-tests", "--bin", "tarae"].map(String::from)
+}
+
+/// The build's jobs on a Docker machine of `cpus` and `memory` bytes (`docker info`'s): a job a CPU and 4 GiB,
+/// from 2 (colima's VM: 11.7 GiB, shared with a test cluster) to 16 (one crate's codegen units — more buys
+/// nothing). Unknown: 2.
+fn jobs_for(cpus: Option<u64>, memory: Option<u64>) -> u64 {
+    match (cpus, memory) {
+        (Some(c), Some(m)) => c.min(m / (4 << 30)).clamp(2, 16),
+        _ => 2,
+    }
+}
+
+/// `jobs_for` the Docker the CLI reaches.
+fn docker_jobs() -> u64 {
+    let info = Command::new("docker").args(["info", "--format", "{{.NCPU}} {{.MemTotal}}"]).output();
+    let text =
+        info.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let mut words = text.as_deref().unwrap_or_default().split_whitespace().map(|w| w.parse::<u64>().ok());
+    jobs_for(words.next().flatten(), words.next().flatten())
+}
 const DRIVE: [&str; 6] =
     ["--", "--ignored", "--exact", "compat::tests::driver", "--nocapture", "--test-threads=1"];
 
@@ -425,7 +446,7 @@ fn plan(
     stacks: &[Stack],
     lane: Lane,
     linux: &[Tier],
-    cargo: &str,
+    (cargo, jobs): (&str, u64),
     base: &str,
     recipes: &BTreeMap<String, (String, String)>,
 ) -> Vec<String> {
@@ -468,7 +489,7 @@ fn plan(
         out.push(format!("docker {}", volume_args(&s.name).join(" ")));
     }
     out.push("# the one build every stack's Linux run takes, kept in the checkout's target volume".into());
-    out.push(format!("cargo xtask linux {}", KEEP.map(quoted).join(" ")));
+    out.push(format!("cargo xtask linux {}", keep(jobs).map(|a| quoted(&a)).join(" ")));
     for t in linux {
         for s in stacks {
             let tag = s.image.as_deref().and_then(|i| recipes.get(i)).map(|(t, _)| t.as_str());
@@ -636,8 +657,9 @@ pub fn run(args: &[String]) -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let base = base(&root)?;
     if a.dry {
-        let here = plan(&stacks, a.lane, &[], &cargo, &base, &BTreeMap::new());
-        let all = plan(&stacks, a.lane, &a.linux, &cargo, &base, &recipes(&root, &base));
+        let jobs = if a.linux.is_empty() { 2 } else { docker_jobs() };
+        let here = plan(&stacks, a.lane, &[], (&cargo, jobs), &base, &BTreeMap::new());
+        let all = plan(&stacks, a.lane, &a.linux, (&cargo, jobs), &base, &recipes(&root, &base));
         // (`--linux-only`: what the plan says past this machine's own)
         for l in all.iter().skip(if a.here { 0 } else { here.len() }) {
             println!("{l}");
@@ -682,10 +704,11 @@ pub fn run(args: &[String]) -> Result<()> {
             });
             ready.insert(s.name.clone(), image);
         }
-        eprintln!("the one Linux build of tarae's tests, kept for every stack …");
-        let mut keep = Command::new(&xtask);
-        keep.arg("linux").args(KEEP).current_dir(&root);
-        if !keep.status().map_err(|e| format!("cargo xtask linux: {e}"))?.success() {
+        let jobs = docker_jobs();
+        eprintln!("the one Linux build of tarae's tests, kept for every stack, on {jobs} jobs …");
+        let mut build = Command::new(&xtask);
+        build.arg("linux").args(keep(jobs)).current_dir(&root);
+        if !build.status().map_err(|e| format!("cargo xtask linux: {e}"))?.success() {
             let why = "the Linux build of tarae's tests failed (above)".to_string();
             ready.values_mut().for_each(|r| *r = Err(why.clone()));
         }
@@ -837,7 +860,7 @@ asks = true
         let s = [stack("node-npm", NODE).unwrap()];
         let tag = "tarae-compat-node:1.99-0123456789ab";
         let recipes = BTreeMap::from([("node".to_string(), (tag.to_string(), "FROM $BASE".to_string()))]);
-        let p = plan(&s, Lane::Gate, &[Tier::Own, Tier::Host], "cargo", "rust:1.99", &recipes);
+        let p = plan(&s, Lane::Gate, &[Tier::Own, Tier::Host], ("cargo", 2), "rust:1.99", &recipes);
         let drive = "-- --ignored --exact compat::tests::driver --nocapture --test-threads=1";
         assert_eq!(
             p,
@@ -882,7 +905,8 @@ asks = true
             stack("rust", "stack = \"rust\"").unwrap(),
             stack("go", "stack = \"go\"\nimage = \"go\"").unwrap(),
         ];
-        let p = plan(&rust, Lane::Gate, &[Tier::Host], "cargo", "rust:1.99", &recipes);
+        let p = plan(&rust, Lane::Gate, &[Tier::Host], ("cargo", 16), "rust:1.99", &recipes);
+        assert!(p.iter().any(|l| l.contains("'CARGO_BUILD_JOBS=16'")), "{p:#?}");
         assert!(
             p.contains(&"# go: no recipe compat/linux/go.Dockerfile — its stacks' cells skipped".to_string())
         );
@@ -898,7 +922,7 @@ asks = true
         );
         let s = [stack("node-npm", &written).unwrap()];
         assert_eq!(
-            plan(&s, Lane::Gate, &[], "cargo", "rust:1.99", &BTreeMap::new())[1],
+            plan(&s, Lane::Gate, &[], ("cargo", 2), "rust:1.99", &BTreeMap::new())[1],
             "# node-npm: the driver first runs, outside the sandbox, in a project of the 2 files compat/node-npm.toml writes:"
         );
     }
@@ -972,6 +996,18 @@ asks = true
         assert!(changes(&cells, &kept).is_empty(), "the last run is what's compared");
         let quick = table("h", &["macOS"], &s, Lane::Quick, &Cells::new(), "");
         assert_eq!(quick, "# compat — h\n\n## node-npm\n\n| command | macOS |\n|---|---|\n| test | – |\n");
+    }
+
+    /// The Linux build's jobs follow the Docker machine: a CPU and 4 GiB a job, 2 to 16 — colima's shared VM 2, a
+    /// 32-core 128 GB one 16, an unknown one 2.
+    #[test]
+    fn the_builds_jobs_follow_the_docker_machine() {
+        let gib = 1u64 << 30;
+        assert_eq!(jobs_for(Some(4), Some(11_700_000_000)), 2);
+        assert_eq!(jobs_for(Some(32), Some(128 * gib)), 16);
+        assert_eq!(jobs_for(Some(8), Some(64 * gib)), 8);
+        assert_eq!(jobs_for(Some(32), Some(24 * gib)), 6);
+        assert_eq!(jobs_for(None, Some(128 * gib)), 2);
     }
 
     /// An image's tag is its recipe's and its base's: either changed, a new tag — and what the old one built is

@@ -215,6 +215,11 @@ kept = ["{gradle}/daemon"]
 # <name>.zip.lck`) — every run, though the distribution is there (measured: denied, `./gradlew` fails). The
 # only writes a run makes in the user's Gradle home
 write-files = ["{gradle}/wrapper/dists/{a}/{b}/{a}.zip.lck"]
+# The downloaded dependencies, read in place (`GRADLE_RO_DEP_CACHE`, below): Gradle still opens their metadata
+# stores (`metadata-<version>/module-metadata.bin`, `module-artifact.bin`) to write, every run, refused, and the
+# build goes on (compat B5, macOS: in every Gradle run's report). Runs never write there by design — what they
+# download goes to their own home — so a write refused anywhere in it is that, never a cause
+quiet-writes = ["{gradle}/caches/modules-2/"]
 # What of the user's environment a run gets for the JDK, Gradle and Maven. Not `ORG_GRADLE_PROJECT_*` (a
 # project's properties — signing keys and repository passwords live there) nor what every JVM or `java` launcher
 # reads as its options — `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`: agents loaded into it, and a
@@ -291,6 +296,19 @@ link = { "wrapper/dists" = "{gradle}/wrapper/dists" }
 set = { GRADLE_RO_DEP_CACHE = { value = "{gradle}/caches", if = "{gradle}/caches/modules-2" } }
 daemon = { make = ["kotlin-daemon"], append = { GRADLE_OPTS = "-Dkotlin.daemon.options=runFilesPath={home}/kotlin-daemon,autoshutdownIdleSeconds=1800 -Dorg.gradle.daemon.idletimeout=1800000" } }
 fresh = { append = { GRADLE_OPTS = "-Dorg.gradle.daemon=false" } }
+# No cleanup of this home's caches: it takes the wrapper's distributions it sees as unused — older versions, no
+# caches of theirs here — and those are the user's, through the link above (compat B6: every macOS run tried to
+# delete their `.zip.ok` markers, refused). A kept home goes whole once unused (`runhomes::prune`). Gradle reads
+# every script in `init.d`; before 8.0 there's no such setting, before 6.0 no `beforeSettings` — the version
+# check keeps those building (`GradleVersion`: Gradle's own, imported in every script)
+files = { "init.d/tarae-no-cleanup.gradle" = """
+// tarae's (a home of Claude's runs): no cleanup here — the wrapper's distributions are the user's
+if (GradleVersion.current().baseVersion >= GradleVersion.version("8.0")) {
+    beforeSettings { settings ->
+        settings.caches { cleanup = Cleanup.DISABLED }
+    }
+}
+""" }
 said = """{home}: the user's Gradle home stays as it is — their own builds run what's there. Your commands have \
 a Gradle home of their own and read the downloaded dependencies and the wrapper's distributions from theirs: \
 Gradle trying to write there is expected, and the build goes on. A dependency or distribution not downloaded \

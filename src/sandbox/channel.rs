@@ -104,6 +104,12 @@ pub struct Run {
     pub shut: Option<Covered>,
     /// The files named like keys its child hides, in a mount namespace of its own, before its rules.
     pub covers: Vec<Covered>,
+    /// The project's protected entries its child binds read-only over themselves, in that namespace, before the
+    /// keys' covers (compat B9, `linux::Covers::seals`): files or folders.
+    pub seals: Vec<Covered>,
+    /// The folders between the project and those it binds over themselves first, writable, outermost first
+    /// (`linux::Covers::pins`).
+    pub pins: Vec<Covered>,
 }
 
 /// A file a run's child mounts `Run.shut` over: where (a real path), and the file the walk found there.
@@ -147,7 +153,8 @@ const NETS: [RunNet; 4] = [RunNet::Plain, RunNet::Served, RunNet::Routed, RunNet
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Msg {
     // tarae → keeper
-    Run(Run),
+    /// (boxed: its lists make it far bigger than the rest)
+    Run(Box<Run>),
     /// Signal the run's process group (cancel) — only while the keeper hasn't reaped it.
     Signal {
         id: u64,
@@ -242,6 +249,8 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend([net, r.held as u8, r.no_userns as u8, r.ptys as u8]);
             list(&mut b, &r.shut.iter().map(Covered::item).collect::<Vec<_>>())?;
             list(&mut b, &r.covers.iter().map(Covered::item).collect::<Vec<_>>())?;
+            list(&mut b, &r.seals.iter().map(Covered::item).collect::<Vec<_>>())?;
+            list(&mut b, &r.pins.iter().map(Covered::item).collect::<Vec<_>>())?;
             valid_run(r)?;
         }
         Msg::Signal { id, sig } => {
@@ -321,8 +330,8 @@ fn valid_run(r: &Run) -> Result<(), Refused> {
         (Some(s), false) => absolute(&s.path),
         _ => false,
     };
-    if !shut || r.covers.iter().any(|c| !absolute(&c.path)) {
-        return Err(Refused("a covered file or the shut file not an absolute path"));
+    if !shut || r.covers.iter().chain(&r.seals).chain(&r.pins).any(|c| !absolute(&c.path)) {
+        return Err(Refused("a covered or sealed file or the shut file not an absolute path"));
     }
     Ok(())
 }
@@ -423,9 +432,11 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                     _ => return Err(Refused("more than one shut file")),
                 },
                 covers: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
+                seals: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
+                pins: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
             };
             valid_run(&run)?;
-            Msg::Run(run)
+            Msg::Run(Box::new(run))
         }
         2 => Msg::Signal { id: r.u64()?, sig: r.i32()? },
         3 => Msg::AskUsage,
@@ -561,7 +572,7 @@ mod tests {
     /// One of every kind, with fields worth mutating.
     fn every_kind() -> Vec<Msg> {
         let run = |net, held| {
-            Msg::Run(Run {
+            Msg::Run(Box::new(Run {
                 id: 7,
                 program: b"/bin/sh".to_vec(),
                 argv: vec![b"sh".to_vec(), b"-c".to_vec(), b"exit 3".to_vec()],
@@ -579,7 +590,19 @@ mod tests {
                     true => vec![Covered { dev: 1 << 40, ino: 7, path: b"/tmp/project/.env".to_vec() }],
                     false => Vec::new(),
                 },
-            })
+                // (sealed entries on the own network's only — with covers and without)
+                seals: match net {
+                    RunNet::Own => vec![
+                        Covered { dev: 3, ino: 1 << 35, path: b"/tmp/project/.git".to_vec() },
+                        Covered { dev: 3, ino: 12, path: b"/tmp/project/Cargo.toml".to_vec() },
+                    ],
+                    _ => Vec::new(),
+                },
+                pins: match net {
+                    RunNet::Own => vec![Covered { dev: 3, ino: 40, path: b"/tmp/project/crates".to_vec() }],
+                    _ => Vec::new(),
+                },
+            }))
         };
         vec![
             run(RunNet::Plain, false),

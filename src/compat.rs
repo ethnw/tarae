@@ -1163,9 +1163,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ("src/sandbox/keeper.rs", "in fn ready: slow", HOOK),
     ("src/sandbox/keeper.rs", "in fn start_with: covers", SEAM),
     ("src/sandbox/linux.rs", "in fn confine_in: granted", SEAM),
+    ("src/sandbox/linux.rs", "in fn confine_in: sealing", SEAM),
     ("src/sandbox/linux.rs", "in fn confine_in: ways", SEAM),
     ("src/sandbox/linux.rs", "in fn confine_in: ways_in", SEAM),
     ("src/sandbox/policy.rs", "in fn for_project: swap_pause", HOOK),
+    ("src/sandbox/policy.rs", "in fn for_project: seals_off", HOOK),
     (
         "src/sandbox/policy.rs",
         r#"in fn guarantees: cfg!(test) || cfg!(not(target_os = "linux")) || se"#,
@@ -1817,12 +1819,13 @@ timeout = 60
         if !sandboxed_here("compat::tests::driver") {
             return skip("no sandbox here");
         }
-        // (macOS: not in $TMPDIR — a policy never opens what holds the project, and a user's project isn't in
-        // it: a JVM's `$TMPDIR/hsperfdata_<user>` was refused only because the fixture was there; `/private/tmp`
-        // is closed instead)
+        // (not in the temp folder runs write — a policy never opens what holds the project, and a user's project
+        // isn't there. macOS: a JVM's `$TMPDIR/hsperfdata_<user>` was refused only because the fixture was in
+        // `$TMPDIR`; `/private/tmp` is closed instead. Linux: in `/tmp` it closed `/tmp`, where pnpm takes its store
+        // lock whatever `TMPDIR` says — compat7, refused only because the fixture was there)
         let temp = match cfg!(target_os = "macos") {
             true => PathBuf::from("/private/tmp"),
-            false => std::env::temp_dir(),
+            false => PathBuf::from("/var/tmp"),
         };
         let s = Scratch::new_in(&temp, stack);
         if let Some(f) = &m.fixture

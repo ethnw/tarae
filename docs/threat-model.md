@@ -128,8 +128,15 @@ Kept:
   `refactor::tests::a_protected_file_in_a_change_set_is_reviewed_with_its_warning`
 
 Not kept:
-- **A protected name made where none is yet, or moved in inside a folder.** Linux: Landlock only grants; a folder
-  holding a protected name is granted entry by entry, but a folder with none can take a new `Makefile`. macOS:
+- **A protected name made where none is yet, or moved in inside a folder.** Linux: Landlock only grants. Where a
+  run has a mount namespace of its own (tier own), each protected name is bound read-only over itself and every
+  folder takes new files, so a new `build.rs` beside a `Cargo.toml` is made; each folder between the project and a
+  protected name is bound over itself too, so it can't be moved away (or removed) with the name inside it and the
+  name made anew — a file moved between such a folder and the rest of the project goes as a copy (`EXDEV`)
+  (test: `sandbox::tests::protected_names_are_sealed_and_the_root_takes_new_files`); elsewhere a folder holding a protected
+  name is granted entry by entry, but a folder with none can take a new `Makefile`. While names a run made wait
+  for their card, the checkout's language servers are paused (rust-analyzer's check would run a new `build.rs`);
+  a server's own file watch may still see one while the run goes. macOS:
   Seatbelt checks a rename's two paths, not what's in a folder — a run makes `x/` in temp holding `build.rs`, then
   moves it into the project as `crates/x` (G23). Neither is refused; both are **seen after the run and asked about
   before anything runs them**. tarae compares the checkout as the run found it and left it: new files in its tree,

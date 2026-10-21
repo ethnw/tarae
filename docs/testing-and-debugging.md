@@ -259,8 +259,9 @@ outputs = ["target"]                             # tools' output folders: the fi
 first-made = ["target/", "Cargo.lock"]           # what a first build makes beside those names
 ```
 
-On Linux a folder holding a protected name takes no new entry from Claude's commands (a folder there may only go,
-once emptied — `cargo clean`), so a fresh clone's first
+On Linux without a mount namespace of the run's own (tiers host and offline; in tier own each protected name is
+bound read-only over itself instead, and every folder takes new files) a folder holding a protected name takes no
+new entry from Claude's commands (a folder there may only go, once emptied — `cargo clean`), so a fresh clone's first
 build couldn't make `target/` beside `Cargo.toml`: before a command runs, tarae makes the pack's `first-made`,
 empty — a folder (written with a `/`) in every folder holding one of its names, a file (written in place, as
 `Cargo.lock` is) in the outermost — then takes away what's still empty when the command is over. A name that

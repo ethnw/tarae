@@ -347,6 +347,47 @@ fresh = { append = { D_OPTS = "-Ddaemon=off" } }
     }
 }
 
+/// A run home's own files (`files`: compat B6, Gradle's init script) read as written; one that isn't a path of plain
+/// names, isn't text or is past `FILE_TEXT_MAX` leaves the home out, said.
+#[test]
+fn a_run_homes_files_read() {
+    let good = "[sandbox.run-home.f]\nenv = \"F_HOME\"\nfiles = { \"init.d/a.conf\" = \"x = 1\\n\" }\n";
+    let t = table(&[("f", good)], &[]);
+    assert_eq!(t.problems, Vec::<String>::new());
+    let [h] = t.run_homes.as_slice() else { panic!("{:?}", t.run_homes) };
+    assert_eq!(h.files, [pair("init.d/a.conf", "x = 1\n")]);
+    let long = format!(
+        "[sandbox.run-home.x]\nenv = \"X\"\nfiles = {{ a = \"{}\" }}\n",
+        "y".repeat(FILE_TEXT_MAX + 1)
+    );
+    let cases = [
+        ("[sandbox.run-home.x]\nenv = \"X\"\nfiles = { \"../a\" = \"\" }\n".to_string(), "plain names"),
+        ("[sandbox.run-home.x]\nenv = \"X\"\nfiles = { \"/a\" = \"\" }\n".into(), "plain names"),
+        ("[sandbox.run-home.x]\nenv = \"X\"\nfiles = { a = 1 }\n".into(), "isn't a string"),
+        (long, "past 4096 bytes"),
+    ];
+    for (text, why) in cases {
+        let t = table(&[("x", &text)], &[]);
+        assert!(t.problems.iter().any(|p| p.contains(why)), "{text}: {:?}", t.problems);
+        assert!(t.run_homes.is_empty(), "{text}: {t:?}");
+    }
+}
+
+/// A run home no variable points a tool at (pytest's, compat B9) reads when what's appended names it (`{home}`); with
+/// neither, it's left out, said.
+#[test]
+fn a_run_home_named_only_by_what_is_appended_reads() {
+    let good = "[sandbox.run-home.p]\nkeep = true\nappend = { P_OPTS = \"-o 'dir={home}'\" }\n";
+    let t = table(&[("p", good)], &[]);
+    assert_eq!(t.problems, Vec::<String>::new());
+    let [h] = t.run_homes.as_slice() else { panic!("{:?}", t.run_homes) };
+    assert_eq!((h.env.as_str(), &h.append[..]), ("", &[pair("P_OPTS", "-o 'dir={home}'")][..]));
+    assert!(!t.env_names().any(str::is_empty), "{:?}", t.env_names().collect::<Vec<_>>());
+    let t = table(&[("x", "[sandbox.run-home.x]\nappend = { X_OPTS = \"-v\" }\n")], &[]);
+    assert!(t.problems.iter().any(|p| p.contains("no `env`")), "{:?}", t.problems);
+    assert!(t.run_homes.is_empty());
+}
+
 /// What a run with a proxy URL gets from a pack (step 5f) reads as written — a run home's file, variables, a file
 /// in the run's folder and what's appended naming it, the registries' hosts — and each wrong entry is left out
 /// in the parser's own words, the rest of its key kept: a value of the proxy's only in a file's lines (a variable

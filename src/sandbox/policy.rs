@@ -40,6 +40,9 @@ pub struct Policy {
     /// This run's own temp folder — its `TMPDIR`, and with the project the only place it may make or reach
     /// a unix socket (`RunDir`).
     pub run: Option<std::sync::Arc<RunDir>>,
+    /// The folder the run runs in, real — what a name its output gives relative is from (`from`). None: the
+    /// project's root.
+    pub cwd: Option<PathBuf>,
     /// Where runs' own folders are made (`runs_root`, real) — every run's, so where runs write
     /// (`write_places`); a run's rules open only its own.
     pub runs: Option<PathBuf>,
@@ -106,6 +109,10 @@ pub struct Policy {
     /// that swapped it goes on — the window another thread of the run's calls into.
     #[cfg(all(test, target_os = "linux"))]
     pub swap_pause: Option<std::time::Duration>,
+    /// Tests (Linux): its protected names closed by their folders' rules even where its run could have them sealed
+    /// by mounts (`linux::Covers::seals`) — for the tests of that rule, in any tier.
+    #[cfg(all(test, target_os = "linux"))]
+    pub seals_off: bool,
     /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
     /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
     #[cfg(target_os = "linux")]
@@ -598,18 +605,20 @@ impl Policy {
     /// denial is lost now and then, at random (1 in 10, measured, `target/sb/p2-measured.md` §5): a path on
     /// a line that failed, at or just before a line saying `Operation not permitted` (cargo says the path,
     /// then `Caused by:`, then the error), that this profile doesn't let a run read or write. Those `seen`
-    /// already said aren't again. Relative paths are from the project (`paths_in`: no disk).
-    /// A name relative to where the run is counts too — `sh`'s `cannot touch 'Makefile'` (`named_in`): on Linux,
-    /// with no audit log to read, the output is all there is, and a protected name refused by its relative name
-    /// was said nowhere (compat, `touch Makefile`: "the report names no cause").
+    /// already said aren't again. Relative paths are from where the run is (`from`; `paths_in`: no disk).
+    /// A name relative to where the run is counts too — `sh`'s `cannot touch 'Makefile'`, Go's `open fx`
+    /// (`named_in`): on Linux, with no audit log to read, the output is all there is, and a protected name refused
+    /// by its relative name was said nowhere (compat, `touch Makefile`, `go build`: "the report names no cause").
     pub fn said_in_output(&self, output: &[(bool, String)], seen: &[Denial]) -> Vec<Denial> {
         const BEFORE: usize = 3;
-        let refused = |l: &str| l.contains("ermi") && refusal(l);
+        let refused = |l: &str| refusal(l);
         let failed = |l: &str| {
             let l = l.to_ascii_lowercase();
             let words = [
                 "not permitted",
                 "permission denied",
+                "read-only file system",
+                "resource busy",
                 "fail",
                 "error",
                 "cannot",
@@ -631,7 +640,7 @@ impl Policy {
         let mut out: Vec<Denial> = Vec::new();
         let lines = output.iter().zip(near.iter().zip(&denied)).filter(|(_, (n, _))| **n);
         for (l, denied) in lines.map(|((_, l), (_, d))| (l, *d)).filter(|(l, _)| failed(l)) {
-            for real in paths_in(l, &self.root).into_iter().chain(named_in(l, &self.root)) {
+            for real in paths_in(l, self.from()).into_iter().chain(named_in(l, self.from())) {
                 let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
                     (true, true) => continue,
                     (true, false) => "file-write*",
@@ -716,6 +725,21 @@ impl Policy {
         said
     }
 
+    /// Where the run is: its folder (`cwd`), else the project's root.
+    pub fn from(&self) -> &Path {
+        self.cwd.as_deref().unwrap_or(&self.root)
+    }
+
+    /// Linux, tier own: whether the project's protected names are sealed by mounts for the run
+    /// (`linux::Covers::seals`).
+    pub(super) fn sealed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return !c.covers.seals.is_empty();
+        }
+        false
+    }
+
     /// Linux: whether `folder` is one of the project's that take no new entry (`linux::Confine::closed`).
     pub(super) fn closed_holds(&self, folder: &Path) -> bool {
         #[cfg(target_os = "linux")]
@@ -742,7 +766,7 @@ impl Policy {
                     _ if low.contains("move") || low.contains("rename") => "file-entry-move",
                     _ => "file-entry-make",
                 };
-                for real in paths_in(line, &self.root).into_iter().chain(named_in(line, &self.root)) {
+                for real in paths_in(line, self.from()).into_iter().chain(named_in(line, self.from())) {
                     let closed = real.parent().is_some_and(|d| c.closed.iter().any(|f| f == d));
                     let target = real.display().to_string();
                     if closed && self.writes_allow(&real) && !out.iter().any(|d| d.target == target) {
@@ -891,6 +915,7 @@ impl Policy {
             ports,
             localhost: env.localhost,
             run: None,
+            cwd: None,
             runs: env.runs.clone(),
             tag: None,
             proxy: None,
@@ -928,6 +953,8 @@ impl Policy {
             own_addresses: env.own_addresses.clone(),
             #[cfg(all(test, target_os = "linux"))]
             swap_pause: None,
+            #[cfg(all(test, target_os = "linux"))]
+            seals_off: false,
             #[cfg(target_os = "linux")]
             confine: None,
         }

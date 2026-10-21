@@ -338,6 +338,8 @@ pub enum LspDot {
     Failed,
     /// Its language has servers, none installed.
     Missing,
+    /// Its session's servers are paused while protected names a run made wait (`Editor::made_hold_sync`).
+    Paused,
 }
 
 /// A server initialized this recently that hasn't finished any work yet hasn't begun loading its project.
@@ -509,6 +511,18 @@ impl Editor {
         }
         let Some(path) = doc.path.clone() else { return };
         let Some(spec) = crate::syntax::detect(&path) else { return };
+        // (its session's servers paused: protected names a run made wait for their card — `made_hold_sync`)
+        let held = self.session_of(&path).filter(|s| {
+            std::iter::once(&self.session).chain(&self.sessions).any(|l| l.id == *s && l.servers_held)
+        });
+        if let Some(s) = held
+            && let Some(l) = std::iter::once(&mut self.session).chain(&mut self.sessions).find(|l| l.id == s)
+        {
+            if !l.asleep.contains(&id) {
+                l.asleep.push(id);
+            }
+            return;
+        }
         if self.lsp.attach_later {
             if !self.session.asleep.contains(&id) {
                 self.session.asleep.push(id);
@@ -3323,8 +3337,15 @@ impl Editor {
         if let Some(c) = doc.lsp.client.and_then(|cid| self.client(cid)) {
             return Some(dot(c));
         }
-        // No main server: why (failed, not installed) — it's what matters, even with one beside it
+        // No main server: why (paused, failed, not installed) — it's what matters, even with one beside it
         let lang = &doc.path.as_deref().and_then(crate::syntax::detect)?.name;
+        let session = doc.path.as_deref().and_then(|p| self.session_of(p));
+        if std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .any(|l| Some(l.id) == session && l.servers_held)
+        {
+            return Some((LspDot::Paused, lang.clone()));
+        }
         if let Some(server) = self.lsp.server_for.get(lang)
             && self.lsp.failed.contains_key(server)
         {
@@ -3495,8 +3516,7 @@ mod tests {
 
     /// `setup` with the stand-in named `server` — a name a pack knows gets that pack's traits.
     fn setup_as(server: &str, name: &str, src: &str) -> (Editor, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tarae-lsp-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new(&format!("lsp-{name}")).into_path();
         let file = dir.join("main.rs");
         std::fs::write(&file, src).unwrap();
         // (a cargo project: rust's server isn't started for a lone .rs)
@@ -3512,6 +3532,109 @@ mod tests {
         ed.open(&file).unwrap();
         let file = std::fs::canonicalize(&file).unwrap();
         (ed, file, log)
+    }
+
+    /// compat B9: while protected names a run made wait for their card, the checkout's language servers are paused
+    /// — stopped, none started for its files — and, Claude's turn over, a card says so; answered (`y`), they're
+    /// back. (A stand-in server; the names only listed, nothing made.)
+    #[test]
+    fn servers_pause_while_a_runs_protected_names_wait() {
+        let (mut ed, file, _log) = setup("made-hold", "fn main() {}\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        ed.session.root = dir.clone();
+        let first = ready(&mut ed);
+        ed.session.made_protected = vec![crate::snapshot::Made { path: "build.rs".into(), hash: "h".into() }];
+        ed.sessions_sync();
+        assert!(ed.lsp.clients.is_empty() && ed.doc().lsp.client.is_none(), "stopped");
+        assert!(ed.session.servers_held && ed.session.asleep.contains(&ed.doc().id));
+        // (said at once, and for as long as it lasts — compat7 review 11)
+        let said = |ed: &Editor| ed.toasts.iter().any(|t| t.text.contains(crate::tools::MADE_PAUSED));
+        assert!(said(&ed), "said as they pause");
+        assert_eq!(ed.lsp_state(), Some((LspDot::Paused, "rust".into())), "the status line says it");
+        ed.attach_lsp(ed.doc().id);
+        assert!(ed.lsp.clients.is_empty(), "none started while they wait");
+        let card = ed.offers.first().expect("the paused servers' card");
+        assert_eq!(card.title, crate::tools::MADE_SERVERS_TITLE);
+        assert!(
+            card.question.contains("build.rs, a name") && card.question.contains("paused"),
+            "{}",
+            card.question
+        );
+        ed.sessions_sync();
+        assert_eq!(ed.offers.len(), 1, "asked once");
+        ed.offer_accept();
+        ed.sessions_sync();
+        let back = ed.doc().lsp.client.expect("back once answered");
+        assert!(back != first && !ed.session.servers_held && ed.offers.is_empty());
+        assert_eq!(ed.lsp_state().map(|s| s.0), Some(LspDot::Starting));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// compat7 review 8: the paused servers' card is its session's — another session in front doesn't see it (nor
+    /// would its `y` keep that one's names); back in front, it's up again and answered there.
+    #[test]
+    fn the_paused_servers_card_goes_with_its_session() {
+        let (mut ed, file, _log) = setup("made-hold-switch", "fn main() {}\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        ed.session.root = dir.clone();
+        ready(&mut ed);
+        let a = ed.session.id;
+        ed.session.made_protected = vec![crate::snapshot::Made { path: "build.rs".into(), hash: "h".into() }];
+        ed.sessions_sync();
+        assert!(ed.offers.first().is_some_and(crate::offer::Offer::made), "the card");
+        let other = crate::scratch::Scratch::new("made-hold-other").into_path();
+        let b = ed.session_add(other.clone());
+        assert!(ed.session_switch(b) && ed.session.id == b, "another session in front");
+        ed.sessions_sync();
+        assert!(!ed.offers.iter().any(crate::offer::Offer::made), "not in front of another session");
+        assert!(ed.session_switch(a));
+        ed.sessions_sync();
+        assert!(ed.offers.first().is_some_and(crate::offer::Offer::made), "up again with its session");
+        ed.offer_accept();
+        ed.sessions_sync();
+        assert!(!ed.session.servers_held && ed.doc().lsp.client.is_some(), "answered there");
+        ed.sessions.clear();
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    /// compat7 review 9 and 10: the paused servers' card comes back while the names still wait — after a run's card
+    /// about them took its place and was answered `n`, and after `r` couldn't remove one (a folder there).
+    #[test]
+    fn the_paused_servers_card_comes_back_while_the_names_wait() {
+        let (mut ed, file, _log) = setup("made-hold-again", "fn main() {}\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        ed.session.root = dir.clone();
+        ready(&mut ed);
+        std::fs::create_dir_all(dir.join("build.rs")).unwrap();
+        ed.session.made_protected = vec![crate::snapshot::Made { path: "build.rs".into(), hash: "h".into() }];
+        ed.sessions_sync();
+        let servers = |ed: &Editor| {
+            ed.offers
+                .iter()
+                .any(|o| matches!(&o.what, crate::offer::What::ProtectedMade { then, .. } if then.servers()))
+        };
+        assert!(servers(&ed), "the card");
+        // (the preflight's card about the same names takes its place; `n` there)
+        let then = crate::tools::MadeThen::Preflight { all: Vec::new(), set: crate::preflight::Set::Quick };
+        crate::tools::ask_made(&mut ed, then);
+        assert!(!servers(&ed) && ed.offers.first().is_some_and(crate::offer::Offer::made));
+        ed.offer_dismiss();
+        ed.sessions_sync();
+        assert!(servers(&ed), "back once that one is answered");
+        // (`r`: a folder isn't removed — asked about again)
+        ed.offer_accept_by('r');
+        let told = |ed: &Editor| ed.toasts.iter().any(|t| t.text.starts_with("not removed"));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !told(&ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        ed.sessions_sync();
+        assert!(told(&ed), "a folder isn't removed");
+        assert!(ed.session.servers_held && servers(&ed), "asked about again");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #208: a file only Claude's turn opened (follow, replay) gets no word of a missing server — no install

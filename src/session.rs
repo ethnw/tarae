@@ -149,6 +149,11 @@ pub struct Session {
     /// Protected names Claude's runs made where none was (`snapshot::Found::protected`, from its root) — its
     /// next run waits on a card about them (`tools::ask_made`); a `y` there clears it.
     pub made_protected: Vec<crate::snapshot::Made>,
+    /// Its language servers stopped while `made_protected` waits for an answer, and none started for its files
+    /// (`made_hold_sync`, compat B9); and the names the paused servers' card was put up for — one not among them
+    /// puts it up again (none: not asked, or asked again — its place taken by a run's card, a name `r` left).
+    pub servers_held: bool,
+    pub servers_asked: Vec<String>,
     /// Those kept on that card (`y`), as they were then — one a later run makes again holding the same isn't
     /// asked about; holding something else, it is.
     pub made_kept: Vec<crate::snapshot::Made>,
@@ -322,6 +327,8 @@ impl Session {
             runs_next: Default::default(),
             wrote: None,
             made_protected: Vec::new(),
+            servers_held: false,
+            servers_asked: Vec::new(),
             made_kept: Vec::new(),
             base_writing: false,
             no_sandbox: None,
@@ -744,6 +751,7 @@ impl Editor {
         self.waiting_sync();
         // (a shared server's folders follow the checkouts — `share.rs`)
         self.share_sync();
+        self.made_hold_sync();
         if self.sessions.is_empty() {
             return;
         }
@@ -773,6 +781,119 @@ impl Editor {
             .collect();
         for id in woken {
             self.attach_lsp(id);
+        }
+    }
+
+    /// Every event (compat B9): a session whose runs made protected names that wait for the user's answer
+    /// (`made_protected`) has its language servers stopped, and none started for its files (`attach_lsp`), until
+    /// those are answered — a server loads what was made before the user looked (rust-analyzer's check runs a new
+    /// `build.rs`, a Java server imports a new Gradle script). With a project's protected names sealed by mounts
+    /// rather than their folders closed (Linux, tier own), Landlock no longer refuses a new one beside an old one;
+    /// the snapshot finds it, and this keeps what runs outside the sandbox from loading it first. The front
+    /// session's pause is said at once (`servers_hold`), its card once Claude's turn is over (`MadeThen::Servers`;
+    /// the status line says it meanwhile — `lsp_state`); its files get their servers back once answered.
+    pub(crate) fn made_hold_sync(&mut self) {
+        let states: Vec<(SessionId, bool, bool)> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .map(|l| (l.id, !l.made_protected.is_empty(), l.servers_held))
+            .collect();
+        for (id, waits, held) in states {
+            match (waits, held) {
+                (true, false) => self.servers_hold(id),
+                (false, true) => self.servers_release(id),
+                _ => {}
+            }
+        }
+        // (the front session's paused servers: a card to answer once Claude's turn is over — mid-turn its next run
+        // asks about the names anyway — once for these names, again for a new one; one about them for a run takes
+        // its place)
+        let s = &self.session;
+        let up = self.offers.iter().any(|o| matches!(o.what, crate::offer::What::ProtectedMade { .. }));
+        let turn = s.chat.as_ref().is_some_and(crate::chat::Chat::busy);
+        let new = s.made_protected.iter().any(|m| !s.servers_asked.contains(&m.path));
+        if s.servers_held && new && !up && !turn {
+            let names = s.made_protected.iter().map(|m| m.path.clone()).collect();
+            self.session.servers_asked = names;
+            crate::tools::ask_made(self, crate::tools::MadeThen::Servers);
+        }
+    }
+
+    fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
+        std::iter::once(&mut self.session).chain(&mut self.sessions).find(|l| l.id == id)
+    }
+
+    /// Session `id`'s language servers stopped — those serving a folder in its checkout or holding it — its files
+    /// waiting for them (`asleep`). A shared server serves other checkouts too (`share.rs`): their files behind
+    /// wait as a resting session's do, the front session's get a server of their own folder's at once (a shared
+    /// one takes no held checkout back in — `Editor::share_held`). The front session's pause is said at once.
+    fn servers_hold(&mut self, id: SessionId) {
+        let Some(l) = self.session_mut(id) else { return };
+        l.servers_held = true;
+        let (root, docs) = (l.root.clone(), l.docs.clone());
+        let serving: Vec<crate::lsp::ClientId> = self
+            .lsp
+            .clients
+            .iter()
+            .filter(|c| c.roots.iter().any(|r| r.starts_with(&root) || root.starts_with(r)))
+            .map(|c| c.id)
+            .collect();
+        let mut again = Vec::new();
+        let mut paused = Vec::new();
+        for cid in serving {
+            // (each file's own session — a shared server serves several)
+            let served: Vec<(DocId, Option<SessionId>)> = self
+                .docs
+                .iter()
+                .filter(|d| d.lsp.clients().any(|c| c == cid))
+                .map(|d| {
+                    let own = docs.contains(&d.id).then_some(id);
+                    (d.id, own.or_else(|| d.path.as_deref().and_then(|p| self.session_of(p))))
+                })
+                .collect();
+            let log = self.server_log(cid);
+            let Some(name) = self.lsp_stopped(cid) else { continue };
+            let msg = format!("{name} for {} paused — Claude's run made a protected name", root.display());
+            log.line(&name, "stop", &msg);
+            if !paused.contains(&name) {
+                paused.push(name);
+            }
+            let front = self.session.id;
+            for (d, owner) in served {
+                match owner {
+                    Some(o) if o == id || o != front => {
+                        if let Some(l) = self.session_mut(o)
+                            && !l.asleep.contains(&d)
+                        {
+                            l.asleep.push(d);
+                        }
+                    }
+                    _ => again.push(d),
+                }
+            }
+        }
+        for d in again {
+            self.attach_lsp(d);
+        }
+        if id == self.session.id && !paused.is_empty() {
+            self.set_warning(format!("{} {}", paused.join(", "), crate::tools::MADE_PAUSED));
+        }
+    }
+
+    /// Session `id`'s names answered: its servers back for its files (in front — behind, when it comes to the
+    /// front or its Claude starts a turn, as a resting session's), and the paused servers' card gone.
+    fn servers_release(&mut self, id: SessionId) {
+        let front = id == self.session.id;
+        let Some(l) = self.session_mut(id) else { return };
+        l.servers_held = false;
+        l.servers_asked.clear();
+        let woken = if front { std::mem::take(&mut l.asleep) } else { Vec::new() };
+        if front {
+            self.drop_cards(
+                |w| matches!(w, crate::offer::What::ProtectedMade { then, .. } if then.servers()),
+            );
+        }
+        for d in woken {
+            self.attach_lsp(d);
         }
     }
 

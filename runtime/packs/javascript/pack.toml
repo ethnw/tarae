@@ -6,8 +6,9 @@ protect = ["package.json"]
 # What npm installs
 outputs = ["node_modules"]
 # What a first `npm install` makes beside package.json: its packages, and the lock file it writes in place (an
-# empty one it takes)
-first-made = ["node_modules/", "package-lock.json"]
+# empty one it takes); and a build's output folder by its usual name (tsc's `outDir`, vite's — compat B9: `tsc`
+# refused making `dist/` beside package.json on Linux)
+first-made = ["node_modules/", "package-lock.json", "dist/"]
 # Read by npm as soon as it's on disk
 config-files = { json = ["package.json"] }
 # What checks and builds: the places Claude's run of one prints go to your list (]q)
@@ -68,7 +69,20 @@ quiet = ["__tests__/", "*.test.js", "*.spec.js", "*.test.jsx", "*.spec.jsx"]
 [sandbox]
 # Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
 not-settings = ["js", "mjs", "jsx"]
-reads = ["~/.npm", "{npm}", "{npm-upper}"]
+# pnpm's metadata cache and its store, where pnpm looks (`PNPM_HOME`'s store aside; pnpm's `getCacheDir` /
+# `getDataDir`): its cache `$XDG_CACHE_HOME/pnpm` on every system, else macOS's `~/Library/Caches/pnpm` or
+# `~/.cache/pnpm`; its home `$XDG_DATA_HOME/pnpm`, else macOS's `~/Library/pnpm` or `~/.local/share/pnpm`. An
+# offline install reads both and copies from the store; read only, as npm's — what's there runs in the user's
+# projects (compat7: closed, `pnpm install --offline` failed on the metadata cache, and its `node_modules` went
+# with it)
+reads = [
+    "~/.npm", "{npm}", "{npm-upper}", "{corepack}", "{xdg-cache}/pnpm", "{user-cache}/pnpm", "{xdg-data}/pnpm",
+    "~/.local/share/pnpm", "~/Library/pnpm",
+]
+# Never written, nor offered on a card (`sandbox::RunsLater`), each place pnpm may look: its home holds the
+# programs `pnpm add -g` installs and its store, whose files are hard-linked into the user's projects; its cache
+# holds what `pnpm dlx` fetched, which runs from there later
+bins = ["{xdg-cache}/pnpm", "{user-cache}/pnpm", "{xdg-data}/pnpm", "~/.local/share/pnpm", "~/Library/pnpm"]
 # npm's debug log in the run's own folder, not `~/.npm/_logs` (closed): measured, every npm command was denied
 # writing its log and deleting the old ones its cleanup lists — in a folder of its own the cleanup finds none
 # of yours. (`logs-max=0` writes none but still tries to delete every old one.) Its "complete log" line names
@@ -76,7 +90,11 @@ reads = ["~/.npm", "{npm}", "{npm-upper}"]
 #
 # The network closed (each host asked on a card): no audit in an install — a host it doesn't need (a plain
 # install passed with `n`, the audit alone went out); `npm audit` itself still asks. The network open: npm's own
-env = { npm_config_logs_dir = "{run}", npm_config_audit = { value = "false", on = "each-host-asked" } }
+#
+# corepack (pnpm's and yarn's shims): a project naming no `packageManager` runs the version its home's
+# `lastKnownGood.json` names; with none there it would look up the newest and write it there — its home is read
+# only (below), so never: it takes its own default (compat B10)
+env = { npm_config_logs_dir = "{run}", npm_config_audit = { value = "false", on = "each-host-asked" }, COREPACK_DEFAULT_TO_LATEST = "0" }
 # What of the user's environment a run gets for node and its package managers (npm's settings in both cases,
 # nvm, corepack, pnpm, yarn) — `npm_config__authToken`, `NODE_AUTH_TOKEN` left out as tokens. Measured: npm hands
 # its whole environment on to the scripts it runs, so what isn't passed here doesn't reach them either
@@ -98,6 +116,10 @@ env = { NODE_USE_ENV_PROXY = "1" }
 [sandbox.homes]
 npm = { env = "npm_config_cache", else = "~/.npm" }
 npm-upper = { env = "NPM_CONFIG_CACHE", else = "~/.npm" }
+# corepack's home: the pnpm and yarn it downloaded, which run later outside the sandbox, so read only, as npm's
+# (compat B10: closed, every pnpm command died in corepack before pnpm started). Unset, corepack's lookup:
+# `$XDG_CACHE_HOME/node/corepack`, else `~/.cache/node/corepack` — on macOS too
+corepack = { env = "COREPACK_HOME", else = "{xdg-cache}/node/corepack" }
 
 # npm's settings hold its tokens (`_authToken`): the file is kept from every run (`allow::SECRETS`), so its
 # copy without them is always given

@@ -119,6 +119,9 @@ pub struct Confine {
     pub covers: Covers,
     /// Where its runs could have their own mount namespace but the keys are closed as 7b closes them: why.
     pub split_why: Option<String>,
+    /// Where its runs could have their own mount namespace but the protected names are closed by their folders'
+    /// rules, not sealed (`Covers::seals`): why.
+    pub seal_why: Option<String>,
     /// The other mounts of a key's filesystem that reach it (`other_ways`) — its paths through them closed as its own.
     pub elsewhere: Vec<PathBuf>,
     /// The other mounts that reach what runs don't read — home, the kept places, the files read from a copy
@@ -152,7 +155,10 @@ impl Confine {
     /// (started so, they'd be read: `start_confined`).
     #[cfg(test)]
     pub fn rules_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        assert!(self.covers.keys.is_empty(), "these rules come with keys hidden by mounts: start_confined");
+        assert!(
+            self.covers.keys.is_empty() && self.covers.seals.is_empty(),
+            "these rules come with files hidden or sealed by mounts: start_confined"
+        );
         self.rules.fd()
     }
 
@@ -197,6 +203,7 @@ impl PartialEq for Confine {
             && self.unread == other.unread
             && self.covers == other.covers
             && self.split_why == other.split_why
+            && self.seal_why == other.seal_why
             && self.elsewhere == other.elsewhere
             && self.unseen == other.unseen
             && Arc::ptr_eq(&self.made, &other.made)
@@ -612,7 +619,21 @@ pub fn covers_said(c: &Confine) -> String {
             if places.len() == 1 { "it" } else { "them" }
         ),
     };
-    format!("{how}{elsewhere}{holes}{whole}{unseen}")
+    let sealed = match (c.covers.seals.is_empty(), &c.seal_why) {
+        (false, _) => " Here the project's protected names are each bound read-only over themselves for the run: \
+                       written, refused (Read-only file system); renamed or removed, refused (Device or resource \
+                       busy) — and so is a folder holding one, each bound over itself: a file moved between it \
+                       and the rest of the project is refused as across filesystems (Invalid cross-device link; \
+                       `mv` copies). Every folder takes new files; a protected name made where none was is asked \
+                       about before what runs next."
+            .to_string(),
+        (true, Some(why)) => format!(
+            " Protected names are closed by their folders' rules here, not bound read-only by mounts of the run's \
+             own: {why}."
+        ),
+        (true, None) => String::new(),
+    };
+    format!("{how}{sealed}{elsewhere}{holes}{whole}{unseen}")
 }
 
 /// More entries than this in the folders on the way down from a mount to a hole's path through it, and the mount is
@@ -853,6 +874,14 @@ pub struct Covers {
     /// The shut file, and which file it was when checked (the child mounts only that one).
     pub shut: Option<Cover>,
     pub keys: Vec<Cover>,
+    /// The project's protected entries its child binds read-only over themselves (compat B9, `Covers::sealed`) —
+    /// the project then one rule, its folders taking new files; none: each folder holding one closed as `grant`
+    /// closes it.
+    pub seals: Vec<Cover>,
+    /// The folders between the project and a sealed entry, outermost first, its child binds over themselves as they
+    /// are, writable (`Covers::sealed`): each a mount point, so renamed or removed, refused (EBUSY) — else moving
+    /// one away would carry its sealed entry with it and leave the name free for a new file.
+    pub pins: Vec<Cover>,
 }
 
 /// A key hidden by a mount: where it is, a real path, and which file it is.
@@ -900,7 +929,53 @@ impl Covers {
                 Some(Cover { path, dev: m.dev(), ino: m.ino() })
             })
             .collect();
-        Ok(Covers { shut: Some(Cover { path: shut, dev: m.dev(), ino: m.ino() }), keys })
+        Ok(Covers {
+            shut: Some(Cover { path: shut, dev: m.dev(), ino: m.ino() }),
+            keys,
+            seals: Vec::new(),
+            pins: Vec::new(),
+        })
+    }
+
+    /// `found` (`There.protected`, real paths) as the entries a run's child seals (B9: each bound read-only over
+    /// itself), each as it is now, and the folders between `root` and them it pins (bound over themselves,
+    /// outermost first) — Err why not: one that's neither a file nor a folder (a link: a mount can't sit on one),
+    /// a folder on the way that isn't one, or more than `room` mounts in all.
+    fn sealed(root: &Path, found: &[PathBuf], room: usize) -> Result<(Vec<Cover>, Vec<Cover>), String> {
+        use std::os::unix::fs::MetadataExt;
+        let mut seals = Vec::new();
+        for f in found {
+            let Ok(m) = f.symlink_metadata() else { continue };
+            if !(m.file_type().is_file() || m.file_type().is_dir()) {
+                return Err(format!("{} is neither a file nor a folder", f.display()));
+            }
+            let path = f.parent().and_then(|d| Some(std::fs::canonicalize(d).ok()?.join(f.file_name()?)));
+            let path = path.ok_or_else(|| format!("{}: no real path", f.display()))?;
+            seals.push(Cover { path, dev: m.dev(), ino: m.ino() });
+        }
+        // (the root itself isn't one: its parent isn't the run's to change)
+        let mut on_the_way: Vec<&Path> = seals
+            .iter()
+            .flat_map(|s| s.path.ancestors().skip(1).take_while(|a| *a != root && a.starts_with(root)))
+            .collect();
+        crate::sorting::by_key(&mut on_the_way, |a| (a.components().count(), a.to_path_buf()));
+        on_the_way.dedup();
+        if seals.len() + on_the_way.len() > room {
+            return Err(format!(
+                "{} protected names and {} folders holding them, past the {room} a run's mounts take",
+                seals.len(),
+                on_the_way.len()
+            ));
+        }
+        let mut pins = Vec::new();
+        for d in on_the_way {
+            let m = d.symlink_metadata().map_err(|e| format!("{}: {e}", d.display()))?;
+            if !m.file_type().is_dir() {
+                return Err(format!("{} isn't a folder", d.display()));
+            }
+            pins.push(Cover { path: d.to_path_buf(), dev: m.dev(), ino: m.ino() });
+        }
+        Ok((seals, pins))
     }
 }
 
@@ -1183,16 +1258,53 @@ pub(super) fn confine_in(
         }
         None => grant(&mut r, Path::new("/"), READ, &[hidden.as_slice(), &pts_hole].concat())?,
     }
-    let made = match make_first {
+    // (compat B9: the project's protected entries sealed by mounts where the run has a mount namespace of its own —
+    // each bound read-only over itself, the project then one rule and every folder taking new files: a protected
+    // name made where none was is the snapshot's (G23), asked about before what runs next. Not where another mount
+    // reaches one — the project's rule would write it that way — nor past the mounts a run takes: then each folder
+    // holding one is closed, as below)
+    let sealing: Result<(Vec<Cover>, Vec<Cover>), String> = match (&own.mounts, &table, &p.run) {
+        (None, ..) => Ok(Default::default()),
+        (Some(Err(why)), ..) => Err(why.clone()),
+        (Some(Ok(())), None, _) => Err("the mount table its commands see couldn't be read".into()),
+        (Some(Ok(())), _, None) => Err("it has no folder of its own".into()),
+        (Some(Ok(())), Some(table), Some(_)) => {
+            let room = COVERS_MAX.saturating_sub(covers.as_ref().map_or(0, |c| c.keys.len()));
+            match found.iter().find_map(|f| ways_through(table, f).into_iter().next()) {
+                Some((other, _)) => {
+                    Err(format!("{} reaches them through another mount of their filesystem", other.display()))
+                }
+                None => Covers::sealed(&p.root, &found, room),
+            }
+        }
+    };
+    // (the break-once: no seals — the project's folders closed again, B9's tests fail; and the tests of that rule,
+    // in any tier. Or the folders on the way not pinned — a protected name moved away with its folder: the seal
+    // test fails)
+    #[cfg(test)]
+    let sealing = match (
+        std::env::var_os("TARAE_TEST_NO_SEALS").is_some() || p.seals_off,
+        std::env::var_os("TARAE_TEST_NO_PINS").is_some(),
+    ) {
+        (true, _) => Ok(Default::default()),
+        (false, true) => sealing.map(|(seals, _)| (seals, Vec::new())),
+        (false, false) => sealing,
+    };
+    let ((seals, pins), seal_why) = match sealing {
+        Ok(s) => (s, None),
+        Err(why) => (Default::default(), Some(why)),
+    };
+    let sealed = !seals.is_empty();
+    let made = match make_first && !sealed {
         true => make(to_make(&p.root, &found, &crate::packs::made_beside())),
         false => Made::none(),
     };
-    grant(&mut r, &p.root, landlock::ALL, &found)?;
+    grant(&mut r, &p.root, landlock::ALL, if sealed { &[][..] } else { &found[..] })?;
     // A folder holding a protected name: a folder in it may go once emptied (`cargo clean`, `rm -rf target` —
     // the user's decision, 2026-10-05). Nothing else: no file there is removed (no `REMOVE_FILE`), no entry
     // made (a rename there is a remove and a make — `.git` renamed away), and what's written is granted
     // entry by entry. An empty protected folder can go too: a rule can't leave a name out.
-    let closed = closed_folders(&p.root, &found);
+    let closed = if sealed { Vec::new() } else { closed_folders(&p.root, &found) };
     for dir in &closed {
         match r.allow(dir, landlock::REMOVE_DIR) {
             Err(e) if !matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) => {
@@ -1246,8 +1358,9 @@ pub(super) fn confine_in(
         made: Arc::new(made),
         closed,
         unread,
-        covers: covers.unwrap_or_default(),
+        covers: Covers { seals, pins, ..covers.unwrap_or_default() },
         split_why,
+        seal_why,
         elsewhere,
         holes_elsewhere,
         closed_whole,
@@ -2223,7 +2336,9 @@ mod tests {
                 own_addresses: Some(Vec::new()),
                 ..Default::default()
             };
-            let p = Policy { run: RunDir::new().ok(), ..Policy::for_project(&env) };
+            // (its tests are of the folders' rule: kept where runs could have their protected names sealed — B9's
+            // own test is `sandbox::tests::protected_names_are_sealed_and_the_root_takes_new_files`)
+            let p = Policy { run: RunDir::new().ok(), seals_off: true, ..Policy::for_project(&env) };
             crate::sandbox::confined(p)
         }
     }
@@ -2548,6 +2663,8 @@ mod tests {
             ("build", true),
             ("sub/target", true),
             ("target", true),
+            // (compat B9: tsc's output folder by its usual name)
+            ("web/dist", true),
             ("web/node_modules", true),
             ("web/package-lock.json", false),
         ]
@@ -2569,7 +2686,8 @@ mod tests {
     fn nothing_made_first_is_a_protected_name() {
         let packs = crate::packs::made_beside();
         let names: Vec<&String> = packs.iter().flat_map(|m| m.folders.iter().chain(&m.files)).collect();
-        for want in ["target", "Cargo.lock", "node_modules", "package-lock.json", ".gradle", "build"] {
+        for want in ["target", "Cargo.lock", "node_modules", "package-lock.json", "dist", ".gradle", "build"]
+        {
             assert!(names.iter().any(|n| *n == want), "{want}: {names:?}");
         }
         for n in &names {
@@ -3427,6 +3545,46 @@ mod tests {
             (outside[0].op.as_str(), outside[0].plain()),
             ("file-write*", format!("writing {}", shown(&s.base)))
         );
+    }
+
+    /// A failed run whose output says a permission was refused but names nothing, in a folder that takes no new
+    /// files, has that rule said as its likely cause (compat B11: mypy crashed naming no path) — not a run that
+    /// passed, nor one elsewhere, nor a failure that says no refusal (a failing test suite).
+    #[test]
+    fn a_failure_naming_nothing_in_a_closed_folder_says_its_rule() {
+        let Some(_) = kernel_abi("a_failure_naming_nothing_in_a_closed_folder_says_its_rule") else { return };
+        let s = Scratch::new("likely");
+        let mut p = s.policy();
+        p.watch = Some(crate::sandbox::Watch::quiet("t."));
+        p.cwd = Some(s.root.clone());
+        let crash = [
+            (true, "Traceback (most recent call last):".to_string()),
+            (true, "PermissionError: [Errno 13] Permission denied".into()),
+        ];
+        let failing =
+            [(true, "Traceback (most recent call last):".to_string()), (true, "AssertionError".into())];
+        let report_of = |p: &Policy, out: &[(bool, String)], passed: bool| {
+            Guard::In(Box::new(p.clone())).report_with(out, crate::sandbox::Told::default(), passed)
+        };
+        let report = |p: &Policy, passed: bool| report_of(p, &crash, passed);
+        assert!(!report_of(&p, &failing, false).blocked, "no refusal said: not the sandbox's");
+        let r = report(&p, false);
+        let root = crate::sandbox::home_shown(&s.root.display().to_string());
+        assert!(r.blocked, "{}", r.text);
+        assert!(r.text.contains(&format!("likely making a new file in {root}, where it ran")), "{}", r.text);
+        assert!(r.text.contains("make it in a folder without one"), "{}", r.text);
+        assert!(!report(&p, true).blocked, "it passed");
+        let elsewhere = Policy { cwd: Some(s.root.join("no-protected-name-here")), ..p.clone() };
+        assert!(!report(&elsewhere, false).blocked, "a folder that takes new files");
+        // (compat7 review 2 and 3: not a refusal naming a file the rules let it write, nor one that isn't
+        // Landlock's EACCES, nor a run whose folder isn't known for its whole output)
+        let line =
+            |l: &str| [(true, "Traceback (most recent call last):".to_string()), (true, l.to_string())];
+        let named = line("PermissionError: [Errno 13] Permission denied: 'data/cache.db'");
+        assert!(!report_of(&p, &named, false).blocked, "a file of the user's, named");
+        assert!(!report_of(&p, &line("OSError: [Errno 1] Operation not permitted"), false).blocked, "EPERM");
+        assert!(!report_of(&p, &line("OSError: [Errno 30] Read-only file system"), false).blocked, "EROFS");
+        assert!(!report(&Policy { cwd: None, ..p.clone() }, false).blocked, "a `cd` after a command");
     }
 
     /// A watch reads its run's records as they come (a stand-in for `journalctl`: a script that prints the

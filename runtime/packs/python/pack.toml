@@ -209,6 +209,26 @@ env = "PYTHONPYCACHEPREFIX"
 keep = true
 when = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
 
+# The checkers' caches, of the runs' own: each tool makes its cache beside the project's files — on Linux the root
+# takes no new folder (it holds `.git`; compat B9: pytest's, ruff's and mypy's refused, ruff and mypy failed) —
+# kept across a Python project's runs, never mixed with the user's own runs' caches. pytest names its by an
+# option only (`cache_dir`, after the project's own settings), its whole `PYTEST_ADDOPTS` tarae's: the user's
+# isn't passed
+[sandbox.run-home.pytest]
+keep = true
+when = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "pytest.ini", "tox.ini"]
+append = { PYTEST_ADDOPTS = "-o 'cache_dir={home}'" }
+
+[sandbox.run-home.ruff]
+env = "RUFF_CACHE_DIR"
+keep = true
+when = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "ruff.toml", ".ruff.toml"]
+
+[sandbox.run-home.mypy]
+env = "MYPY_CACHE_DIR"
+keep = true
+when = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "mypy.ini", ".mypy.ini"]
+
 # uv's cache, of the runs' own (compat B3: the user's closed, every uv command failed on it — `uv run` too):
 # kept across a Python project's runs, as Go's build cache is. It starts empty: what a venv already holds runs
 # offline; what isn't there yet is fetched through tarae's proxy with the network open, then kept

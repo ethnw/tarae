@@ -338,6 +338,29 @@ impl Guard {
         for d in p.merge_made(&mut b.seen, said) {
             o.add(d);
         }
+        // (compat B11: a failed run whose output says a permission was refused — Landlock's EACCES — and names
+        // nothing anywhere, in a folder that takes no new files — Linux, the project's root as a rule — has that
+        // rule said as its likely cause: mypy crashed naming no path. Not every failure there: a failing test suite
+        // isn't the sandbox's, nor a refusal naming a file, an EPERM, or a folder not known for the whole run.
+        // Where the protected names are sealed by mounts, a refusal of theirs naming nothing has that said instead)
+        let unnamed = |l: &String| paths_in(l, p.from()).is_empty() && named_in(l, p.from()).is_empty();
+        let refused: Vec<String> =
+            output.iter().filter(|(_, l)| refusal(l)).map(|(_, l)| l.clone()).collect();
+        let low: Vec<String> = refused.iter().map(|l| l.to_ascii_lowercase()).collect();
+        let only = |words: &[&str]| {
+            refused.iter().all(unnamed) && low.iter().any(|l| words.iter().any(|w| l.contains(w)))
+        };
+        if !passed && b.total == 0 && o.total == 0 && !refused.is_empty() {
+            let target = p.from().display().to_string();
+            if p.cwd.is_some() && p.closed_holds(p.from()) && only(&["permission denied"]) {
+                o.add(Denial { process: SEEN_IN_OUTPUT.into(), op: LIKELY_MADE.into(), target });
+            } else if p.cwd.is_some()
+                && p.sealed()
+                && only(&["read-only file system", "device or resource busy"])
+            {
+                o.add(Denial { process: SEEN_IN_OUTPUT.into(), op: SEALED_LIKELY.into(), target });
+            }
+        }
         for q in std::mem::take(&mut o.quiet) {
             if !b.quiet.iter().any(|d| d.op == q.op && d.target == q.target) {
                 b.quiet.push(q);
@@ -466,6 +489,7 @@ impl Guard {
         let mut beyond = Vec::new();
         let refused_port = &crate::sandboxpack::get().refused_port;
         let (mut entries, mut signals, mut looks, mut attaches) = (false, false, false, false);
+        let mut sealed = false;
         for d in seen {
             if d.op.starts_with("file-entry-") {
                 entries = true;
@@ -478,6 +502,7 @@ impl Guard {
                     _ if d.op == "signal" => signals = true,
                     _ if d.op == "process-info-pidinfo" => looks = true,
                     _ if d.op == "mach-priv-task-port" => attaches = true,
+                    _ if d.op == SEALED_LIKELY => sealed = true,
                     // (a process the packs say needs this machine's ports refused one: Gradle's JVM — below
                     // `PICKED_FROM`, a host beyond this machine instead)
                     w if w.starts_with("connecting to port")
@@ -576,6 +601,13 @@ impl Guard {
                  edit tool: the user reviews it. Don't work around it (another name, a copy, a link).\n",
                 names.join(", ")
             ));
+        }
+        if sealed {
+            s.push_str(
+                "A protected name — what runs later outside the sandbox (the user's builds, their terminal) or sets \
+                 how things run — is bound read-only for your commands here. To change one, edit it with your edit \
+                 tool: the user reviews it. Don't work around it (another name, a copy, a link).\n",
+            );
         }
         if git {
             s.push_str(
@@ -1536,6 +1568,13 @@ const SEEN_IN_OUTPUT: &str = "said in the output";
 /// A denial read from Landlock's audit log (`linux::Audit`): its process — the record names only its domain.
 pub(crate) const SEEN_IN_AUDIT_LOG: &str = "the run";
 pub(crate) const EITHER: &str = "file-read* file-write*";
+/// Linux: what a failed run whose output says a permission was refused, naming nothing, was likely refused — a new
+/// file in the folder it ran in, which takes none (`report_text`, compat B11): its target that folder.
+const LIKELY_MADE: &str = "file-entry-make-likely";
+/// Linux, tier own: what a failed run whose output says a write, move or removal was refused as a sealed name's
+/// ("Read-only file system", "Device or resource busy"), naming nothing, likely tried — a protected name, bound
+/// read-only for the run (`linux::Covers::seals`): its target the folder it ran in.
+const SEALED_LIKELY: &str = "sealed-likely";
 
 /// `target` (a path, or what a denial names) with home spelled `~` — how a denial's words show it.
 pub(crate) fn home_shown(target: &str) -> String {
@@ -1660,6 +1699,14 @@ impl Denial {
                 )
             }
             "file-make-in" => format!("making a new file in {t}"),
+            LIKELY_MADE => format!(
+                "likely making a new file in {t}, where it ran — its output names nothing refused, but a folder \
+                 holding protected names takes no new files on Linux"
+            ),
+            SEALED_LIKELY => format!(
+                "likely changing, moving or removing a protected name, from {t} where it ran — its output names \
+                 none, but each is bound read-only for the run here"
+            ),
             // (Linux, 3b: past the ptys tarae opened for the run — `sandbox::ptys`)
             "pty-make" => format!("making more terminals than a run holds at a time ({t})"),
             "signal" if t.is_empty() => "signalling a process outside the run's own processes".into(),
@@ -2592,8 +2639,9 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The relative names a line of output gives files by — quoted (`'src/x'`, `‘x’`, `"x"`), or `sh`'s `cannot
-/// create x:` — as paths from `root` (where the run is, as a rule), folded. No disk.
+/// The relative names a line of output gives files by — quoted (`'src/x'`, `‘x’`, `"x"`), `sh`'s `cannot
+/// create x:`, or a call and its name before the refusal (`open fx: permission denied`: Go's, `OP_WORDS`) —
+/// as paths from `root` (where the run is), folded. No disk.
 fn named_in(line: &str, root: &Path) -> Vec<PathBuf> {
     let mut names: Vec<&str> = Vec::new();
     for (open, close) in [('\'', '\''), ('‘', '’'), ('"', '"')] {
@@ -2607,6 +2655,27 @@ fn named_in(line: &str, root: &Path) -> Vec<PathBuf> {
     }
     if let Some((name, _)) = line.split_once("cannot create ").and_then(|(_, after)| after.split_once(": ")) {
         names.push(name);
+    }
+    // (`<call> <name>: <refusal>` — only after a call's name, so `Error: Permission denied` names nothing)
+    let low = line.to_ascii_lowercase();
+    // (and on Linux a sealed name's: written, "read-only file system"; renamed or removed, "device or resource
+    // busy" — `linux::Covers::seals`)
+    let at = [
+        ": permission denied",
+        ": operation not permitted",
+        ": read-only file system",
+        ": device or resource busy",
+    ]
+    .iter()
+    .find_map(|r| low.find(r));
+    if let Some(at) = at {
+        let mut words = line[..at].split_whitespace().rev();
+        if let (Some(name), Some(call)) = (words.next(), words.next())
+            && OP_WORDS.contains(&call.trim_start_matches(|c: char| !c.is_ascii_alphabetic()))
+            && !name.contains(['\'', '"', '‘', '’'])
+        {
+            names.push(name);
+        }
     }
     let relative = |n: &&str| !n.is_empty() && !n.starts_with(['/', '~']) && !n.contains(char::is_whitespace);
     names
@@ -2628,16 +2697,24 @@ fn named_in(line: &str, root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The calls a refusal names its file after, as the system's error says it (`open fx: permission denied` — Go's
+/// `os.PathError`): `named_in`.
+const OP_WORDS: [&str; 11] =
+    ["open", "openat", "mkdir", "create", "remove", "unlink", "rename", "link", "symlink", "chmod", "write"];
+
 /// Lines of output that say a permission was refused — what's left to go by when nothing watched.
 pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
     output.iter().filter(|(_, l)| refusal(l)).take(5).map(|(_, l)| l.clone()).collect()
 }
 
 /// Whether a line says the sandbox may have refused something: "Operation not permitted" (Seatbelt's, and
-/// seccomp's on Linux), and on Linux "Permission denied" (Landlock's).
+/// seccomp's on Linux), and on Linux "Permission denied" (Landlock's), "Read-only file system" and "Device or
+/// resource busy" (a protected name sealed by a mount — written; renamed or removed: `linux::Covers::seals`).
 fn refusal(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    l.contains("operation not permitted") || (cfg!(target_os = "linux") && l.contains("permission denied"))
+    let linux = ["permission denied", "read-only file system", "device or resource busy"];
+    l.contains("operation not permitted")
+        || (cfg!(target_os = "linux") && linux.iter().any(|w| l.contains(w)))
 }
 
 /// The names every project keeps, whatever its languages: tarae's project config (its trusted settings and
@@ -3716,7 +3793,7 @@ pub fn confined(mut p: Policy) -> Policy {
 /// value as the run gets it (`run_env`'s: a token-like one is left out, and gets only what's appended — never
 /// tarae's own value, which goes in after `from_run_env`; `{home}` in it: the home's folder) — and, a home a
 /// daemon lives from, its `daemon`'s folders and appends; a home of the run's own, its `fresh` appends; its
-/// `proxy` file with `url`'s values, removed without one (a kept home's, from an earlier run) — and a home with
+/// `files`, written whole each run; its `proxy` file with `url`'s values, removed without one (a kept home's, from an earlier run) — and a home with
 /// one is the run's own when the URL is (`kept_takes`). Gone with the run's folder, but a kept one. What's made
 /// in a home goes through no link (`Unlinked`): a kept one is a folder earlier runs wrote in, and tarae isn't
 /// sandboxed. Blocks (a worker's).
@@ -3738,7 +3815,9 @@ fn run_homes_made(
             Some((home, daemon, dir)) => (home, daemon.then_some(h.daemon.as_ref()).flatten(), Ok(dir)),
             None => (run.join(&h.name), None, Unlinked::made(&run.join(&h.name))),
         };
-        env.push((h.env.clone(), home.display().to_string()));
+        if !h.env.is_empty() {
+            env.push((h.env.clone(), home.display().to_string()));
+        }
         let mut said = Vec::new();
         match &dir {
             Ok(dir) => {
@@ -3751,6 +3830,11 @@ fn run_homes_made(
                     if let Some(to) = at(to).filter(|t| t.is_dir())
                         && let Err(e) = dir.link(Path::new(inside), &to, &mut said)
                     {
+                        said.push(e);
+                    }
+                }
+                for (inside, text) in &h.files {
+                    if let Err(e) = dir.file(Path::new(inside), text.as_bytes(), &mut said) {
                         said.push(e);
                     }
                 }
@@ -3940,6 +4024,15 @@ impl Unlinked {
             }
         }
         Err(format!("{}: a link came back", at.display()))
+    }
+
+    /// File `rel` (plain names) in it holding `text` (`write_file`) — its folders made through no link.
+    fn file(&self, rel: &Path, text: &[u8], gone: &mut Vec<String>) -> Result<(), String> {
+        let name = rel.file_name().and_then(|n| n.to_str()).ok_or("no file named")?;
+        match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(p) => self.folder(p, gone)?.write_file(name, text),
+            None => self.write_file(name, text),
+        }
     }
 
     /// File `name` (a plain name) in it holding `text`, written whole (0600): a file of its own made through no
@@ -6116,6 +6209,15 @@ mod tests {
         );
         assert_eq!(var(&a, "GRADLE_OPTS"), Some(opts), "the daemons on, ending themselves");
         assert!(ours.join("kotlin-daemon").is_dir() && ours.join("wrapper").is_dir());
+        // (its init script: no cleanup reaching the user's wrapper distributions through the link — compat B6)
+        let init = |home: &Path| std::fs::read_to_string(home.join("init.d/tarae-no-cleanup.gradle"));
+        assert!(init(&ours).is_ok_and(|s| s.contains("cleanup = Cleanup.DISABLED")), "{:?}", init(&ours));
+        // (behind Gradle's version: before 6.0 there's no `beforeSettings` — called, the build fails; compat7
+        // review 5)
+        let guarded = |s: &str| {
+            s.find("if (GradleVersion.current()").is_some_and(|g| s.find("beforeSettings") > Some(g))
+        };
+        assert!(init(&ours).is_ok_and(|s| guarded(&s)), "{:?}", init(&ours));
         let again = policy(&g, Os::Linux, Vec::new());
         assert_eq!(
             var(&again, "GRADLE_USER_HOME"),
@@ -6160,8 +6262,108 @@ mod tests {
             assert_eq!(var(&p, "GRADLE_USER_HOME"), Some(run.display().to_string()), "{os:?}");
             assert_eq!(var(&p, "GRADLE_OPTS").as_deref(), Some("-Xmx1g -Dorg.gradle.daemon=false"), "{os:?}");
             assert!(!p.write.iter().any(|w| w.starts_with(&kept)) && p.kept.is_empty(), "{os:?}");
+            assert!(init(&run).is_ok(), "{os:?}: the run's own home has it too");
         }
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// corepack's home (pnpm's and yarn's shims, compat B10) is read by runs where it is — its default, or
+    /// `COREPACK_HOME` — and never written: it holds the pnpm the user runs later; so are pnpm's metadata cache
+    /// and store (an offline install reads both) — nor offered on a card, with its dlx cache and macOS's places too
+    /// (compat7 review 4). (A stand-in home.)
+    #[test]
+    fn corepack_and_pnpm_are_read_and_never_written() {
+        let scratch = crate::scratch::Scratch::new("corepack-home");
+        let base = std::fs::canonicalize(&*scratch).unwrap();
+        let (home, moved) = (base.join("home"), base.join("elsewhere/corepack"));
+        let pnpm = [home.join(".cache/pnpm/v12"), home.join(".local/share/pnpm/store")];
+        let asked = [
+            (Os::Linux, home.join(".cache/pnpm/dlx/0a1b")),
+            (Os::Linux, home.join(".local/share/pnpm/store/v10")),
+            (Os::Mac, home.join("Library/Caches/pnpm/dlx/0a1b")),
+            (Os::Mac, home.join("Library/pnpm/store/v10")),
+        ];
+        for (_, d) in &asked {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // (corepack's own lookup: `COREPACK_HOME`, else `$XDG_CACHE_HOME/node/corepack` — compat7 review 6)
+        let xdg = home.join(".local/cache");
+        let xdg_corepack = xdg.join("node/corepack");
+        for d in [home.join("work/p"), home.join(".cache/node/corepack"), moved.clone(), xdg_corepack.clone()]
+            .iter()
+            .chain(&pnpm)
+        {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let root = home.join("work/p");
+        for (env, at) in [
+            (None, home.join(".cache/node/corepack")),
+            (Some(("COREPACK_HOME", &moved)), moved.clone()),
+            (Some(("XDG_CACHE_HOME", &xdg)), xdg_corepack.clone()),
+        ] {
+            let mut vars = vec![("HOME".to_string(), home.clone().into_os_string())];
+            vars.extend(env.map(|(n, m)| (n.to_string(), m.clone().into_os_string())));
+            let here = Here { env: vars.into_iter().collect(), os: Os::Linux, ..Here::default() };
+            let p =
+                run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+            let known = at.join("lastKnownGood.json");
+            assert!(
+                p.reads_allow(&known) && !p.writes_allow(&known),
+                "{}: {:?}",
+                at.display(),
+                p.reads.allow
+            );
+            let later = RunsLater::new(&home, &vars_in(&home, &here), &[]);
+            assert!(later.refuses(&at).is_some(), "{}", at.display());
+            let offered = crate::allow::write_choices(&at.join("x"), &home, &root, &later);
+            assert!(offered.is_empty(), "{}: offered {offered:?}", at.display());
+            // (its default stays refused when a variable moves it, as every home's does — compat7 verify 2)
+            let default = home.join(".cache/node/corepack");
+            assert!(later.refuses(&default).is_some(), "{env:?}: {}", default.display());
+            // (pnpm's cache moves with `XDG_CACHE_HOME` too: the default's checked)
+            if env.is_some_and(|(n, _)| n == "XDG_CACHE_HOME") {
+                continue;
+            }
+            for d in &pnpm {
+                let f = d.join("index.json");
+                assert!(p.reads_allow(&f) && !p.writes_allow(&f), "{}: {:?}", d.display(), p.reads.allow);
+            }
+        }
+        for (os, d) in &asked {
+            let env = [("HOME".to_string(), home.clone().into_os_string())].into();
+            let here = Here { env, os: *os, ..Here::default() };
+            let later = RunsLater::new(&home, &vars_in(&home, &here), &[]);
+            assert!(later.refuses(d).is_some(), "{}", d.display());
+            let offered = crate::allow::write_choices(&d.join("x"), &home, &root, &later);
+            assert!(offered.is_empty(), "{}: offered {offered:?}", d.display());
+            assert_eq!(crate::allow::write_place(d, &home, &root, &later), None, "{}", d.display());
+        }
+        // (where pnpm itself looks once the XDG variables are set: `$XDG_CACHE_HOME/pnpm` and `$XDG_DATA_HOME/pnpm`
+        // on every system — compat7 verify 1)
+        let (xc, xd) = (home.join(".xc"), home.join(".xd"));
+        let moved_pnpm = [xc.join("pnpm/dlx/0a1b"), xd.join("pnpm/store/v10")];
+        for d in &moved_pnpm {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for os in [Os::Mac, Os::Linux] {
+            let env = [
+                ("HOME".to_string(), home.clone().into_os_string()),
+                ("XDG_CACHE_HOME".to_string(), xc.clone().into_os_string()),
+                ("XDG_DATA_HOME".to_string(), xd.clone().into_os_string()),
+            ]
+            .into();
+            let here = Here { env, os, ..Here::default() };
+            let p =
+                run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+            let later = RunsLater::new(&home, &vars_in(&home, &here), &[]);
+            for d in &moved_pnpm {
+                let f = d.join("index.json");
+                assert!(p.reads_allow(&f) && !p.writes_allow(&f), "{os:?} {}", d.display());
+                assert!(later.refuses(d).is_some(), "{os:?} {}", d.display());
+                let offered = crate::allow::write_choices(&d.join("x"), &home, &root, &later);
+                assert!(offered.is_empty(), "{os:?} {}: offered {offered:?}", d.display());
+            }
+        }
     }
 
     /// What a run home appends to (the java pack's `GRADLE_OPTS`) is the user's value as the run gets it: one
@@ -8230,6 +8432,32 @@ mod tests {
         assert!(p.said_in_output(&allowed, &[]).is_empty(), "the rules let it write there");
     }
 
+    /// A name a call's refusal gives bare — Go's `open fx: permission denied` — is read too, from the folder the run
+    /// ran in (compat B11: `go build`'s binary, "the report names no cause"); not a word that isn't after a call.
+    #[test]
+    fn a_bare_name_after_a_call_is_read_from_where_the_run_ran() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let why = if cfg!(target_os = "linux") { "permission denied" } else { "operation not permitted" };
+        let said = |p: &Policy, line: &str| -> Vec<String> {
+            p.said_in_output(&[(true, line.to_string())], &[]).into_iter().map(|d| d.target).collect()
+        };
+        assert_eq!(said(&p, &format!("open Makefile: {why}")), ["/Users/u/p/Makefile"]);
+        assert_eq!(said(&p, &format!("go: mkdir .github: {why}")), ["/Users/u/p/.github"]);
+        let sub = Policy { cwd: Some(PathBuf::from("/Users/u/p/sub")), ..p.clone() };
+        assert_eq!(said(&sub, &format!("open build.rs: {why}")), ["/Users/u/p/sub/build.rs"]);
+        assert_eq!(said(&sub, &format!("cp: cannot create 'Makefile': {why}")), ["/Users/u/p/sub/Makefile"]);
+        for line in
+            [format!("Error: Makefile {why}"), format!("Makefile: {why}"), format!("open src/a.rs: {why}")]
+        {
+            assert!(said(&p, &line).is_empty(), "{line}");
+        }
+        // (Linux: a name sealed by a mount says so its own way — written, removed — compat7 review 1)
+        if cfg!(target_os = "linux") {
+            assert_eq!(said(&p, "open Makefile: read-only file system"), ["/Users/u/p/Makefile"]);
+            assert_eq!(said(&sub, "remove build.rs: device or resource busy"), ["/Users/u/p/sub/build.rs"]);
+        }
+    }
+
     /// P2 leftovers: Go's telemetry counters (written in home by every go command) are denied but never named —
     /// a Go run's report says nothing was blocked; any other write next to them is named as ever. A shell's
     /// setup (`~/.zshenv`, read by every `zsh -c`) is said calmly, apart — not a warning. And npm keeps its
@@ -8983,6 +9211,7 @@ mod tests {
             ports: vec![port],
             localhost: false,
             run: None,
+            cwd: None,
             runs: None,
             tag: None,
             proxy: None,
@@ -9684,6 +9913,96 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// For real, where a run has a mount namespace of its own (compat B9): the project's protected names are each
+    /// bound read-only over themselves — written, renamed, removed or linked, refused, the file as it was; the folder
+    /// holding one neither moved away with it nor removed (compat7 review 12) — and every folder takes new files, the root too (`go build`'s binary, `tsc`'s `dist/`); a sealed folder takes none
+    /// (a new hook). Said in the report by its path. Elsewhere (no namespace of the run's own) it says it skips
+    /// itself — a machine said to give them (`TARAE_EXPECT_TIER=own`) fails instead.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn protected_names_are_sealed_and_the_root_takes_new_files() {
+        let test = "protected_names_are_sealed_and_the_root_takes_new_files";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let t = profile_path(&crate::scratch::Scratch::new("sb-sealed").into_path());
+        let root = t.join("project");
+        for (f, text) in
+            [("Cargo.toml", "[package]\n"), (".git/HEAD", "ref\n"), ("sub/build.rs", "fn main() {}\n")]
+        {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), text).unwrap();
+        }
+        let p = key_policy(&root);
+        let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let Some(Ok(confine)) = &c.confine else { panic!("{:?}", c.confine) };
+        if confine.covers.seals.is_empty() {
+            let why =
+                confine.seal_why.clone().unwrap_or_else(|| tier::get().short.clone().unwrap_or_default());
+            // (as 7d's: a machine said to give namespaces that doesn't fails; tier own run as root — no mounts of a
+            // run's own, `--as-user` runs it — skips, saying why; run as a user there, none sealed is a failure)
+            // SAFETY: a plain call.
+            let root_here = unsafe { libc::geteuid() } == 0;
+            let own = std::env::var("TARAE_EXPECT_TIER").is_ok_and(|w| w.trim() == "own");
+            if own && (confine.tier() != "own" || !root_here) {
+                panic!(
+                    "{test}: tier own expected here, the runs are {}, nothing sealed — {why}",
+                    confine.tier()
+                );
+            }
+            let line =
+                format!("{}sandbox::tests::{test} — no seals here: {why}\n", crate::test_results::SELF_SKIP);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            return std::fs::remove_dir_all(&t).unwrap_or_default();
+        }
+        assert!(confine.closed.is_empty(), "no folder closed: {:?}", confine.closed);
+        for (refused, file) in [
+            ("echo planted > Cargo.toml", "Cargo.toml"),
+            ("mv Cargo.toml moved.toml", "Cargo.toml"),
+            ("rm -f Cargo.toml", "Cargo.toml"),
+            ("ln Cargo.toml linked.toml", "Cargo.toml"),
+            ("echo planted > sub/build.rs", "sub/build.rs"),
+            // (its folder moved away with it, the name then free — within the project, and into a folder of tools'
+            // output the snapshot doesn't look in)
+            ("mv sub sub-old && mkdir sub && echo planted > sub/build.rs", "sub/build.rs"),
+            ("mkdir -p out && mv sub out/x && mkdir sub && echo planted > sub/build.rs", "sub/build.rs"),
+            ("rm -rf sub && mkdir sub && echo planted > sub/build.rs", "sub/build.rs"),
+        ] {
+            let before = std::fs::read_to_string(root.join(file)).unwrap();
+            let (ok, _, err) = sh_confined(&c, &root, refused);
+            assert!(!ok, "{refused}: it went through");
+            assert_eq!(std::fs::read_to_string(root.join(file)).unwrap(), before, "{refused}: {err}");
+            if refused.starts_with("echo") {
+                let said = c.said_in_output(&[(false, err.clone())], &[]);
+                assert!(said.iter().any(|d| d.target.ends_with(file)), "{refused}: {err} — {said:?}");
+            }
+        }
+        // (a refusal of theirs naming nothing — Rust's — has the seals said as its likely cause, compat7 review 1)
+        let out = [(false, "Error: Read-only file system (os error 30)".to_string())];
+        let r = Guard::In(Box::new(Policy { cwd: Some(root.clone()), ..c.clone() })).report_with(
+            &out,
+            Told::default(),
+            false,
+        );
+        assert!(
+            r.blocked && r.text.contains("likely changing, moving or removing a protected name"),
+            "{}",
+            r.text
+        );
+        assert!(!root.join("moved.toml").exists() && !root.join("linked.toml").exists());
+        assert!(!root.join("sub-old").exists() && !root.join("out/x").exists(), "a folder holding one moved");
+        let (ok, _, err) =
+            sh_confined(&c, &root, "mkdir -p .git/hooks && echo planted > .git/hooks/pre-commit");
+        assert!(!ok && !root.join(".git/hooks/pre-commit").exists(), "a new hook: {err}");
+        let (ok, _, err) =
+            sh_confined(&c, &root, "echo bin > fx && mkdir dist && echo js > dist/a.js && touch sub/new");
+        assert!(ok, "new files beside the protected names: {err}");
+        assert!(
+            root.join("fx").is_file() && root.join("dist/a.js").is_file() && root.join("sub/new").is_file()
+        );
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// For real, where keys are hidden by mounts (7d): a key replaced by a rename, or moved away, between the walk
     /// that found it and its run's start doesn't start the run — the child mounts only over the file the walk found
     /// (device, inode), and the run says why; nothing of the new file or the moved one is read.
@@ -10141,6 +10460,7 @@ mod tests {
                 ports: Vec::new(),
                 localhost: false,
                 run: Some(run.clone()),
+                cwd: None,
                 runs: None,
                 tag: None,
                 proxy: None,
@@ -10223,6 +10543,7 @@ mod tests {
             ports: Vec::new(),
             localhost: false,
             run: None,
+            cwd: None,
             runs: None,
             tag: Some(tag.to_string()),
             proxy: None,
@@ -10292,6 +10613,7 @@ mod tests {
             ports: Vec::new(),
             localhost: false,
             run: None,
+            cwd: None,
             runs: None,
             tag: None,
             proxy: None,
@@ -11501,6 +11823,7 @@ mod tests {
             ports,
             localhost,
             run: None,
+            cwd: None,
             runs: None,
             tag: None,
             proxy: None,

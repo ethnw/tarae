@@ -992,15 +992,19 @@ fn the_packs_say_what_the_core_said() {
     let t = crate::sandboxpack::get();
     assert_eq!(t.problems, Vec::<String>::new());
     // (what a run reads, never reads and writes in home, the caches: the policy pinned above)
-    // Go's telemetry, at its place in home on each system (Linux's where `XDG_CONFIG_HOME` puts it)
+    // Go's telemetry, at its place in home on each system (Linux's where `XDG_CONFIG_HOME` puts it); the Gradle
+    // dependencies runs read in place (compat B5), wherever `GRADLE_USER_HOME` puts them
     let quiet = |os: Os, env: &[(&str, &str)]| {
         let env = env.iter().map(|(k, v)| (k.to_string(), v.into())).collect();
         quiet_places(&vars_in(Path::new("/h"), &Here { env, os, ..Here::default() }))
     };
-    let xdg = [("XDG_CONFIG_HOME", "/x/conf")];
-    assert_eq!(quiet(Os::Mac, &xdg), [PathBuf::from("/h/Library/Application Support/go/telemetry")]);
-    assert_eq!(quiet(Os::Linux, &[]), [PathBuf::from("/h/.config/go/telemetry")]);
-    assert_eq!(quiet(Os::Linux, &xdg), [PathBuf::from("/x/conf/go/telemetry")]);
+    let p = PathBuf::from;
+    let (xdg, gradle) = ([("XDG_CONFIG_HOME", "/x/conf")], p("/h/.gradle/caches/modules-2"));
+    assert_eq!(quiet(Os::Mac, &xdg), [p("/h/Library/Application Support/go/telemetry"), gradle.clone()]);
+    assert_eq!(quiet(Os::Linux, &[]), [p("/h/.config/go/telemetry"), gradle.clone()]);
+    assert_eq!(quiet(Os::Linux, &xdg), [p("/x/conf/go/telemetry"), gradle]);
+    let moved = [("GRADLE_USER_HOME", "/g")];
+    assert_eq!(quiet(Os::Linux, &moved), [p("/h/.config/go/telemetry"), p("/g/caches/modules-2")]);
     // What Claude runs unasked, git's read-only ones being the core's
     let mut now: Vec<&str> = crate::tools::run_allow().collect();
     now.sort();
@@ -1087,7 +1091,8 @@ fn landlocks_rules_are_pinned() {
     }
     pinned("sandbox_landlock.txt", &out);
     // 7d: where the run's child has a mount namespace of its own, the closed keys are hidden by mounts (`Covers`)
-    // and every folder of the project is one rule — the project's rules and the files mounted over, one ABI
+    // and the protected names sealed by them (compat B9) — the project is one rule: its rules and what's mounted
+    // over, one ABI
     let r = landlock::Ruleset::written(6).unwrap();
     // (its mount table: the project on the one mount of its filesystem)
     let table = Some("22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n".to_string());
@@ -1108,6 +1113,13 @@ fn landlocks_rules_are_pinned() {
         c.covers.keys.iter().map(|k| format!("    {}\n", f.named(&shown(&k.path), run))).collect();
     hidden.sort();
     out.extend(hidden);
+    out += "sealed by mounts:\n";
+    let mut sealed: Vec<String> =
+        c.covers.seals.iter().map(|s| format!("    {}\n", f.named(&shown(&s.path), run))).collect();
+    sealed.sort();
+    out.extend(sealed);
+    out += "folders on the way bound over themselves:\n";
+    out.extend(c.covers.pins.iter().map(|s| format!("    {}\n", f.named(&shown(&s.path), run))));
     pinned("sandbox_landlock_covered.txt", &out);
 }
 

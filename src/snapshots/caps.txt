@@ -48,14 +48,19 @@ never read
     $HOME/Library/Keychains
     $STATE
 never written: programs
+    $HOME/.cache/pnpm
     $HOME/.cargo/bin
     $HOME/.local/bin
+    $HOME/.local/share/pnpm
+    $HOME/Library/Caches/pnpm
+    $HOME/Library/pnpm
     $HOME/go/bin
 never written: shared caches
     $HOME/.cargo/git
     $HOME/.cargo/registry
     $HOME/go/pkg/mod
 never written: toolchains' homes
+    $HOME/.cache/node/corepack
     $HOME/.cache/uv
     $HOME/.cargo
     $HOME/.gradle
@@ -115,14 +120,18 @@ never read
     $HOME/Library/Keychains
     $STATE
 never written: programs
+    $HOME/.cache/pnpm
     $HOME/.cargo/bin
     $HOME/.local/bin
+    $HOME/.local/share/pnpm
+    $HOME/Library/pnpm
     $HOME/go/bin
 never written: shared caches
     $HOME/.cargo/git
     $HOME/.cargo/registry
     $HOME/go/pkg/mod
 never written: toolchains' homes
+    $HOME/.cache/node/corepack
     $HOME/.cache/uv
     $HOME/.cargo
     $HOME/.gradle

@@ -138,8 +138,9 @@ pub enum What {
         first: bool,
     },
     /// Claude's last run made protected names where none was (`made` — what Landlock can't refuse,
-    /// `tools::ask_made`), before what runs next there (`then`: Claude's run, your task or preflight): `y`
-    /// keeps them and runs it, `r` removes them first, `v` shows them, `n` doesn't run it.
+    /// `tools::ask_made`), before what runs next there (`then`: Claude's run, your task or preflight) — or, the
+    /// checkout's language servers paused meanwhile, as soon as they are (`Servers`): `y` keeps them and runs it,
+    /// `r` removes them first, `v` shows them, `n` doesn't run it.
     ProtectedMade { then: Box<crate::tools::MadeThen>, made: Vec<crate::snapshot::Made> },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
@@ -840,6 +841,8 @@ impl Offer {
                     | What::ClaudeSettings { .. }
                     // (its session's conversation was refused)
                     | What::Limit(_)
+                    // (its answer keeps, removes or shows its session's names, and runs there)
+                    | What::ProtectedMade { .. }
             )
     }
 
@@ -935,6 +938,10 @@ impl Offer {
                 vec![('y', "Ask each time"), ('s', "This session"), ('n', "Don't run them")]
             }
             W::NoSandbox { .. } => vec![('y', "Once"), ('s', "This session"), ('n', "No")],
+            // (the paused servers': nothing runs on the answer — they come back)
+            W::ProtectedMade { then, .. } if then.servers() => {
+                vec![('y', "Keep"), ('r', "Remove"), ('v', "See them"), ('n', "Not now")]
+            }
             W::ProtectedMade { .. } => {
                 vec![('y', "Keep, run"), ('r', "Remove, run"), ('v', "See them"), ('n', "No")]
             }
@@ -1437,7 +1444,7 @@ impl crate::editor::Editor {
     }
 
     /// `offer_accept`, answered by `key` (its `card` line and how it went say it).
-    fn offer_accept_by(&mut self, key: char) {
+    pub(crate) fn offer_accept_by(&mut self, key: char) {
         if self.offers.first().is_none_or(Offer::installing) {
             return;
         }

@@ -3346,6 +3346,8 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     let grant = ride.extra.grant.clone();
     let said = ed.tokens_said.clone();
     let here = ed.sandbox_here.clone();
+    let (job_run, base, session_root) =
+        (job.clone(), ride.extra.base.as_ref().map(|b| b.tree.clone()), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
@@ -3362,6 +3364,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             }
             let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
             let mut p = crate::sandbox::policy_from(&root, w, &here)?;
+            p.cwd = run_folder(&job_run, base.as_deref(), &session_root, &p.root);
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
             told = crate::tokens::to_tell(&p.reads.copies.told, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)
@@ -3680,16 +3683,68 @@ pub fn unprotected_answer(
     }
 }
 
+/// Where run `job` runs, real — what a name its output gives relative is from (`sandbox::Policy::cwd`): its
+/// folder (on a commit's tree, `base`, its folder there), then the line's `cd`s before its first command. None:
+/// outside `policy_root`, a `cd` that can't be followed (a line it can't read that has one), or one after a command
+/// (no one folder holds for the whole output). On a worker (`cd_into` reads the disk).
+fn run_folder(job: &Job, base: Option<&Path>, session_root: &Path, policy_root: &Path) -> Option<PathBuf> {
+    let cwd = match job {
+        Job::Command(_, cwd) => cwd.clone(),
+        Job::Tests(t) => t.cwd.clone(),
+    };
+    let mut here = match (base, cwd.strip_prefix(session_root)) {
+        (Some(tree), Ok(rel)) => tree.join(rel),
+        _ => cwd,
+    };
+    if let Job::Command(cmd, _) = job {
+        let mut ran = false;
+        let parts = match crate::readonly::parse(cmd) {
+            Some(parts) => parts,
+            // (a line it can't read: its folder only where no `cd` may move it)
+            None if cmd.split(|c: char| c.is_whitespace() || ";&|()`".contains(c)).any(|w| w == "cd") => {
+                return None;
+            }
+            None => Vec::new(),
+        };
+        for part in parts {
+            match part {
+                crate::readonly::Part::Cd(_) if ran => return None,
+                crate::readonly::Part::Cd(d) => here = crate::readonly::cd_into(&here, &d, &[]).ok()?,
+                crate::readonly::Part::Cmd(_) => ran = true,
+            }
+        }
+    }
+    std::fs::canonicalize(&here).ok().filter(|c| c.starts_with(policy_root))
+}
+
 pub const MADE_TITLE: &str = "Claude wants to run — after it made a protected file";
 pub const MADE_YOURS_TITLE: &str = "Before your run — Claude's run made a protected file";
+pub const MADE_SERVERS_TITLE: &str = "Language servers paused — Claude's run made a protected file";
+/// Said after the paused servers' names as they pause (`Editor::servers_hold`).
+pub const MADE_PAUSED: &str =
+    "paused — Claude's run made a protected file; asked about once its turn is over";
 
 /// What waits on the protected-made card (`What::ProtectedMade`): Claude's next run, or a run of yours in
 /// that checkout that runs what's there outside the sandbox — a task (your build), the preflight.
 #[derive(Clone, Debug)]
 pub enum MadeThen {
-    Claude { job: Job, call: Call, ride: Box<Ride> },
-    Task { task: crate::task::Task, force: bool, trace: crate::trace::RunTrace },
-    Preflight { all: Vec<crate::preflight::Step>, set: crate::preflight::Set },
+    Claude {
+        job: Job,
+        call: Call,
+        ride: Box<Ride>,
+    },
+    Task {
+        task: crate::task::Task,
+        force: bool,
+        trace: crate::trace::RunTrace,
+    },
+    Preflight {
+        all: Vec<crate::preflight::Step>,
+        set: crate::preflight::Set,
+    },
+    /// Nothing runs yet: the checkout's language servers, paused while the names wait (`Editor::made_hold_sync`,
+    /// compat B9) — a server loads what's there (rust-analyzer's check runs a new `build.rs`).
+    Servers,
 }
 
 impl MadeThen {
@@ -3702,7 +3757,13 @@ impl MadeThen {
                 let names: Vec<String> = set.of(all).iter().map(|s| s.name.clone()).collect();
                 format!("{}: {}", set.title(all), names.join(", "))
             }
+            MadeThen::Servers => "This checkout's language servers — paused".into(),
         }
+    }
+
+    /// Whether it's the paused servers' (`Servers`).
+    pub fn servers(&self) -> bool {
+        matches!(self, MadeThen::Servers)
     }
 
     /// Whether Claude's call waits on it (else it's yours).
@@ -3741,7 +3802,24 @@ pub(crate) fn ask_made(ed: &mut Editor, then: MadeThen) {
     let paths: Vec<String> = made.iter().map(|m| m.path.clone()).collect();
     let (named, it) = made_named(&paths);
     let among = if made.len() == 1 { "it's" } else { "they're" };
+    // (a card about the same names for Claude's run, your task or preflight takes the paused servers' place —
+    // theirs is put up again once that one is answered and the names still wait: `made_hold_sync`)
+    if !then.servers() {
+        ed.drop_cards(|w| matches!(w, crate::offer::What::ProtectedMade { then, .. } if then.servers()));
+        ed.session.servers_asked.clear();
+    }
     let (title, question) = match &then {
+        MadeThen::Servers => (
+            MADE_SERVERS_TITLE,
+            format!(
+                "{label}\n\nClaude's last run made {named} the sandbox keeps from its commands: a language server \
+                 loads what's in {it} outside the sandbox (rust-analyzer's check runs a new build.rs), so this \
+                 checkout's servers are paused until you answer.\n\nLook at {it} first — {among} among Claude's \
+                 changes (space u takes its turn back); y keeps {it} and brings the servers back, r removes {it} \
+                 — a link itself, never what it leads to — n leaves them paused (asked again before what runs \
+                 next)."
+            ),
+        ),
         MadeThen::Claude { .. } => (
             MADE_TITLE,
             format!(
@@ -3846,6 +3924,12 @@ pub fn made_answer(
                     trace.end("not run: a protected name Claude made");
                     ed.set_status(format!("not run — Claude's last run made {}", some_named(&paths)));
                 }
+                MadeThen::Servers => {
+                    ed.set_status(format!(
+                        "language servers still paused — Claude's last run made {}",
+                        some_named(&paths)
+                    ));
+                }
                 MadeThen::Preflight { .. } => {
                     // (`p` on the bring card: the bring waited for this preflight — said, as a failed one is)
                     let made = some_named(&paths);
@@ -3870,6 +3954,9 @@ fn made_go(ed: &mut Editor, then: MadeThen) {
     match then {
         MadeThen::Claude { job, call, ride } => guard_then_go(ed, For::Claude(call), job, *ride),
         MadeThen::Task { task, force, trace } => ed.task_start_now(task, force, Some(trace)),
+        // (the servers come back once nothing waits; a name `r` left, or one made since the card went up, puts it
+        // up again — `made_hold_sync`)
+        MadeThen::Servers => ed.session.servers_asked.clear(),
         MadeThen::Preflight { all, set } => {
             if let Err(e) = ed.preflight_run(all, set) {
                 ed.session.bring_after_preflight = false;
@@ -4639,6 +4726,41 @@ mod tests {
     /// A project root none of the reports' paths are under (they're shown whole).
     fn elsewhere() -> &'static std::path::Path {
         std::path::Path::new("/elsewhere")
+    }
+
+    /// Where a run of Claude's runs, as its report reads its output's names from (compat7 review 3 and 13): its
+    /// folder, on a commit's tree that folder there, after the line's leading `cd`s — a real path (macOS's temp
+    /// folder is `/private/var/…`); none outside the project, nor after a `cd` that follows a command.
+    #[test]
+    fn a_runs_folder_follows_its_tree_and_its_leading_cds() {
+        use super::{Job, run_folder};
+        let t = crate::scratch::Scratch::new("run-folder").into_path();
+        let (root, tree) = (t.join("p"), t.join("tree"));
+        for d in [root.join("sub/deep"), tree.join("sub")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let real = std::fs::canonicalize(&t).unwrap();
+        let (proot, ptree) = (real.join("p"), real.join("tree"));
+        let cmd = |line: &str, at: &std::path::Path| Job::Command(line.into(), at.to_path_buf());
+        let at = |job: &Job, base: Option<&std::path::Path>, policy: &std::path::Path| {
+            run_folder(job, base, &root, policy)
+        };
+        assert_eq!(at(&cmd("go build", &root.join("sub")), None, &proot), Some(proot.join("sub")));
+        assert_eq!(at(&cmd("go build", &root.join("sub")), Some(&tree), &ptree), Some(ptree.join("sub")));
+        assert_eq!(at(&cmd("cd sub && go build", &root), None, &proot), Some(proot.join("sub")));
+        assert_eq!(at(&cmd("cd sub; cd deep && make", &root), None, &proot), Some(proot.join("sub/deep")));
+        assert_eq!(at(&cmd("make && cd sub && make", &root), None, &proot), None, "a cd after a command");
+        assert_eq!(at(&cmd("cd .. && ls", &root), None, &proot), None, "outside the project");
+        assert_eq!(at(&cmd("cd gone && ls", &root), None, &proot), None, "a folder that isn't there");
+        let unread = "cd sub && echo $(date)";
+        assert_eq!(at(&cmd(unread, &root), None, &proot), None, "a line it can't read, with a cd");
+        assert_eq!(at(&cmd("echo $(date)", &root), None, &proot), Some(proot.clone()), "one without");
+        // (a folder given through a link, or with `..`: its real path)
+        std::os::unix::fs::symlink(&root, t.join("link")).unwrap();
+        let linked = t.join("link/sub/../sub");
+        assert_ne!(std::fs::canonicalize(&linked).unwrap(), linked);
+        assert_eq!(at(&cmd("go build", &linked), None, &proot), Some(proot.join("sub")), "its real path");
+        std::fs::remove_dir_all(&t).ok();
     }
 
     /// 9d: the session's sandbox is a run's once it started — one that didn't spawn (its folder gone: the spawn's

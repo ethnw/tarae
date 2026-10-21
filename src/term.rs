@@ -6560,7 +6560,9 @@ fn draw_statusline(
         // The language name says how its server is doing — no extra cells: dim italic starting · success
         // color connected · error color failed/exited · faintest when none is installed · plain dim otherwise
         use crate::lsp_editor::LspDot;
-        let style = match editor.lsp_state().map(|s| s.0) {
+        let state = editor.lsp_state().map(|s| s.0);
+        let style = match state {
+            Some(LspDot::Paused) => Style { fg: editor.theme.try_get("warning").and_then(|s| s.fg), ..dim },
             Some(LspDot::Starting) => Style { italic: true, ..dim },
             Some(LspDot::Ready) => {
                 Style { fg: editor.theme.try_get("diff.plus").and_then(|s| s.fg).or(ui.accent.fg), ..dim }
@@ -6569,7 +6571,9 @@ fn draw_statusline(
             Some(LspDot::Missing) => Style { fg: ui.linenr.fg, ..dim },
             None => dim,
         };
-        right.push(Seg { text: s.lang.name.clone(), style, keep: 60 });
+        // (paused: said in words — a protected name Claude's run made waits for its card)
+        let paused = if state == Some(LspDot::Paused) { " paused" } else { "" };
+        right.push(Seg { text: format!("{}{paused}", s.lang.name), style, keep: 60 });
         // Servers beside the main one, faint: `python + ruff`
         let also: Vec<String> = doc
             .lsp
