@@ -462,6 +462,16 @@ mod tests {
     /// `pseudo-tty`, said in the run's report: measured, the one denial a passing suite still had). Both count it.
     #[test]
     fn a_broker_asking_another_takes_the_slaves_node_from_it() {
+        // (its outer broker opens the pty as `a_runs_broker_hands_in_ptys_and_counts_them`'s does: in a sandboxed run
+        // with no broker of its own it can't — skipped as that one is, frictions29 90 d)
+        if std::env::var_os(crate::pty::BROKER).is_none()
+            && crate::sandbox::skipped_inside_for(
+                "sandbox::ptybroker::tests::a_broker_asking_another_takes_the_slaves_node_from_it",
+                "its run has no pty broker (a socket was granted it), and /dev/ptmx is closed to a run",
+            )
+        {
+            return;
+        }
         let dir = crate::scratch::Scratch::new("ptybroker-chain");
         let run = std::fs::canonicalize(dir.path()).unwrap();
         let (outer, inner) = (run.join("outer"), run.join("inner"));

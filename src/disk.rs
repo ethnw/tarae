@@ -35,6 +35,56 @@ pub fn stamp(path: &Path) -> Option<Stamp> {
     Some((m.modified().ok()?, m.len()))
 }
 
+/// How long a changed file must stay as it is before a round reads it (frictions29 90 a: a plain write by another
+/// program — truncated, then written — was read half-done, the buffer empty then whole, two toasts: the watcher's
+/// wait settles a burst that wakes it, `fswatch::QUIET`, but a change a round's own stat finds — an immediate
+/// round's, or one made between two rounds — was read at once). Measured
+/// (`measure_how_long_a_plain_write_is_half_done`, idle): `printf >` half-done p99 0.15 ms, max 2.1 ms; `cat` of
+/// 256 KB p99 2.9 ms, max 3.3 ms — this is past ten times that, for a loaded machine.
+pub(crate) const SETTLE: Duration = Duration::from_millis(40);
+/// The longest the watch waits for a file to settle: one written on and on (a log) is read as it is then.
+const SETTLE_MAX: Duration = Duration::from_millis(400);
+
+/// The changed files (document, path, the stamp it holds, the stamp first seen), each once it and the others
+/// stopped changing for `SETTLE` together (a checkout's hundred files wait once, not each), with its text when
+/// it's worth reading — read, then stat'ed again: a file that changed under the read is waited for again
+/// (`SETTLE_MAX` in all). One back as it's held after all isn't a change. On the watch's worker; `pause` waits
+/// `SETTLE` (`event::sleep` — a test passes its own, which writes while the round waits).
+fn settled(
+    mut changed: Vec<(DocId, PathBuf, Option<Stamp>, Option<Stamp>)>,
+    mut pause: impl FnMut(Duration),
+) -> Vec<Stat> {
+    let mut waited = Duration::ZERO;
+    loop {
+        while !changed.is_empty() && waited < SETTLE_MAX {
+            pause(SETTLE);
+            waited += SETTLE;
+            let mut moving = false;
+            for (_, path, _, now) in &mut changed {
+                let again = stamp(path);
+                moving |= again != *now;
+                *now = again;
+            }
+            if !moving {
+                break;
+            }
+        }
+        let read: Vec<(Stat, bool)> = changed
+            .iter()
+            .map(|(id, path, known, now)| {
+                let body = now
+                    .filter(|(_, len)| *len <= RELOAD_MAX)
+                    .and_then(|_| std::fs::read_to_string(path).ok())
+                    .map(|body| Rope::from_str(&body)); // (here, not on the main loop — ~1 ms a MB)
+                ((*id, *known, *now, body), stamp(path) == *now)
+            })
+            .collect();
+        if waited >= SETTLE_MAX || read.iter().all(|(_, still)| *still) {
+            return read.into_iter().map(|(s, _)| s).filter(|s| s.2 != s.1).collect();
+        }
+    }
+}
+
 /// `text` is `body` and a newline — what Claude Code writes of an accepted edit lacks the last one.
 pub fn is_plus_newline(text: &Rope, body: ropey::RopeSlice) -> bool {
     let n = body.len_bytes();
@@ -277,20 +327,13 @@ impl Editor {
                 if let Some(w) = watcher.as_mut() {
                     files.iter().for_each(|(_, p, _)| w.file(p));
                 }
-                let stats: Vec<Stat> = files
+                let changed = files
                     .iter()
-                    .filter_map(|(id, path, known)| {
-                        let now = stamp(path);
-                        if now == *known {
-                            return None;
-                        }
-                        let body = now
-                            .filter(|(_, len)| *len <= RELOAD_MAX)
-                            .and_then(|_| std::fs::read_to_string(path).ok())
-                            .map(|body| Rope::from_str(&body)); // (here, not on the main loop — ~1 ms a MB)
-                        Some((*id, *known, now, body))
-                    })
+                    .map(|(id, path, known)| (*id, path.clone(), *known, stamp(path)))
+                    .filter(|(_, _, known, now)| now != known)
                     .collect();
+                // (read once they stopped changing: never a write half-done — frictions29 90 a)
+                let stats = settled(changed, crate::event::sleep);
                 // (a change that isn't in the stats — a neighbour's, or a folder that appeared: look again)
                 if !stats.is_empty() || watcher.is_none_or(|mut w| w.wait() != crate::fswatch::Woke::Changed)
                 {
@@ -1171,6 +1214,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// By hand (frictions29 90 a): how long a plain write by another program is seen half-done — `printf` (the
+    /// shell truncates, then one write) and `cat` of 256 KB (truncated, then several writes), 200 runs each, a stat
+    /// loop watching: the longest gap between two changes one write makes. `SETTLE` is past it.
+    #[test]
+    #[ignore = "by hand: a measurement"]
+    fn measure_how_long_a_plain_write_is_half_done() {
+        let dir = crate::scratch::Scratch::new("disk-half-done");
+        let (src, f) = (dir.join("src"), dir.join("f"));
+        std::fs::write(&src, "x\n".repeat(128 << 10)).unwrap();
+        let cmds = [
+            ("printf", format!("printf 'one\\ntwo\\n' > '{}'", f.display())),
+            ("cat 256 KB", format!("cat '{}' > '{}'", src.display(), f.display())),
+        ];
+        for (name, cmd) in cmds {
+            let mut gaps = Vec::new();
+            for _ in 0..200 {
+                std::fs::write(&f, "before\n").unwrap();
+                let mut last = stamp(&f);
+                let mut child = std::process::Command::new("/bin/sh").args(["-c", &cmd]).spawn().unwrap();
+                let (mut changed, mut gap) = (None::<std::time::Instant>, Duration::ZERO);
+                loop {
+                    let done = child.try_wait().unwrap().is_some();
+                    let now = stamp(&f);
+                    if now != last {
+                        let t = std::time::Instant::now();
+                        gap = gap.max(changed.map_or(Duration::ZERO, |c| t - c));
+                        (changed, last) = (Some(t), now);
+                    }
+                    if done {
+                        break;
+                    }
+                }
+                gaps.push(gap);
+            }
+            gaps.sort();
+            let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q) as usize];
+            println!("{name}: half-done for median {:?} · p99 {:?} · max {:?}", at(0.5), at(0.99), at(1.0));
+        }
+    }
+
     #[test]
     fn external_changes_reload_conflict_and_autosave() {
         let dir = std::env::temp_dir().join(format!("tarae-disk-{}", std::process::id()));
@@ -1452,6 +1535,47 @@ mod tests {
         ed.flush_saves();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "THREE\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 90 a: another program's plain write — truncated, a line, then the rest — read half-done by a
+    /// round whose own stat found it (a focus regain's, or one armed after the truncate: the watcher's wait
+    /// settles only what wakes it): the buffer went half, then whole, two toasts. The round waits for the file to
+    /// settle: one reload, to the whole text, one toast. No clock in it (the review: a writer racing the round's
+    /// timer fails on a loaded machine): the round's stat finds the first half, and the rest is written while it
+    /// waits — by the test's own pause, `settled`'s — so its next look sees it change, waits again, and reads it
+    /// whole. A writer that stopped halfway for good is read as it is once it has stayed so. (`sim::diskwatch`:
+    /// the same through the editor's rounds on the simulated clock.)
+    #[test]
+    fn a_write_from_outside_is_read_once_it_settles() {
+        use std::io::Write as _;
+        let dir = crate::scratch::Scratch::new("disk-settle");
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let mut ed = Editor::new(Config::default());
+        ed.open(&path).unwrap();
+        let (id, known) = (ed.doc().id, ed.doc().disk);
+        let mut writer = Some(File::create(&path).unwrap());
+        writer.as_mut().unwrap().write_all(b"one\n").unwrap();
+        let changed = vec![(id, path.clone(), known, stamp(&path))];
+        let mut pauses = 0;
+        let stats = settled(changed, |_| {
+            pauses += 1;
+            // (the rest, written while the round waits)
+            if let Some(mut w) = writer.take() {
+                w.write_all(b"two\n").unwrap();
+            }
+        });
+        let body = stats[0].3.as_ref().map(|b| b.to_string());
+        assert_eq!((body.as_deref(), pauses), (Some("one\ntwo\n"), 2), "read once it stopped changing");
+        ed.on_disk(stats);
+        assert_eq!(ed.doc().text.to_string(), "one\ntwo\n");
+        let reloads = ed.messages.iter().filter(|m| m.2.contains("reloaded from disk")).count();
+        assert_eq!(reloads, 1, "{:?}", ed.messages);
+        // A write that stopped halfway: read as it is, once it has stayed so
+        std::fs::write(&path, "half").unwrap();
+        let changed = vec![(id, path.clone(), ed.doc().disk, stamp(&path))];
+        let stats = settled(changed, |_| {});
+        assert_eq!(stats[0].3.as_ref().map(|b| b.to_string()).as_deref(), Some("half"));
     }
 
     /// Every focus regain checks the disk at once — without adding a watch that never ends (they piled up:

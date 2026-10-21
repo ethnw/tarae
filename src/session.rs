@@ -163,6 +163,11 @@ pub struct Session {
     /// The bring card whose `p` that preflight runs for: up again, with what failed, if it doesn't pass
     /// (frictions34 42 — a toast was all, and the output went with the task panel's next run).
     pub bring_card_after: Option<Box<crate::rebase::Moved>>,
+    /// That preflight failed, at the HEAD its card was graded at: a bring card asked again there says so too
+    /// (frictions29 91 — `codereview::push_bring_card`); a pass, or another HEAD, lets it go.
+    pub bring_failed: Option<crate::rebase::Failed>,
+    /// The commit that preflight tests, read before it started (`rebase_preflight_then_bring`).
+    pub bring_tested: Option<String>,
     /// A turn's review `:restart` carried, waiting for the session's kept turns to load to open again
     /// (`codereview::reopen`; frictions15 — it held the restart).
     pub turn_review_back: Option<serde_json::Value>,
@@ -373,6 +378,8 @@ impl Session {
             rebase: None,
             bring_after_preflight: false,
             bring_card_after: None,
+            bring_failed: None,
+            bring_tested: None,
             turn_review_back: None,
             restorable: None,
             parked: Vec::new(),

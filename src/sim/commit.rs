@@ -32,6 +32,8 @@ struct Seen {
     early: Option<String>,
     msg: PathBuf,
     n: usize,
+    /// Each file's text on disk as it was last marked viewed.
+    marked: std::collections::HashMap<PathBuf, String>,
 }
 
 fn run(choices: Choices) -> Vec<String> {
@@ -60,7 +62,7 @@ fn run(choices: Choices) -> Vec<String> {
     let mut ed = Editor::new(crate::config::Config::default());
     ed.session.root = repo.clone();
     crate::codereview::start_in(&mut ed, repo.clone(), None);
-    let seen = RefCell::new(Seen { taken: 0, early: None, msg, n: 0 });
+    let seen = RefCell::new(Seen { taken: 0, early: None, msg, n: 0, marked: Default::default() });
     sim.walk(
         &mut ed,
         INPUTS,
@@ -77,6 +79,14 @@ fn run(choices: Choices) -> Vec<String> {
     let staged = !out(&repo, &["diff", "--cached", "--name-only"]).is_empty();
     let said = ed.messages.iter().any(|m| m.2.contains("stays staged"));
     assert!(!staged || said, "staged, unsaid:\n{}", trace.join("\n"));
+    // (frictions29 82: a file changed since its mark — open or closed — isn't viewed once the jobs ran)
+    if let Some(r) = ed.session.code_review.as_ref() {
+        for f in r.files.iter().filter(|f| r.viewed(&ed, f)) {
+            let now = std::fs::read_to_string(&f.path).unwrap_or_default();
+            let then = seen.borrow().marked.get(&f.path).cloned();
+            assert_eq!(then.as_deref(), Some(now.as_str()), "{} viewed:\n{}", f.rel, trace.join("\n"));
+        }
+    }
     drop(sim);
     drop(ed);
     trace
@@ -93,6 +103,10 @@ fn input(sim: &mut Sim, ed: &mut Editor, repo: &std::path::Path, seen: &RefCell<
             let i = *c.pick(&(0..n).collect::<Vec<_>>());
             crate::codereview::show(ed, i, false);
             crate::codereview::mark_viewed(ed);
+            if let Some(f) = ed.session.code_review.as_ref().map(|r| r.files[i].path.clone()) {
+                let text = std::fs::read_to_string(&f).unwrap_or_default();
+                seen.borrow_mut().marked.insert(f, text);
+            }
             format!("file {i} shown, marked")
         }
         1 => {
@@ -125,6 +139,8 @@ fn input(sim: &mut Sim, ed: &mut Editor, repo: &std::path::Path, seen: &RefCell<
                     &ropey::Rope::from_str(&std::fs::read_to_string(repo.join(f)).unwrap()),
                 );
             }
+            // (by a turn: its end looks again — a closed file's grades too, frictions29 82)
+            crate::reviewer::since_sync_shown(ed);
             format!("{f} changed again")
         }
         3 => {

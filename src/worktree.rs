@@ -160,33 +160,85 @@ impl Kept {
 
 // ── Disk ─────────────────────────────────────────────────────────────────────
 
-/// What `p` takes on disk (allocated blocks; links not followed) — and whether all of it was counted
-/// before `until`.
+/// What `p` takes on disk (allocated blocks; links not followed; a file with several hard links once) — and
+/// whether all of it was counted before `until`.
 pub fn disk_size(p: &Path, until: Instant) -> (u64, bool) {
+    sizes(&[p], until).once
+}
+
+/// What removing `first` frees, and removing `then` with it: a file with hard links only once every one of them
+/// goes (frictions29 83: rustc's incremental cache and cargo's uplifted artifacts are hard links — a checkout's
+/// build folder counted per link was 3× itself, `20 GB` once and `63 GB` per link, measured; the end said "over
+/// 244.9 GB freed" of a 163 GB build area). Each with whether all was counted before `until`.
+fn freed_size(first: &Path, then: Option<&Path>, until: Instant) -> ((u64, bool), (u64, bool)) {
+    let s = sizes(&[Some(first), then].into_iter().flatten().collect::<Vec<_>>(), until);
+    (s.first, s.all)
+}
+
+/// `sizes`' counts: each file once wherever its links are (`once`), and freed — every link within what was
+/// walked (`all`), within the first root alone (`first`).
+struct Sizes {
+    once: (u64, bool),
+    first: (u64, bool),
+    all: (u64, bool),
+}
+
+/// `roots` walked (allocated blocks; links not followed), until `until`.
+fn sizes(roots: &[&Path], until: Instant) -> Sizes {
     use std::os::unix::fs::MetadataExt as _;
-    let Ok(m) = std::fs::symlink_metadata(p) else { return (0, true) };
-    let mut total = m.blocks() * 512;
-    if !m.is_dir() {
-        return (total, true);
-    }
-    let mut stack = vec![p.to_path_buf()];
+    let mut linked: std::collections::HashMap<(u64, u64), Linked> = Default::default();
+    let (mut first, mut rest) = (0u64, 0u64);
+    let mut add = |m: &std::fs::Metadata, in_first: bool| {
+        let blocks = m.blocks() * 512;
+        if m.is_dir() || m.nlink() < 2 {
+            *if in_first { &mut first } else { &mut rest } += blocks;
+            return;
+        }
+        let l =
+            linked.entry((m.dev(), m.ino())).or_insert(Linked { links: m.nlink(), first: 0, all: 0, blocks });
+        (l.first, l.all) = (l.first + u64::from(in_first), l.all + 1);
+    };
+    let mut whole = true;
     let mut seen = 0u32;
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            seen += 1;
-            if seen.is_multiple_of(256) && Instant::now() >= until {
-                return (total, false);
-            }
-            // (`DirEntry::metadata` doesn't follow a link)
-            let Ok(m) = e.metadata() else { continue };
-            total += m.blocks() * 512;
-            if m.is_dir() {
-                stack.push(e.path());
+    'roots: for (i, root) in roots.iter().enumerate() {
+        let Ok(m) = std::fs::symlink_metadata(root) else { continue };
+        add(&m, i == 0);
+        if !m.is_dir() {
+            continue;
+        }
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                seen += 1;
+                if seen.is_multiple_of(256) && Instant::now() >= until {
+                    whole = false;
+                    break 'roots;
+                }
+                // (`DirEntry::metadata` doesn't follow a link)
+                let Ok(m) = e.metadata() else { continue };
+                add(&m, i == 0);
+                if m.is_dir() {
+                    stack.push(e.path());
+                }
             }
         }
     }
-    (total, true)
+    let sum = |f: &dyn Fn(&Linked) -> bool| linked.values().filter(|l| f(l)).map(|l| l.blocks).sum::<u64>();
+    Sizes {
+        once: (first + rest + sum(&|_| true), whole),
+        first: (first + sum(&|l| l.first >= l.links), whole),
+        all: (first + rest + sum(&|l| l.all >= l.links), whole),
+    }
+}
+
+/// A file with more than one hard link, as `sizes` walks: its links, those seen in the first root and in all the
+/// roots, and its blocks.
+struct Linked {
+    links: u64,
+    first: u64,
+    all: u64,
+    blocks: u64,
 }
 
 /// `2.3 GB` · `over 1.2 GB` when counting stopped first.
@@ -884,7 +936,10 @@ fn remove(
     }
     let kept = keep_first(e)?;
     let fate = build_dir_fate(e, builds);
-    let freed = disk_size(&e.root, Instant::now() + MEASURE_FOR);
+    // (what goes, measured before it does: its checkout, and its build folder with it — a file linked from both
+    // freed only by the two)
+    let doomed = fate.as_ref().ok().map(|d| d.path());
+    let (alone, with_build) = freed_size(&e.root, doomed.as_deref(), Instant::now() + MEASURE_FOR);
     let root = e.root.to_str().ok_or("a checkout path that isn't UTF-8")?;
     // (with changes, git asks for --force — the card said they go; without, a change made since stops it)
     let mut args = vec!["worktree", "remove"];
@@ -900,6 +955,7 @@ fn remove(
         Ok(doomed) => remove_build(&doomed),
         Err(said) => said,
     };
+    let freed = if matches!(build, BuildDir::Freed(_)) { with_build } else { alone };
     Ok((freed, build, kept))
 }
 
@@ -1846,7 +1902,7 @@ impl Editor {
             move |ed: &mut Editor| {
                 ed.step_done("session");
                 match result {
-                    Ok((mut freed, build, kept)) => {
+                    Ok((freed, build, kept)) => {
                         if let Some(id) = card {
                             ed.offer_finished(id, Ok(()));
                         }
@@ -1871,17 +1927,14 @@ impl Editor {
                             }
                             (None, _) => String::new(),
                         };
-                        let (mut of_it, mut left) = (String::new(), String::new());
-                        match &build {
-                            BuildDir::Freed(b) => {
-                                freed = (freed.0 + b.0, freed.1 && b.1);
-                                of_it = format!(", {} of it its build dir", size_text(*b));
-                            }
-                            BuildDir::Left(why) => left = format!(" · {why}"),
-                            BuildDir::Nothing | BuildDir::Failed(_) => {}
-                        }
+                        // (what it removed, counted once — its own build folder in it; frictions29 83: never a
+                        // figure of the build area it shares with other checkouts)
+                        let left = match &build {
+                            BuildDir::Left(why) => format!(" · {why}"),
+                            BuildDir::Freed(_) | BuildDir::Nothing | BuildDir::Failed(_) => String::new(),
+                        };
                         ed.set_success(format!(
-                            "Ended {} — {} freed{of_it}{branch}{left}{}",
+                            "Ended {} — {} freed{branch}{left}{}",
                             e.name,
                             size_text(freed),
                             kept.said(&e.keep)
@@ -3104,8 +3157,9 @@ mod tests {
     }
 
     /// `:session-end` asks cargo (on its worker, before the checkout goes) where the session built: its own
-    /// build dir in the cargo home's `build/` goes, its size said within what was freed — the main
-    /// checkout's beside it stays. One the main checkout builds in too stays, and the end note says why.
+    /// build dir in the cargo home's `build/` goes, its size within what was freed — a file with hard links
+    /// counted once, and only when every link goes (frictions29 83: per link, a 20 GB build folder was 63 GB) — the
+    /// main checkout's beside it stays. One the main checkout builds in too stays, and the end note says why.
     /// One that can't all be removed is a warning; the session still ends.
     #[test]
     fn a_sessions_own_build_dir_goes_with_it() {
@@ -3127,10 +3181,18 @@ mod tests {
         let wt = new_session(&mut ed, "own");
         let own = builds.join("bb/own");
         builds_in(&wt, &own, 2);
+        // (its 2 MB linked three more times — an incremental session's copy, the checkout's target — and 3 MB more
+        // linked from a folder that stays: not freed)
+        std::fs::create_dir_all(wt.join("target")).unwrap();
+        for at in [own.join("debug/m2"), own.join("debug/m3"), wt.join("target/m")] {
+            std::fs::hard_link(own.join("debug/marker"), at).unwrap();
+        }
+        std::fs::write(own.join("debug/kept"), vec![1u8; 3 << 20]).unwrap();
+        std::fs::hard_link(own.join("debug/kept"), dir.join("kept-elsewhere")).unwrap();
         let toast = ended(&mut ed, "own");
-        assert!(toast.ends_with(", 2 MB of it its build dir · branch own kept"), "{toast}");
+        assert!(toast.ends_with(" freed · branch own kept") && !toast.contains("build dir"), "{toast}");
         let mb: f64 = toast.split(" — ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
-        assert!(mb >= 2.0, "the build dir counted in what was freed: {toast}");
+        assert!((2.0..3.0).contains(&mb), "its build dir counted once in what was freed: {toast}");
         assert!(!wt.exists() && !own.exists(), "its checkout and its build dir are gone");
         assert!(builds.join("bb").is_dir(), "only its own folder");
         assert!(main_build.join("debug/marker").is_file(), "the main checkout's build dir stays");
@@ -3877,6 +3939,10 @@ mod tests {
         assert!(q.contains("Quick: fmt — :preflight-full runs the rest, before publishing."), "{q}");
         assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
         feed(&mut ed, "p");
+        // (it starts once the commit it tests is read — on a worker)
+        settle_until(&mut ed, |ed| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.task.name != "rebase onto main")
+        });
         let run = ed.session.task_run.as_ref().map(|r| (r.task.name.clone(), r.task.cwd.clone()));
         assert_eq!(run, Some(("quick preflight".into(), wt.clone())), "{}", said(&ed));
         settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "not brought") || says(ed, "bring feat:"));
@@ -3914,11 +3980,16 @@ mod tests {
         assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
         feed(&mut ed, "p");
         settle_until(&mut ed, |ed| card(ed, "Bring feat into main").is_some() || says(ed, "not brought"));
-        let q = card(&ed, "Bring feat into main").unwrap_or_else(|| panic!("{}", said(&ed))).question.clone();
-        assert!(
-            q.ends_with("\n\nThe preflight failed — b: panicked at src/b.rs:3:9: boom. v shows its output."),
-            "{q}"
+        let o = card(&ed, "Bring feat into main").unwrap_or_else(|| panic!("{}", said(&ed)));
+        // (what failed up front, in the warning colour, and its yes a bring anyway — frictions29 91)
+        let q = o.question.clone();
+        assert_eq!(
+            q,
+            "2 commits on main's tip now. Bring them into main anyway?\n\nThe preflight failed: b\n    panicked at \
+             src/b.rs:3:9: boom",
         );
+        assert_eq!((o.decided_lines(), o.warnings.len(), o.warnings.first()), (0..1, 1, Some(&(2..4))));
+        assert_eq!(o.answers(false).first(), Some(&('y', "Bring anyway")));
         assert!(says(&ed, "preflight: 0 of 1 passed — test failed"), "{}", said(&ed));
         assert_ne!(git_in(&repo, &["rev-parse", "main"]), git_in(&wt, &["rev-parse", "HEAD"]), "not brought");
         // Another run takes the task panel
@@ -3945,7 +4016,7 @@ mod tests {
         let title = format!("{}Bring feat into main", crate::offer::CARD_VIEW);
         assert_eq!(ed.doc().title.as_deref(), Some(title.as_str()));
         let text = ed.doc().text.to_string();
-        assert!(text.contains("v shows its output."), "{text}");
+        assert!(text.contains("Bring them into main anyway?"), "{text}");
         // (its first failure only — `y` waits until this is read to its end: the review of 42)
         let head =
             "── preflight · test: its first failure — v again shows all 9 lines ──\n---- b stdout ----\n";
@@ -3961,6 +4032,42 @@ mod tests {
         ed.close_doc(ed.doc().id);
         assert_eq!(ed.preflight_output(""), Ok(()));
         assert_eq!(ed.doc().title.as_deref(), Some("preflight · test"), "the kept output");
+        ed.close_doc(ed.doc().id);
+        // Asked again at that HEAD: the failed card still — not the plain one's words over it, its output behind
+        // `v` (frictions29 91: a regrade did that, and a failing commit was brought)
+        let again = |ed: &mut Editor| {
+            let id = card(ed, "Bring feat into main").unwrap().id;
+            ed.session_bring("feat").unwrap();
+            settle_until(ed, |ed| card(ed, "Bring feat into main").is_some_and(|o| o.id != id));
+            card(ed, "Bring feat into main").unwrap().clone()
+        };
+        let o = again(&mut ed);
+        assert!(o.question.contains("The preflight failed: b\n") && !o.warnings.is_empty(), "{}", o.question);
+        assert_eq!((o.answers(false)[0], o.output.is_some()), (('y', "Bring anyway"), true));
+        // Another HEAD: the plain card
+        git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "fixed"]);
+        let o = again(&mut ed);
+        assert!(!o.question.contains("failed") && o.warnings.is_empty(), "{}", o.question);
+        assert_eq!(
+            (o.answers(false), o.output.is_some()),
+            (vec![('y', "Bring"), ('p', "Preflight, then bring"), ('n', "Not now")], false)
+        );
+        // A commit made while the preflight runs was never tested (the review of 91): the failure is the commit
+        // it tested, and the new one is asked about as plain
+        let steps = std::fs::read_to_string(&script).unwrap();
+        let mid =
+            "git -c user.email=t@t -c user.name=t -c core.hooksPath=/dev/null commit -q --allow-empty -m mid";
+        std::fs::write(&script, format!("{mid}\n{steps}")).unwrap();
+        let tested = git_in(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        feed(&mut ed, "p");
+        let failed = |ed: &Editor| card(ed, "Bring feat into main").is_some_and(|o| !o.warnings.is_empty());
+        settle_until(&mut ed, |ed| failed(ed) || says(ed, "not brought"));
+        assert_ne!(git_in(&wt, &["rev-parse", "HEAD"]).trim(), tested, "a commit made while it ran");
+        let recorded = std::iter::once(&ed.session).chain(&ed.sessions).find_map(|l| l.bring_failed.clone());
+        assert_eq!(recorded.and_then(|f| f.head), Some(tested), "the failure is the commit it tested");
+        let o = again(&mut ed);
+        assert!(o.warnings.is_empty() && !o.question.contains("failed"), "never tested: {}", o.question);
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

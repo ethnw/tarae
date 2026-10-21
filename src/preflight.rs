@@ -431,6 +431,16 @@ impl Preflight {
 /// test's `test x ... FAILED` / `---- x stdout ----` and the panic under it (`panicked at …:` with its message
 /// on the next line), Go's `--- FAIL: TestX` and its first `file_test.go:12: msg` line. None: no test named.
 pub fn failure(lines: &[String]) -> Option<String> {
+    let (test, why) = failed_test(lines)?;
+    Some(match why {
+        Some(w) => format!("{test}: {w}"),
+        None => test,
+    })
+}
+
+/// `failure` as its two parts: the test, and the first line of why when there is one (the bring card names them
+/// on lines of their own — frictions29 91).
+pub fn failed_test(lines: &[String]) -> Option<(String, Option<String>)> {
     let (test, block) = first_failed(lines)?;
     let rest = &block[1..];
     let why = rest.iter().position(|l| l.contains("panicked at ")).map(|p| {
@@ -449,10 +459,7 @@ pub fn failure(lines: &[String]) -> Option<String> {
         let next = rest.first()?.trim();
         next.split_once(':').is_some_and(|(file, _)| file.ends_with(".go")).then(|| next.to_string())
     });
-    Some(match why {
-        Some(w) => format!("{test}: {w}"),
-        None => test,
-    })
+    Some((test, why))
 }
 
 /// The first test that failed in `lines` (`failure`) and its block: the line naming it (its own `---- x stdout

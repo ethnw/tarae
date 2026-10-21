@@ -1053,11 +1053,36 @@ fn saving(l: &crate::session::Session) -> Option<impl FnOnce() + Send + 'static>
 /// (`read_texts`): said, and the turn left out — nothing of it can be stepped or shown; one that can't be read
 /// just now: said, the turn kept as it is.
 pub fn with_texts(ed: &mut Editor, at: usize, then: impl FnOnce(&mut Editor, usize) + Send + 'static) {
+    texts_then(ed, at, false, then);
+}
+
+/// `with_texts` for what no one asked for (a review's files graded again at a save, a turn's end, a HEAD move —
+/// `codereview::grades_sync`): a read under way, or one that fails just now, says nothing — `then` doesn't run,
+/// and the next time it's asked for tries again. A turn whose file is gone for good is still left out — a note
+/// in `:messages`, never a toast.
+pub fn with_texts_quietly(
+    ed: &mut Editor,
+    at: usize,
+    then: impl FnOnce(&mut Editor, usize) + Send + 'static,
+) {
+    texts_then(ed, at, true, then);
+}
+
+/// `with_texts`, `quiet` as `with_texts_quietly` is.
+fn texts_then(
+    ed: &mut Editor,
+    at: usize,
+    quiet: bool,
+    then: impl FnOnce(&mut Editor, usize) + Send + 'static,
+) {
     let cps = &ed.session.checkpoints;
     let Some(cp) = cps.list.get(at) else { return };
     let Files::Kept(files) = &cp.files else { return then(ed, at) };
     if cps.reading {
-        return ed.set_status("reading that turn's changes — a moment");
+        if !quiet {
+            ed.set_status("reading that turn's changes — a moment");
+        }
+        return;
     }
     // (a kept turn came from `dir`: it's set as they come back)
     let Some(dir) = cps.dir.clone() else { return };
@@ -1080,9 +1105,15 @@ pub fn with_texts(ed: &mut Editor, at: usize, then: impl FnOnce(&mut Editor, usi
                 }
                 Err((false, e)) => {
                     let question = quote(&cps.list[at].question);
-                    ed.set_warning(format!(
-                        "couldn't read the turn “{question}”'s changes just now ({e}) — try again"
-                    ));
+                    let said = format!("couldn't read the turn “{question}”'s changes just now ({e})");
+                    match quiet {
+                        true => crate::log::line(
+                            "turns",
+                            "info",
+                            &format!("{said} — tried again when next asked"),
+                        ),
+                        false => ed.set_warning(format!("{said} — try again")),
+                    }
                 }
                 Err((true, e)) => {
                     // (a review on it — its texts are held while one is open, so none is: closed all the same)
@@ -1103,10 +1134,14 @@ pub fn with_texts(ed: &mut Editor, at: usize, then: impl FnOnce(&mut Editor, usi
                         *open -= 1;
                     }
                     keep(ed);
-                    ed.set_warning(format!(
-                        "the turn “{}” isn't kept any more ({e}) — left out",
-                        quote(&question)
-                    ));
+                    let said =
+                        format!("the turn “{}” isn't kept any more ({e}) — left out", quote(&question));
+                    // (no one asked for it — a review's files graded again at a save: in `:messages`, no card over
+                    // the work; the review it closed is in sight)
+                    match quiet {
+                        true => ed.recorded(crate::editor::ToastKind::Warning, said),
+                        false => ed.set_warning(said),
+                    }
                 }
             }
         }

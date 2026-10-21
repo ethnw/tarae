@@ -1283,12 +1283,15 @@ impl Offer {
                 vec![('s', "Stash, rebase, put back"), ('g', "Git tab"), ('n', "Leave it")]
             }
             W::RebaseHeld(_) => vec![('g', "Git tab"), ('n', "Leave it")],
-            // (`p` runs the quick set when the project has two — the card names its steps)
+            // (`p` runs the quick set when the project has two — the card names its steps; only the card back
+            // after that preflight failed has `warnings`, `Moved::failed_card`)
             W::Rebased(_) => {
                 let p = if quick { "Quick preflight, then bring" } else { "Preflight, then bring" };
+                // (after its preflight failed: a bring anyway — frictions29 91)
+                let y = if self.warnings.is_empty() { "Bring" } else { "Bring anyway" };
                 match self.output.is_some() {
-                    true => vec![('y', "Bring"), ('p', p), ('v', "Its output"), ('n', "Not now")],
-                    false => vec![('y', "Bring"), ('p', p), ('n', "Not now")],
+                    true => vec![('y', y), ('p', p), ('v', "Its output"), ('n', "Not now")],
+                    false => vec![('y', y), ('p', p), ('n', "Not now")],
                 }
             }
             // (abort throws the resolution away: a capital, as removing does)
@@ -1561,7 +1564,7 @@ impl crate::editor::Editor {
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
                 (old.decided, old.warning, old.asked, old.diff) = (o.decided, o.warning, o.asked, o.diff);
-                old.warnings = o.warnings;
+                (old.warnings, old.output) = (o.warnings, o.output);
                 (old.held, old.gate, old.held_changes, old.aside) = (o.held, o.gate, o.held_changes, false);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;

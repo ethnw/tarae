@@ -373,18 +373,26 @@ fn a_stuck_run_is_captured_then_asked_about() {
 /// called `setsid` to take a pty was left running, blocked in a read. The run is the test's own `sh` starting
 /// the stand-in (`procs::tests::setsid_helper`, in the test's `Scratch`): after `y` it's gone, and the run's output
 /// says it was stopped with it.
+///
+/// (frictions29 90's ninth and tenth falls: the card says the run's command line and each of its threads, so its
+/// height was the place it ran in's — the scratch folder under `$TMPDIR` and the test binary's path in that line,
+/// a thread's state word under load — and at 120×40 it fitted with no row to spare: a longer `$TMPDIR` cut it, and
+/// `y` on a cut card asks for it to be read first. The line is in a script of the run's own, `sh run.sh`; the
+/// screen leaves the card room; and drawn whole is checked before the `y`, said if not.)
 #[test]
 fn a_stop_from_the_card_ends_what_left_the_runs_group() {
     let dir = crate::scratch::Scratch::new("stuck-apart");
     let mut ed = Editor::new(crate::config::Config::default());
     ed.session.root = dir.path().to_path_buf();
     let exe = std::env::current_exe().unwrap();
-    let cmd = format!(
-        "{}='{}' '{}' --exact procs::tests::setsid_helper --ignored --test-threads=1 >/dev/null 2>&1 & wait",
+    let line = format!(
+        "{}='{}' '{}' --exact procs::tests::setsid_helper --ignored --test-threads=1 >/dev/null 2>&1 & wait\n",
         crate::procs::tests::SETSID_HELPER,
         dir.path().display(),
         exe.display()
     );
+    std::fs::write(dir.join("run.sh"), &line).unwrap();
+    let cmd = "sh run.sh".to_string();
     let task = crate::task::Task { name: "apart".into(), cmd, cwd: dir.path().to_path_buf() };
     let user = crate::tools::For::User("apart".into());
     assert!(ed.task_start_for(task, user, None, Default::default()).is_ok());
@@ -405,8 +413,15 @@ fn a_stop_from_the_card_ends_what_left_the_runs_group() {
     r.wait.idle = Some(ago(11));
     ed.procs_sampled(sample(pid, 0.0));
     settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
-    crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
-    let o = (ed.offers[0].id, ed.offers[0].rev);
+    crate::term::render(&mut ed, &mut Vec::new(), 140, 60).unwrap();
+    let card = &ed.offers[0];
+    assert!(
+        ed.offer_seen_whole(),
+        "the card cut ({:?}) — its `y` would ask it read first:\n{}",
+        ed.screen.offer_card,
+        card.question
+    );
+    let o = (card.id, card.rev);
     ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
     ed.handle_key(Key::plain(Code::Char('y')));
     assert!(ed.offers.iter().all(|o| o.stuck().is_none()));

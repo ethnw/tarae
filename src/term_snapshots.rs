@@ -623,6 +623,60 @@ fn snapshot_welcome_80() {
     s.check("welcome_80");
 }
 
+/// frictions29 89: the first start's trust card over the start screen's column (`:tutor   Learn the keys in 10` cut
+/// under its edge). Where the column fits beside the card it goes there, whole, three tenths down as ever; else it's
+/// lifted over the card (80×24, a card of one setting); else what doesn't fit over it folds from the bottom (a card
+/// of six) — the name and the intro stay, and no row of it is ever cut; the card answered, the list is back.
+#[test]
+fn the_start_screens_column_keeps_out_of_a_card() {
+    let keys = [
+        ("space f", "Open a file"),
+        ("space ?", "Find a command"),
+        (":tutor", "Learn the keys in 10 minutes"),
+    ];
+    // (every width from 80 to 160, a card of one setting and one of six)
+    for (w, held) in (80..=160).step_by(4).flat_map(|w| [(w, 1), (w, 6)]) {
+        let h = 24 + (w - 80) / 5;
+        let mut s = Shot::new(w, h);
+        s.ed.offer_popups = true;
+        let settings: Vec<String> =
+            (0..held).map(|i| format!("  task.step{i} = ./scripts/step{i}.sh")).collect();
+        let q = format!(
+            ".tarae.toml sets what runs commands as you:\n\n{}\n\nHeld back, the rest of the file still applies.",
+            settings.join("\n")
+        );
+        let what = crate::offer::What::ProjectTrust { hash: [0; 32] };
+        let o = crate::offer::Offer::new(crate::trust::TITLE.into(), &q, "", "Project settings".into(), what);
+        s.ed.push_offer(o.deciding(2..2 + held));
+        let shown = screen_text(&mut s);
+        assert!(shown.contains("t a r a e") && shown.contains("Helix keys, Claude inside"), "{w}: {shown}");
+        // (room beside the card: the column's 37 cells, two of air before the card, two from the screen's edge)
+        let card = s.ed.screen.offer_card.expect("the card drawn");
+        let beside = card.0 >= 37 + 2 + 2;
+        let name = shown.lines().position(|r| r.contains("t a r a e")).unwrap();
+        for (k, d) in keys {
+            let row = shown.lines().find(|r| r.contains(k));
+            assert!(row.is_none_or(|r| r.contains(d)), "{w}×{h}, {held}: {k}'s row cut: {shown}");
+            let whole = beside || (w, held) == (80, 1);
+            assert!(!whole || row.is_some(), "{w}×{h}, {held}: {k} beside the card or over it: {shown}");
+        }
+        if beside {
+            assert_eq!(name, (h as usize - 1) * 3 / 10, "{w}×{h}, {held}: three tenths down: {shown}");
+        }
+        if (w, held) == (80, 1) {
+            // (its 11 rows — the name, the stroke, the intro, a blank, the 7 keys — just over the card, a row of air)
+            assert_eq!(name + 11 + 1, card.1, "lifted only as far as the card asks: {shown}");
+        }
+        if (w, held) == (80, 6) {
+            let has = |k: &str| shown.contains(k);
+            assert!(has("space f") && !has(":tutor"), "folded from the bottom: {shown}");
+        }
+        s.ed.offers.clear();
+        let shown = screen_text(&mut s);
+        assert!(keys.iter().all(|(_, d)| shown.contains(d)), "{w}: back once it's answered: {shown}");
+    }
+}
+
 /// Start screen on a short screen: every key stays, the air gives way.
 #[test]
 fn snapshot_welcome_short() {
@@ -950,10 +1004,75 @@ fn frames_of_frictions34() {
     .map(String::from)
     .to_vec();
     let mut s = shot();
-    let quick = Some(vec!["fmt".into(), "clippy".into(), "test".into()]);
     let failed = Some(("quick preflight · test".to_string(), output));
-    s.ed.push_offer(m.failed_card(quick, "quick preflight", failed));
+    s.ed.push_offer(m.failed_card("quick preflight", failed));
     s.frames_both("f34_bring_after");
+}
+
+/// frictions37's screens, for their screenshots (only with `TARAE_FRAMES_DIR` set: both themes there, 80×24 and
+/// 160×40, named by `TARAE_FRAMES_WHICH` — `before` when this function is run on the tree before the batch,
+/// `target/sb/frictions37/shots.sh`): 91 the bring card back after its preflight failed; 89 the first start's trust
+/// card on the start screen; 83 the end's toast (its words made here, both ways).
+#[test]
+fn frictions37_frames() {
+    let Some(_) = std::env::var_os("TARAE_FRAMES_DIR") else { return };
+    let which = std::env::var("TARAE_FRAMES_WHICH").unwrap_or_else(|_| "after".into());
+    for (w, h) in [(80, 24), (160, 40)] {
+        let shot = |file: bool| {
+            let mut s = Shot::new(w, h);
+            s.ed.offer_popups = true;
+            if file {
+                s.file("src/demo.rs", DEMO_RS);
+            }
+            s
+        };
+        // 91: the quick preflight a bring card's `p` ran failed
+        let m = crate::rebase::Moved {
+            root: PathBuf::from("/stand-in/design2"),
+            name: "design2".into(),
+            branch: "design2".into(),
+            base: "main".into(),
+            moved: 0,
+            ahead: 1,
+        };
+        let output = [
+            "running 2746 tests",
+            "test term_snapshots::snapshot_statusline_widths ... FAILED",
+            "failures:",
+            "---- term_snapshots::snapshot_statusline_widths stdout ----",
+            "thread 'term_snapshots::snapshot_statusline_widths' panicked at src/term_snapshots.rs:212:9:",
+            "statusline_wide.txt differs (TARAE_BLESS=1 takes it)",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut s = shot(true);
+        let failed = Some(("quick preflight · test".to_string(), output));
+        s.ed.push_offer(m.failed_card("quick preflight", failed));
+        s.frames_both(&format!("91-{which}-{w}"));
+        // 89: the first start's trust card on the start screen
+        let mut s = shot(false);
+        let q = ".tarae.toml sets what runs commands as you:\n\n  task.release = ./scripts/release.sh\n  \
+                 preflight.test = cargo test --workspace\n  lsp.rust.command = ./tools/ra-wrapper\n\nHeld back, the rest \
+                 of the file still applies.";
+        let what = crate::offer::What::ProjectTrust { hash: [0; 32] };
+        let o = crate::offer::Offer::new(crate::trust::TITLE.into(), q, "", "Project settings".into(), what);
+        s.ed.push_offer(o.deciding(2..5));
+        s.frames_both(&format!("89-{which}-{w}"));
+        // 83: the end's toast
+        let mut s = shot(true);
+        let said = match which.as_str() {
+            "before" => {
+                "Ended view1 — over 244.9 GB freed, over 244.7 GB of it its build dir · branch view1 kept"
+            }
+            _ => "Ended view1 — 19.6 GB freed · branch view1 kept",
+        };
+        s.ed.set_success(said);
+        let fresh = Instant::now().checked_sub(Duration::from_millis(500)).unwrap();
+        for t in &mut s.ed.toasts {
+            (t.at, t.shown) = (fresh, true);
+        }
+        s.frames_both(&format!("83-{which}-{w}"));
+    }
 }
 
 /// frictions29 #25: a rebase's resolved card, Claude saying the commit's message no longer holds — `m` among its

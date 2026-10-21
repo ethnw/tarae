@@ -2383,7 +2383,7 @@ fn last_line_of(text: &str, source: &str) -> usize {
 }
 
 /// The panel's keys, while it has them: `j`/`k` (`g`/`G`, `C-d`/`C-u`) through the rows, `s` stop, `r`
-/// restart, `l` its log, `q` close, Esc back to the code (it stays, looking every second). The space menu,
+/// restart, `l` its log, `q` close, `tab`/`S-tab` the slot's other tabs, Esc back to the code (it stays, looking every second). The space menu,
 /// `:` and `C-w` stay the editor's. true if taken.
 pub fn key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
@@ -2414,6 +2414,9 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('s'), false, false) => ed.procs_stop(),
         (Code::Char('r'), false, false) => ed.procs_restart(),
         (Code::Char('l'), false, false) => ed.procs_log(),
+        // (the slot's other tabs, as from its view modes' `[view.run]` and `[view.terminal]` — view P3)
+        (Code::Tab, false, false) => ed.slot_step(1),
+        (Code::BackTab, false, false) => ed.slot_step(-1),
         _ => ed.key_unused(key, ":procs", "esc code"),
     }
     true

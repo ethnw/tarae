@@ -1193,6 +1193,8 @@ fn finish(ed: &mut Editor) {
 pub fn since_sync_shown(ed: &mut Editor) {
     if ed.session.code_review.is_some() {
         since_sync(ed);
+        // (and the review's own files changed on disk since they were graded — frictions29 82)
+        crate::codereview::grades_sync(ed);
     }
 }
 

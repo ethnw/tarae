@@ -40,6 +40,15 @@ fn git_line(repo: &crate::gitrepo::Repo) -> crate::gitrepo::Line {
 /// What a rebase step that didn't start does: says why (and a start leaves no rebase behind).
 type Unstarted = Box<dyn FnOnce(&mut Editor, String) + Send>;
 
+/// A preflight a bring card's `p` ran that failed (`Session.bring_failed`): which (`title`), its failed step's
+/// output, and the commit it tested (read as `p` started it — else, none read, the HEAD its card was graded at).
+#[derive(Clone, Debug)]
+pub struct Failed {
+    pub title: String,
+    pub output: Option<(String, Vec<String>)>,
+    pub head: Option<String>,
+}
+
 /// A session whose base moved since it left it — what the rebase card says (`y` rebases), and once it's
 /// rebased, what the bring card says (`moved` 0 then).
 #[derive(Clone, Debug)]
@@ -103,24 +112,34 @@ impl Moved {
         )
     }
 
-    /// The bring card once the preflight its `p` ran (`title`) failed: what failed first, in the warning colour,
-    /// and `failed` — the failed step's output (its buffer's title, its lines) — behind `v`.
-    pub fn failed_card(
-        &self,
-        quick: Option<Vec<String>>,
-        title: &str,
-        failed: Option<(String, Vec<String>)>,
-    ) -> Offer {
-        let first = failed.as_ref().and_then(|(_, lines)| crate::preflight::failure(lines));
-        let mut card = self.bring_card(quick, false);
-        let said = match (first, failed.is_some()) {
-            (Some(f), _) => format!("The {title} failed — {f}. v shows its output."),
+    /// The bring card once the preflight its `p` ran (`title`) failed: what's decided is a bring anyway (its
+    /// first paragraph, `y bring anyway`), and the risk — the first test that failed and its panic line — in the
+    /// warning colour, up front (frictions29 91: at the card's foot, under the passing card's words, a driver read
+    /// it as the plain one and brought a failing commit); `failed` — the failed step's output (its buffer's
+    /// title, its lines) — behind `v`.
+    pub fn failed_card(&self, title: &str, failed: Option<(String, Vec<String>)>) -> Offer {
+        let (base, them) = (&self.base, if self.ahead == 1 { "it" } else { "them" });
+        let first = failed.as_ref().and_then(|(_, lines)| crate::preflight::failed_test(lines));
+        let risk = match (first, failed.is_some()) {
+            (Some((test, Some(why))), _) => format!("The {title} failed: {test}\n    {why}"),
+            (Some((test, None)), _) => format!("The {title} failed: {test}"),
             (None, true) => format!("The {title} failed — v shows its output."),
             (None, false) => format!("The {title} failed — the task panel says why."),
         };
-        let at = card.question.lines().count() + 1;
-        card.question.push_str(&format!("\n\n{said}"));
-        let mut card = card.warning(at..at + 1);
+        // (`p` runs it again: its answer says so)
+        let q = format!(
+            "{} on {base}'s tip now. Bring {them} into {base} anyway?\n\n{risk}",
+            crate::worktree::commits(self.ahead),
+        );
+        let mut card = Offer::new(
+            format!("Bring {} into {base}", self.branch),
+            &q,
+            "Bringing…",
+            format!("Couldn't bring {}", self.branch),
+            What::Rebased(Box::new(self.clone())),
+        );
+        // (in `warnings`, not `warning`: the held high-risk changes' lines take that — `push_bring_card`)
+        card.warnings.push(2..2 + risk.lines().count());
         card.output = failed;
         card
     }
@@ -1648,21 +1667,34 @@ impl Editor {
     /// colour, and `v` for the failed step's output (`Offer.output` — kept on the card, whatever runs next).
     fn rebase_bring_failed(&mut self, m: Moved, title: &str) {
         let failed = self.session.preflight.as_ref().and_then(|p| p.step_text("", None, &p.kept).ok());
-        let card = m.failed_card(self.preflight_quick(), title, failed);
+        let output = failed.clone();
+        let head = self.session.bring_tested.take();
+        self.session.bring_failed = Some(Failed { title: title.into(), output, head });
+        let card = m.failed_card(title, failed);
         let (sid, root, base) = (self.session.id, m.root.clone(), m.base.clone());
         crate::codereview::push_bring_card(self, sid, card, root, base);
     }
 
     /// `p` on the bring card: the quick preflight in its session, and the bring once it passes (the full one
-    /// is for before publishing).
+    /// is for before publishing). The commit it tests is read first, on a worker, and the preflight starts once
+    /// it's in: should it fail, the failure is that commit's (`Session.bring_tested` → `Failed.head`) — not one
+    /// Claude made while it ran, which the review of frictions29 91 found recorded as the failing one, the
+    /// commit that failed getting the plain card again.
     pub fn rebase_preflight_then_bring(&mut self, m: Moved) {
         let Some(id) = self.session_at(&m.root) else { return };
-        self.with_session(id, |ed| {
-            ed.session.bring_after_preflight = true;
-            ed.session.bring_card_after = Some(Box::new(m));
-            if let Err(e) = ed.preflight_start(crate::preflight::Set::Quick) {
-                ed.session.bring_after_preflight = false;
-                ed.set_error(e);
+        let root = m.root.clone();
+        self.events.shared_jobs().spawn(move || {
+            let head = git(&root, &["rev-parse", "HEAD"], None).ok().map(|h| h.trim().to_string());
+            move |ed: &mut Editor| {
+                ed.with_session(id, |ed| {
+                    ed.session.bring_after_preflight = true;
+                    ed.session.bring_card_after = Some(Box::new(m));
+                    ed.session.bring_tested = head;
+                    if let Err(e) = ed.preflight_start(crate::preflight::Set::Quick) {
+                        ed.session.bring_after_preflight = false;
+                        ed.set_error(e);
+                    }
+                });
             }
         });
     }
@@ -1672,6 +1704,9 @@ impl Editor {
     pub(crate) fn rebase_preflight_done(&mut self, passed: bool, title: &str) {
         // (taken whatever happens: one left from a preflight that didn't start isn't the next one's)
         let card = self.session.bring_card_after.take();
+        if passed {
+            (self.session.bring_failed, self.session.bring_tested) = (None, None);
+        }
         if !std::mem::take(&mut self.session.bring_after_preflight) {
             return;
         }

@@ -2046,10 +2046,12 @@ its base up to it, fast-forward only. When the base has moved since the session 
   already stopped there: its card, to go on or abort. Should git refuse anyway, its own `error:` lines are said
 - Clean: a card offers to bring it now (`y`), to run the quick [`:preflight`](configuration.md#checks-before-a-push-preflight) first and bring it once that
   passes (`p` — the card names its steps; the `full = true` ones wait for `:preflight-full`, before publishing), or not now (`n`).
-  If that preflight fails, the card comes back saying so in the warning colour — the first test that failed and
-  the first line of why (`The quick preflight failed — worktree::tests::x: panicked at src/worktree.rs:3920:9: …`)
-  — and `v` opens the failed step's whole output, whatever has run in the task panel since (on a card cut to fit,
-  its text with that first failure's lines after it; read to its end, `v` again opens the whole output)
+  If that preflight fails, the card comes back asking to bring it anyway (`y bring anyway`), what failed up front in
+  the warning colour — the first test that failed and, under it, the first line of why (`The quick preflight
+  failed: worktree::tests::x` / `panicked at src/worktree.rs:3920:9: …`) — and `v` opens the failed step's whole
+  output, whatever has run in the task panel since (on a card cut to fit, its text with that first failure's lines
+  after it; read to its end, `v` again opens the whole output). Asked again at the same commit, the card still says
+  it failed; a new commit, or a preflight that passes, makes it the plain one again
 - A conflict where the session's chat has no Claude running yet (none started since tarae did): the ask goes as
   soon as one starts. One that can't start leaves the rebase stopped and waiting on you — the inbox lists it
 - A conflict: the rebase stops, and the session's own Claude is asked in its chat to resolve the files. It's

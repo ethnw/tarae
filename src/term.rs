@@ -3472,7 +3472,7 @@ fn draw(
         }
         None if editor.welcome() => {
             let _fade = Fade::unless(keys.code(), ui);
-            draw_welcome(editor, ui, lay, out)?;
+            draw_welcome(editor, ui, lay, offer.map(OfferCard::rect), out)?;
             None
         }
         // (each pane fades by itself — the focused one only while the code has the keys)
@@ -7702,8 +7702,14 @@ fn draw_signature(
 }
 
 /// Welcome screen (no file): spaced-out name · one-line intro · first-step keys · recent files (number keys).
-/// One block in the middle — first-timers instantly know what to press.
-fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
+/// One block in the middle — first-timers instantly know what to press. `card`: where the front card is.
+fn draw_welcome(
+    editor: &Editor,
+    ui: &Ui,
+    lay: &Layout,
+    card: Option<Rect4>,
+    out: &mut impl Write,
+) -> io::Result<()> {
     let t = &editor.theme;
     let dim = Style { fg: ui.virt.fg, ..ui.base };
     let faint = Style { fg: ui.linenr.fg, ..ui.base };
@@ -7770,13 +7776,35 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         .max(32);
     // A title page set in type, off-centre (design pass 2, 붓): the block three tenths down and a sixth in — the
     // air to its right and below it the page's 여백 — its name over one stroke of ink
-    let top = page * 3 / 10;
-    let x0 = ox + (ew / 6).max(4).min(ew.saturating_sub(block_w) / 2);
+    let mut top = page * 3 / 10;
+    let mut x0 = ox + (ew / 6).max(4).min(ew.saturating_sub(block_w) / 2);
+    // A card up over the column (the first start's trust card, a recovery's — frictions29 89: `:tutor` cut under its
+    // edge; the keys it doesn't answer still reach the page): the column beside it, two cells of air before it,
+    // where it fits whole; else lifted over it, a row of air each side (the air above gives way, as on a short
+    // screen); else what doesn't fit over it folds, whole rows from the bottom — the name and the intro stay — and
+    // nothing is drawn where the card will be
+    let under = |x: usize, w: usize, y: usize| card.is_some_and(|c| overlaps((x, y, w, 1), c));
+    if let Some(c) = card.filter(|&c| overlaps((x0, top, block_w, rows.len()), c)) {
+        let beside = c.0.checked_sub(block_w + 2).filter(|&x| x >= ox + 2);
+        let above = c.1.checked_sub(rows.len() + 1).filter(|&t| t >= 1);
+        match (beside, above) {
+            (Some(x), _) => x0 = x,
+            (None, Some(t)) => top = top.min(t),
+            (None, None) => {
+                top = top.min(1);
+                rows.truncate(c.1.saturating_sub(top + 1).max(3));
+                // (no heading or blank left at its foot)
+                while rows.last().is_some_and(|r| r.is_empty() || r.iter().all(|(s, _)| s == "Recent")) {
+                    rows.pop();
+                }
+            }
+        }
+    }
     for y in 0..page {
         queue!(out, MoveTo(ox as u16, y as u16))?;
         apply(out, ui.base)?;
         queue!(out, Spaces(ew))?;
-        if let Some(r) = (y >= top).then(|| rows.get(y - top)).flatten() {
+        if let Some(r) = (y >= top).then(|| rows.get(y - top)).flatten().filter(|_| !under(x0, block_w, y)) {
             queue!(out, MoveTo(x0 as u16, y as u16))?;
             let mut used = 0;
             for (k, (s, st)) in r.iter().enumerate() {
@@ -7791,7 +7819,11 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         }
     }
     // The stroke: one weight of ink under the name, running on past the block into the page's air
-    let stroke = (block_w + ew / 8).min(ew.saturating_sub(x0 - ox + 2));
+    let mut stroke = (block_w + ew / 8).min(ew.saturating_sub(x0 - ox + 2));
+    // (short of a card on its row, a cell of air before it)
+    if let Some(c) = card.filter(|_| under(x0, stroke, top + 1)) {
+        stroke = c.0.saturating_sub(x0 + 1);
+    }
     queue!(out, MoveTo(x0 as u16, (top + 1) as u16))?;
     apply(out, Style { fg: strong.fg, bold: false, ..ui.base })?;
     queue!(out, Print("▀".repeat(stroke)))?;
@@ -7803,6 +7835,9 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
     let folder = folder.map(|f| format!("{} · ", fit_ellipsis(&f, 30))).unwrap_or_default();
     let foot = format!("{folder}tarae {} · {}", env!("CARGO_PKG_VERSION"), t.name);
     let foot = fit_left(&foot, ew.saturating_sub(4));
+    if under(x0, foot.width(), page.saturating_sub(1)) {
+        return Ok(());
+    }
     queue!(out, MoveTo(x0 as u16, page.saturating_sub(1) as u16))?;
     apply(out, faint)?;
     queue!(out, Print(foot))?;

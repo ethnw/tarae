@@ -46,7 +46,7 @@ fn run(choices: Choices) -> Vec<String> {
     ed.session_switch(0);
     ed.bring_queue.stand_in = true;
     let dir = world.dir.display().to_string();
-    let check = |ed: &Editor| one_bring_card(ed).and_then(|()| queue_held(ed));
+    let check = |ed: &Editor| one_bring_card(ed).and_then(|()| queue_held(ed)).and_then(|()| failed_said(ed));
     let said = |ed: &Editor| format!("{} · {}", print(ed, &dir), queue_said(ed));
     sim.walk(&mut ed, INPUTS, |sim, ed| input(sim, ed, &names), check, said);
     let trace = sim.trace().to_vec();
@@ -186,6 +186,26 @@ fn rebase(root: &std::path::Path) -> bool {
             .success()
     };
     run(&["rebase", "-q", "main"]) || !run(&["rebase", "--abort"])
+}
+
+/// A bring card back from a failed preflight reads as one wherever it is — its risk warned, its `y` a bring anyway —
+/// and none says the plain card's words with the failed one's output behind `v` (frictions29 91: a bring asked
+/// again put them over it).
+fn failed_said(ed: &Editor) -> Result<(), String> {
+    let parked = std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked);
+    for o in ed.offers.iter().chain(parked) {
+        if !matches!(o.what, crate::offer::What::Rebased(_)) {
+            continue;
+        }
+        let failed = o.question.contains("preflight failed");
+        // (a held one has no `y` — `codereview::push_bring_card`)
+        let y = o.answers(true).first().filter(|a| a.0 == 'y').map(|a| a.1);
+        let anyway = o.held.is_some() || y == Some("Bring anyway");
+        if failed != !o.warnings.is_empty() || (failed && !anyway) || (o.output.is_some() && !failed) {
+            return Err(format!("card#{} {:?} reads as {y:?}: {:?}", o.id, o.title, o.question));
+        }
+    }
+    Ok(())
 }
 
 /// The queue holds each session once, and one under way at most.

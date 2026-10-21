@@ -166,6 +166,10 @@ pub struct CodeReview {
     /// The added lines of the files with a high-risk change that say nothing on their own, as it opened
     /// (`grade_files`): a closed file's are told by them (`moved_within`).
     plain: Plain,
+    /// Each file's digest on disk as it was graded (`Grading.digests`): a closed file a turn, a checkout or
+    /// another program changed since is graded again (`grades_sync`) — else its viewed mark held against the
+    /// grades it opened with (frictions29 82: `]u` found none left, the count dropped once a walk opened them).
+    digests: Digests,
     /// Whether a language's grammar failed to load (`Loader::failed_to_load`; tests say so of one that's here).
     failed_to_load: fn(&str) -> bool,
 }
@@ -210,6 +214,7 @@ impl CodeReview {
             whole: Default::default(),
             defs: Default::default(),
             plain: Default::default(),
+            digests: Default::default(),
             failed_to_load: grammar_failed,
         }
     }
@@ -1083,7 +1088,13 @@ pub struct Grading {
     pub defs: Defs,
     /// Their added lines that say nothing on their own (`Plain`).
     pub plain: Plain,
+    /// Each file's digest on disk as it was graded (`checkout_digest`, taken before its text was read): one that
+    /// differs later is graded again (`grades_sync`).
+    pub digests: Digests,
 }
+
+/// Files' digests on disk, by path (`checkout_digest` — None: gone, or not a plain file).
+pub type Digests = std::collections::HashMap<PathBuf, Option<[u8; 32]>>;
 
 /// How many times `text` has each of `asked`.
 fn count_asked(
@@ -1135,7 +1146,9 @@ fn grade_files(
     let mut lines: Vec<(PathBuf, Vec<Hunk>)> = Vec::new();
     let mut defs = Defs::new();
     let mut plain = Plain::new();
+    let mut digests = Digests::new();
     for (i, f) in files.iter().enumerate() {
+        digests.insert(f.path.clone(), checkout_digest(&f.path));
         let raw = raws.get(&f.rel);
         let (hunks, now) = if by_id.contains(&f.rel) {
             let (blob, why) = blob_of(root, f, rev);
@@ -1188,7 +1201,7 @@ fn grade_files(
         }
     }
     let whole = files.iter().filter(|f| whole.contains(&f.rel)).map(|f| f.path.clone()).collect();
-    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts, defs, plain })
+    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread, counts, defs, plain, digests })
 }
 
 /// What a file graded by id (binary, converted) is graded as — its key's blob (a worker's: git): git's id of
@@ -2203,6 +2216,83 @@ fn ungraded_said(ed: &mut Editor, grading: Result<Grading, String>) -> Grading {
     })
 }
 
+/// The review's files changed on disk since they were graded (`CodeReview.digests`: a turn's writes, a checkout,
+/// another program), graded again on a worker — looked at when the reviewer's "since" is (`reviewer::
+/// since_sync_shown`: a save, a turn's end, a HEAD move). A closed file's viewed mark is then held against what
+/// it is now: `]u` lands on one whose changes changed since its mark, and the rail's count says it too (frictions29
+/// 82: both read the grades it opened with until a `]F` walk opened the file).
+pub fn grades_sync(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_ref().filter(|r| !r.digests.is_empty()) else { return };
+    // (a turn's: graded against its texts before — read back first when they're kept on disk only (the review of
+    // 82: it skipped the regrade then); quietly, no one asked: a read under way or failing just now leaves the
+    // digests as they were, so the next save, turn's end or HEAD move grades it again)
+    if let Base::Turn { at, .. } = r.base
+        && ed.session.checkpoints.list.get(at).is_some_and(|c| c.files.here().is_none())
+    {
+        return crate::checkpoint::with_texts_quietly(ed, at, |ed, _| grades_sync(ed));
+    }
+    let befores: std::collections::HashMap<PathBuf, Option<ropey::Rope>> = match &r.base {
+        Base::Turn { at, .. } => {
+            let here = ed.session.checkpoints.list.get(*at).and_then(|c| c.files.here()).unwrap_or_default();
+            here.iter().map(|t| (t.path.clone(), t.before.clone())).collect()
+        }
+        _ => Default::default(),
+    };
+    let work = since_work(r.digests.iter().map(|(p, d)| (p.clone(), *d)).collect());
+    let (root, rev, files) = (r.root.clone(), r.base.rev().map(str::to_string), r.files.clone());
+    let (rules, asked, started) = (r.rules.clone(), asked_of(ed), r.started);
+    ed.events.jobs().spawn(move || {
+        let changed = work();
+        let files: Vec<File> = files.into_iter().filter(|f| changed.contains(&f.path)).collect();
+        let befores: Vec<_> = files.iter().map(|f| befores.get(&f.path).cloned().flatten()).collect();
+        let graded = match files.is_empty() {
+            true => None,
+            false => Some(grade_files(&root, rev.as_deref(), &files, &befores, &rules, &asked)),
+        };
+        move |ed: &mut Editor| {
+            let Some(r) = ed.session.code_review.as_mut().filter(|r| r.started == started) else { return };
+            let g = match graded {
+                Some(Ok(g)) => g,
+                // (asked again at the next save, turn's end or HEAD move: its digests weren't taken)
+                Some(Err(e)) => return crate::log::line("review", "warn", &format!("graded again: {e}")),
+                None => {
+                    ed.unchanged = true;
+                    return;
+                }
+            };
+            for f in &files {
+                let p = &f.path;
+                r.live.get_mut().remove(p);
+                match g.grades.get(p) {
+                    Some(grades) => r.grades.insert(p.clone(), grades.clone()),
+                    None => r.grades.remove(p),
+                };
+                match g.counts.get(p) {
+                    Some(c) => r.counts.get_mut().insert(p.clone(), c.clone()),
+                    None => r.counts.get_mut().remove(p),
+                };
+                match g.moved.get(p) {
+                    Some(&m) => r.moved.insert(p.clone(), m),
+                    None => r.moved.remove(p),
+                };
+                match g.defs.get(p) {
+                    Some(d) => r.defs.insert(p.clone(), d.clone()),
+                    None => r.defs.remove(p),
+                };
+                match g.plain.get(p) {
+                    Some(k) => r.plain.insert(p.clone(), k.clone()),
+                    None => r.plain.remove(p),
+                };
+                if !g.whole.contains(p) {
+                    r.whole.remove(p);
+                }
+                r.digests.insert(p.clone(), g.digests.get(p).copied().flatten());
+            }
+            r.whole.extend(g.whole);
+        }
+    });
+}
+
 /// Each file's changes graded (`risk.rs`), by path.
 pub type Grades = std::collections::HashMap<PathBuf, Graded>;
 
@@ -2220,7 +2310,7 @@ fn open_at(
     root: PathBuf,
     base: Base,
     mut files: Vec<File>,
-    Grading { grades, moved, whole, unread, counts, defs, plain }: Grading,
+    Grading { grades, moved, whole, unread, counts, defs, plain, digests }: Grading,
     start: Option<String>,
     say: bool,
 ) {
@@ -2289,6 +2379,7 @@ fn open_at(
         whole,
         defs,
         plain,
+        digests,
         failed_to_load: grammar_failed,
     });
     // (what was looked at that this base has moved past goes)
@@ -2763,7 +2854,10 @@ pub fn push_bring_card(
             // (git can't say: the bring itself will — and holds then)
             let highs = highs.unwrap_or_default();
             let mut said = None;
-            ed.with_session(sid, |ed| said = reviewer_said(ed, &root, &highs, &head));
+            ed.with_session(sid, |ed| {
+                said = reviewer_said(ed, &root, &highs, &head);
+                failed_kept(ed, &mut card, &head);
+            });
             if let Some(line) = said {
                 card.question.push_str(&format!("\n\n{line}"));
             }
@@ -2785,6 +2879,24 @@ pub fn push_bring_card(
             ed.push_offer(card);
         }
     });
+}
+
+/// A bring card graded at `head`, in the session in front: the one its failed preflight put up marks that HEAD
+/// when the commit the preflight tested wasn't read (`Session.bring_failed` — read, it's that one: a commit made
+/// while it ran was never tested); a plain one asked again at it is that failed card (frictions29 91: a regrade put the
+/// plain card's words over it, its `y` reading as a passing one's — a failing commit brought); another HEAD lets
+/// the failure go.
+fn failed_kept(ed: &mut Editor, card: &mut crate::offer::Offer, head: &str) {
+    let crate::offer::What::Rebased(m) = &card.what else { return };
+    let Some(f) = ed.session.bring_failed.as_mut() else { return };
+    if !card.warnings.is_empty() {
+        f.head.get_or_insert_with(|| head.to_string());
+    } else if f.head.as_deref() == Some(head) {
+        let (title, output) = (f.title.clone(), f.output.clone());
+        *card = m.failed_card(&title, output);
+    } else if f.head.is_some() {
+        ed.session.bring_failed = None;
+    }
 }
 
 /// The bring card's line about the reviewer of the session in front (its checkout `root`; `highs`: the bring's
@@ -5374,6 +5486,116 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The review of 82: a turn's review graded again (`grades_sync`) grades a closed file a turn changed on disk
+    /// against its text before the turn — the checkpoint's, by its path (not against nothing: its line taken out
+    /// counts) — and the one changed is the one no longer viewed.
+    #[test]
+    fn a_turns_review_grades_a_changed_file_again_against_its_text_before() {
+        let files = [("a.txt", "a\n", "a2\n"), ("b.txt", "b\n", "b2\n"), ("c.txt", "c\n", "c2\n")];
+        let (mut ed, dir) = reviewing("turn-regrade", &files);
+        let touched = |rel: &str, before: &str, after: &str| crate::checkpoint::Touched {
+            path: dir.join(rel),
+            before: Some(ropey::Rope::from_str(before)),
+            after: ropey::Rope::from_str(after),
+            ..Default::default()
+        };
+        // (the texts before in another order than the review's files: matched by path)
+        let turn = vec![
+            touched("c.txt", "c\n", "c2\n"),
+            touched("a.txt", "a\n", "a2\n"),
+            touched("b.txt", "b\n", "b2\n"),
+        ];
+        ed.session.checkpoints.list.push(crate::checkpoint::Checkpoint::new("fix".into(), turn));
+        // (a turn's review is rooted at the session's checkout: the test's own repository)
+        ed.session.root = dir.clone();
+        let last = ed.session.checkpoints.list.len() - 1;
+        start_turn(&mut ed, last);
+        let turned = |ed: &Editor| {
+            ed.session.code_review.as_ref().is_some_and(|r| matches!(r.base, Base::Turn { .. }))
+        };
+        settle_until(&mut ed, |ed| turned(ed) && landed(ed));
+        let at = |ed: &Editor, rel: &str| {
+            ed.session.code_review.as_ref().unwrap().files.iter().position(|f| f.rel == rel).unwrap()
+        };
+        let open = |ed: &mut Editor, rel: &str| {
+            let i = at(ed, rel);
+            show(ed, i, false);
+            settle_until(ed, |ed| landed(ed) && ed.doc().path.as_ref().is_some_and(|p| p.ends_with(rel)));
+        };
+        for rel in ["b.txt", "c.txt"] {
+            open(&mut ed, rel);
+            feed(&mut ed, "<space>vm");
+        }
+        open(&mut ed, "a.txt");
+        closed(&mut ed, &dir, "b.txt");
+        closed(&mut ed, &dir, "c.txt");
+        assert!(viewed_now(&ed, "b.txt") && viewed_now(&ed, "c.txt"));
+        // A later turn writes b while it's closed; its end looks again
+        std::fs::write(dir.join("b.txt"), "b2\nmore\n").unwrap();
+        crate::reviewer::since_sync_shown(&mut ed);
+        settle_until(&mut ed, |ed| !viewed_now(ed, "b.txt"));
+        assert!(viewed_now(&ed, "c.txt"), "only the one changed");
+        let r = ed.session.code_review.as_ref().unwrap();
+        let g = &r.grades[&dir.join("b.txt")];
+        let (added, removed): (usize, usize) =
+            (g.iter().map(|g| g.added).sum(), g.iter().map(|g| g.removed).sum());
+        assert_eq!((added, removed), (2, 1), "against `b`, its text before the turn: {g:?}");
+        let out = crate::risk::key("b.txt", b'-', "b");
+        assert!(
+            g.iter().any(|g| g.keys[..g.removed].contains(&out)),
+            "its own text before, not another's: {g:?}"
+        );
+        // Its texts kept on disk only (as a session gone behind leaves a turn read back): read back first, then
+        // graded — not skipped (the review's second round)
+        let store = dir.join("turns-kept");
+        ed.session.checkpoints.dir = Some(store.clone());
+        crate::checkpoint::keep(&ed);
+        let file = format!("{}.json", ed.session.checkpoints.list[last].id);
+        let written = |d: &Path| {
+            let list = |p: &Path| -> Vec<PathBuf> {
+                std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).collect()
+            };
+            list(d).iter().flat_map(|sub| list(sub)).find(|p| p.ends_with(&file))
+        };
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while written(&store).is_none() {
+            assert!(std::time::Instant::now() < by, "its texts never written");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let kept = ["c.txt", "a.txt", "b.txt"].map(|rel| crate::checkpoint::Kept {
+            path: dir.join(rel),
+            unseen: false,
+            gone: false,
+            bytes: None,
+        });
+        ed.session.checkpoints.list[last].files = crate::checkpoint::Files::Kept(kept.to_vec());
+        std::fs::write(dir.join("b.txt"), "b2\nmore\nagain\n").unwrap();
+        // (no one asked: a read of them under way says nothing, and leaves it to the next look)
+        ed.session.checkpoints.reading = true;
+        crate::reviewer::since_sync_shown(&mut ed);
+        assert!(!ed.messages.iter().any(|m| m.2.contains("reading that turn")), "said: {:?}", ed.messages);
+        assert!(ed.session.checkpoints.list[last].files.here().is_none(), "not read");
+        ed.session.checkpoints.reading = false;
+        crate::reviewer::since_sync_shown(&mut ed);
+        let counts = |ed: &Editor| {
+            let g = &ed.session.code_review.as_ref().unwrap().grades[&dir.join("b.txt")];
+            (g.iter().map(|g| g.added).sum::<usize>(), g.iter().map(|g| g.removed).sum::<usize>())
+        };
+        settle_until(&mut ed, |ed| counts(ed) == (3, 1));
+        assert!(ed.session.checkpoints.list[last].files.here().is_some(), "read back");
+        // Its kept file gone for good: the turn left out and the review on it closed — said in `:messages` as a
+        // note, never a toast over the work (no one asked: the regrade of a save)
+        std::fs::remove_file(written(&store).expect("its file")).unwrap();
+        ed.session.checkpoints.list[last].files = crate::checkpoint::Files::Kept(kept.to_vec());
+        std::fs::write(dir.join("b.txt"), "b2\nmore\nagain\nand more\n").unwrap();
+        crate::reviewer::since_sync_shown(&mut ed);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_none());
+        let gone = |s: &str| s.contains("isn't kept any more");
+        assert!(ed.messages.iter().any(|m| gone(&m.2)), "noted: {:?}", ed.messages);
+        assert!(!ed.toasts.iter().any(|t| gone(&t.text)), "no toast: {:?}", ed.toasts);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// frictions25 R3: `]u` goes to the next file not viewed in the rail's order — past the viewed ones, round
     /// the end — `[u` back; the rail's own `u` selects it; all viewed, it says so and stays.
     #[test]
@@ -5428,6 +5650,61 @@ mod tests {
         feed(&mut ed, "]u");
         assert_eq!(rel(&ed), "a.txt");
         assert!(ed.toasts.iter().any(|t| t.text == "all 4 files viewed"), "said");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 82: viewed files a turn changed on disk while closed — `]u` said none were left while a walk
+    /// that opened them found two: their marks were held against the grades the review opened with. Graded
+    /// again at the turn's end, `]u` lands on them, the count says so, and one viewed again stays viewed closed.
+    #[test]
+    fn bracket_u_lands_on_a_file_changed_on_disk_since_its_mark() {
+        let files = [("a.txt", "a\n", "a2\n"), ("b.txt", "b\n", "b2\n"), ("c.txt", "c\n", "c2\n")];
+        let (mut ed, dir) = reviewing("unviewed-on-disk", &files);
+        let rel = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.in_hand(ed).map(|i| r.files[i].rel.clone()).unwrap_or_default()
+        };
+        let open = |ed: &mut Editor, at: &str| {
+            settle_until(ed, |ed| landed(ed) && ed.doc().path.as_ref().is_some_and(|p| p.ends_with(at)));
+        };
+        let count = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.files.iter().filter(|f| r.viewed(ed, f)).count()
+        };
+        for (i, f) in ["a.txt", "b.txt", "c.txt"].into_iter().enumerate() {
+            show(&mut ed, i, false);
+            open(&mut ed, f);
+            feed(&mut ed, "<space>vm");
+        }
+        show(&mut ed, 0, false);
+        open(&mut ed, "a.txt");
+        closed(&mut ed, &dir, "b.txt");
+        closed(&mut ed, &dir, "c.txt");
+        // (a line of c looked at: its grades go through the review's cache of them — `CodeReview.live`)
+        let line = crate::risk::LookedLine {
+            at: 0,
+            text: "c2".into(),
+            added: crate::risk::key("c.txt", b'+', "c2"),
+            count: 1,
+        };
+        ed.session.looked_lines.insert("c.txt".into(), vec![line]);
+        assert_eq!(count(&ed), 3);
+        // A turn writes c while it's closed; its end looks again
+        std::fs::write(dir.join("c.txt"), "c2\nmore\n").unwrap();
+        crate::reviewer::since_sync_shown(&mut ed);
+        settle_until(&mut ed, |ed| !viewed_now(ed, "c.txt"));
+        assert_eq!((count(&ed), viewed_now(&ed, "b.txt")), (2, true), "the count and the marks agree");
+        feed(&mut ed, "]u");
+        open(&mut ed, "c.txt");
+        assert_eq!(rel(&ed), "c.txt", "]u lands on it");
+        // Viewed again and closed: viewed (its grades are what it is now)
+        feed(&mut ed, "<space>vm");
+        show(&mut ed, 0, false);
+        open(&mut ed, "a.txt");
+        closed(&mut ed, &dir, "c.txt");
+        assert_eq!(count(&ed), 3);
+        feed(&mut ed, "]u");
+        assert!(ed.toasts.iter().any(|t| t.text == "all 3 files viewed"), "{:?}", ed.toasts);
         std::fs::remove_dir_all(&dir).ok();
     }
 
