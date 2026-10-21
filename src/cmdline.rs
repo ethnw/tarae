@@ -85,6 +85,11 @@ pub const COMMANDS: &[TypedCmd] = &[
         Arg::None,
         "Look again at what this project's Claude settings run in the chat, and trust them or not",
     ),
+    c(
+        &["git-trust"],
+        Arg::None,
+        "Look again at what this repository's own git settings run, and trust them or not",
+    ),
     c(&["claude-update"], Arg::None, "Look for a newer claude and install it (claude update, as you)"),
     c(&["granted", "sandbox-allowed"], Arg::None, "What Claude may do without asking — take one back"),
     c(&["sandbox-disallow"], Arg::None, "Take back what :granted lists"),

@@ -162,6 +162,10 @@ pub enum What {
     /// A repository's own git settings and hooks run commands (`gittrust.rs`): `y` lets them run, `n` keeps
     /// them off (held — `gitrepo`).
     GitTrust(Box<crate::gittrust::Ask>),
+    /// More than one of those three waiting together for one checkout (`root`, its session's): one card
+    /// (`repotrust.rs`) — `parts` are their own cards, in order (tarae's, Claude's, git's); `y` trusts each, `n`
+    /// holds each back, `v` shows each whole.
+    RepoTrust { root: PathBuf, parts: Vec<Offer> },
     /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
     Screen { call: crate::tools::Call },
     /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs those
@@ -271,6 +275,7 @@ pub const KINDS: &[&str] = &[
     "project-trust",
     "claude-settings",
     "git-trust",
+    "repo-trust",
     "screen",
     "preflight",
     "branch-delete",
@@ -336,6 +341,7 @@ impl What {
             // (the chat reads the settings again when it opens)
             | What::ClaudeSettings { .. }
             | What::GitTrust(_)
+            | What::RepoTrust { .. }
             | What::Recover(_)
             | What::Restart(_)
             | What::RestartSame { .. }
@@ -575,6 +581,7 @@ impl Offer {
                 | What::ProjectTrust { .. }
                 | What::ClaudeSettings { .. }
                 | What::GitTrust(_)
+                | What::RepoTrust { .. }
                 | What::Read { .. }
                 | What::Grant { .. }
                 | What::Outside { .. }
@@ -814,6 +821,10 @@ impl Offer {
     /// Whether it parks with its session when another comes to the front: Claude's, and a review's end
     /// (#159: it stayed up in the other session, and `y` there ended that one's review).
     pub fn goes_with_session(&self) -> bool {
+        // (the repository's trust: with its session while Claude's part is in it)
+        if let What::RepoTrust { parts, .. } = &self.what {
+            return parts.iter().any(Offer::goes_with_session);
+        }
         self.claudes()
             || matches!(
                 self.what,
@@ -900,6 +911,7 @@ impl Offer {
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Hold back")],
             W::ClaudeSettings { .. } => vec![('y', "Trust"), ('v', "Details"), ('n', "Hold back")],
             W::GitTrust(_) => vec![('y', "Trust"), ('n', "Hold back")],
+            W::RepoTrust { .. } => vec![('y', "Trust"), ('v', "Details"), ('n', "Hold back")],
             W::NoSandbox { first: true, .. } => {
                 vec![('y', "Ask each time"), ('s', "This session"), ('n', "Don't run them")]
             }
@@ -1056,6 +1068,7 @@ impl Offer {
             W::ProjectTrust { .. } => "project-trust",
             W::ClaudeSettings { .. } => "claude-settings",
             W::GitTrust(_) => "git-trust",
+            W::RepoTrust { .. } => "repo-trust",
             W::Screen { .. } => "screen",
             W::Preflight { .. } => "preflight",
             W::BranchDelete { .. } => "branch-delete",
@@ -1165,11 +1178,12 @@ impl crate::editor::Editor {
         }
         // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
         // plugin's ask — the other's request would be: one asking the same joins its card, `plugin_ask`; nor a
-        // repository's commands — a submodule's card would take its parent's place: one each, `git_trust_check`)
+        // repository's commands — a submodule's card would take its parent's place: one each, `git_trust_check`;
+        // nor a repository's trust — another checkout's: its parts join it by checkout, `trust_offer`)
         // (a host's card is joined by `hosts::asked` itself — by its host, never by its title)
         let own = o.asker().is_some()
             || o.host().is_some()
-            || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_));
+            || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_) | What::RepoTrust { .. });
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
@@ -1280,7 +1294,9 @@ impl crate::editor::Editor {
             // (the card stays while it's read)
             Code::Char('v') if o.made() => crate::tools::made_view(self),
             // (its detail, kept off the card — it stands beside the work while Claude runs held back)
-            Code::Char('v') if matches!(o.what, What::ClaudeSettings { .. }) => self.offer_view(),
+            Code::Char('v') if matches!(o.what, What::ClaudeSettings { .. } | What::RepoTrust { .. }) => {
+                self.offer_view()
+            }
             Code::Char('v') if o.host_details().is_some() => self.offer_view(),
             Code::Char('r') if o.made() => self.offer_accept_by('r'),
             Code::Char('n') => self.offer_dismiss(),
@@ -1432,6 +1448,7 @@ impl crate::editor::Editor {
             What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
             What::ClaudeSettings { hash } => self.claude_settings_answer(id, hash, true),
             What::GitTrust(ask) => self.git_trust_answer(id, *ask, true),
+            What::RepoTrust { parts, .. } => crate::repotrust::answer(self, id, parts, true),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep, folder)
             }
@@ -1817,6 +1834,10 @@ impl crate::editor::Editor {
         if let Some(&What::ClaudeSettings { hash }) = self.offers.first().map(|o| &o.what) {
             return self.claude_settings_view(hash);
         }
+        if let Some(What::RepoTrust { parts, .. }) = self.offers.first().map(|o| &o.what) {
+            let more = crate::repotrust::view_text(self, &parts.clone());
+            return self.offer_view_with(more);
+        }
         if let Some(more) = self.offers.first().and_then(Offer::host_details) {
             return self.offer_view_with(more);
         }
@@ -2022,6 +2043,7 @@ impl crate::editor::Editor {
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
             What::ClaudeSettings { hash } => self.claude_settings_answer(o.id, hash, false),
             What::GitTrust(ask) => self.git_trust_answer(o.id, *ask, false),
+            What::RepoTrust { parts, .. } => crate::repotrust::answer(self, o.id, parts, false),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, o.id, *pending, None, keep, folder)
             }

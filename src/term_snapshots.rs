@@ -954,6 +954,7 @@ fn frames_of_the_answer_words() {
     if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
         return;
     }
+    frames_of_the_repository_card();
     let shot = |name: &str, setup: &dyn Fn(&mut Shot)| {
         let mut s = Shot::new(100, 30);
         s.ed.offer_popups = true;
@@ -1031,7 +1032,7 @@ fn frames_of_the_answer_words() {
         );
         s.ed.push_offer(o);
     });
-    // A hook changed since the base: what a yes keeps
+    // A hook changed since the base: what a yes keeps (with the frames of piece I below)
     shot("f_hooks", &|s| {
         let ask = crate::hooks::Ask {
             what: "commit".into(),
@@ -1047,6 +1048,50 @@ fn frames_of_the_answer_words() {
         };
         s.ed.push_offer(ask.card());
     });
+}
+
+/// Piece I: the repository's card as its parts come — tarae's alone, Claude's joining, git's joining (each frame
+/// for jitter: it grows from where it stands), wide and narrow.
+fn frames_of_the_repository_card() {
+    for (w, wide) in [(100, ""), (64, "_narrow")] {
+        let mut s = Shot::new(w, 30);
+        s.ed.offer_popups = true;
+        s.file("src/demo.rs", DEMO_RS);
+        let root = s.ed.session.root.clone();
+        let both = Box::new((s.ed.config.clone(), s.ed.keymaps.clone()));
+        let items = vec![("task.release".to_string(), "./scripts/release.sh".to_string())];
+        let project = crate::trust::Project {
+            file: root.join(".tarae.toml"),
+            hash: [1; 32],
+            items,
+            state: crate::trust::State::Ask,
+            with: both.clone(),
+            without: both,
+        };
+        s.ed.project_trust_set(Some(project));
+        s.frames_both(&format!("i_1_tarae{wide}"));
+        let q = "Claude started with these held back — y gives them to it, the conversation going on.\n\n  \
+                 .claude/settings.json: apiKeyHelper = ./scripts/key.sh\n  .claude/settings.json: env \
+                 ANTHROPIC_BASE_URL (its value not shown)";
+        let what = crate::offer::What::ClaudeSettings { hash: [2; 32] };
+        let o =
+            crate::offer::Offer::new(crate::claudetrust::TITLE.into(), q, "", "Claude settings".into(), what);
+        s.ed.trust_offer(o.deciding(2..4));
+        s.frame();
+        s.frames_both(&format!("i_2_claude{wide}"));
+        let ask = crate::gittrust::Ask {
+            config: root.join(".git/config"),
+            place: root.clone(),
+            digest: [3; 32],
+            items: vec![("core.fsmonitor".into(), ".git/fsmonitor.sh".into(), "on every status")],
+            files: Vec::new(),
+            filters: false,
+        };
+        s.ed.trust_offer(ask.card(&root));
+        s.frame();
+        assert_eq!(s.ed.offers.len(), 1, "one card");
+        s.frames_both(&format!("i_3_git{wide}"));
+    }
 }
 
 /// A command Claude wants to run outside the sandbox — the run card P3 keeps — shown whole (a commit message past

@@ -404,6 +404,12 @@ Kept:
   test: `gitrepo::held::tests::fsmonitor_is_held_on_status_and_snapshots` ·
   `gitrepo::held::tests::a_hooks_path_is_held_on_the_git_tabs_commit` · `gitrepo::held::tests::a_credential_helper_is_held` ·
   `gitrepo::held::tests::a_submodules_own_commands_are_held`
+- A repository's trust parts waiting together (its `.tarae.toml`, its Claude settings, its git's commands) are one
+  card; each answer is kept as its own card's is, so one `y` is never a later change's. A part joining the card
+  settles it again before `y` counts, and a git value too long to show is held back on `y`.
+  test: `repotrust::tests::yes_trusts_each_part_in_its_own_store_and_a_change_asks_its_part_alone` ·
+  `repotrust::tests::a_part_joining_settles_the_card_again` ·
+  `repotrust::tests::a_git_value_too_long_to_show_is_held_back_on_yes`
 - Your own git-tab actions ask before running a hook in the checkout that changed since the base. A `y` is
   kept for that file's content (its SHA-256, with the trust answers in `trust.json`, shared by the repository's
   checkouts): a hook rewritten since asks again, byte for byte; `n` keeps nothing. What the look can't see is

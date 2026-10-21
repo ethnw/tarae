@@ -2,7 +2,8 @@
 //!
 //! - **Claude's level**: a strict subset of the state — its own session in detail, other sessions as name,
 //!   what they do and how many cards; no unsent text (the chat's draft, a prompt's or picker's query); a
-//!   plugin's card and a repository's git settings (`git-trust`) by their titles only, in the inbox too.
+//!   plugin's card, a repository's git settings (`git-trust`), its Claude settings and the card holding them
+//!   (`repo-trust`) by their titles only, in the inbox too.
 //!   Less than the `screen` tool sends, so its `ui` tool asks no card.
 //! - **The context line**: every message's `<editor-context>` gains `ui: …` when something's up beyond the
 //!   code and the chat — the cards, the toasts, the runs under way, by id.
@@ -101,12 +102,13 @@ impl Editor {
         s.toasts.retain(|t| !others.contains(&t.id));
         // (the inbox is every session's: only its own session's entries — the others are counts)
         s.inbox.retain(|e| e.session == own);
-        // (a plugin's card, a repository's own git settings and its Claude settings — text from outside, a
-        // credential helper's value maybe a secret: by title only, on the card and in the inbox; any other card's
-        // ask cut as the one-line forms cut it: the whole is for scripts — Claude's level doesn't grow with a
-        // long card)
-        let by_title =
-            |kind: &str| kind.starts_with("plugin") || kind == "git-trust" || kind == "claude-settings";
+        // (a plugin's card, a repository's own git settings and its Claude settings, and the repository's card
+        // that holds them — text from outside, a credential helper's value maybe a secret: by title only, on the
+        // card and in the inbox; any other card's ask cut as the one-line forms cut it: the whole is for scripts —
+        // Claude's level doesn't grow with a long card)
+        let by_title = |kind: &str| {
+            kind.starts_with("plugin") || matches!(kind, "git-trust" | "claude-settings" | "repo-trust")
+        };
         for c in &mut s.cards {
             c.asks = match by_title(c.kind) {
                 true => c.title.clone(),

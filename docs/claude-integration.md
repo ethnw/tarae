@@ -260,7 +260,9 @@ the same values don't ask again, other ones do. `.claude/settings.local.json` is
 while git says it's untracked and ignored. If either file changes while the chat is open, tarae reads it again,
 and a change that needs your answer starts Claude again at once with them held back — mid-turn too, the turn cut
 off — the conversation going on and the card up again (Claude Code itself would otherwise pick up an edited
-helper mid-conversation). `:claude-settings` shows the card again. The chat also only ever starts tarae's
+helper mid-conversation). `:claude-settings` shows the card again. When the project's `.tarae.toml` or its git's
+own commands wait for their card too, it's one card for the repository, each part answered and kept on its own
+([configuration](configuration.md)). The chat also only ever starts tarae's
 own MCP server (`--strict-mcp-config`), whatever `llm.args` says, so a project's `.mcp.json` servers don't
 connect.
 

@@ -339,30 +339,45 @@ impl crate::editor::Editor {
     pub fn project_trust_set(&mut self, p: Option<Project>) {
         let asks = p.as_ref().is_some_and(|p| p.state == State::Ask);
         self.offers.retain(|o| !matches!(o.what, crate::offer::What::ProjectTrust { .. }) || asks);
-        if let Some(p) = p.as_ref().filter(|_| asks) {
-            self.project_trust_offer(p);
+        if !asks {
+            crate::repotrust::drop_part(self, |w| matches!(w, crate::offer::What::ProjectTrust { .. }), true);
         }
+        // (set first: the repository's card it may join names the file from it)
         self.project_trust = p;
+        if let Some(p) = self.project_trust.clone().filter(|_| asks) {
+            let o = self.project_trust_card(&p);
+            self.trust_offer(o);
+        }
     }
 
-    fn project_trust_offer(&mut self, p: &Project) {
+    /// Its own card — the repository's takes its lines when another part waits with it (`repotrust.rs`).
+    fn project_trust_card(&self, p: &Project) -> crate::offer::Offer {
         let what = crate::offer::What::ProjectTrust { hash: p.hash };
         // (what's decided: the settings, under the line naming the file)
-        let o = crate::offer::Offer::new(
+        crate::offer::Offer::new(
             TITLE.into(),
             &question(&self.session.root, p),
             "",
             "Project settings".into(),
             what,
         )
-        .deciding(2..2 + p.items.len());
-        self.push_offer(o);
+        .deciding(2..2 + p.items.len())
     }
 
     /// The answer on the card (`hash` = what it showed): the config switches, and the answer is kept.
     pub fn project_trust_answer(&mut self, id: u64, hash: Digest, trusted: bool) {
         self.offer_finished(id, Ok(()));
-        let Some(p) = self.project_trust.as_mut().filter(|p| p.hash == hash) else { return };
+        let Some(n) = self.project_trust_answered(hash, trusted) else { return };
+        match trusted {
+            true => self.set_success(format!("Trusted — the project's {n} held-back settings apply")),
+            false => self.set_status("Held back — :project-trust to look again"),
+        }
+    }
+
+    /// The answer for what the file says (`hash`), on its card or the repository's: the config switches, the
+    /// answer is kept — how many settings it was about (None: the file says something else now).
+    pub(crate) fn project_trust_answered(&mut self, hash: Digest, trusted: bool) -> Option<usize> {
+        let p = self.project_trust.as_mut().filter(|p| p.hash == hash)?;
         p.state = if trusted { State::Trusted } else { State::Ignored };
         let (file, n) = (p.file.clone(), p.items.len());
         self.project_trust_apply();
@@ -376,10 +391,7 @@ impl crate::editor::Editor {
                 }
             });
         }
-        match trusted {
-            true => self.set_success(format!("Trusted — the project's {n} held-back settings apply")),
-            false => self.set_status("Held back — :project-trust to look again"),
-        }
+        Some(n)
     }
 
     /// The config as the project's state says (the user's `:set`s on top).
@@ -396,7 +408,10 @@ impl crate::editor::Editor {
     /// `:project-trust` — the card again, for what the file says now.
     pub fn project_trust_ask(&mut self) -> Result<(), String> {
         let p = self.project_trust.clone().ok_or("nothing in this project's .tarae.toml needs trust")?;
-        self.project_trust_offer(&p);
+        // (asked alone: out of the repository's card, if it's there)
+        crate::repotrust::drop_part(self, |w| matches!(w, crate::offer::What::ProjectTrust { .. }), true);
+        let o = self.project_trust_card(&p);
+        self.push_offer(o);
         Ok(())
     }
 
@@ -408,6 +423,7 @@ impl crate::editor::Editor {
         }
         let (hash, file) = (p.hash, p.file.clone());
         self.offers.retain(|o| !matches!(o.what, crate::offer::What::ProjectTrust { .. }));
+        crate::repotrust::drop_part(self, |w| matches!(w, crate::offer::What::ProjectTrust { .. }), true);
         if let Some(p) = self.project_trust.as_mut() {
             p.state = State::Ignored;
         }

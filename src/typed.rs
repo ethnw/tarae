@@ -239,6 +239,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "project-trust" => editor.project_trust_ask(),
         "project-untrust" => editor.project_untrust(),
         "claude-settings" => editor.claude_settings_ask(),
+        "git-trust" => editor.git_trust_ask(),
         "claude-update" => crate::claudeupdate::update(editor),
         "granted" | "sandbox-allowed" => {
             editor.granted();

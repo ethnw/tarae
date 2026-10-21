@@ -590,8 +590,9 @@ fn seen_now(ed: &mut Editor, id: u64, seen: Seen) {
     if ask {
         offer(ed, &seen);
     } else {
-        // (this session's card only — up in front, or parked while it's behind)
+        // (this session's card only — up in front, or parked while it's behind; its part of the repository's)
         ed.drop_cards(|w| matches!(w, crate::offer::What::ClaudeSettings { .. }));
+        crate::repotrust::drop_part(ed, |w| matches!(w, crate::offer::What::ClaudeSettings { .. }), false);
     }
     match (restart, ask) {
         (true, true) => crate::chat::settings_restart(
@@ -712,13 +713,20 @@ pub fn detail(seen: &Seen) -> String {
     lines.join("\n")
 }
 
+/// Its card, up — or joining the repository's, when another part waits with it (`repotrust.rs`).
 fn offer(ed: &mut Editor, seen: &Seen) {
-    let Some(hash) = seen.digest() else { return };
+    if let Some(o) = card(seen) {
+        ed.trust_offer(o);
+    }
+}
+
+fn card(seen: &Seen) -> Option<crate::offer::Offer> {
+    let hash = seen.digest()?;
     let (q, decided) = question(seen);
     let asked = crate::cards::Asked::new(crate::cards::Why::Own, crate::cards::Request::Own);
     let what = crate::offer::What::ClaudeSettings { hash };
     let o = crate::offer::Offer::new(TITLE.into(), &q, "", "Claude settings".into(), what).deciding(decided);
-    ed.push_offer(o.asked(asked));
+    Some(o.asked(asked))
 }
 
 impl Editor {
@@ -727,8 +735,20 @@ impl Editor {
     /// once, else at its turn's end); held back, at once.
     pub fn claude_settings_answer(&mut self, id: u64, hash: Digest, trusted: bool) {
         self.offer_finished(id, Ok(()));
-        let Some(c) = self.session.chat.as_mut() else { return };
-        let Some(seen) = c.settings.seen.as_mut().filter(|s| s.digest() == Some(hash)) else { return };
+        let Some(n) = self.claude_settings_answered(hash, trusted) else { return };
+        match trusted {
+            true => {
+                self.set_success(format!("Trusted — the project's {n} Claude settings apply in the chat"))
+            }
+            false => self.set_status("Held back — :claude-settings to look again"),
+        }
+    }
+
+    /// The answer for what the settings say (`hash`), on their card or the repository's: kept, claude started as
+    /// answered — how many settings it was about (None: no chat, or they say something else now).
+    pub(crate) fn claude_settings_answered(&mut self, hash: Digest, trusted: bool) -> Option<usize> {
+        let c = self.session.chat.as_mut()?;
+        let seen = c.settings.seen.as_mut().filter(|s| s.digest() == Some(hash))?;
         seen.state = if trusted { State::Trusted } else { State::Ignored };
         let (seen, n) = (seen.clone(), seen.scan.as_ref().map_or(0, |s| s.items.len()));
         let now = settings(crate::chat::CHAT_SETTINGS, &seen);
@@ -758,13 +778,8 @@ impl Editor {
                 }
             });
         }
-        match trusted {
-            true => {
-                self.set_success(format!("Trusted — the project's {n} Claude settings apply in the chat"))
-            }
-            false => self.set_status("Held back — :claude-settings to look again"),
-        }
         crate::chat::gate_opened(self);
+        Some(n)
     }
 
     /// `v` on the card: its text and `detail` in its buffer — for what the card shows (`hash`), else (read again
@@ -786,7 +801,11 @@ impl Editor {
         if seen.scan.is_none() {
             return Err("nothing in this project's Claude settings needs trust".into());
         }
-        offer(self, &seen);
+        // (asked alone: out of the repository's card, if it's there)
+        crate::repotrust::drop_part(self, |w| matches!(w, crate::offer::What::ClaudeSettings { .. }), false);
+        if let Some(o) = card(&seen) {
+            self.push_offer(o);
+        }
         Ok(())
     }
 }

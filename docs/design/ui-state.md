@@ -196,7 +196,7 @@ side git · 4 rows · in hand git:src/term.rs
     `said` (faint). A driver tells a card's weight from it without reading the frame. Left out at Claude's
     level (its `asks` stays cut); the text form keeps its one line.
   - `warnings` (cardburden 5): the warnings the card says (`cardwarn.rs`), by id; left out when none. Claude's
-    level has them, but not a plugin's or `git-trust` card's.
+    level has them, but not a plugin's, `git-trust`, `claude-settings` or `repo-trust` card's.
 - **`inbox`** (2026-10-05, `inbox.rs`) — what waits for the user, every session's, oldest first: the cards above
   that wait (not downloading) and the edits waiting for their review (`edit#s0:review` up in its session,
   `edit#s1:<request>` queued), reads queued for their card, a change set's files; after all that asks, Claude's

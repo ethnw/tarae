@@ -40,6 +40,15 @@ the [keymap reference](reference/keymap.md).
   `.claude/settings.local.json`) would run in the chat — its helper commands, its `env` block, the plugins it
   turns on — waits for its own card the first time the chat starts, kept the same way. `:claude-settings` shows
   it again ([Claude integration](claude-integration.md))
+- **And so are a repository's own git commands.** What its git config runs (`core.fsmonitor`, filters, hooks in
+  its git folder …) is held from the git tarae runs until you trust it on its card, kept the same way.
+  `:git-trust` shows it again
+- **One card for the repository.** When more than one of these waits at once — tarae's, Claude's and git's, say,
+  as a repository opens — they're one card, "Trust this repository's settings?", each part under its heading with
+  the lines its own card shows: `y` trusts each, `n` holds each back, `v` shows each whole. Nothing waits for it
+  (the chat starts with Claude's part held back). Each answer is kept as its own card's is, so a later change to
+  one part asks about that part alone, on its own card. Its command (`:project-trust`, `:claude-settings`,
+  `:git-trust`) asks about a part alone. A git value too long to show is never trusted: `y` holds git's part back
 - **Some settings are only yours.** Whose credentials Claude uses, and who pays for it, are never a project's to
   say: `llm.environment-key`, `llm.billing` and `llm.reviewer-billing` are read from your own config only — a
   project's `.tarae.toml` (trusted or not) and its `.tarae.local.toml` are refused them, with a warning at each

@@ -118,6 +118,7 @@ mod refactor;
 mod repeat;
 mod replace;
 mod replay;
+mod repotrust;
 mod restart;
 mod restore;
 mod reviewer;

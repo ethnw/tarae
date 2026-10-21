@@ -194,8 +194,9 @@ Done so far, under way, and the order after it (2026-10-17):
     exactly those paths; `y` commits them through tarae's own git, plumbing and no hooks, what else is staged left
     as it was; `n` does nothing; it never pushes or amends.
   - **E** (to be re-judged, 2026-10-17): one list — settings and trust answers join `:granted`, each taken back with `d`.
-  - **I** (to be re-judged, 2026-10-17): one trust card when tarae's, Claude's and git's wait together as the repository opens; a later change
-    asks only about its own part.
+  - **I** — done: one trust card when tarae's, Claude's and git's wait together as the repository opens (each part
+    joins it as it's found, nothing waits); a later change asks only about its own part. `:git-trust` asks git's
+    part again.
   - **G**, manifest tools run in a copy (`cargo add` → a change set of `Cargo.toml` and `Cargo.lock`): only if
     `cargo xtask cards` shows manifest refusals often.
 
