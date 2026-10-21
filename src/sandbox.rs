@@ -2972,8 +2972,9 @@ static DEVICE_PLACES: std::sync::LazyLock<Vec<&'static str>> =
 /// closed (the default) or open (`llm.sandbox-network`: beyond this machine through tarae's proxy), every port
 /// on this machine is closed but `llm.sandbox-ports` — these included. `llm.sandbox-localhost` opens them too:
 /// once `localhost:*` is allowed no port's deny wins over it, before or after, by any filter (measured by
-/// the user, 2026-10-02) — so "localhost but these" can't be written. `docs/claude-integration.md` lists
-/// them (a test checks).
+/// the user, 2026-10-02) — so "localhost but these" can't be written. Beyond this machine tarae's proxy refuses
+/// them at every host unless a rule of `llm.sandbox-hosts` names the host with the port (`Egress::names_port`).
+/// `docs/claude-integration.md` lists them (a test checks).
 pub const RISKY_PORTS: [(u16, &str); 10] = [
     (2375, "Docker API — starts containers that mount any folder"),
     (2376, "Docker API over TLS — the same"),
@@ -7777,6 +7778,7 @@ mod tests {
             ".vscode",
             ".tarae.local.toml",
             ".git",
+            "__pycache__",
         ];
         let java = [
             "build.gradle",
@@ -7800,6 +7802,21 @@ mod tests {
         {
             assert!(!CORE_NAMES.contains(&ecosystem), "{ecosystem}: the core's");
         }
+    }
+
+    /// Python's bytecode beside its source is what your own `pytest` imports later (F1): `__pycache__` is kept by
+    /// name — a run's interpreter writes its own elsewhere (the pack's `PYTHONPYCACHEPREFIX`) — but a
+    /// virtualenv's, tools' output, isn't; an Edit of it asks.
+    #[test]
+    fn bytecode_beside_its_source_is_kept_and_a_virtualenvs_isnt() {
+        let root = Path::new("/Users/u/p");
+        assert!(protected_in(root, &root.join("pkg/__pycache__/m.cpython-312.pyc")));
+        assert!(protected_in(root, &root.join("__pycache__")));
+        let venv = root.join(".venv/lib/python3.12/site-packages/x/__pycache__/m.cpython-312.pyc");
+        assert!(!protected_in(root, &venv));
+        assert!(crate::edits::listed(Path::new("pkg/__pycache__/m.cpython-312.pyc"), &[]));
+        let profile = Policy::for_project(&env(root)).profile();
+        assert!(profile.contains(&any_case("__pycache__")), "in the profile's names");
     }
 
     /// A pack's names are kept whatever the project's languages: a Java build file in a Rust project, a

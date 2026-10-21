@@ -118,6 +118,15 @@ impl Egress {
         self.answered.iter().any(|(h, p)| covers(h, host) && *p == port)
     }
 
+    /// Whether a rule names `host` with `port` itself — not any host, nor a rule taking the request's default:
+    /// what a risky port (`sandbox::RISKY_PORTS`) is reached by.
+    pub fn names_port(&self, host: &str, port: u16) -> bool {
+        self.hosts.iter().any(|p| {
+            let (Pattern::Name(_, at) | Pattern::Under(_, at)) = p;
+            *at == Some(port) && p.matches(host, port, port)
+        })
+    }
+
     /// Why `ip` is never reached through the proxy — None: it may be. As `route`: never (link-local, the cloud
     /// metadata servers, multicast, broadcast, those carried in NAT64 or 6to4), this machine (loopback, none),
     /// this machine's own addresses beyond loopback — all when those couldn't be read.

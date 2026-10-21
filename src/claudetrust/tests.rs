@@ -188,6 +188,28 @@ fn a_hostile_file_naming_your_variables_gets_them_empty_never_their_value() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// A project's `cleanupPeriodDays` would decide when Claude Code deletes your conversations — every project's
+/// (`0`: all of them, Claude Code's settings docs). Held until trusted and said on the card; held back, yours is
+/// laid over it, else Claude Code's own default (`CLEANUP_DEFAULT`).
+#[test]
+fn a_projects_cleanup_period_is_held_to_yours() {
+    let root = temp("cleanup");
+    let user = root.join("your-settings.json");
+    std::fs::write(root.join(PROJECT), r#"{"cleanupPeriodDays": 0}"#).unwrap();
+    let held = |state| {
+        let seen = Seen { state, ..look(&root, None, Some(&user), |_| false, |_| None) };
+        let v: Json = serde_json::from_str(&settings(crate::chat::CHAT_SETTINGS, &seen).0).unwrap();
+        (v.get("cleanupPeriodDays").cloned(), question(&seen).0)
+    };
+    let (v, q) = held(State::Ask);
+    assert_eq!(v, Some(Json::from(30)), "you set none: Claude Code's own default");
+    assert!(q.contains(".claude/settings.json: cleanupPeriodDays = 0"), "{q}");
+    std::fs::write(&user, r#"{"cleanupPeriodDays": 90}"#).unwrap();
+    assert_eq!(held(State::Ignored).0, Some(Json::from(90)), "yours");
+    assert_eq!(held(State::Trusted).0, None, "trusted: theirs applies");
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// A project's `permissions.allow` would let tools run unasked — `Read` anywhere, past `reads.rs` — in a folder
 /// you once trusted in Claude Code (under `-p` in one never trusted it's unused; tarae can't tell which). Held
 /// back, each rule becomes an `ask` rule beside the chat's own (an `ask` outranks an `allow` from any file), so

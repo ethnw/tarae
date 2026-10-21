@@ -860,10 +860,10 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   - `llm.sandbox-localhost = true` opens every port on this machine, for tests that talk to their own servers
     on ports picked at random. **That includes the ports in the table below**: it can't leave them out.
     tarae's own `.tarae.toml` sets it, because its tests do this
-  - With `llm.sandbox-network` on, everything is reachable except the ports in the table, unless they're in
-    `llm.sandbox-ports`. On macOS that holds for this machine's loopback only: the sandbox names ports by
-    `localhost`, so on this machine's other addresses (its LAN's) those ports are reached as the network is. On
-    Linux this machine's other addresses count as this machine: only the ports you open (below)
+  - With `llm.sandbox-network` on, tarae's proxy refuses the ports in the table at every host, unless a host of
+    `llm.sandbox-hosts` is written with the port (`docker.example:2375`) — `"*"` or the host alone doesn't
+    reach them. This machine's other addresses (its LAN's, its bridges') are never reached through the proxy, on
+    either system: only the ports you open (below)
 
   | Port | What usually listens there |
   |---|---|
@@ -1231,7 +1231,7 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 The `claude` program the chat talks to (and the reviewer's) runs as you, as it does in your own terminal and in
 every other editor — no sandbox of its own (2026-10-17; tarae had one on macOS and Linux before). Your login,
 settings, `CLAUDE.md` and conversations are its as they are in your own CLI, and it cleans its old conversations as
-your `cleanupPeriodDays` says. What keeps it is that everything it does through its tools goes through tarae: a
+your `cleanupPeriodDays` says (a project's is held until you trust it). What keeps it is that everything it does through its tools goes through tarae: a
 Read outside the project asks you, every edit comes as a review, its commands run in the sandbox above, and it has
 no shell. Hooks, plugins, MCP servers but tarae's, skills and auto memory are off; a repository's Claude settings
 wait for your trust. It isn't given `SSH_AUTH_SOCK` and doesn't update itself (`:claude-update` does).

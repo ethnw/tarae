@@ -912,11 +912,9 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
 
 ## Open items
 
-- **macOS: this machine's own addresses beyond loopback.** Seatbelt names a port by `localhost` only, so with
-  `llm.sandbox-network` on a command reaches the risky ports (Docker's 2375, Jupyter's 8888…) on this machine's
-  LAN or bridge address as the network. Linux takes those addresses as this machine (§Sockets and routing); macOS
-  can't express it — its report and `llm.sandbox-network`'s description say so. A way would be the egress proxy
-  (step 5) checking the addresses it connects to, on macOS too.
+- ~~**macOS: this machine's own addresses beyond loopback.**~~ Closed by the egress proxy (step 5): a run reaches
+  the network only through it, and `Egress::refuses` refuses this machine's own addresses on both systems (G7 in
+  the threat model); the risky ports at other hosts too, unless a host rule names the port (audit F3, 2026-10-17).
 - **Linux: own addresses read once a policy.** An address that comes up during a run (a bridge, a new lease) is
   beyond this machine to that run until its next policy.
 - **The fresh `/proc`'s cost under Landlock** (+0.2 s on a Gradle run 2 with a PID namespace, step 4's M4): a

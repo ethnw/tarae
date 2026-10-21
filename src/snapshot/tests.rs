@@ -111,7 +111,7 @@ fn what_a_run_changed_text_blobs_deleted_new_and_not_ignored_files() {
     std::fs::write(dir.join("src/new.txt"), "fresh\n").unwrap();
     std::fs::write(dir.join("untracked.txt"), "mine, changed\n").unwrap();
     std::fs::write(dir.join("build/out.o"), "built again\n").unwrap();
-    let Found { files: c, skipped, left_out, ignored_gone, protected, head } = before.since().unwrap();
+    let Found { files: c, skipped, left_out, ignored_gone, protected, head, .. } = before.since().unwrap();
     assert!(skipped.is_empty() && left_out == 0, "{skipped:?} {left_out}");
     assert_eq!(head, None, "HEAD stayed");
     assert!(protected.is_empty(), "no protected name made: {protected:?}");
@@ -251,6 +251,71 @@ fn ignored_files_a_run_deleted_are_named() {
     let found = before.since().unwrap();
     assert_eq!(found.ignored_gone, [".env.local", "build/"]);
     assert!(found.files.is_empty(), "nothing a tree has: {found:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// F1: below a folder of tools' output a run writes freely, and what's there runs later as the user (a test
+/// runner in `node_modules`, a virtualenv's bytecode, a library in `target/`). After a run that isn't a build or
+/// a check (`Before.outputs`), the programs, bytecode and libraries it changed there are named — by name and time
+/// alone, one line a folder, its first `CODE_SHOWN`; one there before, untouched, isn't, nor a text file. A
+/// build's run looks at none.
+#[test]
+fn code_a_run_changed_below_tools_output_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo("output-code");
+    std::fs::write(dir.join(".gitignore"), "build/\n.env.local\nnode_modules/\n.venv/\n").unwrap();
+    let put = |rel: &str, exec: bool| {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "stand-in\n").unwrap();
+        if exec {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    };
+    let old = put("node_modules/old/bin/old.js", true);
+    let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&old).unwrap().set_modified(hour_ago).unwrap();
+    put(".venv/notes.txt", false);
+    let mut before = Before::take(&dir);
+    before.outputs = true;
+    put("node_modules/jest/bin/jest.js", true);
+    put(".venv/lib/python3.12/site-packages/m/__pycache__/m.cpython-312.pyc", false);
+    put(".venv/lib/libx.dylib", false);
+    put(".venv/lib/x.so", false);
+    put(".venv/bin/python", true);
+    put(".venv/notes.txt", false);
+    let found = before.since().unwrap().output_code;
+    let first = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        found,
+        [
+            OutputCode {
+                folder: ".venv/".into(),
+                count: 4,
+                first: first(&[
+                    ".venv/bin/python",
+                    ".venv/lib/libx.dylib",
+                    ".venv/lib/python3.12/site-packages/m/__pycache__/m.cpython-312.pyc"
+                ]),
+                cut: false,
+            },
+            OutputCode {
+                folder: "node_modules/".into(),
+                count: 1,
+                first: first(&["node_modules/jest/bin/jest.js"]),
+                cut: false,
+            },
+        ]
+    );
+    let said = OutputCode::said(&found);
+    assert!(
+        said.contains("  .venv/: 4 — .venv/bin/python, .venv/lib/libx.dylib, ")
+            && said.contains(", and 1 more\n"),
+        "{said}"
+    );
+    before.outputs = false;
+    assert!(before.since().unwrap().output_code.is_empty(), "a build's: not looked at");
     std::fs::remove_dir_all(&dir).ok();
 }
 

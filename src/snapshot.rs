@@ -508,6 +508,11 @@ pub struct Before {
     /// The commits every ref named (`tips`) — what a move of HEAD can have come from (`head_moved`). None:
     /// git couldn't say.
     pub refs: Option<Vec<String>>,
+    /// When it was taken: what changed since is the run's (`output_code`).
+    pub started: std::time::SystemTime,
+    /// Whether the code changed below tools' output is looked for (`output_code`) — not after a build or a
+    /// check, whose output it is.
+    pub outputs: bool,
 }
 
 /// What a run changed (`Before::since`): the files, those it can't take back (named — `changes`), how many
@@ -522,6 +527,96 @@ pub struct Found {
     pub ignored_gone: Vec<String>,
     pub protected: Vec<Made>,
     pub head: Option<HeadMove>,
+    pub output_code: Vec<OutputCode>,
+}
+
+/// How many of a folder's changed programs, bytecode and libraries the run's report names (`OutputCode`).
+const CODE_SHOWN: usize = 3;
+
+/// Entries a folder of tools' output is looked through for code at most (`output_code`) — names and times only;
+/// past it the report says so.
+const CODE_WALK_MAX: usize = 200_000;
+
+/// What a run changed below one ignored folder of tools' output (`outputs`, from the root) that runs later as the
+/// user — programs (an executable bit), Python's bytecode, libraries (`.so`, `.dylib`): F1 — the sandbox lets runs
+/// write there, as srt and Codex do. Found by name and time alone (`Before.started`), nothing read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputCode {
+    /// The folder, as git lists it (`target/`).
+    pub folder: String,
+    pub count: usize,
+    /// The first `CODE_SHOWN`, sorted.
+    pub first: Vec<String>,
+    /// Past `CODE_WALK_MAX` entries: not looked through whole.
+    pub cut: bool,
+}
+
+impl OutputCode {
+    /// The run's report on them, one line a folder — "" for none.
+    pub fn said(all: &[OutputCode]) -> String {
+        if all.is_empty() {
+            return String::new();
+        }
+        let mut s = "Below tools' output, where the sandbox lets runs write, it changed programs, bytecode or \
+                     libraries — what the user's own builds, tests and tools load later, outside the sandbox:\n"
+            .to_string();
+        for c in all {
+            let more = c.count - c.first.len();
+            let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+            let cut = match c.cut {
+                true => format!(" (past {CODE_WALK_MAX} entries: not looked through whole)"),
+                false => String::new(),
+            };
+            s.push_str(&format!("  {}: {} — {}{more}{cut}\n", c.folder, c.count, c.first.join(", ")));
+        }
+        s
+    }
+}
+
+/// `OutputCode` for each ignored folder of tools' output among `ignored` (git's entries after the run: a folder
+/// one entry — one of tools' output inside another ignored folder isn't looked at), changed `since`.
+fn output_code(root: &Path, ignored: &[String], since: std::time::SystemTime) -> Vec<OutputCode> {
+    use std::os::unix::fs::PermissionsExt;
+    let outputs = crate::sandbox::outputs();
+    let code = |name: &std::ffi::OsStr, mode: u32| {
+        let ext = Path::new(name).extension().and_then(|e| e.to_str());
+        mode & 0o111 != 0 || matches!(ext, Some("pyc" | "so" | "dylib"))
+    };
+    let mut out = Vec::new();
+    for folder in ignored.iter().filter(|e| e.ends_with('/')) {
+        if !Path::new(folder).iter().any(|p| outputs.iter().any(|o| p == o.as_str())) {
+            continue;
+        }
+        let (mut found, mut seen, mut todo) = (Vec::new(), 0, vec![root.join(folder)]);
+        // (no link followed: a `DirEntry`'s metadata is the entry's own)
+        'walk: while let Some(d) = todo.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for e in entries.flatten() {
+                seen += 1;
+                if seen > CODE_WALK_MAX {
+                    break 'walk;
+                }
+                let Ok(m) = e.metadata() else { continue };
+                if m.is_dir() {
+                    todo.push(e.path());
+                } else if m.is_file()
+                    && m.modified().is_ok_and(|t| t >= since)
+                    && code(&e.file_name(), m.permissions().mode())
+                    && let Ok(rel) = e.path().strip_prefix(root)
+                {
+                    found.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let cut = seen > CODE_WALK_MAX;
+        if !found.is_empty() || cut {
+            crate::sorting::sort(&mut found);
+            let count = found.len();
+            found.truncate(CODE_SHOWN);
+            out.push(OutputCode { folder: folder.clone(), count, first: found, cut });
+        }
+    }
+    out
 }
 
 /// A name a run made that's asked about (`Found.protected`), from the project's root, and what it holds
@@ -786,9 +881,11 @@ pub fn ignored(root: &Path) -> Result<Vec<String>, String> {
 impl Before {
     /// Taken now (on a worker).
     pub fn take(root: &Path) -> Before {
+        let started = std::time::SystemTime::now();
         let ignored = ignored(root).ok();
         let (head, refs) = (head(root), tips(root));
-        Before { root: root.to_path_buf(), tree: snap(root), wrote: Vec::new(), ignored, head, refs }
+        let (tree, wrote) = (snap(root), Vec::new());
+        Before { root: root.to_path_buf(), tree, wrote, ignored, head, refs, started, outputs: false }
     }
 
     /// What the run changed: the checkout taken again and compared (on a worker) — Err: it can't tell.
@@ -796,7 +893,12 @@ impl Before {
         let then = self.tree.as_ref().map_err(String::clone)?;
         let now = snap(&self.root)?;
         let left_out = then.left_out.max(now.left_out);
-        let (ignored_gone, ignored_new) = match (&self.ignored, ignored(&self.root)) {
+        let now_ignored = ignored(&self.root);
+        let output_code = match (&now_ignored, self.outputs) {
+            (Ok(is), true) => output_code(&self.root, is, self.started),
+            _ => Vec::new(),
+        };
+        let (ignored_gone, ignored_new) = match (&self.ignored, now_ignored) {
             (Some(was), Ok(is)) => {
                 let set = |v: &[String]| v.iter().cloned().collect::<std::collections::HashSet<String>>();
                 let (was_set, is_set) = (set(was), set(&is));
@@ -832,7 +934,7 @@ impl Before {
             }
             _ => None,
         };
-        Ok(Found { files, skipped, left_out, ignored_gone, protected, head })
+        Ok(Found { files, skipped, left_out, ignored_gone, protected, head, output_code })
     }
 }
 

@@ -344,10 +344,10 @@ fn finish(ed: &mut Editor, n: u64) {
         .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
         .filter(|(p, _)| all.iter().any(|f| f.0 == *p))
         .collect();
-    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
+    let (root, keys, lines) = (project_root(ed), crate::reads::Keys::of(ed), Lines::of(ed));
     let (call, server, tests) = (a.call, a.server, name.tests);
     ed.events.jobs().spawn(move || {
-        let places = crate::lsp_editor::read_places(all, &open);
+        let places = crate::lsp_editor::read_places(all, &open, Some(&lines));
         let mut t = crate::testcode::Tests::new(&root);
         t.prefetch(&places.iter().map(|p| p.path.clone()).collect::<Vec<_>>());
         let places: Vec<(Place, bool)> = places
@@ -1108,11 +1108,69 @@ fn finish_defs(ed: &mut Editor, n: u64) {
         .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
         .filter(|(p, _)| all.contains(&p))
         .collect();
-    let (root, keys) = (project_root(ed), crate::reads::Keys::of(ed));
+    let (root, keys, lines) = (project_root(ed), crate::reads::Keys::of(ed), Lines::of(ed));
     ed.events.jobs().spawn(move || {
-        let text = defs_text(&root, &a, &servers, &open, &keys);
+        let text = defs_text(&root, &a, &servers, &open, &keys, &lines);
         move |ed: &mut Editor| answer(ed, a.call, Ok(text))
     });
+}
+
+/// What a place's line says when it isn't read for Claude: outside the project, where the read gate would ask.
+pub const NOT_READ: &str = "(outside the project — not read)";
+
+/// How `references` and `definition` read a place's file for Claude (F2): opened first (`paths::open_read` — a
+/// FIFO doesn't wait), judged by the descriptor's own path — inside the project by its real path (a link in it
+/// leading out isn't), or outside where the read gate lets Read go unasked (`reads::Gate::judge`) — and read
+/// from that descriptor. A worker's.
+pub struct Lines {
+    root: PathBuf,
+    real: std::sync::OnceLock<Option<PathBuf>>,
+    gate: crate::reads::Gate,
+}
+
+impl Lines {
+    pub fn new(root: PathBuf, gate: crate::reads::Gate) -> Lines {
+        Lines { root, real: std::sync::OnceLock::new(), gate }
+    }
+
+    /// For session `ed.session`'s chat.
+    pub fn of(ed: &Editor) -> Lines {
+        Lines::new(project_root(ed), crate::reads::Gate::of(ed, Vec::new()))
+    }
+
+    /// Whether what's at `real` (a real path) is read.
+    fn may(&self, real: &Path) -> bool {
+        let root = self.real.get_or_init(|| std::fs::canonicalize(&self.root).ok());
+        root.as_ref().is_some_and(|r| real.starts_with(r)) || self.gate.judge(real, true).is_ok()
+    }
+
+    /// Whether an open buffer of `path` is read — where its file really is, judged (one not on disk yet: by its
+    /// path).
+    pub fn buffer(&self, path: &Path) -> bool {
+        match std::fs::canonicalize(path) {
+            Ok(real) => self.may(&real),
+            Err(_) => path.starts_with(&self.root),
+        }
+    }
+
+    /// `path`'s lines — None: not read. A file gone, or not a file: no lines (a place in the project isn't
+    /// outside for being gone); one outside that won't open isn't read.
+    pub fn read(&self, path: &Path) -> Option<Vec<String>> {
+        let Ok(o) = crate::paths::open_read(path) else {
+            return path.starts_with(&self.root).then(Vec::new);
+        };
+        self.may(&o.real).then(|| lines_of(o))
+    }
+}
+
+/// What a file opened with `paths::open_read` holds, line by line — none when it isn't a regular file.
+pub fn lines_of(o: crate::paths::Opened) -> Vec<String> {
+    use std::io::Read;
+    let mut b = Vec::new();
+    if !o.meta.is_file() || (&o.file).read_to_end(&mut b).is_err() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&b).lines().map(str::to_string).collect()
 }
 
 /// The answer: how many and from which server, then the places by file — each its signature (one outside
@@ -1124,27 +1182,30 @@ fn defs_text(
     servers: &str,
     open: &HashMap<PathBuf, ropey::Rope>,
     keys: &crate::reads::Keys,
+    lines: &Lines,
 ) -> String {
+    // (where a place is listed — what's read is `lines`')
     let real = std::fs::canonicalize(root).ok();
     let inside = |p: &Path| p.starts_with(root) || real.as_ref().is_some_and(|r| p.starts_with(r));
     let read = |found: &[(PathBuf, usize, String)]| -> Vec<(Place, String)> {
-        let mut files: HashMap<&Path, Vec<String>> = HashMap::new();
+        let mut files: HashMap<&Path, Option<Vec<String>>> = HashMap::new();
         let mut out: Vec<(Place, String)> = found
             .iter()
             .map(|(path, line, what)| {
-                let text = if !inside(path) {
-                    "(outside the project — not read)".to_string()
-                } else if keys.shut(path) {
+                let text = if keys.shut(path) {
                     crate::reads::KEY_LINE.to_string()
                 } else if let Some(rope) = open.get(path) {
-                    signature(&|k| (k < rope.len_lines()).then(|| rope.line(k).to_string()), *line)
+                    match lines.buffer(path) {
+                        true => {
+                            signature(&|k| (k < rope.len_lines()).then(|| rope.line(k).to_string()), *line)
+                        }
+                        false => NOT_READ.to_string(),
+                    }
                 } else {
-                    let lines = files.entry(path.as_path()).or_insert_with(|| {
-                        std::fs::read(path)
-                            .map(|b| String::from_utf8_lossy(&b).lines().map(str::to_string).collect())
-                            .unwrap_or_default()
-                    });
-                    signature(&|k| lines.get(k).cloned(), *line)
+                    match files.entry(path.as_path()).or_insert_with(|| lines.read(path)) {
+                        Some(read) => signature(&|k| read.get(k).cloned(), *line),
+                        None => NOT_READ.to_string(),
+                    }
                 };
                 (Place { path: path.clone(), line: *line, col: 0, text }, what.clone())
             })
@@ -2517,15 +2578,50 @@ mod tests {
             DefAsk::new(Call::test(0), "Drop".into(), Goto::Implementation, None, vec![], vec!["ra".into()]);
         a.found = outside.iter().map(|p| (PathBuf::from(p), 9, String::new())).collect();
         let open = HashMap::new();
-        let text =
-            defs_text(Path::new("/p"), &a, "ra", &open, &crate::reads::Keys::none_opened(Path::new("/p")));
+        let lines = || Lines::new(PathBuf::from("/p"), crate::reads::Gate::for_test(Path::new("/p")));
+        let keys = || crate::reads::Keys::none_opened(Path::new("/p"));
+        let text = defs_text(Path::new("/p"), &a, "ra", &open, &keys(), &lines());
         assert!(text.starts_with("3 implementations (ra):\n/h/.cargo/"), "all outside: listed — {text}");
         assert!(text.contains("  10: (outside the project — not read)"), "{text}");
         a.found.push((PathBuf::from("/p/a.rs"), 2, String::new()));
         assert_eq!(
-            defs_text(Path::new("/p"), &a, "ra", &open, &crate::reads::Keys::none_opened(Path::new("/p"))),
+            defs_text(Path::new("/p"), &a, "ra", &open, &keys(), &lines()),
             "1 implementation (ra); 3 more outside the project (hashbrown 2, std 1), not listed:\na.rs\n  3:"
         );
+    }
+
+    /// What `references` and `definition` read for Claude is judged by the opened file's own path (F2): a link in
+    /// the project leading out isn't inside — its line not read, from disk or from an open buffer — the project's
+    /// own file is, and so is one outside that the read gate lets go unasked (a grant standing in).
+    #[test]
+    fn a_place_through_a_link_out_of_the_project_isnt_read() {
+        use crate::reads::Gate;
+        let s = crate::scratch::Scratch::new("nav-link-out");
+        let base = std::fs::canonicalize(s.path()).unwrap();
+        let (root, out) = (base.join("p"), base.join("out"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(out.join("b.rs"), "fn b() { stand_in_outside() }\n").unwrap();
+        std::os::unix::fs::symlink(&out, root.join("link")).unwrap();
+        let (a, b) = (root.join("a.rs"), root.join("link/b.rs"));
+        let texts = |gate: Gate, open: &HashMap<PathBuf, ropey::Rope>| -> Vec<String> {
+            let lines = Lines::new(root.clone(), gate);
+            let found = vec![(a.clone(), 0, 0), (b.clone(), 0, 0)];
+            crate::lsp_editor::read_places(found, open, Some(&lines)).into_iter().map(|p| p.text).collect()
+        };
+        let none = HashMap::new();
+        assert_eq!(texts(Gate::for_test(&root), &none), ["fn a() {}", NOT_READ]);
+        let open = HashMap::from([(b.clone(), ropey::Rope::from_str("fn b() { stand_in_outside() }\n"))]);
+        assert_eq!(texts(Gate::for_test(&root), &open), ["fn a() {}", NOT_READ], "nor its open buffer");
+        let granted = texts(Gate::for_test(&root).granting(out.clone()), &none);
+        assert_eq!(granted, ["fn a() {}", "fn b() { stand_in_outside() }"], "where the gate lets it go");
+        let mut d =
+            DefAsk::new(Call::test(0), "b".into(), Goto::Implementation, None, vec![], vec!["ra".into()]);
+        d.found = vec![(b.clone(), 0, String::new())];
+        let lines = Lines::new(root.clone(), Gate::for_test(&root));
+        let text = defs_text(&root, &d, "ra", &none, &crate::reads::Keys::none_opened(&root), &lines);
+        assert!(text.contains(NOT_READ) && !text.contains("stand_in_outside"), "{text}");
     }
 
     /// The declaration's file first and its row first in it, marked; the rest by file then line; one row a

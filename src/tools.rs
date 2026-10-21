@@ -1317,6 +1317,30 @@ fn allowed_words(words: &[String], extra: &[String]) -> bool {
     rules.any(|rule| rule_matches(words, &rule_env(&rule).1))
 }
 
+/// Whether every command in `cmd` builds or tests the project — a check (`is_check`), or one of the packs'
+/// `builders` (`cargo build`, `go generate` …; a `cd` aside): what it makes below tools' output is its output, not
+/// named after it (`snapshot::OutputCode`). A line it can't read isn't one.
+pub fn builds(cmd: &str) -> bool {
+    if is_check(cmd) {
+        return true;
+    }
+    let Some(parts) = crate::readonly::parse(cmd) else { return false };
+    let mut any = false;
+    for p in &parts {
+        let crate::readonly::Part::Cmd(w) = p else { continue };
+        let Some(first) = w.first() else { continue };
+        let name = first.text.rsplit('/').next().unwrap_or_default();
+        if name == "cd" || crate::readonly::says(w) {
+            continue;
+        }
+        if !crate::sinceyes::builder(name) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 /// Whether a command Claude runs is a check or a build — every command in its line one of the packs'
 /// `checks` (a `cd` aside). Only those feed the user's list; a grep of Claude's looking around doesn't replace
 /// it (#28).
@@ -4222,22 +4246,32 @@ fn run_changes(
 
 fn run_changes_now(
     ed: &mut Editor,
-    snap: crate::snapshot::Before,
+    mut snap: crate::snapshot::Before,
     generation: u64,
     cmd: String,
     told: impl FnOnce(&mut Editor, String) + Send + 'static,
 ) {
+    // (what a build or a check makes below tools' output is its output: looked for after the rest — F1)
+    snap.outputs = !builds(&cmd);
     ed.events.jobs().spawn(move || {
         let found = snap.since();
         move |ed: &mut Editor| {
             let said = match found {
-                Ok(crate::snapshot::Found { files, skipped, left_out, ignored_gone, protected, head })
-                    if !files.is_empty()
-                        || !skipped.is_empty()
-                        || left_out > 0
-                        || !ignored_gone.is_empty()
-                        || !protected.is_empty()
-                        || head.is_some() =>
+                Ok(crate::snapshot::Found {
+                    files,
+                    skipped,
+                    left_out,
+                    ignored_gone,
+                    protected,
+                    head,
+                    output_code,
+                }) if !files.is_empty()
+                    || !skipped.is_empty()
+                    || left_out > 0
+                    || !ignored_gone.is_empty()
+                    || !protected.is_empty()
+                    || head.is_some()
+                    || !output_code.is_empty() =>
                 {
                     let root = ed.session.root.clone();
                     let named: Vec<String> = files
@@ -4315,6 +4349,7 @@ fn run_changes_now(
                             some_named(&ignored_gone)
                         ));
                     }
+                    out.push_str(&crate::snapshot::OutputCode::said(&output_code));
                     // (kept for the card before its next run — Landlock couldn't refuse them)
                     // (one kept on its card, holding what it held then: not asked about again)
                     let kept = &ed.session.made_kept;
@@ -7080,6 +7115,21 @@ mod tests {
         // #117: a reader into an interpreter is the interpreter's run — never unasked by the built-in rules
         for c in ["nm -n -C x | awk -f y.awk", "sh -c 'nm -n x | awk -f y.awk'", "cat a | sed -f s.sed"] {
             assert!(!super::runs_unasked(c, &[]), "{c}");
+        }
+    }
+
+    /// F1: a build's or a check's output below tools' output is its own — what other runs change there is named
+    /// (`snapshot::OutputCode`): a line of builders and checks (a `cd` aside) builds; an interpreter, a script
+    /// or a copy doesn't, nor a line it can't read.
+    #[test]
+    fn what_builds_is_the_checks_and_the_builders() {
+        for c in ["cargo build", "cd sub && cargo test", "cargo fmt && cargo clippy", "make -f x.mk"] {
+            assert!(super::builds(c), "{c}");
+        }
+        for c in
+            ["python3 -c 'print(1)'", "./build.sh", "cp a target/debug/x", "cargo build; cp a b", "echo $X"]
+        {
+            assert!(!super::builds(c), "{c}");
         }
     }
 

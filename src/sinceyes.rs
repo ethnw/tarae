@@ -423,7 +423,7 @@ fn with_runs(own: Changed, runs: Option<Result<Vec<String>, String>>) -> Changed
 const BUILDERS_FLOOR: [&str; 3] = ["ninja", "bazel", "xcodebuild"];
 
 /// Whether `name` is a program that builds or tests (`BUILDERS_FLOOR`, the packs' `builders`).
-fn builder(name: &str) -> bool {
+pub(crate) fn builder(name: &str) -> bool {
     BUILDERS_FLOOR.contains(&name) || crate::sandboxpack::get().builders.iter().any(|b| b == name)
 }
 

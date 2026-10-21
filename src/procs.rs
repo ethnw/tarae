@@ -1099,12 +1099,17 @@ pub fn tool_schema() -> serde_json::Value {
 
 /// A `procs` call (#97: Claude ran ps, pgrep and lsof through `run`, a card each): two looks
 /// `TOOL_WINDOW` apart on a worker, the rows `:procs` makes of them, each process's command line and
-/// folder — answered with `report`.
+/// folder as `told` lets them go — answered with `report`.
 pub fn tool_call(ed: &mut Editor, call: crate::tools::Call, args: &serde_json::Value) {
     let all = args["all"].as_bool() == Some(true);
     let (known, groups, held) = (ed.procs_known(), ed.procs_groups(), ed.procs.held.clone());
     let queued = ed.procs_queued();
     let (me, name) = (ed.session.id, ed.session.label().to_string());
+    // (the user's own tasks, every session's: what they run is theirs, as the terminal's is)
+    let users: Vec<u32> = std::iter::once(&ed.session)
+        .chain(&ed.sessions)
+        .filter_map(|l| l.task_run.as_ref().filter(|r| !r.by_claude)?.pid())
+        .collect();
     ed.events.jobs().spawn(move || {
         let mut s = Sampler::default();
         s.sample(std::process::id());
@@ -1114,9 +1119,8 @@ pub fn tool_call(ed: &mut Editor, call: crate::tools::Call, args: &serde_json::V
         let mut rows = rows(&sample, &known, std::process::id(), &held, &groups, now);
         with_queued(&mut rows, &queued, &groups);
         let mine = |r: &Row| all || groups.is_empty() || r.session == Some(me);
-        let shown: Vec<Row> = rows.into_iter().filter(mine).collect();
-        let extra =
-            shown.iter().filter(|r| r.pid > 0).map(|r| (r.pid, (command(r.pid), cwd(r.pid)))).collect();
+        let mut shown: Vec<Row> = rows.into_iter().filter(mine).collect();
+        let extra = told(&mut shown, &users, command, cwd);
         let scope = match (all, groups.is_empty()) {
             (false, false) => format!("session {name}"),
             _ => "every session".to_string(),
@@ -1124,6 +1128,37 @@ pub fn tool_call(ed: &mut Editor, call: crate::tools::Call, args: &serde_json::V
         let text = report(&shown, &extra, &scope);
         move |ed: &mut Editor| crate::tools::answer(ed, call, Ok(text))
     });
+}
+
+/// What the tool says of each row's process, by pid: its command line and folder. The user's own — the
+/// terminal's and their tasks' (`users`: the tasks' pids), and all they started — by the program's name alone, no
+/// folder, their `what` left out too (a shell's title is the command it runs, a task's its command line): what
+/// the user typed never reaches Claude. The rest's command lines and `what` as `tokens::redacted` leaves them.
+fn told(
+    rows: &mut [Row],
+    users: &[u32],
+    command: impl Fn(u32) -> Option<String>,
+    cwd: impl Fn(u32) -> Option<PathBuf>,
+) -> HashMap<u32, (Option<String>, Option<PathBuf>)> {
+    let mut out = HashMap::new();
+    let mut theirs = false;
+    for r in rows.iter_mut() {
+        if r.depth == 0 {
+            theirs = r.kind == Kind::Terminal || (r.kind == Kind::Task && users.contains(&r.pid));
+        }
+        if theirs {
+            r.what.clear();
+            if r.pid > 0 {
+                out.insert(r.pid, (Some(r.program.clone()), None));
+            }
+            continue;
+        }
+        r.what = crate::tokens::redacted(&r.what);
+        if r.pid > 0 {
+            out.insert(r.pid, (command(r.pid).map(|c| crate::tokens::redacted(&c)), cwd(r.pid)));
+        }
+    }
+    out
 }
 
 /// What the tool answers: a line on what's measured, then each row as `:procs` lists it — a session's
@@ -2490,15 +2525,14 @@ mod tests {
         assert_eq!(command(u32::MAX - 1), None, "no such process: nothing made up");
     }
 
-    /// #97: Claude's `procs` answers what `:procs` shows, no card — this session's processes (a command
-    /// running in it: pid, parent, age, CPU, footprint and resident memory, command line, folder), not
-    /// another session's unless `all` asks.
+    /// #97: Claude's `procs` answers what `:procs` shows, no card — this session's processes (a task of the
+    /// user's running in it: pid, parent, age, CPU, footprint and resident memory, its program alone — what the
+    /// user runs isn't Claude's to read, F6), not another session's unless `all` asks.
     #[test]
     fn claudes_procs_tool_says_what_procs_shows() {
         use serde_json::json;
-        let base = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-procs-tool-{}", std::process::id()));
+        let scratch = crate::scratch::Scratch::new("procs-tool");
+        let base = std::fs::canonicalize(scratch.path()).unwrap();
         let (here, there) = (base.join("here"), base.join("there"));
         for d in [&here, &there] {
             std::fs::create_dir_all(d).unwrap();
@@ -2535,10 +2569,10 @@ mod tests {
         let mine = ask(&mut ed, 970, json!({}));
         assert!(ed.offers.is_empty(), "no card");
         assert!(mine.starts_with("The editor's processes for session here"), "{mine}");
-        assert!(mine.contains("sleeps-here — sleep 20"), "{mine}");
+        assert!(mine.contains("\nsleeps-here\n"), "{mine}");
         // (`sh -c` with one command runs it in its own place)
-        assert!(mine.contains("command: sleep 20") || mine.contains("command: sh -c sleep 20"), "{mine}");
-        assert!(mine.contains(&format!("folder: {}", crate::allow::tilde(&here))), "{mine}");
+        assert!(mine.contains("command: sleep\n") || mine.contains("command: sh\n"), "{mine}");
+        assert!(!mine.contains("sleep 20") && !mine.contains("folder: "), "the user's command: {mine}");
         let pid = ed.session.task_run.as_ref().and_then(|r| r.pid()).unwrap();
         assert!(mine.contains(&format!("pid {pid} · parent {}", std::process::id())), "{mine}");
         assert!(mine.contains("· up ") && mine.contains("· cpu "), "{mine}");
@@ -2552,7 +2586,6 @@ mod tests {
         assert!(every.contains("sleeps-here") && every.contains("sleeps-there"), "{every}");
         ed.session.task_run = None;
         ed.with_session(other, |ed| ed.session.task_run = None);
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// #100 as met: a run of Claude's in a session behind whose program outlives its panel (closed — the
@@ -2718,6 +2751,67 @@ mod tests {
         );
         assert_eq!(rows[2].under, Kind::Lsp(7), "a child is judged as what it's under");
         assert_eq!(rows[1].up, Some(Duration::from_secs(60)));
+    }
+
+    /// The `procs` tool never hands Claude what the user typed: what runs under the terminal or a task of the
+    /// user's — a stand-in `sh` whose own command line holds `tarae-fake-token` — by its program's name alone, no
+    /// folder, the terminal's title and the task's command left out; Claude's own run's command line and the
+    /// rest with their tokens taken out (`tokens::redacted`).
+    #[test]
+    fn the_tool_says_the_users_processes_by_their_program_alone() {
+        // (a second command keeps sh from exec'ing `sleep` in its place: its own words stay on its command line)
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 9; true", "tarae-fake-token"])
+            .spawn()
+            .unwrap();
+        struct Ends(std::process::Child);
+        impl Drop for Ends {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Ends(child);
+        let pid = child.0.id();
+        let by = Instant::now() + Duration::from_secs(5);
+        while !command(pid).is_some_and(|c| c.contains("tarae-fake-token")) && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(command(pid).is_some_and(|c| c.contains("tarae-fake-token")), "{:?}", command(pid));
+        let known = |pid, kind, title: &str, what: &str| Known {
+            pid,
+            kind,
+            title: title.into(),
+            what: what.into(),
+            session: None,
+            at: None,
+        };
+        let s = sample(vec![
+            os(1, 0, "tarae"),
+            os(5, 1, "zsh"),
+            os(pid, 5, "sh"),
+            os(7, 1, "sh"),
+            os(8, 1, "make"),
+        ]);
+        let known = [
+            known(5, Kind::Terminal, "terminal", "deploy --password tarae-fake-token"),
+            known(7, Kind::Task, "claude's command", "curl --api-key=tarae-fake-token x"),
+            known(8, Kind::Task, "deploy", "make deploy TOKEN=tarae-fake-token"),
+        ];
+        let mut rows = rows(&s, &known, 1, &[], &[], 1_060);
+        let lines = |p: u32| match p {
+            7 => Some("curl --api-key=tarae-fake-token x".to_string()),
+            8 => Some("make deploy tarae-fake-token".to_string()),
+            5 => Some("zsh -l tarae-fake-token".to_string()),
+            p if p == pid => command(p),
+            _ => None,
+        };
+        let extra = told(&mut rows, &[8], lines, |_| Some(PathBuf::from("/w")));
+        let text = report(&rows, &extra, "every session");
+        assert!(!text.contains("tarae-fake-token"), "{text}");
+        assert!(text.contains("  command: sh\n") && text.contains("  command: make\n"), "{text}");
+        assert!(text.contains("command: curl --api-key=… x\n"), "Claude's own run, its token out: {text}");
+        drop(child);
     }
 
     /// Two sessions: what's shared stays on top (tarae, the spare claude, one tarae doesn't know); then each

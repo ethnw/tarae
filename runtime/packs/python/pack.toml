@@ -1,6 +1,10 @@
 # Python: basedpyright, pyright or pylsp, and ruff beside it; pytest from the project's root, with its
 # virtualenv's Python; debugpy to debug.
 
+# What runs later outside Claude's sandbox, in every project (`packs::protect`): bytecode beside its source —
+# your own `pytest` imports it. A run's Python writes its own elsewhere (`PYTHONPYCACHEPREFIX`, below); a
+# virtualenv's is tools' output, written as ever
+protect = ["__pycache__"]
 # The virtualenv, and compiled bytecode
 outputs = [".venv", "__pycache__"]
 # Read by pip, uv, poetry and pipenv as soon as they're on disk

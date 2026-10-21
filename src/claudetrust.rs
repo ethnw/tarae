@@ -13,7 +13,8 @@
 //! Answers go in its store (`$state/trust.json`), under `.claude/settings.json`'s place — a repository's
 //! checkouts share them.
 //! - Held: `COMMANDS` (shown whole), every `env` name (names only: a value may be a token — the digest still
-//!   covers it), every plugin `enabledPlugins` turns on.
+//!   covers it), every plugin `enabledPlugins` turns on, `cleanupPeriodDays` (when Claude Code deletes your
+//!   conversations — every project's; held back: yours, else `CLEANUP_DEFAULT`).
 //! - Shown, not asked: `HELD`, which the chat's own `--settings` already turns off (`disableAllHooks` — it
 //!   outranks the project's files).
 //! - Held back (`n`), or a command too long to show (never trusted, as `trust.rs`): claude starts with each such
@@ -86,6 +87,14 @@ pub const COMMANDS: [&str; 5] =
 /// off and narrows the other three to managed settings (Claude Code's settings reference, `disableAllHooks`).
 pub const HELD: [&str; 4] = ["hooks", "statusLine", "subagentStatusLine", "fileSuggestion"];
 
+/// The setting for how many days Claude Code keeps your conversations: a project's would decide for every
+/// project's (`0` deletes them all) — held.
+const CLEANUP: &str = "cleanupPeriodDays";
+
+/// Claude Code's own `cleanupPeriodDays` when no file sets it (https://code.claude.com/docs/en/settings,
+/// `cleanupPeriodDays`: default 30) — what a project's is held back to when yours sets none.
+pub const CLEANUP_DEFAULT: u64 = 30;
+
 /// A file bigger than this isn't read: never trusted, left out.
 const READ_MAX: u64 = 1 << 20;
 
@@ -102,6 +111,8 @@ pub enum Kind {
     Allow,
     /// A `permissions.additionalDirectories` entry: a folder Claude reads as its own — held as `Allow`.
     Dir,
+    /// `cleanupPeriodDays` (`CLEANUP`), its value as written.
+    Cleanup,
 }
 
 /// One thing a file sets that's held until trusted.
@@ -147,6 +158,8 @@ pub struct Baseline {
     pub yours: std::collections::BTreeSet<String>,
     /// Each name the files' `env` blocks set that's on `RESTORED`, and its value in tarae's environment.
     pub env: std::collections::BTreeMap<String, String>,
+    /// Your `cleanupPeriodDays`, as written — None: you set none.
+    pub cleanup: Option<String>,
 }
 
 /// The project's Claude settings as last read, and the answer for them.
@@ -239,6 +252,9 @@ fn read_one(file: &'static str, bytes: &[u8]) -> Result<Holds, String> {
         for (name, on) in plugins.iter().filter(|(_, on)| on.as_bool() != Some(false)) {
             items.push(Item { file, kind: Kind::Plugin, key: name.clone(), value: on.to_string() });
         }
+    }
+    if let Some(days) = obj.get(CLEANUP) {
+        items.push(Item { file, kind: Kind::Cleanup, key: CLEANUP.into(), value: days.to_string() });
     }
     if let Some(p) = obj.get("permissions") {
         let p = p.as_object().ok_or("permissions isn't an object")?;
@@ -344,6 +360,7 @@ pub fn baseline(scan: Option<&Scan>, mine: &[Item], env: impl Fn(&str) -> Option
     for i in mine.iter().filter(|i| i.kind == Kind::Command) {
         b.commands.insert(i.key.clone(), i.value.clone());
     }
+    b.cleanup = mine.iter().rfind(|i| i.kind == Kind::Cleanup).map(|i| i.value.clone());
     let named = scan.into_iter().flat_map(|s| &s.items).filter(|i| i.kind == Kind::Env);
     for name in named.map(|i| &i.key) {
         if mine.iter().any(|i| i.kind == Kind::Env && &i.key == name) {
@@ -422,6 +439,10 @@ pub fn overrides(seen: &Seen) -> (Map<String, Json>, Vec<&'static str>) {
             Kind::Allow => ask.push(Json::String(i.key.clone())),
             // (a folder can't be taken back by an override: its file isn't loaded)
             Kind::Dir => left_out.extend(source(i.file)),
+            Kind::Cleanup => {
+                let yours = seen.base.cleanup.as_deref().and_then(|v| serde_json::from_str(v).ok());
+                out.insert(CLEANUP.into(), yours.unwrap_or(Json::from(CLEANUP_DEFAULT)));
+            }
         }
     }
     if !ask.is_empty() {
@@ -654,6 +675,11 @@ pub fn question(seen: &Seen) -> (String, std::ops::Range<usize>) {
             Kind::Plugin => format!("  {}: turns on the plugin {}", i.file, line(&i.key)),
             Kind::Allow => format!("  {}: lets {} run unasked", i.file, line(&i.key)),
             Kind::Dir => format!("  {}: adds the folder {} for Claude", i.file, line(&i.key)),
+            Kind::Cleanup => format!(
+                "  {}: {CLEANUP} = {} (Claude Code deletes your conversations older than that, every project's)",
+                i.file,
+                line(&i.value)
+            ),
         });
     }
     for (file, why) in &scan.unreadable {
@@ -678,8 +704,8 @@ pub fn detail(seen: &Seen) -> String {
     }
     lines.push(String::new());
     lines.push(
-        "Held back, Claude runs with these emptied — PATH, SHELL and the locale your own — the plugins off; the \
-         rest of the files still apply. No value of yours goes on Claude's command line for a name they chose; a \
+        "Held back, Claude runs with these emptied — PATH, SHELL and the locale your own — the plugins off, \
+         cleanupPeriodDays yours (else Claude Code's default, 30 days); the rest of the files still apply. No value of yours goes on Claude's command line for a name they chose; a \
          file that sets a variable your own Claude settings set too isn't loaded at all, so yours applies."
             .to_string(),
     );

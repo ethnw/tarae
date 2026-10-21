@@ -326,6 +326,27 @@ fn the_never_reached_are_refused_by_the_proxy() {
     assert_eq!(good.accepted.load(Ordering::SeqCst), 1, "its one reachable address");
 }
 
+/// A risky port (`sandbox::RISKY_PORTS`: Docker's API, kubelet …) is reached only where a host's rule names it
+/// with that port: not with any host allowed, nor by a rule naming the host alone — refused at once, said, and
+/// the outside not reached; `docker.test:2375` or `*.test:2375` lets it through.
+#[test]
+fn a_risky_port_is_reached_only_where_a_rule_names_it() {
+    let out = outside(echo);
+    let (resolve, _) = resolver(vec![("docker.test", vec![vec![out.at]])]);
+    let f = start(resolve, limits());
+    for rules in [Egress { any: true, ..rules(&[]) }, Egress { any: true, ..rules(&["docker.test"]) }] {
+        let (mut c, d) = connection(&f.proxy, 1, 1, rules);
+        assert_eq!(ask(&mut c, &connect_head("docker.test:2375")), 403);
+        let target = said(&d);
+        assert!(target.starts_with("docker.test:2375: ") && target.contains("Docker API"), "{target}");
+    }
+    assert_eq!(out.accepted.load(Ordering::SeqCst), 0, "nothing connected");
+    for named in ["docker.test:2375", "*.test:2375"] {
+        let (mut c, _) = connection(&f.proxy, 1, 1, rules(&[named]));
+        assert_eq!(ask(&mut c, &connect_head("docker.test:2375")), 200, "{named}");
+    }
+}
+
 /// A tunnel's ClientHello must name the host its CONNECT asked for: another name, or bytes that aren't TLS,
 /// close it — said — and none of them reaches the outside.
 #[test]

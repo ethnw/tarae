@@ -462,12 +462,23 @@ fn apply_source(
     }
     if let Some(Value::Table(langs)) = table.get("lang") {
         for (lang, v) in langs {
+            let lsp = &config.editor.lsp;
+            // (a server the language doesn't list yet starts a program — rust-analyzer runs build scripts — so only
+            // once trusted; a list that only narrows goes in)
+            let (had, had_also) = (crate::lsp::names(lang, lsp), crate::lsp::also_names(lang, lsp));
             if let Some(list) = v.get("lsp").and_then(Value::as_array) {
-                let names = list.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
-                config.editor.lsp.languages.insert(lang.clone(), names);
+                let names: Vec<String> = list.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+                if names.iter().all(|n| had.contains(n)) || pass(format!("lang.{lang}.lsp"), &v["lsp"]) {
+                    config.editor.lsp.languages.insert(lang.clone(), names);
+                }
             }
             if let Some(list) = v.get("also").and_then(Value::as_array) {
                 let names: Vec<String> = list.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+                if !names.iter().all(|n| had_also.contains(n))
+                    && !pass(format!("lang.{lang}.also"), &v["also"])
+                {
+                    continue;
+                }
                 for n in &names {
                     if !config.editor.lsp.servers.contains_key(n) && crate::lsp::default_spec(n).is_none() {
                         warnings
@@ -1099,6 +1110,33 @@ Z = ["move_line_down", ":sh touch marker"]
         let (i, _) = load_from(None, Some(path.clone()), &store);
         assert_eq!(i.project.as_ref().unwrap().state, State::Ignored);
         assert_eq!(i.editor.restart_build, "");
+    }
+
+    /// What starts a language server waits for trust (G13: rust-analyzer runs a project's build scripts and proc
+    /// macros): `editor.lsp`, and a `[lang.*]` `lsp`/`also` naming a server the language doesn't list — a list
+    /// that only narrows goes in untrusted.
+    #[test]
+    fn what_starts_a_language_server_waits_for_trust() {
+        use crate::trust::Store;
+        let load = |name: &str, src: &str| {
+            let path = project_file(name, src);
+            let (c, _) = load_from(None, Some(path.clone()), &Store::default());
+            fs::remove_dir_all(path.parent().unwrap()).ok();
+            let held: Vec<String> =
+                c.project.map(|p| p.items.into_iter().map(|(k, _)| k).collect()).unwrap_or_default();
+            (held, c.editor.lsp)
+        };
+        let (held, _) = load("lsp-on", "[editor]\nlsp = true\n");
+        assert_eq!(held, ["editor.lsp"]);
+        let (held, lsp) = load("lsp-lsp", "[lang.toml]\nlsp = [\"rust-analyzer\"]\n");
+        assert_eq!(held, ["lang.toml.lsp"]);
+        assert!(!lsp.languages.contains_key("toml"), "{:?}", lsp.languages);
+        let (held, lsp) = load("lsp-also", "[lang.toml]\nalso = [\"rust-analyzer\"]\n");
+        assert_eq!(held, ["lang.toml.also"]);
+        assert!(!lsp.also.contains_key("toml"), "{:?}", lsp.also);
+        let (held, lsp) = load("lsp-narrow", "[lang.toml]\nlsp = []\nalso = []\n");
+        assert!(held.is_empty(), "{held:?}");
+        assert_eq!(lsp.languages["toml"], Vec::<String>::new());
     }
 
     /// `llm.sandbox-upstream` from a project file, all the way to a run's policy: held back until the project is

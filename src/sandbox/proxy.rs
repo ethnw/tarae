@@ -897,6 +897,20 @@ fn serve(c: Conn, shared: &Shared) {
              through an upstream proxy isn't caught)",
         ));
     }
+    // (where what listens runs what it's asked to: only a rule naming it with its port reaches it — never any
+    // host, a rule naming the host alone, or a card's yes)
+    if let Some((_, what)) = crate::sandbox::RISKY_PORTS.iter().find(|(p, _)| *p == port)
+        && !c.rules.names_port(&name, port)
+    {
+        let what = what.split_once(" — ").map_or(*what, |(what, _)| what);
+        return refuse(Refused::new(
+            403,
+            format!(
+                "a risky port ({what}) — reached only where llm.sandbox-hosts names it with its port: \
+                 {name}:{port}"
+            ),
+        ));
+    }
     // (a refusal the user's answer would lift: its own op — `:sandbox-blocked` offers the host)
     let refuse_host = |why: String| {
         let why = format!("{name}:{port}: {why}");

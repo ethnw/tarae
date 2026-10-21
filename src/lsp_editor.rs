@@ -169,28 +169,36 @@ pub struct Place {
 const PLACE_TEXT_MAX: usize = 240;
 
 /// The places' lines — open files from their buffers (`open`, what's on screen even unsaved), the rest
-/// read from disk (on a worker), each file once.
+/// read from disk (on a worker, `paths::open_read`: a FIFO doesn't wait), each file once. `lines`: for Claude,
+/// what it may read (`nav::Lines`) — a place it may not says `nav::NOT_READ`; None: the user's own list.
 pub fn read_places(
     found: Vec<(std::path::PathBuf, usize, usize)>,
     open: &HashMap<std::path::PathBuf, ropey::Rope>,
+    lines: Option<&crate::nav::Lines>,
 ) -> Vec<Place> {
     let mut files: HashMap<std::path::PathBuf, Option<Vec<String>>> = HashMap::new();
     found
         .into_iter()
         .map(|(path, line, col)| {
+            // (None: not read)
             let text = match open.get(&path) {
-                Some(rope) => (line < rope.len_lines()).then(|| rope.line(line).to_string()),
+                Some(_) if lines.is_some_and(|l| !l.buffer(&path)) => None,
+                Some(rope) => Some((line < rope.len_lines()).then(|| rope.line(line).to_string())),
                 None => files
                     .entry(path.clone())
-                    .or_insert_with(|| {
-                        std::fs::read(&path)
-                            .ok()
-                            .map(|b| String::from_utf8_lossy(&b).lines().map(str::to_string).collect())
+                    .or_insert_with(|| match lines {
+                        Some(l) => l.read(&path),
+                        None => {
+                            Some(crate::paths::open_read(&path).map(crate::nav::lines_of).unwrap_or_default())
+                        }
                     })
                     .as_ref()
-                    .and_then(|lines| lines.get(line).cloned()),
+                    .map(|lines| lines.get(line).cloned()),
             };
-            let text: String = text.unwrap_or_default().trim().chars().take(PLACE_TEXT_MAX).collect();
+            let text: String = match text {
+                Some(text) => text.unwrap_or_default().trim().chars().take(PLACE_TEXT_MAX).collect(),
+                None => crate::nav::NOT_READ.to_string(),
+            };
             Place { path, line, col, text }
         })
         .collect()
@@ -3099,7 +3107,7 @@ impl Editor {
         let generation = self.lsp.refs.generation;
         self.lsp.refs.answered |= goto == Goto::References;
         self.events.jobs().spawn(move || {
-            let places = read_places(found, &open);
+            let places = read_places(found, &open, None);
             move |ed: &mut Editor| {
                 // (another go-to since: this list is moot)
                 if ed.lsp.refs.generation != generation {

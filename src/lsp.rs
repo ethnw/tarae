@@ -300,13 +300,20 @@ pub fn find_server(lang: &str, config: &LspConfig) -> Option<ServerSpec> {
     })
 }
 
+/// The names of the servers configured for `lang` (`[lang.<lang>] lsp`, else its pack's `lsp`).
+pub fn names(lang: &str, config: &LspConfig) -> Vec<String> {
+    match config.languages.get(lang) {
+        Some(names) => names.clone(),
+        None => crate::syntax::spec(lang).map(|s| s.lsp.clone()).unwrap_or_default(),
+    }
+}
+
 /// The servers configured for `lang` (or its pack's `lsp`), installed or not.
 pub fn candidates(lang: &str, config: &LspConfig) -> Vec<ServerSpec> {
-    let names: &[String] = match config.languages.get(lang) {
-        Some(names) => names,
-        None => crate::syntax::spec(lang).map_or(&[], |s| &s.lsp),
-    };
-    names.iter().filter_map(|n| config.servers.get(n).cloned().or_else(|| default_spec(n))).collect()
+    names(lang, config)
+        .iter()
+        .filter_map(|n| config.servers.get(n).cloned().or_else(|| default_spec(n)))
+        .collect()
 }
 
 /// The servers that start beside the main one for `lang` (`[lang.<lang>] also`, else the defaults): those on

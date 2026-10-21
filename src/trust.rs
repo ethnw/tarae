@@ -20,7 +20,9 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 22] = [
+pub const RISKY: [&str; 23] = [
+    // (a project turning on the language servers the user turned off — rust-analyzer runs its build scripts)
+    "editor.lsp",
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -603,6 +605,24 @@ mod tests {
             n += 1;
         }
         assert!(n >= 10, "the sandbox's settings found: {n}");
+    }
+
+    /// Beyond `llm.sandbox*`: the settings that start a program, or pick which — a language server (G13), a
+    /// build, Claude — wait for trust too (`[lang.*] lsp`/`also`: `config::tests::what_starts_a_language_server_waits_for_trust`).
+    #[test]
+    fn every_setting_that_starts_a_program_waits_for_trust() {
+        let starts = [
+            "editor.lsp",
+            "editor.restart-build",
+            "editor.restart-binary",
+            "llm.command",
+            "llm.args",
+            "session.ended",
+        ];
+        for s in starts {
+            assert!(crate::settings::SETTINGS.iter().any(|x| x.path == s), "{s} is a setting");
+            assert!(is_risky(s), "{s}");
+        }
     }
 
     #[test]

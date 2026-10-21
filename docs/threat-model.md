@@ -98,6 +98,8 @@ Not kept:
   but nothing stops you running it unread.
 - **Linux, Landlock ABI 2**: truncating isn't controlled — a run could empty any file of yours. tarae asks before
   every run at ABI 2 and says why. Below ABI 2: no sandbox, every command asks (§1.12).
+- **Below a pack's tools' output** (`target/`, `node_modules/`, `.venv/`) a run writes freely — what runs from
+  there later is §1.2's (G28).
 
 ### 1.2 What runs later — the protected names
 
@@ -105,8 +107,8 @@ A file that runs or configures a build *without you reading it* is a way out of 
 run, outside it, runs it. So these names are never made, changed, moved, removed or hard-linked by a run, anywhere
 in the project, in any case: `.git`, `.tarae.toml`, `.tarae.local.toml`, `.envrc`, `.github`, `.claude`, `.vscode`,
 and every language pack's `protect` list (`build.rs`, `Cargo.toml`, `.cargo`, `Makefile`, `package.json`,
-`pom.xml`, `gradlew`, …), plus `llm.sandbox-protect`. Below a tool's output folder (`target/`,
-`node_modules/`) they're output and written as usual.
+`pom.xml`, `gradlew`, `__pycache__` …), plus `llm.sandbox-protect`. Below a tool's output folder (`target/`,
+`node_modules/`, `.venv/`) they're output and written as usual.
 
 Kept:
 - The names, by name, wherever they are, whatever the project's languages.
@@ -114,6 +116,10 @@ Kept:
   `sandbox::tests::a_packs_names_are_kept_in_a_project_of_another_language` ·
   `sandbox::linux::tests::protected_names_are_found_where_they_are` ·
   `sandbox::linux::tests::a_project_inside_a_writable_place_keeps_its_protected_names`
+- Python's bytecode beside its source (`__pycache__`, what your own `pytest` imports) is a protected name: a run's
+  Python writes its own under `PYTHONPYCACHEPREFIX` in the run's folder; a virtualenv's is tools' output.
+  test: `sandbox::tests::bytecode_beside_its_source_is_kept_and_a_virtualenvs_isnt` ·
+  `sandbox::tests::what_runs_later_stays_as_it_is_under_the_real_profile` (every name, macOS)
 - Folders that hold what runs later outside the project — toolchain homes, folders on `PATH`, shared caches — are
   never written and never offered on a grant card.
   test: `sandbox::tests::what_runs_later_is_never_an_asked_folder` · `allow::tests::which_folders_a_denied_write_may_open`
@@ -162,6 +168,19 @@ Not kept:
   moved in under a plain name. Codex's Linux sandbox watches a missing *top-level* protected name with inotify
   (`IN_CREATE | IN_MOVED_TO`), deletes what appears and fails the run — top-level names only. sandbox-runtime and
   Codex deny unlink and create on a protected path's ancestors, as the claude profile does for `~/.claude` (§2).
+- **What runs from tools' output** (G28). Below a pack's `outputs` (`target/`, `node_modules/`, `.venv/`) a run
+  writes freely, so what your own builds, tests and tools load from there later can be planted: a test runner in
+  `node_modules/.bin`, a virtualenv's `python`, a proc macro's library in `target/` (rust-analyzer loads it as
+  you), a build script cargo runs again without rebuilding it. sandbox-runtime and Codex leave them writable the
+  same way (their whole working folder is), and so does tarae (user decision 2026-10-17: no separate output folder
+  for runs). What tarae does: `__pycache__` beside the source is protected (above); and after a run that isn't a
+  build or a check (the packs' `checks` and `builders`), the programs (an executable bit), bytecode (`.pyc`) and
+  libraries (`.so`, `.dylib`) it changed below an ignored output folder are named in Claude's report — by name and
+  modification time, nothing read, one line a folder with its first 3, past 200,000 entries said. Said, not asked:
+  no card, and a build's or a check's run isn't looked at (it writes there by design); a file copied in with its
+  old time isn't seen.
+  test: `snapshot::tests::code_a_run_changed_below_tools_output_is_named` ·
+  `tools::tests::what_builds_is_the_checks_and_the_builders`
 - **Names no pack knows.** A tool that runs a file by another name (`Taskfile.yml`, `noxfile.py`,
   `.pre-commit-config.yaml`) is protected only once a pack lists it or you add it to `llm.sandbox-protect`.
 - **What you accept in a review.** A `build.rs` you accept runs at your next build — and rust-analyzer runs it as
@@ -286,9 +305,17 @@ Kept:
 - **Never reached**: link-local (cloud metadata), multicast, broadcast, in any carried form; metadata names by name.
   test: `sandbox::proxy::tests::the_never_reached_are_refused_by_the_proxy` ·
   `sandbox::keeper::tests::the_never_reached_are_refused` · `sandbox::proxy::tests::upstream::metadata_names_are_refused_by_name`
+- **This machine's own addresses beyond loopback** (its LAN and bridge addresses) aren't reached through the
+  proxy by any name that leads there — every address, when they couldn't be read (`Egress::refuses`,
+  `src/sandbox/proxy/egress.rs`; G7, closed).
+  test: `sandbox::proxy::tests::the_never_reached_are_refused_by_the_proxy` ·
+  `sandbox::proxy::macos_tests::a_name_leading_to_an_own_address_is_refused` ·
+  `sandbox::proxy::macos_tests::a_run_whose_own_addresses_are_unread_reaches_nothing`
 - **Risky ports** (Docker's API, Jupyter, DevTools, Node's inspector, Redis, etcd, kube, kubelet) aren't reached
-  with the network open unless listed.
-  test: `sandbox::tests::the_docs_name_every_risky_port` (the list) · `sandbox::golden::the_policy_is_pinned` (rule)
+  through the proxy at any host unless a rule of `llm.sandbox-hosts` names that host with the port
+  (`docker.example:2375`) — never by `"*"`, a rule naming the host alone, or a card's yes.
+  test: `sandbox::tests::the_docs_name_every_risky_port` (the list) ·
+  `sandbox::proxy::tests::a_risky_port_is_reached_only_where_a_rule_names_it`
 - **Your upstream proxy** (`llm.sandbox-upstream = "env"`): its host and credentials never reach a run.
   test: `sandbox::tests::runs_never_see_the_upstream` · `sandbox::proxy::tests::upstream::upstream_credentials_go_only_to_the_upstream`
 - Each session's host rules are its own.
@@ -308,8 +335,6 @@ Not kept:
   between your project and the internet. A list is that list alone: the registries aren't added to it.
 - **`llm.sandbox-localhost` opens the risky ports too.** Neither OS can say "every port but these" once it's on.
   On macOS it also opens other runs' proxy ports, which then only their tokens guard.
-- **macOS: this machine's LAN and bridge addresses** are reached as the network is (Seatbelt names ports by
-  `localhost` only), so the risky ports there are reached with the network on. An open item in the design doc.
 - **Behind an upstream proxy**, the addresses a name leads to are the upstream's to look up: tarae checks the host
   and server name, not the address.
 - **DNS as a channel**: a tool that does its own lookups gets no resolver
@@ -488,10 +513,16 @@ Not kept:
 | `y`/`a`/`s` on Claude's `also: {network}` card (or `:sandbox-blocked`'s host) | the same, before the run: that host and its pack's other registries, for the run it opens, the conversation or the session; a `y` also lifts a no you gave that host this session; a registry's caches writable from that run, the network closed. Never an address, `localhost` or a cloud metadata server's name |
 | `A` on a host card, the network open (by default, or with a list) | that host, always, in this project |
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
+| `y`/`a`/`A` on Claude's `also: {read}` card (or `:sandbox-blocked`'s) | that folder and everything in it readable for runs — `A` in this project always; home, above it and places holding keys only once |
+| `y` on a key file's card | that one file readable for the run, once only: "Its commands read what's in it — a key or a token, by its name — and what they print reaches Claude." |
+| `y`/`a`/`A` on Claude's `also: {env}` card | that variable of yours passed to runs — `A` keeps it for every later run in this project; a name like a secret's for the session at most: "Its commands read its value, and what they print reaches Claude." |
+| `y`/`a`/`A` on Claude's `also: {terminals}` card (macOS) | every open terminal (`/dev/ttys*`), yours too — `A` in this project always: "macOS's sandbox can't tell a terminal a command made from yours: its commands could read what you type in your shells, tarae's and other sessions', and type into them." |
+| `y`/`a`/`A` on a read card (Claude's Read outside the project) | Claude reads there — this once, this conversation, or always (`$state/sandbox.json`); home, above it and key folders only once |
 | `y`/`s` on a no-sandbox card | commands as you, unconfined — `s` its checks and reads unasked until the session ends, in every chat of it, never kept past a restart |
 | `llm.sandbox = false` | every command of Claude's as you, unconfined, **unasked** — only the chat's title says `› no sandbox` |
 
 test: `allow::tests::which_folders_a_denied_write_may_open` · `allow::tests::home_above_it_and_key_folders_are_never_kept` ·
+`tools::tests::also_asks_for_localhost_a_variable_and_the_terminals` ·
 `editor::tests::claude_asks_to_run_outside_the_sandbox_with_a_reason` · `tools::tests::claude_asks_for_one_socket_not_the_sandbox_off`
 
 Each of these settings is yours: a project's `.tarae.toml` sets one only once you trust it.
@@ -550,7 +581,7 @@ Kept:
   anyway, which holds what your own Claude Code runs later; each claude update needed the rules measured again.
   Both were removed. Your login, settings, `CLAUDE.md` and conversations are claude's as they are in your own
   CLI, and your Claude settings a hold-back's baseline; claude cleans its old conversations as your
-  `cleanupPeriodDays` says, as your own Claude Code does.
+  `cleanupPeriodDays` says, as your own Claude Code does — a project's is held (below).
   test: `llm::tests::every_claude_starts_as_its_own_program` ·
   `claudetrust::tests::a_chat_starts_held_back_while_its_card_waits` ·
   `claudetrust::tests::your_claude_settings_are_the_baseline_where_claude_loads_them`
@@ -582,6 +613,15 @@ Kept:
   test: `editor::tests::claudes_reads_outside_the_project_ask_first` · `reads::tests::inside_or_allowed_goes_without_asking` ·
   `chat::tests::a_key_named_file_reaches_claude_only_when_the_user_lets_it` · `reads::tests::a_link_to_a_key_file_is_the_key_file` ·
   `notes::tests::a_note_outside_the_project_is_refused_alike`
+- **`references` and `definition` read a place's line by the opened file's real path**: inside the project, or
+  outside where Read would go unasked; else `(outside the project — not read)` — a link in the project leading out
+  isn't inside, an open buffer of such a file neither.
+  test: `nav::tests::a_place_through_a_link_out_of_the_project_isnt_read`
+- **Claude's `procs` tool doesn't read what you typed**: a process under your terminal or one of your tasks is
+  named by its program alone — no arguments, no folder, nor the terminal's title or the task's command; every
+  other command line goes with what looks like a token taken out (`tokens::redacted` — a heuristic).
+  test: `procs::tests::the_tool_says_the_users_processes_by_their_program_alone` ·
+  `procs::tests::claudes_procs_tool_says_what_procs_shows`
 - **Every change is reviewed**, or with review at the end allowed unseen and shown after — never for a protected
   name, `.git`, outside the project, or a buffer you changed. Moves and deletes always ask. tarae writes through
   descriptors, never a path re-walked after its check — `space u` too, a file that isn't text included, and in
@@ -592,14 +632,16 @@ Kept:
   `snapshot::tests::putting_a_blob_back_never_goes_through_a_link_swapped_in`
 - **Every command** Claude asks for goes through tarae's `run` — §1.
 - **A repository's Claude settings are held until you trust them**: helper commands, `env`, plugins, `allow` rules,
-  `additionalDirectories`. While the card waits claude runs with all of them held back, as `n` leaves it — the
+  `additionalDirectories`, `cleanupPeriodDays` (when claude deletes your conversations — every project's; `0`
+  is all of them: held back, yours applies, else Claude Code's default, 30 days). While the card waits claude runs with all of them held back, as `n` leaves it — the
   chat doesn't wait for the answer; `y` starts it again with them. A change while it runs starts it again at once
   held back (mid-turn too), the card up again.
   test: `claudetrust::tests::a_chat_starts_held_back_while_its_card_waits` ·
   `claudetrust::tests::a_change_mid_chat_restarts_it_held_back_at_once` ·
   `claudetrust::tests::what_a_repository_runs_is_held_and_hooks_only_shown` ·
   `claudetrust::tests::settings_made_while_claude_runs_restart_it_held_back_and_ask` ·
-  `claudetrust::tests::every_command_key_is_held_up_front_but_trusted_or_yours`
+  `claudetrust::tests::every_command_key_is_held_up_front_but_trusted_or_yours` ·
+  `claudetrust::tests::a_projects_cleanup_period_is_held_to_yours`
 - **Its environment**: API keys dropped unless you keep them; a parent Claude Code session's variables dropped.
   test: `llm::tests::what_the_process_itself_holds_never_reaches_claude` ·
   `llm::tests::keys_go_to_claude_only_when_you_keep_them_outside_claude_code`
@@ -654,7 +696,10 @@ live check runs, is ABI 4.
 Not Claude's, but a hostile repository reaches them:
 - **Language servers** run the project's code as you: rust-analyzer runs `build.rs` and proc macros when it loads
   the project. **Not tied to trust yet.** Opening a hostile Rust repository in tarae runs its build script, as it
-  does in any editor with rust-analyzer.
+  does in any editor with rust-analyzer. Turning servers off (`editor.lsp = false`) is yours to keep: a project's
+  `editor.lsp`, and a `[lang.*]` `lsp`/`also` naming a server the language doesn't list, wait for trust.
+  test: `config::tests::what_starts_a_language_server_waits_for_trust` ·
+  `trust::tests::every_setting_that_starts_a_program_waits_for_trust`
 - **`.tarae.toml`'s risky part** (tasks, server commands, `:` bindings, settings that run something or loosen a
   guard, `[[attach]]` before-commands) waits for a trust card, keyed by real path and hash.
   test: `trust::tests::too_long_to_show_is_never_trusted` · `config::tests::the_users_own_file_is_never_held_back`
@@ -671,13 +716,13 @@ Not Claude's, but a hostile repository reaches them:
 | G4 | Network on = exfiltration to the packs' registries and the hosts you said yes to; with hosts `"*"`, to any host | registries take uploads; `"*"` favours builds that fetch from anywhere | said; narrowed by C1b (the default was any host); a list narrows more |
 | G5 | macOS: other processes' environments and command lines | no Seatbelt rule under `(allow default)` | closed: the deny-default profile (2026-10-17) keeps them (test: `sandbox::apart::two_sessions_cant_reach_each_others_processes`) |
 | G6 | macOS: POSIX shared memory, loopback whoever's | no rule names who made a POSIX name (srt allows it too); Seatbelt names ports by `localhost` only | said; System V's and renice closed by the deny-default profile (G27) |
-| G7 | macOS: LAN addresses' risky ports with the network on | Seatbelt names ports by `localhost` only | open; the proxy could check |
+| G7 | macOS: LAN addresses' risky ports with the network on | Seatbelt names ports by `localhost` only | closed: the proxy refuses this machine's own addresses (`src/sandbox/proxy/egress.rs`; test: `sandbox::proxy::macos_tests::a_name_leading_to_an_own_address_is_refused`), and risky ports at any host unless a rule names the port (test: `sandbox::proxy::tests::a_risky_port_is_reached_only_where_a_rule_names_it`) |
 | G8 | macOS: a leftover without its tag isn't ended | no subreaper | said; stays sandboxed |
 | G9 | Linux without namespaces: processes, SysV IPC, `/dev/shm` shared; without a PID namespace: processes | no namespaces there | said; the AppArmor profile gives own namespaces |
 | G10 | Linux: a new protected name in a folder without one | Landlock only grants | caught after the run, asked before anything runs it — Claude's next run, your task, your preflight (§1.2) |
 | G11 | Linux ABI 2: truncation | kernel | every run asks |
 | G12 | The supervisor and proxy parse hostile input inside tarae | threads (D19) | fuzzing; a confined process (D21); a review |
-| G13 | rust-analyzer runs `build.rs`/proc macros untrusted | not tied to trust | later |
+| G13 | rust-analyzer runs `build.rs`/proc macros untrusted | not tied to trust | later; a project can't turn servers on or add one untrusted (§3) |
 | G14 | The temp folders are shared | D16 | said |
 | G15 | Apple Events/LaunchServices denials are pinned, not shown | no behaviour test | the must-be-refused suite; the keychain's and the clipboard's are tried (`sandbox::tests::what_the_default_refuses_and_the_base_lets_through`) |
 | G16 | Landlock rules are shown on the kernels CI and the test machines have | kernels differ | the suite on several kernels |
@@ -689,6 +734,7 @@ Not Claude's, but a hostile repository reaches them:
 | G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | caught after the run, asked before anything runs it, as G10 (§1.2: new files, ignored folders' names, names past 5,000 new files, links, repositories); left: an ignored folder that was there before, what a leftover makes later, no git checkout, your tests and `:restart`'s build |
 | G26 | macOS: where the network reaches a host as the run starts, trust's service (`com.apple.trustd.agent`) is reachable, and it fetches revocation lists and issuers itself, outside tarae's proxy | Go's TLS (and Security.framework's) asks it: without it `x509: OSStatus -26276`, measured | only then (as srt's `enableWeakerNetworkIsolation`), never with every host asked; left: a run can make it fetch a URL a certificate names |
 | G27 | macOS: System V shared memory and `setpriority` are refused a run's own too, and a System V segment it makes can't be removed — `shmget` isn't checked, `shmctl(IPC_RMID)` is refused (measured: the probe's 4 KB segment stayed) | the deny-default profile, as srt's (it allows neither); a segment's key doesn't say whose it is | said; a tool that needs either (a SysV user, `renice`) fails in the sandbox — a `BASE` row only with a measured need |
+| G28 | Below a pack's tools' output (`target/`, `node_modules/`, `.venv/`) a run writes freely: what your own builds, tests and tools load from there later can be planted | builds write there; srt and Codex leave it writable too (user decision 2026-10-17: no separate output folder for runs) | narrowed: `__pycache__/` beside the source protected; the programs, bytecode and libraries a run that isn't a build or a check changed there are named in Claude's report (§1.2; tests: `snapshot::tests::code_a_run_changed_below_tools_output_is_named`, `sandbox::tests::bytecode_beside_its_source_is_kept_and_a_virtualenvs_isnt`) |
 
 ## 5. For a reviewer: where to start
 

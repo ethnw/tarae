@@ -500,6 +500,35 @@ fn a_run_whose_own_addresses_are_unread_reaches_nothing() {
     assert!(h.is_none(), "the outside was reached: {h:?}");
 }
 
+/// G7, closed: a name leading to one of this machine's own addresses beyond loopback (its LAN or bridge address,
+/// where a risky port may listen) is refused by the proxy (`Egress::refuses`) — the network open, any host — and
+/// said; the outside isn't reached. Through the real `spawn`, as `a_run_whose_own_addresses_are_unread_reaches_
+/// nothing`: the stand-in outside's loopback is taken for beyond (`TEST_BEYOND`), then named as an own address.
+#[test]
+fn a_name_leading_to_an_own_address_is_refused() {
+    let root = Path::new("/Users/u/p-g7-own");
+    let name = "own-g7.example.invalid";
+    let (port, seen) = outside(name, root, 1);
+    let base = open(root);
+    let mut r = RunPort::new(base.run_id).unwrap();
+    let own = Some(vec![std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    std::sync::Arc::get_mut(&mut r).expect("a new run's port, ours alone").own_addresses = own;
+    let p = Policy { proxy: Some(r), ..base };
+    let mut curl = Command::new("/usr/bin/curl");
+    curl.args(["-s", "--max-time", "10", &format!("http://{name}:{port}/through")]);
+    curl.envs(
+        env_of(&command(Some(&p), "true", &[]))
+            .into_iter()
+            .filter(|(k, _)| k.to_lowercase().ends_with("_proxy")),
+    );
+    let ended = after_run(Some(&p));
+    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), 30);
+    ended();
+    assert!(out.contains("one of this machine's own addresses"), "refused, saying why: {out:?}");
+    let (h, _) = seen.join().unwrap();
+    assert!(h.is_none(), "the outside was reached: {h:?}");
+}
+
 /// Through the real path (`policy` → `command` → `spawn`), under Seatbelt, a run's plain `curl` goes out
 /// through tarae's proxy alone: its proxy variables lead it to its own port, and the outside (the test's
 /// stand-in, as in `a_runs_port_takes_it_to_the_outside`) gets the request. The same listener reached directly
