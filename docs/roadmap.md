@@ -35,7 +35,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **Sessions** | Several branches of work at once, each in its own checkout with its own panes, chat, terminal, tests and tasks. A session is brought into its base by fast-forward, or by a rebase whose conflicts its own Claude resolves ([claude-integration.md](claude-integration.md#rebasing-a-session)) |
 | **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, and risk grades mark what a person must look at ([code review](claude-integration.md#code-review)) |
 | **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0–P5 of the card model are built, and `:granted` lists what Claude may do without asking ([design/cards.md](design/cards.md)) |
-| **Sandbox, macOS** | Claude's commands run under Seatbelt: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
+| **Sandbox, macOS** | Claude's commands run under a deny-default Seatbelt profile, as Anthropic's sandbox-runtime: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
 | **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
 | **Repository trust** | A project's risky settings, and a repository's own git config and hooks, wait for a yes before anything of theirs runs |
 | **Queues** | A run waits its turn instead of being refused, and says what it waited for (phases 0, H and 1 of [design/async.md](design/async.md)) |
@@ -60,7 +60,7 @@ from each other. Daemons such as Gradle's stay warm between runs.
 4. **Routing every socket** — done. The supervisor routes each address-bearing call by one table: to the session's
    own loopback, to this machine, or out. An outbound socket is replaced by one made in tarae's own network, so
    the session's network stays closed. Link-local, metadata, multicast, broadcast and unspecified addresses are
-   refused. Measured: a cost of about 0.2 s per Gradle run, seen only in tier A+.
+   refused. Measured: a cost of about 0.2 s per Gradle run, seen only in tier own.
 5. **The egress proxy** — done. One proxy in tarae, as threads: connections go out by host
    name. It reads the HTTP CONNECT line and the TLS SNI, and never decrypts; plain HTTP goes through it too. A host
    the run's rules don't name waits for the user's card; `llm.sandbox-hosts` lists the ones allowed. On macOS each
@@ -69,9 +69,8 @@ from each other. Daemons such as Gradle's stay warm between runs.
    it chains to that one, http:// or SOCKS5 (host and SNI checks kept; the address checks are that proxy's, said
    in the report).
    Later: an `https://` upstream, and Negotiate/NTLM.
-6. **The transparent proxy** — built (6c–6g), then removed (2026-10-17): no security gain where a session's netns
-   already fails closed, a cost per connection, tests only a VM could run. Every tier goes out by step 5's proxy
-   variable; the supervisor is slimmed; Docker's default profile (no `CAP_SYS_PTRACE`) is offline.
+6. **Out by the proxy alone** — done. Every tier goes out by step 5's proxy variable. A tool that ignores it, or
+   raw TCP, fails closed, and the report points at `outside_sandbox`.
 7. **Sessions kept apart** — done. Tests that one session can't reach another's processes, sockets or files, on
    Linux in every tier and on macOS, and the fixes they found: a run's folder no other run can write, on macOS no
    signal or terminal outside a run's own. The keepers' memory with many sessions, measured; tarae's log names each
@@ -82,6 +81,21 @@ from each other. Daemons such as Gradle's stay warm between runs.
 9. **Showing the tier** — done. What a run's sandbox keeps apart and shares, said in Claude's result, the sandbox
    panel, `:procs`, `tarae state` and the run's environment, and how tarae's AppArmor profile would raise it.
 10. **Docs** — done. The design's tier table is checked against the code by a test.
+
+### Sandbox simplification (2026-10-17)
+
+Fewer moving parts where they bought no security, Anthropic's sandbox-runtime (srt) followed where it has a
+recipe, and the tests runnable without a cloud VM.
+
+1. **The claude process runs as you** on both OSes, as every other tool runs it. What protects is the tool gating
+   and the runs' sandbox; confining claude broke its login on macOS and needed `~/.claude` whole on Linux.
+2. **Three tiers** — own, host, offline — in place of six letters, so a user can tell them apart.
+3. **No serving by copies.** It had a likely Landlock escape. Where `pidfd_getfd` is refused (Docker's default
+   profile) the session is offline, and says `--cap-add SYS_PTRACE` serves it.
+4. **No transparent proxy.** A session's own network already fails closed; it cost time per connection, and its
+   tests ran only on a VM. Every tier goes out by the proxy variable.
+5. **macOS denies by default**, as srt: every allow besides files and the network is one table, each row with the
+   tool that needed it. Other processes' command lines and environments, System V IPC and priority are now kept.
 
 ## Next
 
@@ -119,10 +133,8 @@ After it, the rest goes on in this order.
 The aim is to state what the sandbox guarantees and show that it holds.
 
 1. **One threat-model document** — done: [threat-model.md](threat-model.md), what is kept from a run and what
-   isn't, per tier and per OS, each claim with its test. Confining the `claude` process itself was tried (macOS:
-   Seatbelt, V1d; Linux: Landlock and seccomp, claudeown) and removed (user decision 2026-10-17): no other tool
-   confines the CLI, what a steered claude does goes through tarae's tools, and its cost was large (a login broken
-   every few hours on macOS, `~/.claude` granted whole on Linux anyway, the rules measured again each update).
+   isn't, per tier and per OS, each claim with its test. The claude process runs as you; what protects is the tool
+   gating and the runs' sandbox.
 2. **Fuzzing the parsers that read what a run sends** — the supervisor's reading of system-call arguments, and
    the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the
@@ -139,17 +151,17 @@ The aim is to state what the sandbox guarantees and show that it holds.
    the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing that forwarding further waits
    for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped that work twice); a run's own
    `setsockopt` is unchanged (its own rights).
-3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
-   nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
-4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
+3. **A "must be refused" property suite**, run on several kernels on a schedule: nothing a run does changes the
+   session's rules, and nothing is reached but through tarae's proxy and sockets.
+4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there, and the session is tier offline.
 5. **A speed comparison** against a bubblewrap-style sandbox.
 
 ### 3. Frictions, and lighter cards and reviews
 
-Done so far, under way, and the order after it (2026-10-16):
+Done so far, under way, and the order after it (2026-10-17):
 
 - **The compatibility suite** (below): pieces 0–3 done, up to the first macOS table and its findings B1–B7.
-  Piece 4 done (`8993751a`): an image per toolchain, a volume per stack, and the first Linux tables, A+ and C
+  Piece 4 done (`8993751a`): an image per toolchain, a volume per stack, and the first Linux tables, own and host
   (Ubuntu 24.04, kernel 7.0). Piece 6's first fixes done (`ca5b79bc`, B1–B4 and B8): Python's bytecode,
   golangci-lint's cache and uv's cache are the project's own run homes, never the user's. The rest of piece 6
   next.
@@ -162,29 +174,29 @@ Done so far, under way, and the order after it (2026-10-16):
   One conversation a piece, in this order:
   - **A** — done (`f80f38f6`): the chat no longer waits for the project's Claude settings card. claude starts at
     once with them held back, and `y` gives them to it.
-  - **B** — under way: no sandbox, or a partial one, asks once a session (`y` ask each time · `s` run unasked this
+  - **B** — done (`b795fd6b`): no sandbox, or a partial one, asks once a session (`y` ask each time · `s` run unasked this
     session · `n` don't run them), never kept across a restart. And the API-key card when claude isn't logged in
     and a key is held back: `y` this session · `A` writes `llm.environment-key = "keep"` to the user's own config.
-  - **C** — under way, parts C1, C2, C3: the network for Claude's commands. With the network closed, the first
-    connection to a new host waits on a card: `y` this run · `a` this chat · `s` this session · `n`. "Always"
-    stays the setting, `llm.sandbox-network`. The card suggests the pack's registries; a suggestion is never a
-    grant, the user's `y` is. For Rust and Go, tarae's own fetch as well (`cargo fetch`, `go mod download` with
-    `GOTOOLCHAIN=local`): it runs outside the sandbox and runs no project code, so the toolchain caches stay
-    closed to Claude's commands. Pack data; the core names no tool.
-  - **D** — under way: every refusal Claude can ask for has its `also` (`localhost`, `env`, `terminals` beside
+  - **C** — done (C1 `3248e87f`, C2 `35565bba`; C1b below): the network for Claude's commands. With the network
+    closed, the first connection to a new host waits on a card: `y` this run · `a` this chat · `s` this session ·
+    `n`. "Always" stays the setting, `llm.sandbox-network`. A registry's yes lets in its pack's other registries.
+    Claude asks for a host with `also: {"network": host}`. Not built: tarae's own fetch for Rust and Go
+    (`cargo fetch`, `go mod download` with `GOTOOLCHAIN=local`), outside the sandbox and running no project code,
+    so the toolchain caches stay closed to Claude's commands.
+  - **D** — done (`10c92ebe`): every refusal Claude can ask for has its `also` (`localhost`, `env`, `terminals` beside
     `read`, `write`, `port`; `space m s` lists every port and the variables the output names). Gradle's loopback
     gets its card at the first refusal, holding Claude's call, with `s`/`A` (no pack default). A rerun from
     `space m s` sends its end to Claude by itself, only with the chat idle, in the same conversation, for the
-    last turn's failed run; the card says so. Follow-up once C is on main: Gradle's card before the first run.
-  - **F**: words and memory — a hook's yes remembered (a rewritten hook asks again), one vocabulary for the
+    last turn's failed run; the card says so. Open: Gradle's card before the first run.
+  - **F** (to be re-judged, 2026-10-17): words and memory — a hook's yes remembered (a rewritten hook asks again), one vocabulary for the
     answer rows, manifest tools (`cargo add`) said before they run, the docs.
-  - **H**: Claude's `commit {message, paths}` tool. The card shows the message and the diff; `y` commits through
+  - **H** (to be re-judged, 2026-10-17): Claude's `commit {message, paths}` tool. The card shows the message and the diff; `y` commits through
     tarae's own git with no hooks, `n` does nothing; it never pushes.
-  - **E**: one list — settings and trust answers join `:granted`, each taken back with `d`.
-  - **I**: one trust card when tarae's, Claude's and git's wait together as the repository opens; a later change
+  - **E** (to be re-judged, 2026-10-17): one list — settings and trust answers join `:granted`, each taken back with `d`.
+  - **I** (to be re-judged, 2026-10-17): one trust card when tarae's, Claude's and git's wait together as the repository opens; a later change
     asks only about its own part.
-  - **G**, manifest tools run in a copy (`cargo add` → a change set of `Cargo.toml` and `Cargo.lock`): only after
-    C, and only if `cargo xtask cards` shows manifest refusals often.
+  - **G**, manifest tools run in a copy (`cargo add` → a change set of `Cargo.toml` and `Cargo.lock`): only if
+    `cargo xtask cards` shows manifest refusals often.
 
   Review at the end stays off by default.
 - **After the sandbox UX pass**, from reading agent-security papers (2026-10-16: Progent, CaMeL, a
@@ -411,8 +423,8 @@ git tab, search, a short Kubernetes one.
   script.
 - **Raw TCP to an address**: user-written `ip:port` / `cidr:port` rules in `llm.sandbox-hosts` (never a card), for
   a LAN database or a container's or VM's IP. Waiting for the user's call.
-- **Open from step 6**: `go get` sometimes takes 36–40 s in the sandbox (cause unknown);
-  `gradle_builds_in_the_sandbox` fails in the M5 image's tier C (Gradle 8.10.2 starts an ordinary daemon; next
+- **Open from the keeper's work**: `go get` sometimes takes 36–40 s in the sandbox (cause unknown);
+  `gradle_builds_in_the_sandbox` fails in the M5 image's tier host (Gradle 8.10.2 starts an ordinary daemon; next
   frictions batch); a crash-recovery test that failed once.
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
