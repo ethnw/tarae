@@ -309,12 +309,14 @@ const MAC_SHARED: &str = " Here a command shares POSIX shared memory with other 
      other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.";
 
 /// What a Landlock run may change of a file's attributes where served (own, host — linmeta B, D-h): Landlock has no
-/// right for them, so tarae serves its mode and times calls (`seccomp::serves_attr`), and allows them only where the
-/// run may write, or through a file it holds open for writing (what Landlock let it write) — an owner call too, but
-/// only one that changes nothing (sandbox C); a change of owner, extended attributes, ACLs and flags are refused in
-/// every tier (`seccomp::ATTR_CALLS`).
-const ATTRS_SERVED: &str = " A command changes a file's mode and times only where it may write, or through a file it \
-     holds open for writing; never a file's owner, extended attributes, ACLs or flags — in the project neither.";
+/// right for them, so tarae serves its mode, times and extended attribute calls (`seccomp::serves_attr`), and allows
+/// them only where the run may write, or through a file it holds open for writing (what Landlock let it write) — an
+/// owner call too, but only one that changes nothing (sandbox C); a change of owner, of flags, and the `security.` and
+/// `trusted.` attributes (a program's capabilities, a security module's labels) are refused in every tier
+/// (`seccomp::ATTR_CALLS`, `supervisor::attrs`: D2 B).
+const ATTRS_SERVED: &str = " A command changes a file's mode, times and extended attributes (ACLs too) only where it \
+     may write, or through a file it holds open for writing; never a file's owner or flags, nor its security or \
+     trusted attributes — in the project neither.";
 
 /// What an unserved Landlock run may change of a file's attributes (tier offline stays a full tier with this said:
 /// user decision 2026-10-18): nothing serves its calls, so mode and times stay the run's.
@@ -667,15 +669,15 @@ impl Guarantees {
         }
     }
 
-    /// `tarae state`'s `attributes`: where a run may change a file's mode and times (`where-writes`, `anywhere`), and
-    /// its owner, extended attributes and flags (`where-writes`, `never`).
+    /// `tarae state`'s `attributes`: where a run may change a file's mode and times (`where-writes`, `anywhere`), its
+    /// extended attributes and ACLs (`where-writes`, `never`), and its owner and flags (`where-writes`, `never`).
     pub fn attrs_json(&self) -> serde_json::Value {
-        let (mode_times, owner_xattrs_flags) = match self.by {
-            By::Landlock { tier: Tier::Offline, .. } => ("anywhere", "never"),
-            By::Landlock { .. } => ("where-writes", "never"),
-            By::Seatbelt => ("where-writes", "where-writes"),
+        let (mode_times, xattrs, owner_flags) = match self.by {
+            By::Landlock { tier: Tier::Offline, .. } => ("anywhere", "never", "never"),
+            By::Landlock { .. } => ("where-writes", "where-writes", "never"),
+            By::Seatbelt => ("where-writes", "where-writes", "where-writes"),
         };
-        serde_json::json!({ "mode_times": mode_times, "owner_xattrs_flags": owner_xattrs_flags })
+        serde_json::json!({ "mode_times": mode_times, "xattrs": xattrs, "owner_flags": owner_flags })
     }
 
     /// What its runs share, in the report's words (said after the sentence: `told`): Landlock below

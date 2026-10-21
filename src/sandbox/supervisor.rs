@@ -56,7 +56,7 @@ use super::{Denial, Policy};
 mod attrs;
 
 #[cfg(test)]
-pub(super) use attrs::in_group;
+pub(super) use attrs::{holds, in_group};
 
 /// A call's answer: what it returns, or the errno it fails with.
 type Answer = Result<i64, i32>;

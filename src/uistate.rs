@@ -25,7 +25,9 @@ use crate::sizes::Slot;
 /// `reading` before.
 /// 6: `reviewer_run.high` is always a number — by the grades of the snapshot the reviewer read (bgreview), not None
 /// while its review isn't open; since added: `taken`, `files`, `changed_since`. A finding's `high` is a bool.
-pub const V: u64 = 6;
+/// 7: `sessions[].sandbox.attributes.owner_xattrs_flags` is two keys, `xattrs` (served where a run may write, D2 B)
+/// and `owner_flags`.
+pub const V: u64 = 7;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;

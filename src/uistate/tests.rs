@@ -2040,7 +2040,7 @@ fn tarae_state_says_the_sandbox() {
             "by": "landlock", "tier": "own", "abi": 8, "partial": false,
             "namespaces": { "user": true, "net": true, "pid": true, "shm": true, "netns": true },
             "network": { "open": false, "asked": false, "listed": false, "way": "proxy" }, "kept": kept, "shared": [],
-            "attributes": { "mode_times": "where-writes", "owner_xattrs_flags": "never" },
+            "attributes": { "mode_times": "where-writes", "xattrs": "where-writes", "owner_flags": "never" },
             "why": null, "hint": null, "line": line,
         })
     );

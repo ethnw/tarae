@@ -743,9 +743,12 @@ fn the_guarantees_say_each_tier() {
         if line.contains(" · attributes mode and times anywhere · ") != open
             || g.attrs_said().contains("any file of the user's it can name") != open
             || (state == "anywhere") != open
-            || g.attrs_said().contains("changes a file's mode and times only where it may write") != served
+            || g.attrs_said()
+                .contains("changes a file's mode, times and extended attributes (ACLs too) only where")
+                != served
             || ((state == "where-writes") != (served || g.tier().is_none()))
-            || ((g.json()["attributes"]["owner_xattrs_flags"] == "never") != g.tier().is_some())
+            || ((g.json()["attributes"]["xattrs"] == "never") != open)
+            || ((g.json()["attributes"]["owner_flags"] == "never") != g.tier().is_some())
         {
             wrong
                 .push(format!("{label}: a file's attributes said {line:?} · {:?} · {state}", g.attrs_said()));

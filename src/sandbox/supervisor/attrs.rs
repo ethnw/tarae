@@ -3,7 +3,13 @@
 //! the run may write (`Policy::writes_allow`: its write places, never a protected name) — as macOS's profile has
 //! `file-write-mode` and `file-write-times`. An owner call is let only where it changes nothing — each id `-1` or
 //! the file's own (`rsync -a`, `cp -a`) — and there as a mode is; made by tarae with `-1`, `-1`, so the
-//! kernel's own side effects (its change time, a set-ID bit cleared) are the run's call's.
+//! kernel's own side effects (its change time, a set-ID bit cleared) are the run's call's. Its extended attributes
+//! (D2 B, ACLs too — `install -m`, `cp --preserve=all`, `rsync -AX`) as its mode: `user.` and the two ACLs
+//! (`system.posix_acl_access`, `_default`) only where it may write; `security.` and `trusted.` (a program's
+//! capabilities, a security module's labels) and every other `system.` refused by name in every place, as root too;
+//! a name in no namespace the kernel has is its own `EOPNOTSUPP`, after its write check. The name and the value are
+//! read once from the caller's memory, and set by tarae through its own descriptor; an ACL's user and group ids are
+//! the run's, read in its user namespace (`acl_ids`: one it doesn't map the kernel's `EINVAL` there).
 //!
 //! The safe form, as the socket calls': a path is read once from the caller's memory (`wire::c_path`) and opened by
 //! the kernel, never walked by tarae — an absolute one from the run's root (`/proc/<tid>/root`, `RESOLVE_IN_ROOT`),
@@ -27,26 +33,32 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use super::super::wire::{Times, c_path, no_name, self_fd, through_proc, times};
+use super::super::wire::{
+    Times, c_path, no_name, self_fd, through_proc, times, xattr_args, xattr_name, xattr_value,
+};
 use super::{Answer, Caller, Listener, Served, errno, refuse, refuse_with, result};
+use crate::seccomp::{SYS_REMOVEXATTRAT, SYS_SETXATTRAT};
 
 /// What a call changes.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Change {
     Mode(libc::mode_t),
     /// Access and modification times as `utimensat` takes them; None: both now.
     Times(Option<[i64; 4]>),
     /// Owner and group as the call gives them (`u32::MAX`: as it is) — let only where neither changes (`refused`).
     Owner(u32, u32),
+    /// An extended attribute: its name, and its value with `XATTR_CREATE`/`XATTR_REPLACE` — None: removed.
+    Xattr(CString, Option<(Vec<u8>, i32)>),
 }
 
 impl Change {
     /// How a refusal says it (Seatbelt's words, which the report says as "changing …").
-    fn op(self) -> &'static str {
+    fn op(&self) -> &'static str {
         match self {
             Change::Mode(_) => "file-write-mode",
             Change::Times(_) => "file-write-times",
             Change::Owner(..) => "file-write-owner",
+            Change::Xattr(..) => "file-write-xattr",
         }
     }
 }
@@ -64,6 +76,9 @@ enum Again {
     Proc { follow: bool },
     /// `fchown(fd, …)`, `fchownat(fd, "", …, AT_EMPTY_PATH)`: made as every owner call is (`chown_unchanged`).
     Owner,
+    /// `fsetxattr(fd, …)`, `fremovexattr(fd, …)`, `setxattrat(fd, "", AT_EMPTY_PATH, …)` and `removexattrat`'s:
+    /// the same on tarae's copy (one `O_PATH`: the kernel's own `EBADF`).
+    Xattr,
 }
 
 /// Where a call's file is: a path from a folder of the caller's (`AT_FDCWD`: where it works), or a descriptor.
@@ -85,7 +100,7 @@ fn cwd(dirfd: u64) -> bool {
     dirfd as i32 == libc::AT_FDCWD
 }
 
-/// A call that changes a file's mode, times or owner (`seccomp::serves_attr`), answered.
+/// A call that changes a file's mode, times, owner or extended attributes (`seccomp::serves_attr`), answered.
 pub(super) fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let a = n.data.args;
@@ -161,6 +176,50 @@ pub(super) fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer 
                 0 => (At::Fd(low(a[0]), Again::Utimensat { empty: false, flags: 0 }), t),
                 at => (At::Path { dirfd: a[0], path: path(at)?, follow: true }, t),
             }
+        }
+        // (an extended attribute's, in the kernel's order: its flags, name and value, then the file — measured)
+        libc::SYS_setxattr | libc::SYS_lsetxattr => {
+            let x = set(&c, a[1], a[2], a[3], a[4] as i32)?;
+            let follow = n.data.nr as libc::c_long == libc::SYS_setxattr;
+            (At::Path { dirfd: libc::AT_FDCWD as u64, path: path(a[0])?, follow }, x)
+        }
+        libc::SYS_fsetxattr => {
+            let x = set(&c, a[1], a[2], a[3], a[4] as i32)?;
+            (At::Fd(low(a[0]), Again::Xattr), x)
+        }
+        libc::SYS_removexattr | libc::SYS_lremovexattr => {
+            let x = Change::Xattr(xattr_name(&c, a[1])?, None);
+            let follow = n.data.nr as libc::c_long == libc::SYS_removexattr;
+            (At::Path { dirfd: libc::AT_FDCWD as u64, path: path(a[0])?, follow }, x)
+        }
+        libc::SYS_fremovexattr => {
+            (At::Fd(low(a[0]), Again::Xattr), Change::Xattr(xattr_name(&c, a[1])?, None))
+        }
+        nr @ (SYS_SETXATTRAT | SYS_REMOVEXATTRAT) => {
+            if !xattrat_here() {
+                return Err(libc::ENOSYS);
+            }
+            let setting = nr == SYS_SETXATTRAT;
+            // (`setxattrat`'s `struct xattr_args` first, then its flags)
+            let args = if setting { Some(xattr_args(&c, a[4], a[5])?) } else { None };
+            let flags = a[2] as i32;
+            if flags & !(NOFOLLOW | EMPTY) != 0 {
+                return Err(libc::EINVAL);
+            }
+            let x = match args {
+                Some((value, size, xflags)) => set(&c, a[3], value, size, xflags)?,
+                None => Change::Xattr(xattr_name(&c, a[3])?, None),
+            };
+            // (no path with `AT_EMPTY_PATH`: an empty one; `removexattrat`'s on where the caller works: `EBADF`, as
+            // the kernel answers it — `setxattrat`'s there is that folder, as `fchownat`'s)
+            let named = match a[1] {
+                0 if flags & EMPTY != 0 => Vec::new(),
+                at => path(at)?,
+            };
+            if !setting && named.is_empty() && flags & EMPTY != 0 && cwd(a[0]) {
+                return Err(libc::EBADF);
+            }
+            (with_flags(a[0], named, flags, Again::Xattr)?, x)
         }
         _ => return Err(libc::ENOSYS),
     };
@@ -249,10 +308,14 @@ fn open_in_run(c: &Caller, dirfd: u64, path: &[u8], follow: bool, guarded: bool)
 fn on_path(p: &Served, c: &Caller, file: &OwnedFd, change: Change) -> Answer {
     let st = stat(file)?;
     let real = name_of(file)?;
-    if changes_owner(change, &st) {
-        return owner_refused(p, c, file, &real, &st, change);
+    if changes_owner(&change, &st) {
+        return owner_refused(p, c, file, &real, &st, &change);
     }
-    if let Some(no) = refused(p, c, file, &real, &st, change, false) {
+    if let Some(no) = xattr_refused(p, c, file, &real, &st, &change) {
+        return no;
+    }
+    let change = acl_ids(c, change)?;
+    if let Some(no) = refused(p, c, file, &real, &st, &change, false) {
         return no;
     }
     match change {
@@ -260,7 +323,12 @@ fn on_path(p: &Served, c: &Caller, file: &OwnedFd, change: Change) -> Answer {
         Change::Mode(mode) => chmod_proc(file, mode),
         // (an empty path: the descriptor's own file, a link itself too)
         Change::Times(t) => utimensat(file.as_raw_fd(), c"".as_ptr(), t, EMPTY),
-        Change::Owner(..) => chown_unchanged(file, change, &st),
+        Change::Owner(uid, gid) => chown_unchanged(file, &Change::Owner(uid, gid), &st),
+        // (through its `/proc/self/fd/M`, followed — `fsetxattr` refuses an `O_PATH` descriptor: the file it was
+        // opened on, a link itself too, measured)
+        Change::Xattr(name, value) => {
+            xattr_made(XattrAt::Path(&proc_path(file), true), &name, value.as_ref())
+        }
     }
 }
 
@@ -272,18 +340,26 @@ fn on_fd(p: &Served, c: &Caller, fd: u64, change: Change, again: Again) -> Answe
     let st = stat(&file)?;
     let proc = proc_path(&file);
     let name = name_of(&file)?;
-    if changes_owner(change, &st) {
-        return owner_refused(p, c, &file, &name, &st, change);
+    if changes_owner(&change, &st) {
+        return owner_refused(p, c, &file, &name, &st, &change);
     }
+    if let Some(no) = xattr_refused(p, c, &file, &name, &st, &change) {
+        return no;
+    }
+    let change = acl_ids(c, change)?;
     let named = || named_there(c, &name, &st);
     if !no_name(name.as_os_str().as_bytes(), st.st_nlink == 0, named)
-        && let Some(no) = refused(p, c, &file, &name, &st, change, writable(&file))
+        && let Some(no) = refused(p, c, &file, &name, &st, &change, writable(&file))
     {
         return no;
     }
     let f = file.as_raw_fd();
     match (again, change) {
-        (_, Change::Owner(..)) => chown_unchanged(&file, change, &st),
+        (_, Change::Owner(uid, gid)) => chown_unchanged(&file, &Change::Owner(uid, gid), &st),
+        (Again::Xattr, Change::Xattr(name, value)) => xattr_made(XattrAt::Fd(f), &name, value.as_ref()),
+        (Again::Proc { follow }, Change::Xattr(name, value)) => {
+            xattr_made(XattrAt::Path(&proc, follow), &name, value.as_ref())
+        }
         // SAFETY: plain calls on tarae's own descriptor.
         (Again::Fchmod, Change::Mode(mode)) => result(unsafe { libc::fchmod(f, mode) } as isize),
         (Again::Fchmodat2(flags), Change::Mode(mode)) => {
@@ -314,13 +390,20 @@ fn refused(
     file: &OwnedFd,
     name: &Path,
     st: &libc::stat,
-    change: Change,
+    change: &Change,
     written: bool,
 ) -> Option<Answer> {
     if (written || p.writes_allow(name)) && named_there(c, name, st) {
         return None;
     }
     let errno = if read_only(file) { libc::EROFS } else { libc::EPERM };
+    // (an extended attribute's change the kernel would refuse anyway: its own answer, unsaid — a seal's `EROFS` is
+    // the sandbox's, said)
+    if let (libc::EPERM, Change::Xattr(n, _)) = (errno, change)
+        && let Some(own) = xattr_kernel_refuses(file, st, n.as_bytes())
+    {
+        return Some(Err(own));
+    }
     Some(refuse_with(p, c, errno, change.op(), name.display().to_string()))
 }
 
@@ -332,8 +415,8 @@ fn named_there(c: &Caller, name: &Path, st: &libc::stat) -> bool {
 
 /// Whether an owner call changes the owner or the group — each asked for (not `-1`) and not what the file has: never
 /// let, in no place (`rsync -a`'s and `cp -a`'s ask for what the file has, and are).
-fn changes_owner(change: Change, st: &libc::stat) -> bool {
-    matches!(change, Change::Owner(uid, gid)
+fn changes_owner(change: &Change, st: &libc::stat) -> bool {
+    matches!(*change, Change::Owner(uid, gid)
         if ![u32::MAX, st.st_uid].contains(&uid) || ![u32::MAX, st.st_gid].contains(&gid))
 }
 
@@ -346,7 +429,7 @@ fn owner_refused(
     file: &OwnedFd,
     name: &Path,
     st: &libc::stat,
-    change: Change,
+    change: &Change,
 ) -> Answer {
     let errno = if read_only(file) { libc::EROFS } else { libc::EPERM };
     if errno == libc::EPERM && !kernel_lets(change, st) {
@@ -358,14 +441,14 @@ fn owner_refused(
 /// Whether the kernel lets tarae's credentials — the run's user's — make an owner call on `st`'s file (`chown_ok`,
 /// `chgrp_ok`): root any (`CAP_CHOWN`; a root without it is said); else only the file's owner, its owner kept and
 /// its group one of the caller's.
-fn kernel_lets(change: Change, st: &libc::stat) -> bool {
+fn kernel_lets(change: &Change, st: &libc::stat) -> bool {
     // SAFETY: a plain call.
     lets(unsafe { libc::geteuid() }, change, st, in_group)
 }
 
 /// `kernel_lets` for a caller of `euid` in the groups `in_group` says.
-fn lets(euid: u32, change: Change, st: &libc::stat, in_group: impl Fn(u32) -> bool) -> bool {
-    let Change::Owner(uid, gid) = change else { return true };
+fn lets(euid: u32, change: &Change, st: &libc::stat, in_group: impl Fn(u32) -> bool) -> bool {
+    let Change::Owner(uid, gid) = *change else { return true };
     let owner = euid == st.st_uid;
     euid == 0
         || (uid == u32::MAX || owner && uid == st.st_uid)
@@ -390,7 +473,7 @@ pub(in crate::sandbox) fn in_group(gid: u32) -> bool {
 /// link): the kernel's own side effects — its change time, a set-user-ID or set-group-ID bit cleared — as the run's
 /// call would have had them. But the kernel's own `EPERM` where it refuses that call (`kernel_lets`: an id given
 /// as the file's own, on a file not the caller's) — `-1`, `-1` alone it lets anyone make.
-fn chown_unchanged(fd: &OwnedFd, change: Change, st: &libc::stat) -> Answer {
+fn chown_unchanged(fd: &OwnedFd, change: &Change, st: &libc::stat) -> Answer {
     if !kernel_lets(change, st) {
         return Err(libc::EPERM);
     }
@@ -405,6 +488,206 @@ fn writable(fd: &OwnedFd) -> bool {
     flags >= 0
         && flags & libc::O_PATH == 0
         && matches!(flags & libc::O_ACCMODE, libc::O_WRONLY | libc::O_RDWR)
+}
+
+/// `setxattr`'s change: its flags (`XATTR_CREATE`, `XATTR_REPLACE`, else `EINVAL`), then its name at `name` and its
+/// value of `size` bytes at `value`, each read once — the kernel's order (`setxattr_copy`).
+fn set(c: &Caller, name: u64, value: u64, size: u64, flags: i32) -> Result<Change, i32> {
+    if flags & !(libc::XATTR_CREATE | libc::XATTR_REPLACE) != 0 {
+        return Err(libc::EINVAL);
+    }
+    let name = xattr_name(c, name)?;
+    Ok(Change::Xattr(name, Some((xattr_value(c, value, size)?, flags))))
+}
+
+/// Whether this kernel has `setxattrat` and `removexattrat` (Linux 6.13) — asked once, with a size no call takes:
+/// `EINVAL` where it has them, `ENOSYS` where not — the run's own answer there.
+fn xattrat_here() -> bool {
+    static HERE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // SAFETY: a call that reads nothing: its size is refused first.
+    *HERE.get_or_init(
+        || unsafe { libc::syscall(SYS_SETXATTRAT, -1, 0, 0, 0, 0, 0) } < 0 && errno_now() != libc::ENOSYS,
+    )
+}
+
+fn errno_now() -> i32 {
+    io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// Whose an extended attribute's name is (the kernel's namespaces: `xattr_resolve_name`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Namespace {
+    /// `user.` and the two ACLs: served where the run may write, as a mode.
+    Served,
+    /// `security.`, `trusted.`, any other `system.`: never — a program's capabilities (`security.capability`) or a
+    /// security module's labels, set by tarae, root in a container, would be the run's to give.
+    Refused,
+    /// No namespace the kernel has: its own `EOPNOTSUPP`, nothing set — after its write check, as it judges the
+    /// file first (`xattr_permission`).
+    None,
+}
+
+/// The two POSIX ACLs' names.
+const ACLS: [&[u8]; 2] = [b"system.posix_acl_access", b"system.posix_acl_default"];
+
+fn namespace(name: &[u8]) -> Namespace {
+    match name {
+        n if ACLS.contains(&n) => Namespace::Served,
+        n if n.starts_with(b"user.") => Namespace::Served,
+        n if [&b"security."[..], b"trusted.", b"system."].iter().any(|w| n.starts_with(w)) => {
+            Namespace::Refused
+        }
+        _ => Namespace::None,
+    }
+}
+
+/// The answer to an extended attribute's change by its name alone (`namespace`), wherever its file (`fd`, named
+/// `file`, `st` its stat) is: refused and said — but the kernel's own answer, unsaid, where it would refuse that call
+/// anyway (`xattr_kernel_refuses`) — or the kernel's `EOPNOTSUPP`; None for one served — decided then as a mode is.
+fn xattr_refused(
+    p: &Served,
+    c: &Caller,
+    fd: &OwnedFd,
+    file: &Path,
+    st: &libc::stat,
+    change: &Change,
+) -> Option<Answer> {
+    let Change::Xattr(name, _) = change else { return None };
+    match namespace(name.as_bytes()) {
+        Namespace::Served => None,
+        Namespace::Refused => Some(match xattr_kernel_refuses(fd, st, name.as_bytes()) {
+            Some(own) => Err(own),
+            None => refuse(p, c, change.op(), file.display().to_string()),
+        }),
+        // (the kernel's write check comes first: a file the user may not write is its `EACCES`, an immutable one's
+        // `EPERM`, a read-only mount's `EROFS`)
+        Namespace::None => Some(Err(write_refused(fd).unwrap_or(libc::EOPNOTSUPP))),
+    }
+}
+
+/// An ACL's value with its user and group ids, which the run gave in its own user namespace, made tarae's: the kernel
+/// reads them in the caller's (`posix_acl_from_xattr`), so an id the run's namespace doesn't map is its own `EINVAL`
+/// there — never set as whoever that number is in tarae's (tier own maps one uid and one gid). Any other change, and
+/// a value the kernel refuses for its shape, as it is: the kernel answers it.
+fn acl_ids(c: &Caller, change: Change) -> Result<Change, i32> {
+    match change {
+        Change::Xattr(name, Some((value, flags))) if ACLS.contains(&name.as_bytes()) => {
+            let map =
+                |f: &str| std::fs::read_to_string(format!("/proc/{}/{f}", c.tid)).map_err(|_| libc::ESRCH);
+            let value = acl_in(value, &map("uid_map")?, &map("gid_map")?)?;
+            Ok(Change::Xattr(name, Some((value, flags))))
+        }
+        other => Ok(other),
+    }
+}
+
+/// `acl_ids` on `value` (`posix_acl_xattr_header`, version 2, then entries of tag, permissions and id, little-endian)
+/// with the run's `uid_map` and `gid_map` as tarae reads them: `inside outside count` a line, `outside` in tarae's
+/// namespace.
+fn acl_in(mut value: Vec<u8>, uid_map: &str, gid_map: &str) -> Result<Vec<u8>, i32> {
+    const ACL_USER: u16 = 2;
+    const ACL_GROUP: u16 = 8;
+    if value.len() < 4 || value[..4] != 2u32.to_le_bytes() || !(value.len() - 4).is_multiple_of(8) {
+        return Ok(value);
+    }
+    for e in value[4..].as_chunks_mut::<8>().0 {
+        let map = match u16::from_le_bytes([e[0], e[1]]) {
+            ACL_USER => uid_map,
+            ACL_GROUP => gid_map,
+            _ => continue,
+        };
+        let id = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
+        e[4..].copy_from_slice(&mapped(map, id).ok_or(libc::EINVAL)?.to_le_bytes());
+    }
+    Ok(value)
+}
+
+/// `id` of a namespace as its map (`inside outside count` lines) gives it to the reader; None where the map has none.
+fn mapped(map: &str, id: u32) -> Option<u32> {
+    map.lines().find_map(|l| {
+        let mut f = l.split_whitespace().map(|f| f.parse::<u64>().ok());
+        let (inside, outside, count) = (f.next()??, f.next()??, f.next()??);
+        let past = u64::from(id).checked_sub(inside).filter(|&d| d < count)?;
+        u32::try_from(outside + past).ok()
+    })
+}
+
+/// Where tarae refuses an extended attribute's change, the kernel's own answer when it would refuse that call anyway
+/// with tarae's credentials — the run's user's — as sandbox C's owner calls have it (`kernel_lets`): unsaid, as
+/// outside a sandbox (a user's `cp --preserve=all` of another's file goes on without what it can't copy). The kernel's
+/// rules (`xattr_permission`, the ACL and `security.capability` handlers): `trusted.` needs `CAP_SYS_ADMIN`;
+/// `security.capability` `CAP_SETFCAP`; an ACL the file's owner (or `CAP_FOWNER`); `user.` a file or a folder (a
+/// sticky one its owner's), and write permission on it (`faccessat` through tarae's own descriptor, as the kernel
+/// judges it: `EACCES`, an immutable file's `EPERM`). None where it would let it, or where only trying could tell —
+/// another `security.` name is a security module's to judge, another `system.` a file system's.
+fn xattr_kernel_refuses(fd: &OwnedFd, st: &libc::stat, name: &[u8]) -> Option<i32> {
+    const CAP_FOWNER: u32 = 3;
+    const CAP_SYS_ADMIN: u32 = 21;
+    const CAP_SETFCAP: u32 = 31;
+    // SAFETY: a plain call.
+    let mine = unsafe { libc::geteuid() } == st.st_uid || holds(CAP_FOWNER);
+    let kind = st.st_mode & libc::S_IFMT;
+    let refused = |no: bool| no.then_some(libc::EPERM);
+    match name {
+        n if n.starts_with(b"trusted.") => refused(!holds(CAP_SYS_ADMIN)),
+        b"security.capability" => refused(!holds(CAP_SETFCAP)),
+        n if ACLS.contains(&n) => refused(!mine),
+        n if n.starts_with(b"user.") => {
+            if ![libc::S_IFREG, libc::S_IFDIR].contains(&kind)
+                || kind == libc::S_IFDIR && st.st_mode & libc::S_ISVTX != 0 && !mine
+            {
+                return Some(libc::EPERM);
+            }
+            write_refused(fd)
+        }
+        _ => None,
+    }
+}
+
+/// The kernel's write check on tarae's own descriptor's file (`inode_permission(MAY_WRITE)`), as
+/// `faccessat(W_OK, AT_EACCESS)` through its `/proc/self/fd/M` judges it: `EACCES`, an immutable file's `EPERM`, a
+/// read-only mount's `EROFS`; None where it may write.
+fn write_refused(fd: &OwnedFd) -> Option<i32> {
+    let p = proc_path(fd);
+    // SAFETY: a path that lives through the call.
+    let r = unsafe { libc::faccessat(libc::AT_FDCWD, p.as_ptr(), libc::W_OK, libc::AT_EACCESS) };
+    (r != 0).then(errno_now)
+}
+
+/// Whether tarae holds capability `cap` (`/proc/self/status`'s `CapEff`) — what the kernel asks for some calls.
+pub(in crate::sandbox) fn holds(cap: u32) -> bool {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let caps = status.lines().find_map(|l| l.strip_prefix("CapEff:"));
+    caps.and_then(|v| u64::from_str_radix(v.trim(), 16).ok()).is_some_and(|c| c & (1 << cap) != 0)
+}
+
+/// Where tarae makes an extended attribute's change: a path of its own (`/proc/self/fd/M`; followed or not), or its
+/// own descriptor.
+enum XattrAt<'a> {
+    Path(&'a std::ffi::CStr, bool),
+    Fd(i32),
+}
+
+/// An extended attribute set to `value` (its bytes and flags) or removed (None), by tarae.
+fn xattr_made(at: XattrAt, name: &std::ffi::CStr, value: Option<&(Vec<u8>, i32)>) -> Answer {
+    let n = name.as_ptr();
+    // SAFETY: tarae's own path or descriptor, a name and a value that live through the call (an empty value's
+    // address, never read).
+    let r = unsafe {
+        match (at, value) {
+            (XattrAt::Path(p, true), Some((v, f))) => {
+                libc::setxattr(p.as_ptr(), n, v.as_ptr().cast(), v.len(), *f)
+            }
+            (XattrAt::Path(p, false), Some((v, f))) => {
+                libc::lsetxattr(p.as_ptr(), n, v.as_ptr().cast(), v.len(), *f)
+            }
+            (XattrAt::Fd(fd), Some((v, f))) => libc::fsetxattr(fd, n, v.as_ptr().cast(), v.len(), *f),
+            (XattrAt::Path(p, true), None) => libc::removexattr(p.as_ptr(), n),
+            (XattrAt::Path(p, false), None) => libc::lremovexattr(p.as_ptr(), n),
+            (XattrAt::Fd(fd), None) => libc::fremovexattr(fd, n),
+        }
+    };
+    result(r as isize)
 }
 
 fn stat(fd: &OwnedFd) -> Result<libc::stat, i32> {
@@ -479,7 +762,39 @@ mod tests {
             (1001, none, none, true),
             (0, 1001, 30, true),
         ] {
-            assert_eq!(lets(euid, Change::Owner(uid, gid), &st, groups), want, "{euid}: {uid} {gid}");
+            assert_eq!(lets(euid, &Change::Owner(uid, gid), &st, groups), want, "{euid}: {uid} {gid}");
         }
+    }
+
+    /// D2 B: an ACL's user and group ids are the run's, in its user namespace — made tarae's by its maps, one they
+    /// don't hold the kernel's `EINVAL` there; owner, group, mask and other carry none; a value the kernel refuses
+    /// for its shape is left for its own answer.
+    #[test]
+    fn an_acls_ids_are_read_in_the_runs_namespace() {
+        let acl = |entries: &[(u16, u32)]| {
+            let mut v = 2u32.to_le_bytes().to_vec();
+            for &(tag, id) in entries {
+                v.extend(tag.to_le_bytes());
+                v.extend(4u16.to_le_bytes());
+                v.extend(id.to_le_bytes());
+            }
+            v
+        };
+        let none = u32::MAX;
+        // (tier own's maps, a nested namespace's, the initial one's)
+        let (own, nested, host) = ("1000 1000 1\n", "0 100000 65536\n", "0 0 4294967295\n");
+        let mine = acl(&[(1, none), (2, 1000), (4, none), (8, 1000), (0x10, none), (0x20, none)]);
+        assert_eq!(acl_in(mine.clone(), own, own), Ok(mine.clone()));
+        assert_eq!(acl_in(mine.clone(), host, host), Ok(mine));
+        assert_eq!(acl_in(acl(&[(2, 0)]), own, own), Err(libc::EINVAL), "root, unmapped");
+        assert_eq!(acl_in(acl(&[(8, 1001)]), own, own), Err(libc::EINVAL), "another group");
+        assert_eq!(acl_in(acl(&[(2, 5), (8, 7)]), nested, host), Ok(acl(&[(2, 100_005), (8, 7)])));
+        assert_eq!(acl_in(acl(&[(2, none)]), host, host), Err(libc::EINVAL), "-1 is no one's");
+        assert_eq!(acl_in(acl(&[(1, 7)]), own, own), Ok(acl(&[(1, 7)])));
+        let odd = vec![2, 0, 0, 0, 2, 0];
+        assert_eq!(acl_in(odd.clone(), own, own), Ok(odd));
+        let mut v1 = acl(&[(2, 0)]);
+        v1[0] = 1;
+        assert_eq!(acl_in(v1.clone(), own, own), Ok(v1));
     }
 }

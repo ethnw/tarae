@@ -4048,6 +4048,8 @@ mod tests {
             "reach" => helper_reach(&std::env::var("TARAE_TO").unwrap_or_default()),
             "attr_calls" => helper_attr_calls(),
             "attr_race" => helper_attr_race(),
+            "xattr_shapes" => helper_xattr_shapes(),
+            "xattr_calls" => helper_xattr_calls(),
             "attr_shm" => helper_attr_shm(),
             "attr_shm_manifest" => helper_attr_shm_manifest(),
             "perf_chmod" => helper_perf_chmod(),
@@ -5702,8 +5704,8 @@ mod tests {
         }
         // (what `rsync -a` asks on the way, by `cp -a` — no rsync in the test image: the owner and group the file
         // has, done. Only as root: a user's `cp -a` goes on past a refused owner call, so only root's fails where
-        // those are refused — the rows above hold a user's. Not `install -m`: coreutils sets that mode as an ACL, and
-        // extended attributes are refused in every tier — D-h)
+        // those are refused — the rows above hold a user's. `install -m`, which sets that mode as an ACL, is `xattr_calls`'
+        // — D2 B)
         // SAFETY: a plain call.
         if unsafe { libc::geteuid() } == 0 {
             match std::process::Command::new("cp").args(["-a", inside, "copied"]).output() {
@@ -5723,6 +5725,361 @@ mod tests {
 
         let wrong = wrong.into_inner();
         if wrong.is_empty() { "ok".to_string() } else { wrong.join("\n") }
+    }
+
+    /// `xattr_shapes`: D2 B's extended attribute calls whose answer is the kernel's own, on files of its own where
+    /// it works — each argument's error in the kernel's order (flags, name, value, then the file), a name or a value
+    /// too long, a file not there, `user.` on a link, an `O_PATH` descriptor, `AT_EMPTY_PATH` on where it works, an
+    /// ACL the kernel judges — `name=ok` or `name=<errno>`, `;` between. Run unsandboxed (the kernel's answers) and
+    /// served (tarae's), compared row for row.
+    fn helper_xattr_shapes() -> String {
+        xattr_shapes()
+            .into_iter()
+            .map(|(n, r)| format!("{n}={}", r.map_or_else(|e| e.to_string(), |()| "ok".into())))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// `helper_xattr_shapes`'s rows, each Ok or its errno.
+    fn xattr_shapes() -> Vec<(&'static str, Result<(), i32>)> {
+        std::fs::write("shape_f", "shape\n").unwrap();
+        let _ = std::fs::remove_file("shape_l");
+        std::os::unix::fs::symlink("shape_f", "shape_l").unwrap();
+        // (a file of its own it may not write: as a user, the kernel's write check answers before the name's namespace)
+        let _ = std::fs::remove_file("shape_ro");
+        std::fs::write("shape_ro", "shape\n").unwrap();
+        std::fs::set_permissions("shape_ro", std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+        let raw = |nr: libc::c_long, a: [libc::c_long; 6]| -> Result<(), i32> {
+            // SAFETY: each row's arguments point at what lives through the call, or at nothing mapped (0).
+            let r = unsafe { libc::syscall(nr, a[0], a[1], a[2], a[3], a[4], a[5]) };
+            if r < 0 { Err(io::Error::last_os_error().raw_os_error().unwrap_or(0)) } else { Ok(()) }
+        };
+        let c = |s: &std::ffi::CStr| s.as_ptr() as libc::c_long;
+        let (f, l, gone, blank) = (c(c"shape_f"), c(c"shape_l"), c(c"shape_gone"), c(c""));
+        let ro_f = c(c"shape_ro");
+        let (name, x) = (c(c"user.tarae.shape"), c(c"x"));
+        let mut n255 = vec![b'a'; 255];
+        n255[..5].copy_from_slice(b"user.");
+        let mut n256 = n255.clone();
+        n256.push(b'a');
+        let (n255, n256) = (std::ffi::CString::new(n255).unwrap(), std::ffi::CString::new(n256).unwrap());
+        let big = vec![0u8; 65537];
+        let big_p = big.as_ptr() as libc::c_long;
+        let open =
+            |flags| unsafe { libc::open(c"shape_f".as_ptr(), flags | libc::O_CLOEXEC) } as libc::c_long;
+        let (ro, opath) = (open(libc::O_RDONLY), open(libc::O_PATH));
+        let at = libc::AT_FDCWD as libc::c_long;
+        let (empty, nofollow) =
+            (libc::AT_EMPTY_PATH as libc::c_long, libc::AT_SYMLINK_NOFOLLOW as libc::c_long);
+        // (`struct xattr_args`: the value's address, its size, its flags; 24 bytes with a tail of zeroes or not)
+        let args = |value: libc::c_long, size: u32, flags: u32| {
+            let mut b = (value as u64).to_ne_bytes().to_vec();
+            b.extend(size.to_ne_bytes());
+            b.extend(flags.to_ne_bytes());
+            b.extend([0u8; 8]);
+            b
+        };
+        let (ok_args, flags_args, big_args) = (args(x, 1, 0), args(x, 1, 4), args(big_p, 65537, 0));
+        let mut tail_args = ok_args.clone();
+        tail_args[20] = 1;
+        let a = |b: &Vec<u8>| b.as_ptr() as libc::c_long;
+        // (an ACL: user::rw-, user:<uid>:r--, group::r--, mask::r--, other::r-- — one the kernel keeps, mode 644)
+        // SAFETY: a plain call.
+        let uid = unsafe { libc::getuid() };
+        let mut acl = 2u32.to_ne_bytes().to_vec();
+        for (tag, perm, id) in
+            [(1u16, 6u16, u32::MAX), (2, 4, uid), (4, 4, u32::MAX), (0x10, 4, u32::MAX), (0x20, 4, u32::MAX)]
+        {
+            acl.extend(tag.to_ne_bytes());
+            acl.extend(perm.to_ne_bytes());
+            acl.extend(id.to_ne_bytes());
+        }
+        let (access, default) = (c(c"system.posix_acl_access"), c(c"system.posix_acl_default"));
+        let (set, lset, fset) = (libc::SYS_setxattr, libc::SYS_lsetxattr, libc::SYS_fsetxattr);
+        let (rm, frm) = (libc::SYS_removexattr, libc::SYS_fremovexattr);
+        let (setat, rmat) = (crate::seccomp::SYS_SETXATTRAT, crate::seccomp::SYS_REMOVEXATTRAT);
+        let here = c(c".");
+        let rows: Vec<(&'static str, libc::c_long, [libc::c_long; 6])> = vec![
+            ("set", set, [f, name, x, 1, 0, 0]),
+            ("set, an empty name", set, [f, c(c""), x, 1, 0, 0]),
+            ("set, no name", set, [f, 0, x, 1, 0, 0]),
+            ("set, a name of 255", set, [f, c(&n255), x, 1, 0, 0]),
+            ("set, a name of 256", set, [f, c(&n256), x, 1, 0, 0]),
+            ("set, no value of 1", set, [f, name, 0, 1, 0, 0]),
+            ("set, no value of 0", set, [f, name, 0, 0, 0, 0]),
+            ("set, a value past 64 KiB", set, [f, name, big_p, 65537, 0, 0]),
+            ("set, an unknown flag", set, [f, name, x, 1, 4, 0]),
+            ("set, an unknown flag, no file", set, [gone, name, x, 1, 4, 0]),
+            ("set, an empty name, no file", set, [gone, c(c""), x, 1, 0, 0]),
+            ("set, past 64 KiB, no file", set, [gone, name, big_p, 65537, 0, 0]),
+            ("set, no file", set, [gone, name, x, 1, 0, 0]),
+            ("set, no path", set, [0, name, x, 1, 0, 0]),
+            ("set, an empty path", set, [blank, name, x, 1, 0, 0]),
+            ("set, create what's there", set, [f, name, x, 1, libc::XATTR_CREATE as _, 0]),
+            ("set, replace what isn't", set, [f, c(c"user.tarae.none"), x, 1, libc::XATTR_REPLACE as _, 0]),
+            ("set, no namespace", set, [f, c(c"tarae.x"), x, 1, 0, 0]),
+            ("set, no namespace, a file it may not write", set, [ro_f, c(c"tarae.x"), x, 1, 0, 0]),
+            ("remove, no namespace, a file it may not write", rm, [ro_f, c(c"tarae.x"), 0, 0, 0, 0]),
+            ("set, user. alone", set, [f, c(c"user."), x, 1, 0, 0]),
+            ("set, user. on a link itself", lset, [l, name, x, 1, 0, 0]),
+            ("set, through a link", set, [l, name, x, 1, 0, 0]),
+            ("set, by an O_PATH descriptor", fset, [opath, name, x, 1, 0, 0]),
+            ("set, by a descriptor read-only", fset, [ro, name, x, 1, 0, 0]),
+            ("set, by a bad descriptor", fset, [-1, name, x, 1, 0, 0]),
+            ("set, by a bad descriptor, an unknown flag", fset, [-1, name, x, 1, 4, 0]),
+            ("remove", rm, [f, name, 0, 0, 0, 0]),
+            ("remove what isn't", rm, [f, name, 0, 0, 0, 0]),
+            ("remove, an empty name", rm, [f, c(c""), 0, 0, 0, 0]),
+            ("remove, an empty name, no file", rm, [gone, c(c""), 0, 0, 0, 0]),
+            ("remove, by an O_PATH descriptor", frm, [opath, name, 0, 0, 0, 0]),
+            ("setat", setat, [at, f, 0, name, a(&ok_args), 16]),
+            ("setat, args of 8", setat, [at, f, 0, name, a(&ok_args), 8]),
+            ("setat, args past a page", setat, [at, f, 0, name, a(&ok_args), 1 << 20]),
+            ("setat, args of 24, a tail of 0", setat, [at, f, 0, name, a(&ok_args), 24]),
+            ("setat, args of 24, a tail not 0", setat, [at, f, 0, name, a(&tail_args), 24]),
+            ("setat, no args", setat, [at, f, 0, name, 0, 16]),
+            ("setat, an unknown at-flag", setat, [at, f, 0x2000, name, a(&ok_args), 16]),
+            ("setat, an unknown at-flag, args of 8", setat, [at, f, 0x2000, name, a(&ok_args), 8]),
+            ("setat, an unknown at-flag, an empty name", setat, [at, f, 0x2000, c(c""), a(&ok_args), 16]),
+            ("setat, an unknown flag", setat, [at, f, 0, name, a(&flags_args), 16]),
+            ("setat, a value past 64 KiB", setat, [at, f, 0, name, a(&big_args), 16]),
+            ("setat, where it works, empty", setat, [at, blank, empty, name, a(&ok_args), 16]),
+            ("setat, where it works, no path", setat, [at, 0, empty, name, a(&ok_args), 16]),
+            ("setat, no path, no flag", setat, [at, 0, 0, name, a(&ok_args), 16]),
+            ("setat, an empty path, no flag", setat, [at, blank, 0, name, a(&ok_args), 16]),
+            ("setat, a descriptor read-only", setat, [ro, blank, empty, name, a(&ok_args), 16]),
+            ("setat, a descriptor read-only, no path", setat, [ro, 0, empty, name, a(&ok_args), 16]),
+            ("setat, an O_PATH descriptor", setat, [opath, blank, empty, name, a(&ok_args), 16]),
+            ("setat, a bad descriptor", setat, [-1, blank, empty, name, a(&ok_args), 16]),
+            ("setat, a link itself", setat, [at, l, nofollow, name, a(&ok_args), 16]),
+            ("removeat", rmat, [at, f, 0, name, 0, 0]),
+            ("removeat, where it works, empty", rmat, [at, blank, empty, name, 0, 0]),
+            ("removeat, where it works", rmat, [at, here, 0, name, 0, 0]),
+            ("removeat, a descriptor read-only", rmat, [ro, blank, empty, name, 0, 0]),
+            ("removeat, an O_PATH descriptor", rmat, [opath, blank, empty, name, 0, 0]),
+            ("removeat, an unknown at-flag", rmat, [at, f, 0x2000, name, 0, 0]),
+            ("removeat, an unknown at-flag, no file", rmat, [at, gone, 0x2000, name, 0, 0]),
+            ("removeat, an empty name, no file", rmat, [at, gone, 0, c(c""), 0, 0]),
+            ("an ACL", set, [f, access, a(&acl), acl.len() as _, 0, 0]),
+            ("an ACL the kernel refuses", set, [f, access, x, 1, 0, 0]),
+            ("a default ACL on a file", set, [f, default, a(&acl), acl.len() as _, 0, 0]),
+            ("an ACL removed", rm, [f, access, 0, 0, 0, 0]),
+        ];
+        let said = rows.into_iter().map(|(what, nr, args)| (what, raw(nr, args))).collect();
+        // SAFETY: descriptors of its own.
+        unsafe { (libc::close(ro as i32), libc::close(opath as i32)) };
+        let _ = (
+            std::fs::remove_file("shape_f"),
+            std::fs::remove_file("shape_l"),
+            std::fs::remove_file("shape_ro"),
+        );
+        said
+    }
+
+    /// `xattr_calls` (D2 B): extended attributes (ACLs too) in a served run, each row `want`ed — set, read back and
+    /// removed in the project by path, by descriptor and by `*xattrat`; refused outside its write places
+    /// (`$TARAE_OUTSIDE`, which holds `user.tarae.keep`), on a protected name (`$TARAE_PROTECTED`), through `/proc`,
+    /// and by name in every place (`security.`, `trusted.`, other `system.`); `install -m` and `cp --preserve=all`
+    /// in the project; then `xattr_shapes` against the kernel's own answers (`$TARAE_SHAPES`). `ok`, or what wasn't.
+    fn helper_xattr_calls() -> String {
+        use std::ffi::CString;
+        let outside = CString::new(std::env::var("TARAE_OUTSIDE").expect("TARAE_OUTSIDE")).unwrap();
+        let protected = CString::new(std::env::var("TARAE_PROTECTED").expect("TARAE_PROTECTED")).unwrap();
+        let out_link =
+            CString::new(std::env::var("TARAE_OUTSIDE_LINK").expect("TARAE_OUTSIDE_LINK")).unwrap();
+        let out_ro = CString::new(std::env::var("TARAE_OUTSIDE_RO").expect("TARAE_OUTSIDE_RO")).unwrap();
+        // (what the kernel answers tarae for a file its user may not write: `EPERM` from tarae where the kernel would let
+        // it — root's `CAP_DAC_OVERRIDE` — else the kernel's own `EACCES`)
+        let ro_want: i32 = std::env::var("TARAE_RO_WANT").expect("TARAE_RO_WANT").parse().unwrap();
+        // (an ACL naming another user or group: the kernel reads its ids in the run's user namespace — where it has
+        // one, mapping only its own ids, its `EINVAL`; set where it has none — 0)
+        let other: i32 =
+            std::env::var("TARAE_ACL_OTHER_WANT").expect("TARAE_ACL_OTHER_WANT").parse().unwrap();
+        let other_want = if other == 0 { Ok(()) } else { Err(other) };
+        // SAFETY: plain calls.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let acl_naming = |tag: u16, id: u32| {
+            let none = u32::MAX;
+            let mut entries = vec![(1u16, 6u16, none), (4, 4, none), (0x10, 4, none), (0x20, 4, none)];
+            entries.insert(if tag == 2 { 1 } else { 2 }, (tag, 4, id));
+            let mut v = 2u32.to_le_bytes().to_vec();
+            for (tag, perm, id) in entries {
+                v.extend(tag.to_le_bytes());
+                v.extend(perm.to_le_bytes());
+                v.extend(id.to_le_bytes());
+            }
+            v
+        };
+        let (acl_user, acl_group) = (acl_naming(2, uid.wrapping_add(1)), acl_naming(8, gid.wrapping_add(1)));
+        std::fs::write("inside_x", "x\n").unwrap();
+        let _ = std::fs::remove_file("link_out_x");
+        std::os::unix::fs::symlink(outside.to_str().unwrap(), "link_out_x").unwrap();
+        let raw = |nr: libc::c_long, a: [libc::c_long; 6]| -> Result<(), i32> {
+            // SAFETY: each row's arguments point at what lives through the call.
+            let r = unsafe { libc::syscall(nr, a[0], a[1], a[2], a[3], a[4], a[5]) };
+            if r < 0 { Err(io::Error::last_os_error().raw_os_error().unwrap_or(0)) } else { Ok(()) }
+        };
+        let c = |s: &std::ffi::CStr| s.as_ptr() as libc::c_long;
+        let (inside, out, prot) = (c(c"inside_x"), c(&outside), c(&protected));
+        let (name, keep, x) = (c(c"user.tarae"), c(c"user.tarae.keep"), c(c"x"));
+        let (acl, a) = (c(c"system.posix_acl_access"), |b: &Vec<u8>| b.as_ptr() as libc::c_long);
+        let open = |p: &std::ffi::CStr, flags| unsafe { libc::open(p.as_ptr(), flags | libc::O_CLOEXEC) }
+            as libc::c_long;
+        let (fd_in, fd_out) = (open(c"inside_x", libc::O_RDONLY), open(&outside, libc::O_RDONLY));
+        let proc_out = CString::new(format!("/proc/self/fd/{fd_out}")).unwrap();
+        let mut xa = (x as u64).to_ne_bytes().to_vec();
+        xa.extend(1u32.to_ne_bytes());
+        xa.extend(0u32.to_ne_bytes());
+        let xa = xa.as_ptr() as libc::c_long;
+        let at = libc::AT_FDCWD as libc::c_long;
+        let empty = libc::AT_EMPTY_PATH as libc::c_long;
+        let (set, fset, rm, frm) =
+            (libc::SYS_setxattr, libc::SYS_fsetxattr, libc::SYS_removexattr, libc::SYS_fremovexattr);
+        let (setat, rmat) = (crate::seccomp::SYS_SETXATTRAT, crate::seccomp::SYS_REMOVEXATTRAT);
+        let read_back = |p: &std::ffi::CStr| {
+            let mut v = [0u8; 8];
+            // SAFETY: a buffer of 8.
+            let n = unsafe { libc::getxattr(p.as_ptr(), c"user.tarae".as_ptr(), v.as_mut_ptr().cast(), 8) };
+            if n < 0 {
+                Err(io::Error::last_os_error().raw_os_error().unwrap_or(0))
+            } else {
+                Ok(v[..n as usize].to_vec())
+            }
+        };
+        let (ok, eperm, enotsup) = (Ok(()), Err(libc::EPERM), Err(libc::EOPNOTSUPP));
+        let mut wrong = Vec::new();
+        let rows = vec![
+            // (in the project: served)
+            ("set inside", set, [inside, name, x, 1, 0, 0], ok),
+            ("remove inside", rm, [inside, name, 0, 0, 0, 0], ok),
+            ("set inside, by a descriptor read-only", fset, [fd_in, name, x, 1, 0, 0], ok),
+            ("remove inside, by a descriptor", frm, [fd_in, name, 0, 0, 0, 0], ok),
+            ("setat inside", setat, [at, inside, 0, name, xa, 16], ok),
+            ("removeat inside, by a descriptor", rmat, [fd_in, c(c""), empty, name, 0, 0], ok),
+            ("setat inside, by a descriptor", setat, [fd_in, c(c""), empty, name, xa, 16], ok),
+            // (set by path last, read back after: where the `*xattrat` rows are the kernel's `ENOSYS` too)
+            ("set inside again, to be read back", set, [inside, name, x, 1, 0, 0], ok),
+            // (outside its write places, by each way: refused, said)
+            ("set outside", set, [out, name, x, 1, 0, 0], eperm),
+            ("set outside, by a descriptor read-only", fset, [fd_out, name, x, 1, 0, 0], eperm),
+            ("set outside, by its /proc/self/fd", set, [c(&proc_out), name, x, 1, 0, 0], eperm),
+            ("set outside, through the project's link", set, [c(c"link_out_x"), name, x, 1, 0, 0], eperm),
+            ("setat outside", setat, [at, out, 0, name, xa, 16], eperm),
+            ("remove outside", rm, [out, keep, 0, 0, 0, 0], eperm),
+            ("remove outside, by a descriptor", frm, [fd_out, keep, 0, 0, 0, 0], eperm),
+            ("removeat outside", rmat, [at, out, 0, keep, 0, 0], eperm),
+            // (where the kernel would refuse it anyway: its own answer, unsaid — `user.` on a link itself, even root's;
+            // a file its user may not write)
+            ("set a link itself, outside", libc::SYS_lsetxattr, [c(&out_link), name, x, 1, 0, 0], eperm),
+            ("set outside, read-only to its user", set, [c(&out_ro), name, x, 1, 0, 0], Err(ro_want)),
+            // (a protected name in the project)
+            ("set a protected name", set, [prot, name, x, 1, 0, 0], eperm),
+            ("setat a protected name", setat, [at, prot, 0, name, xa, 16], eperm),
+            // (through /proc: refused, never resolved for the run)
+            ("set through /proc/self/cwd", set, [c(c"/proc/self/cwd/inside_x"), name, x, 1, 0, 0], eperm),
+            // (by name, where the run may write: never, as root too)
+            ("security.capability inside", set, [inside, c(c"security.capability"), x, 1, 0, 0], eperm),
+            ("trusted. inside", set, [inside, c(c"trusted.tarae"), x, 1, 0, 0], eperm),
+            ("another system. inside", set, [inside, c(c"system.tarae"), x, 1, 0, 0], eperm),
+            // (no namespace the kernel has: its own answer, nothing said)
+            ("no namespace inside", set, [inside, c(c"tarae.x"), x, 1, 0, 0], enotsup),
+            // (an ACL's ids are the run's, read in its user namespace)
+            (
+                "an ACL naming another user inside",
+                set,
+                [inside, acl, a(&acl_user), acl_user.len() as _, 0, 0],
+                other_want,
+            ),
+            (
+                "an ACL naming another group inside",
+                set,
+                [inside, acl, a(&acl_group), acl_group.len() as _, 0, 0],
+                other_want,
+            ),
+        ];
+        // (`setxattrat` and `removexattrat` where this kernel has them — not under Docker's default seccomp profile,
+        // which hides them from every process: there the kernel's `ENOSYS`, tarae's too)
+        let at_here = raw(setat, [-1, 0, 0, 0, 0, 0]) != Err(libc::ENOSYS);
+        for (what, nr, args, want) in rows {
+            let want = if at_here || ![setat, rmat].contains(&nr) { want } else { Err(libc::ENOSYS) };
+            let got = raw(nr, args);
+            // (a protected name sealed read-only in tier own, B9: `EROFS`, as the kernel answers it there)
+            let sealed = what.contains("protected") && got == Err(libc::EROFS);
+            if got != want && !sealed {
+                wrong.push(format!("{what}: got {got:?}, want {want:?}"));
+            }
+        }
+        if read_back(c"inside_x") != Ok(b"x".to_vec()) {
+            wrong.push(format!("inside_x's user.tarae read back: {:?}", read_back(c"inside_x")));
+        }
+        // SAFETY: descriptors of its own.
+        unsafe { (libc::close(fd_in as i32), libc::close(fd_out as i32)) };
+        // (the tools that failed before: `install -m` sets its mode as an ACL; `cp --preserve=all` copies the
+        // attributes and the ACL)
+        std::fs::write("tool_src", "t\n").unwrap();
+        let set_ok = raw(set, [c(c"tool_src"), name, x, 1, 0, 0]);
+        let tools: [&[&str]; 2] = [
+            &["install", "-m", "644", "tool_src", "tool_installed"],
+            &["cp", "--preserve=all", "tool_src", "tool_copied"],
+        ];
+        for line in tools {
+            match std::process::Command::new(line[0]).args(&line[1..]).output() {
+                Ok(o) if o.status.success() => {}
+                o => wrong.push(format!(
+                    "{}: {:?} {}",
+                    line.join(" "),
+                    o.as_ref().map(|o| o.status),
+                    o.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default()
+                )),
+            }
+        }
+        if set_ok != Ok(()) || read_back(c"tool_copied") != Ok(b"x".to_vec()) {
+            wrong.push(format!("cp --preserve=all's copy: {set_ok:?} {:?}", read_back(c"tool_copied")));
+        }
+        // (where the image has them — not the test image: run by hand with `--image`, an image with rsync and acl:
+        // `setfacl` on the source, `rsync -AX` copying its ACL and attributes)
+        let has = |p: &str| {
+            std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success())
+        };
+        if has("setfacl") {
+            // SAFETY: a plain call.
+            let me = format!("u:{}:r", unsafe { libc::getuid() });
+            let ran = std::process::Command::new("setfacl").args(["-m", &me, "tool_src"]).output();
+            if !ran.as_ref().is_ok_and(|o| o.status.success()) {
+                wrong.push(format!("setfacl -m {me}: {ran:?}"));
+            }
+        }
+        if has("rsync") {
+            let ran = std::process::Command::new("rsync").args(["-AX", "tool_src", "tool_rsynced"]).output();
+            let acl = |p: &std::ffi::CStr| {
+                // SAFETY: a path and a name that live through the call; no buffer asked.
+                unsafe {
+                    libc::getxattr(p.as_ptr(), c"system.posix_acl_access".as_ptr(), std::ptr::null_mut(), 0)
+                }
+            };
+            let acls = (acl(c"tool_src") >= 0, acl(c"tool_rsynced") >= 0);
+            if !ran.as_ref().is_ok_and(|o| o.status.success())
+                || read_back(c"tool_rsynced") != Ok(b"x".to_vec())
+                || acls.0 != acls.1
+            {
+                wrong.push(format!("rsync -AX: {ran:?} {:?} ACLs {acls:?}", read_back(c"tool_rsynced")));
+            }
+        }
+        for f in ["inside_x", "link_out_x", "tool_src", "tool_installed", "tool_copied", "tool_rsynced"] {
+            let _ = std::fs::remove_file(f);
+        }
+        // (every other answer the kernel's own)
+        let kernel = std::env::var("TARAE_SHAPES").unwrap_or_default();
+        let served = helper_xattr_shapes();
+        for (k, s) in kernel.split(';').zip(served.split(';')) {
+            if k != s {
+                wrong.push(format!("the kernel's {k}, served {s}"));
+            }
+        }
+        if kernel.split(';').count() != served.split(';').count() {
+            wrong.push(format!("rows: the kernel's {kernel}, served {served}"));
+        }
+        if wrong.is_empty() { "ok".into() } else { wrong.join("\n") }
     }
 
     /// `attr_race`: midway folder flipped between inside project and outside directory 10 000 times under a chmod + utimensat loop;
@@ -5900,7 +6257,8 @@ mod tests {
         format!("mode {mode} times {times} link {link}")
     }
 
-    /// `perf_chmod`: 2 000 `chmod` calls and 2 000 `utimensat` calls on a project file, time in µs a call.
+    /// `perf_chmod`: 2 000 `chmod` calls, 2 000 `utimensat` calls and 2 000 `setxattr` calls (D2 B) on a project
+    /// file, time in µs a call.
     fn helper_perf_chmod() -> String {
         let inside = "perf_target";
         std::fs::write(inside, "perf\n").unwrap();
@@ -5930,9 +6288,26 @@ mod tests {
             }
         }
         let utimensat_us = t1.elapsed().as_micros() as f64 / n as f64;
+
+        // (not where the filter refuses it outright: tier offline's, `TARAE_PERF_XATTR=0`)
+        let xattrs = std::env::var("TARAE_PERF_XATTR").map_or(true, |v| v != "0");
+        let t2 = std::time::Instant::now();
+        for _ in 0..if xattrs { n } else { 0 } {
+            // SAFETY: a path, a name and a value that live through the call.
+            if unsafe {
+                libc::setxattr(c_inside.as_ptr(), c"user.tarae".as_ptr(), c"x".as_ptr().cast(), 1, 0)
+            } != 0
+            {
+                failed.push(format!("setxattr {}", io::Error::last_os_error()));
+            }
+        }
+        let setxattr_us = t2.elapsed().as_micros() as f64 / n as f64;
         let _ = std::fs::remove_file(inside);
         match failed.first() {
             Some(first) => format!("{} calls failed, the first: {first}", failed.len()),
+            None if xattrs => {
+                format!("chmod={chmod_us:.2} utimensat={utimensat_us:.2} setxattr={setxattr_us:.2}")
+            }
             None => format!("chmod={chmod_us:.2} utimensat={utimensat_us:.2}"),
         }
     }
@@ -9312,6 +9687,149 @@ mod tests {
         }
     }
 
+    /// D2 B: a run's extended attributes (ACLs too) are served as its mode — `user.` and the ACLs set, read back and
+    /// removed in the project by path, descriptor and `*xattrat`, `install -m` and `cp --preserve=all` there; refused
+    /// and said outside its write places, on a protected name and through `/proc`, and `security.`, `trusted.` and
+    /// any other `system.` by name, in the project too; what a file outside held kept. Every other answer is the
+    /// kernel's own: the same rows (`xattr_shapes`) run unsandboxed first, served answers compared row for row.
+    #[test]
+    fn a_runs_xattr_calls_are_served_or_refused() {
+        let test = "a_runs_xattr_calls_are_served_or_refused";
+        let Some(tiers) = served_tiers(test) else {
+            return;
+        };
+        // (the kernel's answers: the rows in a folder of the test's own, no sandbox — a child, so its folder is its own)
+        let shapes = crate::scratch::Scratch::new("sb-xattr-shapes").into_path();
+        let kernel = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sandbox::keeper::tests::helper",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HELPER, "xattr_shapes")
+            .current_dir(&shapes)
+            .output()
+            .unwrap();
+        let kernel = said_next(&mut String::from_utf8_lossy(&kernel.stdout).lines().map(String::from));
+        std::fs::remove_dir_all(&shapes).ok();
+        if !kernel.starts_with("set=ok;") {
+            crate::test_results::said_skip(&format!(
+                "sandbox::keeper::tests::{test} — no user. attributes on this file system: {kernel}"
+            ));
+            return;
+        }
+        let has = |p: &str| {
+            std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success())
+        };
+        if !has("rsync") {
+            crate::test_results::said_skip(&format!(
+                "sandbox::keeper::tests::{test} — its rsync -AX row: no rsync here (run it with --image, one with rsync)"
+            ));
+        }
+        // SAFETY: a call that reads nothing: its size is refused first.
+        let at_here = unsafe { libc::syscall(crate::seccomp::SYS_SETXATTRAT, -1, 0, 0, 0, 0, 0) } == 0
+            || io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS);
+        if !at_here {
+            crate::test_results::said_skip(&format!(
+                "sandbox::keeper::tests::{test} — its setxattrat and removexattrat rows: none here (Docker's default \
+                 seccomp profile hides them; --userns runs them)"
+            ));
+        }
+        for (tier, ns) in tiers {
+            let name = format!("xattrs-{tier}");
+            let k = keeper_for(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let hook = root.join(".git/hooks/pre-commit");
+            std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+            std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+            assert!(!p.writes_allow(&hook), "tier {tier}: a protected name");
+            let out_dir = crate::scratch::Scratch::new(&format!("sb-xattr-out-{tier}")).into_path();
+            let outside = std::fs::canonicalize(&out_dir).unwrap().join("outside_file");
+            std::fs::write(&outside, "marker\n").unwrap();
+            let out_link = outside.with_file_name("outside_link");
+            std::os::unix::fs::symlink(&outside, &out_link).unwrap();
+            let out_ro = outside.with_file_name("outside_ro");
+            std::fs::write(&out_ro, "marker\n").unwrap();
+            std::fs::set_permissions(&out_ro, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+            // (tarae's capabilities decide what the kernel would let it do: `CAP_DAC_OVERRIDE` 1, `CAP_SYS_ADMIN` 21,
+            // `CAP_SETFCAP` 31)
+            let holds = super::super::supervisor::holds;
+            let ro_want = if holds(1) { libc::EPERM } else { libc::EACCES };
+            let c_path = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+            let get = |p: &Path, n: &std::ffi::CStr| {
+                // SAFETY: a path and a name that live through the call; no buffer asked.
+                unsafe { libc::getxattr(c_path(p).as_ptr(), n.as_ptr(), std::ptr::null_mut(), 0) >= 0 }
+            };
+            // SAFETY: a path, a name and a value that live through the call.
+            let kept = unsafe {
+                libc::setxattr(
+                    c_path(&outside).as_ptr(),
+                    c"user.tarae.keep".as_ptr(),
+                    c"k".as_ptr().cast(),
+                    1,
+                    0,
+                )
+            };
+            assert_eq!(kept, 0, "tier {tier}: user.tarae.keep set outside before the run");
+            let (out_s, hook_s) = (outside.display().to_string(), hook.display().to_string());
+            let (link_s, ro_s) = (out_link.display().to_string(), out_ro.display().to_string());
+            let ro_want_s = ro_want.to_string();
+            let acl_other_s = if ns.user { libc::EINVAL } else { 0 }.to_string();
+            let (said, refused) = served_said(
+                &k,
+                (&Arc::new(p), &c, &root),
+                "xattr_calls",
+                &[
+                    ("TARAE_OUTSIDE", &out_s),
+                    ("TARAE_PROTECTED", &hook_s),
+                    ("TARAE_SHAPES", &kernel),
+                    ("TARAE_OUTSIDE_LINK", &link_s),
+                    ("TARAE_OUTSIDE_RO", &ro_s),
+                    ("TARAE_RO_WANT", &ro_want_s),
+                    ("TARAE_ACL_OTHER_WANT", &acl_other_s),
+                ],
+            );
+            assert_eq!(said, "ok", "tier {tier}:\n{said}");
+            for (f, n, want) in [
+                (&outside, c"user.tarae", false),
+                (&outside, c"user.tarae.keep", true),
+                (&hook, c"user.tarae", false),
+            ] {
+                assert_eq!(get(f, n), want, "tier {tier}: {} {n:?}", f.display());
+            }
+            let xattr: Vec<_> = refused.iter().filter(|d| d.op == "file-write-xattr").collect();
+            let on = |t: &str| xattr.iter().filter(|d| d.target == t).count();
+            let inside = root.join("inside_x").display().to_string();
+            // (the `*xattrat` rows among them: two outside, one on the protected name)
+            let at = usize::from(at_here);
+            assert_eq!(on(&out_s), 6 + 2 * at, "tier {tier}: each way outside said once: {refused:?}");
+            assert_eq!(on(&hook_s), 1 + at, "tier {tier}: the protected name said: {refused:?}");
+            // (by name: another `system.` always; `trusted.` and `security.capability` only where the kernel would let
+            // tarae set them — else its own `EPERM`, unsaid)
+            let by_name = 1 + usize::from(holds(21)) + usize::from(holds(31));
+            assert_eq!(on(&inside), by_name, "tier {tier}: refused by name said: {refused:?}");
+            assert_eq!(on(&link_s), 0, "tier {tier}: the kernel's own refusal unsaid: {refused:?}");
+            assert_eq!(
+                on(&ro_s),
+                usize::from(holds(1)),
+                "tier {tier}: said only where the kernel lets: {refused:?}"
+            );
+            assert!(
+                xattr.iter().any(|d| d.target.starts_with("/proc/self/cwd/")),
+                "tier {tier}: {refused:?}"
+            );
+            assert!(
+                refused.iter().all(|d| d.plain().starts_with("changing ")),
+                "tier {tier}: denials say 'changing …': {refused:?}"
+            );
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+            std::fs::remove_dir_all(&out_dir).ok();
+        }
+    }
+
     /// Test 4: a file outside write places never changes its mode or times, whatever happens to links while
     /// the call is being decided (a link flipped 10,000 times under a chmod loop).
     #[test]
@@ -9360,7 +9878,9 @@ mod tests {
         }
     }
 
-    /// M11: a served `chmod` and `utimensat` on a project file against the same unserved, median of five.
+    /// M11: a served `chmod` and `utimensat` on a project file against the same unserved, and a served `setxattr`
+    /// (D2 B) against the same with no sandbox (tier offline's filter refuses it: a refusal is no cost of serving
+    /// one), median of five.
     #[test]
     fn perf_a_served_chmod() {
         if crate::test_results::unoptimized("sandbox::keeper::tests::perf_a_served_chmod") {
@@ -9387,6 +9907,47 @@ mod tests {
                     _ => panic!("tier {tier}: the measurement didn't run whole: {s}"),
                 }
             };
+            let xattr_us = |s: &str| {
+                let us = s.split_whitespace().find_map(|w| w.strip_prefix("setxattr=")?.parse::<f64>().ok());
+                us.unwrap_or_else(|| panic!("tier {tier}: no setxattr measured: {s}"))
+            };
+            // (the same calls with no sandbox: a child in a folder of its own)
+            let bare = crate::scratch::Scratch::new(&format!("sb-perf-bare-{tier}")).into_path();
+            // (`user.` attributes where the runs work and where the bare child does — tmpfs before Linux 6.6 has none:
+            // there `setxattr` isn't measured, said)
+            let takes_xattrs = |dir: &Path| {
+                let probe = dir.join("xattr_probe");
+                std::fs::write(&probe, "").unwrap();
+                let c = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: a path, a name and a value that live through the call.
+                let r =
+                    unsafe { libc::setxattr(c.as_ptr(), c"user.tarae".as_ptr(), c"x".as_ptr().cast(), 1, 0) };
+                let _ = std::fs::remove_file(&probe);
+                r == 0
+            };
+            let xattrs = takes_xattrs(&root) && takes_xattrs(&bare);
+            if !xattrs {
+                crate::test_results::said_skip(&format!(
+                    "sandbox::keeper::tests::{test} — its setxattr, tier {tier}: no user. attributes on this file system"
+                ));
+            }
+            let bare_said = || {
+                let out = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "sandbox::keeper::tests::helper",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(HELPER, "perf_chmod")
+                    .current_dir(&bare)
+                    .output()
+                    .unwrap();
+                said_next(&mut String::from_utf8_lossy(&out.stdout).lines().map(String::from))
+            };
+            let mut served_xattr = Vec::new();
+            let mut bare_xattr = Vec::new();
 
             let mut served_chmod = Vec::new();
             let mut served_utime = Vec::new();
@@ -9394,12 +9955,18 @@ mod tests {
             let mut unserved_utime = Vec::new();
 
             for _ in 0..5 {
-                let (said_served, _) = served_said(&k, (&p_arc, &c, &root), "perf_chmod", &[]);
+                let served = [("TARAE_PERF_XATTR", if xattrs { "1" } else { "0" })];
+                let (said_served, _) = served_said(&k, (&p_arc, &c, &root), "perf_chmod", &served);
                 let (c_us, u_us) = parse_us(&said_served);
                 served_chmod.push(c_us);
                 served_utime.push(u_us);
+                if xattrs {
+                    served_xattr.push(xattr_us(&said_served));
+                    bare_xattr.push(xattr_us(&bare_said()));
+                }
 
-                let (said_unserved, _) = served_said(&k, (&p_arc, &plain_c, &root), "perf_chmod", &[]);
+                let unserved = [("TARAE_PERF_XATTR", "0")];
+                let (said_unserved, _) = served_said(&k, (&p_arc, &plain_c, &root), "perf_chmod", &unserved);
                 let (c_us, u_us) = parse_us(&said_unserved);
                 unserved_chmod.push(c_us);
                 unserved_utime.push(u_us);
@@ -9414,11 +9981,18 @@ mod tests {
             let med_uc = median(unserved_chmod);
             let med_su = median(served_utime);
             let med_uu = median(unserved_utime);
+            let xattr = if xattrs {
+                let (med_sx, med_bx) = (median(served_xattr), median(bare_xattr));
+                format!("; setxattr {med_sx:.1} µs (no sandbox {med_bx:.1} µs, +{:.1} µs)", med_sx - med_bx)
+            } else {
+                "; setxattr not measured (no user. attributes here)".into()
+            };
+            std::fs::remove_dir_all(&bare).ok();
 
             let line = format!(
-                "M11, tier {tier}: served chmod {med_sc:.1} µs (unserved {med_uc:.1} µs, +{:.1} µs); utimensat {med_su:.1} µs (unserved {med_uu:.1} µs, +{:.1} µs)\n",
+                "M11, tier {tier}: served chmod {med_sc:.1} µs (unserved {med_uc:.1} µs, +{:.1} µs); utimensat {med_su:.1} µs (unserved {med_uu:.1} µs, +{:.1} µs){xattr}\n",
                 med_sc - med_uc,
-                med_su - med_uu
+                med_su - med_uu,
             );
             let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
             k.end();

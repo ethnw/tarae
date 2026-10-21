@@ -7,7 +7,7 @@
 //! an errno is the host's libc's, as only Linux's ever reaches a run.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -339,6 +339,64 @@ pub(super) fn c_path(m: &impl Mem, at: u64) -> Result<Vec<u8>, i32> {
         next = next.checked_add(want as u64).ok_or(libc::EFAULT)?;
     }
     Err(libc::ENAMETOOLONG)
+}
+
+/// The longest name of an extended attribute, its NUL too (`XATTR_NAME_MAX` + 1).
+const XATTR_NAME: usize = 256;
+/// The largest value of an extended attribute (`XATTR_SIZE_MAX`).
+pub(super) const XATTR_SIZE: u64 = 65536;
+
+/// An extended attribute's name a call gives at `at` (a C string), read once, a page at a time — at 0: `EFAULT`;
+/// empty, or no NUL within `XATTR_NAME`: `ERANGE`, as the kernel says them (`import_xattr_name`).
+pub(super) fn xattr_name(m: &impl Mem, at: u64) -> Result<CString, i32> {
+    if at == 0 {
+        return Err(libc::EFAULT);
+    }
+    let (mut name, mut next) = (Vec::new(), at);
+    while name.len() < XATTR_NAME {
+        let want = ((PAGE - next % PAGE) as usize).min(XATTR_NAME - name.len());
+        let chunk = m.read(next, want)?;
+        if let Some(end) = chunk.iter().position(|&b| b == 0) {
+            name.extend_from_slice(&chunk[..end]);
+            return CString::new(name).map_err(|_| libc::ERANGE).and_then(|n| match n.as_bytes() {
+                [] => Err(libc::ERANGE),
+                _ => Ok(n),
+            });
+        }
+        name.extend_from_slice(&chunk);
+        next = next.checked_add(want as u64).ok_or(libc::EFAULT)?;
+    }
+    Err(libc::ERANGE)
+}
+
+/// An extended attribute's value of `size` bytes at `at`, read once — none read for 0; past `XATTR_SIZE`: `E2BIG`,
+/// as the kernel says it (`setxattr_copy`).
+pub(super) fn xattr_value(m: &impl Mem, at: u64, size: u64) -> Result<Vec<u8>, i32> {
+    match size {
+        0 => Ok(Vec::new()),
+        s if s > XATTR_SIZE => Err(libc::E2BIG),
+        s => m.read(at, s as usize),
+    }
+}
+
+/// `setxattrat`'s `struct xattr_args` of `size` bytes at `at` (Linux 6.13): its value's address, the value's size and
+/// the flags, read once — smaller than its first form (16 bytes): `EINVAL`; larger than a page (the kernel's), or a byte past
+/// the fields this kernel knows not 0: `E2BIG`, as the kernel says them (`copy_struct_from_user`).
+pub(super) fn xattr_args(m: &impl Mem, at: u64, size: u64) -> Result<(u64, u64, i32), i32> {
+    if size < 16 {
+        return Err(libc::EINVAL);
+    }
+    // SAFETY: a plain call.
+    if size > unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64 {
+        return Err(libc::E2BIG);
+    }
+    let b = m.read(at, size as usize)?;
+    if b[16..].iter().any(|&x| x != 0) {
+        return Err(libc::E2BIG);
+    }
+    let u32_at = |i: usize| u32::from_ne_bytes(b[i..i + 4].try_into().unwrap_or_default());
+    let value = u64::from_ne_bytes(b[..8].try_into().unwrap_or_default());
+    Ok((value, u64::from(u32_at(8)), u32_at(12) as i32))
 }
 
 /// How a call gives a file's new times: `utime`'s `struct utimbuf` (two seconds), `utimes`' and `futimesat`'s two

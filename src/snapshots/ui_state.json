@@ -228,7 +228,8 @@
         "abi": 8,
         "attributes": {
           "mode_times": "anywhere",
-          "owner_xattrs_flags": "never"
+          "owner_flags": "never",
+          "xattrs": "never"
         },
         "by": "landlock",
         "hint": null,
@@ -290,7 +291,8 @@
         "abi": null,
         "attributes": {
           "mode_times": "where-writes",
-          "owner_xattrs_flags": "where-writes"
+          "owner_flags": "where-writes",
+          "xattrs": "where-writes"
         },
         "by": "seatbelt",
         "hint": null,
@@ -430,5 +432,5 @@
       "where": "waiting"
     }
   ],
-  "v": 6
+  "v": 7
 }

@@ -12201,10 +12201,10 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// linmeta: a file outside a run's write places keeps its mode, times, group, flags, extended attributes and ACL —
-    /// changed by path, through a descriptor the run opened for reading, or by that descriptor's `/dev/fd` name (the
-    /// profile lets a run write `/dev/fd`: Seatbelt judges the file it leads to) — and so does a protected name in
-    /// the project (a hook made executable runs later, outside); a file of the project's takes them all. Seatbelt's
+    /// linmeta, D2 B: a file outside a run's write places keeps its mode, times, group, flags, extended attributes and
+    /// ACL — changed by path, through a descriptor the run opened for reading, or by that descriptor's `/dev/fd` name
+    /// (the profile lets a run write `/dev/fd`: Seatbelt judges the file it leads to) — and so does a protected name
+    /// in the project (a hook made executable runs later, outside); a file of the project's takes them all. Seatbelt's
     /// `file-write-mode`, `-times`, `-owner`, `-flags`, `-xattr` and `-acl` are `file-write*`'s, allowed only where
     /// writes are (`target/sb/linmeta-design.md`).
     #[test]
@@ -12241,7 +12241,8 @@ mod tests {
         }
         let attrs = g.attrs_json();
         let mode_times_where = attrs["mode_times"] == "where-writes";
-        let owner_xattrs_where = attrs["owner_xattrs_flags"] == "where-writes";
+        let xattrs_where = attrs["xattrs"] == "where-writes";
+        let owner_where = attrs["owner_flags"] == "where-writes";
         let fresh = |f: &Path| {
             let _ = std::fs::remove_file(f);
             std::fs::write(f, "marker\n").unwrap();
@@ -12344,25 +12345,67 @@ mod tests {
         {
             let has_python3 =
                 Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success());
-            if has_python3 {
+            // (what the scratch's file system holds — tmpfs before Linux 6.6 has no `user.` attributes, a kernel
+            // without its ACL option no POSIX ACLs: a row the project's file can't take is said skipped)
+            let takes = |name: &std::ffi::CStr, value: &[u8]| {
+                let probe = root.join("xattr_probe");
+                std::fs::write(&probe, "").unwrap();
+                let c = std::ffi::CString::new(probe.as_os_str().as_bytes()).unwrap();
+                // SAFETY: a path, a name and a value that live through the call.
+                let r = unsafe {
+                    libc::setxattr(c.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0)
+                };
+                let _ = std::fs::remove_file(&probe);
+                r == 0
+            };
+            // (the least ACL: user::rw-, group::r--, other::r--)
+            let mut least = 2u32.to_le_bytes().to_vec();
+            for (tag, perm) in [(1u16, 6u16), (4, 4), (0x20, 4)] {
+                least.extend(tag.to_le_bytes());
+                least.extend(perm.to_le_bytes());
+                least.extend(u32::MAX.to_le_bytes());
+            }
+            let (user_ok, acl_ok) =
+                (takes(c"user.tarae.probe", b"x"), takes(c"system.posix_acl_access", &least));
+            if !has_python3 {
+                skipped("its xattr row: no python3 here");
+            } else if !user_ok {
+                skipped("its xattr row: no user. attributes on this file system");
+            }
+            if has_python3 && !acl_ok {
+                skipped("its ACL row: no POSIX ACLs on this file system");
+            }
+            if has_python3 && user_ok {
                 tries.push((
                     "xattr",
                     "python3 -c 'import os, sys; os.setxattr(sys.argv[1], \"user.tarae.marker\", b\"x\")' {f}"
                         .to_string(),
                 ));
-            } else {
-                skipped("its xattr row: no python3 here");
+            }
+            if has_python3 && acl_ok {
+                // (an ACL, as `setfacl -m u:<uid>:r` sets it: user::rw-, user:<uid>:r--, group::r--, mask::r--,
+                // other::r--)
+                tries.push((
+                    "ACL",
+                    "python3 -c 'import os, struct, sys; e = [(1, 6, 2**32 - 1), (2, 4, os.getuid()), (4, 4, 2**32 - 1), \
+                     (16, 4, 2**32 - 1), (32, 4, 2**32 - 1)]; os.setxattr(sys.argv[1], \"system.posix_acl_access\", \
+                     struct.pack(\"<I\", 2) + b\"\".join(struct.pack(\"<HHI\", *x) for x in e))' {f}"
+                        .to_string(),
+                ));
             }
         }
         let mut wrong = vec![];
         for (what, line) in &tries {
             let is_mode_times = what.starts_with("mode") || what.starts_with("times");
+            let is_xattr = *what == "xattr" || *what == "ACL";
             for (f, is_mine) in [(&theirs, false), (&hook, false), (&mine, true)] {
                 let by_name = cfg!(target_os = "linux") && what.ends_with("/dev/fd");
                 let kept = if is_mode_times {
                     if mode_times_where { !is_mine || by_name } else { false }
+                } else if is_xattr {
+                    if xattrs_where { !is_mine } else { true }
                 } else {
-                    if owner_xattrs_where { !is_mine } else { true }
+                    if owner_where { !is_mine } else { true }
                 };
                 fresh(f);
                 let before = state(f);
@@ -12379,8 +12422,12 @@ mod tests {
                     ));
                 }
                 #[cfg(not(target_os = "macos"))]
-                if is_mode_times && kept && mode_times_where {
-                    let op = if what.starts_with("mode") { "file-write-mode" } else { "file-write-times" };
+                if (is_mode_times && mode_times_where || is_xattr && xattrs_where) && kept {
+                    let op = match what.split(',').next() {
+                        Some("mode") => "file-write-mode",
+                        Some("times") => "file-write-times",
+                        _ => "file-write-xattr",
+                    };
                     let by = std::time::Instant::now() + std::time::Duration::from_millis(500);
                     while w.blocked().seen.is_empty() && std::time::Instant::now() < by {
                         std::thread::sleep(std::time::Duration::from_millis(10));

@@ -620,6 +620,50 @@ fn a_path_is_read_to_its_nul_a_page_at_a_time() {
     assert_eq!(c_path(&unended, 0x1ff0), Err(libc::EFAULT));
 }
 
+/// D2 B: an extended attribute's name is read once to its NUL, a page at a time — 255 bytes at most, empty or longer
+/// `ERANGE`, at 0 or into what isn't mapped `EFAULT`; its value read once, none for 0, past 64 KiB `E2BIG` (no read);
+/// `setxattrat`'s `struct xattr_args` read once — shorter than 16 bytes `EINVAL`, a page or less, a byte past the
+/// fields not 0 `E2BIG` — each as the kernel says it (measured: Linux 7.0).
+#[test]
+fn an_xattrs_name_value_and_args_are_read_as_the_kernel_reads_them() {
+    let near_end = Fake::default().at(0x1ffa, b"user.\0x".to_vec());
+    assert_eq!(xattr_name(&near_end, 0x1ffa), Ok(c"user.".into()));
+    assert_eq!(*near_end.reads.borrow(), [(0x1ffa, 6)], "only to the page's end");
+    let mut longest = vec![b'a'; 255];
+    longest.push(0);
+    assert_eq!(
+        xattr_name(&Fake::default().at(0x1000, longest.clone()), 0x1000).map(|n| n.as_bytes().len()),
+        Ok(255)
+    );
+    longest.insert(0, b'a');
+    assert_eq!(xattr_name(&Fake::default().at(0x1000, longest), 0x1000), Err(libc::ERANGE), "256 bytes");
+    assert_eq!(xattr_name(&Fake::default().at(0x1fff, b"\0".to_vec()), 0x1fff), Err(libc::ERANGE), "empty");
+    assert_eq!(xattr_name(&Fake::default(), 0), Err(libc::EFAULT));
+    assert_eq!(xattr_name(&Fake::default().at(0x1ff0, vec![b'a'; 16]), 0x1ff0), Err(libc::EFAULT));
+
+    let value = Fake::default().at(0x100, b"xyz".to_vec());
+    assert_eq!(xattr_value(&value, 0x100, 3), Ok(b"xyz".to_vec()));
+    assert_eq!(xattr_value(&value, 0, 0), Ok(Vec::new()), "none read for 0, its address unread");
+    let unread = Fake::default();
+    assert_eq!(xattr_value(&unread, 0x100, XATTR_SIZE + 1), Err(libc::E2BIG));
+    assert_eq!(xattr_value(&unread, 0x100, u64::MAX), Err(libc::E2BIG));
+    assert!(unread.reads.borrow().is_empty(), "past the size, nothing read");
+    assert_eq!(xattr_value(&unread, 0, 1), Err(libc::EFAULT));
+
+    let mut args = 0x5000u64.to_ne_bytes().to_vec();
+    args.extend(7u32.to_ne_bytes());
+    args.extend(2u32.to_ne_bytes());
+    let m = Fake::default().at(0x100, args.clone());
+    assert_eq!(xattr_args(&m, 0x100, 16), Ok((0x5000, 7, 2)));
+    assert_eq!(xattr_args(&m, 0x100, 8), Err(libc::EINVAL));
+    assert_eq!(xattr_args(&m, 0x100, 1 << 20), Err(libc::E2BIG), "past a page");
+    args.extend([0; 8]);
+    assert_eq!(xattr_args(&Fake::default().at(0x100, args.clone()), 0x100, 24), Ok((0x5000, 7, 2)));
+    args[20] = 1;
+    assert_eq!(xattr_args(&Fake::default().at(0x100, args), 0x100, 24), Err(libc::E2BIG));
+    assert_eq!(xattr_args(&Fake::default(), 0, 16), Err(libc::EFAULT));
+}
+
 /// linmeta: the three ways a call gives times, as `utimensat` takes them; a microsecond outside a second refused as
 /// the kernel refuses it; none given: now.
 #[test]

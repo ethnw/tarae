@@ -224,19 +224,22 @@ fn userns_ops() -> Vec<Op> {
 /// What the filter does with a call that changes a file's attributes (`ATTR_CALLS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Attr {
-    /// Refused in every mode — extended attributes, inode flags.
+    /// Refused in every mode — inode flags.
     Refused,
     /// Mode and times: to tarae where served (`supervisor::attrs`), else the run's (offline).
     ModeTimes,
     /// Owner and group: to tarae where served, let only where it changes neither (`supervisor::attrs`: `rsync -a`,
     /// `cp -a` asking for what the file has); refused where not served (offline) — D-h.
     Owner,
+    /// Extended attributes (ACLs too): to tarae where served, let only where the run may write and only in the
+    /// namespaces it serves (`supervisor::attrs`); refused where not served (offline) — D2 B.
+    Xattr,
 }
 
 /// `setxattrat` and `removexattrat` (Linux 6.13), `file_setattr` (6.17: an inode's flags, as `FS_IOC_FSSETXATTR`) —
 /// one number each on every architecture, not all in libc yet.
-const SYS_SETXATTRAT: libc::c_long = 463;
-const SYS_REMOVEXATTRAT: libc::c_long = 466;
+pub const SYS_SETXATTRAT: libc::c_long = 463;
+pub const SYS_REMOVEXATTRAT: libc::c_long = 466;
 const SYS_FILE_SETATTR: libc::c_long = 469;
 
 /// Every call that changes a file's attributes, by name (as the kernel's table names it: `the_filter_names_every_
@@ -261,20 +264,21 @@ const ATTR_CALLS: &[(&str, libc::c_long, Attr)] = &[
     ("chown", libc::SYS_chown, Attr::Owner),
     #[cfg(target_arch = "x86_64")]
     ("lchown", libc::SYS_lchown, Attr::Owner),
-    ("setxattr", libc::SYS_setxattr, Attr::Refused),
-    ("lsetxattr", libc::SYS_lsetxattr, Attr::Refused),
-    ("fsetxattr", libc::SYS_fsetxattr, Attr::Refused),
-    ("removexattr", libc::SYS_removexattr, Attr::Refused),
-    ("lremovexattr", libc::SYS_lremovexattr, Attr::Refused),
-    ("fremovexattr", libc::SYS_fremovexattr, Attr::Refused),
-    ("setxattrat", SYS_SETXATTRAT, Attr::Refused),
-    ("removexattrat", SYS_REMOVEXATTRAT, Attr::Refused),
+    ("setxattr", libc::SYS_setxattr, Attr::Xattr),
+    ("lsetxattr", libc::SYS_lsetxattr, Attr::Xattr),
+    ("fsetxattr", libc::SYS_fsetxattr, Attr::Xattr),
+    ("removexattr", libc::SYS_removexattr, Attr::Xattr),
+    ("lremovexattr", libc::SYS_lremovexattr, Attr::Xattr),
+    ("fremovexattr", libc::SYS_fremovexattr, Attr::Xattr),
+    ("setxattrat", SYS_SETXATTRAT, Attr::Xattr),
+    ("removexattrat", SYS_REMOVEXATTRAT, Attr::Xattr),
     ("file_setattr", SYS_FILE_SETATTR, Attr::Refused),
 ];
 
-/// Whether call `nr` is one a served filter hands tarae for a file's mode, times or owner (`supervisor::attrs`).
+/// Whether call `nr` is one a served filter hands tarae for a file's mode, times, owner or extended attributes
+/// (`supervisor::attrs`).
 pub fn serves_attr(nr: libc::c_long) -> bool {
-    ATTR_CALLS.iter().any(|&(_, n, a)| n == nr && matches!(a, Attr::ModeTimes | Attr::Owner))
+    ATTR_CALLS.iter().any(|&(_, n, a)| n == nr && a != Attr::Refused)
 }
 
 /// The `ioctl`s that set an inode's flags or what acts like them, for its owner — refused in every mode, as the
@@ -288,16 +292,18 @@ const FLAG_IOCTLS: [u32; 8] =
 /// A file's attributes (linmeta, `target/sb/linmeta-design.md`): Landlock has no right for them — the kernel's
 /// docs list `chmod`, `chown`, `setxattr` and `utime` among what it can't restrict — so the filter takes them
 /// (`ATTR_CALLS`, `FLAG_IOCTLS`).
-/// In served tiers (own, host), mode and times calls go to tarae, which lets them only where the run may write
-/// (`writes_allow`), and owner calls too, only where they change nothing. In unserved tiers (offline), mode and times
-/// stay the run's and owner calls are refused. Extended attributes and inode flags are refused in every tier
-/// (`EPERM`). Starts and ends on the call's number.
+/// In served tiers (own, host), mode, times and extended attribute calls go to tarae, which lets them only where the
+/// run may write (`writes_allow`), and owner calls too, only where they change nothing. In unserved tiers (offline),
+/// mode and times stay the run's, owner and extended attribute calls are refused. Inode flags are refused in every
+/// tier (`EPERM`). Starts and ends on the call's number.
 fn attr_ops(served: bool) -> Vec<Op> {
     let mut ops: Vec<Op> = Vec::new();
     for &(_, n, a) in ATTR_CALLS {
         match a {
-            Attr::ModeTimes | Attr::Owner if served => ops.push(Op::Is(n as u32, To::Tarae, To::Next)),
-            Attr::Refused | Attr::Owner => ops.push(Op::Is(n as u32, To::Refuse, To::Next)),
+            Attr::ModeTimes | Attr::Owner | Attr::Xattr if served => {
+                ops.push(Op::Is(n as u32, To::Tarae, To::Next))
+            }
+            Attr::Refused | Attr::Owner | Attr::Xattr => ops.push(Op::Is(n as u32, To::Refuse, To::Next)),
             Attr::ModeTimes => {}
         }
     }
@@ -949,9 +955,10 @@ mod tests {
         assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0, 0]), allow, "none");
     }
 
-    /// linmeta: a file's owner, extended attributes and flags are refused in every mode — the flag `ioctl`s
-    /// whatever the request's high half, no other `ioctl`; its mode and times go to tarae where served and are the
-    /// run's where not; the blocks after still see the call's number.
+    /// linmeta: a file's flags are refused in every mode — the flag `ioctl`s whatever the request's high half, no
+    /// other `ioctl`; its mode and times go to tarae where served and are the run's where not; its owner and extended
+    /// attributes go to tarae where served and are refused where not (D2 B); the blocks after still see the call's
+    /// number.
     #[test]
     fn a_files_attributes_are_refused_or_go_to_tarae() {
         let arch = ARCH.unwrap();
@@ -962,8 +969,8 @@ mod tests {
                 let run = |nr, args: &[u64]| eval_with(mode, no_userns, arch, nr, args);
                 for &(name, nr, a) in ATTR_CALLS {
                     let want = match a {
-                        Attr::ModeTimes | Attr::Owner if served => tarae,
-                        Attr::Refused | Attr::Owner => EPERM,
+                        Attr::ModeTimes | Attr::Owner | Attr::Xattr if served => tarae,
+                        Attr::Refused | Attr::Owner | Attr::Xattr => EPERM,
                         Attr::ModeTimes => ALLOW,
                     };
                     assert_eq!(run(nr, &[3, 0x1000, 0o644]), want, "{mode:?}: {name}");
@@ -1053,9 +1060,9 @@ mod tests {
         assert!(calls.iter().any(|(name, _)| name == "fchmodat"), "the table was read: {}", calls.len());
     }
 
-    /// Test 2's rows for what's refused outright: each call that changes a file's owner, extended attributes or
-    /// flags, raw (no libc fallback), on a file of the test's own — `EPERM` on a filtered thread; without the
-    /// filter, whatever the kernel says (done, unsupported, missing), never `EPERM`.
+    /// Test 2's rows for what's refused where nothing serves it (offline, `Mode::Plain`): each call that changes a
+    /// file's owner, extended attributes or flags, raw (no libc fallback), on a file of the test's own — `EPERM` on a
+    /// filtered thread; without the filter, whatever the kernel says (done, unsupported, missing), never `EPERM`.
     #[test]
     fn owner_xattr_and_flag_calls_are_refused_on_a_filtered_thread() {
         let dir = temp("attrs");
