@@ -760,6 +760,31 @@ mod tests {
         );
     }
 
+    /// A read or a write refused at a folder (a listing, a folder removed) offers that folder first — never
+    /// only the one above it, which may hold other projects — then the wider ones, as a file's do.
+    #[test]
+    fn a_folder_refused_offers_itself_first() {
+        let base = crate::scratch::Scratch::new("blocked-folder");
+        std::fs::create_dir_all(base.join("home/Workspace/sandbox-runtime")).unwrap();
+        std::fs::create_dir_all(base.join("home/proj")).unwrap();
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let srt = home.join("Workspace/sandbox-runtime");
+        let d = |op: &str| Denial { process: "ls".into(), op: op.into(), target: srt.display().to_string() };
+        let caps = crate::caps::Caps::at(&home, &home.join("proj"));
+        let all = choices(&[d("file-read-data"), d("file-write-unlink")], &caps);
+        let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
+        let workspace = home.join("Workspace");
+        assert_eq!(
+            got,
+            [
+                Grant::Read(srt.clone()),
+                Grant::Read(workspace.clone()),
+                Grant::Write(srt.clone()),
+                Grant::Write(workspace)
+            ]
+        );
+    }
+
     /// A terminal refused (macOS, 3c — reading or writing `/dev/ttysN`) offers the terminals, once, whichever
     /// and however many: never `/dev` nor the file itself for writing. Its card says what yes risks — though
     /// not as much as outside, so a chat's `a` and the project's `A` take it — and the project keeps it

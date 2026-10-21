@@ -613,6 +613,9 @@ pub struct Editor {
     /// Claude reads outside home unasked where the capability model does (`reads::by_default`, D3) — off in
     /// tests, for the same reason.
     pub read_outside: bool,
+    /// (Tests: the home a session's `Caps` are made for — `caps::Basis.home`; None: the process's.)
+    #[cfg(test)]
+    pub caps_home: Option<PathBuf>,
     /// What a read-only shellcheck may read beyond its line (`readonly::Shellcheck`): home's rc files and
     /// `SHELLCHECK_OPTS`, the process's — none in tests (they never read yours; a test sets its own).
     pub shellcheck: crate::readonly::Shellcheck,
@@ -846,6 +849,8 @@ impl Editor {
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
             read_outside: !cfg!(test),
+            #[cfg(test)]
+            caps_home: None,
             shellcheck: if cfg!(test) {
                 Default::default()
             } else {

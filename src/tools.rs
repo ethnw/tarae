@@ -926,8 +926,8 @@ fn also_host(host: &str, port: u16, caps: &crate::caps::Caps, net: &NetNow) -> O
     (!listed && !granted).then(|| Grant::Host(host.to_string(), port))
 }
 
-/// What `ask` would open for a run from `cwd` in a session that may do `caps` — as a grant card for what the
-/// sandbox blocked offers it (`blocked::choices`: never home or above, keys, what runs later …): None when it's
+/// What `ask` would open for a run from `cwd` in a session that may do `caps` — the place it names and nothing
+/// wider (`allow::read_place`, `allow::write_place`: never home or above, keys, what runs later …): None when it's
 /// open already (`open_port`: the settings' ports; `localhost`: every one; a host by `net`), Err when no card opens
 /// it (said to Claude). A variable by the environment of the session's last run (`env`): one passed already runs.
 fn also_grant(
@@ -954,7 +954,8 @@ fn also_grant(
             crate::allow::tilde(p)
         )
     };
-    let (op, target) = match ask {
+    let home = caps.home.as_deref().unwrap_or(Path::new("/"));
+    match ask {
         AlsoAsk::Port(n) => {
             if let Some((_, why)) = crate::sandbox::RISKY_PORTS.iter().find(|(p, _)| p == n) {
                 return Err(format!(
@@ -962,18 +963,29 @@ fn also_grant(
                 ));
             }
             let open = open_port(*n) || caps.ports.iter().any(|e| e.what == *n) || !caps.localhost.is_empty();
-            return Ok((!open).then_some(Grant::Port(*n)));
+            Ok((!open).then_some(Grant::Port(*n)))
         }
-        AlsoAsk::Localhost => {
-            return Ok((!localhost && caps.localhost.is_empty()).then_some(Grant::Localhost));
-        }
+        AlsoAsk::Localhost => Ok((!localhost && caps.localhost.is_empty()).then_some(Grant::Localhost)),
         AlsoAsk::Terminals if !cfg!(target_os = "macos") => {
-            return Err("only macOS's sandbox closes the terminals — they aren't what blocked it here".into());
+            Err("only macOS's sandbox closes the terminals — they aren't what blocked it here".into())
         }
-        AlsoAsk::Terminals => return Ok(caps.terminals.is_empty().then_some(Grant::Terminals)),
-        AlsoAsk::Env(n) => return also_env(n, caps, env),
-        AlsoAsk::Network(h, p) => return Ok(also_host(h, *p, caps, net)),
-        AlsoAsk::Read(p) => ("file-read-data", real(p)?),
+        AlsoAsk::Terminals => Ok(caps.terminals.is_empty().then_some(Grant::Terminals)),
+        AlsoAsk::Env(n) => also_env(n, caps, env),
+        AlsoAsk::Network(h, p) => Ok(also_host(h, *p, caps, net)),
+        AlsoAsk::Read(p) => {
+            let target = real(p)?;
+            // (a file named like a key in the project: that one file — the project is read anyway, what's closed
+            // is the name)
+            if crate::sandbox::key_named_in(&crate::sandbox::profile_path(&caps.root), &target) {
+                return Ok(Some(Grant::Key(target)));
+            }
+            // (read already — the project, a place read by default, one answered: it runs)
+            if caps.reads(&target) || caps.by_default(caps.class(Some(&target))) {
+                return Ok(None);
+            }
+            let place = crate::allow::read_place(&target, home, &caps.kept);
+            place.map(|p| Some(Grant::Read(p))).ok_or_else(|| never(&target))
+        }
         AlsoAsk::Write(p) => {
             let r = real(p)?;
             // (the temp folders are written already; in the project only the protected names aren't — an edit's)
@@ -989,26 +1001,13 @@ fn also_grant(
                     crate::chat::shown(&caps.root, &r)
                 ));
             }
-            ("file-write-create", r)
+            if !r.is_dir() {
+                return Err(format!("also write names a folder — {} isn't one", crate::allow::tilde(&r)));
+            }
+            let place = crate::allow::write_place(&r, home, &caps.root, &caps.later);
+            place.map(|p| Some(Grant::Write(p))).ok_or_else(|| never(&r))
         }
-    };
-    let d = crate::sandbox::Denial {
-        process: "the command".into(),
-        op: op.into(),
-        target: target.display().to_string(),
-    };
-    let grants: Vec<Grant> = crate::blocked::choices(&[d], caps).into_iter().map(|c| c.grant).collect();
-    // (read already — the project but a file named like a key, a place read by default, one answered: it runs)
-    let key = grants.iter().find(|g| matches!(g, Grant::Key(_))).cloned();
-    let read = matches!(ask, AlsoAsk::Read(_));
-    if read && key.is_none() && (caps.reads(&target) || caps.by_default(caps.class(Some(&target)))) {
-        return Ok(None);
     }
-    let found = match read {
-        true => key.or_else(|| grants.into_iter().find(|g| matches!(g, Grant::Read(_)))),
-        false => grants.into_iter().find(|g| matches!(g, Grant::Write(_))),
-    };
-    found.map(Some).ok_or_else(|| never(&target))
 }
 
 /// The environment the session's last sandboxed run got (its command's or its tests', the newer) — what `also`'s
@@ -5775,6 +5774,72 @@ mod tests {
         assert!(r.as_ref().is_err_and(|e| e.contains("3 cards for also this turn")), "{r:?}");
         crate::reads::turn_over(&mut ed);
         assert!(send(&mut ed, 11, also(json!({ "port": 47005 }))).unwrap().is_some(), "a new turn");
+        ed.offers.clear();
+        ed.session.task_run = None;
+    }
+
+    /// `also` grants the place it names and nothing wider (alsoread): a folder itself — never the one above it,
+    /// which may hold other projects and their tokens —, a file itself, a folder to write in; a file to write in
+    /// is refused, and home as ever. (A made-up home in the test's temp folder.)
+    #[test]
+    fn also_grants_the_place_it_names_never_one_above() {
+        use super::AlsoAsk::{Read, Write};
+        use crate::allow::Grant;
+        let base = crate::scratch::Scratch::new("also-place");
+        for d in ["home/Workspace/sandbox-runtime/src", "home/Workspace/other", "home/proj"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let srt = home.join("Workspace/sandbox-runtime");
+        std::fs::write(srt.join("README.md"), "stand-in\n").unwrap();
+        let root = home.join("proj");
+        let caps = crate::caps::Caps::at(&home, &root);
+        let closed = |_: u16| false;
+        let grant = |a: super::AlsoAsk| {
+            let net = super::NetNow { open: false, rules: Some(Vec::new()), session: Vec::new() };
+            super::also_grant(&a, &root, &caps, (&closed, false), None, &net)
+        };
+        let at = |p: &std::path::Path| p.display().to_string();
+        assert_eq!(grant(Read(at(&srt))), Ok(Some(Grant::Read(srt.clone()))), "the folder, not ~/Workspace");
+        let readme = srt.join("README.md");
+        assert_eq!(grant(Read(at(&readme))), Ok(Some(Grant::Read(readme.clone()))), "a file: itself");
+        assert_eq!(
+            grant(Write(at(&srt))),
+            Ok(Some(Grant::Write(srt.clone()))),
+            "the folder, not ~/Workspace"
+        );
+        let file = grant(Write(at(&readme)));
+        assert!(file.as_ref().is_err_and(|e| e.contains("names a folder")), "{file:?}");
+        let whole = grant(Read(at(&home)));
+        assert!(whole.as_ref().is_err_and(|e| e.contains("no card opens")), "{whole:?}");
+    }
+
+    /// alsoread, from the chat: `also {read: folder}`'s card offers that folder, and `y` runs the command with that
+    /// folder open — not `~/Workspace` above it. (A made-up home in the test's temp folder; `true` stands in.)
+    #[test]
+    fn an_also_read_of_a_folder_grants_that_folder_on_y() {
+        use serde_json::json;
+
+        use crate::allow::Grant;
+        let base = crate::scratch::Scratch::new("also-folder");
+        for d in ["home/Workspace/sandbox-runtime", "home/proj"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let srt = home.join("Workspace/sandbox-runtime");
+        let (mut ed, generation) = also_chat(&home.join("proj"));
+        ed.caps_home = Some(home.clone());
+        let also = json!({ "read": srt.display().to_string() });
+        let args = json!({ "command": "true", "also": also, "reason": "its sandbox's sources" });
+        let q = also_sent(&mut ed, generation, 1, args).unwrap().expect("its card");
+        let offered = match &ed.offers[0].what {
+            crate::offer::What::Grant { grant, .. } => Some(grant.clone()),
+            _ => None,
+        };
+        assert_eq!(offered, Some(Grant::Read(srt.clone())), "{q}");
+        also_key(&mut ed, 'y');
+        let extra = super::ADMITTED.with(|a| a.borrow().last().map(|(_, e)| e.grant.clone()));
+        assert_eq!(extra, Some(Some(Grant::Read(srt))), "this run's grant: the folder named");
         ed.offers.clear();
         ed.session.task_run = None;
     }

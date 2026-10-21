@@ -553,32 +553,25 @@ const WRITE_CHOICES: usize = 4;
 const WRITE_DEPTH: usize = 3;
 
 /// The folders a card may offer to let Claude's commands write in, for a write the sandbox denied at
-/// `target`: from its nearest existing folder up to just below home (outside home, `WRITE_CHOICES` at most,
-/// none shallower than `WRITE_DEPTH`), widest last — none that is home or above it, holds keys or a place
-/// that runs something later (`NEVER_WRITE`; `later`: the folders of programs the user runs, the shared
-/// caches, a toolchain's home and all in it), or is in (or holds) the project. Real paths.
+/// `target`: the folder itself when it is one, else its nearest existing folder, up to just below home
+/// (outside home, `WRITE_CHOICES` at most, none shallower than `WRITE_DEPTH`), widest last — none that
+/// `write_refused`. Real paths.
 pub fn write_choices(
     target: &Path,
     home: &Path,
     root: &Path,
     later: &crate::sandbox::RunsLater,
 ) -> Vec<PathBuf> {
-    let mut at = target.parent().map(Path::to_path_buf);
+    let mut at =
+        if target.is_dir() { Some(target.to_path_buf()) } else { target.parent().map(Path::to_path_buf) };
     while let Some(p) = at.clone().filter(|p| !p.exists()) {
         at = p.parent().map(Path::to_path_buf);
     }
-    let never: Vec<PathBuf> = SECRETS.iter().chain(NEVER_WRITE.iter()).map(|s| home.join(s)).collect();
     let mut out = Vec::new();
     while let Some(dir) = at {
         at = dir.parent().map(Path::to_path_buf);
         let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-        let refused = home.starts_with(&dir)
-            || never.iter().any(|n| n.starts_with(&dir) || dir.starts_with(n))
-            || later.refuses(&dir).is_some()
-            || dir.starts_with(root)
-            || root.starts_with(&dir)
-            || dir.components().count() <= WRITE_DEPTH;
-        if !refused && !out.contains(&dir) {
+        if !write_refused(&dir, home, root, later) && !out.contains(&dir) {
             out.push(dir);
         }
     }
@@ -586,30 +579,65 @@ pub fn write_choices(
     out
 }
 
+/// The folder a card may offer for a write Claude named itself (`also`): `target` (a real path) and nothing
+/// wider — None when it isn't a folder or `write_refused`.
+pub fn write_place(
+    target: &Path,
+    home: &Path,
+    root: &Path,
+    later: &crate::sandbox::RunsLater,
+) -> Option<PathBuf> {
+    (target.is_dir() && !write_refused(target, home, root, later)).then(|| target.to_path_buf())
+}
+
+/// Whether no card may open folder `dir` (real) to writes: home or above it, one that holds keys or a place
+/// that runs something later (`NEVER_WRITE`; `later`: the folders of programs the user runs, the shared
+/// caches, a toolchain's home and all in it), one in (or holding) the project, or one shallower than
+/// `WRITE_DEPTH`.
+fn write_refused(dir: &Path, home: &Path, root: &Path, later: &crate::sandbox::RunsLater) -> bool {
+    let never = || SECRETS.iter().chain(NEVER_WRITE.iter()).map(|s| home.join(s));
+    home.starts_with(dir)
+        || never().any(|n| n.starts_with(dir) || dir.starts_with(n))
+        || later.refuses(dir).is_some()
+        || dir.starts_with(root)
+        || root.starts_with(dir)
+        || dir.components().count() <= WRITE_DEPTH
+}
+
 /// The places a card may offer to let Claude's commands read, for a read the sandbox denied at `target` (a
-/// real path in home — reads elsewhere aren't confined): a file right in home itself (`~/.zshenv`), else
-/// the folder it's in and those above it up to just below home, nearest first (`WRITE_CHOICES` at most) —
-/// never home or above it, nor a place in, or holding, one kept from every run (`kept`: keys, Claude's and
-/// tarae's own).
+/// real path in home — reads elsewhere aren't confined): a folder itself, or a file right in home
+/// (`~/.zshenv`), else the folder a file is in — then those above up to just below home, nearest first
+/// (`WRITE_CHOICES` at most) — never home or above it, nor a place in, or holding, one kept from every run
+/// (`kept`: keys, Claude's and tarae's own).
 pub fn read_choices(target: &Path, home: &Path, kept: &[PathBuf]) -> Vec<PathBuf> {
     if !target.starts_with(home) || target == home {
         return Vec::new();
     }
-    let open =
-        |p: &Path| !kept.iter().any(|k| k.starts_with(p) || p.starts_with(k)) && keepable(p, Some(home));
-    if target.parent() == Some(home) {
-        return [target.to_path_buf()].into_iter().filter(|t| open(t)).collect();
-    }
     let mut out = Vec::new();
-    let mut at = target.parent();
+    let itself = target.is_dir() || target.parent() == Some(home);
+    let mut at = if itself { Some(target) } else { target.parent() };
     while let Some(dir) = at.filter(|d| *d != home) {
-        if open(dir) {
+        if read_open(dir, home, kept) {
             out.push(dir.to_path_buf());
         }
         at = dir.parent();
     }
     out.truncate(WRITE_CHOICES);
     out
+}
+
+/// The place a card may offer for a read Claude named itself (`also`): `target` (a real path in home, a file
+/// or a folder) and nothing wider — None when it's home or above, outside home (reads there aren't
+/// confined), or in or holding a place kept from every run.
+pub fn read_place(target: &Path, home: &Path, kept: &[PathBuf]) -> Option<PathBuf> {
+    let open = target.starts_with(home) && target != home && read_open(target, home, kept);
+    open.then(|| target.to_path_buf())
+}
+
+/// Whether a card may open `p` (in home) to reads: not in or holding a place `kept` from every run, and an
+/// answer about it may last (`keepable`).
+fn read_open(p: &Path, home: &Path, kept: &[PathBuf]) -> bool {
+    !kept.iter().any(|k| k.starts_with(p) || p.starts_with(k)) && keepable(p, Some(home))
 }
 
 /// What `a`/`A` on a read's card allow for `reads` (real paths) — each place itself, or its folder when
@@ -1424,6 +1452,38 @@ pub(crate) mod tests {
         assert_eq!(got.len(), WRITE_CHOICES, "{got:?}");
         assert_eq!(got[0], deep);
         assert!(write_choices(Path::new("/opt/x/y"), &home, &root, &later).is_empty(), "{got:?}");
+        // A folder refused itself: that folder first; named by `also`, that folder alone — never one above
+        assert_eq!(at("data/new"), [home.join("data/new"), home.join("data")], "the folder itself first");
+        let place = |t: &Path| write_place(t, &home, &root, &later);
+        assert_eq!(place(&home.join("data/new")), Some(home.join("data/new")));
+        assert_eq!(place(&home.join("data/new/x.json")), None, "not a folder");
+        for t in [home.clone(), home.join(".local/bin"), home.join("work/proj"), home.join("opt/cargo/x")] {
+            assert_eq!(place(&t), None, "{t:?}");
+        }
+    }
+
+    /// A read refused at a folder (`space m s`) offers that folder first, then those above; named by `also`,
+    /// `read_place` is that place alone, a folder or a file — never the folder above it, which may hold other
+    /// projects and their tokens. (A made-up home in the test's temp folder.)
+    #[test]
+    fn a_folder_read_offers_the_folder_itself() {
+        let base = crate::scratch::Scratch::new("read-place");
+        std::fs::create_dir_all(base.join("home/Workspace/sandbox-runtime/src")).unwrap();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let kept = [home.join(".ssh")];
+        let srt = home.join("Workspace/sandbox-runtime");
+        assert_eq!(read_choices(&srt, &home, &kept), [srt.clone(), home.join("Workspace")]);
+        assert_eq!(read_choices(&srt.join("README.md"), &home, &kept)[0], srt, "a file: its folder first");
+        assert_eq!(read_choices(&home.join("Workspace"), &home, &kept), [home.join("Workspace")]);
+        assert_eq!(read_place(&srt, &home, &kept), Some(srt.clone()));
+        assert_eq!(read_place(&srt.join("README.md"), &home, &kept), Some(srt.join("README.md")));
+        let above = home.parent().unwrap().to_path_buf();
+        for t in
+            [home.clone(), above, home.join(".ssh"), home.join(".ssh/id_ed25519"), PathBuf::from("/opt/x")]
+        {
+            assert_eq!(read_place(&t, &home, &kept), None, "{t:?}");
+        }
     }
 
     /// cardauto 6: a `sandbox.json` of the old form (a list per kind, no times) is read with each answer at the

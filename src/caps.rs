@@ -342,6 +342,9 @@ pub struct Basis {
     /// The hosts this session's `s` let through (`Session.hosts`, the proxy's): what a run's rules carry with the
     /// answers (`tools::with_allowed`) — so a registry's caches open under them (piece C).
     pub hosts: Vec<(String, u16)>,
+    /// (Tests: home in place of the process's — `Editor.caps_home`.)
+    #[cfg(test)]
+    pub home: Option<PathBuf>,
 }
 
 impl Basis {
@@ -386,6 +389,10 @@ impl Basis {
     /// The whole value, for home and the variables as the process has them. A worker's: it reads the store and
     /// looks for the defaults.
     pub fn build(&self) -> Caps {
+        #[cfg(test)]
+        if let Some(home) = &self.home {
+            return self.build_in(Some(home), &crate::sandbox::Here::now());
+        }
         self.build_in(crate::allow::home().as_deref(), &crate::sandbox::Here::now())
     }
 
@@ -417,6 +424,8 @@ impl crate::editor::Editor {
             outside: self.read_outside,
             taking: self.allow_taking.clone(),
             hosts: self.session.granted_hosts(),
+            #[cfg(test)]
+            home: self.caps_home.clone(),
         }
     }
 
@@ -430,13 +439,26 @@ impl crate::editor::Editor {
     pub fn caps_sync_of(&mut self, id: crate::event::SessionId) {
         let (store, temp, outside) = (self.allow_path.clone(), self.read_temp, self.read_outside);
         let taking = self.allow_taking.clone();
+        #[cfg(test)]
+        let home = self.caps_home.clone();
         let Some(s) = self.session_by_id(id) else { return };
         s.caps_asked += 1;
         let generation = s.caps_asked;
         let chat = s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
         let (root, session) = (s.root.clone(), s.allowed.clone());
         let hosts = s.granted_hosts();
-        let basis = Basis { root, store, session, chat, temp, outside, taking, hosts };
+        let basis = Basis {
+            root,
+            store,
+            session,
+            chat,
+            temp,
+            outside,
+            taking,
+            hosts,
+            #[cfg(test)]
+            home,
+        };
         self.events.shared_jobs().spawn(move || {
             let caps = Arc::new(basis.build());
             let dropped = basis.drop_covered(&caps);
