@@ -219,7 +219,9 @@ pub(super) fn named(level: i32, kind: i32) -> String {
 ///
 /// Its iovecs as the kernel takes them (`import_iovec`): the whole array first, every length checked before any
 /// buffer is read — one that isn't an `ssize_t` (its top bit set) `EINVAL` — and a datagram whose total passes
-/// `SEND_MAX` `EMSGSIZE`, nothing of it read; then the buffers in order, up to `SEND_MAX`.
+/// `SEND_MAX` `EMSGSIZE`, nothing of it read; then the buffers in order, up to `SEND_MAX`. Its control as the kernel
+/// takes it (`____sys_sendmsg`): read wherever `msg_control` points when it has a length, a null pointer too —
+/// `EFAULT` where nothing is mapped there (V2-4).
 pub(super) fn read_msg<M: Mem>(
     m: &M,
     mut pass: impl FnMut(i32) -> Result<OwnedFd, i32>,
@@ -269,7 +271,7 @@ pub(super) fn read_msg<M: Mem>(
     if control_len > CONTROL_MAX {
         return Err(libc::ENOBUFS.into());
     }
-    let theirs = if control_at == 0 { Vec::new() } else { m.read(control_at, control_len)? };
+    let theirs = if control_len == 0 { Vec::new() } else { m.read(control_at, control_len)? };
     // (what goes out is built here: a header of tarae's per `SCM_RIGHTS`, nothing of the run's bytes)
     let (mut control, mut fds) = (Vec::new(), Vec::new());
     // `struct cmsghdr`: its length (with itself), level, type, then the data — each aligned to 8

@@ -285,3 +285,45 @@ fn the_kernel_binds_a_unix_socket_where_tarae_read_it() {
     }
     t.check(&["refused", "path", "abstract", "made up"], 300);
 }
+
+/// V2-4: the kernel reads a message's control wherever `msg_control` points once `msg_controllen` has a length — a
+/// null pointer too, which faults (nothing is mapped at 0 for a run: `vm.mmap_min_addr`) — and `read_msg` reads the
+/// same message so: `EFAULT` from both; with no length, both take it. A one-byte datagram over a socket pair of the
+/// test's own.
+#[test]
+fn a_control_length_with_a_null_pointer_faults_in_the_kernel_as_in_tarae() {
+    let mut fds = [0; 2];
+    // SAFETY: room for the two descriptors `socketpair` writes.
+    let made = unsafe {
+        libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr())
+    };
+    assert_eq!(made, 0, "socketpair: {}", errno());
+    // SAFETY: just made, ours alone.
+    let (s, _peer) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    let byte = [7u8];
+    for len in [16usize, 0] {
+        let mut iov = libc::iovec { iov_base: byte.as_ptr() as *mut libc::c_void, iov_len: 1 };
+        // SAFETY: all zeros is an empty `struct msghdr`.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = std::ptr::null_mut();
+        msg.msg_controllen = len as _;
+        // SAFETY: the header and its one buffer are ours and live for the call; the null control is what's asked.
+        let kernel = match unsafe { libc::sendmsg(s.as_raw_fd(), &msg, libc::MSG_DONTWAIT) } {
+            -1 => Err(errno()),
+            _ => Ok(()),
+        };
+        let m = Fake::default()
+            .at(HEAD, msghdr((0, 0), (IOV, 1), (0, len as u64)))
+            .at(IOV, iovecs(&[(BUFS, 1)]))
+            .at(BUFS, byte);
+        let tarae = read_msg(&m, passer(&mut Vec::new()), HEAD, true).map(|_| ()).map_err(|u| u.errno());
+        assert_eq!(
+            kernel,
+            if len > 0 { Err(libc::EFAULT) } else { Ok(()) },
+            "the kernel, control length {len}"
+        );
+        assert_eq!(tarae, kernel, "tarae, control length {len}");
+    }
+}

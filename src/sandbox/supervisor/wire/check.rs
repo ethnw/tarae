@@ -8,7 +8,8 @@ use std::cell::RefCell;
 use super::*;
 
 /// A run's memory as a test lays it out: pieces at addresses, nothing between them (`EFAULT`, as `/proc/<tid>/mem`
-/// says it) — and every read asked of it, `(at, len)` in order.
+/// says it) — and every read asked of it, `(at, len)` in order. A memory: an address holds one byte whatever the
+/// read that reaches it (pieces laid over each other: the first laid), and pieces that meet read as one (V2-5).
 #[derive(Default, Clone)]
 pub(crate) struct Fake {
     pub(crate) pieces: Vec<(u64, Vec<u8>)>,
@@ -21,16 +22,29 @@ impl Fake {
         self
     }
 
-    /// What's there, unrecorded — a read of nothing anywhere (`read_exact_at` asks the kernel nothing).
+    /// What's there, unrecorded — a read of nothing anywhere (`read_exact_at` asks the kernel nothing); one past
+    /// the end of the address space, or with a byte no piece holds, `EFAULT`.
     pub(crate) fn peek(&self, at: u64, len: usize) -> Result<Vec<u8>, i32> {
-        if len == 0 {
-            return Ok(Vec::new());
+        // (in u128: a piece laid near the top may claim bytes past 2^64, which no read reaches)
+        let span = |(base, b): &(u64, Vec<u8>)| (u128::from(*base), u128::from(*base) + b.len() as u128);
+        let (mut pos, end) = (u128::from(at), u128::from(at) + len as u128);
+        if end > 1 << 64 && len > 0 {
+            return Err(libc::EFAULT);
         }
-        let within = |(base, b): &(u64, Vec<u8>)| {
-            let from = usize::try_from(at.checked_sub(*base)?).ok()?;
-            b.get(from..from.checked_add(len)?).map(<[u8]>::to_vec)
-        };
-        self.pieces.iter().find_map(within).ok_or(libc::EFAULT)
+        let mut out = Vec::new();
+        while pos < end {
+            let k =
+                self.pieces.iter().position(|p| (span(p).0..span(p).1).contains(&pos)).ok_or(libc::EFAULT)?;
+            let (from, mut to) = span(&self.pieces[k]);
+            // (up to where a piece laid earlier starts: its bytes are the memory's from there)
+            for p in &self.pieces[..k] {
+                to = if (pos + 1..to).contains(&span(p).0) { span(p).0 } else { to };
+            }
+            let to = to.min(end);
+            out.extend_from_slice(&self.pieces[k].1[(pos - from) as usize..(to - from) as usize]);
+            pos = to;
+        }
+        Ok(out)
     }
 
     /// A message's memory as a fuzz input holds it: a byte of flags (1: a datagram), where its header is (8 bytes),
@@ -310,8 +324,6 @@ fn apart(
         _ if long(0) != 0 && namelen > ADDR_MAX as i32 && refused == Some(libc::EINVAL) => {
             Some("F3 name past 128")
         }
-        // (F4) a control length with no pointer: the kernel's copy faults, tarae reads no control and goes on
-        Err((libc::EFAULT, "control")) if long(32) == 0 => Some("F4 control at 0"),
         // the iovec array not all there: tarae reads it whole (`EFAULT`), the kernel meets a bad length first
         Err((libc::EINVAL, "iovec length"))
             if refused == Some(libc::EFAULT) && m.peek(long(16), 16 * long(24) as usize).is_err() =>

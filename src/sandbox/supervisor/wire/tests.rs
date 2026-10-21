@@ -472,15 +472,14 @@ fn a_message_is_read_as_the_kernel_reads_it() {
         "credentials",
         "another control message",
         "F3 name past 128",
-        "F4 control at 0",
     ];
     let each = steps.iter().all(|s| seen.get(s).is_some_and(|&n| n > 20));
     assert!(each && seen["taken"] > 5000 && seen["taken with descriptors"] > 5000, "{seen:?}");
 }
 
 /// Where `read_msg` reads a message apart from the kernel, each as `apart` names it: (F3) a name past 128 bytes —
-/// the kernel cuts it, tarae refuses it; (F4) a control length with no pointer — the kernel's copy faults, tarae
-/// goes on without control; an iovec array not all there — tarae `EFAULT` where the kernel meets a bad length first.
+/// the kernel cuts it, tarae refuses it; an iovec array not all there — tarae `EFAULT` where the kernel meets a bad
+/// length first. (F4, a control length with a null pointer, was one until V2-4: `read_msg` reads it as the kernel does.)
 #[test]
 fn read_apart_from_the_kernel() {
     let both = |m: &Fake| {
@@ -491,8 +490,6 @@ fn read_apart_from_the_kernel() {
     };
     let long_name = Fake::default().at(HEAD, msghdr((NAME, 200), (IOV, 0), (0, 0))).at(NAME, [7; 200]);
     assert_eq!(both(&long_name), (Err(libc::EINVAL), Ok((Some(vec![7; 128]), 0))));
-    let no_control = Fake::default().at(HEAD, msghdr((0, 0), (IOV, 0), (0, 16)));
-    assert_eq!(both(&no_control), (Ok((None, 0)), Err((libc::EFAULT, "control"))));
     let cut = Fake::default().at(HEAD, msghdr((0, 0), (IOV, 2), (0, 0))).at(IOV, iovecs(&[(BUFS, 1 << 63)]));
     assert_eq!(both(&cut), (Err(libc::EFAULT), Err((libc::EINVAL, "iovec length"))));
 }
@@ -528,6 +525,53 @@ fn writes_fuzz_seeds() {
     fuzz_seeds("netlink", batches);
     let messages = (0..8).map(|k| (format!("message-{k}"), laid_out(&mut rng).input(HEAD, k % 2 == 0)));
     fuzz_seeds("msghdr", messages);
+}
+
+/// V2-4 (fuzz `msghdr`, 2026-10-16): a control length with a null pointer is read where the pointer points, as the
+/// kernel reads it (`____sys_sendmsg` copies `ctl_len` bytes from `msg_control` whatever it is): with memory at
+/// address 0, its descriptors passed; with none there (every run's case — `vm.mmap_min_addr`), `EFAULT`. tarae read
+/// no control at a null pointer and sent the message without it. The fuzz input, minimized: a stream's header at
+/// `HEAD` with no name, no iovecs and 24 bytes of control at 0 — and, at 0, `SCM_RIGHTS` passing descriptor 3.
+#[test]
+fn a_control_at_address_0_is_read_as_the_kernel_reads_it() {
+    let header = msghdr((0, 0), (IOV, 0), (0, 24));
+    let at_0 = rights(&[3]);
+    let input = [&[0][..], &HEAD.to_le_bytes(), &HEAD.to_le_bytes(), &[56, 0], &header].concat();
+    let mapped = [&input[..], &0u64.to_le_bytes(), &[24, 0], &at_0].concat();
+    let (at, datagram, m) = Fake::from_input(&mapped).unwrap();
+    assert_eq!(check::message(&m, at, datagram), "taken with descriptors");
+    let (at, datagram, m) = Fake::from_input(&input).unwrap();
+    assert_eq!(check::message(&m, at, datagram), "control", "nothing at 0: the kernel's EFAULT");
+}
+
+/// V2-5 (fuzz `msghdr`, 2026-10-16): the stand-in memory is one — an address holds one byte, whatever the size of
+/// the read that reaches it (where pieces are laid over each other, the first laid), and a read across pieces that
+/// meet is whole, as the kernel's copies and `/proc/<tid>/mem` read across mappings. It held the first piece that
+/// held a read whole: the model's 16-byte iovec reads saw one piece, `read_msg`'s one read of the array another.
+/// The fuzz input, minimized: a stream's header at `HEAD` naming three iovecs at `IOV`; at `IOV` first one iovec
+/// (`BUFS`, 2), then three (`BUFS`, 4); four bytes at `BUFS`.
+#[test]
+fn a_fake_memory_holds_one_byte_an_address() {
+    let piece = |at: u64, b: &[u8]| [&at.to_le_bytes()[..], &(b.len() as u16).to_le_bytes(), b].concat();
+    let input = [
+        &[0][..],
+        &HEAD.to_le_bytes(),
+        &piece(HEAD, &msghdr((0, 0), (IOV, 3), (0, 0))),
+        &piece(IOV, &iovecs(&[(BUFS, 2)])),
+        &piece(IOV, &iovecs(&[(BUFS, 4); 3])),
+        &piece(BUFS, b"abcd"),
+    ]
+    .concat();
+    let (at, datagram, m) = Fake::from_input(&input).unwrap();
+    assert_eq!(check::message(&m, at, datagram), "taken");
+    assert_eq!(m.peek(IOV, 48).unwrap()[..16], m.peek(IOV, 16).unwrap(), "the first piece laid there");
+    let msg = read_msg(&m, passer(&mut Vec::new()), at, datagram).ok().unwrap();
+    assert_eq!(msg.data, b"ababcdabcd");
+    let meeting = Fake::default().at(BUFS, *b"ab").at(BUFS + 2, *b"cd").at(u64::MAX - 1, *b"yz");
+    assert_eq!(meeting.peek(BUFS, 4), Ok(b"abcd".to_vec()), "across pieces that meet");
+    assert_eq!(meeting.peek(BUFS + 1, 4), Err(libc::EFAULT), "past them");
+    assert_eq!(meeting.peek(u64::MAX - 1, 2), Ok(b"yz".to_vec()));
+    assert_eq!(meeting.peek(u64::MAX, 2), Err(libc::EFAULT), "past the address space's end");
 }
 
 /// F1: the `i`th message of a `sendmmsg` array is found by checked sums — one whose header (and its `msg_len`,
