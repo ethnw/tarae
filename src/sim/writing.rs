@@ -2,7 +2,10 @@
 //! on a worker (the result landing among the steps), the call made once its input is whole and its review opening
 //! from another job; keys between — moves, typing in the buffer, `y`/`n` on the review — frames at two widths, the
 //! turn's end, the next turn's edit over another line, time passing. After every step: no document's text changed
-//! but by a key (nothing applied, nothing decided); a stream piece never moved the keys; rows are drawn only in a
+//! but by a key (nothing applied, nothing decided); a stream piece never moved the keys, and moved the cursor only
+//! while follow led it — onto the line a drawn block rewrites (`Block::place`; its caret, drawn, may move with every
+//! frame); a key of yours that moved the cursor paused follow; a buffer with nothing unsaved and no save under
+//! way is its file on disk (a review's `y` saves through the saver's job, the simulation's own); rows are drawn only in a
 //! buffer that holds what they replace, never under a review, none once the turn is over; and a review that opens
 //! on rows drawn whole shows the same rows — the same lines taken out, the same lines written.
 
@@ -15,7 +18,9 @@ use crate::key::{Code, Key};
 use crate::llm::StreamEv;
 use crate::writing::{Delta, Place, Scan, Tool};
 
-const SEEDS: &[u64] = &[0, 1, 2, 3];
+// (4: the line rewritten moves as a kept line is written · 66: a review answered with something applied saves —
+// the saver's job, never a thread of its own · 150: a review left open while follow is paused wakes nothing)
+const SEEDS: &[u64] = &[0, 1, 2, 3, 4, 66, 150];
 
 const INPUTS: usize = 80;
 
@@ -43,6 +48,8 @@ struct World {
     keyed: bool,
     /// A stream piece moved where the keys go.
     moved_keys: Option<String>,
+    /// The cursor moved as follow mustn't lead it (by a piece), or a key's move left follow leading.
+    led_wrong: Option<String>,
     /// The rows last drawn with their text whole: their document, its version then, each row's text.
     whole: Option<(crate::document::DocId, u64, Vec<String>)>,
     /// The review generation already compared.
@@ -82,18 +89,23 @@ fn generation(ed: &Editor) -> u64 {
     ed.session.chat.as_ref().map_or(0, crate::chat::Chat::generation)
 }
 
-/// A turn begins (a message sent, as the stand-in has it): its edit replaces line `line` of the text as it is now
-/// — the keys in the order the model writes them.
+/// A turn begins (a message sent, as the stand-in has it): its edit replaces lines `line` and the next of the text as
+/// it is now, keeping the first (its head moves from line to line as it's written) — the keys in the order the
+/// model writes them.
 fn begin(ed: &mut Editor, w: &mut World, line: usize) {
     let Some(c) = ed.session.chat.as_mut() else { return };
     c.state = crate::chat::State::Thinking;
     let doc = ed.doc();
-    let old = doc.text.line(line.min(crate::movement::last_line(&doc.text))).to_string();
-    let new = format!("    // turn {}\n{}    let z = {};\n", w.turn, old.replace("= ", "= 1 + "), w.turn);
+    let last = crate::movement::last_line(&doc.text);
+    let (a, b) = (doc.text.line(line.min(last)).to_string(), doc.text.line((line + 1).min(last)).to_string());
+    let old = format!("{a}{b}");
+    let new = format!("    // turn {}\n{a}{}    let z = {};\n", w.turn, b.replace("= ", "= 1 + "), w.turn);
     let s = |t: &str| serde_json::to_string(t).unwrap();
     w.input =
         format!(r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#, s(&old), s(&new));
     (w.sent, w.made, w.scan) = (0, false, Some(Scan::new(Tool::Edit)));
+    // (the rows an earlier turn drew are its own: this turn's review is compared with this turn's)
+    w.whole = None;
     w.turn += 1;
 }
 
@@ -108,8 +120,30 @@ fn keys(ed: &mut Editor, keys: &str) {
             '<' => chars.by_ref().take_while(|&c| c != '>').collect::<String>().parse().unwrap(),
             ch => Key::plain(Code::Char(ch)),
         };
-        ed.handle_key(k);
+        // (through the loop, as a person's key comes: follow sees it after it — `follow::watch`)
+        ed.handle_event(crate::event::Event::Key(k));
     }
+}
+
+/// Where the cursor is: its document and line.
+fn cursor(ed: &Editor) -> (crate::document::DocId, usize) {
+    (ed.doc().id, ed.cursor_line())
+}
+
+/// A piece moved the cursor: only while follow could lead it (on, not paused, nothing of yours under way), and onto
+/// the line a drawn block in the document in front rewrites (`Block::place`) — never a line between.
+fn led_right(ed: &Editor, could: bool) -> Result<(), String> {
+    if !could {
+        return Err("a piece moved the cursor while follow couldn't lead it".into());
+    }
+    let doc = ed.doc();
+    let line = ed.cursor_line();
+    let last = crate::movement::last_line(&doc.text);
+    let blocks = crate::writing::shown(doc).map(|s| s.blocks.clone()).unwrap_or_default();
+    if !blocks.iter().any(|b| b.place().min(last) == line) {
+        return Err(format!("a piece led the cursor to line {line}, no line rewritten there"));
+    }
+    Ok(())
 }
 
 fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
@@ -138,9 +172,17 @@ fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
             scan.feed(&piece);
             let d = Delta { call, tool: Tool::Edit, pieces: scan.take(), done: end == chars.len() };
             let region = ed.keys_to().region.name().to_string();
+            let could =
+                ed.session.chat.as_ref().is_some_and(|c| c.follow.active()) && crate::follow::free(ed);
+            let before = (cursor(ed), could);
             crate::chat::stream_event(ed, g, StreamEv::Writing(d));
             if ed.keys_to().region.name() != region {
                 w.moved_keys = Some(format!("{region} → {}", ed.keys_to().region.name()));
+            }
+            if cursor(ed) != before.0
+                && let Err(e) = led_right(ed, before.1)
+            {
+                w.led_wrong = Some(e);
             }
             format!("{n} characters of the input ({end} of {})", chars.len())
         }
@@ -166,7 +208,14 @@ fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
         2 => {
             let k = *c.pick(&["j", "k", "gg", "ix<esc>", "u", "y", "n", "<esc>"]);
             w.keyed = true;
+            let leading = ed.keys_to().region.name() == "code" && crate::follow::leads(ed);
+            let at = cursor(ed);
             keys(ed, k);
+            // (`y`/`n` answer a review, which may lead the cursor to what it took: follow's, not yours)
+            let paused = ed.session.chat.as_ref().is_none_or(|c| !c.follow.active());
+            if leading && cursor(ed) != at && !paused {
+                w.led_wrong = Some(format!("keys {k} moved the cursor and follow still leads"));
+            }
             format!("keys {k}")
         }
         3 => {
@@ -217,6 +266,18 @@ fn held(ed: &Editor, w: &mut World) -> Result<(), String> {
     w.texts = now;
     if let Some(m) = w.moved_keys.take() {
         return Err(format!("a stream piece moved the keys: {m}"));
+    }
+    if let Some(m) = w.led_wrong.take() {
+        return Err(m);
+    }
+    // A review answered with something applied saves it (`refactor::reviewed` → `save_beneath`, the saver's job):
+    // a buffer with nothing unsaved and no save under way is its file on disk
+    for d in ed.docs.iter().filter(|d| !d.is_modified() && d.saving == 0) {
+        let Some(path) = d.path.as_ref() else { continue };
+        let disk = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if d.text != disk.as_str() {
+            return Err(format!("{} unsaved on disk, its buffer saying it's saved", path.display()));
+        }
     }
     let review = ed.session.review.as_ref();
     let c = ed.session.chat.as_ref().ok_or("the chat went")?;

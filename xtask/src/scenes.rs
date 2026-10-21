@@ -354,6 +354,24 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@20?knots\", t.k", "@1"],
     },
+    // (the same with the keys back in the code: the cursor on the line being rewritten, Claude's caret at the end of
+    // what it writes — two places, one cursor)
+    Scene {
+        name: "writingcode",
+        claude: "writemid",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@20?knots\", t.k",
+            "\x1b",
+            "@1",
+        ],
+    },
     // (Claude's edit of three changes: the first accepted, the second refused, the third in hand)
     Scene {
         name: "decided",

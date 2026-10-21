@@ -12,7 +12,23 @@ pub fn now() -> Instant {
     if let Some(t) = crate::sim::now() {
         return t;
     }
-    Instant::now()
+    let now = Instant::now();
+    #[cfg(test)]
+    let now = now + AHEAD.get();
+    now
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How far `advance` moved this thread's clock on.
+    static AHEAD: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// Tests outside a simulation: this thread's clock moved on by `d` — what `now` and `since` read here from now on (a
+/// key-sequence test's wait past follow's PACE, say, without sleeping and without reaching into the state).
+#[cfg(test)]
+pub fn advance(d: Duration) {
+    AHEAD.set(AHEAD.get() + d);
 }
 
 /// The wall clock, as logic reads it.

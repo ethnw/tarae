@@ -3206,6 +3206,23 @@ fn faded(s: Style, ground: Option<Color>) -> Style {
     Style { fg: Some(Color::Rgb { r, g, b }), ..s }
 }
 
+/// Claude's caret while it writes (`draw_text`): an insert caret's bar — never the person's block cursor's shape.
+const CARET: &str = "▎";
+
+/// The caret's colour on the row it ends (`ground`: that row's, its wash): the accent, bold.
+fn caret_style(ui: &Ui, ground: Style) -> Style {
+    Style { fg: ui.accent.fg, bold: true, italic: false, underline: false, ..ground }
+}
+
+/// `apply` at full strength inside a region drawn faded — Claude's place in the code while the keys are elsewhere
+/// (`codeview::Shows.claude`, the head of what it writes): the one thing there that must read from afar.
+fn apply_full(out: &mut impl Write, s: Style) -> io::Result<()> {
+    let ground = FADING.take();
+    let done = apply(out, s);
+    FADING.set(ground);
+    done
+}
+
 /// Apply a style wholesale (clearing the previous one).
 fn apply(out: &mut impl Write, s: Style) -> io::Result<()> {
     let s = match FADING.get() {
@@ -3610,6 +3627,8 @@ fn draw_text(
     let cur_line = mv::line_of(text, primary);
     // The phantom line (after the final newline) shows only when the cursor is there.
     let max_line = mv::last_line(text).max(cur_line);
+    // Claude's caret on a line it keeps, at that line's end (a pane's only — a review or a preview has no writing)
+    let caret_line = crate::writing::caret_line(doc).filter(|_| shows.cursor);
     // Screen row → doc line (not 1:1: folded doc-comment blocks). Per-line tables index by "Nth row from top"
     let span = view.iter().map(|v| v.last_line()).max().map_or(1, |m| m + 1 - top.min(m)).max(1);
     // Syntax highlight: capture name → theme style once per frame (hundreds of lookups, µs).
@@ -4060,6 +4079,7 @@ fn draw_text(
                     Mark::Taken if part.is_none_or(|p| p.index == 0) => {
                         ("−", Style { fg: ui.diff_minus.fg, bold: true, ..base })
                     }
+                    // (the line being written too: Claude's place is its caret, at the row's end)
                     Mark::Added { .. } => ("▎", Style { fg: ui.diff_plus.fg, ..base }),
                     _ => (" ", base),
                 };
@@ -4103,6 +4123,16 @@ fn draw_text(
                         }
                         g => queue!(out, Print(g))?,
                     }
+                }
+                // Claude's caret: a bar in the accent in the cell right after the last character written — an insert
+                // caret, Claude typing; the person's cursor is a block, so the two never look alike. A mark, not the
+                // keys' cursor (that stays where the keys are); unfaded in a pane without the keys
+                if matches!(kind, OtherKind::Writing { head: true })
+                    && part.is_none_or(|p| p.last)
+                    && room > 0
+                {
+                    apply_full(out, caret_style(ui, base))?;
+                    queue!(out, Print(CARET))?;
                 }
                 continue;
             }
@@ -4195,9 +4225,17 @@ fn draw_text(
         let mark = match edit {
             Some(_) => (taken && (first || cut))
                 .then_some(("−", Style { fg: ui.diff_minus.fg, bold: true, ..line_base })),
+            // (Claude's place where follow led the cursor, the keys elsewhere: its bar in the accent, over the git one)
+            None if shows.claude == Some(line) => {
+                Some(("▎", Style { fg: ui.accent.fg, bold: true, ..line_base }))
+            }
             None => git_marks.get(li).copied().flatten().filter(|(g, _)| last || *g != "▁"),
         };
         match mark.filter(|_| gutter) {
+            Some((glyph, st)) if edit.is_none() && shows.claude == Some(line) => {
+                apply_full(out, st)?;
+                queue!(out, Print(glyph))?;
+            }
             Some((glyph, st)) => {
                 apply(out, st)?;
                 queue!(out, Print(glyph))?;
@@ -4391,9 +4429,19 @@ fn draw_text(
                 col = c.col;
             }
         }
+        // Claude's caret after the last character of the line it's writing, when that line is one it keeps — as after
+        // a written row's (the Other rows above): never a frame without it while the writing goes on
+        let caret_here =
+            caret_line == Some(line) && last && !clipped && x0 + col.saturating_sub(row_left) < lay.text_cols;
+        if caret_here {
+            apply_full(out, caret_style(ui, line_base))?;
+            queue!(out, Print(CARET))?;
+            shift += 1;
+        }
         // Guides on blank lines — no chars there, so fill spaces up to that spot
         if col == 0 && depth > unit && s.trim().is_empty() {
-            let mut at = usize::from(line == cur_line && hit_eol(&cursors, ranges, start, &s));
+            let eol_cell = line == cur_line && hit_eol(&cursors, ranges, start, &s);
+            let mut at = usize::from(eol_cell || caret_here);
             for k in (unit..depth).step_by(unit) {
                 if k < at || k >= lay.text_cols {
                     continue;
@@ -6881,6 +6929,13 @@ fn draw_statusline(
             format!("{} · {mode}", if o.keys.mode == Mode::Select { "SELECT" } else { "NORMAL" })
         }
         _ => mode,
+    };
+    // Follow leading the cursor (`follow::leads`), said as the mode is: `● follow` in the code, after the word of
+    // the place with the keys elsewhere (`● chat · follow`)
+    let mode = match crate::follow::leads(editor) {
+        true if keys == Keys::Code && editor.mode == Mode::Normal => "FOLLOW".to_string(),
+        true => format!("{mode} · FOLLOW"),
+        false => mode,
     };
     let mut left = Vec::new();
     // `● normal`: a dot in the mode's colour (the accent, or the mode's own with `color-modes`), the word in ink

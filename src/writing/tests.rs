@@ -89,7 +89,13 @@ fn frame(ed: &mut Editor, w: u16, h: u16) -> Vec<String> {
     crate::term::render(ed, &mut buf, w, h).unwrap();
     let code = ed.screen.chat_x.unwrap_or(w as usize);
     let text = crate::screen::text(&buf, w, h).unwrap();
-    text.lines().map(|l| l.chars().take(code).collect::<String>().trim_end().to_string()).collect()
+    // (Claude's caret right after a row's text is left out — the rows read as their text; a scrollbar's `▎`
+    // after spaces stays)
+    let uncaret = |r: String| match r.strip_suffix('▎') {
+        Some(t) if !t.is_empty() && !t.ends_with(' ') => t.to_string(),
+        _ => r,
+    };
+    text.lines().map(|l| uncaret(l.chars().take(code).collect::<String>().trim_end().to_string())).collect()
 }
 
 /// tarae's edit replacing line 3 with `new`, its keys in the order the model writes them (serde's own `to_string`
@@ -156,7 +162,8 @@ fn an_edit_is_drawn_as_it_is_written() {
     let input = edit_input("    let b = 20;\n    let c = a + b;\n");
     // (to the middle of the second line it writes)
     let mid = input.find("let c").unwrap() + "let c = a".len();
-    // (its place in sight: nothing moves — the cursor where you left it, the keys in the chat or not)
+    // (its place in sight: the screen holds still — the cursor led to the line under the row it writes, the keys
+    // in the chat or not)
     ed.session.at = crate::session::At::Chat;
     frame(&mut ed, 100, 30);
     let mut w = Writer::new("t1", Tool::Edit);
@@ -164,7 +171,11 @@ fn an_edit_is_drawn_as_it_is_written() {
     settle(&mut ed, |ed| shown(ed.doc()).is_some());
     frame(&mut ed, 100, 30);
     w.send(&mut ed, g, "", &[], false);
-    assert_eq!(ed.doc().selection().primary().head, 0, "the cursor where it was");
+    assert_eq!(
+        (ed.cursor_line(), ed.doc().top),
+        (2, 0),
+        "the cursor on the line it rewrites, the screen still"
+    );
     ed.session.leave(crate::session::At::Chat);
     crate::term::WET_SEEN.with_borrow_mut(Vec::clear);
     let rows = frame(&mut ed, 100, 30);
@@ -293,7 +304,7 @@ fn a_change_that_lands_takes_its_rows() {
 }
 
 /// A write longer than the screen: follow keeps the line being written in sight as it comes, the screen moving
-/// down with it — and the cursor where follow put it, on the first line it replaces.
+/// down with it — and the cursor where follow put it, on the line it rewrites.
 #[test]
 fn the_head_stays_in_sight_as_it_is_written() {
     let (mut ed, dir, g) = scene("writing-head");
@@ -321,7 +332,611 @@ fn the_head_stays_in_sight_as_it_is_written() {
         // (the follow card may cover a row's end)
         assert!(rows.iter().any(|r| r.contains(&format!("▎written {n}"))), "written {n} in sight: {rows:#?}");
     }
-    assert_eq!(crate::movement::line_of(&ed.doc().text, ed.doc().selection().primary().head), 9);
+    assert_eq!(ed.cursor_line(), 9);
+}
+
+/// A key as the person presses it: through the event loop, so follow sees it (`follow::watch`).
+fn press(ed: &mut Editor, keys: &str) {
+    let mut chars = keys.chars();
+    while let Some(c) = chars.next() {
+        let k: Key = match c {
+            '<' => chars.by_ref().take_while(|&c| c != '>').collect::<String>().parse().unwrap(),
+            c => Key::plain(Code::Char(c)),
+        };
+        ed.handle_event(crate::event::Event::Key(k));
+    }
+}
+
+/// The status line's left words (`● normal`, `● follow`) — the frame's last row.
+fn status(rows: &[String]) -> String {
+    rows.last().cloned().unwrap_or_default()
+}
+
+/// Lines 1–3 rewritten, the first two kept: written a line at a time, each piece ending a line — the head on the
+/// line it keeps.
+fn kept_lines_input() -> String {
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let old = "    let a = 1;\n    let b = 2;\n    println!(\"{a} {b}\");\n";
+    let new = "    let a = 1;\n    let b = 2;\n    println!(\"{a}\");\n";
+    format!(r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#, s(old), s(new))
+}
+
+/// The cell right after a text on the frame, and where the terminal's own cursor is.
+struct After {
+    fg: vt100::Color,
+    bg: vt100::Color,
+    text: String,
+    /// (row, column); None: hidden
+    cursor: Option<(u16, u16)>,
+    at: (u16, u16),
+}
+
+impl After {
+    /// Claude's caret: an insert caret's bar in the accent, on the row's own ground (not a block of colour).
+    fn is_caret(&self, accent: vt100::Color) -> bool {
+        self.text == "▎" && self.fg == accent && self.bg != accent
+    }
+}
+
+/// The frame as a terminal shows it: the cell right after `needle` on the row it ends (that row ending with it, or
+/// with it and Claude's caret).
+fn after(ed: &mut Editor, needle: &str) -> After {
+    crossterm::style::force_color_output(true);
+    let mut bytes = Vec::new();
+    crate::term::render(ed, &mut bytes, 100, 30).unwrap();
+    let mut parser = vt100::Parser::new(30, 100, 0);
+    parser.process(&bytes);
+    let screen = parser.screen();
+    let with_caret = format!("{needle}▎");
+    let ends = |r: &str| r.trim_end().ends_with(needle) || r.trim_end().ends_with(&with_caret);
+    let (y, row) = screen.rows(0, 100).enumerate().find(|(_, r)| ends(r)).expect(needle);
+    let x = (row[..row.rfind(needle).unwrap()].chars().count() + needle.chars().count()) as u16;
+    let cell = screen.cell(y as u16, x).unwrap();
+    let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
+    After {
+        fg: cell.fgcolor(),
+        bg: cell.bgcolor(),
+        text: cell.contents().to_string(),
+        cursor,
+        at: (y as u16, x),
+    }
+}
+
+/// (a) An edit written live with the keys in the code: follow puts the cursor on the line it rewrites — the first it
+/// takes out — at once, never paced, moving with it when a line it writes turns out kept; Claude's caret, a cell in
+/// the accent, rides the end of the row being written with every piece (not the terminal's cursor: that's where the
+/// keys are); the status line says `● follow`. Your key pauses it, said, and the cursor stays where you took it.
+#[test]
+fn follow_puts_the_cursor_on_the_line_being_rewritten() {
+    let (mut ed, _dir, g) = scene("writing-lead");
+    ed.config.llm.follow_resume = 0;
+    frame(&mut ed, 100, 30);
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● normal"), "not led yet");
+    let input = kept_lines_input();
+    let upto = |t: &str| input.rfind(t).unwrap() + t.len();
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..upto(r"let a = 1;\n")], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    w.send(&mut ed, g, "", &[], false);
+    assert_eq!(
+        (ed.cursor_line(), ed.doc().top),
+        (2, 0),
+        "at once, on the first line it takes out; the screen still"
+    );
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● follow"));
+    // The next line it writes is one it keeps: the line it rewrites is the one after — the cursor there at once
+    w.send(&mut ed, g, &input[upto(r"let a = 1;\n")..upto(r"let b = 2;\n")], &[], false);
+    assert_eq!(ed.cursor_line(), 3, "not paced");
+    // The caret at the end of what's written, piece by piece — the terminal's cursor elsewhere
+    let accent = accent(&ed);
+    let mut at = upto(r"let b = 2;\n");
+    for (json, t) in [("    print", "    print"), (r#"    println!(\"{a"#, r#"    println!("{a"#)] {
+        w.send(&mut ed, g, &input[at..upto(json)], &[], false);
+        at = upto(json);
+        let a = after(&mut ed, t);
+        assert!(a.is_caret(accent), "{t:?}: the caret right after it ({:?} {:?})", a.text, a.fg);
+        assert_ne!(a.cursor, Some(a.at), "{t:?}: a mark, not the terminal's cursor");
+        assert_eq!(ed.cursor_line(), 3, "{t:?}: the cursor stays on the line rewritten");
+    }
+    // Your key: follow pauses, says so, and leads no more
+    press(&mut ed, "k");
+    assert_eq!(ed.cursor_line(), 2);
+    let f = &ed.session.chat.as_ref().unwrap().follow;
+    assert!(f.paused, "your key paused it");
+    assert!(ed.toasts.iter().any(|t| t.text.contains("you took over")), "said");
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● normal"));
+}
+
+/// A piece that ends right at the end of a line the edit keeps: the row being written is that line, and the caret
+/// sits after its last character — on every frame while the writing goes on, never a frame without it; it leaves the
+/// line before as it goes on.
+#[test]
+fn the_caret_never_misses_a_frame_on_a_line_kept() {
+    let (mut ed, _dir, g) = scene("writing-caret-kept");
+    frame(&mut ed, 100, 30);
+    let accent = accent(&ed);
+    let input = kept_lines_input();
+    let upto = |t: &str| input.rfind(t).unwrap() + t.len();
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..upto(r"let a = 1;\n")], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    w.send(&mut ed, g, "", &[], false);
+    assert_eq!(crate::writing::caret_line(ed.doc()), Some(1), "the row being written is a line it keeps");
+    let a = after(&mut ed, "    let a = 1;");
+    assert!(a.is_caret(accent), "the caret after the kept line's last character");
+    assert_ne!(a.cursor, Some(a.at), "a mark, not the terminal's cursor");
+    w.send(&mut ed, g, &input[upto(r"let a = 1;\n")..upto(r"let b = 2;\n")], &[], false);
+    let b = after(&mut ed, "    let b = 2;");
+    assert!(b.is_caret(accent), "on the next kept line");
+    assert!(!after(&mut ed, "    let a = 1;").is_caret(accent), "gone from the line before");
+    // Into a line it writes: the caret on that row's end again
+    w.send(&mut ed, g, &input[upto(r"let b = 2;\n")..upto("    print")], &[], false);
+    assert!(after(&mut ed, "    print").is_caret(accent));
+    assert!(!after(&mut ed, "    let b = 2;").is_caret(accent));
+}
+
+/// Claude's caret is a bar and the person's cursor a block: they never look alike. In both built-in themes, the keys
+/// in the code or in the chat (the pane faded), the bar reads at a glance on the writing row's wash — WCAG 2's floor
+/// for a mark that isn't text, 3:1.
+#[test]
+fn the_caret_is_a_bar_that_reads_on_the_writing_rows_wash() {
+    let rgb = |c: vt100::Color| match c {
+        vt100::Color::Rgb(r, g, b) => [r, g, b],
+        c => panic!("a true colour: {c:?}"),
+    };
+    for theme in ["meok", "hanji"] {
+        for at in [crate::session::At::Code, crate::session::At::Chat] {
+            let (mut ed, _dir, g) = scene("writing-caret-reads");
+            ed.theme = crate::theme::load(theme).unwrap();
+            ed.session.at = at;
+            frame(&mut ed, 100, 30);
+            let input = edit_input("    let b = 20;\n    let c = a");
+            let mut w = Writer::new("t1", Tool::Edit);
+            w.send(&mut ed, g, &input[..input.len() - 4], &[], false);
+            settle(&mut ed, |ed| shown(ed.doc()).is_some());
+            w.send(&mut ed, g, "", &[], false);
+            let accent = accent(&ed);
+            let a = after(&mut ed, "    let c = a");
+            assert!(a.is_caret(accent), "{theme} {at:?}: a bar in the accent ({:?})", a.text);
+            let r = crate::chrome::contrast(rgb(a.fg), rgb(a.bg));
+            assert!(r >= 3.0, "{theme} {at:?}: the caret on the wash {r:.2} (floor 3)");
+            // The person's cursor, at the start of the line rewritten: a block of the cursor's colour, never a bar
+            if at == crate::session::At::Code {
+                let mut bytes = Vec::new();
+                crate::term::render(&mut ed, &mut bytes, 100, 30).unwrap();
+                let mut parser = vt100::Parser::new(30, 100, 0);
+                parser.process(&bytes);
+                let screen = parser.screen();
+                let (y, row) =
+                    screen.rows(0, 100).enumerate().find(|(_, r)| r.contains("let b = 2;")).expect("its row");
+                let x = row[..row.find("    let b = 2;").unwrap()].chars().count();
+                let cell = screen.cell(y as u16, x as u16).unwrap();
+                let block = ed.theme.try_get("ui.cursor.primary").and_then(|s| s.bg).map(|c| match c {
+                    crossterm::style::Color::Rgb { r, g, b } => vt100::Color::Rgb(r, g, b),
+                    c => panic!("{c:?}"),
+                });
+                assert_eq!(Some(cell.bgcolor()), block, "{theme}: the person's cursor a block");
+                assert_ne!(cell.contents(), "▎", "{theme}: not a bar");
+            }
+        }
+    }
+}
+
+/// A key sequence under way — `g`…, a count, `space` (which-key), `C-w` (the window prefix, the way to the chat) —
+/// isn't taking over: follow holds the cursor still meanwhile and stays on, and the sequence's end decides: `esc`
+/// (or a hop elsewhere) leaves it leading, a move (`2j`) pauses it.
+#[test]
+fn a_key_sequence_under_way_holds_the_cursor_and_its_end_decides() {
+    for prefix in ["g", "2", "<space>", "<C-w>"] {
+        let (mut ed, _dir, g) = scene("writing-sequence");
+        frame(&mut ed, 100, 30);
+        press(&mut ed, prefix);
+        let input = kept_lines_input();
+        let upto = |t: &str| input.rfind(t).unwrap() + t.len();
+        let mut w = Writer::new("t1", Tool::Edit);
+        w.send(&mut ed, g, &input[..upto(r"let a = 1;\n")], &[], false);
+        settle(&mut ed, |ed| shown(ed.doc()).is_some());
+        w.send(&mut ed, g, "", &[], false);
+        assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "{prefix}: not paused");
+        assert!(!ed.toasts.iter().any(|t| t.text.contains("you took over")), "{prefix}: nothing said");
+        assert_eq!(ed.cursor_line(), 0, "{prefix}: the cursor held while it's under way");
+        // Its end without a move: follow leads on, the next piece puts the cursor on the line rewritten
+        press(&mut ed, "<esc>");
+        w.send(&mut ed, g, &input[upto(r"let a = 1;\n")..upto(r"let b = 2;\n")], &[], false);
+        assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "{prefix}: still on");
+        assert_eq!(ed.cursor_line(), 3, "{prefix}: led again");
+    }
+    // A sequence that ends in a move: you took over
+    let (mut ed, _dir, _g) = scene("writing-sequence-move");
+    frame(&mut ed, 100, 30);
+    let read = json!({"file_path": _dir.join("a.rs"), "offset": 1, "limit": 1});
+    crate::chat::stream_event(
+        &mut ed,
+        _g,
+        StreamEv::Tool { id: "r1".into(), name: "Read".into(), input: read },
+    );
+    press(&mut ed, "2");
+    assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "a count alone: not yet");
+    press(&mut ed, "j");
+    assert_eq!(ed.cursor_line(), 2);
+    assert!(ed.session.chat.as_ref().unwrap().follow.paused, "2j: paused");
+}
+
+/// A motion that leaves a selection, as Helix's do (`w`, a search `/let` and its `enter`), pauses follow like any
+/// move — and follow comes back after it as after any key: on its own once you've been quiet `llm.follow-resume`,
+/// or with `C-f`; leading again, it takes the cursor (a point) where Claude is.
+#[test]
+fn follow_comes_back_after_a_word_motion_or_a_search() {
+    for keys in ["w", "/let<ret>", "/let<ret>n"] {
+        for by in ["quiet", "C-f"] {
+            let (mut ed, dir, g) = scene("writing-resume");
+            // (tests: a second of `llm.follow-resume` is 20 ms)
+            ed.config.llm.follow_resume = 1;
+            frame(&mut ed, 100, 30);
+            let read = json!({"file_path": dir.join("a.rs"), "offset": 3, "limit": 1});
+            crate::chat::stream_event(
+                &mut ed,
+                g,
+                StreamEv::Tool { id: "r1".into(), name: "Read".into(), input: read },
+            );
+            assert_eq!(ed.cursor_line(), 2);
+            press(&mut ed, keys);
+            let r = ed.doc().selection().primary();
+            assert!(r.to() - r.from() > 1, "{keys}: a selection wider than a character");
+            assert!(ed.session.chat.as_ref().unwrap().follow.paused, "{keys}: you took over");
+            match by {
+                "quiet" => settle(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().follow.paused),
+                _ => crate::follow::toggle(&mut ed),
+            }
+            assert!(crate::follow::leads(&ed), "{keys}, {by}: leading again");
+            let r = ed.doc().selection().primary();
+            assert_eq!(
+                (ed.cursor_line(), r.to() - r.from() <= 1),
+                (2, true),
+                "{keys}, {by}: back on Claude's line"
+            );
+        }
+    }
+}
+
+/// SELECT holds follow: entered with `v` it pauses, and follow waits — no piece moves the cursor, and the quiet while
+/// passes without taking over (the selection being extended is yours); `esc` back to normal mode and the quiet while
+/// after it, follow leads again, the cursor on Claude's line as a point.
+#[test]
+fn select_holds_follow_until_you_leave_it() {
+    let (mut ed, dir, g) = scene("writing-select");
+    // (tests: a second of `llm.follow-resume` is 20 ms)
+    ed.config.llm.follow_resume = 1;
+    frame(&mut ed, 100, 30);
+    let read = json!({"file_path": dir.join("a.rs"), "offset": 3, "limit": 1});
+    crate::chat::stream_event(
+        &mut ed,
+        g,
+        StreamEv::Tool { id: "r1".into(), name: "Read".into(), input: read },
+    );
+    press(&mut ed, "vl");
+    assert!(ed.session.chat.as_ref().unwrap().follow.paused, "SELECT: you took over");
+    // The quiet while's wake comes and goes (every event until none for a while): follow still waits
+    while let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(300)) {
+        ed.handle_event(ev);
+    }
+    assert!(ed.session.chat.as_ref().unwrap().follow.paused, "SELECT holds it past the quiet while");
+    let read = json!({"file_path": dir.join("a.rs"), "offset": 5, "limit": 1});
+    crate::chat::stream_event(
+        &mut ed,
+        g,
+        StreamEv::Tool { id: "r2".into(), name: "Read".into(), input: read },
+    );
+    assert_eq!(ed.cursor_line(), 2, "no stop moves it");
+    let r = ed.doc().selection().primary();
+    assert!(r.to() - r.from() > 1, "your selection stays");
+    // Out of SELECT: the quiet while after it, follow leads again
+    press(&mut ed, "<esc>");
+    settle(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().follow.paused);
+    assert!(crate::follow::leads(&ed));
+    assert_eq!(ed.cursor_line(), 4, "on Claude's line, its last stop");
+}
+
+/// INSERT or SELECT entered with a key of yours is you taking over, though the cursor stays: follow pauses, and a
+/// piece then doesn't move the cursor.
+#[test]
+fn a_key_left_under_way_pauses_follow() {
+    for keys in ["i", "v"] {
+        let (mut ed, _dir, g) = scene("writing-midway");
+        frame(&mut ed, 100, 30);
+        press(&mut ed, keys);
+        assert!(ed.session.chat.as_ref().unwrap().follow.paused, "{keys}: paused");
+        let input = kept_lines_input();
+        Writer::new("t1", Tool::Edit).send(&mut ed, g, &input[..input.len() - 20], &[], false);
+        settle(&mut ed, |ed| shown(ed.doc()).is_some());
+        assert_eq!(ed.cursor_line(), 0, "{keys}: the cursor where you left it");
+    }
+}
+
+/// A key of yours that edits where the cursor is — `d` at a point, `r`, `~`, `p` — is you acting in the code:
+/// follow pauses as for a move, said the same way, and leads no more.
+#[test]
+fn an_edit_of_yours_where_the_cursor_is_pauses_follow() {
+    for keys in ["d", "rx", "~", "yp"] {
+        let (mut ed, dir, g) = scene("writing-edited");
+        frame(&mut ed, 100, 30);
+        // Follow puts the cursor on line 1's `f` (a read there)
+        let read = json!({"file_path": dir.join("a.rs"), "offset": 1, "limit": 1});
+        crate::chat::stream_event(
+            &mut ed,
+            g,
+            StreamEv::Tool { id: "r1".into(), name: "Read".into(), input: read },
+        );
+        assert_eq!(ed.cursor_line(), 0);
+        assert!(crate::follow::leads(&ed), "{keys}: led");
+        let before = ed.doc().text.to_string();
+        press(&mut ed, keys);
+        assert_ne!(ed.doc().text.to_string(), before, "{keys}: an edit");
+        let f = &ed.session.chat.as_ref().unwrap().follow;
+        assert!(f.paused, "{keys}: paused");
+        assert!(ed.toasts.iter().any(|t| t.text.contains("you took over")), "{keys}: said");
+        assert!(status(&frame(&mut ed, 100, 30)).contains("● normal"), "{keys}");
+        // (Claude reads elsewhere: the editor stays with you)
+        let read = json!({"file_path": dir.join("a.rs"), "offset": 4, "limit": 1});
+        crate::chat::stream_event(
+            &mut ed,
+            g,
+            StreamEv::Tool { id: "r2".into(), name: "Read".into(), input: read },
+        );
+        assert_eq!(ed.cursor_line(), 0, "{keys}: stays with you");
+    }
+}
+
+/// The cell where `needle` starts on a frame drawn by a terminal — and its foreground.
+fn fg_before(ed: &mut Editor, needle: &str) -> (vt100::Color, String) {
+    crossterm::style::force_color_output(true);
+    let mut bytes = Vec::new();
+    crate::term::render(ed, &mut bytes, 100, 30).unwrap();
+    let mut parser = vt100::Parser::new(30, 100, 0);
+    parser.process(&bytes);
+    let screen = parser.screen();
+    let (y, row) = screen.rows(0, 100).enumerate().find(|(_, r)| r.contains(needle)).expect(needle);
+    let x = row[..row.find(needle).unwrap()].chars().count();
+    let cell = screen.cell(y as u16, x.saturating_sub(1) as u16).unwrap();
+    (cell.fgcolor(), cell.contents().to_string())
+}
+
+fn accent(ed: &Editor) -> vt100::Color {
+    match ed.theme.try_get("ui.accent").and_then(|s| s.fg) {
+        Some(crossterm::style::Color::Rgb { r, g, b }) => vt100::Color::Rgb(r, g, b),
+        c => panic!("ui.accent: {c:?}"),
+    }
+}
+
+/// (c) The keys in the chat: the code has no cursor, so Claude's place is a mark — its caret at the end of the row
+/// being written (that row's bar the written rows' own); a stop with nothing written
+/// (a read) has the accent bar on the line follow led the cursor to; the status line says `chat · follow`. The keys
+/// back in the code: the cursor is on that line, the mark gone.
+#[test]
+fn with_the_keys_in_the_chat_claudes_place_is_a_mark() {
+    let (mut ed, dir, g) = scene("writing-mark");
+    ed.session.at = crate::session::At::Chat;
+    frame(&mut ed, 100, 30);
+    let input = edit_input("    let b = 20;\n    let c = a");
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..input.len() - 4], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    w.send(&mut ed, g, "", &[], false);
+    // The row being written: its bar as the other rows written have it (the caret marks Claude's place)
+    let (head, bar) = fg_before(&mut ed, "    let c = a");
+    let (written, _) = fg_before(&mut ed, "    let b = 20;");
+    assert_eq!((head, bar.as_str()), (written, "▎"), "the head's bar: the written rows' own");
+    // Claude's caret right after what's written — the code's only cursor-like thing; the terminal's is the chat's
+    let a = after(&mut ed, "    let c = a");
+    assert!(a.is_caret(accent(&ed)), "the caret, unfaded in the pane without the keys");
+    assert_ne!(a.cursor, Some(a.at), "not the terminal's cursor");
+    assert_eq!(ed.cursor_line(), 2, "the cursor (unseen) on the line it rewrites");
+    assert_ne!(written, accent(&ed), "the rows written: their own bar");
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● chat · follow"));
+    // Nothing written any more, a read: the accent bar on its line
+    crate::chat::stream_event(&mut ed, g, StreamEv::Done(Ok(String::new())));
+    ed.session.chat.as_mut().unwrap().state = State::Thinking;
+    let read = json!({"file_path": dir.join("a.rs"), "offset": 4, "limit": 1});
+    crate::chat::stream_event(
+        &mut ed,
+        g,
+        StreamEv::Tool { id: "r1".into(), name: "Read".into(), input: read },
+    );
+    assert_eq!(ed.cursor_line(), 3);
+    let (mark, bar) = fg_before(&mut ed, r#"    println!("{a} {b}");"#);
+    assert_eq!((mark, bar.as_str()), (accent(&ed), "▎"), "Claude's place marked");
+    let (other, bar) = fg_before(&mut ed, "    let a = 1;");
+    assert!(other != accent(&ed) || bar != "▎", "one line marked");
+    // The keys back in the code: the cursor there, the mark gone (one cursor, where the keys go)
+    ed.session.leave(crate::session::At::Chat);
+    assert_eq!(ed.cursor_line(), 3);
+    let (_, bar) = fg_before(&mut ed, r#"    println!("{a} {b}");"#);
+    assert_ne!(bar, "▎", "no mark where the cursor is");
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● follow"));
+}
+
+/// One edit of two changes far apart in an 80-line file, written until the second is drawn while its jump waits: the
+/// first jumped to, the second out of sight within PACE — the view and the cursor held there. The editor, its
+/// folder, the generation, the call's reader and the view's top then.
+fn a_jump_waiting(name: &str) -> (Editor, crate::scratch::Scratch, u64, Writer, usize) {
+    let (mut ed, dir, g) = scene(name);
+    let text: String = (1..=80).map(|i| format!("    let x{i} = {i};\n")).collect();
+    std::fs::write(dir.join("a.rs"), &text).unwrap();
+    crate::typed::execute(&mut ed, "reload").unwrap();
+    frame(&mut ed, 100, 30);
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let input = format!(
+        r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}},{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#,
+        s("    let x60 = 60;\n"),
+        s("    let x60 = 600;\n"),
+        s("    let x5 = 5;\n"),
+        s("    let x5 = 50;\n")
+    );
+    let mut w = Writer::new("t1", Tool::Edit);
+    let first = input.find("600").unwrap();
+    w.send(&mut ed, g, &input[..first], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    w.send(&mut ed, g, "", &[], false);
+    assert_eq!(ed.cursor_line(), 59, "the first change: jumped there");
+    frame(&mut ed, 100, 30);
+    let top = ed.doc().top;
+    // The second, far above, within PACE: the view and the cursor hold
+    let second = input.find("50;").unwrap();
+    w.send(&mut ed, g, &input[first..second], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some_and(|s| s.blocks.len() == 2));
+    w.send(&mut ed, g, "", &[], false);
+    frame(&mut ed, 100, 30);
+    assert_eq!((ed.cursor_line(), ed.doc().top), (59, top), "within PACE: held");
+    (ed, dir, g, w, top)
+}
+
+/// A second change elsewhere out of sight within PACE of the last jump: the view holds (it moves at most that often),
+/// the cursor with it — then the next piece once PACE has gone by takes both there.
+#[test]
+fn a_jump_to_another_change_waits_for_pace() {
+    let (mut ed, _dir, g, mut w, _) = a_jump_waiting("writing-jumps");
+    // Still within PACE: the next piece holds too
+    w.send(&mut ed, g, "", &[], false);
+    assert_eq!(ed.cursor_line(), 59);
+    // PACE gone by: the next piece jumps
+    crate::clock::advance(crate::follow::PACE);
+    w.send(&mut ed, g, "", &[], false);
+    assert_eq!(ed.cursor_line(), 4, "there now, on the line it rewrites");
+}
+
+/// The stream ends with a jump still waiting (its call answered inside PACE): it's never taken — not late, once PACE
+/// has gone by, to a change that's gone — and it doesn't hold the cursor back: a later edit in sight gets it at once.
+#[test]
+fn a_jump_left_waiting_is_never_taken_late() {
+    let (mut ed, _dir, g, _w, top) = a_jump_waiting("writing-jump-left");
+    crate::writing::answered(&mut ed, "t1");
+    crate::clock::advance(crate::follow::PACE);
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let near = format!(
+        r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#,
+        s("    let x62 = 62;\n"),
+        s("    let x62 = 620;\n")
+    );
+    let mut w = Writer::new("t2", Tool::Edit);
+    w.send(&mut ed, g, &near[..near.find("620").unwrap()], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some_and(|s| s.blocks.iter().any(|b| b.first == 61)));
+    w.send(&mut ed, g, "", &[], false);
+    frame(&mut ed, 100, 30);
+    assert_eq!(
+        (ed.cursor_line(), ed.doc().top),
+        (61, top),
+        "the later edit in sight: the cursor there, no late jump"
+    );
+}
+
+/// Where follow won't move (a file outside the project), a landed edit of Claude's leaves your selection as it is —
+/// collapsed only once follow takes the cursor.
+#[test]
+fn a_landed_edit_follow_wont_follow_leaves_your_selection() {
+    let (mut ed, _dir, _g) = scene("writing-landed-outside");
+    let elsewhere = crate::scratch::Scratch::new("writing-landed-elsewhere");
+    let path = elsewhere.join("b.rs");
+    std::fs::write(&path, TEXT).unwrap();
+    ed.open(&path).unwrap();
+    let wide = crate::selection::Range { anchor: 0, head: 8 };
+    ed.doc_mut().set_selection(crate::selection::Selection::single(wide));
+    let before = ropey::Rope::from_str(TEXT);
+    let after = ropey::Rope::from_str(&TEXT.replace("let b = 2", "let b = 3"));
+    crate::follow::wrote(&mut ed, &path, &before, &after);
+    let r = ed.doc().selection().primary();
+    assert_eq!((r.from(), r.to()), (0, 8), "your selection stays");
+}
+
+/// An edit that only adds lines: the cursor on the line its new rows stand on — where its first line is once it
+/// lands, so landing doesn't move it.
+#[test]
+fn an_added_lines_cursor_stays_put_when_it_lands() {
+    let (mut ed, dir, g) = scene("writing-adds");
+    ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.to_path_buf());
+    frame(&mut ed, 100, 30);
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let (old, new) = ("    let b = 2;\n", "    let b = 2;\n    let c = 3;\n");
+    let input =
+        format!(r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#, s(old), s(new));
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..input.find("= 3").unwrap()], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    w.send(&mut ed, g, "", &[], false);
+    assert_eq!(ed.cursor_line(), 3, "on the line its new row stands on");
+    w.send(&mut ed, g, &input[input.find("= 3").unwrap()..], &[], true);
+    let input: Value = serde_json::from_str(&input).unwrap();
+    crate::chat::stream_event(
+        &mut ed,
+        g,
+        StreamEv::Tool { id: "t1".into(), name: "mcp__tarae__edit".into(), input: input.clone() },
+    );
+    let request = json!({"subtype": "mcp_message", "server_name": "tarae", "message": {"jsonrpc": "2.0",
+        "id": 2, "method": "tools/call", "params": {"name": "edit", "arguments": input}}});
+    crate::chat::stream_event(&mut ed, g, StreamEv::Control { request_id: "c1".into(), request });
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let c = 3;"));
+    assert_eq!(ed.doc().text.line(3).to_string(), "    let c = 3;\n");
+    assert_eq!(ed.cursor_line(), 3, "landed: on its first line, where it was");
+}
+
+/// An edit landing unseen (review at the end): the cursor on its first changed line — wherever it was meanwhile.
+#[test]
+fn an_edit_landing_unseen_leads_the_cursor_there() {
+    let (mut ed, dir, g) = scene("writing-unseen");
+    let mut text: String = (1..=60).map(|i| format!("    let x{i} = {i};\n")).collect();
+    text.insert_str(text.find("    let x40").unwrap(), TEXT);
+    std::fs::write(dir.join("a.rs"), &text).unwrap();
+    crate::typed::execute(&mut ed, "reload").unwrap();
+    ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.to_path_buf());
+    frame(&mut ed, 100, 30);
+    let input: Value = serde_json::from_str(&edit_input("    let b = 20;\n")).unwrap();
+    ed.doc_mut().set_selection(crate::selection::Selection::point(0));
+    crate::chat::stream_event(
+        &mut ed,
+        g,
+        StreamEv::Tool { id: "t1".into(), name: "mcp__tarae__edit".into(), input: input.clone() },
+    );
+    let request = json!({"subtype": "mcp_message", "server_name": "tarae", "message": {"jsonrpc": "2.0",
+        "id": 2, "method": "tools/call", "params": {"name": "edit", "arguments": input}}});
+    crate::chat::stream_event(&mut ed, g, StreamEv::Control { request_id: "c1".into(), request });
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let b = 20;"));
+    assert!(ed.session.review.is_none(), "unseen");
+    let changed = ed.doc().text.to_string().lines().position(|l| l == "    let b = 20;").unwrap();
+    assert_eq!(ed.cursor_line(), changed, "on its first changed line");
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● follow"));
+}
+
+/// (b) An edit landing through its review and `y`: the cursor on its first changed line, still led.
+#[test]
+fn an_edit_accepted_in_its_review_leads_the_cursor_there() {
+    let (mut ed, dir, g) = scene("writing-accepted");
+    let mut text: String = (1..=60).map(|i| format!("    let x{i} = {i};\n")).collect();
+    text.insert_str(text.find("    let x40").unwrap(), TEXT);
+    std::fs::write(dir.join("a.rs"), &text).unwrap();
+    crate::typed::execute(&mut ed, "reload").unwrap();
+    frame(&mut ed, 100, 30);
+    let input = edit_input("    let b = 20;\n");
+    write(&mut ed, g, "t1", Tool::Edit, &input, &[30, 70]);
+    let input: Value = serde_json::from_str(&input).unwrap();
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    crate::chat::stream_event(
+        &mut ed,
+        g,
+        StreamEv::Tool { id: "t1".into(), name: "mcp__tarae__edit".into(), input: input.clone() },
+    );
+    let request = json!({"subtype": "mcp_message", "server_name": "tarae", "message": {"jsonrpc": "2.0",
+        "id": 2, "method": "tools/call", "params": {"name": "edit", "arguments": input}}});
+    crate::chat::stream_event(&mut ed, g, StreamEv::Control { request_id: "c1".into(), request });
+    settle(&mut ed, |ed| ed.session.review.is_some());
+    frame(&mut ed, 100, 30);
+    // (the cursor somewhere else meanwhile, as a reload or your own look may leave it)
+    ed.doc_mut().set_selection(crate::selection::Selection::point(0));
+    crate::follow::settle(&mut ed);
+    press(&mut ed, "y");
+    settle(&mut ed, |ed| ed.session.review.is_none());
+    let changed = ed.doc().text.to_string().lines().position(|l| l == "    let b = 20;").unwrap();
+    assert_eq!(ed.cursor_line(), changed, "on its first changed line");
+    assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "your `y` answered the review: still led");
+    assert!(status(&frame(&mut ed, 100, 30)).contains("● follow"));
 }
 
 /// Performance budget: a stream's batch while an edit is written into a 200k-line file — its pieces read, its rows

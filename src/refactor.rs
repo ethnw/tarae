@@ -332,6 +332,10 @@ fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>, wh
         Op::Text | Op::Create => {
             ed.disk_take(&f.path, &f.after, stamp);
             saw(ed, &f.path);
+            // (Claude's, landed unseen: follow at its first changed line)
+            if let Whose::Claude(_) = whose {
+                crate::follow::wrote(ed, &f.path, &f.before, &f.after);
+            }
         }
         Op::Delete => close(ed, &f.path),
         Op::Move { to, .. } => {
@@ -866,6 +870,10 @@ fn reviewed(ed: &mut Editor, f: FileChange, whose: Whose, doc_id: DocId, dirty: 
         None => Outcome::Failed("its buffer was closed".into()),
         Some(now) if now == f.before => Outcome::Declined,
         Some(now) => {
+            // (Claude's, its `y` given: follow at its first changed line, as for one landed unseen)
+            if let Whose::Claude(_) = whose {
+                crate::follow::wrote(ed, &f.path, &f.before, &now);
+            }
             match front(ed, whose).filter(|_| whose == Whose::Yours).map(|l| (l.step, l.what.clone())) {
                 Some((step, what)) => {
                     let file = vec![(f.path.clone(), was(&f), Some(now.clone()))];

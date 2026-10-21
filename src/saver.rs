@@ -1,16 +1,18 @@
 //! Saving off the main loop, as Helix does. A save is checked where it's asked (still loading, no name,
-//! changed on disk), then the text — a rope clone, no copy — goes to one saver thread that writes it the way
-//! `:w` always has (temp file, F_FULLFSYNC on macOS, rename: `disk::write_atomic`) while typing goes on.
-//! Measured on macOS: a 270 KB file held the main loop 9 ms, nearly all of it the flush — `:wa` or an
-//! auto-save of ten files, 90 ms.
+//! changed on disk), then the text — a rope clone, no copy — goes to the saver's queue and a job of its own
+//! writes it the way `:w` always has (temp file, F_FULLFSYNC on macOS, rename: `disk::write_atomic`) while
+//! typing goes on. Measured on macOS: a 270 KB file held the main loop 9 ms, nearly all of it the flush —
+//! `:wa` or an auto-save of ten files, 90 ms.
 //!
-//! One thread, first in first out: a later save of a file never lands before an earlier one. When the
-//! thread runs out of work the main loop hears of it and finishes those saves at once (saved version, disk
-//! stamp, "Saved", the language server's didSave …) — one message for a batch. Quitting waits for what's
-//! still being written (`Editor::flush_saves`), as Helix's quit commands do.
+//! One save written at a time, first in first out: each job takes the oldest left under the saver's write lock,
+//! so a later save of a file never lands before an earlier one. When nothing is left to write the main loop
+//! hears of it and finishes those saves at once (saved version, disk stamp, "Saved", the language server's
+//! didSave …) — one message for a batch. Quitting waits for what's still being written
+//! (`Editor::flush_saves`), as Helix's quit commands do. (Jobs, not a thread of its own: a simulation schedules
+//! them as its own — `sim/writing.rs`'s review answered with something applied saves.)
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -115,10 +117,55 @@ struct Wait {
     then: Box<dyn FnOnce(&mut Editor)>,
 }
 
+/// Saves asked and not taken yet, oldest first — and whether a drainer is on them.
+#[derive(Default)]
+struct Queue {
+    jobs: VecDeque<Job>,
+    draining: bool,
+}
+
+fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `job` written as `:w` always has (or beneath its folder through no link), its outcome kept for the main loop —
+/// whether nothing is left to write now. `_slow`: tests' slow disk.
+fn write_one(job: Job, shared: &(Mutex<Shared>, Condvar), _slow: Duration) -> bool {
+    let write = |w: &mut std::io::BufWriter<std::fs::File>| {
+        // (inside the write: its temp file is there meanwhile, as on a slow disk)
+        #[cfg(test)]
+        std::thread::sleep(_slow);
+        job.text.write_to(w)
+    };
+    let result = match job.beneath.as_deref() {
+        Some(root) => write_beneath(root, &job.path, &job.text, &|| {
+            #[cfg(test)]
+            std::thread::sleep(_slow);
+        }),
+        None => job.folders.as_deref().map_or(Ok(()), |root| make_folders(root, &job.path)).and_then(|()| {
+            crate::disk::write_atomic(&job.path, write)
+                .map(|()| crate::disk::stamp(&job.path))
+                .map_err(|e| format!("writing {}: {e}", job.path.display()))
+        }),
+    };
+    let (lock, cv) = shared;
+    let idle = {
+        let mut s = locked(lock);
+        let Job { id, path, version, then, .. } = job;
+        s.done.push(Done { id, path, version, then, result });
+        s.pending -= 1;
+        s.written += 1;
+        s.pending == 0
+    };
+    cv.notify_all();
+    idle
+}
+
 pub struct Saver {
     events: crate::event::Tx,
-    /// The thread, started with the first save
-    tx: Option<Sender<Job>>,
+    /// Saves asked and not written yet — one drainer job at a time takes them, oldest first, each under `writing`
+    queue: Arc<Mutex<Queue>>,
+    writing: Arc<Mutex<()>>,
     shared: Arc<(Mutex<Shared>, Condvar)>,
     /// Oldest first
     waits: Vec<Wait>,
@@ -132,7 +179,8 @@ impl Saver {
     pub fn new(events: crate::event::Tx) -> Saver {
         Saver {
             events,
-            tx: None,
+            queue: Arc::default(),
+            writing: Arc::default(),
             shared: Arc::default(),
             waits: Vec::new(),
             #[cfg(test)]
@@ -140,61 +188,51 @@ impl Saver {
         }
     }
 
-    fn push(&mut self, job: Job) {
-        let shared = self.shared.clone();
-        let events = self.events.clone();
-        #[cfg(test)]
-        let slow = self.slow;
-        let tx = self.tx.get_or_insert_with(|| {
-            let (tx, rx) = channel::<Job>();
-            crate::event::thread("tarae-saver", move || {
-                while let Ok(job) = rx.recv() {
-                    let write = |w: &mut std::io::BufWriter<std::fs::File>| {
-                        // (inside the write: its temp file is there meanwhile, as on a slow disk)
-                        #[cfg(test)]
-                        std::thread::sleep(slow);
-                        job.text.write_to(w)
-                    };
-                    let result = match job.beneath.as_deref() {
-                        Some(root) => write_beneath(root, &job.path, &job.text, &|| {
-                            #[cfg(test)]
-                            std::thread::sleep(slow);
-                        }),
-                        None => job
-                            .folders
-                            .as_deref()
-                            .map_or(Ok(()), |root| make_folders(root, &job.path))
-                            .and_then(|()| {
-                                crate::disk::write_atomic(&job.path, write)
-                                    .map(|()| crate::disk::stamp(&job.path))
-                                    .map_err(|e| format!("writing {}: {e}", job.path.display()))
-                            }),
-                    };
-                    let (lock, cv) = &*shared;
-                    let idle = {
-                        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-                        let Job { id, path, version, then, .. } = job;
-                        s.done.push(Done { id, path, version, then, result });
-                        s.pending -= 1;
-                        s.written += 1;
-                        s.pending == 0
-                    };
-                    cv.notify_all();
-                    // Out of work: the main loop finishes the batch (one message for `:wa`), and starts what
-                    // waited for it
-                    if idle && events.send(Event::Job(Box::new(|ed: &mut Editor| ed.saves_woke()))).is_err() {
-                        return;
-                    }
-                }
-            });
-            tx
-        });
+    /// `job` queued; a drainer started if none is on the queue — one at a time (`:wa` of ten files is one job, not
+    /// ten threads), a `background` job: kept work, the process's end waits for it.
+    fn push(&mut self, job: Job, jobs: &crate::event::Jobs) {
         {
-            let mut s = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = locked(&self.shared.0);
             s.pending += 1;
             s.asked += 1;
         }
-        let _ = tx.send(job);
+        {
+            let mut q = locked(&self.queue);
+            q.jobs.push_back(job);
+            if std::mem::replace(&mut q.draining, true) {
+                return;
+            }
+        }
+        let (queue, writing, shared) = (self.queue.clone(), self.writing.clone(), self.shared.clone());
+        let events = self.events.clone();
+        #[cfg(test)]
+        let slow = self.slow;
+        #[cfg(not(test))]
+        let slow = Duration::ZERO;
+        jobs.background(move || {
+            loop {
+                let idle = {
+                    // (taken under the write lock: a later save of a file never lands before an earlier one, whoever
+                    // writes it — this job or a flush, `wait`)
+                    let _one = locked(&writing);
+                    let job = {
+                        let mut q = locked(&queue);
+                        match q.jobs.pop_front() {
+                            Some(job) => job,
+                            None => {
+                                q.draining = false;
+                                return;
+                            }
+                        }
+                    };
+                    write_one(job, &shared, slow)
+                };
+                // Out of work: the main loop finishes the batch (one message for `:wa`), and starts what waited for it
+                if idle {
+                    let _ = events.send(Event::Job(Box::new(|ed: &mut Editor| ed.saves_woke())));
+                }
+            }
+        });
     }
 
     /// Saves written since last asked.
@@ -208,8 +246,23 @@ impl Saver {
         (s.asked, s.written)
     }
 
-    /// Until nothing is left to write, or `within` passes — whether it's all written.
+    /// Until nothing is left to write, or `within` passes — whether it's all written. What's still queued while no
+    /// write is under way is written here, oldest first: a quit or a save of the file itself doesn't wait on a job
+    /// (in a simulation, one only it would run); one under way (a slow disk) is waited for, `within` at most.
     pub fn wait(&self, within: Duration) -> bool {
+        #[cfg(test)]
+        let slow = self.slow;
+        #[cfg(not(test))]
+        let slow = Duration::ZERO;
+        loop {
+            let _one = match self.writing.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => break,
+            };
+            let Some(job) = locked(&self.queue).jobs.pop_front() else { break };
+            write_one(job, &self.shared, slow);
+        }
         let (lock, cv) = &*self.shared;
         let s = lock.lock().unwrap_or_else(|p| p.into_inner());
         let (s, _) = cv.wait_timeout_while(s, within, |s| s.pending > 0).unwrap_or_else(|p| p.into_inner());
@@ -252,7 +305,8 @@ impl Editor {
         doc.saving += 1;
         let folders = doc.make_folders.clone();
         let job = Job { id, path, text: doc.text.clone(), version: doc.version(), then, folders, beneath };
-        self.saver.push(job);
+        let jobs = self.events.jobs();
+        self.saver.push(job, &jobs);
         Ok(())
     }
 
@@ -414,6 +468,40 @@ mod tests {
             };
             ed.handle_key(key);
         }
+    }
+
+    /// A flush (a quit, a save of the file itself) never waits on a job: what's still queued it writes itself,
+    /// oldest first — in a simulation the drainer is a job only the simulation runs, and a flush waiting on it would
+    /// wait out `QUIT_WAIT` with nothing written. Several saves are one drainer job, not a thread each.
+    #[test]
+    fn a_flush_writes_what_is_queued_itself() {
+        let dir = crate::scratch::Scratch::new("saver-flush-sim");
+        let paths: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("{i}.txt"))).collect();
+        for p in &paths {
+            std::fs::write(p, "one\n").unwrap();
+        }
+        let sim =
+            crate::sim::Sim::new("saver_flush", crate::sim::Choices::seeded(1), Duration::from_secs(30));
+        let mut ed = Editor::new(Config::default());
+        for p in &paths {
+            ed.open(p).unwrap();
+            feed(&mut ed, "ix<esc>");
+            let id = ed.doc().id;
+            ed.save_in_background(id, false, Then::Command).unwrap();
+        }
+        {
+            let q = locked(&ed.saver.queue);
+            assert!(q.draining && q.jobs.len() == 3, "one drainer for the three, none run yet");
+        }
+        let began = std::time::Instant::now();
+        assert!(ed.flush_saves(), "all written");
+        assert!(began.elapsed() < Duration::from_secs(2), "not waited out");
+        for p in &paths {
+            assert_eq!(std::fs::read_to_string(p).unwrap(), "xone\n", "{}", p.display());
+        }
+        assert!(ed.docs.iter().all(|d| !d.is_modified()), "finished: saved");
+        drop(ed);
+        drop(sim);
     }
 
     fn opened(name: &str) -> (Editor, PathBuf) {

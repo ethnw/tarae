@@ -144,7 +144,8 @@ configs carry over as they are.
 - **Path bar** — `project › folder › file ● › ƒ enclosing_fn`: the function, type, or module around the cursor comes
   from the tree-sitter tree. With several buffers open, the list shows on the right. Turn it off with
   `editor.header = false`
-- **Status line** — the mode (`● normal`: the dot in the accent, or a color per mode, the word in ink bold) · git branch and `+3 −2` · Claude status (`…` waiting,
+- **Status line** — the mode (`● normal`: the dot in the accent, or a color per mode, the word in ink bold; `● follow`
+  while Claude's follow mode leads the cursor, `● chat · follow` with the keys in the chat) · git branch and `+3 −2` · Claude status (`…` waiting,
   `● change` a change of Claude's waits for its review) · `● errors ▲ warnings` · language, colored by its server's state — dim italic starting, green
   connected (a "ready" toast says so too), red failed or exited, faintest when none is installed · encoding and line
   endings · selection count · position (keys you've started — a count, `g`, `space w` — show in its place until

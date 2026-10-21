@@ -268,6 +268,18 @@ impl Block {
 }
 
 impl Block {
+    /// The line it rewrites — the first it takes out; for one that only adds lines, the line its new rows stand on
+    /// (they're drawn above it): where follow puts the cursor (`follow::writing_at`), the change's first line once
+    /// it lands, so the cursor doesn't move then.
+    pub fn place(&self) -> usize {
+        let taken = self.rows.iter().find_map(|r| match r {
+            Row::Text { line, edit: Some(Edit { mark: Mark::Taken, .. }), .. } => Some(*line),
+            _ => None,
+        });
+        let added = || self.rows.iter().find_map(|r| matches!(r, Row::Other { .. }).then(|| r.line()));
+        taken.or_else(added).unwrap_or(self.first)
+    }
+
     /// Laid out after `before` (the same item, the same version, more text): the counts of the rows they share at
     /// the start are `before`'s, as it last counted them.
     fn after(self, before: &Block) -> Block {
@@ -547,11 +559,18 @@ pub fn sync(ed: &mut Editor) {
     for (path, first, last) in bound_now {
         crate::follow::writing(ed, &path, first..last + 1);
     }
-    // The line being written past the screen's end (its block begun on screen, the cursor elsewhere): follow takes
-    // the editor onto it
-    let lines = past_sight(ed);
-    if let (Some(lines), Some(path)) = (lines, ed.doc().path.clone()) {
-        crate::follow::writing_head(ed, &path, lines);
+    // (a block elsewhere whose jump waited for PACE, first: the cursor goes there with it)
+    crate::follow::writing_due(ed);
+    // What's written in the document in front (the block being written, else the first): follow puts the cursor on the
+    // line it rewrites — the editor taken onto its block first when the line being written went past the screen's
+    // end (its block begun on screen, the cursor elsewhere)
+    let block = shown(ed.doc()).and_then(|s| {
+        let b = s.blocks.iter().find(|b| b.head.is_some()).or(s.blocks.first())?;
+        Some((b.first..b.last + 1, b.place()))
+    });
+    if let (Some((lines, line)), Some(path)) = (block, ed.doc().path.clone()) {
+        let past = past_sight(ed).is_some();
+        crate::follow::writing_at(ed, &path, lines, line, past);
     }
 }
 
@@ -580,19 +599,40 @@ fn relocate(text: &Rope, f: &Found) -> Option<(usize, usize)> {
 }
 
 /// The lines of the block being written in the focused pane when its head is below the screen while its first
-/// row is on it — rows counted as the pane lays them out (`codeview::Measure`); None with the cursor on it.
+/// row is on it — rows counted as the pane lays them out (`codeview::Measure`); None with the cursor on it (or on the
+/// line right under it, where the new rows of one that only adds lines stand).
 fn past_sight(ed: &Editor) -> Option<std::ops::Range<usize>> {
     let doc = ed.doc();
     let b = shown(doc)?.blocks.iter().find(|b| b.head.is_some())?;
     let cursor = crate::movement::line_of(&doc.text, doc.selection().primary().head);
     let (rows, cols) = ed.viewport;
-    if (b.first..=b.last).contains(&cursor) || rows == 0 || b.first < doc.top {
+    if (b.first..=b.last + 1).contains(&cursor) || rows == 0 || b.first < doc.top {
         return None;
     }
     let wrap = ed.wraps(doc).then_some(cols);
     let m = crate::codeview::Measure::new(ed, doc, ed.editing_in(true), (wrap, cols), b.first, rows);
     let above = (doc.top..b.first).map(|l| m.rows(l)).sum::<usize>().saturating_sub(doc.top_skip());
     (above < rows && above + m.removed(b.first) + m.head(b.first) >= rows).then_some(b.first..b.last + 1)
+}
+
+/// Whether Claude is still writing a change over `lines` of `path` (an item of a call under way, its place there):
+/// a jump to it that waited is still worth taking (`follow::writing_due`).
+pub fn being_written(ed: &Editor, path: &std::path::Path, lines: &std::ops::Range<usize>) -> bool {
+    let Some(c) = ed.session.chat.as_ref() else { return false };
+    c.writing.calls.iter().flat_map(|c| &c.items).any(|it| match &it.place {
+        Place::Found(f) => f.path == path && f.lines.0 < lines.end && lines.start <= f.lines.1,
+        _ => false,
+    })
+}
+
+/// The line of `doc` whose end Claude's caret is at when the row it's writing is one it keeps (a piece ended right
+/// at that line's end) — drawn after the line's last character, as after a written row's (`term::draw_text`): the
+/// caret never misses a frame while the writing goes on.
+pub fn caret_line(doc: &crate::document::Document) -> Option<usize> {
+    shown(doc)?.blocks.iter().find_map(|b| match b.rows.get(b.head?)? {
+        Row::Text { line, .. } => Some(*line),
+        _ => None,
+    })
 }
 
 /// The rows of an item that replaces bytes `from..to` of `text` with `new` (`closed`: whole) — the review's own

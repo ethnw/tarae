@@ -133,6 +133,9 @@ pub struct Shows {
     pub guides: bool,
     /// The cursor line's blame at its end (focused, not INSERT).
     pub blame: bool,
+    /// Claude's place, where follow led the cursor while the keys are elsewhere (`follow::place`): its line's bar
+    /// in the accent — a mark, not a cursor.
+    pub claude: Option<usize>,
 }
 
 /// Where a code view's change marks come from — the one source of its signs, washes, removed rows, the
@@ -501,6 +504,7 @@ impl Shows {
     pub fn pane(editor: &Editor, doc: &Document, focused: bool, left: usize) -> Shows {
         let not_insert = editor.mode != Mode::Insert;
         let config = &editor.config;
+        let cursors = focused && editor.cursor_in() == Some(crate::chrome::CursorIn::Code);
         Shows {
             focused,
             cursor: true,
@@ -509,7 +513,7 @@ impl Shows {
             changes: Changes::of(doc),
             numbers: config.line_number,
             primary: focused && not_insert && crate::term::cursor_shape(editor) == CursorShape::Block,
-            cursors: focused && editor.cursor_in() == Some(crate::chrome::CursorIn::Code),
+            cursors,
             search: editor.search_hits.as_ref().is_some_and(|h| h.doc == doc.id),
             cursorline: (focused && config.cursorline).then(|| {
                 let primary = crate::term::cursor_idx(editor.mode, doc.selection().primary(), &doc.text);
@@ -519,6 +523,7 @@ impl Shows {
             inlay: config.inlay_hints && left == 0,
             guides: config.indent_guides && left == 0,
             blame: focused && not_insert,
+            claude: (focused && !cursors).then(|| crate::follow::place(editor, doc)).flatten(),
         }
     }
 
@@ -544,6 +549,7 @@ impl Shows {
             inlay: config.inlay_hints && left == 0,
             guides: config.indent_guides && left == 0,
             blame: false,
+            claude: None,
         }
     }
 
@@ -566,6 +572,7 @@ impl Shows {
             inlay: false,
             guides: false,
             blame: false,
+            claude: None,
         }
     }
 
@@ -593,6 +600,7 @@ impl Shows {
             inlay: false,
             guides: config.indent_guides,
             blame: false,
+            claude: None,
         }
     }
 }

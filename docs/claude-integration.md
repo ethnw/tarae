@@ -435,7 +435,7 @@ where Claude is reading while it works. Each file it reads opens with the cursor
 the range placed as a whole: left where it is if it's all on screen already, centred if it fits, and starting
 near the top if it's taller than the screen. Those lines get a faint accent wash. Each edit is shown once it's
 written, review at the end included: its new lines on the review's green wash, the lines it replaced in red
-above them. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
+above them, the cursor on its first changed line — so too after your `y` in its review. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
 file`), and the finished answer takes you to its first `path:line`. A card beside the code says what Claude is at
 and for how long (`thinking 3.2s`) and the turn as the chat shows it: its stops as knots, the one in hand `●` (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Session`), and
 what Claude thinks and says between them, a running log of the turn: a new thought goes under the last one
@@ -448,8 +448,19 @@ being read. The panel comes back with the finished answer, or right away with `s
 While Claude waits on you (a command or a read on its card, an edit under review), the card says `waiting for
 your answer`, and over an edit's review it keeps to the room between the changes.
 
-Moving in the editor (a key, a click or a paste that moves the cursor or switches files) pauses following.
-Claude's edit reloading the file you're in doesn't, and neither does switching sessions. Follow takes over again
+While follow leads the cursor the status line says `● follow` where it says the mode (`● chat · follow` with the
+keys in the chat). Claude's place is a mark, not a cursor: while it writes, its caret — a bar `▎` in the accent
+in the cell right after the last character written, an insert caret riding the end of the line as it types, with
+the keys in the code or not. Your cursor stays a block, so the two never look alike. With
+nothing being written and the keys elsewhere (the code has no cursor then), the bar before the line follow led the
+cursor to is in the accent. Neither fades with the pane. When the keys come back to the code, the
+cursor is on that line.
+
+Moving in the editor (a key, a click or a paste that moves the cursor or switches files) pauses following, and so
+does a key that edits where the cursor is (`d`, `r`, `~`) or enters INSERT or SELECT. While a key sequence is under
+way — a pending `g`, a count, `space`, `C-w` — follow holds the cursor still, and the sequence's end decides: a
+move or an edit pauses it, a hop to the chat or a picker doesn't. Follow never moves the cursor from under you. The status line says `you took over — C-f follows Claude again`, and the cursor stays where you took it.
+Claude's edit reloading the file you're in doesn't pause it, and neither does switching sessions. Follow takes over again
 by itself `llm.follow-resume` seconds (20 by default; 0 = only `C-f`) after your last key if Claude is still
 working. The next question also turns it back on.
 
@@ -525,7 +536,11 @@ the last words of the line in progress still wet ([`editor.motion`](reference/se
 decided and no key is taken: you keep working — the drawing stays while you edit elsewhere in the file and goes
 if you change those lines. Each change of a
 call appears where it goes. When it's out of sight, follow takes you there and places it where the review will
-show it, then keeps the line being written in sight. Once the call is made, the review opens on the same rows.
+show it, then keeps the line being written in sight (another change elsewhere within 1.5 s of the last jump waits
+that long: the view moves at most that often). In sight or not, the cursor goes at once to the line it rewrites —
+the first it takes out; for one that only adds lines, the line its new rows stand on — which is where the change
+starts once it lands, so the cursor doesn't move then. Claude's caret rides the end of what it writes, piece by
+piece. Once the call is made, the review opens on the same rows.
 This is for tarae's `edit` and, with `llm.edit-tools` set to `both` or `native`, Claude Code's Edit and Write (a
 Write over the whole file); a new file, a move or a delete waits for its card.
 
