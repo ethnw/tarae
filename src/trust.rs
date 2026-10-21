@@ -63,7 +63,7 @@ pub const RISKY: [&str; 23] = [
 /// time on reviewed changes are kept (`llm.card-record`, `review.record`), whether pings spend your usage to keep
 /// a conversation warm (`llm.keep-warm*`), what the board's Claudes are asked (`review.angles`) and how many of
 /// them run on your credential and memory (`review.skeptics-max`, `review.board-at-once`) — a project never does.
-pub const YOURS_ONLY: [&str; 14] = [
+pub const YOURS_ONLY: [&str; 15] = [
     "llm.card-record",
     "review.record",
     "llm.keep-warm",
@@ -75,6 +75,8 @@ pub const YOURS_ONLY: [&str; 14] = [
     "llm.edit-tools",
     "features.count",
     "ui.shuttle-keys",
+    // (which keys the hints say by their twins: a project's could make every hint name the wrong keys)
+    "editor.zellij-keys",
     // (what the board's Claudes are asked: a project's angle could talk its own reviewer into anything)
     "review.angles",
     // (how many of them: each is billed on your reviewer credential, ~200 MB while it reads)

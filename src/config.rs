@@ -56,6 +56,10 @@ pub struct EditorConfig {
     pub auto_pairs: bool,
     /// Long lines as several rows: "prose" (Markdown, commit messages, plain text) | "always" | "never".
     pub soft_wrap: String,
+    /// The hints say a key zellij takes by its twin (`zellij.rs`): "auto" (inside zellij) | "on" | "off".
+    pub zellij_hints: String,
+    /// The letters zellij takes with `C-` (`zellij::DEFAULT_KEYS` — yours only, `trust::YOURS_ONLY`).
+    pub zellij_keys: Vec<char>,
     /// `:w` asks the language server to format first (lsp_editor.rs `format_then_save`).
     pub format_on_save: bool,
     /// Blame at the cursor line's end (`b` in the git tab flips it until quit).
@@ -140,6 +144,8 @@ impl Default for EditorConfig {
             cursor_diagnostics: true,
             auto_pairs: true,
             soft_wrap: "always".into(),
+            zellij_hints: "auto".into(),
+            zellij_keys: crate::zellij::DEFAULT_KEYS.to_vec(),
             format_on_save: true,
             git_blame: true,
             auto_save: "focus".into(),

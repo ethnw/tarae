@@ -3,6 +3,13 @@
 Ten minutes, hands on. This is a practice buffer — edit it freely, it's
 never saved. Forget a key? Press `space` — a card shows what comes next,
 and `space ?` finds any command by what it does.
+@zellij
+@zellij Inside zellij, its normal mode takes these before tarae sees them
+@zellij (`editor.zellij-keys` names them):
+@zellij   {zellij-keys}
+@zellij Where tarae has another way, this tutor and the hints say it; for the
+@zellij rest, `C-g` locks zellij — every key is tarae's then — and `C-g` again
+@zellij unlocks it.
 
 ────────────────────────────────────────────────────────────────
 
@@ -158,8 +165,12 @@ project, a command it wants to run, a grammar to download. Answer with
 the keys on the card — `y` yes · `n` no · `v` show more. `esc` never
 answers a card.
 
-A card waits while you type in the chat or the terminal, and the status
-line says so: ▲1 waiting · C-q. `C-q` hands it your keys.
+@plain-q A card waits while you type in the chat or the terminal, and the status
+@plain-q line says so: ▲1 waiting · C-q. `C-q` hands it your keys.
+@zellij-q A card waits while you type in the chat or the terminal, and the status
+@zellij-q line says so: ▲1 waiting. zellij takes `C-q`, so go back to the code —
+@zellij-q `esc esc` from the chat, `C-\ C-\` from the terminal — and a card in
+@zellij-q front takes your keys there.
 
   → `:e try.py` `enter` — unless Python's colours are here already, a
     card offers to download them. `n` for now, `:bc!` closes the file.
@@ -192,8 +203,10 @@ list — its letters are keys:
 
 `space I` lists everything waiting for your answer: every card and every
 change of Claude's, in every session, oldest first. `enter` goes to it.
-The status line counts them (▲2 waiting), and `C-q` takes you to the
-first.
+@plain-q The status line counts them (▲2 waiting), and `C-q` takes you to the
+@plain-q first.
+@zellij-q The status line counts them (▲2 waiting). zellij takes `C-q`, which
+@zellij-q goes to the first elsewhere — here `space I` lists them.
 
 ────────────────────────────────────────────────────────────────
 

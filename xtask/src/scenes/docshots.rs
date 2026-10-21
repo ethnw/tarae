@@ -838,7 +838,8 @@ fn prepared(scene: &DocScene, bg: Bg, bin: &Path, me: &Path) -> Result<Prepared>
         cwd,
         config,
         background: Some(bg.word()),
-        env: Vec::new(),
+        // (taken from inside zellij, tarae would say the twins of the keys zellij takes — `src/zellij.rs`)
+        env: vec![("ZELLIJ", None)],
     };
     let keys: Vec<String> = scene.keys.iter().map(|k| k.to_string()).collect();
     Ok(Prepared { _dir: dir, setup, state, homes, keys })

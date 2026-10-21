@@ -236,7 +236,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "set!" => set(editor, rest, true),
         "toggle" => toggle(editor, rest),
         "config-show" => {
-            let text = settings::show(&editor.config);
+            let mut text = settings::show(&editor.config);
+            if editor.twins_said() {
+                text.push_str(&crate::zellij::config_lines(editor));
+            }
             editor.new_scratch();
             editor.doc_mut().text = ropey::Rope::from_str(&text);
             Ok(())

@@ -1885,7 +1885,8 @@ const TYPED_IN_PALETTE: &[(&str, &str)] = &[
 /// so everything is usable without knowing the keys.
 fn command_palette(cx: &mut Context) {
     use crate::picker::{Action, Item};
-    let keys = cx.editor.keymaps.bindings();
+    let letters = if cx.editor.twins_said() { cx.editor.zellij_letters() } else { &[] };
+    let keys = cx.editor.keymaps.bindings_in(letters);
     let mut items: Vec<Item> = COMMANDS
         .iter()
         .filter(|c| c.name != "command_palette")

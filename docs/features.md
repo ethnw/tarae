@@ -38,6 +38,20 @@ You don't need to know the keys to start:
   wheel moves the selection and a click opens. (Your terminal's own text selection is usually shift+drag.)
 - **Key hints** — while a completion, a picker or a docs window is open, the keys that operate it show dimmed on the
   status line, right after the mode
+- **Inside zellij** — zellij's normal mode takes some `C-` keys before tarae sees them: the letters
+  `editor.zellij-keys` names (your config only), by default zellij's own — lock, quit, and its modes, session on
+  `C-o` ([the list](reference/keymap.md#inside-zellij)); a config of your own names its own (session on `C-y`:
+  `y` for `o`). When tarae runs inside zellij (`ZELLIJ` is set), wherever one of those is hinted —
+  which-key, the palette, the chat's and the cards' hints, the tutor — tarae says its twin, the key or command that does
+  the same without it: `pageup` for `C-b`, `backspace` for insert mode's `C-h`, and for `C-q` what reaches where it
+  goes — for the card in front the way back to the code, where it takes the keys itself (`esc` from insert mode, a
+  prompt or a picker, `esc esc` from the chat, `C-\ C-\` from the terminal); for a card in a session behind or an
+  edit, the way back and then `space I` (the inbox); for a turn that ended, the way back and `space W`. The chat's
+  `C-t` `C-p` `C-s` `C-o` are `:model` `:chat-resume` `:chat-screen` `:chat-point`, typed in the code — the way back
+  first (`esc esc :model`). The bindings stay as they are; a key with no twin works once `C-g` has
+  locked zellij. Every key of a twin is said as bound (a remap moves it). `editor.zellij-hints` = `auto` (inside
+  zellij) · `on` · `off` — `off` for zellij's unlock-first preset. `:config-show` lists the keys and their twins
+  while they're said, the [keymap](reference/keymap.md#inside-zellij) always
 - **What you use** — with `features.count` on in your config, `:features` shows which commands, cards, panels,
   pickers and Claude tools you use and which you never do; counted on this machine only, never sent
   ([feature counts](feature-counts.md))

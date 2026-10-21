@@ -677,9 +677,16 @@ impl Editor {
             true => inbox.iter().position(|e| e.session_id() == id).unwrap_or(inbox.len()),
             false => inbox.len() + self.turns_ended().iter().position(|&l| l == id).unwrap_or(0),
         };
-        match before {
-            0 => "C-q goes there".into(),
-            n => format!("C-q goes there after {n} older"),
+        // (inside zellij its twin: the inbox lists the card, the session list the session — said from the code, no
+        // way back in it: a toast is made as news comes, wherever the keys are then, and read later from anywhere —
+        // the live hints say the way back)
+        let reach = if waits { crate::zellij::Reach::Inbox } else { crate::zellij::Reach::Sessions };
+        match (self.twinned("C-q"), before) {
+            (true, 0) if waits => format!("{} lists it", self.c_q_place(reach)),
+            (true, n) if waits => format!("{} lists it, after {n} older", self.c_q_place(reach)),
+            (true, _) => format!("{} lists its session", self.c_q_place(reach)),
+            (false, 0) => "C-q goes there".into(),
+            (false, n) => format!("C-q goes there after {n} older"),
         }
     }
 

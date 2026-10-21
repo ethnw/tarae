@@ -198,6 +198,7 @@ mod waits;
 mod wasm;
 mod worktree;
 mod wrap;
+mod zellij;
 
 use std::path::PathBuf;
 

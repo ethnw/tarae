@@ -5015,6 +5015,11 @@ fn draw_review_header(
     // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
     // (beside the chat it cut esc's off)
     let chat = editor.session.chat.as_ref().map(|c| c.focused);
+    // (inside zellij its twin — worked out only where the header says it: it reads where the keys are and the inbox)
+    let c_q = match current && (chat == Some(true) || rev.away) {
+        true => editor.key_said("C-q"),
+        false => String::new(),
+    };
     let esc: &[(&str, &str)] = &[("esc", "back, unanswered")];
     let esc_short: &[(&str, &str)] = &[("esc", "back")];
     type Hints<'a> = Vec<(&'a str, &'a str)>;
@@ -5030,12 +5035,16 @@ fn draw_review_header(
         (_, Decision::Reject) => {
             (vec![("", "rejected")], vec![("", "rejected")], Style { fg: ui.virt.fg, ..base })
         }
-        _ if current && chat == Some(true) => {
-            (vec![("C-q", "answer it — the chat has the keys")], vec![("C-q", "answer it")], base)
-        }
-        _ if current && rev.away => {
-            (vec![("C-q", "answer it — the code has the keys")], vec![("C-q", "answer it")], base)
-        }
+        _ if current && chat == Some(true) => (
+            vec![(c_q.as_str(), "answer it — the chat has the keys")],
+            vec![(c_q.as_str(), "answer it")],
+            base,
+        ),
+        _ if current && rev.away => (
+            vec![(c_q.as_str(), "answer it — the code has the keys")],
+            vec![(c_q.as_str(), "answer it")],
+            base,
+        ),
         _ if current && left > 1 => (
             [&[("y", "accept this one"), ("a", all.as_str()), ("n", "reject")][..], esc, &[("tab", "next")]]
                 .concat(),
@@ -6577,7 +6586,8 @@ fn draw_statusline(
         if let Some(short) = card_short(editor, lay) {
             left.push(Seg { text: format!(" · {short}"), style: ui.status.patch(warn), keep: INBOX - 1 });
         } else if held {
-            left.push(Seg { text: " · C-q".into(), style: ui.status.patch(warn), keep: INBOX - 1 });
+            let key = editor.key_said("C-q");
+            left.push(Seg { text: format!(" · {key}"), style: ui.status.patch(warn), keep: INBOX - 1 });
         }
         gap = " ";
     }
@@ -7597,7 +7607,7 @@ fn card_short(editor: &Editor, lay: &Layout) -> Option<String> {
     }
     // The chat in hand taking the whole width: `C-q` folds it and the code, the card with it, is back
     if lay.edit_w == 0 && editor.session.chat.as_ref().is_some_and(|c| c.focused) && lay.width >= edit_w {
-        return Some("C-q shows its card".into());
+        return Some(format!("{} shows its card", editor.key_said("C-q")));
     }
     // The window width that leaves the code that much beside the chat as it's laid out (`sizes::widths`)
     let side = editor.session.sidebar.is_some();
@@ -7790,10 +7800,13 @@ impl OfferCard {
                     }
                     // Where its answers go (#24/#25): the keys elsewhere (the chat's input, insert mode, a
                     // review) — `C-q` brings them here, what's being typed stays; brought here — Esc goes back
+                    let typing;
                     let whose = if editor.card_keys {
                         Some("esc goes back, unanswered")
                     } else if !editor.card_has_keys() {
-                        Some("C-q to answer it — what you're typing stays")
+                        typing =
+                            format!("{} to answer it — what you're typing stays", editor.key_said("C-q"));
+                        Some(typing.as_str())
                     } else {
                         None
                     };
@@ -7862,11 +7875,13 @@ impl OfferCard {
             let how = match &o.state {
                 _ if said.is_some() => said.unwrap_or_default().to_string(),
                 OfferState::Asking if o.aside && !editor.card_keys => {
-                    "aside while you look — C-q answers it".into()
+                    format!("aside while you look — {} answers it", editor.key_said("C-q"))
                 }
                 OfferState::Asking if o.aside => "esc goes back, unanswered".into(),
                 // (whose keys they are, read: frictions15 — a card holding them unseen let go at `C-q`)
-                OfferState::Asking if !editor.card_has_keys() => "C-q answers it".into(),
+                OfferState::Asking if !editor.card_has_keys() => {
+                    format!("{} answers it", editor.key_said("C-q"))
+                }
                 // (held: shorter, so Esc's way back fits beside the answers)
                 OfferState::Asking => match (editor.offer_seen_whole(), editor.card_keys) {
                     (true, false) => "read to its end — y answers".to_string(),
@@ -8385,13 +8400,28 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
         .to_string(),
     };
     let title = title.as_str();
+    // Inside zellij a key it takes says its twin after what it does, the key itself dim (`zellij.rs`)
+    let twins: Vec<Option<String>> = entries
+        .iter()
+        .map(|(k, _, group)| {
+            let seq: Vec<Key> = keys.iter().copied().chain([*k]).collect();
+            (editor.twins_said() && !group && view.is_none())
+                .then(|| editor.keymaps.twin(editor.mode, &seq, editor.zellij_letters()))
+                .flatten()
+        })
+        .collect();
+    let twin_w = |t: &Option<String>| t.as_ref().map_or(0, |t| t.width() + 2);
     let kw = entries.iter().map(|(k, _, _)| k.shown().width()).max().unwrap_or(1);
     const DESC: usize = 30;
-    let dw = entries.iter().map(|(_, d, _)| d.width()).max().unwrap_or(0).min(DESC);
+    let dw =
+        entries.iter().zip(&twins).map(|((_, d, _), t)| d.width().min(DESC) + twin_w(t)).max().unwrap_or(0);
     let max_rows = lay.text_rows.saturating_sub(2 * pad + 3).max(1);
     let Some((cols, dw)) = which_key_columns(entries.len(), kw, dw, max_rows, lay.edit_w) else {
         return Ok(());
     };
+    // (a twin goes where its description, cut, would keep fewer than `WHICH_KEY_CUT_MIN` cells — a narrow screen)
+    let twins: Vec<Option<String>> =
+        twins.into_iter().map(|t| t.filter(|t| t.width() + 2 + WHICH_KEY_CUT_MIN <= dw)).collect();
     let cell = kw + 2 + dw;
     let rows = entries.len().div_ceil(cols);
     let inner = cols * cell + (cols - 1) * 3;
@@ -8428,12 +8458,17 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
             let used = match entries.get(i) {
                 Some((k, d, group)) => {
                     let ks = k.shown();
-                    apply(out, key_style)?;
+                    let twin = twins[i].as_deref();
+                    apply(out, if twin.is_some() { Style { bold: true, ..dim } } else { key_style })?;
                     queue!(out, Print(format!("{ks:<kw$}  ")))?;
-                    let d = fit_ellipsis(d, dw);
+                    let d = fit_ellipsis(d, dw - twin_w(&twins[i]));
                     apply(out, if *group { dim } else { card })?;
                     queue!(out, Print(&d))?;
-                    kw + 2 + d.width()
+                    if let Some(t) = twin {
+                        apply(out, key_style)?;
+                        queue!(out, Print(format!("  {t}")))?;
+                    }
+                    kw + 2 + d.width() + twin_w(&twins[i])
                 }
                 None => 0,
             };
@@ -10694,8 +10729,16 @@ fn draw_chat(
             vec![sp("tab ".into(), Style { bold: true, ..dim }), sp("for a suggestion".into(), faint)],
         ];
         // (the key for the model sits with the other first keys; the title names the one in use)
-        let model_key =
-            vec![sp("C-t ".into(), Style { bold: true, ..dim }), sp("for another model".into(), faint)];
+        // (a key and what it does; inside zellij its `:` command alone — `Editor::key_hint`)
+        let first_key = |k: &'static str, what: &'static str| {
+            let (k, what) = editor.key_hint(k, what);
+            let mut row = vec![sp(k.to_string(), Style { bold: true, ..dim })];
+            if !what.is_empty() {
+                row.push(sp(format!(" {what}"), faint));
+            }
+            row
+        };
+        let model_key = first_key("C-t", "for another model");
         for s in crate::chat::SUGGESTIONS {
             intro.push(vec![sp("› ".into(), faint), sp(fit_ellipsis(s, w - 2), dim)]);
         }
@@ -10706,10 +10749,7 @@ fn draw_chat(
         if !past.is_empty() {
             let now = crate::chats::now();
             intro.push(vec![]);
-            intro.push(vec![
-                sp("C-p ".into(), Style { bold: true, ..dim }),
-                sp("to continue an earlier one".into(), faint),
-            ]);
+            intro.push(first_key("C-p", "to continue an earlier one"));
             for (_, title, updated) in past.iter().take(2) {
                 let when = format!("  {}", crate::chats::ago(*updated, now));
                 let first = title.lines().next().unwrap_or_default();
@@ -11093,6 +11133,11 @@ fn draw_chat(
     // Hint
     chat_row_start(out, x0, y, edge(y), card)?;
     let key = Style { bold: true, ..dim };
+    // (inside zellij their twins — `zellij.rs`; worked out only where the row says them: they read where the keys
+    // are and the inbox)
+    let c_q: String;
+    let screen: (String, &str);
+    let point: (String, &str);
     let mut hints: Vec<(&str, &str)> = Vec::new();
     // (each key as bound — a remap moves the hint)
     let bound = |name: &str, like: &str| crate::view::bound(editor, crate::view::Surface::Chat, name, like);
@@ -11120,8 +11165,10 @@ fn draw_chat(
         hints.push(("space L", "close"));
     } else if c.busy() {
         // (a card up asks mid-turn: the chat keeps the keys, `C-q` hands them over — frictions26)
-        if editor.offers.first().is_some_and(|o| !o.installing()) {
-            hints.push(("C-q", "answer card"));
+        // (not while it holds them already: given by `C-q`, its answers answer it)
+        if !editor.card_keys && editor.offers.first().is_some_and(|o| !o.installing()) {
+            c_q = editor.key_said("C-q");
+            hints.push((c_q.as_str(), "answer card"));
         }
         // (Enter queues what's typed for this turn's end — #23; ↑ takes it back)
         if !c.input.trim().is_empty() {
@@ -11157,9 +11204,11 @@ fn draw_chat(
         }
         // (how the screen, or a thing on it, goes along — after what the answer offers, where the row has room)
         if c.screen.is_none() {
-            hints.push(("C-s", "screen"));
+            screen = editor.key_hint("C-s", "screen");
+            hints.push((screen.0.as_str(), screen.1));
         }
-        hints.push(("C-o", "point"));
+        point = editor.key_hint("C-o", "point");
+        hints.push((point.0.as_str(), point.1));
         if code {
             hints.push(("C-y", "copy"));
         }
@@ -11168,14 +11217,16 @@ fn draw_chat(
     }
     let mut used = 0;
     for (k, d) in hints {
-        let wd = k.width() + d.width() + 3;
+        // (a key alone — a `:` command that says what it does: `Editor::key_hint`)
+        let what = if d.is_empty() { "  ".to_string() } else { format!(" {d}  ") };
+        let wd = k.width() + what.width();
         if used + wd > w {
             break;
         }
         apply(out, key)?;
         queue!(out, Print(k))?;
         apply(out, faint)?;
-        queue!(out, Print(format!(" {d}  ")))?;
+        queue!(out, Print(what))?;
         used += wd;
     }
     chat_row_end(out, card, lay.chat_w, used)?;
@@ -15740,6 +15791,62 @@ mod tests {
         assert!(worst < budget, "delta {delta:?} took {worst:?} (budget {budget:?})");
     }
 
+    /// The same frames inside zellij, a card up while Claude writes and the chat holding the keys: the hint row's
+    /// `answer card` says `C-q`'s twin, worked out each frame (where the keys go, the inbox, the keys as bound —
+    /// `zellij.rs`). Within a frame as the plain one is.
+    #[test]
+    fn perf_budget_chat_frame_inside_zellij() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_chat_frame_inside_zellij") {
+            return;
+        }
+        let budget = frame_budget();
+        let deltas: Vec<String> = (0..24).map(|i| format!(" word{i}")).collect();
+        let keys: Vec<&str> = deltas.iter().map(String::as_str).collect();
+        let (worst, delta) = worst_of_best(&keys, || {
+            let mut ed = long_chat(200);
+            ed.zellij = true;
+            ed.session.chat.as_mut().unwrap().focused = true;
+            let what = crate::offer::What::Screen { call: crate::tools::Call::test(1) };
+            ed.push_offer(crate::offer::Offer::new(
+                "Claude asks".into(),
+                "to see the screen",
+                "",
+                String::new(),
+                what,
+            ));
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 160, 45).unwrap();
+            // (the twin, not `C-q`: the frame pays for working it out — the chat's way back to the card in front)
+            let mut p = vt100::Parser::new(45, 160, 0);
+            p.process(&buf);
+            let s = p.screen().contents();
+            let row = s
+                .lines()
+                .filter(|l| l.contains("card") || l.contains("enter"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(s.contains("esc esc answer card"), "the row says the twin:\n{row}");
+            keys.iter()
+                .map(|d| {
+                    let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
+                    m.text.push_str(d);
+                    m.changed();
+                    buf.clear();
+                    let t = Instant::now();
+                    render(&mut ed, &mut buf, 160, 45).unwrap();
+                    t.elapsed()
+                })
+                .collect()
+        });
+        let ms = worst.as_secs_f64() * 1000.0;
+        let line = format!(
+            "PERF chat_frame_inside_zellij {ms:.3} budget={:.0} noise=0.05\n",
+            budget.as_secs_f64() * 1000.0
+        );
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        assert!(worst < budget, "delta {delta:?} took {worst:?} (budget {budget:?})");
+    }
+
     /// Each message's kept rows, held (so a block laid out again can't land where a freed one was).
     type Kept = Vec<Option<std::sync::Arc<[crate::chat::ChatRow]>>>;
 
@@ -17714,7 +17821,8 @@ mod tests {
         type Words = std::collections::BTreeMap<String, usize>;
         let (mut seen, mut terminal) = (Words::new(), Words::new());
         let word = |rest: &str, ends: &[char]| rest.split(ends).next().unwrap_or_default().to_string();
-        for (_, src) in crate::sim::lint::sources() {
+        // (zellij.rs's texts are keys, not esc's words: the twins — the way back to the code, `esc`, then what's typed)
+        for (_, src) in crate::sim::lint::sources().into_iter().filter(|(path, _)| path != "zellij.rs") {
             // (a line's hint ends at its dash: `esc close — then C-q reaches the card`)
             let src = src.replace(" — ", "\"");
             for part in src.split("(\"esc\", \"").skip(1) {

@@ -273,6 +273,100 @@ fn the_order_is_by_each_ones_wait_on_its_own_clock() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Inside zellij `C-q` is zellij's (uxaudit 7): the code's twin, `space I` `enter`, reaches a card waiting in a
+/// session behind as `C-q` does, and the card takes the keys.
+#[test]
+fn inside_zellij_space_i_enter_reaches_the_card_as_c_q_does() {
+    let (mut ed, dir, back, _) = three("zellij");
+    ed.zellij = true;
+    park(&mut ed, back, claudes(1, 20));
+    assert_eq!(ed.key_said("C-q"), "space I");
+    feed(&mut ed, "<space>I<ret>");
+    assert_eq!(ed.session.id, back, "went to the card's session");
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+    feed(&mut ed, "n");
+    assert!(ed.offers.is_empty(), "its n answered it: {:?}", ed.messages.last());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Inside zellij, `C-q`'s twin is where it goes: a card behind is the inbox's even from the chat (its way back to
+/// the code, then `space I`) — never the way back alone, which reaches only a card in front — and a turn that
+/// ended, with nothing waiting, the session list's.
+#[test]
+fn inside_zellij_c_qs_twin_reaches_what_c_q_goes_to() {
+    let (mut ed, dir, back, third) = three("zellij-twin");
+    ed.zellij = true;
+    let mut c = crate::chat::Chat::new();
+    c.focused = true;
+    c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "hi", ""));
+    c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Assistant, "hello", ""));
+    ed.session.chat = Some(c);
+    park(&mut ed, back, claudes(1, 20));
+    assert_eq!(ed.key_said("C-q"), "esc esc space I");
+    screen(&mut ed, 160, 30);
+    feed(&mut ed, "<esc>");
+    screen(&mut ed, 160, 30);
+    feed(&mut ed, "<esc><space>I<ret>");
+    assert_eq!(ed.session.id, back, "went to the card's session");
+    feed(&mut ed, "n");
+    assert!(ed.offers.is_empty(), "its n answered it: {:?}", ed.messages.last());
+    // Nothing waits, third's turn ended: the session list
+    session(&mut ed, third).turn_end = Some((Instant::now() - Duration::from_secs(30), Ok(())));
+    assert_eq!(ed.next_up(), super::Next::Done(third));
+    assert_eq!(ed.key_said("C-q"), "space W");
+    assert_eq!(ed.c_q_place(crate::zellij::Reach::Sessions), "space W");
+    feed(&mut ed, "<space>W");
+    assert!(ed.picker.is_some(), "the session list");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Leaving a session whose card waits, its toast says how to get back to it: `C-q goes there` — inside zellij
+/// `space I lists it` (the card is the inbox's from here, not the way back).
+#[test]
+fn inside_zellij_or_not_the_toast_for_a_session_left_waiting_says_its_key() {
+    // (inside zellij by its setting, auto and off — and outside, on)
+    let cases = [(false, "auto", false), (true, "auto", true), (true, "off", false), (false, "on", true)];
+    for (zellij, setting, twins) in cases {
+        let (mut ed, dir, back, _) = three(&format!("zellij-left-{zellij}-{setting}"));
+        ed.zellij = zellij;
+        ed.config.zellij_hints = setting.into();
+        // (the session switched to has its chat holding the keys: a way back made into the toast would say
+        // `esc esc space I` — read later, from anywhere, the toast names only the inbox)
+        let mut c = crate::chat::Chat::new();
+        c.focused = true;
+        c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "hi", ""));
+        session(&mut ed, back).chat = Some(c);
+        up(&mut ed, claudes(1, 20));
+        assert!(ed.session_switch(back));
+        let says = if twins {
+            "front · waits for you — space I lists it"
+        } else {
+            "front · waits for you — C-q goes there"
+        };
+        let all: Vec<&str> = ed.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert!(all.iter().any(|t| t.ends_with(says)), "{says}: {all:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// A panel holding the keys (the side panel): `esc` back to the code first, then `space I` — a bare `space I`
+/// there could be the panel's own keys.
+#[test]
+fn inside_zellij_a_panels_twin_of_c_q_goes_back_first() {
+    let (mut ed, dir, back, _) = three("zellij-panel");
+    ed.zellij = true;
+    // (`space e` shows the files panel and gives it the keys)
+    feed(&mut ed, "<space>e");
+    assert!(matches!(ed.keys_to().region, crate::uistate::Region::Side(_)), "{:?}", ed.keys_to().region);
+    park(&mut ed, back, claudes(1, 20));
+    assert_eq!(ed.key_said("C-q"), "esc space I");
+    feed(&mut ed, "<esc>");
+    assert!(matches!(ed.keys_to().region, crate::uistate::Region::Code), "esc: the code");
+    feed(&mut ed, "<space>I<ret>");
+    assert_eq!(ed.session.id, back, "went to the card's session");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// frictions29 19: `C-q` from a chat that holds the keys reaches the card — one parked in a session behind (the
 /// chat open and focused), one up in front (the chat minimized while Claude works, its input not on screen) —
 /// and the card it reaches takes the keys: its `n` answers it, nothing typed into the chat.

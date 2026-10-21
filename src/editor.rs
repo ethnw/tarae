@@ -669,6 +669,9 @@ pub struct Editor {
     /// Claude reads outside home unasked where the capability model does (`reads::by_default`, D3) — off in
     /// tests, for the same reason.
     pub read_outside: bool,
+    /// tarae runs inside zellij: a hinted key it takes is said by its twin (`zellij.rs`) — off in tests, which
+    /// set it.
+    pub zellij: bool,
     /// (Tests: the home a session's `Caps` are made for — `caps::Basis.home`; None: the process's.)
     #[cfg(test)]
     pub caps_home: Option<PathBuf>,
@@ -936,6 +939,7 @@ impl Editor {
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
             read_outside: !cfg!(test),
+            zellij: crate::zellij::inside(),
             #[cfg(test)]
             caps_home: None,
             shellcheck: if cfg!(test) {
@@ -1123,7 +1127,7 @@ impl Editor {
     /// `:tutor` — hands-on tutorial (a disposable practice buffer, drawn as text: `tutor.rs`).
     pub fn open_tutor(&mut self) {
         let id = self.alloc_id();
-        let (text, paint) = crate::tutor::text();
+        let (text, paint) = crate::tutor::text(self.twins_said(), self.zellij_letters());
         let mut doc = Document::from_str(id, &text);
         doc.title = Some("tutor".into());
         doc.throwaway = true;
@@ -3501,7 +3505,7 @@ impl Editor {
             }
             if self.card_keys {
                 self.card_keys = false;
-                self.set_status("keys back — the card waits, C-q answers it");
+                self.set_status(format!("keys back — the card waits, {} answers it", self.key_said("C-q")));
                 return true;
             }
             // (another goes first — stacked under it here and older, or, nothing asking here, one in a
@@ -4225,10 +4229,14 @@ impl Editor {
             // (said, not dropped: a `C-q` here waited for a card the prompt keeps from it)
             (Code::Char(_), true) => {
                 let out = match self.offers.is_empty() {
-                    true => "enter runs the line, esc close",
-                    false => "esc close — then C-q reaches the card",
+                    true => "enter runs the line, esc close".to_string(),
+                    // (the way back is this line's own `esc`: what reaches the card is said from the code)
+                    false => match self.c_q_from_code() {
+                        Some(key) => format!("esc close — then {key} reaches the card"),
+                        None => "esc close — then the card takes the keys".to_string(),
+                    },
                 };
-                self.key_unused(key, "the command line", out);
+                self.key_unused(key, "the command line", &out);
             }
             _ => {}
         }

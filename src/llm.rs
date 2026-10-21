@@ -1843,12 +1843,18 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
             match ed.session.chat.as_mut().filter(|_| rev.from_chat) {
                 Some(c) => {
                     c.focused = true;
-                    ed.set_status("back to the chat — the change waits unanswered, C-q answers it");
+                    let key = ed.key_said("C-q");
+                    ed.set_status(format!(
+                        "back to the chat — the change waits unanswered, {key} answers it"
+                    ));
                 }
                 None => {
                     rev.away = true;
                     ed.mode = crate::editor::Mode::Normal;
-                    ed.set_status("back to the code — the change waits unanswered, C-q answers it");
+                    let key = ed.key_said("C-q");
+                    ed.set_status(format!(
+                        "back to the code — the change waits unanswered, {key} answers it"
+                    ));
                 }
             }
             return true;

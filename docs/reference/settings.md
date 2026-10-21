@@ -35,6 +35,8 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `editor.inline-diagnostics` | bool | `true` | Show diagnostic messages at the end of their line and tint error/warning lines |
 | `editor.cursor-diagnostics` | bool | `true` | Cursor on an underlined problem whose message doesn't fit at the line end: show it in full in a card (Esc hides it) |
 | `editor.soft-wrap` | `"always"` · `"prose"` · `"never"` | `"always"` | Show long lines as several rows: always, in prose only (Markdown, commit messages, plain text), or never |
+| `editor.zellij-hints` | `"auto"` · `"on"` · `"off"` | `"auto"` | Hints say a key zellij takes by the keys that do the same: inside zellij (auto), always, or never — off for its unlock-first preset or keys of your own |
+| `editor.zellij-keys` | list of strings | `["g", "q", "p", "n", "s", "t", "h", "o", "b"]` | The letters zellij takes with Ctrl before tarae sees them — its default normal mode's; a config of your own names its own (session on Ctrl y: "y" for "o") |
 | `editor.format-on-save` | bool | `true` | :w formats with the language server first (saves as is if it can't within 2 s) |
 | `editor.git-blame` | bool | `true` | Show who last changed the cursor line, when, and why at its end (b in the git tab flips it) |
 | `editor.auto-pairs` | bool | `true` | Typing ( [ { " ' ` adds the closer; typing the closer steps over it; backspace removes both |

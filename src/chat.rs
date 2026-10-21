@@ -2411,7 +2411,9 @@ pub fn send(ed: &mut Editor) {
         });
     }
     if !question.is_empty() && crate::reads::pointing_asks(ed) {
-        return ed.set_status("not sent yet — answer the card about what you pointed at first (C-q)");
+        let key = ed.key_said("C-q");
+        return ed
+            .set_status(format!("not sent yet — answer the card about what you pointed at first ({key})"));
     }
     if !question.is_empty() && submit_input(ed, &question) {
         let c = ed.session.chat.as_mut().expect("just sent");

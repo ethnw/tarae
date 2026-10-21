@@ -280,6 +280,33 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.soft_wrap = v.as_str().unwrap_or("always").to_string(),
     },
     Setting {
+        path: "editor.zellij-hints",
+        kind: Kind::Enum(&["auto", "on", "off"]),
+        doc: "Hints say a key zellij takes by the keys that do the same: inside zellij (auto), always, or never — off for its unlock-first preset or keys of your own",
+        get: |c| Value::from(c.zellij_hints.as_str()),
+        set: |c, v| c.zellij_hints = v.as_str().unwrap_or("auto").to_string(),
+    },
+    Setting {
+        path: "editor.zellij-keys",
+        kind: Kind::StrList,
+        doc: "The letters zellij takes with Ctrl before tarae sees them — its default normal mode's; a config of your own names its own (session on Ctrl y: \"y\" for \"o\")",
+        get: |c| Value::Array(c.zellij_keys.iter().map(|k| Value::from(k.to_string())).collect()),
+        set: |c, v| {
+            // (one lowercase letter each, as zellij's `Ctrl <letter>` binds; anything else left out)
+            c.zellij_keys = v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str())
+                .filter_map(|s| {
+                    let mut chars = s.chars();
+                    chars.next().filter(|c| c.is_ascii_alphabetic() && chars.next().is_none())
+                })
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        },
+    },
+    Setting {
         path: "editor.format-on-save",
         kind: Kind::Bool,
         doc: ":w formats with the language server first (saves as is if it can't within 2 s)",

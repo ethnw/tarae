@@ -2512,7 +2512,7 @@ fn step_aside(ed: &mut Editor, id: u64) {
 /// After `h`: where the keys went, on the status line (the card stepped aside).
 fn aside_said(ed: &mut Editor) {
     let now = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-    ed.set_status(format!("{now} · C-q goes back to the card"));
+    ed.set_status(format!("{now} · {} goes back to the card", ed.key_said("C-q")));
 }
 
 /// Where a bring's change `h` is in the review open: (file, its line now) — the high-risk change there not
@@ -2549,8 +2549,9 @@ pub fn held_go(ed: &mut Editor, card: u64, left: &[Held]) {
     if let Some((i, at)) = in_review(ed, first) {
         high_go(ed, i, at);
         ed.set_status(format!(
-            "high-risk {} — space v h looks at it · C-q goes back to the card",
-            first.place()
+            "high-risk {} — space v h looks at it · {} goes back to the card",
+            first.place(),
+            ed.key_said("C-q")
         ));
         return;
     }
@@ -4914,6 +4915,21 @@ pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After a bring card's `h`, the status line says how back to the card: `C-q` — inside zellij its twin, the
+    /// inbox (`zellij.rs`).
+    #[test]
+    fn aside_said_names_the_way_back_to_the_card() {
+        for zellij in [false, true] {
+            let mut ed = Editor::new(crate::config::Config::default());
+            ed.zellij = zellij;
+            ed.set_status("to the change");
+            aside_said(&mut ed);
+            let key = if zellij { "space I" } else { "C-q" };
+            let says = format!("to the change · {key} goes back to the card");
+            assert_eq!(ed.status.as_ref().map(|s| s.0.as_str()), Some(says.as_str()));
+        }
+    }
 
     fn feed(ed: &mut Editor, keys: &str) {
         let mut chars = keys.chars();

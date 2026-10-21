@@ -21,6 +21,9 @@
 //!   `TARAE_SHOT_COLS`/`TARAE_SHOT_ROWS` (default 112×30).
 //! - `TARAE_SHOT_REPLAY=<file>` — draw terminal bytes recorded elsewhere instead of running tarae.
 //! - `TARAE_SHOT_BIN` — another tarae binary (absolute; a saved "before" build for a before/after), not built.
+//! - `TARAE_SHOT_ZELLIJ=1` — the tarae runs as inside zellij (`ZELLIJ=0`, as zellij sets it: the hints say the twins
+//!   of the keys zellij takes — `src/zellij.rs`). Without it `ZELLIJ` is taken out, so a shot taken from inside
+//!   zellij shows the default hints.
 //! - `TARAE_SHOT_SCALE` — the picture's scale, a whole number 1–4 (default 1; `--live` too): at 2 the font is
 //!   30 px and every measure of the 1× picture — cells, the margin, lines, blocks, the cursor — doubles, so it's
 //!   the same layout at twice the pixels, box drawing and half-blocks on whole pixels (for a high-density screen).
@@ -109,8 +112,16 @@ impl Setup {
         let cwd = folder("TARAE_SHOT_CWD", std::env::var_os("TARAE_SHOT_CWD"), true)?.unwrap_or(root);
         let config = folder("TARAE_SHOT_XDG", std::env::var_os("TARAE_SHOT_XDG"), true)?
             .unwrap_or_else(|| "/tmp/tarae-shot/xdg".into());
-        Ok(Setup { bin, files, cwd, config, background: None, env: Vec::new() })
+        let env = shot_env(std::env::var_os("TARAE_SHOT_ZELLIJ"));
+        Ok(Setup { bin, files, cwd, config, background: None, env })
     }
+}
+
+/// The shot's own variables for tarae, `TARAE_SHOT_ZELLIJ` as given: `ZELLIJ` taken out — a shot taken from inside
+/// zellij shows the default hints — unless it's `1`, then `ZELLIJ=0` as zellij sets it (the hints say the twins of
+/// the keys zellij takes — `src/zellij.rs`).
+fn shot_env(zellij: Option<std::ffi::OsString>) -> Vec<(&'static str, Option<&'static str>)> {
+    vec![("ZELLIJ", zellij.is_some_and(|v| v == "1").then_some("0"))]
 }
 
 /// One shot of `setup`'s tarae on a `cols`×`rows` pty, `keys` sent as `cargo xtask shot` sends them, its state
@@ -902,6 +913,13 @@ mod tests {
     /// taken in, its setup's own variables and the terminal's (`as_a_terminal`'s `XDG_STATE_HOME`): `drive` sets
     /// them last, and that order is what makes them win. (A stand-in on the pty draws `ok` only when `HOME`,
     /// `XDG_CACHE_HOME` and `XDG_STATE_HOME` are the homes given.)
+    #[test]
+    fn a_shot_runs_tarae_outside_zellij_unless_asked() {
+        assert_eq!(super::shot_env(None), [("ZELLIJ", None)], "taken out: the default hints");
+        assert_eq!(super::shot_env(Some("0".into())), [("ZELLIJ", None)], "only `1` asks");
+        assert_eq!(super::shot_env(Some("1".into())), [("ZELLIJ", Some("0"))], "as zellij sets it");
+    }
+
     #[test]
     fn a_shots_homes_win_over_what_else_sets_them() {
         if Fonts::load(1).is_err() {

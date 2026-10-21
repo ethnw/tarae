@@ -125,6 +125,34 @@ impl Node {
         out
     }
 
+    /// The shortest sequence here bound to `cmds` none of whose keys zellij takes — a taken key's twin
+    /// (`zellij.rs`).
+    fn twin(&self, cmds: &[MappableCommand], letters: &[char]) -> Option<String> {
+        self.untaken(&cmd_names(cmds), letters)
+    }
+
+    /// The shortest sequence here bound to the commands named `want`, none of its keys zellij's — one walk, only
+    /// the keys zellij leaves (no map of every binding: it's asked while a frame is drawn).
+    fn untaken(&self, want: &[String], letters: &[char]) -> Option<String> {
+        fn walk(node: &Node, prefix: &str, want: &[String], letters: &[char], best: &mut Option<String>) {
+            for (k, t) in node.map.iter().filter(|(k, _)| !crate::zellij::takes(k, letters)) {
+                let seq = if prefix.is_empty() { k.shown() } else { format!("{prefix} {}", k.shown()) };
+                match t {
+                    KeyTrie::Node(n) => walk(n, &seq, want, letters, best),
+                    KeyTrie::Leaf(c) if cmd_names(c) == want => {
+                        if best.as_ref().is_none_or(|b| (seq.len(), &seq) < (b.len(), b)) {
+                            *best = Some(seq);
+                        }
+                    }
+                    KeyTrie::Leaf(_) => {}
+                }
+            }
+        }
+        let mut best = None;
+        walk(self, "", want, letters, &mut best);
+        best
+    }
+
     pub fn search(&self, keys: &[Key]) -> Option<&KeyTrie> {
         let mut node = self;
         for (i, key) in keys.iter().enumerate() {
@@ -175,6 +203,16 @@ impl Node {
         }
         node
     }
+}
+
+/// Command names of a binding (`:line` for typed commands) — several run in sequence.
+fn cmd_names(cmds: &[MappableCommand]) -> Vec<String> {
+    cmds.iter()
+        .map(|c| match c {
+            MappableCommand::Static(c) => c.name.to_string(),
+            MappableCommand::Typed(t) => format!(":{t}"),
+        })
+        .collect()
 }
 
 /// A binding that gives its key back to the terminal's program (`to_program`, alone).
@@ -409,19 +447,28 @@ impl Keymaps {
             .collect()
     }
 
-    /// Command name → shortest key bound to it (normal mode) — shown in the command palette.
+    /// Command name → shortest key bound to it (normal mode).
     pub fn bindings(&self) -> HashMap<&'static str, String> {
-        fn walk(node: &Node, prefix: &str, out: &mut HashMap<&'static str, String>) {
+        self.bindings_in(&[])
+    }
+
+    /// `bindings` as the command palette shows them — a key zellij takes (`letters` with `C-`; none outside it)
+    /// gives way to its twin (`zellij.rs`), one with none stays.
+    pub fn bindings_in(&self, letters: &[char]) -> HashMap<&'static str, String> {
+        type Best = HashMap<&'static str, (bool, String)>;
+        fn walk(node: &Node, prefix: &str, taken: bool, letters: &[char], out: &mut Best) {
             for (k, t) in &node.map {
                 let seq = if prefix.is_empty() { k.shown() } else { format!("{prefix} {}", k.shown()) };
+                let taken = taken || crate::zellij::takes(k, letters);
                 match t {
-                    KeyTrie::Node(n) => walk(n, &seq, out),
+                    KeyTrie::Node(n) => walk(n, &seq, taken, letters, out),
                     KeyTrie::Leaf(cmds) => {
                         if let [MappableCommand::Static(c)] = cmds.as_slice() {
-                            let better =
-                                out.get(c.name).is_none_or(|old| (seq.len(), &seq) < (old.len(), old));
+                            let better = out
+                                .get(c.name)
+                                .is_none_or(|(t, old)| (taken, seq.len(), &seq) < (*t, old.len(), old));
                             if better {
-                                out.insert(c.name, seq);
+                                out.insert(c.name, (taken, seq));
                             }
                         }
                     }
@@ -429,7 +476,55 @@ impl Keymaps {
             }
         }
         let mut out = HashMap::new();
-        walk(&self.normal, "", &mut out);
+        walk(&self.normal, "", false, letters, &mut out);
+        out.into_iter().map(|(name, (_, seq))| (name, seq)).collect()
+    }
+
+    /// Command `name`'s shortest key in `mode` none of whose keys zellij takes (`letters` with `C-`) — None: it
+    /// has none such.
+    pub fn untaken(&self, mode: Mode, name: &str, letters: &[char]) -> Option<String> {
+        self.root(mode).untaken(&[name.to_string()], letters)
+    }
+
+    /// Inside zellij, the twin of `keys` bound in `mode` when it takes one of them (`letters` with `C-`,
+    /// `zellij.rs`): the shortest sequence of the mode's bound to the same, none of it zellij's.
+    pub fn twin(&self, mode: Mode, keys: &[Key], letters: &[char]) -> Option<String> {
+        if !keys.iter().any(|k| crate::zellij::takes(k, letters)) {
+            return None;
+        }
+        let Some(KeyTrie::Leaf(cmds)) = self.root(mode).search(keys) else { return None };
+        self.root(mode).twin(cmds, letters)
+    }
+
+    /// The bindings of the code's modes zellij takes (`letters` with `C-`) — (mode, keys, command, twin), select
+    /// mode's only where they differ from normal's — for `:config-show` and the keymap reference.
+    pub fn taken(&self, letters: &[char]) -> Vec<(&'static str, String, String, Option<String>)> {
+        fn walk(node: &Node, prefix: &[Key], letters: &[char], out: &mut Vec<(Vec<Key>, Vec<String>)>) {
+            for (k, t) in node.sorted() {
+                let seq: Vec<Key> = prefix.iter().copied().chain([*k]).collect();
+                match t {
+                    KeyTrie::Node(n) => walk(n, &seq, letters, out),
+                    KeyTrie::Leaf(c) if seq.iter().any(|k| crate::zellij::takes(k, letters)) => {
+                        out.push((seq, cmd_names(c)))
+                    }
+                    KeyTrie::Leaf(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (name, mode) in [("normal", Mode::Normal), ("select", Mode::Select), ("insert", Mode::Insert)] {
+            let mut found = Vec::new();
+            walk(self.root(mode), &[], letters, &mut found);
+            for (seq, names) in found {
+                let same =
+                    matches!(self.lookup(Mode::Normal, &seq), Lookup::Matched(n) if cmd_names(n) == names);
+                if mode == Mode::Select && same {
+                    continue;
+                }
+                let keys = seq.iter().map(Key::shown).collect::<Vec<_>>().join(" ");
+                out.push((name, keys, names.join(" + "), self.twin(mode, &seq, letters)));
+            }
+        }
         out
     }
 
@@ -462,16 +557,6 @@ mod tests {
             Lookup::Matched(cmds) => Some(cmd_names(cmds).join(",")),
             _ => None,
         }
-    }
-
-    /// Command names of a binding (`:line` for typed commands) — several run in sequence.
-    fn cmd_names(cmds: &[MappableCommand]) -> Vec<String> {
-        cmds.iter()
-            .map(|c| match c {
-                MappableCommand::Static(c) => c.name.to_string(),
-                MappableCommand::Typed(t) => format!(":{t}"),
-            })
-            .collect()
     }
 
     fn row(out: &mut String, keys: &str, cmds: &[MappableCommand]) {
@@ -622,6 +707,35 @@ mod tests {
         ("A picker", "`C-t` · `C-f` `C-b`, wheel over it", "The preview away and back · scroll it"),
     ];
 
+    /// The twins of `ON_SCREEN`'s keys zellij takes (`zellij::twin`, `key::list_move`'s other keys).
+    const ZELLIJ_ON_SCREEN: &[(&str, &str, &str)] = &[
+        (
+            "A card waiting",
+            "`C-q`",
+            "The card in front: the way back to the code, where it takes the keys — `esc` from insert mode, a \
+             prompt, a picker, a panel, a view mode or a chat with nothing said yet · `esc esc` from the chat's input \
+             · `C-\\ C-\\` from the terminal's program. A card in a session behind, an edit, the edit review: the way \
+             back, then `space I` (the inbox, `enter` goes to it). A turn that ended: the way back, then `space W`",
+        ),
+        (
+            "The chat's input",
+            "`C-t` · `C-p` · `C-s` · `C-o`",
+            "The way back to the code (`esc esc`, `esc` with nothing said yet), then `:model` · `:chat-resume` · \
+             `:chat-screen` · `:chat-point` — in the input `:` is a character",
+        ),
+        ("A list or output panel", "`C-n` `C-p` · `C-b`", "`j` `k` · `PageUp`"),
+        (
+            "A picker",
+            "`C-n` `C-p` · `C-b` · `C-t`",
+            "`↓` `↑` · the wheel over the preview · none (the preview away)",
+        ),
+        (
+            "A picker of files or places",
+            "`C-s` · `C-q`",
+            "none (`C-v` opens it beside) · none (the places kept as the list)",
+        ),
+    ];
+
     /// `docs/reference/keymap.md` — the default keymap per mode and submode (descriptions = command docs,
     /// the same text which-key and the palette show), then every `:` command from `cmdline::COMMANDS`.
     fn reference() -> String {
@@ -683,6 +797,25 @@ mod tests {
         );
         for (at, key, what) in ON_SCREEN {
             out.push_str(&format!("| {at} | {key} | {} |\n", md_cell(what)));
+        }
+
+        let defaults = crate::zellij::DEFAULT_KEYS;
+        out.push_str(&format!(
+            "\n## Inside zellij\n\nzellij's default normal mode takes {} before tarae sees them — `editor.zellij-keys` \
+             (yours only) names the letters zellij takes, these by default; a config of your own (session on `C-y`) \
+             names its own, and `editor.zellij-hints = off` says no twins at all (the unlock-first preset). Inside \
+             zellij (`ZELLIJ` set) the hints — which-key, the palette, the panels', the tutor — say the same thing \
+             without them, the twins below (for the default keys); the bindings stay. A key with no twin works once \
+             `C-g` has locked zellij (`C-g` again unlocks it).\n\n\
+             | Where | Key | Inside zellij |\n|---|---|---|\n",
+            crate::zellij::said(&defaults, true)
+        ));
+        for (mode, keys, cmds, twin) in km.taken(&defaults) {
+            let twin = twin.map_or("none".to_string(), |t| md_code(&t));
+            out.push_str(&format!("| {mode} mode | {} ({}) | {twin} |\n", md_code(&keys), md_code(&cmds)));
+        }
+        for (at, key, twin) in ZELLIJ_ON_SCREEN {
+            out.push_str(&format!("| {at} | {key} | {} |\n", md_cell(twin)));
         }
 
         out.push_str(

@@ -299,6 +299,70 @@ fn reviewing(name: &str, files: &[&str], risky: &[&str]) -> (Editor, PathBuf) {
     reviewing_texts(name, &texts, risky)
 }
 
+/// Inside zellij, a card stepped aside while the review's rail has the keys (as a bring card's `h` leaves it —
+/// `codereview::aside_said`): `C-q`'s twin is the rail's way back, `esc`, then the inbox — and those keys give the
+/// card the keys again.
+#[test]
+fn inside_zellij_an_aside_card_from_the_rail_is_the_inboxs() {
+    let (mut ed, dir) = reviewing_texts("zellij-rail", &[("a.txt", "a\n", "b\n")], &[]);
+    ed.zellij = true;
+    // (the review opens in the code; `space e` in a review gives its rail the keys — `sidebar_show`)
+    for k in ["space", "e"] {
+        ed.handle_key(k.parse().unwrap());
+    }
+    frame(&mut ed);
+    assert_eq!(ed.keys_to().region, crate::uistate::Region::Rail, "space e: the rail");
+    let what = crate::offer::What::Screen { call: crate::tools::Call::test(1) };
+    ed.push_offer(crate::offer::Offer::new(
+        "Claude asks".into(),
+        "to see the screen",
+        "",
+        String::new(),
+        what,
+    ));
+    ed.offers[0].aside = true;
+    frame(&mut ed);
+    assert_eq!(ed.key_said("C-q"), "esc space I");
+    for k in ["esc", "space", "I", "ret"] {
+        ed.handle_key(k.parse().unwrap());
+        frame(&mut ed);
+    }
+    assert!(ed.card_has_keys(), "{:?} {:?}", ed.keys_to().region, ed.status);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A bring's high-risk change shown in the review open (`codereview::held_go`, as its card's `h` does): the status
+/// line says how back to the card — `C-q`, inside zellij its twin.
+#[test]
+fn inside_zellij_or_not_a_brings_change_in_the_review_says_the_way_back_to_its_card() {
+    for zellij in [false, true] {
+        let (mut ed, dir) = reviewing(&format!("zellij-held-{zellij}"), &["a.txt"], &["a.txt"]);
+        ed.zellij = zellij;
+        let r = ed.session.code_review.as_ref().expect("the review");
+        let graded = r.graded(&ed, &r.files[0]);
+        let high = graded.iter().find(|g| g.grade == crate::risk::Grade::High).expect("a high-risk change");
+        let held = crate::codereview::Held {
+            rel: "a.txt".into(),
+            at: 0,
+            lines: 1,
+            why: "risky".into(),
+            removed: Vec::new(),
+            added: Vec::new(),
+            mode: None,
+            keys: high.keys.clone(),
+            size: None,
+        };
+        crate::codereview::held_go(&mut ed, 7, &[held]);
+        let key = if zellij { "space I" } else { "C-q" };
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(
+            status.ends_with(&format!("space v h looks at it · {key} goes back to the card")),
+            "{status}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 /// `reviewing` with each file's (name, committed text, text now).
 fn reviewing_texts(name: &str, files: &[(&str, &str, &str)], risky: &[&str]) -> (Editor, PathBuf) {
     let (mut ed, dir) = repo(name, files, risky);
