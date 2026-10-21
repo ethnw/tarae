@@ -104,10 +104,10 @@ In this order.
 
 ### 1. Publishing
 
-First (decided 2026-10-15), because the Cyber Verification Program's approval unblocks the fuzzing work in §2
-that the model's safeguards stopped (the control messages); stabilization (§9) waits.
+First (decided 2026-10-15); stabilization (§9) waits. The Cyber Verification Program, meant to unblock the
+fuzzing work in §2 that the model's safeguards stopped (the control messages), waits for users (item 5).
 
-Items 1–3 are done (2026-10-16); 4 and 5 are the user's: the repository made public, then the application.
+Items 1–3 are done (2026-10-16); 4 is the user's: the repository made public. 5 is not applied for.
 
 1. **What's in flight finishes** — done: the card model's P3 piece 4 and the diagram's P3 layout.
 2. **`SECURITY.md`** at the repository's root — done: where to report (`security@sinabro.io`), what's in scope,
@@ -116,16 +116,15 @@ Items 1–3 are done (2026-10-16); 4 and 5 are the user's: the repository made p
 3. **The pull requests** — done: PR #4 and PR #5 merged on GitHub; Q1 (§2) is in, before the repository goes
    public.
 4. **The repository made public** — by the user.
-5. **Anthropic's Cyber Verification Program**, applied for by the user as an individual, on the open-source track
-   ("Maintainer of a widely depended-on open-source project"; an individual with maintainer authority can apply).
-   What it needs: maintainer status, shown by the public repository; a one-to-three-sentence scope ("Security
-   engineering for tarae, an open-source code editor I maintain: building and testing the sandbox that confines an
-   AI coding agent's commands, on my own machines and test VMs"); the security contact, `security@sinabro.io`. No
-   homepage needed. The hope: the sandbox's own testing (seccomp, fd passing, namespaces) goes on without the
-   model's cyber safeguards stopping it. The risk: the track names "a widely depended-on project", and a
-   repository made public that week may be turned down. If it is, §2's stopped items stay deferred as they are
-   (`cyber-verification-items.md` keeps them) and the user applies again once tarae has users; nothing else in
-   the order changes.
+5. **Anthropic's Cyber Verification Program** — not applied for (user, 2026-10-19): it doesn't fit yet, because
+   tarae has no users; the user applies once it does, as an individual, on the open-source track ("Maintainer of
+   a widely depended-on open-source project"; an individual with maintainer authority can apply). What it needs:
+   maintainer status, shown by the public repository; a one-to-three-sentence scope ("Security engineering for
+   tarae, an open-source code editor I maintain: building and testing the sandbox that confines an AI coding
+   agent's commands, on my own machines and test VMs"); the security contact, `security@sinabro.io`. No homepage
+   needed. The hope: the sandbox's own testing (seccomp, fd passing, namespaces) goes on without the model's cyber
+   safeguards stopping it. Until then §2's stopped items stay deferred as they are (`cyber-verification-items.md`
+   keeps them); nothing else in the order changes.
 
 After it, the rest goes on in this order.
 
@@ -149,9 +148,9 @@ The aim is to state what the sandbox guarantees and show that it holds.
    pointer, which tarae sent on without control where the kernel answers EFAULT (fixed; a Linux test pins the
    kernel's answer), and V2-5, in the tests' fake memory, not the reader. Q1 done (2026-10-16): of the control
    messages it forwards only descriptors go (`SCM_RIGHTS`, at most 253), every other type refused and named in
-   the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing that forwarding further waits
-   for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped that work twice); a run's own
-   `setsockopt` is unchanged (its own rights).
+   the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing that forwarding further stays
+   deferred until tarae has users and the Cyber Verification Program is applied for (§1; the model's safeguards
+   stopped that work twice); a run's own `setsockopt` is unchanged (its own rights).
 3. **A "must be refused" property suite** — done on both systems: nothing a run does changes the session's
    rules, and nothing is reached but through tarae's proxy and sockets. macOS (`df2f70e3`); Linux (`08ec1cb3`), rows
    21–26 measured against an unsandboxed baseline. Left: running it on several kernels, on a schedule.
@@ -166,8 +165,11 @@ The aim is to state what the sandbox guarantees and show that it holds.
    open, said in the report, `tarae state` and the state line; macOS's Seatbelt is pinned to refuse them all outside
    the write places. Part B, being written outside tarae (`~/Workspace/tarae-linmeta-b`): tarae serves a file's mode
    and times in tiers own and host, only where the run may write. Tier offline stays a full tier with them open,
-   said (user decision 2026-10-18). Left: an ownership change that changes nothing (`rsync -a`, `install -g` to the
-   primary group) is refused today; nested user namespaces in tier own are a piece of their own.
+   said (user decision 2026-10-18). Its round 3 is under way, a session of its own: Gemini's tree, where tarae's
+   board found seven high — owner calls go back to refused (the user's D-h covered mode and times only),
+   `/dev/shm` was opened too widely, and a link's times re-resolved its parent. Left: an ownership change that
+   changes nothing (`rsync -a`, `install -g` to the primary group) is refused today; nested user namespaces in
+   tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
 
@@ -266,18 +268,22 @@ Done so far, under way, and the order after it (2026-10-17):
 - **Auto mode** is built only if the card record shows it's worth it: one to two weeks of `$state/cards` after P3
   runs in the user's tarae, each class's residual rate held against D1's bar (at least one card of a class per
   session-hour; then the 300-card safety bar). Likely not built.
-- **Frictions**: batches 24–29 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
+- **Frictions**: batches 24–30 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
   project asks for itself — Claude's Read on the key's own card, tarae's own tools leave it out — and on macOS a
   run doesn't read one where a grant or a default opened (the shared temp folders too; its own `$TMPDIR` reads);
   `cargo xtask linux` proves the tree it mounts is this checkout, and a filter that matched no test fails. Left from
   it, each its own piece: such names closed to runs outside home, and on Linux outside the project (Landlock only
   grants); its item 4, the high-risk gate after a whole-file look, back on the list with a property test over
-  looks. **Batch 30 next** (`target/sb/frictions29.md`, items 23–27): the terminals grant asked again for every
-  e2e or scenes run (a grant of new ptys only); a bring queue for several sessions ready at once; a conflict
-  resolution that changes what the commit message says, with nothing asking to update it; a preflight that
-  inherits tarae's environment; a session's CLAUDE.md, copied when it started, never getting later rules. Its item
-  12, the web tool: not built — measured first; if needed, tarae's `read` takes an https URL (GET, text, `select`),
-  not a new tool; Claude Code's WebSearch stays held back.
+  looks. Batch 30 (2026-10-19, `ed16927d`, `target/sb/frictions30-plan.md`, its batch 1): frictions29's small
+  ones — a host card outlives its run (`y` is for the next run), `C-q` brings the card's keys with it, review notes
+  and replies wait for the turn's end, a landing grades the other bring cards again, a failed preflight names the
+  tools' variables it ran with, and what a card, a report or the inbox said too little of; the terminals asked
+  again after a `y` take none of the turn's `ALSO_MAX`. **Batch 31 under way** (frictions31, a session of its
+  own): frictions30's order 3–4 and a new item 28, the terminals' A (the ptys tarae makes and hands to a run)
+  measured first. frictions29's item 12, the web tool: not built — measured first; if needed, tarae's `read`
+  takes an https URL (GET, text, `select`), not a new tool; Claude Code's WebSearch stays held back.
+
+- **`:session-apply`** — under way (sessapply, a session of its own).
 
 Small fixes found while using tarae every day:
 
@@ -320,7 +326,8 @@ let it send keys too, in a way that can't land somewhere it didn't mean:
 
 The person at the keyboard already has the same guards: a card ignores keys typed as it appears, `y` counts only
 after the text was in sight, and no key changes state in silence. This was "guarded keys", phase 4 of
-[design/ui-state.md](design/ui-state.md), dropped there and now back under its new name.
+[design/ui-state.md](design/ui-state.md), dropped there and now back under its new name. Its plan is under way
+(shuttleplan, a session of its own).
 
 ### 5. A remote split
 
@@ -442,10 +449,12 @@ git tab, search, a short Kubernetes one.
   reveal only for code that arrives whole (user decision 2026-10-17).
 - **글타래** (*geul-tarae*, "a skein of writing"): a visual pass. Design details that suit ink (meok) and hanji
   paper, and a way of showing and generating text that suits tarae (the plan: the `geultarae` session's
-  target/sb/geultarae-plan.md). P0–P3 done: the shots as a scene list (`cargo xtask scenes`, `900833ab`), the
-  audit's fixes (`680f9326`), the chat laying out a message once (`66bebbc5`), and 번짐, the head of what Claude
-  is writing as ink not yet dry (`660435df`). P4–P8 next (its §5): weight and margins, the seal for what's
-  decided, the turn as a thread, live edits, 코드멍's reveal.
+  target/sb/geultarae-plan.md). P0–P4 done: the shots as a scene list (`cargo xtask scenes`, `900833ab`), the
+  audit's fixes (`680f9326`), the chat laying out a message once (`66bebbc5`), 번짐, the head of what Claude
+  is writing as ink not yet dry (`660435df`), and weight and margins (2026-10-19, `0ceac0aa`): `● normal` for the
+  solid pill, the start screen a title page set in type with no seal, the edit review's head in ink, the chat's
+  prose at a 72-cell measure, list cards their own height. P5–P8 next (its §5): the seal for what's decided, the
+  turn as a thread, live edits, 코드멍's reveal.
 - **Quoting** (인용, user 2026-10-17; `quote` in the docs and commands, as pointing is `point`): select part of
   any text tarae shows and ask about it at once. Code has its selection, and test and preflight output open in a
   buffer (`space x o`, the task panel's `o`); pointing gives a whole element's id, `C-s` the whole screen. Missing:
