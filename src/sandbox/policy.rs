@@ -3,6 +3,38 @@
 
 use super::*;
 
+/// The name a tool's refusal gives bare after the tool's own name — macOS's `touch: Makefile: Operation not permitted`,
+/// `mkdir: .github: Permission denied` (`<program>: <name>: <refusal>`) — as a path from `root` (where the run is),
+/// folded; `named_in` reads the other forms. A name with no program before it (`Makefile: Operation not permitted`)
+/// names nothing. frictions29 30: the kernel's report of a protected name refused was lost (1 in 10, measured), and
+/// this line, all the output said, was read as no cause.
+fn program_named_in(line: &str, root: &Path) -> Option<PathBuf> {
+    let low = line.to_ascii_lowercase();
+    let refusals = [": permission denied", ": operation not permitted", ": read-only file system"];
+    let at = refusals.iter().find_map(|r| low.find(r))?;
+    let (program, name) = line[..at].trim().split_once(": ")?;
+    let program_like =
+        !program.is_empty() && program.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c));
+    let bare = !name.is_empty()
+        && !name.starts_with(['/', '~'])
+        && !name.contains(char::is_whitespace)
+        && !name.contains(['\'', '"', '‘', '’']);
+    if !program_like || !bare {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for c in root.join(name).components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
 /// What a run's rule for the files named like keys says of one (`Policy::key_rule`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyRule {
@@ -893,7 +925,8 @@ impl Policy {
         let mut out: Vec<Denial> = Vec::new();
         let lines = output.iter().zip(near.iter().zip(&denied)).filter(|(_, (n, _))| **n);
         for (l, denied) in lines.map(|((_, l), (_, d))| (l, *d)).filter(|(l, _)| failed(l)) {
-            for real in paths_in(l, self.from()).into_iter().chain(named_in(l, self.from())) {
+            let named = named_in(l, self.from()).into_iter().chain(program_named_in(l, self.from()));
+            for real in paths_in(l, self.from()).into_iter().chain(named) {
                 let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
                     (true, true) => continue,
                     (true, false) => "file-write*",
@@ -1240,3 +1273,6 @@ impl Policy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

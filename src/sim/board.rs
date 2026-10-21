@@ -1,6 +1,6 @@
 //! The board (`space v C`) and the one reviewer, simulated (detsim P1): a review of one change, its reviewer
 //! asked at random for a board or the one pass as the keys ask (`codereview::ask_board`/`ask_claude`: the review
-//! opened first, refused while one reads), its members stand-ins (`Editor.reviewer_stand_in`: no process —
+//! opened first, refused while one reads; a board's card asking first, answered by a later step — frictions29 32), its members stand-ins (`Editor.reviewer_stand_in`: no process —
 //! a process's reader threads aren't the simulation's; what a member says is the scenario's step) — an angle's
 //! claim, a skeptic's verdict, a member's end or failure — among the line's jobs and timers: the memory read
 //! before each start, the retry while it's critical, the other angles' stagger, the skeptics the angles' end
@@ -24,10 +24,11 @@ use crate::llm::StreamEv;
 use crate::reviewer::{Role, State};
 
 /// The seeds every `cargo test` runs, each twice — the first of `TARAE_SIM_SEEDS=60` to catch each break of
-/// `target/sb/reviewpanel-r8-seeds.sh` (2026-10-18, macOS, ~1 s a run): 0 a refuted claim pinned and no
-/// stagger, 8 the line ignoring the memory, 10 a stop that leaves members waiting, 34 a same failure pinned
+/// `target/sb/f32-board-seeds.sh` (2026-10-19, macOS, ~1 s a run; picked again once the board asked on its card —
+/// the first ones were `reviewpanel-r8-seeds.sh`'s): 0 a board started without its card, 1 no stagger, 3 the line
+/// ignoring the memory, 4 a refuted claim pinned, 5 a stop that leaves members waiting, 47 a same failure pinned
 /// apart (its skeptic's `same_as` landing on a claim it confirmed).
-const SEEDS: &[u64] = &[0, 8, 10, 34];
+const SEEDS: &[u64] = &[0, 1, 3, 4, 5, 47];
 
 /// The scenario's own steps a run (the jobs' and results' come between them).
 const INPUTS: usize = 40;
@@ -80,6 +81,11 @@ fn run(choices: Choices) -> Vec<String> {
     let mut sim = Sim::new("the_board_and_its_line", choices, LIMIT);
     let mut ed = Editor::new(crate::config::Config::default());
     (ed.session.root, ed.session.name) = (repo.clone(), "proj".into());
+    // (half the runs in a conversation whose board was said yes to already: boards start at once, as before the
+    // card, and reach their skeptics as often; the other half ask on it first — frictions32)
+    if sim.choices.below(2) == 0 {
+        ed.session.board_yes = Some(None);
+    }
     (ed.reviewer_stand_in, ed.reviewer_room) = (true, room);
     ed.config.review_board_at_once = AT_ONCE;
     // (as shipped, not the tests' none: the other angles wait for the first one's prompt — a timer stepped)
@@ -97,19 +103,38 @@ fn run(choices: Choices) -> Vec<String> {
 fn input(sim: &mut Sim, ed: &mut Editor) -> String {
     let n = sim.steps;
     let c = &mut sim.choices;
-    // (by arm: a board 1, the one pass 1, a member says something 12, one ends 6, one fails 1, a stop 1, the
-    // review closed 1, the memory 1, time passing 2, a frame 1 — members speak most, so claims reach skeptics;
-    // with none reading, a second passes instead: the stagger and the line move on)
+    // (by arm: a board or its card's answer 3, the one pass 1, a member says something 12, one ends 6, one fails 1,
+    // a stop 1, the review closed 1, the memory 1, time passing 2, a frame 1 — members speak most, so claims reach
+    // skeptics; a board takes two steps since its card (frictions32), so it weighs three; with none reading, a
+    // second passes instead: the stagger and the line move on)
     let none = |sim: &mut Sim| {
         sim.wait(Duration::from_secs(1));
         "(none reads) 1000 ms pass".to_string()
     };
-    match c.weighted(&[1, 1, 12, 6, 1, 1, 1, 1, 2, 1]) {
-        // (as the keys do: the review opened first if it isn't, refused while its reviewer reads)
-        0 => {
-            crate::codereview::ask_board(ed, None);
-            "space v C".into()
-        }
+    match c.weighted(&[3, 1, 12, 6, 1, 1, 1, 1, 2, 1]) {
+        // (as the keys do: the review opened first if it isn't, refused while its reviewer reads — a board's card
+        // asks first, its cost read on a worker; up, it's answered: mostly yes, at times a key as the user presses it
+        // — refused until the card's drawn and settled — or no)
+        0 => match ed.offers.first().is_some_and(|o| matches!(o.what, crate::offer::What::Board(_))) {
+            true => match c.below(4) {
+                0 => {
+                    ed.offer_dismiss();
+                    "n on the board's card".into()
+                }
+                1 => {
+                    let taken = ed.offer_key(crate::key::Key::plain(crate::key::Code::Char('y')));
+                    format!("y pressed on the board's card ({})", if taken { "taken" } else { "not taken" })
+                }
+                _ => {
+                    ed.offer_accept();
+                    "y on the board's card".into()
+                }
+            },
+            false => {
+                crate::codereview::ask_board(ed, None);
+                "space v C".into()
+            }
+        },
         1 => {
             crate::codereview::ask_claude(ed, None);
             "space v c".into()
@@ -206,6 +231,10 @@ fn member(ed: &Editor, i: usize) -> String {
 /// pinned stands.
 fn held(ed: &Editor, started: &mut BTreeSet<u64>) -> Result<(), String> {
     use crate::share::Pressure;
+    // (the key that spends money: no board reads without a yes on its card — frictions29 32)
+    if ed.session.reviewer.as_ref().is_some_and(|r| r.board.is_some()) && ed.session.board_yes.is_none() {
+        return Err("a board started with no yes on its card".into());
+    }
     let Some(r) = ed.session.reviewer.as_ref() else { return Ok(()) };
     let reading = r.members.iter().filter(|m| m.state == State::Reading).count();
     if reading > AT_ONCE {
@@ -271,7 +300,9 @@ fn held(ed: &Editor, started: &mut BTreeSet<u64>) -> Result<(), String> {
 /// What a trace line ends with: the reviewer's state, each member's, the claims, the last thing said.
 fn print(ed: &Editor, dir: &str) -> String {
     let last = ed.messages.last().map(|m| m.2.replace(dir, "<dir>")).unwrap_or_default();
-    let Some(r) = ed.session.reviewer.as_ref() else { return format!("no reviewer · said {last:?}") };
+    let up = ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Board(_)));
+    let card = if up { " · the board's card up" } else { "" };
+    let Some(r) = ed.session.reviewer.as_ref() else { return format!("no reviewer · said {last:?}{card}") };
     let word = |s: &State| match s {
         State::Waiting => "waits".to_string(),
         State::Reading => "reads".to_string(),
@@ -283,7 +314,7 @@ fn print(ed: &Editor, dir: &str) -> String {
         (0..r.members.len()).map(|i| format!("{} {}", r.member_name(i), word(&r.members[i].state))).collect();
     let claims = r.board.as_deref().map_or(0, |b| b.claims.len());
     format!(
-        "{} {} [{}] · {claims} claims · {} findings · said {last:?}",
+        "{} {} [{}] · {claims} claims · {} findings · said {last:?}{card}",
         if r.board.is_some() { "board" } else { "reviewer" },
         word(&r.state),
         members.join(", "),

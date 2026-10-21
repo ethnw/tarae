@@ -373,6 +373,11 @@ pub struct Chat {
     /// Places outside the project the user let Claude read once this conversation — a read beside one of
     /// them offers their folder (`allow::grant_places`, #102).
     pub read_once: Vec<PathBuf>,
+    /// Places the user said `n` to on a read's card this turn (`reads::answer`), and whether what's under one is
+    /// meant too (outside the project; in it only key files and searches opening them ask — that one): a read of it
+    /// is told no at once, no card (frictions29 34: one file's card came back four times in a minute) — cleared at
+    /// the turn's end.
+    pub read_no: Vec<(PathBuf, bool)>,
     /// The folders a read's card offered for `a`/`A`, looked through for tokens on a worker (None: under way)
     /// — a folder is offered once its card can say what it holds (`reads::refold`).
     pub scanned: std::collections::HashMap<PathBuf, Option<crate::tokens::Found>>,
@@ -688,6 +693,7 @@ impl Chat {
             allowed: Default::default(),
             reads: Default::default(),
             read_once: Vec::new(),
+            read_no: Vec::new(),
             scanned: Default::default(),
             kept_keys: None,
             kept_keys_asked: 0,

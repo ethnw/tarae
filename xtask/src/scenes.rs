@@ -183,22 +183,76 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "run the tests", "\r", "@?Its reason", "@1"],
     },
+    // (the same run asked again after a yes, the program it runs rebuilt since — git ignores it: the card's "Same as")
+    Scene {
+        name: "samebinary",
+        claude: "samebinary",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "run the probe",
+            "\r",
+            "@?Its reason",
+            "@1",
+            "\x11",
+            "@1",
+            "y",
+            "@20?Same as card",
+            "@1",
+        ],
+    },
+    // (tarae's search of a folder outside the project: its read card, the pattern named)
+    Scene {
+        name: "searchcard",
+        claude: "searchcard",
+        files: MAIN,
+        keys: &["@1", " ", "l", "@1", "find the card record", "\r", "@?goes to Claude", "@1"],
+    },
     // (the board under way: an angle done, two reading, one waiting its turn — then, done, a confirmed finding's
     // card: the angles that found it, its skeptic's trace)
-    Scene { name: "board", claude: "boardmid", files: MAIN, keys: &["@1", " ", "v", "C", "@?2 found", "@1"] },
+    Scene {
+        name: "board",
+        claude: "boardmid",
+        files: MAIN,
+        keys: &["@1", " ", "v", "C", "@?Start a board", "@1", "y", "@?2 found", "@1"],
+    },
+    // (the card a board asks on first: the session, what boards cost, the angles — frictions32)
+    Scene {
+        name: "boardcard",
+        claude: "boardmid",
+        files: MAIN,
+        keys: &["@1", " ", "v", "C", "@?Start a board", "@1"],
+    },
     // (the same on a narrow screen, the rail given the keys: the four angles folded into rows of marks —
     // `--size 74x30` is where it folds)
     Scene {
         name: "boardnarrow",
         claude: "boardmid",
         files: MAIN,
-        keys: &["@1", " ", "v", "C", "@?the board reads", "@3", " ", "e", "@?skeptics", "@1"],
+        keys: &[
+            "@1",
+            " ",
+            "v",
+            "C",
+            "@?Start a board",
+            "@1",
+            "y",
+            "@?the board reads",
+            "@3",
+            " ",
+            "e",
+            "@?skeptics",
+            "@1",
+        ],
     },
     Scene {
         name: "boardnote",
         claude: "boarddone",
         files: MAIN,
-        keys: &["@1", " ", "v", "C", "@30?the board is done", "@2"],
+        keys: &["@1", " ", "v", "C", "@?Start a board", "@1", "y", "@30?the board is done", "@2"],
     },
 ];
 
@@ -478,7 +532,8 @@ fn demo_crate(dir: &Path) -> Result<()> {
 /// JSON has its keys sorted) with `script`'s turn on `out`, `pause` after each piece of text: `full` explains,
 /// reads and edits (its calls wait for tarae's answers); `mid` stops in the middle of its code block and waits
 /// for tarae to go; `midlist` stops in a list after a quote, on a line in Japanese; `ask` answers `space i` and
-/// stops mid-line; `card` asks to run outside the sandbox; `warm` answers on a big conversation's 1h cache, and
+/// stops mid-line; `card` asks to run outside the sandbox; `samebinary` asks it twice, a program rebuilt between;
+/// `searchcard` searches a folder in home with tarae's `search`; `warm` answers on a big conversation's 1h cache, and
 /// `warmfork` as a ping's fork of it; `boardmid` / `boarddone` are a board's members (each by what its message
 /// asks — `board`); `idle` never answers.
 fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Duration) -> io::Result<()> {
@@ -503,6 +558,8 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "midlist" => turn.explain_listed()?,
             "ask" => turn.rewrite()?,
             "card" => turn.ask_outside()?,
+            "samebinary" => turn.same_binary()?,
+            "searchcard" => turn.search_outside()?,
             "warm" => turn.warm(false)?,
             "warmfork" => turn.warm(true)?,
             "boardmid" => turn.board(&line, false)?,
@@ -715,6 +772,43 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         let run = json!({"command": "cargo test --quiet", "outside_sandbox": true,
             "reason": "cargo needs to fetch the registry index"});
         self.call(1, "run", run)?;
+        self.line(json!({"type": "result", "result": "done"}))
+    }
+
+    /// A program that isn't text (a NUL in it), under the demo's ignored `target/`: run outside the sandbox,
+    /// rebuilt, run again — the second card is the first's "Same as".
+    fn same_binary(&mut self) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = Path::new("target/probe");
+        let build = |n: &str| -> io::Result<()> {
+            std::fs::create_dir_all("target")?;
+            // (a NUL: what tarae takes for a program's bytes — after the lines sh runs)
+            let mut bytes = format!("#!/bin/sh\necho probe {n}\nexit 0\n# build ").into_bytes();
+            bytes.extend(b"\x00\xff");
+            std::fs::write(probe, bytes)?;
+            std::fs::set_permissions(probe, std::fs::Permissions::from_mode(0o755))
+        };
+        build("one")?;
+        self.words("The probe needs a terminal of its own, so I will run it outside the sandbox.")?;
+        self.text("\n")?;
+        let run = json!({"command": "./target/probe", "outside_sandbox": true,
+            "reason": "the probe opens a terminal of its own"});
+        self.call(1, "run", run.clone())?;
+        build("two, with a drain loop")?;
+        self.words("Rebuilt with a drain loop — once more.")?;
+        self.text("\n")?;
+        self.call(2, "run", run)?;
+        self.line(json!({"type": "result", "result": "done"}))
+    }
+
+    /// tarae's `search` of a folder in home, outside the project: its read card, a pattern too long for it.
+    fn search_outside(&mut self) -> io::Result<()> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        self.words("The card record is outside the project; I will search it for the terminal grants.")?;
+        self.text("\n")?;
+        let pattern = r#""kind":"(grant|run|read)".*"(terminals|pty|tty)".*"answer":"(y|a|s|A)".*"session":"frictions3[0-9]""#;
+        let search = json!({"pattern": pattern, "path": format!("{home}/Library/Logs")});
+        self.call(1, "search", search)?;
         self.line(json!({"type": "result", "result": "done"}))
     }
 }

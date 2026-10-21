@@ -264,6 +264,9 @@ pub enum What {
     /// The user stopped a turn and the runs its calls waited on go on (`tools::left_running`): `y` stops them ·
     /// `n` lets them run. Light; it goes by itself once they've ended (`tools::left_sync`). Its session's.
     LeftRunning { runs: Vec<crate::tools::Left> },
+    /// A board asked for (`board::Ask`, frictions29 32 — the key that spends money): `y` starts it, holding for its
+    /// session and conversation · `n` starts none. Its session's.
+    Board(Box<crate::board::Ask>),
 }
 
 /// Every card's kind (`Offer::kind`) — what `:features` lists, so a card never asked shows as 0
@@ -316,6 +319,7 @@ pub const KINDS: &[&str] = &[
     "limit",
     "features-reset",
     "left-running",
+    "board",
 ];
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
@@ -390,6 +394,8 @@ impl What {
             | What::BillingSwitch { .. }
             // (the chat after a restart fails again, and asks again: the answer isn't kept)
             | What::EnvKey { .. }
+            // (the review it's for ends with the restart)
+            | What::Board(_)
             | What::Limit(_) => Lost,
         }
     }
@@ -624,6 +630,8 @@ impl Offer {
                 | What::BillingSwitch { .. }
                 | What::EnvKey { .. }
                 | What::Limit(_)
+                // (its yes spends money — a key sent as it came up never starts a board)
+                | What::Board(_)
         )
     }
 
@@ -650,6 +658,14 @@ impl Offer {
     pub fn host_details(&self) -> Option<String> {
         match &self.what {
             What::Host(a) if !a.open => Some(crate::hosts::details(a)),
+            _ => None,
+        }
+    }
+
+    /// What its `v` shows after its text, if it's a read card whose search pattern it cut (`reads::details`).
+    pub fn read_details(&self) -> Option<String> {
+        match &self.what {
+            What::Read { pending, .. } => crate::reads::details(&pending.look),
             _ => None,
         }
     }
@@ -863,6 +879,8 @@ impl Offer {
                     | What::ProtectedMade { .. }
                     // (the user's own change set is its session's `applying`)
                     | What::ChangeSet { .. }
+                    // (a board on its session's review — frictions29 32: keys meant for one session started one in another)
+                    | What::Board(_)
             )
     }
 
@@ -965,16 +983,20 @@ impl Offer {
             W::ProtectedMade { .. } => {
                 vec![('y', "Keep, run"), ('r', "Remove, run"), ('v', "See them"), ('n', "No")]
             }
-            W::Read { keep: true, .. } => {
-                vec![
-                    ('y', "Once"),
-                    ('a', "This chat"),
-                    ('s', "This session"),
-                    ('A', "Always here"),
-                    ('n', "No"),
-                ]
+            W::Read { keep, .. } => {
+                let mut v = match keep {
+                    true => {
+                        vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always here")]
+                    }
+                    false => vec![('y', "Once")],
+                };
+                // (a search's pattern the card cut: whole on `v`)
+                if self.read_details().is_some() {
+                    v.push(('v', "Pattern"));
+                }
+                v.push(('n', "No"));
+                v
             }
-            W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
             // (as the host's own card, the network closed: never kept past a session)
             W::Grant { grant: crate::allow::Grant::Host(..), .. } => {
                 vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('n', "No")]
@@ -1098,6 +1120,7 @@ impl Offer {
             }
             W::Limit(_) => vec![('y', "This session"), ('n', "Wait")],
             W::FeaturesReset => vec![('y', "Empty them"), ('n', "Keep them")],
+            W::Board(_) => vec![('y', "Start it"), ('n', "Not now")],
         }
     }
 
@@ -1152,6 +1175,7 @@ impl Offer {
             W::EnvKey { .. } => "environment-key",
             W::Limit(_) => "limit",
             W::FeaturesReset => "features-reset",
+            W::Board(_) => "board",
         }
     }
 }
@@ -1397,7 +1421,7 @@ impl crate::editor::Editor {
             Code::Char('v') if matches!(o.what, What::ClaudeSettings { .. } | What::RepoTrust { .. }) => {
                 self.offer_view()
             }
-            Code::Char('v') if o.host_details().is_some() => self.offer_view(),
+            Code::Char('v') if o.host_details().is_some() || o.read_details().is_some() => self.offer_view(),
             Code::Char('v') if matches!(o.what, What::Instructions(_)) => self.offer_view(),
             Code::Char('r') if o.made() => self.offer_accept_by('r'),
             Code::Char('n') => self.offer_dismiss(),
@@ -1577,6 +1601,10 @@ impl crate::editor::Editor {
             What::ReviewEnd { session, started } => {
                 self.offer_finished(id, Ok(()));
                 crate::codereview::close_answered(self, session, started);
+            }
+            What::Board(a) => {
+                self.offer_finished(id, Ok(()));
+                crate::board::answer(self, *a, true);
             }
             What::Rebase(m) => self.rebase_start(id, *m),
             // (refused above)
@@ -1956,7 +1984,7 @@ impl crate::editor::Editor {
             let more = crate::repotrust::view_text(self, &parts.clone());
             return self.offer_view_with(more);
         }
-        if let Some(more) = self.offers.first().and_then(Offer::host_details) {
+        if let Some(more) = self.offers.first().and_then(|o| o.host_details().or_else(|| o.read_details())) {
             return self.offer_view_with(more);
         }
         if let Some(What::Commit(c)) = self.offers.first().map(|o| &o.what) {
@@ -2226,6 +2254,7 @@ impl crate::editor::Editor {
             }
             What::Limit(a) => self.limit_wait(&a),
             What::FeaturesReset => self.features_reset_answer(o.id, false),
+            What::Board(a) => crate::board::answer(self, *a, false),
         }
     }
 

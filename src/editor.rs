@@ -8852,6 +8852,50 @@ mod tests {
         log
     }
 
+    /// frictions29 34: `n` on a read's card holds for that place until the turn ends — Claude's Read of a file in the
+    /// folder it said no to is told so at once, in those words, with no card; the turn's end lets it ask again.
+    #[test]
+    fn a_reads_no_holds_until_the_turn_ends() {
+        use crate::reads::TITLE;
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("reads-no");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let marker = out.join("marker.txt");
+        std::fs::write(&marker, "tarae-marker\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = this_repo();
+        let asks = [
+            ("Grep", json!({"pattern": "tarae-marker", "path": out})),
+            ("Read", json!({"file_path": marker})),
+        ];
+        let log = fake_tool_asks(&mut ed, &dir, &asks);
+        let answered = |ed: &mut Editor, id: &str| {
+            let quoted = format!("\"request_id\":\"{id}\"");
+            settle_until(ed, |_| std::fs::read_to_string(&log).unwrap_or_default().contains(&quoted));
+            permission_answer_to(&log, id)
+        };
+        feed(&mut ed, "<space>lread them<ret>");
+        settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.title == TITLE));
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 140, 40).unwrap();
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        answer(&mut ed, "n");
+        let a = answered(&mut ed, "p1");
+        assert_eq!(a["behavior"], "deny");
+        assert!(a["message"].as_str().unwrap().ends_with("(this no holds for the rest of the turn)"), "{a}");
+        // Asked again for a file in it: no at once, said why, no card
+        let a = answered(&mut ed, "p2");
+        assert_eq!(a["behavior"], "deny");
+        let said = format!("the user said no to {} this turn", out.display());
+        assert!(a["message"].as_str().unwrap().starts_with(&said), "{a}");
+        assert!(!ed.offers.iter().any(|o| o.title == TITLE), "no card");
+        // The turn's end: the no is gone with it
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(|c| c.read_no.is_empty()));
+    }
+
     /// Claude's Read, Grep and Glob (measured: allowed by name they read anywhere unasked — so they aren't):
     /// inside the project they're allowed at once; outside, a card says exactly what's read — `n` no, `a`
     /// this chat (what it covers then goes unasked), `A` always (kept for the project, `:granted`
@@ -9056,9 +9100,12 @@ mod tests {
         assert!(q.starts_with(&pem.display().to_string()), "{q}");
         answer(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p8")["behavior"], "allow");
-        card(&mut ed);
-        answer(&mut ed, "n");
-        assert_eq!(answered(&mut ed, "p9")["behavior"], "deny", "the search asks again");
+        // (the search said no to this turn: told so at once, no card — frictions29 34)
+        let a = answered(&mut ed, "p9");
+        assert_eq!(a["behavior"], "deny");
+        let said = format!("the user said no to {} this turn", project.display());
+        assert!(a["message"].as_str().unwrap().starts_with(&said), "{a}");
+        assert!(!ed.offers.iter().any(|o| o.title == KEYS_TITLE));
         // Kept for the project by an earlier build's `A`: a later conversation reads it unasked
         crate::allow::keep(&store, &project, |a| a.add(&crate::allow::Grant::Key(pem.clone()))).unwrap();
         let basis =

@@ -187,7 +187,15 @@ pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else {
         return crate::tools::answer(ed, then.call, Err("the chat it came from is gone".into()));
     };
-    let Ask { look, class, found, repository, not_whole } = ask;
+    let Ask { mut look, class, found, repository, not_whole } = ask;
+    // (tarae's search: its card says what it searches for — frictions29 33: `Gate::judge` knows only the place)
+    if then.tool == "search" {
+        let s = |k: &str| then.args[k].as_str().unwrap_or_default().to_string();
+        (look.tool, look.pattern, look.filter) = ("Grep".into(), s("pattern"), s("glob"));
+    }
+    if let Some(no) = said_no(c, &look) {
+        return crate::tools::answer(ed, then.call, Err(no));
+    }
     c.reads.push_back(Pending {
         request_id: String::new(),
         generation,
@@ -203,6 +211,23 @@ pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
     });
     refold(ed);
     next(ed);
+}
+
+/// What a read at or under a place the user said `n` to this turn (`Chat.read_no`) is told at once, with no card;
+/// None: no such no.
+fn said_no(c: &crate::chat::Chat, look: &Look) -> Option<String> {
+    said_no_in(&c.read_no, look)
+}
+
+/// `said_no`, from the places said no to.
+fn said_no_in(read_no: &[(PathBuf, bool)], look: &Look) -> Option<String> {
+    let at = look.at.as_ref()?;
+    let (no, _) = read_no.iter().find(|(n, under)| if *under { at.starts_with(n) } else { at == n })?;
+    Some(format!(
+        "the user said no to {} this turn — they aren't asked again until it ends; ask them in your answer if you \
+         need it",
+        no.display()
+    ))
 }
 
 /// The card's answer to whoever asked: a permission ask allowed or denied (`no` its message), a tool's call
@@ -961,6 +986,9 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
             if ok {
                 return crate::chat::respond(ed, &request_id, allow(&input));
             }
+            if let Some(no) = said_no(c, &look) {
+                return crate::chat::respond(ed, &request_id, json!({ "behavior": "deny", "message": no }));
+            }
             let since = std::time::Instant::now();
             let own = None;
             c.reads.push_back(Pending {
@@ -1388,7 +1416,7 @@ pub fn question(look: &Look, keep: bool, folder: Option<(&Path, bool)>) -> Strin
         "Read" => at,
         "Grep" => {
             let all = if look.file { "" } else { " and everything in it" };
-            let mut s = format!("searches {at}{all}\nfor {}", look.pattern);
+            let mut s = format!("searches {at}{all}\nfor {}", pattern_shown(&look.pattern).0);
             if !look.filter.is_empty() {
                 s.push_str(&format!("\nin files {}", look.filter));
             }
@@ -1435,6 +1463,37 @@ pub fn question(look: &Look, keep: bool, folder: Option<(&Path, bool)>) -> Strin
     q
 }
 
+/// A search's pattern a card shows at most this many characters of — `v` shows it whole.
+const PATTERN_SHOWN: usize = 60;
+
+/// A search's pattern as a card or its `v` shows it: as it is, or escaped when it holds what a card can't show as it
+/// is (a line's end, a tab, control or bidi marks — `tools::draws_as_itself`).
+pub fn pattern_text(pattern: &str) -> String {
+    match crate::tools::draws_as_itself(pattern) && !pattern.contains(['\n', '\t']) {
+        true => pattern.to_string(),
+        false => pattern.escape_debug().to_string(),
+    }
+}
+
+/// A search's pattern as its card shows it (frictions29 33: it showed none) — `pattern_text`, at most
+/// `PATTERN_SHOWN` characters and `…` — and whether it was cut.
+pub fn pattern_shown(pattern: &str) -> (String, bool) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let text = pattern_text(pattern);
+    let mut g = text.graphemes(true);
+    let shown: String = g.by_ref().take(PATTERN_SHOWN).collect();
+    match g.next() {
+        Some(_) => (format!("{shown}…"), true),
+        None => (shown, false),
+    }
+}
+
+/// What a read card's `v` shows after its text: a search's whole pattern, when the card cut it.
+pub fn details(look: &Look) -> Option<String> {
+    let cut = look.tool == "Grep" && pattern_shown(&look.pattern).1;
+    cut.then(|| format!("The whole pattern:\n\n{}\n", pattern_text(&look.pattern)))
+}
+
 /// The user's answer on the card: None = no; else allowed, for once or longer (`a`, `A` — only when the
 /// card offered it; `folder`: what they allow, when the card said so).
 pub fn answer(
@@ -1471,7 +1530,22 @@ pub fn answer(
                 )
             }
         };
-        reply(ed, p, false, &no);
+        // (the no holds for that place until the turn ends: an ask for it waiting, or come again, is told so — no card)
+        // (outside the project, what's under it too; in it, that file or search — the project isn't refused whole)
+        let mut again = Vec::new();
+        let root = ed.session.root.clone();
+        if let (Some(c), Some(at)) = (ed.session.chat.as_mut(), p.look.at.clone()) {
+            c.read_no.push((at.clone(), !at.starts_with(&root)));
+            let read_no = c.read_no.clone();
+            let (no, wait): (Vec<_>, Vec<_>) =
+                c.reads.drain(..).partition(|w| said_no_in(&read_no, &w.look).is_some());
+            c.reads.extend(wait);
+            again = no.into_iter().filter_map(|w| Some((said_no_in(&read_no, &w.look)?, w))).collect();
+        }
+        reply(ed, p, false, &format!("{no} (this no holds for the rest of the turn)"));
+        for (no, w) in again {
+            reply(ed, w, false, &no);
+        }
         return next(ed);
     };
     reply(ed, p.clone(), true, "");
@@ -1546,6 +1620,7 @@ pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         waiting.extend(c.reads.drain(..).filter_map(|p| p.then));
         c.ran.clear();
+        c.read_no.clear();
         (c.also_asked, c.also_yes) = (0, false);
     }
     // (a call of tarae's tools is always answered — its card's going answers the one up: `asking_sync`)

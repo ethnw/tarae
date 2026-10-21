@@ -23,7 +23,8 @@
 //! built here) isn't all that runs: the card counts the project's changes too.
 //!
 //! At each answer (`tools::run_answer`) what it runs is kept in the session (`Session.answered`, until you
-//! quit): for scripts, their text (and the project's tree, as above); for the rest, the project's working tree
+//! quit): for scripts, their text — a program's size and digest, outside git's view (`kept_text`) — (and the
+//! project's tree, as above); for the rest, the project's working tree
 //! as a git tree (`snapshot::tree`: the real index isn't touched, no hook runs) — taken before it runs. At the
 //! next ask the tree is taken again and compared from the project's root. Both on workers, before the run
 //! starts and before the card.
@@ -51,9 +52,10 @@ pub struct Answered {
 pub enum Kept {
     /// The project's tree at the yes (a git tree's id).
     Tree(String),
-    /// The scripts it runs as they were: real path, text (None: not text, or not there) — and, when one of
-    /// them runs the project's code (`runs_project`), the project's tree (Err: why it couldn't be taken); and
-    /// the project's files the line or a script names (`inputs`), as they were.
+    /// The scripts it runs as they were: real path, text (`kept_text`: a program's size and digest; None: not
+    /// there, or not readable) — and, when one of them runs the project's code (`runs_project`), the project's
+    /// tree (Err: why it couldn't be taken); and the project's files the line or a script names (`inputs`), as
+    /// they were.
     Scripts {
         scripts: Vec<(PathBuf, Option<String>)>,
         project: Option<Result<String, String>>,
@@ -164,7 +166,7 @@ pub fn take_with(root: &Path, cwd: &Path, cmd: &str, tree: impl FnOnce() -> Resu
     if !scripts.is_empty() {
         let read = |s: &PathBuf| {
             let path = std::fs::canonicalize(cwd.join(s)).unwrap_or_else(|_| cwd.join(s));
-            let text = std::fs::read(&path).ok().and_then(|b| String::from_utf8(b).ok());
+            let text = kept_text(&path);
             (path, text)
         };
         let scripts: Vec<(PathBuf, Option<String>)> = scripts.iter().map(read).collect();
@@ -187,6 +189,77 @@ const INPUT_BYTES: u64 = 256 << 10;
 /// What a named file's text is kept as when it's named like a key or holds a token: this, then its hash — a change
 /// to it is said, its lines never shown (review 9).
 const HIDDEN: &str = "\u{0}tarae: not kept, its hash: ";
+
+/// What a file that isn't text — it holds a NUL, as `readtool` tells a binary — is kept as (frictions29 31: a program
+/// rebuilt under an ignored `target/` was "script unchanged" — kept as no text, and no text equals no text): this,
+/// its size, then its digest — or, past `HASH_MAX`, its stamp (inode and change time: any write moves it, the same
+/// bytes written again too). Its change is said, never shown.
+const BYTES: &str = "\u{0}tarae: not text, ";
+
+/// What a text that isn't UTF-8 throughout (a Latin-1 comment in a script) ends with, after its text with those bytes
+/// replaced: then its bytes' digest — shown and read as text (`readable`), compared by its bytes.
+const LOSSY: &str = "\u{0}tarae: not UTF-8 throughout, its digest: ";
+
+/// A file bigger than this is kept by its stamp, not read (a debug build's program can pass 200 MB).
+const HASH_MAX: u64 = 64 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// (Tests: `HASH_MAX` for this thread — a file kept by its stamp without writing 64 MB.)
+    static HASH_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(HASH_MAX) };
+}
+
+/// `HASH_MAX` (tests: this thread's `HASH_LIMIT`).
+fn hash_max() -> u64 {
+    #[cfg(test)]
+    return HASH_LIMIT.with(|m| m.get());
+    #[cfg(not(test))]
+    HASH_MAX
+}
+
+/// A kept text as it's shown and read: without the digest one that isn't UTF-8 throughout ends with (`LOSSY`).
+fn readable(t: &str) -> &str {
+    t.split_once(LOSSY).map_or(t, |(text, _)| text)
+}
+
+/// A file a run runs or names, as kept: its text (not UTF-8 throughout: `LOSSY`), or — not text, or past
+/// `HASH_MAX` — `BYTES` with its size and its digest or stamp. None: not there, or not readable.
+fn kept_text(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    if m.len() > hash_max() {
+        return Some(format!(
+            "{BYTES}{} bytes, its stamp: {}:{}.{}",
+            m.len(),
+            m.ino(),
+            m.ctime(),
+            m.ctime_nsec()
+        ));
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return Some(format!("{BYTES}{} bytes, its digest: {}", bytes.len(), crate::sha256::hex(&bytes)));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Some(text),
+        // (mostly text: shown with what isn't UTF-8 replaced, compared by its bytes — the reviewer's review: one
+        // Latin-1 byte made a whole script `not text`, its change unseen before a run outside the sandbox)
+        Err(e) => {
+            let bytes = e.into_bytes();
+            Some(format!("{}{LOSSY}{}", String::from_utf8_lossy(&bytes), crate::sha256::hex(&bytes)))
+        }
+    }
+}
+
+/// A kept file's size as a change says it (`not text: 543032 → 543080 bytes` — a program's bytes are never shown):
+/// `543080 bytes`, or `text`; None: not there.
+fn kept_size(kept: &Option<String>) -> Option<String> {
+    let kept = kept.as_deref()?;
+    Some(match kept.strip_prefix(BYTES).and_then(|b| b.split_once(", ")) {
+        Some((size, _)) => size.to_string(),
+        None => "text".into(),
+    })
+}
 
 /// The words of a script's `text` it writes to — after `>` or `>>` (`2>`, `&>` too), and `tee`'s — which a run
 /// changes itself: not what it reads (review 8: `echo ok > out.log` made every later card "changed").
@@ -222,25 +295,35 @@ fn inputs(
     scripts: &[(PathBuf, Option<String>)],
 ) -> Vec<(PathBuf, Option<String>)> {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let mut named: Vec<(String, PathBuf)> = Vec::new();
+    // (word, from where, whether the script runs it)
+    let mut named: Vec<(String, PathBuf, bool)> = Vec::new();
     // (the line's words, from where it runs)
     for p in crate::readonly::flat(cmd).unwrap_or_default() {
         if let crate::readonly::Part::Cmd(w) = p {
-            named.extend(w.iter().skip(1).map(|w| (w.text.clone(), cwd.to_path_buf())));
+            named.extend(w.iter().skip(1).map(|w| (w.text.clone(), cwd.to_path_buf(), false)));
         }
     }
-    // (a script's words, from beside it and from where it runs — but what it writes to)
+    // (a script's words, from beside it and from where it runs — but what it writes to; first what it runs by a
+    // relative path, a program built here, whatever its size: frictions29 31)
     for (path, text) in scripts {
-        let (Some(text), Some(dir)) = (text, path.parent()) else { continue };
+        let (Some(text), Some(dir)) =
+            (text.as_deref().filter(|t| !t.starts_with(BYTES)).map(readable), path.parent())
+        else {
+            continue;
+        };
+        for w in text.lines().flat_map(commands).filter_map(|w| w.first().copied().filter(|p| ran(p))) {
+            named.push((w.to_string(), dir.to_path_buf(), true));
+            named.push((w.to_string(), cwd.to_path_buf(), true));
+        }
         let writes = written(text);
         let words = text.split(|c: char| !(c.is_alphanumeric() || "._/-+@~".contains(c)));
         for w in words.filter(|w| (w.contains('.') || w.contains('/')) && !writes.iter().any(|x| x == w)) {
-            named.push((w.to_string(), dir.to_path_buf()));
-            named.push((w.to_string(), cwd.to_path_buf()));
+            named.push((w.to_string(), dir.to_path_buf(), false));
+            named.push((w.to_string(), cwd.to_path_buf(), false));
         }
     }
     let mut out: Vec<(PathBuf, Option<String>)> = Vec::new();
-    for (word, from) in named {
+    for (word, from, runs) in named {
         if out.len() >= INPUTS_MAX {
             break;
         }
@@ -248,7 +331,7 @@ fn inputs(
             continue;
         }
         let Ok(real) = std::fs::canonicalize(from.join(&word)) else { continue };
-        let small = std::fs::metadata(&real).is_ok_and(|m| m.is_file() && m.len() <= INPUT_BYTES);
+        let small = std::fs::metadata(&real).is_ok_and(|m| m.is_file() && (runs || m.len() <= INPUT_BYTES));
         let git = real.strip_prefix(&root).is_ok_and(|r| r.starts_with(".git"));
         let known = scripts.iter().any(|(p, _)| *p == real) || out.iter().any(|(p, _)| *p == real);
         if !small || git || known || !real.starts_with(&root) {
@@ -258,15 +341,14 @@ fn inputs(
         let secret = crate::sandbox::key_named(&root, &real)
             || crate::secretnames::named_secret(&real)
             || !crate::tokens::found_in(&real).files.is_empty();
-        let bytes = std::fs::read(&real).ok();
         let text = match secret {
-            true => bytes.map(|b| {
+            true => std::fs::read(&real).ok().map(|b| {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 b.hash(&mut h);
                 format!("{HIDDEN}{:016x}", h.finish())
             }),
-            false => bytes.and_then(|b| String::from_utf8(b).ok()),
+            false => kept_text(&real),
         };
         out.push((real, text));
     }
@@ -341,7 +423,8 @@ impl Answered {
                 let names: Vec<String> = now.iter().map(|(p, _)| crate::chat::shown(root, p)).collect();
                 said.push(match &own {
                     Changed::Lines { .. } => format!("script changed: {}", listed(&names)),
-                    _ => format!("script unchanged ({})", listed(&names)),
+                    Changed::Unknown(_) => format!("script: can't tell ({})", listed(&names)),
+                    Changed::Nothing => format!("script unchanged ({})", listed(&names)),
                 });
                 // (the files it names: what it reads, compared too — frictions29 14)
                 let read = scripts_changed(root, was, &inputs, false);
@@ -355,7 +438,8 @@ impl Answered {
                     }
                     said.push(match &read {
                         Changed::Lines { .. } => format!("files it names changed: {}", listed(&names)),
-                        _ => format!("files it names unchanged ({})", listed(&names)),
+                        Changed::Unknown(_) => format!("files it names: can't tell ({})", listed(&names)),
+                        Changed::Nothing => format!("files it names unchanged ({})", listed(&names)),
                     });
                 }
                 let own = joined(own, read);
@@ -565,18 +649,42 @@ pub(crate) fn builder(name: &str) -> bool {
 /// project that isn't text (a binary built here), or a script with a line that builds or tests (`builder`),
 /// runs a file by a relative path (`./x`, `target/debug/t`), or hands one to an interpreter (`python3 x.py`).
 fn runs_project(root: &Path, scripts: &[(PathBuf, Option<String>)]) -> bool {
-    scripts.iter().any(|(path, text)| match text {
+    scripts.iter().any(|(path, text)| match text.as_deref() {
         None => path.starts_with(root) && path.is_file(),
-        Some(t) => t.lines().any(runs_project_line),
+        Some(t) if t.starts_with(BYTES) => path.starts_with(root),
+        Some(t) => readable(t).lines().any(runs_project_line),
     })
 }
 
-/// One line of a script: whether it runs the project's code (`runs_project`) — read by words, as a shell
-/// would split it at `;` `&` `|` and brackets; a comment says nothing.
+/// One line of a script: whether it runs the project's code (`runs_project`).
 fn runs_project_line(line: &str) -> bool {
+    commands(line).into_iter().any(|words| {
+        let program = words[0];
+        let name = program.rsplit('/').next().unwrap_or(program);
+        builder(name)
+            || ran(program)
+            || (crate::tools::runner(name)
+                && !builder(name)
+                && words[1..].iter().find(|w| !w.starts_with('-')).is_some_and(|w| relative(w)))
+    })
+}
+
+/// A word naming a file from where it is (`target/debug/t`, `x.py`) — not an option, a variable, home, a root path.
+fn relative(w: &str) -> bool {
+    !w.starts_with(['/', '-', '$', '~']) && w.contains(['/', '.'])
+}
+
+/// A program a script runs by a relative path (`./probe`, `target/debug/t`): a file of the project.
+fn ran(program: &str) -> bool {
+    program.contains('/') && relative(program)
+}
+
+/// One line of a script as the commands in it — read by words, as a shell would split it at `;` `&` `|` and
+/// brackets — each the program and its words, after what only leads one (`exec`, `A=1`, `if` …); a comment has none.
+fn commands(line: &str) -> Vec<Vec<&str>> {
     let line = line.trim();
     if line.starts_with('#') {
-        return false;
+        return Vec::new();
     }
     let lead = |w: &&str| {
         (w.contains('=') && !w.starts_with('-'))
@@ -598,17 +706,10 @@ fn runs_project_line(line: &str) -> bool {
                     | "{"
             )
     };
-    line.split([';', '|', '&', '(', ')', '`']).any(|part| {
-        let mut words = part.split_whitespace().map(|w| w.trim_matches(['"', '\''])).skip_while(lead);
-        let Some(program) = words.next() else { return false };
-        let name = program.rsplit('/').next().unwrap_or(program);
-        let relative = |w: &str| !w.starts_with(['/', '-', '$', '~']) && w.contains(['/', '.']);
-        builder(name)
-            || (program.contains('/') && relative(program))
-            || (crate::tools::runner(name)
-                && !builder(name)
-                && words.find(|w| !w.starts_with('-')).is_some_and(relative))
-    })
+    line.split([';', '|', '&', '(', ')', '`'])
+        .map(|part| part.split_whitespace().map(|w| w.trim_matches(['"', '\''])).skip_while(lead).collect())
+        .filter(|words: &Vec<&str>| !words.is_empty())
+        .collect()
 }
 
 /// A script's own changes (`own`) and, as it runs the project's code, the project's since tree `kept` (None:
@@ -683,12 +784,31 @@ fn scripts_changed(
             return Changed::Unknown(format!("it runs {name} now, not what it ran then"));
         };
         names.push(name.clone());
+        // (not read then nor now: never "unchanged" — frictions29 31)
+        if before.is_none() && text.is_none() {
+            let ignored = path.strip_prefix(root).is_ok_and(|rel| {
+                let rel = rel.to_string_lossy();
+                crate::snapshot::git(root, &["check-ignore", "-q", "--", &rel], None).is_ok()
+            });
+            let git = if ignored { "git ignores it, and " } else { "" };
+            return Changed::Unknown(format!("can't tell whether {name} changed — {git}it couldn't be read"));
+        }
         if before == text {
             continue;
         }
         let hidden = |t: &Option<String>| t.as_deref().is_some_and(|t| t.starts_with(HIDDEN));
         if hidden(before) || hidden(text) {
             lines.push(format!("{name} — changed; named like a key, or it holds a token: not shown"));
+            continue;
+        }
+        let bytes = |t: &Option<String>| t.as_deref().is_some_and(|t| t.starts_with(BYTES));
+        if bytes(before) || bytes(text) {
+            let size = |t| kept_size(t).unwrap_or_else(|| "gone".into());
+            let (before, text) = (size(before), size(text));
+            // (`39 → 61 bytes`, not `39 bytes → 61 bytes`: a card cuts a diff's line at its edge)
+            let before =
+                before.strip_suffix(" bytes").filter(|_| text.ends_with(" bytes")).unwrap_or(before.as_str());
+            lines.push(format!("{name} — not text: {before} → {text}"));
             continue;
         }
         if !path.starts_with(root) {
@@ -699,6 +819,11 @@ fn scripts_changed(
             lines.push(format!("{name} — {}", if text.is_none() { "gone, or not text" } else { "new" }));
             continue;
         };
+        let (before, text) = (readable(before), readable(text));
+        if before == text {
+            lines.push(format!("{name} — changed only in bytes that aren't UTF-8 — not shown"));
+            continue;
+        }
         if !crate::tools::draws_as_itself(text) {
             lines.push(format!(
                 "{name} has characters a card can't show as they are — read it before you say yes"

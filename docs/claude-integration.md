@@ -965,7 +965,12 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   diff's colours. Past the sandbox — outside it, or with a socket (Docker's is as much as root) — the whole
   project's hunks are shown, since what runs there isn't bounded by it. A command that only reads in the
   sandbox says `it only reads`. What changed can't be told (not a git checkout, it runs other files than it
-  did): it says why, and to read it as new. It never answers for you: the card waits for its key as before,
+  did, a script that couldn't be read then nor now): it says why, and to read it as new. A program that isn't
+  text — a binary (it holds a NUL) built under an ignored `target/` — is compared by its bytes' digest, outside
+  git's view, as is one a script runs by a relative path (`./probe`, whatever its size): changed, its sizes are said
+  (`not text: 543032 → 543080 bytes`), never its bytes. One past 64 MB is compared by its inode and change time
+  instead: written again, even with the same bytes, it reads as changed. A script that isn't UTF-8 throughout (a
+  Latin-1 comment) is still shown, what isn't UTF-8 replaced, and compared by its bytes. It never answers for you: the card waits for its key as before,
   weighty as before, its warnings where they were — but you only read what's new. Nothing outside the
   project is shown: a script there is named as changed, never shown. At each answer, tarae keeps what the
   command runs, taken right before it runs (no extra wait: the run takes its place in line at once): the
@@ -1259,9 +1264,11 @@ session's — as git's own files say, both ways: an entry under `.git/worktrees`
 back is no checkout), the temp folders (`/tmp`, your `$TMPDIR`), the toolchains' sources, the crates cargo
 downloaded, Go's module cache, and the project's build folders outside it that its commands may write. Outside
 those, a card says exactly what would be read: the file, or the folder searched and what
-for. What's read goes to Claude.
+for (a pattern past 60 characters is cut; `v` shows it whole). What's read goes to Claude.
 
 - `y` once · `a` this conversation · `s` this session · `A` always here (in this project) · `n` no
+- `n` holds until the turn ends: Claude asking again for that place — outside the project, for anything in it too;
+  in it, that file or search — is told no at once ("the user said no to … this turn"), with no card
 - "This conversation" and "always" cover the place: the file, or the folder and everything in it. A read in a
   git repository outside the project offers that repository's top instead (said on the card) — never home or
   above, a place holding keys, a toolchain's home or a folder of programs, nor one where a token-like file was
@@ -1668,7 +1675,12 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
 `space v C` (or `:review-board [branch]`) has **the board** read the changes instead of the one reviewer: one
 Claude per **angle**, each reading the same diff for its own kind of fault, then one **skeptic** per group of
 their findings, told to refute them. Only what a skeptic could trace is pinned as confirmed. It takes longer
-and costs more than `space v c`: use it where a miss costs most. A review with high-risk changes no board has
+and costs more than `space v c`: use it where a miss costs most. Being the one key that spends money (≈ $3–5 a
+board), it asks first: "Start a board on frictions31?", then what the last boards cost ("≈ API $4.10 — the last 5
+boards here", the median of the last five that read to their end, from the call-order record) and the angles that
+would read; `y` starts it. A yes holds for that session and its chat's conversation — another board there starts
+without asking; a new conversation, another session or a restart asks again. A key pressed as the card comes up
+isn't taken (a script's keys meant for one session started a board in another). A review with high-risk changes no board has
 read points at it, on the rail (`space v C  a board reads the ▲`) and on the card that ends the review —
 also after a board one of whose angles failed or was stopped before it read to its end: each angle reads for its
 own kind of fault.

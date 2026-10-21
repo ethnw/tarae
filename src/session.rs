@@ -66,6 +66,9 @@ pub struct Session {
     /// (`space v C`) when `review_board` too.
     pub review_ask: bool,
     pub review_board: bool,
+    /// A yes on the board's card (`board::Ask`), and the chat's conversation it was given in: another board in this
+    /// session starts unasked while that conversation goes on. Not kept past a restart.
+    pub board_yes: Option<Option<String>>,
     /// The review being opened is for the high-risk changes a bring's card names (its `h`, #196): those not
     /// looked at, and the card's id — it opens on the first (`codereview::held_go`).
     pub review_high: Option<(u64, Vec<crate::codereview::Held>)>,
@@ -299,6 +302,7 @@ impl Session {
             code_review: None,
             review_ask: false,
             review_board: false,
+            board_yes: None,
             review_high: None,
             held_view: None,
             reviewer: None,

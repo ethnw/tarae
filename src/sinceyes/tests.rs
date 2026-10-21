@@ -202,6 +202,104 @@ fn the_files_a_script_names_are_compared_with_it() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions29 31: a program that isn't text, under an ignored `target/`, rebuilt between the yes and the ask — kept
+/// by its digest, so "script changed" (its sizes, never its bytes), never "unchanged"; the same bytes: unchanged. One a
+/// script runs by a relative path, past what a named file is kept to, rebuilt: "files it names changed". One that
+/// can't be read then nor now: can't tell, and why.
+#[test]
+fn a_program_git_ignores_is_compared_by_its_bytes() {
+    let (dir, root) = repo("program");
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let sb = root.join("target/sb");
+    std::fs::create_dir_all(&sb).unwrap();
+    let build = |name: &str, len: usize, n: &str| {
+        let mut b = b"\x7fELF\xff\x00".to_vec();
+        b.resize(len.max(6), 0xff);
+        b.extend(n.bytes());
+        std::fs::write(sb.join(name), b).unwrap();
+    };
+    build("probe", 0, "one");
+    let cmd = "./target/sb/probe";
+    let y = yes(&root, cmd);
+    let s = y.since(&root, &root, cmd, false);
+    assert!(s.unchanged && !s.script_changed, "{s:?}");
+    build("probe", 0, "two, rebuilt");
+    for outside in [false, true] {
+        let s = y.since(&root, &root, cmd, outside);
+        assert!(!s.unchanged && s.script_changed, "{s:?}");
+        assert!(s.head().contains("\n  script changed: target/sb/probe"), "{}", s.head());
+        let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
+        let said = "target/sb/probe — not text: 9 → 18 bytes";
+        assert!(lines.iter().any(|l| l == said), "{lines:#?}");
+    }
+    // A program a script runs, bigger than a named file is kept to: rebuilt, the same size
+    std::fs::write(sb.join("run.sh"), "set -e\n./probe-big --drain\n").unwrap();
+    build("probe-big", 300 << 10, "a");
+    let cmd = "sh target/sb/run.sh";
+    let y = yes(&root, cmd);
+    let Kept::Scripts { inputs, .. } = &y.kept else { panic!("{:?}", y.kept) };
+    assert_eq!(inputs.len(), 1, "{inputs:?}");
+    assert!(y.since(&root, &root, cmd, false).unchanged);
+    build("probe-big", 300 << 10, "b");
+    let s = y.since(&root, &root, cmd, false);
+    assert!(!s.unchanged && s.script_changed, "{s:?}");
+    assert!(s.head().contains("\n  files it names changed: target/sb/probe-big"), "{}", s.head());
+    // Not there then nor now: can't tell, never unchanged
+    let cmd = "sh target/sb/gone.sh";
+    let s = yes(&root, cmd).since(&root, &root, cmd, false);
+    let why = "can't tell whether target/sb/gone.sh changed — git ignores it, and it couldn't be read";
+    assert_eq!(s.changed, Changed::Unknown(why.into()), "{s:?}");
+    assert!(!s.unchanged && s.head().contains("; read it as new."), "{}", s.head());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The reviewer's review of frictions32: a script with a byte that isn't UTF-8 (a Latin-1 comment) is still text —
+/// its diff shown with that byte replaced, the files it names followed; a change in that byte alone is said, never
+/// "unchanged". A file past the digest's limit is kept by its stamp: left alone, unchanged; written again with the
+/// same bytes, changed (as the docs say).
+#[test]
+fn a_script_not_utf8_throughout_is_shown_and_a_big_one_kept_by_its_stamp() {
+    let (dir, root) = repo("latin1");
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let sb = root.join("target/sb");
+    std::fs::create_dir_all(&sb).unwrap();
+    std::fs::write(sb.join("hosts.txt"), "a\n").unwrap();
+    let script = |echo: &str, byte: u8| {
+        let mut b = b"# caf".to_vec();
+        b.push(byte);
+        b.extend(format!("\ncat hosts.txt\necho {echo}\n").bytes());
+        std::fs::write(sb.join("go.sh"), b).unwrap();
+    };
+    script("one", 0xe9);
+    let cmd = "sh target/sb/go.sh";
+    let y = yes(&root, cmd);
+    let Kept::Scripts { inputs, .. } = &y.kept else { panic!("{:?}", y.kept) };
+    assert_eq!(inputs.len(), 1, "the file it names, followed: {inputs:?}");
+    assert!(y.since(&root, &root, cmd, false).unchanged);
+    script("two", 0xe9);
+    let s = y.since(&root, &root, cmd, false);
+    let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
+    assert!(lines.iter().any(|l| l == "-echo one") && lines.iter().any(|l| l == "+echo two"), "{lines:#?}");
+    assert!(!lines.iter().any(|l| l.contains('\0')), "{lines:#?}");
+    // Only the byte that isn't UTF-8 changed
+    script("one", 0xe8);
+    let s = y.since(&root, &root, cmd, false);
+    assert!(s.script_changed && !s.unchanged, "{s:?}");
+    let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
+    let said = "target/sb/go.sh — changed only in bytes that aren't UTF-8 — not shown";
+    assert!(lines.iter().any(|l| l == said), "{lines:#?}");
+    // Past the digest's limit: by its stamp
+    HASH_LIMIT.with(|m| m.set(16));
+    let y = yes(&root, cmd);
+    assert!(y.since(&root, &root, cmd, false).unchanged, "left alone");
+    let bytes = std::fs::read(sb.join("go.sh")).unwrap();
+    std::fs::write(sb.join("go.sh"), &bytes).unwrap();
+    let s = y.since(&root, &root, cmd, false);
+    HASH_LIMIT.with(|m| m.set(HASH_MAX));
+    assert!(s.script_changed && !s.unchanged, "the same bytes written again: by its stamp, changed — {s:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// frictions30's review (6, 8, 9): of what a script names, what it writes (`> out.log`, `tee`) isn't compared — a
 /// run changes it itself; a file made since the yes isn't either (the run's own, or named by a script whose own diff
 /// shows it); one gone since is said; one named like a key or holding a token is compared by its hash, its change

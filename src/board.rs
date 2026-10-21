@@ -259,7 +259,106 @@ pub fn start(ed: &mut crate::editor::Editor) {
     if chosen.is_empty() {
         return ed.set_status("no angle's `when` holds for these changes — space v c reads them in one pass");
     }
-    crate::reviewer::gather(ed, Some(Board::new(chosen)));
+    // (asked once for this session and its conversation — a second board in the same work starts unasked)
+    if ed.session.board_yes.as_ref() == Some(&conversation(ed)) {
+        return crate::reviewer::gather(ed, Some(Board::new(chosen)));
+    }
+    ask(ed, chosen, r.started);
+}
+
+/// A board asks before it starts — the one key that spends money (frictions29 32, the user's choice 2026-10-19: a
+/// driver's keys meant for one session started a board, ≈ $5, in another). Its card names the session and what the
+/// last boards cost; `y` starts it. A yes holds for that session and its chat's conversation (`Session.board_yes`):
+/// a second board in the same work starts unasked; another conversation, or another session, asks again. Not kept
+/// past a restart.
+#[derive(Clone, Debug)]
+pub struct Ask {
+    pub session: crate::event::SessionId,
+    /// The session's name, as the card says it.
+    pub name: String,
+    /// The chat's conversation it was asked in (None: no chat, or none begun).
+    pub conversation: Option<String>,
+    /// The review it's for (`CodeReview.started`): one ended meanwhile starts no board.
+    pub review: std::time::Instant,
+    pub angles: Vec<Angle>,
+    /// What the last boards cost (`estimate`), read before the card.
+    pub estimate: Option<(f64, usize)>,
+}
+
+/// The conversation a yes on the board's card holds for: the session's chat's, if one's begun.
+fn conversation(ed: &crate::editor::Editor) -> Option<String> {
+    ed.session.chat.as_ref().and_then(|c| c.conversation.clone())
+}
+
+/// What the last boards cost read on a worker (the call-order record), then the card — one a session.
+fn ask(ed: &mut crate::editor::Editor, angles: Vec<Angle>, review: std::time::Instant) {
+    let up = |ed: &crate::editor::Editor| {
+        ed.offers.iter().any(|o| matches!(&o.what, crate::offer::What::Board(_)))
+    };
+    if up(ed) {
+        return ed.set_status("the board's card is up — y starts it, n doesn't");
+    }
+    let a = Ask {
+        session: ed.session.id,
+        name: ed.session.name.clone(),
+        conversation: conversation(ed),
+        review,
+        angles,
+        estimate: None,
+    };
+    let record = ed.calls_dir.clone();
+    ed.events.jobs().spawn(move || {
+        let estimate = record.and_then(|d| estimate(&d, crate::clock::system()));
+        // (applied in its own session — `jobs()`: a switch meanwhile leaves the card there, as it goes with its
+        // session; the review may have ended meanwhile, or another card come for it — said, never dropped in silence)
+        move |ed: &mut crate::editor::Editor| {
+            if ed.session.code_review.as_ref().is_none_or(|r| r.started != a.review) {
+                return ed.set_status("the review ended before the board's card came — no board");
+            }
+            if up(ed) {
+                return ed.set_status("the board's card is up — y starts it, n doesn't");
+            }
+            ed.push_offer(card(Ask { estimate, ..a }));
+        }
+    });
+}
+
+/// The card: the question its title (`Start a board on frictions31?`), what the last boards cost its first line
+/// (`≈ API $4.10 — the last 5 boards here`, their median), then its angles and how long a yes holds.
+pub fn card(a: Ask) -> crate::offer::Offer {
+    let cost = match a.estimate {
+        Some((c, 1)) => format!("≈ API ${c:.2} — the last board here"),
+        Some((c, k)) => format!("≈ API ${c:.2} — the last {k} boards here"),
+        None => "its cost isn't known yet — no board has ended whole here".into(),
+    };
+    let names: Vec<&str> = a.angles.iter().map(|x| x.name.as_str()).collect();
+    let (n, them) = match names.len() {
+        1 => ("One Claude reads".to_string(), "from its angle"),
+        k => (format!("{k} Claudes read"), "each from its angle"),
+    };
+    let q = format!(
+        "{cost}\n\n{n} the changes, {them} — {} — then a skeptic checks each group of their claims.\n\nA yes \
+         holds for this session and its conversation: another board here starts without asking.",
+        names.join(", ")
+    );
+    let title = format!("Start a board on {}?", a.name);
+    crate::offer::Offer::new(title, &q, "", String::new(), crate::offer::What::Board(Box::new(a)))
+}
+
+/// The board's card answered: `y` starts it (its review still the one there), and holds for the session and its
+/// conversation; `n` starts none.
+pub fn answer(ed: &mut crate::editor::Editor, a: Ask, yes: bool) {
+    if !yes {
+        return ed.set_status("no board — space v C asks again");
+    }
+    if ed.session.id != a.session || ed.session.code_review.as_ref().is_none_or(|r| r.started != a.review) {
+        return ed.set_status("that review is over — no board started");
+    }
+    if ed.session.reviewer.as_ref().is_some_and(crate::reviewer::Reviewer::reading) {
+        return ed.set_status("the reviewer is still reading — :reviewer-stop stops it");
+    }
+    ed.session.board_yes = Some(a.conversation.clone());
+    crate::reviewer::gather(ed, Some(Board { estimate: a.estimate, ..Board::new(a.angles) }));
 }
 
 /// What a skeptic made of a claim — none yet while it's open.

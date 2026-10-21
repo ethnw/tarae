@@ -600,6 +600,51 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// frictions29 33: tarae's `search` of a folder outside the project asks on Read's card, which names what it
+    /// searches for (it said `for ` and nothing) and the files it keeps to; a pattern too long for the card is cut,
+    /// and `v` shows it whole.
+    #[test]
+    fn a_searchs_card_names_its_pattern() {
+        let (dir, outside, base) = places("search-card");
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.chat = Some(crate::chat::Chat::new());
+        let generation = ed.session.chat.as_ref().unwrap().generation();
+        let settle = |ed: &mut Editor| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                let ev = ed.events.recv_timeout(left).expect("its card before the timeout");
+                ed.handle_event(ev);
+            }
+        };
+        let real = std::fs::canonicalize(&outside).unwrap();
+        let search = |ed: &mut Editor, n: u64, pattern: &str| {
+            let args = json!({"pattern": pattern, "path": outside.display().to_string(), "glob": "*.txt"});
+            crate::nav::search(ed, Call::of(generation, "", json!(n)), &args).unwrap();
+            settle(ed);
+            (ed.offers[0].question.clone(), ed.offers[0].answers(false))
+        };
+        let (q, answers) = search(&mut ed, 921, "outside marker");
+        let head =
+            format!("searches {} and everything in it\nfor outside marker\nin files *.txt\n", real.display());
+        assert!(q.starts_with(&head), "{q}");
+        assert!(!answers.iter().any(|a| a.0 == 'v'), "{answers:?}");
+        ed.offer_dismiss();
+        crate::reads::turn_over(&mut ed);
+        // Too long for the card: cut, whole on `v`
+        let long = format!("terminals{}", "|grant".repeat(50));
+        let (q, answers) = search(&mut ed, 922, &long);
+        assert!(q.contains(&format!("\nfor {}…\n", &long[..60])), "{q}");
+        assert!(answers.contains(&('v', "Pattern")), "{answers:?}");
+        ed.offer_view();
+        let shown = ed.doc().text.to_string();
+        assert!(shown.contains(&format!("The whole pattern:\n\n{long}\n")), "{shown}");
+        // (one a card can't show as it is: escaped)
+        assert_eq!(crate::reads::pattern_shown("a\nb\u{202E}c"), ("a\\nb\\u{202e}c".to_string(), false));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// The whole way: a read outside the project waits on Read's card holding its call; `y` runs it again
     /// and answers with the text, `n` answers no — the call answered either way.
     #[test]
@@ -643,10 +688,25 @@ mod tests {
             settle(&mut ed, &|_| answered(n).is_some());
             match (yes, answered(n).unwrap()) {
                 (true, Ok(t)) => assert!(t.ends_with("1: outside marker"), "{t}"),
-                (false, Err(e)) => assert!(e.starts_with("the user chose not to let you read"), "{e}"),
+                (false, Err(e)) => {
+                    assert!(e.starts_with("the user chose not to let you read"), "{e}");
+                    assert!(e.ends_with("(this no holds for the rest of the turn)"), "{e}");
+                }
                 (_, r) => panic!("{r:?}"),
             }
         }
+        // frictions29 34: the no holds for that file until the turn ends — asked again, told so at once, no card
+        let args = json!({ "files": [o.display().to_string()] });
+        call(&mut ed, Call::of(generation, "", json!(903)), &args).unwrap();
+        settle(&mut ed, &|_| answered(903).is_some());
+        let e = answered(903).unwrap().unwrap_err();
+        let real = std::fs::canonicalize(&o).unwrap();
+        assert!(e.starts_with(&format!("the user said no to {} this turn", real.display())), "{e}");
+        assert!(card(&ed).is_none(), "no card");
+        // The turn's end: asked again, a card again
+        crate::reads::turn_over(&mut ed);
+        call(&mut ed, Call::of(generation, "", json!(904)), &args).unwrap();
+        settle(&mut ed, &|ed| card(ed).is_some());
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -1,5 +1,25 @@
 use super::*;
 
+/// The board's card asks its question in the title and says the cost on its first line — the last boards' median
+/// once some ended whole, else that it isn't known.
+#[test]
+fn the_boards_card_asks_then_says_the_cost() {
+    let ask = |estimate| Ask {
+        session: 0,
+        name: "frictions31".into(),
+        conversation: None,
+        review: std::time::Instant::now(),
+        angles: built_in(),
+        estimate,
+    };
+    let first = |o: &crate::offer::Offer| o.question.lines().next().unwrap_or_default().to_string();
+    let o = card(ask(Some((4.1, 5))));
+    assert_eq!(o.title, "Start a board on frictions31?");
+    assert_eq!(first(&o), "≈ API $4.10 — the last 5 boards here");
+    assert_eq!(first(&card(ask(Some((3.0, 1))))), "≈ API $3.00 — the last board here");
+    assert_eq!(first(&card(ask(None))), "its cost isn't known yet — no board has ended whole here");
+}
+
 fn changed(rel: &str, grade: Grade) -> Changed {
     Changed { rel: rel.into(), grade: Some(grade) }
 }

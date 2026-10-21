@@ -293,7 +293,8 @@ pub fn gather(ed: &mut Editor, board: Option<crate::board::Board>) {
     let (root, label, of, n) = (r.root.clone(), r.base.label(), r.started, r.files.len());
     let Some(diff) = crate::codereview::diff_work(ed) else { return };
     let at = root.clone();
-    let record = board.as_ref().and(ed.calls_dir.clone());
+    // (a board its card asked for has what the last cost already — not read twice)
+    let record = board.as_ref().filter(|b| b.estimate.is_none()).and(ed.calls_dir.clone());
     let work = move || {
         let head = crate::gitrepo::git(&at, &["rev-parse", "HEAD"], None).unwrap_or_default();
         let estimate = record.and_then(|d| crate::board::estimate(&d, crate::clock::system()));
@@ -308,7 +309,7 @@ pub fn gather(ed: &mut Editor, board: Option<crate::board::Board>) {
         if ed.session.code_review.as_ref().is_none_or(|r| r.started != of) {
             return;
         }
-        let board = board.map(|b| crate::board::Board { estimate, ..b });
+        let board = board.map(|b| crate::board::Board { estimate: b.estimate.or(estimate), ..b });
         begin(ed, Gathered { root, label, of, n, head, diff }, board);
     });
 }
@@ -1642,9 +1643,20 @@ fn verdict_sync(ed: &mut Editor) {
 mod tests {
     use super::*;
 
+    /// Events handled until `done` holds — a board's card in front answered `y`, the yes every board test here takes
+    /// for granted (the card's own test asks it itself: `space_v_capital_c_asks_then_starts_the_board`).
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
+        settle_with(ed, done, true)
+    }
+
+    /// `settle_until`; `yes`: a board's card in front answered `y`.
+    fn settle_with(ed: &mut Editor, done: impl Fn(&Editor) -> bool, yes: bool) {
         let end = Instant::now() + std::time::Duration::from_secs(10);
         while !done(ed) {
+            if yes && ed.offers.first().is_some_and(|o| matches!(o.what, crate::offer::What::Board(_))) {
+                ed.offer_accept();
+                continue;
+            }
             let left = end.saturating_duration_since(Instant::now());
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
             ed.handle_event(ev);
@@ -3304,9 +3316,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `space v C` opens the review and starts the board; its end is said with what it found.
+    /// `space v C` opens the review and asks first (frictions29 32 — the key that spends money): a card naming the
+    /// session and what boards cost, weighty — a `y` sent as it came up is refused, said so, no board; `y` once it's
+    /// settled starts it, and its end is said with what it found. The next board in this session and conversation
+    /// starts unasked; in another conversation it asks again.
     #[test]
-    fn space_v_capital_c_starts_the_board() {
+    fn space_v_capital_c_asks_then_starts_the_board() {
+        use crate::offer::What;
         let (dir, repo) = place("board-key");
         let mut ed = Editor::new(crate::config::Config::default());
         fake_board(
@@ -3318,19 +3334,65 @@ mod tests {
             ],
         );
         (ed.session.root, ed.session.name) = (repo.clone(), "author".into());
-        let a = repo.join("a.txt");
-        ed.open(&a).unwrap();
-        for k in ["space", "v", "C"] {
-            ed.handle_key(k.parse().unwrap());
-        }
-        settle_until(&mut ed, |ed| {
-            ed.session.reviewer.as_ref().is_some_and(|r| r.board.is_some() && !r.reading())
-        });
+        ed.open(&repo.join("a.txt")).unwrap();
+        let keys =
+            |ed: &mut Editor, keys: &[&str]| keys.iter().for_each(|k| ed.handle_key(k.parse().unwrap()));
+        let card = |ed: &Editor| ed.offers.first().filter(|o| matches!(o.what, What::Board(_))).cloned();
+        let drawn = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();
+        keys(&mut ed, &["space", "v", "C"]);
+        settle_with(&mut ed, |ed| card(ed).is_some(), false);
+        let o = card(&ed).unwrap();
+        assert_eq!(o.title, "Start a board on author?");
+        let head = "its cost isn't known yet — no board has ended whole here\n\n2 Claudes read the changes, each \
+                    from its angle — correctness, tests —";
+        assert!(o.question.starts_with(head), "{}", o.question);
+        assert!(o.question.contains("A yes holds for this session and its conversation"), "{}", o.question);
+        assert_eq!(o.answers(false), [('y', "Start it"), ('n', "Not now")]);
+        // A `y` sent as it came up: refused, no board
+        drawn(&mut ed);
+        keys(&mut ed, &["y"]);
+        assert!(card(&ed).is_some() && ed.session.reviewer.is_none(), "not taken");
+        let said = ed.offer_said_now().unwrap_or_default();
+        assert!(said.contains("came as the card did"), "said on the card: {said:?}");
+        // Settled: `y` starts it
+        ed.offer_seen.set(Some((o.id, o.rev, Instant::now() - crate::offer::SETTLE)));
+        drawn(&mut ed);
+        keys(&mut ed, &["y"]);
+        let done =
+            |ed: &Editor| ed.session.reviewer.as_ref().is_some_and(|r| r.board.is_some() && !r.reading());
+        settle_with(&mut ed, done, false);
         assert!(
             ed.messages.iter().any(|m| m.2.contains("the board is done: no findings")),
             "{:?}",
             ed.messages
         );
+        assert_eq!(ed.session.board_yes, Some(None), "held for this session, no conversation begun");
+        // The next one here: unasked
+        let first = ed.session.reviewer.as_ref().unwrap().board.as_ref().unwrap().id.clone();
+        keys(&mut ed, &["space", "v", "C"]);
+        assert!(card(&ed).is_none(), "asked once");
+        let next = |ed: &Editor| {
+            ed.session.reviewer.as_ref().is_some_and(|r| r.board.as_ref().is_some_and(|b| b.id != first))
+        };
+        settle_with(&mut ed, |ed| next(ed) && !ed.session.reviewer.as_ref().unwrap().reading(), false);
+        // Another conversation: asked again, `n` starts none
+        let mut chat = crate::chat::Chat::new();
+        (chat.conversation, chat.focused) = (Some("conv-2".into()), false);
+        ed.session.chat = Some(chat);
+        keys(&mut ed, &["space", "v", "C"]);
+        settle_with(&mut ed, |ed| card(ed).is_some(), false);
+        ed.offer_dismiss();
+        assert!(
+            ed.messages.last().is_some_and(|m| m.2 == "no board — space v C asks again"),
+            "{:?}",
+            ed.messages
+        );
+        // The review closed while its cost was read: said, no card (the reviewer's review of frictions32)
+        keys(&mut ed, &["space", "v", "C"]);
+        crate::codereview::close(&mut ed);
+        let gone = "the review ended before the board's card came — no board";
+        settle_with(&mut ed, |ed| ed.messages.iter().any(|m| m.2 == gone), false);
+        assert!(card(&ed).is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
