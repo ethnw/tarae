@@ -394,11 +394,16 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&ed.session.root, &path), line + 1))
 }
 
-/// Where a new note goes: `path` (relative to `root`) and its lines, 0-based.
+/// Where a new note goes: `path` (relative to `root`) and its lines, 0-based. In `root` only, by its real path,
+/// asked before anything about the file: a path outside gets one answer whether or not it's there — a note's
+/// lines go to Claude on the user's reply, and only the Read card lets Claude see outside (auditfix2 F12).
 fn placed(root: &Path, args: &Value) -> Result<(PathBuf, Range<usize>), String> {
     let path =
         args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path and line are required for a new note")?;
     let path = crate::chat::resolve(root, path);
+    if crate::paths::inside(root, &path).is_none() {
+        return Err("outside the project — notes go on its files only".into());
+    }
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     if !path.is_file() {
         return Err(format!("{} isn't a file", path.display()));
@@ -995,12 +1000,12 @@ mod tests {
     /// there was a reviewer (`claude`) reads as the author's.
     #[test]
     fn notes_carry_their_author() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-by-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-by");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
         let f = dir.join("a.rs");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
         let mut ed = editor();
+        ed.session.root = dir.clone();
         ed.open(&f).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 1, "text": "the author's"})).unwrap();
         let (found, _) =
@@ -1027,8 +1032,33 @@ mod tests {
         std::fs::write(&outside, "x\n").unwrap();
         assert!(finding(&mut ed, &dir, &json!({"path": outside, "line": 1, "text": "out"})).is_err());
         assert!(finding(&mut ed, &dir, &json!({"reply_to": 1, "text": "re"})).is_err());
-        std::fs::remove_file(&outside).ok();
-        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// auditfix2 F12: Claude's `note` pins on the project's files only — a file outside it (a stand-in in the
+    /// test's own scratch folder) and a name there that isn't get one answer and no note: neither its lines (on
+    /// the user's reply) nor whether it exists reach Claude without the Read card. Inside: pinned.
+    #[test]
+    fn a_note_outside_the_project_is_refused_alike() {
+        let (inside, away) =
+            (crate::scratch::Scratch::new("notes-in"), crate::scratch::Scratch::new("notes-out"));
+        let root = std::fs::canonicalize(inside.path()).unwrap();
+        let out = std::fs::canonicalize(away.path()).unwrap();
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        std::fs::write(out.join("hosts"), "127.0.0.1 stand-in\n").unwrap();
+        let mut ed = editor();
+        ed.session.root = root.clone();
+        let pin =
+            |ed: &mut Editor, path: &Path| tool_call(ed, &json!({"path": path, "line": 1, "text": "t"}));
+        let there = pin(&mut ed, &out.join("hosts")).unwrap_err();
+        let none = pin(&mut ed, &out.join("nothing")).unwrap_err();
+        assert!(there.contains("outside the project"), "{there}");
+        assert_eq!(there, none, "one answer, there or not");
+        // (through a link in the project too)
+        std::os::unix::fs::symlink(&out, root.join("away")).unwrap();
+        assert_eq!(pin(&mut ed, Path::new("away/hosts")).unwrap_err(), there);
+        assert!(ed.session.notes.list.is_empty());
+        pin(&mut ed, Path::new("a.rs")).unwrap();
+        assert_eq!(ed.session.notes.list.len(), 1);
     }
 
     fn feed(ed: &mut Editor, keys: &str) {
@@ -1088,6 +1118,7 @@ mod tests {
         std::fs::write(&f, "one\ntwo\nthree\nfour\n").unwrap();
         std::fs::write(&g, "alpha\nbeta\n").unwrap();
         let mut ed = editor();
+        ed.session.root = dir.clone();
         ed.open(&f).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 1, "text": "the author's"})).unwrap();
         let find = |ed: &mut Editor, path: &str, line: u64, text: &str| {
@@ -1264,12 +1295,12 @@ mod tests {
     /// does the same from the command line, `:notes-clear` closes every note.
     #[test]
     fn notes_close_by_row_or_by_author() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-close-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-close");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
         let f = dir.join("a.rs");
         std::fs::write(&f, "one\ntwo\nthree\nfour\nfive\n").unwrap();
         let mut ed = editor();
+        ed.session.root = dir.clone();
         ed.open(&f).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 1, "text": "the author's"})).unwrap();
         finding(&mut ed, &dir, &json!({"path": "a.rs", "line": 2, "text": "found one"})).unwrap();
@@ -1296,12 +1327,12 @@ mod tests {
     /// closed at once, as before.
     #[test]
     fn closing_by_author_asks_first_over_your_unsent_drafts() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-drafts-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-drafts");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
         let f = dir.join("a.rs");
         std::fs::write(&f, "one\ntwo\nthree\nfour\nfive\n").unwrap();
         let mut ed = editor();
+        ed.session.root = dir.clone();
         ed.open(&f).unwrap();
         let one = finding(&mut ed, &dir, &json!({"path": "a.rs", "line": 2, "text": "found one"})).unwrap().0;
         finding(&mut ed, &dir, &json!({"path": "a.rs", "line": 3, "text": "found two"})).unwrap();
@@ -1359,12 +1390,12 @@ mod tests {
     /// line are two rows, each its own.
     #[test]
     fn a_row_closes_its_own_note_when_two_say_the_same() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-same-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-same");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
         let f = dir.join("a.rs");
         std::fs::write(&f, "one\ntwo\n").unwrap();
         let mut ed = editor();
+        ed.session.root = dir.clone();
         ed.open(&f).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 2, "text": "same"})).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 2, "text": "same"})).unwrap();
@@ -1381,12 +1412,12 @@ mod tests {
     /// a note past the end of a shrunk file lands on the last line instead of crashing.
     #[test]
     fn notes_survive_a_restart_and_outside_edits() {
-        let dir = std::env::temp_dir().join(format!("tarae-notes-save-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("notes-save");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
         let f = dir.join("a.rs");
         std::fs::write(&f, "a\nb\ntarget();\nc\n").unwrap();
-        let f = std::fs::canonicalize(&f).unwrap();
         let mut ed = editor();
+        ed.session.root = dir.clone();
         ed.open(&f).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 3, "text": "look here"})).unwrap();
         tool_call(&mut ed, &json!({"reply_to": 1, "text": "and here"})).unwrap();

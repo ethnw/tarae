@@ -1502,7 +1502,8 @@ message, the branch, each file with its line counts, and the first lines of the 
   exactly as it was. A named file you staged part of goes in whole, and the card says so; so does one with
   unsaved changes in a buffer (what's on disk goes in).
 - **A protected name** (`Cargo.toml`, a `Makefile`, `.github`, …: what a build or a tool runs later, outside the
-  sandbox) **or a key file** is in the warning colour on its row.
+  sandbox), **a key file or a git hook** (a file of the checkout's own hooks folder: once committed, your git-tab
+  actions run it with no hooks card) is in the warning colour on its row.
 - **Refused, with the reason:** a folder; a path outside the project or the checkout; anything in `.git`; a file
   inside another repository; an ignored untracked file; a file with no change from HEAD; an empty message.
   Also refused while a rebase, a merge, a cherry-pick or a revert is under way, or the index has conflicts.

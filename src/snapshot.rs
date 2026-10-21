@@ -441,29 +441,55 @@ fn batch(root: &Path, mode: &str, ids: &[&str]) -> Result<Vec<u8>, String> {
     Ok(ran.stdout)
 }
 
-/// Blob `id` written out at `path` (its folder made) — None: `path` removed. Only while `path` is still
-/// `expect` (a blob id; None: no file): a file changed since is left as it is (Err says so).
+/// Blob `id` written out at `path` (its folders made) — None: `path` removed. Only while `path` is still
+/// `expect` (a blob id; None: no file): a file changed since is left as it is (Err says so). In the project
+/// only, read and written through no link from its root (`beneath.rs`), as `checkpoint::file` writes text: a
+/// run of Claude's may have swapped a folder for a link to outside since the turn — refused, never gone
+/// through.
 pub fn put(root: &Path, path: &Path, expect: Option<&str>, id: Option<&str>) -> Result<(), String> {
     let shown = crate::chat::shown(root, path);
-    let now = match path.exists() {
-        false => None,
-        true => {
-            let p = path.to_string_lossy();
-            // (as `add` hashed it: through the checkout's filters)
-            Some(git(root, &["hash-object", "--", &p], None)?.trim().to_string())
+    let said = |e: std::io::Error| format!("{shown}: {e}");
+    let base = crate::beneath::Dir::root(root).map_err(said)?;
+    let rel = path
+        .strip_prefix(&base.at)
+        .or_else(|_| path.strip_prefix(root))
+        .map_err(|_| format!("{shown} is outside the project — left as it is"))?;
+    let (Some(name), Some(folder)) = (rel.file_name(), rel.parent()) else {
+        return Err(format!("{shown}: no file named"));
+    };
+    let now = match base.folder(folder, false) {
+        Ok(d) => d.read(name).map_err(said)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(said(e)),
+    };
+    let there = now.is_some();
+    let now = match now {
+        None => None,
+        // (as `add` hashed it: through the checkout's filters — the bytes read above, by their path from the root)
+        Some(bytes) => {
+            let at = format!("--path={}", rel.to_string_lossy());
+            let ran =
+                crate::gitrepo::ran(&command(root, &["hash-object", "--stdin", &at], None)?, Some(&bytes))?;
+            if !ran.ok {
+                return Err(format!("{shown}: git hash-object failed"));
+            }
+            Some(String::from_utf8_lossy(&ran.stdout).trim().to_string())
         }
     };
     if now.as_deref() != expect {
         return Err(format!("{shown} changed since — left as it is"));
     }
     match id {
-        None => std::fs::remove_file(path).map_err(|e| format!("{shown}: {e}")),
+        None => base.folder(folder, false).and_then(|d| d.remove(name)).map_err(said),
         Some(id) => {
             let bytes = git_bytes(root, &["cat-file", "blob", id], None)?;
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("{shown}: {e}"))?;
+            let d = base.folder(folder, true).map_err(said)?;
+            match there {
+                true => d.replace(name, &bytes),
+                false => d.create(name, &bytes),
             }
-            std::fs::write(path, bytes).map_err(|e| format!("{shown}: {e}"))
+            .map(|_| ())
+            .map_err(said)
         }
     }
 }

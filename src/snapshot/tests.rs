@@ -45,6 +45,54 @@ fn file(c: &[Change], dir: &Path, rel: &str) -> Change {
     c.iter().find(|c| c.path == dir.join(rel)).cloned().unwrap_or_else(|| panic!("{rel} in {c:#?}"))
 }
 
+/// auditfix2 F9: `space u` putting back a file that isn't text writes through its folders by descriptor, as
+/// text does (`checkpoint::file`) — `bin/` swapped for a link to outside since the turn (what a sandboxed run
+/// can do): neither making the file again nor removing it reaches the folder the link leads to, and what's
+/// there now is read through no link (the same bytes outside aren't "the turn's"). Outside the project:
+/// refused. Through no link it's put back and removed as before.
+#[test]
+fn putting_a_blob_back_never_goes_through_a_link_swapped_in() {
+    let dir = std::fs::canonicalize(repo("put-beneath")).unwrap();
+    let away = crate::scratch::Scratch::new("snapshot-put-outside");
+    let outside = std::fs::canonicalize(away.path()).unwrap();
+    let bytes = b"\x00\x01bin-made";
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("bin/made.bin"), bytes).unwrap();
+    let made = dir.join("bin/made.bin");
+    let id =
+        git(&dir, &["hash-object", "-w", "--", &made.to_string_lossy()], None).unwrap().trim().to_string();
+    std::fs::rename(dir.join("bin"), dir.join("bin.aside")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("bin")).unwrap();
+    let empty = || std::fs::read_dir(&outside).unwrap().count() == 0;
+    // Made again (undoing a turn that deleted it): never through the link
+    let e = put(&dir, &made, None, Some(&id)).unwrap_err();
+    assert!(e.contains("a link"), "{e}");
+    assert!(empty(), "nothing made through the link");
+    // Removed (undoing a turn that made it): the same bytes outside stay
+    std::fs::write(outside.join("made.bin"), bytes).unwrap();
+    let e = put(&dir, &made, Some(&id), None).unwrap_err();
+    assert!(e.contains("a link"), "{e}");
+    assert_eq!(std::fs::read(outside.join("made.bin")).unwrap(), bytes, "never removed through the link");
+    std::fs::remove_file(outside.join("made.bin")).unwrap();
+    // A path outside the project
+    let e = put(&dir, &outside.join("made.bin"), None, Some(&id)).unwrap_err();
+    assert!(e.contains("outside the project"), "{e}");
+    assert!(empty(), "nothing made outside");
+    // Through no link: as before
+    std::fs::remove_file(dir.join("bin")).unwrap();
+    std::fs::rename(dir.join("bin.aside"), dir.join("bin")).unwrap();
+    std::fs::remove_file(&made).unwrap();
+    std::fs::remove_dir(dir.join("bin")).unwrap();
+    put(&dir, &made, None, Some(&id)).unwrap();
+    assert_eq!(std::fs::read(&made).unwrap(), bytes, "made again, its folder too");
+    std::fs::write(&made, b"\x00other").unwrap();
+    let e = put(&dir, &made, Some(&id), None).unwrap_err();
+    assert!(e.contains("changed since"), "{e}");
+    std::fs::write(&made, bytes).unwrap();
+    put(&dir, &made, Some(&id), None).unwrap();
+    assert!(!made.exists());
+}
+
 /// What a run changed: a line (text both sides), a file that isn't text (by its blobs), one deleted, one
 /// new, an untracked one changed — and nothing of the ignored build folder. git's own index is left as it
 /// was; tarae's is kept for the next one. Nothing changed: no changes. A file the editor wrote meanwhile

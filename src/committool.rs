@@ -71,6 +71,10 @@ pub fn schema() -> Value {
 pub const PROTECTED: (&str, &str) =
     ("protected", "Protected: a build or a tool runs it later, outside the sandbox.");
 pub const KEY: (&str, &str) = ("a key file", "A key file: what's in it goes into the history.");
+pub const HOOK: (&str, &str) = (
+    "a git hook",
+    "A git hook: runs as you, outside the sandbox, on commit, push, pull … — once committed, no card asks.",
+);
 
 /// A commit asked for, worked out: what the card shows and what `y` commits.
 #[derive(Clone, Debug)]
@@ -108,7 +112,8 @@ pub struct File {
     pub lines: Option<(usize, usize)>,
     /// `A` new · `D` deleted · `M` changed · `T` its type.
     pub status: char,
-    /// What yes means for it, in the warning colour: a protected name, a key file (`PROTECTED`, `KEY`).
+    /// What yes means for it, in the warning colour: a protected name, a key file, a git hook (`PROTECTED`,
+    /// `KEY`, `HOOK`).
     pub warn: Option<&'static str>,
 }
 
@@ -345,6 +350,18 @@ pub fn prepare(root: &Path, message: &str, paths: &[String], unsaved: &[PathBuf]
             })
             .flatten()
     };
+    // The checkout's own hooks folder: the one git uses, and the one the repository's own config names while
+    // that waits for its trust card (a `y` there makes it the one) — a hook committed runs as the user from
+    // then on, with no hooks card: it's "as the last commit has it" (auditfix2 F11)
+    let named = repo.local.found.iter().filter(|(k, _)| k == "core.hookspath").map(|(_, v)| {
+        let p = top.join(v);
+        std::fs::canonicalize(&p).unwrap_or(p)
+    });
+    let hooks: Vec<PathBuf> = crate::hooks::folder(&top)
+        .map(|(_, d)| d)
+        .into_iter()
+        .chain(named.filter(|d| d.starts_with(&top) && !d.starts_with(&git_dir)))
+        .collect();
     let files = status
         .iter()
         .map(|(s, rel)| {
@@ -353,6 +370,8 @@ pub fn prepare(root: &Path, message: &str, paths: &[String], unsaved: &[PathBuf]
                 Some(PROTECTED.0)
             } else if crate::sandbox::key_named_in(root, &path) {
                 Some(KEY.0)
+            } else if hooks.iter().any(|d| path.starts_with(d)) {
+                Some(HOOK.0)
             } else {
                 None
             };
@@ -519,8 +538,8 @@ pub fn commit(a: &Ask) -> Result<Done, String> {
     Ok(Done { id, short, index })
 }
 
-/// The card: the message (what's decided), where and which files — a protected name or a key file in the
-/// warning colour — the diff's start, what stays staged, what the user should know of their own changes.
+/// The card: the message (what's decided), where and which files — a protected name, a key file or a git hook
+/// in the warning colour — the diff's start, what stays staged, what the user should know of their own changes.
 pub fn card(c: Commit) -> Offer {
     let a = &c.ask;
     let mut q: Vec<String> = Vec::new();
@@ -572,11 +591,11 @@ pub fn card(c: Commit) -> Offer {
             a.files[FILES_SHOWN..].iter().filter(|f| f.warn.is_some()).map(|f| f.shown.as_str()).collect();
         if !past.is_empty() {
             warnings.push(q.len()..q.len() + 1);
-            q.push(format!("  among them {}: protected or a key file", past.join(", ")));
+            q.push(format!("  among them {}: protected, a key file or a git hook", past.join(", ")));
         }
     }
     // What a warned row means, once each
-    for (word, said) in [PROTECTED, KEY] {
+    for (word, said) in [PROTECTED, KEY, HOOK] {
         if a.files.iter().any(|f| f.warn == Some(word)) {
             warnings.push(q.len()..q.len() + 1);
             q.push(said.into());

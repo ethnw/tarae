@@ -369,9 +369,11 @@ Kept:
 - Claude's `git` tool runs reads only, from an option allowlist, key files kept out on git's side.
   test: `gittool::tests::only_reads_pass_and_only_the_options_listed`
 - Claude's `commit` commits only on your `y`, and only the paths it names, as the card showed them. What else is
-  staged stays staged. No hook runs, not even in a trusted repository, and nothing is pushed or amended.
+  staged stays staged. No hook runs, not even in a trusted repository, and nothing is pushed or amended. A file
+  of the checkout's hooks folder is in the warning colour (the one git uses, or the one the repository's config
+  names while it waits for trust): once committed, it runs on your git-tab actions with no hooks card.
   test: `committool::tests::only_the_named_paths_go_in_and_what_else_is_staged_stays` ·
-  `committool::tests::what_cant_be_committed_refuses_the_call_named`
+  `committool::tests::what_cant_be_committed_refuses_the_call_named` · `committool::tests::a_hook_is_warned_about`
 - Git that tarae runs itself never runs a repository's own commands (hooks, `core.fsmonitor`, filters,
   `diff.external`, `core.sshCommand`, credential helpers, …) until you trust them on a card — one test per key.
   test: `gitrepo::held::tests::fsmonitor_is_held_on_status_and_snapshots` ·
@@ -379,10 +381,13 @@ Kept:
   `gitrepo::held::tests::a_submodules_own_commands_are_held`
 - Your own git-tab actions ask before running a hook in the checkout that changed since the base. A `y` is
   kept for that file's content (its SHA-256, with the trust answers in `trust.json`, shared by the repository's
-  checkouts): a hook rewritten since asks again, byte for byte; `n` keeps nothing. srt asks nothing here: it
+  checkouts): a hook rewritten since asks again, byte for byte; `n` keeps nothing. What the look can't see is
+  asked about too, with only `n` (so never kept): a file it can't read or that isn't a plain one (read without
+  waiting on a FIFO), a folder it can't list or past 3 deep, the files past 256. srt asks nothing here: it
   denies writes to `.git/hooks` and has no rule for a `core.hooksPath` inside the checkout.
   test: `worktree::tests::the_users_git_asks_before_hooks_a_claude_could_have_written` ·
-  `worktree::tests::hooks_in_the_checkout_never_run_in_taraes_rebase`
+  `worktree::tests::hooks_in_the_checkout_never_run_in_taraes_rebase` ·
+  `hooks::tests::a_hook_it_cant_read_is_asked_about` · `hooks::tests::past_what_is_looked_at_is_asked_about_whole`
 
 Not kept:
 - **Git you run yourself** (your terminal, your tasks) reads the repository's config as git always does.
@@ -572,13 +577,19 @@ Kept:
   `claudetrust::tests::chat_settings_l6_checks_are_what_tarae_passes`
 - **Every Read asks tarae** (Read isn't in `--allowedTools`; claude sends `can_use_tool`). Inside the project it's
   allowed, but a key-named file; outside, a card says what's read; home, above it and key folders only once.
+  Claude's `note` pins on the project's files only (a note's lines reach Claude on your reply): a path outside
+  gets one answer whether or not it's there.
   test: `editor::tests::claudes_reads_outside_the_project_ask_first` · `reads::tests::inside_or_allowed_goes_without_asking` ·
-  `chat::tests::a_key_named_file_reaches_claude_only_when_the_user_lets_it` · `reads::tests::a_link_to_a_key_file_is_the_key_file`
+  `chat::tests::a_key_named_file_reaches_claude_only_when_the_user_lets_it` · `reads::tests::a_link_to_a_key_file_is_the_key_file` ·
+  `notes::tests::a_note_outside_the_project_is_refused_alike`
 - **Every change is reviewed**, or with review at the end allowed unseen and shown after — never for a protected
   name, `.git`, outside the project, or a buffer you changed. Moves and deletes always ask. tarae writes through
-  descriptors, never a path re-walked after its check.
+  descriptors, never a path re-walked after its check — `space u` too, a file that isn't text included, and in
+  the project only.
   test: `edits::tests::an_edit_to_a_protected_file_warns_on_its_review` · `edittool::tests::a_lone_delete_is_never_written_unseen` ·
-  `saver::tests::a_save_claude_caused_never_goes_through_a_link_swapped_in`
+  `saver::tests::a_save_claude_caused_never_goes_through_a_link_swapped_in` ·
+  `checkpoint::tests::putting_a_file_back_never_goes_through_a_link_swapped_in` ·
+  `snapshot::tests::putting_a_blob_back_never_goes_through_a_link_swapped_in`
 - **Every command** Claude asks for goes through tarae's `run` — §1.
 - **A repository's Claude settings are held until you trust them**: helper commands, `env`, plugins, `allow` rules,
   `additionalDirectories`. While the card waits claude runs with all of them held back, as `n` leaves it — the

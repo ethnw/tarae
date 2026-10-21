@@ -71,6 +71,13 @@ pub struct Hook {
 const FILES_MAX: usize = 256;
 const DEPTH_MAX: usize = 3;
 
+/// What a hook the walk can't look at is (its `kind`): asked about, never left out — its text None, so the
+/// card offers only `n` and no `y` is kept for it (auditfix2 F10); its hash `UNHASHED`.
+const UNREADABLE: &str = "can't be read";
+const NOT_A_FILE: &str = "not a plain file";
+const NOT_LOOKED: &str = "not looked at";
+const UNHASHED: crate::trust::Digest = [0; 32];
+
 /// What the card says: the action, against what base, the hooks — of the checkout `top` (where a `y` is kept).
 #[derive(Clone, Debug)]
 pub struct Ask {
@@ -116,6 +123,9 @@ impl Ask {
                     let t = t.replace("\r\n", "\n").replace('\t', "    ");
                     q += &format!("\n\n{}:\n{}", h.rel, t.trim_end_matches('\n'));
                 }
+                None if [UNREADABLE, NOT_A_FILE, NOT_LOOKED].contains(&h.kind) => {
+                    q += &format!("\n\n{}: {} — only n is offered", h.rel, h.kind)
+                }
                 None => {
                     q += &format!(
                         "\n\n{}: not text this card can show as it is (binary, or characters that draw as something \
@@ -147,48 +157,87 @@ pub struct Wait {
     go: Go,
 }
 
-/// The files of the hooks folder git uses in the checkout `top`, when that folder is inside it, that are
-/// untracked or new or changed since `base` — every file, not only the hooks this action runs (`likely` marks
-/// those): config decides what an action runs, and a hook runs the folder's other files (on a worker). A hooks
-/// folder outside the checkout, or under its git folder: none. One whose content a `y` kept in the trust
-/// store at `store` (`Ask::top`'s file, its SHA-256) isn't asked about.
-pub fn unseen(top: &Path, base: &str, likely: &[&str], store: Option<&Path>) -> Vec<Hook> {
+/// The hooks folder git uses in the checkout `top` (by real path), when that folder is inside it and not
+/// under its git folder — the one a Claude could write. With `top` by its real path.
+pub fn folder(top: &Path) -> Option<(PathBuf, PathBuf)> {
     let path = |args: &[&str]| -> Option<PathBuf> {
         let p = PathBuf::from(git(top, args, None).ok()?.trim());
         Some(std::fs::canonicalize(&p).unwrap_or(p))
     };
-    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let top = real(top);
-    let Some(dir) = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"]) else {
-        return Vec::new();
-    };
+    let top = std::fs::canonicalize(top).unwrap_or_else(|_| top.to_path_buf());
+    let dir = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
     let gits = [
         path(&["rev-parse", "--path-format=absolute", "--git-dir"]),
         path(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     ];
-    if !dir.starts_with(&top) || gits.iter().flatten().any(|g| dir.starts_with(g)) {
-        return Vec::new();
-    }
+    (dir.starts_with(&top) && !gits.iter().flatten().any(|g| dir.starts_with(g))).then_some((top, dir))
+}
+
+/// The files of the hooks folder git uses in the checkout `top`, when that folder is inside it, that are
+/// untracked or new or changed since `base` — every file, not only the hooks this action runs (`likely` marks
+/// those): config decides what an action runs, and a hook runs the folder's other files (on a worker). A hooks
+/// folder outside the checkout, or under its git folder: none. One whose content a `y` kept in the trust
+/// store at `store` (`Ask::top`'s file, its SHA-256) isn't asked about. What it can't look at — a file it
+/// can't read or that isn't a plain one, a folder it can't list or deeper than `DEPTH_MAX`, the files past
+/// `FILES_MAX` — is asked about too, never left out: it can't be shown, so only `n` is offered.
+pub fn unseen(top: &Path, base: &str, likely: &[&str], store: Option<&Path>) -> Vec<Hook> {
+    let Some((top, dir)) = folder(top) else { return Vec::new() };
+    let rel_of = |p: &Path| p.strip_prefix(&top).ok().map(|r| r.to_string_lossy().into_owned());
+    let mut out = Vec::new();
+    // (a folder, or what's past the walk in it: `p` from the checkout's top, then `then`)
+    let mut whole = |p: &Path, then: String, kind| {
+        let rel = rel_of(p).unwrap_or_default() + &then;
+        out.push(Hook { rel, kind, likely: false, text: None, hash: UNHASHED })
+    };
     // Every file in it (links not followed — a link's target is read as the file it is)
     let mut files = Vec::new();
+    let mut past = 0;
     let mut stack = vec![(dir.clone(), 0)];
     while let Some((d, depth)) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let Ok(t) = e.file_type() else { continue };
-            if t.is_dir() && depth < DEPTH_MAX {
-                stack.push((e.path(), depth + 1));
-            } else if !t.is_dir() && files.len() < FILES_MAX {
-                files.push(e.path());
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            whole(&d, "/".into(), NOT_LOOKED);
+            continue;
+        };
+        for e in rd {
+            let Ok(e) = e else {
+                whole(&d, "/".into(), NOT_LOOKED);
+                break;
+            };
+            // (a type it can't tell: as a file — opening it says what it is)
+            match e.file_type() {
+                Ok(t) if t.is_dir() && depth < DEPTH_MAX => stack.push((e.path(), depth + 1)),
+                Ok(t) if t.is_dir() => whole(&e.path(), "/".into(), NOT_LOOKED),
+                _ if files.len() < FILES_MAX => files.push(e.path()),
+                _ => past += 1,
             }
         }
     }
+    if past > 0 {
+        whole(&dir, format!("/… {past} more files"), NOT_LOOKED);
+    }
     crate::sorting::sort(&mut files);
     let kept = store.map(|s| crate::trust::Store::read(Some(s)));
-    let mut out = Vec::new();
     for p in files {
-        let Ok(rel) = p.strip_prefix(&top).map(|r| r.to_string_lossy().into_owned()) else { continue };
-        let Ok(now) = std::fs::read(&p) else { continue };
+        let Some(rel) = rel_of(&p) else { continue };
+        // (a hook git runs by its name, at the folder's top)
+        let named = p.parent() == Some(dir.as_path())
+            && p.file_name().is_some_and(|n| likely.iter().any(|l| n == *l));
+        // (opened without waiting — a FIFO has no writer — and read from what was opened)
+        let now = match crate::paths::open_read(&p) {
+            Err(_) => Err(UNREADABLE),
+            Ok(o) if !o.meta.is_file() => Err(NOT_A_FILE),
+            Ok(o) => {
+                let mut now = Vec::new();
+                std::io::Read::read_to_end(&mut &o.file, &mut now).map(|_| now).map_err(|_| UNREADABLE)
+            }
+        };
+        let now = match now {
+            Ok(now) => now,
+            Err(kind) => {
+                out.push(Hook { rel, kind, likely: named, text: None, hash: UNHASHED });
+                continue;
+            }
+        };
         let then = git(top.as_path(), &["show", &format!("{base}:{rel}")], None);
         if then.as_deref().is_ok_and(|t| t.as_bytes() == now.as_slice()) {
             continue;
@@ -204,9 +253,6 @@ pub fn unseen(top: &Path, base: &str, likely: &[&str], store: Option<&Path>) -> 
             (true, true) => "changed",
         };
         let text = String::from_utf8(now).ok().filter(|t| crate::tools::draws_as_itself(t));
-        // (a hook git runs by its name, at the folder's top)
-        let named = p.parent() == Some(dir.as_path())
-            && p.file_name().is_some_and(|n| likely.iter().any(|l| n == *l));
         out.push(Hook { rel, kind, likely: named, text, hash });
     }
     // (the ones this action runs first)
@@ -326,5 +372,89 @@ mod tests {
             "{q}"
         );
         assert!(!binary.runnable() && q.contains("only n is offered") && !q.contains("A yes is kept"));
+    }
+
+    /// git in the test's own repository — no hooks, no signing, a name of its own.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+            .args(["-c", "user.email=t@example.invalid", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A repository in `s` whose hooks folder is `.githooks` in the checkout (its commands trusted, as the
+    /// user's `y` on their card), `files` committed there as they are.
+    fn checkout(s: &crate::scratch::Scratch, files: &[(&str, &[u8])]) -> PathBuf {
+        let dir = std::fs::canonicalize(s.path()).unwrap();
+        for (rel, bytes) in files {
+            let p = dir.join(".githooks").join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        }
+        git_in(&dir, &["init", "-q"]);
+        git_in(&dir, &["add", "-A"]);
+        git_in(&dir, &["commit", "-q", "-m", "base"]);
+        git_in(&dir, &["config", "core.hooksPath", ".githooks"]);
+        let r = crate::gitrepo::repo(&dir).unwrap();
+        crate::gitrepo::answered(&r.config_file(), r.local.digest(), true);
+        dir
+    }
+
+    /// (rel, kind, shown) of each.
+    fn said(hooks: &[Hook]) -> Vec<(&str, &str, bool)> {
+        hooks.iter().map(|h| (h.rel.as_str(), h.kind, h.text.is_some())).collect()
+    }
+
+    /// auditfix2 F10: what the walk can't read is asked about, never left out — a hook made `0111` (git runs
+    /// it: `execve` needs no read), and a FIFO (opened without waiting for a writer: the action would never
+    /// start). Neither can be shown: only `n`.
+    #[test]
+    fn a_hook_it_cant_read_is_asked_about() {
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let s = crate::scratch::Scratch::new("hooks-unreadable");
+        let dir = checkout(&s, &[("pre-commit", b"#!/bin/sh\nexit 0\n")]);
+        assert_eq!(said(&unseen(&dir, "HEAD", COMMIT, None)), [], "as the last commit has it");
+        let hook = dir.join(".githooks/pre-commit");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o111)).unwrap();
+        // (as root every file reads: nothing to see there)
+        if std::fs::File::open(&hook).is_err() {
+            let hooks = unseen(&dir, "HEAD", COMMIT, None);
+            assert_eq!(said(&hooks), [(".githooks/pre-commit", "can't be read", false)]);
+            assert!(!Ask { what: "commit".into(), base: "HEAD".into(), hooks, top: dir.clone() }.runnable());
+        }
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fifo = std::ffi::CString::new(dir.join(".githooks/pipe").into_os_string().into_vec()).unwrap();
+        // SAFETY: a path of the test's own scratch folder, live for the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let top = dir.clone();
+        std::thread::spawn(move || tx.send(unseen(&top, "HEAD", COMMIT, None)));
+        let hooks = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("never waits on a FIFO");
+        assert_eq!(said(&hooks), [(".githooks/pipe", "not a plain file", false)]);
+    }
+
+    /// auditfix2 F10: past what the walk looks at, the rest is asked about whole — 300 files committed as they
+    /// are (more than `FILES_MAX`: which ones `read_dir` gives first isn't said), and a folder deeper than
+    /// `DEPTH_MAX`.
+    #[test]
+    fn past_what_is_looked_at_is_asked_about_whole() {
+        let s = crate::scratch::Scratch::new("hooks-many");
+        let names: Vec<String> = (0..300).map(|i| format!("d{i:03}")).collect();
+        let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"#!/bin/sh\n"[..])).collect();
+        let dir = checkout(&s, &files);
+        let hooks = unseen(&dir, "HEAD", COMMIT, None);
+        assert_eq!(said(&hooks), [(".githooks/… 44 more files", "not looked at", false)]);
+        let s = crate::scratch::Scratch::new("hooks-deep");
+        let dir = checkout(&s, &[("pre-commit", b"#!/bin/sh\n"), ("a/b/c/d/lib.sh", b"#!/bin/sh\n")]);
+        let hooks = unseen(&dir, "HEAD", COMMIT, None);
+        assert_eq!(said(&hooks), [(".githooks/a/b/c/d/", "not looked at", false)]);
+        let q = Ask { what: "commit".into(), base: "HEAD".into(), hooks, top: dir.clone() }.card().question;
+        assert!(q.contains("\n\n.githooks/a/b/c/d/: not looked at — only n is offered"), "{q}");
     }
 }

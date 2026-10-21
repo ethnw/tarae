@@ -284,6 +284,35 @@ fn the_card_says_what_goes_in_and_y_commits_n_doesnt() {
     no_hook_ran(&dir);
 }
 
+/// auditfix2 F11: a file of the checkout's own hooks folder is warned about — once committed it runs as the
+/// user with no hooks card ("as the last commit has it") — also while the repository's `core.hooksPath` waits
+/// for its trust card (a `y` there later makes it the hooks folder); a file beside it isn't.
+#[test]
+fn a_hook_is_warned_about() {
+    let s = crate::scratch::Scratch::new("commit-hook");
+    let dir = repo(&s);
+    std::fs::write(dir.join("b.txt"), "bee bee\n").unwrap();
+    let a = prepare(&dir, "Lint", &strings(&["hooks/pre-commit", "b.txt"]), &[]).unwrap();
+    let warned: Vec<(&str, Option<&str>)> = a.files.iter().map(|f| (f.shown.as_str(), f.warn)).collect();
+    assert_eq!(warned, [("b.txt", None), ("hooks/pre-commit", Some("a git hook"))]);
+    let o = card(Commit { call: Call::test(61), ask: a });
+    let lines: Vec<&str> = o.question.split('\n').collect();
+    let warned: Vec<&str> = o.warnings.iter().flat_map(|r| lines[r.clone()].iter().copied()).collect();
+    assert!(warned.iter().any(|l| l.starts_with("A git hook: runs as you")), "{warned:?}");
+    // Not trusted yet: its hooks folder held, still warned about
+    let s = crate::scratch::Scratch::new("commit-hook-held");
+    let dir = std::fs::canonicalize(s.path()).unwrap();
+    std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+    git_in(&dir, &["init", "-q", "-b", "main"]);
+    git_in(&dir, &["-c", "user.name=t", "-c", "user.email=t@example.invalid", "add", "-A"]);
+    git_in(&dir, &["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "base"]);
+    git_in(&dir, &["config", "core.hooksPath", ".githooks"]);
+    std::fs::create_dir_all(dir.join(".githooks")).unwrap();
+    std::fs::write(dir.join(".githooks/pre-push"), "#!/bin/sh\n").unwrap();
+    let a = prepare(&dir, "Push check", &strings(&[".githooks/pre-push"]), &[]).unwrap();
+    assert_eq!(a.files[0].warn, Some("a git hook"));
+}
+
 /// Events until `done`.
 fn pump(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
