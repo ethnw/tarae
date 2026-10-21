@@ -24,6 +24,8 @@
 //!   [`trace`]).
 //! - `cards [PATH …]` — the card record (`$state/cards/`) as cardauto's tables: the P3 table, what P3 removes,
 //!   its wrong yeses with their commands, the stamp rate, runs refused with no card (see [`cards`]).
+//! - `turns [PATH …]` — the call-order record (`$state/calls/`) as code mode's baseline: turns by kind, round
+//!   trips in a row, which tools follow which, large results, the gate for a `code` tool (see [`turns`]).
 //! - `claude-stub serve|drive|summary` — what the `claude` program touches, measured against a fake API: the
 //!   stub, tarae's side of claude's pipes, an strace log by folder (see [`claudestub`]; `target/sb/v1b-linux.sh`).
 //! - `compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run]` — the "must work" compatibility suite:
@@ -53,6 +55,7 @@ mod scenes;
 mod shot;
 mod stream;
 mod trace;
+mod turns;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -72,10 +75,11 @@ fn main() {
         Some("trace") => trace::run(&args[1..]),
         Some("claude-stub") => claudestub::run(&args[1..]),
         Some("cards") => cards::run(&args[1..]),
+        Some("turns") => turns::run(&args[1..]),
         Some("compat") => compat::run(&args[1..]),
         Some("glyphs") => glyphs::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | turns [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
                 .into(),
         ),
     };

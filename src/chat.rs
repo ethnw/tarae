@@ -976,6 +976,9 @@ pub fn keep_now(ed: &Editor) {
 pub fn close(ed: &mut Editor) {
     // (the hosts its conversation's `a` let through go with it — one conversation a session at a time)
     crate::hosts::chat_ended(ed);
+    // (a turn under way ends here, cut off: its process goes with the chat, and its exit is never heard)
+    ed.session.usage.cut_off(crate::usage::now_ms());
+    ed.calls_record();
     ed.session.chat = None;
     crate::restart::turn_over(ed);
 }
@@ -1016,6 +1019,9 @@ pub fn reset(ed: &mut Editor) {
     c.money = None;
     // (a billing waiting for the last conversation's turn to end goes with it)
     ed.session.billing_next = None;
+    // (a turn under way ends here, cut off: the killed process's exit comes to a generation no longer heard)
+    ed.session.usage.cut_off(crate::usage::now_ms());
+    ed.calls_record();
     ed.session.usage.new_conversation();
     // (review at the end stays as it's set — `llm.review-at-end`)
     crate::edits::at_end_new_chat(ed);
@@ -1289,6 +1295,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         StreamEv::Usage(seen) => ed.session.usage.seen(seen),
         StreamEv::Spent(spent) => {
             ed.session.usage.spent(spent);
+            ed.calls_record();
             crate::uistate::watch::usage(ed, "turn");
             crate::usage::view_sync(ed);
         }
@@ -1569,6 +1576,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             // (a turn cut off: what its requests reported, no cost)
             ed.session.usage.cut_off(crate::usage::now_ms());
+            ed.calls_record();
             crate::usage::watch(ed);
             if login_hint.is_some() {
                 crate::envkey::ask(ed);
@@ -3582,6 +3590,93 @@ mod tests {
         on_event(&mut ed, generation, StreamEv::ToolResult { id: "t1".into(), text, error: false });
         let c = ed.session.chat.as_ref().unwrap();
         assert_eq!(c.msgs[0].look.as_ref().unwrap().range, "exit 101");
+    }
+
+    /// A request's usage as the stream says it, for message `id`.
+    fn seen(id: &str) -> StreamEv {
+        let counts =
+            crate::usage::Counts { input: Some(10), write: Some(500), read: Some(20_000), output: Some(90) };
+        StreamEv::Usage(crate::usage::Seen {
+            id: Some(id.into()),
+            model: "claude-opus-5-5".into(),
+            counts,
+            ttl: None,
+            at_ms: 0,
+        })
+    }
+
+    /// A turn that ends while its session is behind still reaches the call-order record: its events applied
+    /// in the session they're tagged with, the line written on a worker, nothing left waiting in any
+    /// session's usage.
+    #[test]
+    fn a_turn_ending_in_a_session_behind_reaches_the_call_order_record() {
+        let dir = crate::scratch::Scratch::new("calls-behind");
+        let mut ed = editor("");
+        ed.calls_dir = Some(dir.path().to_path_buf());
+        let behind = ed.session_add(ed.session.root.clone());
+        let mut c = Chat::new();
+        c.state = State::Thinking;
+        let generation = c.generation;
+        ed.sessions.iter_mut().find(|l| l.id == behind).unwrap().chat = Some(c);
+        // (as its pump sends them: tagged with its session, applied with it swapped in)
+        let send = |ed: &mut Editor, ev: StreamEv| {
+            ed.handle_event(crate::event::Event::For(
+                behind,
+                Box::new(move |ed| on_event(ed, generation, ev)),
+            ))
+        };
+        send(&mut ed, seen("m1"));
+        let input = serde_json::json!({ "pattern": "x" });
+        send(&mut ed, StreamEv::Tool { id: "t1".into(), name: "mcp__tarae__search".into(), input });
+        send(&mut ed, StreamEv::ToolResult { id: "t1".into(), text: String::new(), error: false });
+        let spent = crate::usage::Spent { at_ms: crate::usage::now_ms(), ..Default::default() };
+        send(&mut ed, StreamEv::Spent(spent));
+        assert_ne!(ed.session.id, behind, "it stayed behind");
+        assert!(
+            ed.sessions.iter().all(|l| l.usage.to_record.is_empty()) && ed.session.usage.to_record.is_empty()
+        );
+        let lines = crate::calls::recorded(dir.path(), 1);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["steps"][0]["tools"], serde_json::json!(["search"]), "{lines:?}");
+    }
+
+    /// A turn the user leaves mid-way — a new chat (`C-l`, `:chat-new`) or the chat closed — is recorded as
+    /// cut off, with the calls it made; what it left doesn't join the next turn's.
+    #[test]
+    fn a_turn_left_by_a_new_chat_or_a_close_is_recorded_cut_off() {
+        let dir = crate::scratch::Scratch::new("calls-left");
+        let mut ed = editor("");
+        ed.calls_dir = Some(dir.path().to_path_buf());
+        // (a stand-in for the new chat's claude, which reads and says nothing)
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let thinking = |ed: &mut Editor| {
+            let c = ed.session.chat.get_or_insert_with(Chat::new);
+            c.state = State::Thinking;
+            c.generation
+        };
+        let called = |ed: &mut Editor, generation: u64, id: &str, tool: &str| {
+            on_event(ed, generation, seen(id));
+            let input = serde_json::json!({ "file_path": "a.rs" });
+            on_event(ed, generation, StreamEv::Tool { id: format!("{id}-t"), name: tool.into(), input });
+        };
+        let g = thinking(&mut ed);
+        called(&mut ed, g, "m1", "mcp__tarae__search");
+        reset(&mut ed);
+        let g = thinking(&mut ed);
+        called(&mut ed, g, "m2", "mcp__tarae__read");
+        close(&mut ed);
+        assert!(ed.session.chat.is_none());
+        let g = thinking(&mut ed);
+        called(&mut ed, g, "m3", "mcp__tarae__hover");
+        on_event(&mut ed, g, StreamEv::Spent(crate::usage::Spent { at_ms: 1, ..Default::default() }));
+        let lines = crate::calls::recorded(dir.path(), 3);
+        let mut steps: Vec<String> = lines
+            .iter()
+            .map(|l| l["steps"].as_array().unwrap().iter().map(|s| s["tools"].to_string()).collect())
+            .collect();
+        steps.sort();
+        assert_eq!(steps, [r#"["hover"]"#, r#"["read"]"#, r#"["search"]"#], "each turn its own: {lines:?}");
     }
 
     /// A turn's calls counted from the stream as the chat reads it: each `tool_use` and its result, a range

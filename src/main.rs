@@ -362,6 +362,16 @@ fn main() -> Result<()> {
             _ => {}
         });
     }
+    // The call-order record's months past `cards::KEEP_MONTHS` (a worker's)
+    if let Some(dir) = editor.calls_dir.clone() {
+        editor.events.jobs().background(move || match cards::prune(&dir, std::time::SystemTime::now()) {
+            Ok(gone) if !gone.is_empty() => {
+                log::line("calls", "info", &format!("record pruned: {}", gone.join(", ")))
+            }
+            Err(e) => log::line("calls", "warn", &format!("{}: pruning the record: {e}", dir.display())),
+            _ => {}
+        });
+    }
     if !files.is_empty() {
         editor.current = 0;
     }

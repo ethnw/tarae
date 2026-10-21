@@ -232,6 +232,35 @@ impl Turn {
         v
     }
 
+    /// Its entry in the call-order record (`calls::DIR`, `cargo xtask turns`): numbers and tool names only —
+    /// never a call's arguments, a result or a word of the conversation. `what`: `chat`, or an aside's
+    /// (`reviewer`, `ask`, `draft`); `steps`: its requests in order, each with its calls' tools in order
+    /// (`calls::Tally::take_steps`), beside each request's context and output. An aside's requests aren't
+    /// counted (no tally: `calls` None) — `null`, not 0.
+    pub fn entry(&self, what: &str, steps: &[Vec<&'static str>], requests: &[Request]) -> Value {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.at_ms);
+        let steps: Vec<Value> = (0..steps.len().max(requests.len()))
+            .map(|i| {
+                let r = requests.get(i).map(|r| r.counts);
+                json!({ "tools": steps.get(i).cloned().unwrap_or_default(),
+                        "context": r.and_then(|c| c.context()), "output": r.and_then(|c| c.output) })
+            })
+            .collect();
+        json!({
+            "v": crate::calls::RECORD_V,
+            "at": crate::log::stamp(at),
+            "what": what,
+            "model": self.model,
+            "requests": self.calls.as_ref().map(|_| self.requests),
+            "counts": self.counts.json(),
+            "cost": self.cost,
+            "ms": self.ms,
+            "compacted": self.compacted,
+            "calls": self.calls.as_ref().map(|c| c.sums.json()),
+            "steps": steps,
+        })
+    }
+
     /// It compacted and reported no tokens of its own (`/compact`'s turn).
     pub fn only_compacted(&self) -> bool {
         self.compacted.is_some() && self.counts.context().unwrap_or(0) + self.counts.output.unwrap_or(0) == 0
@@ -376,6 +405,8 @@ pub struct Usage {
     compacting: Option<String>,
     /// The turn under way's tool calls, counted as they come (`calls.rs`).
     pub tally: crate::calls::Tally,
+    /// Turns ended, their call-order record entries not yet handed to the record (`Editor::calls_record`).
+    pub to_record: Vec<Value>,
 }
 
 impl Usage {
@@ -417,6 +448,7 @@ impl Usage {
                 r.clone()
             }
             (None, Some(id)) => {
+                self.tally.request();
                 let sent_ms = self.requesting.take().unwrap_or(s.at_ms);
                 let r = Request { id, model: s.model, sent_ms, counts: s.counts, ttl: s.ttl };
                 self.requests.push(r.clone());
@@ -486,6 +518,7 @@ impl Usage {
             model.dedup();
         }
         let contexts: Vec<u64> = requests.iter().filter_map(|r| r.counts.context()).collect();
+        let steps = self.tally.take_steps();
         let calls = self.tally.end(&contexts, s.ms, s.at_ms);
         self.turns.push(Turn {
             at_ms: s.at_ms,
@@ -502,7 +535,9 @@ impl Usage {
             compacted: self.compacting.take(),
             calls: Some(calls),
         });
-        self.turns.last().expect("just pushed")
+        let turn = self.turns.last().expect("just pushed");
+        self.to_record.push(turn.entry("chat", &steps, &requests));
+        turn
     }
 
     /// A one-turn process's result (`space i`, a commit draft — `what`): a turn of its own, beside the
@@ -520,6 +555,8 @@ impl Usage {
             compacted: None,
             calls: None,
         });
+        let turn = self.turns.last().expect("just pushed");
+        self.to_record.push(turn.entry(what, &[], &[]));
     }
 
     /// The turn ended with no result (claude exited, cut off): what its requests said, no cost.
@@ -837,8 +874,8 @@ pub fn report(
             let models: Vec<String> =
                 t.model.split(", ").filter(|m| !m.is_empty()).map(model_short).collect();
             let mut model = if models.is_empty() { "not reported".to_string() } else { models.join(", ") };
-            // (a one-turn process's: `space i`'s, the reviewer's — `reviewer.rs`)
-            if matches!(t.conversation.as_str(), "ask" | "reviewer") {
+            // (a one-turn process's: `space i`'s, a commit draft's, the reviewer's — `reviewer.rs`)
+            if matches!(t.conversation.as_str(), "ask" | "draft" | "reviewer") {
                 model = format!("{} · {model}", t.conversation);
             }
             // (a `/compact` turn's 0 tokens and its summary's cost, said for what they are)
@@ -1147,6 +1184,75 @@ mod tests {
             }
         }
         (u, results)
+    }
+
+    /// A turn's call-order record entry: its requests in order, each with its calls' tool names in the order
+    /// they came (an unknown tool `other`) and its context and output — a request without calls is a step
+    /// with none; never a call's input. An aside's entry has no steps.
+    #[test]
+    fn a_turn_is_recorded_as_its_requests_tool_names_in_order() {
+        let mut u = Usage::default();
+        u.fresh("c1");
+        let usage = |out: u64| {
+            json!({ "input_tokens": 10, "cache_read_input_tokens": 20_000,
+                                       "cache_creation_input_tokens": 500, "output_tokens": out })
+        };
+        let line = |u: &mut Usage, v: Value| match crate::llm::usage_line(&v, 0) {
+            Some(crate::llm::StreamEv::Usage(s)) => u.seen(s),
+            Some(crate::llm::StreamEv::Spent(s)) => {
+                u.spent(s);
+            }
+            _ => {}
+        };
+        let call = |u: &mut Usage, id: &str, name: &str| {
+            let input = json!({ "pattern": "needle-in-the-input", "file_path": "/p/secret.rs" });
+            u.tally.called(id, name, &input, std::path::Path::new("/p"), None, 0);
+        };
+        for (id, tools) in
+            [("m1", &["mcp__tarae__search", "mcp__other__fetch"][..]), ("m2", &["Read"]), ("m3", &[])]
+        {
+            let start = json!({ "type": "stream_event", "event": { "type": "message_start",
+                "message": { "id": id, "model": "claude-opus-5-5", "usage": usage(1) } } });
+            line(&mut u, start);
+            let whole = json!({ "type": "assistant", "message": { "id": id, "model": "claude-opus-5-5",
+                "content": [], "usage": usage(120) } });
+            line(&mut u, whole);
+            for (i, t) in tools.iter().enumerate() {
+                call(&mut u, &format!("{id}-{i}"), t);
+            }
+        }
+        line(
+            &mut u,
+            json!({ "type": "result", "session_id": "c1", "total_cost_usd": 0.05, "duration_ms": 9_000,
+                             "usage": usage(360) }),
+        );
+        assert_eq!(u.to_record.len(), 1);
+        let e = &u.to_record[0];
+        assert_eq!(
+            (e["v"].as_u64(), e["what"].as_str(), e["requests"].as_u64()),
+            (Some(1), Some("chat"), Some(3))
+        );
+        let steps: Vec<Value> = e["steps"].as_array().unwrap().iter().map(|s| s["tools"].clone()).collect();
+        assert_eq!(steps, [json!(["search", "other"]), json!(["Read"]), json!([])]);
+        assert_eq!(
+            (e["steps"][0]["context"].as_u64(), e["steps"][0]["output"].as_u64()),
+            (Some(20_510), Some(120))
+        );
+        assert_eq!((e["calls"]["calls"].as_u64(), e["cost"].as_f64()), (Some(3), Some(0.05)));
+        let text = e.to_string();
+        assert!(!text.contains("needle") && !text.contains("secret") && !text.contains("fetch"), "{text}");
+        // The next turn starts with no steps; an aside's entry has none
+        u.aside(
+            Spent { conversation: "reviewer".into(), total_cost: Some(0.2), ..Spent::default() },
+            "reviewer",
+        );
+        assert_eq!(u.to_record.len(), 2);
+        assert_eq!(
+            (u.to_record[1]["what"].as_str(), u.to_record[1]["steps"].clone()),
+            (Some("reviewer"), json!([]))
+        );
+        assert!(u.to_record[1]["requests"].is_null(), "its requests weren't counted: not 0");
+        assert!(u.tally.take_steps().is_empty());
     }
 
     #[test]

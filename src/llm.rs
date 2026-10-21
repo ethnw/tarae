@@ -1426,7 +1426,7 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
         })
         .collect::<Vec<_>>();
     let doc_id = doc.id;
-    start(ed, doc_id, instruction, &prompt, hunks)
+    start(ed, doc_id, instruction, &prompt, hunks, "ask")
 }
 
 /// Claude writes what `from..to` of document `doc_id` should be, from `prompt` alone (one answer, no tools) —
@@ -1448,7 +1448,7 @@ pub fn draft(
     }
     let old = doc.text.byte_slice(from..to).to_string();
     let hunk = Hunk { from, to, old, new: String::new(), decision: Decision::Undecided, conflict: false };
-    start(ed, doc_id, label, prompt, vec![hunk])?;
+    start(ed, doc_id, label, prompt, vec![hunk], "draft")?;
     // (its time limit: a draft still being written then is stopped, and said)
     let generation = ed.llm_generation;
     ed.events.jobs().spawn(move || {
@@ -1492,13 +1492,15 @@ pub fn stop_waiting(ed: &mut Editor, generation: Option<u64>, said: &str) {
 }
 
 /// One answer for `hunks` of `doc_id` (the prompt asks for a `<r i="N">` each): the process, the review
-/// waiting for it, the stream into it.
+/// waiting for it, the stream into it. `what` asked it (`ask`: `space i` · `draft`: a commit message) — its
+/// turn's name in `:usage` and the call-order record.
 fn start(
     ed: &mut Editor,
     doc_id: DocId,
     instruction: &str,
     prompt: &str,
     hunks: Vec<Hunk>,
+    what: &'static str,
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
     let cred = ed.credential(ed.session.billing, crate::billing::Role::Ask)?;
@@ -1545,7 +1547,8 @@ fn start(
             // result that reports nothing has nothing to add)
             StreamEv::Spent(s) if !s.counts.any() && s.total_cost.is_none() => return None,
             StreamEv::Spent(s) => Box::new(move |ed: &mut Editor| {
-                ed.session.usage.aside(s, "ask");
+                ed.session.usage.aside(s, what);
+                ed.calls_record();
                 crate::usage::view_sync(ed);
             }),
             // (the account's limits, whichever claude says them)

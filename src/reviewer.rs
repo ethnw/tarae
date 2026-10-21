@@ -315,6 +315,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             r.cost = s.total_cost;
             if s.counts.any() || s.total_cost.is_some() {
                 ed.session.usage.aside(s, "reviewer");
+                ed.calls_record();
                 crate::uistate::watch::usage(ed, "turn");
                 crate::usage::view_sync(ed);
             }
@@ -1525,9 +1526,15 @@ mod tests {
     fn the_reviewers_cost_is_its_own() {
         let (dir, repo) = place("cost");
         let mut ed = Editor::new(crate::config::Config::default());
+        let record = crate::scratch::Scratch::new("calls-reviewer");
+        ed.calls_dir = Some(record.path().to_path_buf());
         fake(&mut ed, &dir, &[result("No findings.")]);
         ed.session.usage.fresh("author-c1");
         reviewed(&mut ed, &repo);
+        // (a turn of its own in the call-order record too, its requests not counted)
+        let lines = crate::calls::recorded(record.path(), 1);
+        assert_eq!((lines[0]["what"].as_str(), lines[0]["cost"].as_f64()), (Some("reviewer"), Some(0.12)));
+        assert!(lines[0]["requests"].is_null(), "{lines:?}");
         let u = &ed.session.usage;
         let t = u.last_turn().expect("its turn");
         assert_eq!((t.conversation.as_str(), t.cost), ("reviewer", Some(0.12)));

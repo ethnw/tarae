@@ -669,6 +669,8 @@ pub struct Editor {
     pub features: crate::features::Counts,
     /// The card record's folder (`cards.rs`, `$state/cards`) — None in tests: nothing written.
     pub cards_dir: Option<PathBuf>,
+    /// The call-order record's folder (`calls.rs`, `$state/calls`) — None in tests: nothing written.
+    pub calls_dir: Option<PathBuf>,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
@@ -893,6 +895,11 @@ impl Editor {
                 None
             } else {
                 crate::config::state_dir().map(|d| d.join(crate::cards::DIR))
+            },
+            calls_dir: if cfg!(test) {
+                None
+            } else {
+                crate::config::state_dir().map(|d| d.join(crate::calls::DIR))
             },
             features: crate::features::Counts::new(if cfg!(test) {
                 None
@@ -13926,6 +13933,32 @@ mod tests {
         feed(&mut ed, "<space>U");
         assert_eq!(text(&ed), "LINE 1\nline 2\nline 3\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `space i`'s answer and a commit draft are each a turn of their own in the call-order record, named by
+    /// what asked (`ask` · `draft` — one `start` serves both), their requests not counted (`null`, not 0).
+    #[test]
+    fn an_ask_and_a_commit_draft_are_recorded_by_what_asked() {
+        let dir = crate::scratch::Scratch::new("calls-asides");
+        let mut ed = editor("foo bar");
+        ed.calls_dir = Some(dir.path().to_path_buf());
+        let reply = serde_json::json!({ "type": "result", "result": "<r i=\"1\">FOO</r>", "total_cost_usd": 0.01,
+                                         "usage": { "input_tokens": 5, "output_tokens": 3 } });
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), format!("read line; printf '%s\\n' '{reply}'")];
+        feed(&mut ed, "e iupper<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        feed(&mut ed, "y");
+        assert!(ed.session.review.is_none());
+        assert_eq!(crate::calls::recorded(dir.path(), 1)[0]["what"], "ask");
+        let doc = ed.doc().id;
+        crate::llm::draft(&mut ed, doc, "a commit message", "draft it", 0, 0).unwrap();
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        let lines = crate::calls::recorded(dir.path(), 2);
+        let mut what: Vec<&str> = lines.iter().map(|l| l["what"].as_str().unwrap()).collect();
+        what.sort_unstable();
+        assert_eq!(what, ["ask", "draft"], "{lines:?}");
+        assert!(lines.iter().all(|l| l["requests"].is_null() && l["steps"] == serde_json::json!([])));
     }
 
     #[test]

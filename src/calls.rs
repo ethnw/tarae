@@ -19,6 +19,14 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+/// The call-order record's folder in tarae's state (`$state/calls/2026-10.jsonl`, a file a month, as the card
+/// record's): a line a turn — its requests in order with their calls' tool names, and its numbers
+/// (`usage::Turn::entry`). Names and numbers only; read by `cargo xtask turns` (code mode's baseline,
+/// `target/sb/codemode-plan.md`).
+pub const DIR: &str = "calls";
+/// The record's version, in each entry (`v`).
+pub const RECORD_V: u64 = 1;
+
 /// The lines Claude's Read reads when it's given no limit.
 const READ_LINES: u64 = 2000;
 
@@ -159,6 +167,9 @@ pub struct Tally {
     wrote: Option<Instant>,
     /// Calls of tarae's tools come and not answered yet (`tools::mcp` → `tools::sized`).
     mcp_open: usize,
+    /// The turn's model requests in order, each with its calls' tool names in order (`features::claude_tool`:
+    /// names only, an unknown one `other`) — the call-order record's (`usage::Turn::entry`).
+    steps: Vec<Vec<&'static str>>,
 }
 
 impl Tally {
@@ -174,6 +185,11 @@ impl Tally {
         now: u64,
     ) {
         let tool = name.strip_prefix("mcp__tarae__").unwrap_or(name).to_string();
+        match self.steps.last_mut() {
+            Some(step) => step.push(crate::features::claude_tool(name)),
+            // (a call before its request's usage was seen: a request of its own)
+            None => self.steps.push(vec![crate::features::claude_tool(name)]),
+        }
         *self.turn.tools.entry(tool.clone()).or_default() += 1;
         self.turn.sums.calls += 1;
         if self.open.is_empty() {
@@ -320,6 +336,16 @@ impl Tally {
         self.reads.clear();
     }
 
+    /// A model request of the turn began (its first usage seen): the calls from now on are its.
+    pub fn request(&mut self) {
+        self.steps.push(Vec::new());
+    }
+
+    /// The turn's requests so far, each with its calls' tool names in order — taken (`end` drops them).
+    pub fn take_steps(&mut self) -> Vec<Vec<&'static str>> {
+        std::mem::take(&mut self.steps)
+    }
+
     /// The turn ended at `now`: its calls, with its requests' contexts and its time (`ms`: as its result
     /// said). Calls still open end with it.
     pub fn end(&mut self, contexts: &[u64], ms: Option<u64>, now: u64) -> Calls {
@@ -331,12 +357,45 @@ impl Tally {
         self.asked.clear();
         self.denied.clear();
         self.mcp_open = 0;
+        self.steps.clear();
         let mut c = std::mem::take(&mut self.turn);
         c.sums.requests = contexts.len() as u64;
         c.sums.context = contexts.iter().sum();
         c.sums.context_max = contexts.iter().copied().max().unwrap_or(0);
         c.sums.model_ms = ms.map_or(0, |ms| ms.saturating_sub(c.sums.tool_ms));
         c
+    }
+}
+
+impl crate::editor::Editor {
+    /// Hands the turns ended in the session in front to the call-order record (`DIR`), on a worker with
+    /// nothing to bring back — none kept where there's no record (tests: none unless given).
+    pub fn calls_record(&mut self) {
+        let entries = std::mem::take(&mut self.session.usage.to_record);
+        let Some(dir) = self.calls_dir.clone().filter(|_| !entries.is_empty()) else { return };
+        let file = crate::cards::month_file(std::time::SystemTime::now());
+        self.events.jobs().background(move || {
+            if let Err(e) = crate::cards::append(&dir, &file, &entries) {
+                crate::log::line("calls", "warn", &format!("{}: {e}", dir.join(&file).display()));
+            }
+        });
+    }
+}
+
+/// The record's lines in `dir` once there are `n` whole ones (written on workers; 5 s at most), in no
+/// particular order.
+#[cfg(test)]
+pub fn recorded(dir: &Path, n: usize) -> Vec<Value> {
+    let file = dir.join(crate::cards::month_file(std::time::SystemTime::now()));
+    let end = Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let whole: Vec<&str> = text.split_inclusive('\n').filter(|l| l.ends_with('\n')).collect();
+        if whole.len() >= n {
+            return whole.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        }
+        assert!(Instant::now() < end, "{} of {n} lines at {}: {text}", whole.len(), file.display());
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
