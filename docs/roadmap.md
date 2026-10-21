@@ -421,7 +421,9 @@ main that has what it waits for, and the user says go:
   value — `Session.at`, the six flags gone; one search and selection per pane — the user's friction 84 replayed as a
   test; `C-w h/j/k/l` from every surface, said where nothing is that way; the `C-w`-inside-a-terminal decision in
   the plan's §2.6), view P3 (`1b988324`). Order from here: design pass 2's D2/D3 (under way) → **P2b** surfaces as
-  leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program) → **P3** panes of their own (the tests panel
+  leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program; part 1 `e6d8891c`: the tree holding every surface, the layout from it, hops of any kind, zoom, the code splits' sizes, `C-w` inside a terminal's program, restart and the state's panes) → **P2c** text surfaces
+  as documents (the user, 2026-10-21: the chat's transcript, the run panels' output and later the terminal as
+  buffers under the editor's keys — view mode becomes normal mode on a read-only document) → **P3** panes of their own (the tests panel
   the first linked group) → **P3b** tabs and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
   terminal → shells across `:restart`. After its own terminal engine, then images at full
@@ -605,8 +607,9 @@ git tab, search, a short Kubernetes one.
   floats in a frame named in its top line (`╭─ space ─╮`), a card's answer keys in its bottom line, two cards never
   touching; `pane_names` — a group's members in one header with `·`, the one in sight lit (`files · outline · git`,
   `terminal · check · procs`); comments a warm wash apart from the virtual text's cool dim (ΔE ≥ 12, tested).
-  Next: D4 the contrast test (in), D5 the docs pictures, and motion (honest only, the note's table) as its own
-  small piece after panes P2b.
+  A polish after (`de0b8890`): a floating frame covers its whole rect, a full row of air under Claude's card,
+  scrollbar thumbs `▎` beside a line. D4 the contrast test is in; D5 the docs pictures retaken (28 differ; kept once
+  the user has seen them); motion (honest only, the note's table) as its own small piece after panes P2b.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
