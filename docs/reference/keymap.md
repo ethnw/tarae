@@ -491,7 +491,6 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:project-untrust` |  | Stop running what this project's .tarae.toml sets |
 | `:claude-settings` |  | Look again at what this project's Claude settings run in the chat, and trust them or not |
 | `:claude-update` |  | Look for a newer claude and install it (claude update, as you) |
-| `:claude-login` |  | Log claude in (claude auth login, in the terminal) |
 | `:granted` | `:sandbox-allowed` | What Claude may do without asking — take one back |
 | `:sandbox-disallow` |  | Take back what :granted lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |

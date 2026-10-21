@@ -4,6 +4,72 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::sandbox::Os;
 
+/// `llm.claude-sandbox` is on by default on both systems (user decision 2026-10-16, claudeown), the setting's
+/// default too; `llm.claude-sandbox-required` off.
+#[test]
+fn claude_is_confined_by_default_on_both() {
+    assert!(on_by_default(Os::Mac) && on_by_default(Os::Linux));
+    let d = crate::llm::LlmConfig::default();
+    assert_eq!((d.claude_sandbox, d.claude_sandbox_required), (true, false));
+}
+
+/// The one decision (`start_as`): confined where its profile was made; else as you, said — the setting off is said
+/// as such, and the profile then never made — or, required, not at all.
+#[test]
+fn how_a_claude_starts_is_one_decision() {
+    let made =
+        || Ok(Profile::new(Path::new("/p"), Path::new("/h"), false, &crate::sandbox::Here::default(), "t."));
+    let not = || Err::<Profile, String>("no Landlock here".into());
+    let never = || -> Result<Profile, String> { panic!("made with the setting off") };
+    let said = |s: Start| match s {
+        Start::Confined(_) => "confined".to_string(),
+        Start::Unconfined(why) => format!("as you: {why}"),
+        Start::Refused(why) => format!("refused: {why}"),
+    };
+    for required in [false, true] {
+        assert_eq!(said(start_as(true, required, made)), "confined");
+    }
+    assert_eq!(said(start_as(true, false, not)), "as you: no Landlock here");
+    assert_eq!(said(start_as(false, false, never)), "as you: llm.claude-sandbox is off");
+    assert_eq!(
+        said(start_as(true, true, not)),
+        "refused: claude doesn't start: no Landlock here, and llm.claude-sandbox-required is on"
+    );
+    assert!(
+        said(start_as(false, true, never))
+            .starts_with("refused: claude doesn't start: llm.claude-sandbox is off")
+    );
+}
+
+/// Every claude tarae starts has your own folder and settings, confined or not: no `CLAUDE_CONFIG_DIR` of tarae's
+/// (yours passed on as it is), the user source kept, nothing made by a spawn.
+#[test]
+fn every_claude_has_your_folder_and_settings() {
+    let dir = crate::scratch::Scratch::new("claude-yours");
+    let args: Vec<String> = ["--setting-sources", "user,project,local"].map(String::from).to_vec();
+    for confined in [true, false] {
+        let cfg = crate::llm::LlmConfig {
+            command: "sh".into(),
+            args: ["-c", "printf '%s|%s' \"$CLAUDE_CONFIG_DIR\" \"$*\"", "x"]
+                .map(String::from)
+                .into_iter()
+                .chain(args.iter().cloned())
+                .collect(),
+            claude_sandbox: confined,
+            ..Default::default()
+        };
+        let given = crate::llm::Env::from([
+            ("HOME".to_string(), dir.to_string_lossy().into_owned()),
+            ("CLAUDE_CONFIG_DIR".to_string(), "/yours".to_string()),
+        ]);
+        let sub = crate::billing::Credential::Subscription;
+        let child = crate::llm::spawn(&cfg, &[], &dir, Some(&given), &sub).unwrap();
+        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        assert_eq!(out, "/yours|--setting-sources user,project,local", "confined: {confined}");
+    }
+    assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 0, "nothing made by a spawn");
+}
+
 /// A stand-in home in the test's own temp folder: a fake key, claude's own, what runs later, and a project in it
 /// with a protected name, `.git` and a file named like a key. Removed when dropped.
 struct Home {
@@ -200,7 +266,8 @@ fn as_claude(h: &Home, p: &Profile, tmp: &Path) -> HashMap<String, bool> {
         ("E".to_string(), project_folder(&h.root)),
     ]);
     let cred = crate::billing::Credential::Subscription;
-    let child = crate::llm::spawn(&cfg, &[], &h.root, Some(&env), &cred, Some(p)).unwrap();
+    let (child, unconfined) = crate::llm::spawn_as(&cfg, &[], &h.root, Some(&env), &cred, Some(p)).unwrap();
+    assert_eq!(unconfined, None);
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     outcomes(&out.stdout)

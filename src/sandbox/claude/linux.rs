@@ -1,42 +1,46 @@
-//! The claude process itself under Landlock on Linux (V1 Linux part 2, the user's decisions 2026-10-15: (a), the
-//! user source off, one folder, N1 — `target/sb/v1-linux-proposal.md` §3). The same pieces as macOS's profile
-//! (`Profile`: `kept_reads`, the protected names, the files named like keys, the temp folders, the devices), made
-//! into grants (`Profile::grants` — data, checked on every system) and those into Landlock rules as the runs' are
-//! (`sandbox::linux::grant_around`, around holes and keys). Made on a worker (`for_chat`), applied on a short-lived
-//! thread that then starts claude (`spawn`; `no_new_privs` with it) — Landlock confines the calling thread and
-//! what it starts.
+//! The claude process itself under Landlock and a seccomp filter on Linux (V1 Linux part 2, 2026-10-15; on your own
+//! `~/.claude` and on by default since claudeown, 2026-10-16 — `target/sb/claudeown-plan.md`). The same pieces as
+//! macOS's profile (`Profile`: `kept_reads`, the protected names, the files named like keys, the temp folders, the
+//! devices), made into grants (`Profile::grants` — data, checked on every system) and those into Landlock rules as
+//! the runs' are (`sandbox::linux::grant_around`, around holes and keys). Made on a worker (`for_chat`), applied on a
+//! short-lived thread that then starts claude (`spawn`; `no_new_privs` with it) — Landlock and seccomp confine the
+//! calling thread and what it starts.
 //!
 //! Reads: `/` with home, the terminals (another one's input, tarae's own) and every kept place outside home as holes;
-//! home entry by entry around what's kept —
-//! the runs' `kept_reads`, your `~/.claude` and `~/.claude.json` in it (claude's folder is tarae's here,
-//! `claudehome.rs`), tarae's state — and around the files named like keys at its top; claude's folder by a rule of
-//! its own though it sits in tarae's state; tarae's log as a file. Home-wide, not the runs' narrow home: a Read you
-//! allow on a card still reaches the file (a running process can't be given new rules). The project's files named
-//! like keys are left out wherever it is. Writes: claude's folder and its lock folders whole, the temp folders, the
-//! devices but the terminals (claude starts no pty under `-p`, and isn't setsid: `/dev/tty` is tarae's own terminal —
+//! home entry by entry around what's kept — the runs' `kept_reads` but claude's own (`CLAUDES`), tarae's state —
+//! and around the files named like keys at its top; tarae's log as a file. Home-wide, not the runs' narrow home: a
+//! Read you allow on a card still reaches the file (a running process can't be given new rules). The project's
+//! files named like keys are left out wherever it is. Writes: `~/.claude` whole (its login is refreshed there: a
+//! lock folder made at its top, the store renamed over — a grant narrower than the folder refused the lock, and a
+//! confined claude then failed every turn once its token was refused: run R), `~/.claude.json` as a file (its temp
+//! file and lock beside it in home are refused; claude then writes it in place — measured), the version-lock
+//! folders whole, the temp folders, the devices but the terminals (claude starts no pty under `-p`, and isn't setsid: `/dev/tty` is tarae's own terminal —
 //! a write there is on your screen, its ioctl types keys into tarae); the project only in the arms with Claude Code's
 //! Edit and Write, as runs have it (N1): entry by entry around the protected names there, so a folder holding one
 //! (the top: `.git`) takes no new entry: a new file there is refused, and so is the temp file claude's Edit and Write
 //! make beside the one they change — claude 2.1.296 then writes a file already there in place (measured, the live
-//! check's run C), so an edit there works; the chat says what's refused (`said_in_result`). Unix sockets by path aren't handled at any ABI (decision 17:
-//! files only — `landlock::Ruleset::files`); the scopes from ABI 6 (abstract sockets, signals outside its domain);
-//! its refusals read from Landlock's audit from ABI 7, as runs'. Below `MIN_ABI` claude runs unconfined, said; so
-//! does a claude whose program is in a place the rules keep (`program_kept`: the old local install in `~/.claude`).
+//! check's run C), so an edit there works; the chat says what's refused (`said_in_result`). Unix sockets: Landlock's
+//! files-only ruleset (`landlock::Ruleset::files`) leaves them be, and the seccomp filter refuses making one
+//! (`seccomp::Claude`: `socket(AF_UNIX)` — glibc's nscd look-up is claude's only one, and it goes on; `socketpair`
+//! and the internet its own) — no path it finds reaches the session's D-Bus, tmux or an agent (G24); the scopes
+//! from ABI 6 (abstract sockets, signals outside its domain); its refusals read from Landlock's audit from ABI 7, as
+//! runs'. Below `MIN_ABI`, rules the kernel refuses or that don't go on, claude runs as you, said — or not at all,
+//! with `llm.claude-sandbox-required` (`claude::start_as`); so does a claude whose program is in a place the rules
+//! keep (`program_kept`).
 //!
-//! What Landlock can't say (`LIMITS`, the threat model's §2): a name inside a granted folder (claude's folder is
-//! all or nothing — why the user source is off); a file named like a key deeper in home than its top (macOS's
-//! regex has no such gap; claude's Read still asks tarae, `reads.rs`); a unix socket's connect — a way out of the
-//! rules (an agent, the session's D-Bus, a tmux server), said plainly; what's made in home after the rules (closed
-//! until claude's next start: the chat makes each claude's as it starts); home's own listing (no rule can hold home without what's
-//! kept in it).
+//! What Landlock can't say (`LIMITS`, the threat model's §2): a name inside a granted folder (`~/.claude` is all or
+//! nothing: what your own Claude Code runs later there — settings, hooks, `CLAUDE.md`, commands — is claude's to
+//! write, where macOS's profile keeps it, G25); a file named like a key deeper in home than its top (macOS's regex
+//! has no such gap; claude's Read still asks tarae, `reads.rs`); what's made in home after the rules (closed until
+//! claude's next start: the chat makes each claude's as it starts); home's own listing (no rule can hold home
+//! without what's kept in it).
 
 // (the grants are data on every system — their tests and golden run on macOS too; only Linux makes rules of them)
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 
-use super::Profile;
-use crate::claudehome::Place;
+use super::{OWN_DIRS, Profile, profile_path};
 
 /// Below this Landlock ABI claude runs unconfined, said: before 3 truncating any file stays open (the runs' line —
 /// `sandbox::linux::FULL`).
@@ -44,14 +48,14 @@ pub const MIN_ABI: u32 = 3;
 
 /// What the chat says once since tarae started, when its claude runs confined on Linux: what the rules can't hold —
 /// unix sockets plainly, a way out of them (decision 17: files only).
-pub const LIMITS: &str = "claude itself runs under Landlock, files only: it reads all but what's kept (keys, \
-                          tokens, your ~/.claude, tarae's state) and writes only its own folder, the temp folders \
-                          and the devices. It reaches any unix socket whose path it can find — your session's D-Bus \
-                          (where systemd-run --user runs anything unconfined), tmux's sockets, the SSH and GPG \
-                          agents under $XDG_RUNTIME_DIR — so against a hostile claude program this is no wall; it \
-                          holds against claude's file bugs. Nor can Landlock keep from it a file named like a key \
-                          deeper in home than its top. What's made after it started is as it was until its next \
-                          start: in home closed to it, a key or protected name in the project open to it";
+pub const LIMITS: &str = "claude itself runs under Landlock and makes no unix socket: it reads all but what's \
+                          kept (keys, tokens, tarae's state) and writes only your ~/.claude and ~/.claude.json, the \
+                          temp folders and the devices. Landlock grants ~/.claude whole — claude refreshes your \
+                          login there — so what your own Claude Code runs later in it (settings, hooks, CLAUDE.md, \
+                          commands, agents, skills, plugins) is this claude's to write, where macOS keeps them from \
+                          it. Nor can Landlock keep from it a file named like a key deeper in home than its top. \
+                          What's made after it started is as it was until its next start: in home closed to it, a \
+                          key or protected name in the project open to it";
 
 /// …and in the arms with Claude Code's Edit and Write.
 pub const LIMITS_EDIT: &str = " — a folder holding a protected name (the project's top holds .git) takes no new \
@@ -66,6 +70,8 @@ pub enum Right {
     Read,
     /// Reading one file.
     ReadFile,
+    /// Reading, writing and truncating one file, not replacing it: `~/.claude.json` (its folder is home).
+    File,
     /// Every right (but unix sockets by path, never handled): claude's folders, the temp folders, the project (N1).
     All,
     /// Reading and writing a device file, not making or removing it (the runs' `WRITE_ONE`).
@@ -78,6 +84,7 @@ impl Right {
         match self {
             Right::Read => "read",
             Right::ReadFile => "read the file",
+            Right::File => "write the file",
             Right::All => "all",
             Right::Device => "device",
         }
@@ -130,16 +137,26 @@ impl PartialEq for Rules {
 
 impl Eq for Rules {}
 
-/// claude's folders where they're tarae's: `CLAUDE_CONFIG_DIR` and the lock folders (real).
-fn own_places(place: &Place) -> Vec<PathBuf> {
-    std::iter::once(place.dir()).chain(place.locks.iter().cloned()).map(|d| super::profile_path(&d)).collect()
-}
+/// `~/.claude.json`'s name in home.
+const OWN_FILE: &str = ".claude.json";
 
 impl Profile {
+    /// claude's own places, written (real): `~/.claude` whole, `~/.claude.json` as a file, the version-lock folders.
+    fn own_places(&self) -> Vec<(PathBuf, Right)> {
+        let mut own = vec![
+            (profile_path(&self.home.join(OWN_DIRS[0])), Right::All),
+            (profile_path(&self.home.join(OWN_FILE)), Right::File),
+        ];
+        own.extend(self.locks.iter().map(|l| (l.clone(), Right::All)));
+        own
+    }
+
     /// Claude's grants, in order, given what's in the project now: `protected` (where each protected name starts —
-    /// `linux::there`) and `keys` (its files named like keys). None where claude's folder isn't tarae's (macOS).
+    /// `linux::there`) and `keys` (its files named like keys). None for macOS's profile (Seatbelt's text).
     pub fn grants(&self, protected: &[PathBuf], keys: &[PathBuf]) -> Vec<Grant> {
-        let Some(place) = &self.place else { return Vec::new() };
+        if self.os != crate::sandbox::Os::Linux {
+            return Vec::new();
+        }
         let (home, root) = (&self.home, &self.root);
         let keys: Vec<PathBuf> = keys.iter().cloned().chain(self.home_keys()).collect();
         let grant = |path: &Path, right: Right, holes: Vec<PathBuf>| Grant {
@@ -165,11 +182,11 @@ impl Profile {
         out.extend(self.log.iter().map(|l| grant(l, Right::ReadFile, Vec::new())));
         // Writes: claude's own, the temp folders, the devices — none reaching into home or the project but their own
         // (a temp folder holding either: a test's home)
-        let places = own_places(place).into_iter().map(|p| (p, Right::All));
+        let places = self.own_places().into_iter();
         let temps = self.temps.iter().map(|t| (t.clone(), Right::All));
         let devices = DEVICES.iter().map(|(d, r)| (PathBuf::from(d), *r));
         for (path, right) in places.chain(temps).chain(devices) {
-            if broken == "closed" && right == Right::All {
+            if broken == "closed" && matches!(right, Right::All | Right::File) {
                 continue;
             }
             let holes = self.write_holes(&path, protected);
@@ -216,9 +233,9 @@ impl Profile {
         keys
     }
 
-    /// `reads_allow` where claude's folder is tarae's (`place`): its grants' reads, in Rust.
-    pub(super) fn reads_allow_in(&self, place: &Place, real: &Path) -> bool {
-        if self.log.as_deref() == Some(real) || own_places(place).iter().any(|d| real.starts_with(d)) {
+    /// `reads_allow` on Linux: its grants' reads, in Rust.
+    pub(super) fn reads_allow_in(&self, real: &Path) -> bool {
+        if self.log.as_deref() == Some(real) || self.own_places().iter().any(|(d, _)| real.starts_with(d)) {
             return true;
         }
         let key = super::super::key_named_in(&self.root, real)
@@ -233,10 +250,10 @@ impl Profile {
                 .any(|k| real.starts_with(k) && !(self.root.starts_with(k) && real.starts_with(&self.root)))
     }
 
-    /// `writes_allow` where claude's folder is tarae's (`place`): its grants' writes, in Rust — a file not there yet
-    /// in a folder on the way to a protected name too (N1: such a folder takes no new entry).
-    pub(super) fn writes_allow_in(&self, place: &Place, real: &Path) -> bool {
-        if own_places(place).iter().any(|d| real.starts_with(d)) {
+    /// `writes_allow` on Linux: its grants' writes, in Rust — a file not there yet in a folder on the way to a
+    /// protected name too (N1: such a folder takes no new entry).
+    pub(super) fn writes_allow_in(&self, real: &Path) -> bool {
+        if self.own_places().iter().any(|(d, _)| real.starts_with(d)) {
             return true;
         }
         let in_home = real.starts_with(&self.home);
@@ -250,8 +267,22 @@ impl Profile {
                 || DEVICES.iter().any(|(d, _)| real.starts_with(d)))
     }
 
-    /// Where `command` (`llm.command`) starts from when its rules keep that place (the old local install in
-    /// `~/.claude/local/`, which is yours, kept): it couldn't be run under them — claude runs unconfined then, said,
+    /// claude's own places made where nothing is, before its rules are (a grant needs its path there): `~/.claude`
+    /// (0700) and `~/.claude.json` (`{}`, 0600) from home's own folder, the version-lock folders (their parents as
+    /// they come — yours). Never through a link: `mkdirat` and `O_CREAT | O_EXCL` make nothing where a link is,
+    /// leading anywhere or nowhere. What's there is used as it is, wherever it leads (dotfiles), but one that leads
+    /// to no folder or file is refused — Err, and claude runs as you, said (`start_as`). A worker's.
+    pub fn own_made(&self) -> Result<(), String> {
+        made_at(&self.home, OWN_DIRS[0], None)?;
+        made_at(&self.home, OWN_FILE, Some(b"{}"))?;
+        for l in &self.locks {
+            let (Some(parent), Some(name)) = (l.parent(), l.file_name()) else { continue };
+            made_at(parent, &name.to_string_lossy(), None)?;
+        }
+        Ok(())
+    }
+
+    /// Where `command` (`llm.command`) starts from when its rules keep that place: it couldn't be run under them — claude runs unconfined then, said,
     /// rather than failing to start. Found as `Command` finds it (a path from `root`, else on `PATH` as `here` says
     /// it), links followed. None: allowed, or not found (the spawn says so).
     pub fn program_kept(&self, command: &str, here: &super::Here) -> Option<PathBuf> {
@@ -271,6 +302,46 @@ impl Profile {
         let Some(dir) = real.parent() else { return false };
         let Some(rules) = &self.rules else { return false };
         real.symlink_metadata().is_err() && rules.protected.iter().any(|p| p.starts_with(dir) && p != dir)
+    }
+}
+
+/// `name` in `dir` made where nothing is — a folder (0700), or (`file`) a file of that text (0600) — through no link:
+/// `mkdirat` and `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` from `dir`'s descriptor (`dir` made first where it isn't,
+/// 0700). Then it must be one, followed where it leads.
+fn made_at(dir: &Path, name: &str, file: Option<&[u8]>) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::DirBuilderExt;
+    let at = dir.join(name);
+    let said = |e: std::io::Error| format!("claude's {}: {e}", at.display());
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(said)?;
+    let d = std::fs::File::open(dir).map_err(said)?;
+    let c = crate::sandbox::c_name(std::ffi::OsStr::new(name))?;
+    match file {
+        // SAFETY: a folder descriptor of ours and a name, live for the call (one there already: EEXIST).
+        None => unsafe {
+            libc::mkdirat(d.as_raw_fd(), c.as_ptr(), 0o700);
+        },
+        Some(text) => {
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            // SAFETY: as above; a descriptor it returns is ours alone, owned by the `File` at once.
+            let fd = unsafe { libc::openat(d.as_raw_fd(), c.as_ptr(), flags, 0o600 as libc::c_uint) };
+            if fd >= 0 {
+                // SAFETY: a new descriptor of ours (above).
+                let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+                f.write_all(text).map_err(said)?;
+            }
+        }
+    }
+    let there =
+        std::fs::metadata(&at).map_err(|e| format!("claude's {}: {e} — a link to nowhere?", at.display()))?;
+    match (file.is_some(), there.is_file(), there.is_dir()) {
+        (true, true, _) | (false, _, true) => Ok(()),
+        _ => Err(format!(
+            "claude's {}: not a {}",
+            at.display(),
+            if file.is_some() { "file" } else { "folder" }
+        )),
     }
 }
 
@@ -295,6 +366,7 @@ fn bits(right: Right) -> u64 {
     match right {
         Right::Read => l::EXECUTE | l::READ_FILE | l::READ_DIR,
         Right::ReadFile => l::READ_FILE,
+        Right::File => l::READ_FILE | l::WRITE_FILE | l::TRUNCATE,
         Right::All => l::ALL,
         Right::Device => l::READ_FILE | l::WRITE_FILE | l::TRUNCATE | l::IOCTL_DEV,
     }
@@ -326,7 +398,7 @@ pub fn rules_in(
 }
 
 /// The chat's (and the reviewer's) claude's profile on Linux, for `root` and `home` as `here` says them — or why
-/// it runs unconfined: no Landlock, one below `MIN_ABI`, no folder of claude's own, rules the kernel refused. Walks
+/// it runs unconfined: no Landlock, one below `MIN_ABI`, claude's own places not made, rules the kernel refused. Walks
 /// the project once (`linux::there`) and probes the audit once (`audit_readable`, ≤ ½ s): a worker's. `command`:
 /// claude's program (`llm.command`) — one the rules keep can't run under them (`program_kept`).
 #[cfg(target_os = "linux")]
@@ -344,7 +416,6 @@ pub fn for_chat(
         ));
     }
     let p = Profile::new(root, home, writes_project, here, &super::tag());
-    let place = p.place.clone().ok_or("no folder of claude's own to keep it to")?;
     if let Some(program) = p.program_kept(command, here) {
         return Err(format!(
             "its program {} is in a place its rules keep closed (your own Claude Code's) — Claude Code's native \
@@ -352,7 +423,7 @@ pub fn for_chat(
             program.display()
         ));
     }
-    place.made()?;
+    p.own_made()?;
     let there = crate::sandbox::linux::there(&p.root, &[], &[]);
     let grants = p.grants(&there.protected, &there.keys);
     let said = |e: std::io::Error| format!("its Landlock rules couldn't be made: {e}");
@@ -362,27 +433,39 @@ pub fn for_chat(
     Ok(Profile { rules: Some(std::sync::Arc::new(rules)), ..p })
 }
 
-/// `cmd` started confined to `p`'s rules (`confined`): the child takes the thread's credentials, and nothing else of
-/// tarae's is confined. A profile without its rules starts nothing (on Linux `for_chat` always makes them).
+/// `cmd` started confined to `p`'s rules and claude's filter (`confined`): the child takes the thread's
+/// credentials, and nothing else of tarae's is confined. Ok(Err(why)): they didn't go on, and nothing was started —
+/// the caller says what then (`claude::spawn`), from its own thread, never the half-confined one.
 #[cfg(target_os = "linux")]
-pub fn spawn(p: &Profile, cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+pub fn spawn(
+    p: &Profile,
+    cmd: &mut std::process::Command,
+) -> std::io::Result<Result<std::process::Child, String>> {
     confined(p, || cmd.spawn())
 }
 
 /// `start` on a short-lived thread named by `p`'s tag (Landlock's audit names the thread that confined it —
-/// `audit_of`), which confines itself to `p`'s rules first (`no_new_privs` with it). Waits for `start` only.
+/// `audit_of`), which confines itself first: `p`'s rules, then claude's seccomp filter (`seccomp::Claude`;
+/// `no_new_privs` with them). Ok(Err(why)): either didn't go on, `start` not called. Waits for `start` only.
 #[cfg(target_os = "linux")]
 pub fn confined<T: Send>(
     p: &Profile,
     start: impl FnOnce() -> std::io::Result<T> + Send,
-) -> std::io::Result<T> {
-    let Some(rules) = &p.rules else {
-        return Err(std::io::Error::other("claude's Landlock rules weren't made"));
+) -> std::io::Result<Result<T, String>> {
+    let Some(rules) = &p.rules else { return Ok(Err("its Landlock rules weren't made".into())) };
+    let filter = match crate::seccomp::Claude::new() {
+        Ok(f) => f,
+        Err(e) => return Ok(Err(format!("its seccomp filter: {e}"))),
     };
     std::thread::scope(|s| {
         let t = std::thread::Builder::new().name(p.tag.clone()).spawn_scoped(s, || {
-            rules.ruleset.apply()?;
-            start()
+            if let Err(e) = rules.ruleset.apply() {
+                return Ok(Err(format!("its Landlock rules didn't go on: {e}")));
+            }
+            if let Err(e) = filter.apply() {
+                return Ok(Err(format!("its seccomp filter didn't go on: {e}")));
+            }
+            start().map(Ok)
         })?;
         t.join().unwrap_or_else(|_| Err(std::io::Error::other("claude's confining thread panicked")))
     })
@@ -393,9 +476,9 @@ pub fn confined<T: Send>(
 #[cfg(target_os = "linux")]
 pub const FLAG: &str = "--claude-confined";
 
-/// `FLAG`'s: claude's folder made, its profile for the project here (the arm with Edit and Write with `--writes`),
-/// its command as `llm::spawn` makes it (the keys in the environment kept: the live check's stub takes a fake
-/// one), this thread confined, then exec'd. Never returns.
+/// `FLAG`'s: its profile for the project here (claude's own places made; the arm with Edit and Write with
+/// `--writes`), its command as `llm::spawn` makes it (the keys in the environment kept: the live check's stub takes
+/// a fake one), this thread confined — rules and filter —, then exec'd. Never returns.
 #[cfg(target_os = "linux")]
 pub fn main() -> ! {
     use std::os::unix::process::CommandExt;
@@ -412,10 +495,6 @@ pub fn main() -> ! {
         fail(format!("usage: tarae {FLAG} [--writes] <claude> [args…]"))
     };
     let root = std::env::current_dir().unwrap_or_else(|e| fail(e.to_string()));
-    let os = crate::sandbox::Os::HOST;
-    if let Err(e) = crate::claudehome::make(os, true, None) {
-        fail(e)
-    }
     let p = super::for_chat(&root, writes, program)
         .unwrap_or_else(|e| fail(format!("claude would run unconfined: {e}")));
     let cfg = crate::llm::LlmConfig {
@@ -431,6 +510,8 @@ pub fn main() -> ! {
     if let Some(r) = &p.rules {
         r.ruleset.apply().unwrap_or_else(|e| fail(format!("its rules: {e}")));
     }
+    let filter = crate::seccomp::Claude::new().unwrap_or_else(|e| fail(format!("its filter: {e}")));
+    filter.apply().unwrap_or_else(|e| fail(format!("its filter: {e}")));
     // (the pipes are the caller's: stdin, stdout and stderr as this process has them)
     let e = cmd
         .stdin(std::process::Stdio::inherit())

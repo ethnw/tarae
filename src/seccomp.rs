@@ -241,6 +241,25 @@ fn outside_ops(arch: u32) -> Vec<Op> {
     ops
 }
 
+/// What the claude process itself gets beside its Landlock rules (`sandbox::claude::linux`, claudeown D): no unix
+/// socket — `socket(AF_UNIX, …)` refused, so no path it finds reaches the session's D-Bus, tmux or an agent (G24;
+/// glibc's nscd look-up is its only one, and it goes on: measured on a real system, run R) — while `socketpair`
+/// (Bun's pipes to its children) and the internet families stay its own: claude talks to its API itself. io_uring
+/// missing and another ABI's calls refused, as in every filter here.
+fn claude_ops(arch: u32) -> Vec<Op> {
+    let nr = |n: libc::c_long| n as u32;
+    let mut ops = native(arch);
+    for n in [libc::SYS_io_uring_setup, libc::SYS_io_uring_enter, libc::SYS_io_uring_register] {
+        ops.push(Op::Is(nr(n), To::Missing, To::Next));
+    }
+    ops.extend([
+        Op::Is(nr(libc::SYS_socket), To::Next, To::Allow),
+        Op::Load(arg_low(0)),
+        Op::Is(libc::AF_UNIX as u32, To::Refuse, To::Allow),
+    ]);
+    ops
+}
+
 /// `ops` for `mode` as classic BPF (`assemble`).
 fn program(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<libc::sock_filter> {
     assemble(&ops(arch, mode, no_userns, ptys))
@@ -363,17 +382,41 @@ impl NoUserns {
     /// the kernel asks of an unprivileged caller (so a setuid program it starts runs without its privileges).
     /// Raw calls only: fit for a fork's child.
     pub fn apply(&self) -> io::Result<()> {
-        let fprog = libc::sock_fprog { len: self.0.len() as u16, filter: self.0.as_ptr().cast_mut() };
-        // SAFETY: the program outlives the call (the kernel copies it; it never writes through the pointer).
-        unsafe {
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                || libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, &raw const fprog) != 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        Ok(())
+        put_on(&self.0)
     }
+}
+
+/// The claude process's filter (`claude_ops`), made before it's put on — on the short-lived thread that then starts
+/// claude (`sandbox::claude::linux::confined`), after its Landlock rules.
+pub struct Claude(Vec<libc::sock_filter>);
+
+impl Claude {
+    pub fn new() -> io::Result<Claude> {
+        let arch = ARCH.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Unsupported, "no seccomp filter for this architecture")
+        })?;
+        Ok(Claude(assemble(&claude_ops(arch))))
+    }
+
+    /// Puts it on the calling thread, and what it starts from now on, for good (`no_new_privs` first).
+    pub fn apply(&self) -> io::Result<()> {
+        put_on(&self.0)
+    }
+}
+
+/// `prog` on the calling thread, `no_new_privs` first, which the kernel asks of an unprivileged caller (so a
+/// setuid program it starts runs without its privileges). Raw calls only: fit for a fork's child.
+fn put_on(prog: &[libc::sock_filter]) -> io::Result<()> {
+    let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_ptr().cast_mut() };
+    // SAFETY: the program outlives the call (the kernel copies it; it never writes through the pointer).
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            || libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, &raw const fprog) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// `start` on a short-lived thread under the outside filter (`NoUserns`): what it starts (`posix_spawn`)
@@ -487,6 +530,33 @@ mod tests {
     }
 
     /// io_uring answers as if the kernel had none — `ENOSYS`, where a container's own filter says `EPERM`.
+    /// claude's own filter (`Claude`): no unix socket — a listener's path is never reached — while a `socketpair`
+    /// (Bun's pipes to its children), internet sockets and netlink's routing one stay its own; io_uring missing.
+    #[test]
+    fn claudes_filter_refuses_unix_sockets_only() {
+        let at = temp("claude").join("l");
+        let listener = UnixListener::bind(&at).unwrap();
+        let (connect, others, uring) = std::thread::spawn(move || {
+            Claude::new().unwrap().apply().expect("the filter applies");
+            let connect = UnixStream::connect(&at).map(drop).map_err(|e| e.raw_os_error());
+            let pair = UnixStream::pair().map(drop).map_err(|e| e.raw_os_error());
+            let tcp = std::net::TcpListener::bind("127.0.0.1:0").map(drop).map_err(|e| e.raw_os_error());
+            let udp = socket(libc::AF_INET, libc::SOCK_DGRAM).map_err(Some);
+            let route = socket_of(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE).map_err(Some);
+            // SAFETY: no buffer is read: the call is answered before its arguments are
+            let uring = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, std::ptr::null_mut::<u8>()) };
+            let uring = (uring < 0).then(|| io::Error::last_os_error().raw_os_error());
+            (connect, [pair, tcp, udp, route], uring)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(connect, Err(Some(libc::EPERM)), "a listener's path");
+        assert_eq!(others, [Ok(()); 4], "a socketpair, TCP, UDP, netlink's routing");
+        assert_eq!(uring, Some(Some(libc::ENOSYS)), "io_uring missing");
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "no one came");
+    }
+
     #[test]
     fn io_uring_setup_is_refused() {
         let got = filtered(|| {

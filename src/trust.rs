@@ -59,13 +59,14 @@ pub const RISKY: [&str; 22] = [
 /// with (`llm.edit-tools`), whether the claude program itself is confined (`llm.claude-sandbox`), whether
 /// what you use is counted (`features.count`) and whether your cards are kept (`llm.card-record`) — a project
 /// never does.
-pub const YOURS_ONLY: [&str; 7] = [
+pub const YOURS_ONLY: [&str; 8] = [
     "llm.card-record",
     "llm.environment-key",
     "llm.billing",
     "llm.reviewer-billing",
     "llm.edit-tools",
     "llm.claude-sandbox",
+    "llm.claude-sandbox-required",
     "features.count",
 ];
 

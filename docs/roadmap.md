@@ -121,17 +121,11 @@ After it, the rest goes on in this order.
 The aim is to state what the sandbox guarantees and show that it holds.
 
 1. **One threat-model document** — done: [threat-model.md](threat-model.md), what is kept from a run and what
-   isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined, files only
-   (macOS: Seatbelt, V1d; Linux: Landlock, V1 parts 1–2). On Linux that meant tarae's own claude folder and a
-   second login; since `882af6bc` claude runs there on the user's own folder and login, confined only with
-   `llm.claude-sandbox = true`.
-   User decision 2026-10-16 (B), under way in session claudeown: on Linux claude is confined by default again, on
-   the user's own `~/.claude` and login, as Claude Code's documented recipe for running claude under its sandbox
-   runtime does. tarae's own claude folder and second login go. Where the rules can't be made, claude starts
-   unconfined and says why. What it gives up — claude can change its own settings, hooks and CLAUDE.md under
-   `~/.claude` — is written in G25. Its unix sockets (G24): a seccomp refusal of `socket(AF_UNIX)` (socketpair
-   allowed), as Claude Code's optional seccomp filter does, if claude works with it — measured first; else the
-   gap stays as it is (V3, on a 7.2+ kernel).
+   isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined by default on
+   both OSes (macOS: Seatbelt, V1d; Linux: Landlock on the user's own `~/.claude` and login, granted whole — G25
+   —, and a seccomp filter that refuses unix sockets, G24; claudeown, user decision 2026-10-16 (B)). tarae's own
+   claude folder and second login are gone; where the rules can't be made claude starts as the user and says why
+   (`llm.claude-sandbox-required`: not at all).
 2. **Fuzzing the parsers that read what a run sends** — the supervisor's reading of system-call arguments, and
    the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the

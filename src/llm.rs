@@ -119,10 +119,11 @@ pub struct LlmConfig {
     /// Chat: Claude's commands run in a sandbox (`sandbox.rs`) — writes in the project, temp and the
     /// toolchain's folders; no network but this machine.
     pub sandbox: bool,
-    /// Chat: its claude itself under a files-only profile (`sandbox::claude`: Seatbelt, Landlock) — your config
-    /// only; on by default on macOS only (`sandbox::claude::on_by_default`). On Linux it also gives every claude
-    /// tarae's own folder and login (`claudehome.rs`).
+    /// Chat: its claude itself under a profile of its own (`sandbox::claude`: Seatbelt; Landlock and seccomp) —
+    /// your config only; on by default (`sandbox::claude::on_by_default`).
     pub claude_sandbox: bool,
+    /// With it, a claude that can't be confined doesn't start (`sandbox::claude::start_as`) — your config only.
+    pub claude_sandbox_required: bool,
     pub sandbox_network: bool,
     /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`) — None: any host (`"any"`);
     /// another is held and asked on a card (`hosts.rs`).
@@ -179,6 +180,7 @@ impl Default for LlmConfig {
             review_ask: Vec::new(),
             sandbox: true,
             claude_sandbox: crate::sandbox::claude::on_by_default(crate::sandbox::Os::HOST),
+            claude_sandbox_required: false,
             sandbox_network: false,
             sandbox_hosts: None,
             sandbox_upstream: Default::default(),
@@ -223,7 +225,7 @@ impl Warm {
         }
         // Spared for another folder or billing, or gone: it goes
         self.drop_spare();
-        let child = spawn(cfg, &[], dir, given, cred, None).map_err(|e| e.said(&cfg.command, false))?;
+        let child = spawn(cfg, &[], dir, given, cred).map_err(|e| e.said(&cfg.command, false))?;
         self.child = Some((child, dir.to_path_buf(), cred.clone()));
         Ok(())
     }
@@ -301,19 +303,32 @@ pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
 /// with tarae's environment less what `claude_env` leaves out, on `cred` (`billing.rs`: an API session's key helper
 /// laid into its `--settings`). `given`: `Editor::claude_env` — a test's stand-in for tarae's environment, laid
 /// over the process's as if inherited (None: the process's own); what's left out is judged on it alone, and the
-/// process's names those rules judge aren't inherited (`judged`). `confine`: under claude's own profile (`sandbox::claude`, the chat's — `sandbox-exec` execs
-/// claude, so the pid is claude's; Linux: started from a thread confined to its rules); None: as you.
+/// process's names those rules judge aren't inherited (`judged`). `confine`: under claude's own profile
+/// (`sandbox::claude`, the chat's — `sandbox-exec` execs claude, so the pid is claude's; Linux: started from a
+/// thread confined to its rules); None: as you. Confined, `spawn_as` — it says when the rules didn't go on.
 pub fn spawn(
     cfg: &LlmConfig,
     extra: &[&str],
     dir: &Path,
     given: Option<&Env>,
     cred: &Credential,
-    confine: Option<&crate::sandbox::claude::Profile>,
 ) -> Result<Child, SpawnError> {
+    spawn_as(cfg, extra, dir, given, cred, None).map(|(child, _)| child)
+}
+
+/// `spawn` under `confine`, and why it runs as you after all where Linux's rules didn't go on
+/// (`sandbox::claude::spawn` — with `llm.claude-sandbox-required` it doesn't start: `SpawnError::Start`).
+pub fn spawn_as(
+    cfg: &LlmConfig,
+    extra: &[&str],
+    dir: &Path,
+    given: Option<&Env>,
+    cred: &Credential,
+    confine: Option<&crate::sandbox::claude::Profile>,
+) -> Result<(Child, Option<String>), SpawnError> {
     let mut cmd = command(cfg, extra, dir, given, cred, confine)?;
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    crate::sandbox::claude::spawn(confine, &mut cmd).map_err(SpawnError::Start)
+    crate::sandbox::claude::spawn(confine, cfg.claude_sandbox_required, &mut cmd).map_err(SpawnError::Start)
 }
 
 /// `spawn`'s command, not started: its program (under `confine`'s), arguments and environment — also what
@@ -334,11 +349,6 @@ pub fn command(
         "a test started the real claude — give llm.command a stand-in (`sh -c 'cat > /dev/null'`)"
     );
     let args = crate::billing::args(&cfg.args, cred).map_err(SpawnError::Billing)?;
-    // On Linux with claude confined its folder is tarae's (`claudehome.rs`): made through no link, the user source
-    // off — for every claude, so all share one login; by default your own
-    let (args, folder) =
-        crate::claudehome::for_claude(crate::sandbox::Os::HOST, cfg.claude_sandbox, given, &args)
-            .map_err(SpawnError::Folder)?;
     // (under `sandbox-exec` a missing program is its exec failing, not the spawn: said as the spawn's, so a
     // missing claude still says how to install it — `spawn_failed`)
     if confine.is_some() && !program_there(&cfg.command, dir, given) {
@@ -378,9 +388,6 @@ pub fn command(
     for name in ClaudeEnv::of(given, keep_keys).removed {
         cmd.env_remove(name);
     }
-    if let Some(f) = &folder {
-        cmd.env(crate::claudehome::VAR, f);
-    }
     if let Some(m) = &cfg.model {
         cmd.args(["--model", m]);
     }
@@ -408,8 +415,6 @@ pub enum SpawnError {
     Start(std::io::Error),
     /// Its billing can't be laid into its arguments (`billing::args`).
     Billing(String),
-    /// Its folder (Linux, `claudehome.rs`) can't be made through no link, or has no place.
-    Folder(String),
 }
 
 impl SpawnError {
@@ -417,7 +422,7 @@ impl SpawnError {
     pub fn said(&self, command: &str, whole: bool) -> String {
         match self {
             SpawnError::Start(e) => spawn_failed(command, e, whole),
-            SpawnError::Billing(why) | SpawnError::Folder(why) => why.clone(),
+            SpawnError::Billing(why) => why.clone(),
         }
     }
 }
@@ -628,21 +633,21 @@ pub fn env_told(ed: &mut Editor) -> Option<String> {
     Some(said)
 }
 
-/// What a claude that failed with `error` for want of a login is told, when tarae left a key out, or where tarae's
-/// claudes keep a login of their own (Linux with claude confined: `:claude-login`, once) — None: not a login
-/// failure, or neither. With the key card up for it (`envkey::offered`), one line pointing there.
+/// Claude Code's words when it has no login (its errors reference, under `-p`: "Not logged in · Please run /login",
+/// "Failed to authenticate…", "Please run /login · API Error: 401…").
+pub const NOT_LOGGED_IN: [&str; 3] = ["Not logged in", "Please run /login", "Failed to authenticate"];
+
+/// What a claude that failed with `error` for want of a login is told when tarae left a key out — None: not a
+/// login failure, or none left out (claude's own words say `/login`, as your own claude's do). With the key card
+/// up for it (`envkey::offered`), one line pointing there.
 pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
-    if !crate::claudehome::NOT_LOGGED_IN.iter().any(|l| error.contains(l)) {
+    if !NOT_LOGGED_IN.iter().any(|l| error.contains(l)) {
         return None;
     }
-    let var = crate::claudehome::var_in(ed.claude_env.as_ref());
-    let confined = ed.config.llm.claude_sandbox;
-    let place = crate::claudehome::Place::of(crate::sandbox::Os::HOST, confined, &var).ok().flatten();
-    let own = crate::claudehome::login_hint(error, place.as_ref(), &mut ed.claude_login_told);
     let env = ClaudeEnv::of(ed.claude_env.as_ref(), keeps_key(ed));
     let keys = env.keys();
     if keys.is_empty() {
-        return own;
+        return None;
     }
     // (the key card says the rest — `envkey.rs`: the chat only points at it)
     if crate::envkey::offered(ed, &env) {
@@ -651,9 +656,9 @@ pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
             keys.join(" and ")
         ));
     }
-    let how = crate::claudehome::how_to_log_in(place.as_ref());
     Some(format!(
-        "Claude has no login of its own, and tarae didn't pass on {} from its environment ({}). {how}",
+        "Claude has no login of its own, and tarae didn't pass on {} from its environment ({}). Or log in: run \
+         `claude` in a terminal, then /login.",
         keys.join(" and "),
         env.keys_why(&keys)
     ))
@@ -1367,13 +1372,6 @@ impl Review {
 
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
-    // (on Linux once claude's own folder is made, on a worker — `claudehome.rs`)
-    if crate::claudehome::after_made(ed, |ed| {
-        prewarm(ed);
-        Ok(())
-    }) {
-        return;
-    }
     let cfg = ed.config.llm.clone();
     let warmed = ed
         .credential(ed.session.billing, crate::billing::Role::Ask)
@@ -1390,11 +1388,6 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
     }
     if ed.session.review.is_some() {
         return Err("an ask is already in progress (:ask-cancel)".into());
-    }
-    // (on Linux once claude's own folder is made, on a worker — `claudehome.rs`)
-    let again = instruction.to_string();
-    if crate::claudehome::after_made(ed, move |ed| ask(ed, &again)) {
-        return Ok(());
     }
     let cfg = ed.config.llm.clone();
     let doc = ed.doc();
@@ -1437,13 +1430,7 @@ pub fn draft(
     if ed.session.review.is_some() {
         return Err("Claude is already answering (:ask-cancel)".into());
     }
-    // (on Linux once claude's own folder is made, on a worker — `claudehome.rs`)
-    let (label_, prompt_) = (label.to_string(), prompt.to_string());
-    if crate::claudehome::after_made(ed, move |ed| draft(ed, doc_id, &label_, &prompt_, from, to)) {
-        return Ok(());
-    }
     let doc = ed.docs.iter().find(|d| d.id == doc_id).ok_or("the buffer is gone")?;
-    // (it may have changed while the folder was made)
     if from > to || to > doc.text.len_bytes() {
         return Err("the buffer changed — draft again".into());
     }
@@ -1957,7 +1944,7 @@ pub(crate) mod tests {
     fn a_test_never_starts_the_real_claude() {
         // (a path that isn't there: without the guard, nothing starts and nothing panics)
         let cfg = LlmConfig { command: "/nonexistent/claude".into(), ..LlmConfig::default() };
-        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None, &Credential::Subscription, None);
+        let _ = spawn(&cfg, &[], &std::env::temp_dir(), None, &Credential::Subscription);
     }
 
     /// No claude: Claude Code isn't installed — how to get it and log in, as its docs say (#163); any other
@@ -1992,7 +1979,7 @@ pub(crate) mod tests {
         };
         let given = Env::from([("DISABLE_UPDATES".to_string(), "0".to_string())]);
         let sub = Credential::Subscription;
-        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
+        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub).unwrap();
         let out = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "1 0");
     }
@@ -2009,7 +1996,7 @@ pub(crate) mod tests {
             ("CLAUDE_MEMORY_STORES".to_string(), "team".to_string()),
         ]);
         let sub = Credential::Subscription;
-        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
+        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub).unwrap();
         let out = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "1 unset");
     }
@@ -2026,7 +2013,7 @@ pub(crate) mod tests {
         // (given, as `given` passes tarae's environment on; the test binary's own isn't changed — a stand-in path)
         let given = Env::from([("SSH_AUTH_SOCK".to_string(), "/tarae-test/agent.sock".to_string())]);
         let sub = Credential::Subscription;
-        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub, None).unwrap();
+        let child = spawn(&cfg, &[], &std::env::temp_dir(), Some(&given), &sub).unwrap();
         let out = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "unset");
     }
@@ -2045,13 +2032,14 @@ pub(crate) mod tests {
             log: None,
             agent: None,
             tag: "tarae-claude.test.".into(),
-            place: None,
+            os: crate::sandbox::Os::Mac,
+            locks: Vec::new(),
             rules: None,
         };
         let path = Env::from([("PATH".to_string(), "/nowhere".to_string())]);
         let cfg = LlmConfig { command: "tarae-no-such-agent".into(), ..Default::default() };
         let sub = Credential::Subscription;
-        let e = spawn(&cfg, &[], &dir, Some(&path), &sub, Some(&p)).expect_err("not started");
+        let e = spawn_as(&cfg, &[], &dir, Some(&path), &sub, Some(&p)).expect_err("not started");
         assert_eq!(e.said(&cfg.command, true), "tarae-no-such-agent isn't on PATH (llm.command)");
         assert!(program_there("sh", &dir, None) && program_there("/bin/sh", &dir, None));
     }
@@ -2313,7 +2301,7 @@ pub(crate) mod tests {
             true => Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-2".into())]),
             false => Env::new(),
         };
-        let mut child = spawn(&cfg, &[], &dir, Some(&given), &Credential::Subscription, None).unwrap();
+        let mut child = spawn(&cfg, &[], &dir, Some(&given), &Credential::Subscription).unwrap();
         drop(child.stdin.take());
         child.wait().unwrap();
         let names = std::fs::read_to_string(dir.join("env.names")).unwrap();
@@ -2340,7 +2328,7 @@ pub(crate) mod tests {
         let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
         ed.claude_env = Some(Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into())]));
         ed.session.env_key = Some(false);
-        // (claude unconfined — Linux's default: your own login, on either system)
+        // (claude unconfined: no profile to make, the same on either system)
         ed.config.llm.claude_sandbox = false;
         // (a stand-in claude with no login: each message answered as Claude Code does under `-p`)
         let failed = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;

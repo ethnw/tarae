@@ -446,9 +446,16 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.claude-sandbox",
         kind: Kind::Bool,
-        doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. Off on Linux unless you turn it on: there it can't write your login without all of ~/.claude, so every claude tarae starts then keeps a folder and login of its own (~/.local/state/tarae/claude, :claude-login once) and loads no user settings; off, claude runs as you, on your own login — Claude's commands stay sandboxed and its edits reviewed. A new chat process starts with it. Only your own config sets it",
+        doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. Linux: it makes no unix socket, and it writes all of ~/.claude — your login is refreshed there — so what your own Claude Code runs later in it (settings, hooks, CLAUDE.md) isn't kept from it as on macOS. Where it can't be confined it runs as you, said (llm.claude-sandbox-required: not at all). A new chat process starts with it. Only your own config sets it",
         get: |c| Value::from(c.llm.claude_sandbox),
         set: |c, v| c.llm.claude_sandbox = b(v),
+    },
+    Setting {
+        path: "llm.claude-sandbox-required",
+        kind: Kind::Bool,
+        doc: "Chat and reviewer: a claude that can't be confined (llm.claude-sandbox off, no Seatbelt here, no Landlock or an old one, its rules refused) doesn't start, said — off: it runs as you, said once. Only your own config sets it",
+        get: |c| Value::from(c.llm.claude_sandbox_required),
+        set: |c, v| c.llm.claude_sandbox_required = b(v),
     },
     Setting {
         path: "llm.environment-key",

@@ -518,11 +518,7 @@ impl Places {
         Places {
             root: ed.session.root.clone(),
             store: ed.trust_path.clone(),
-            // (where claude's folder is tarae's — Linux, claude confined — tarae's claudes load no user settings
-            // (`claudehome::sources`), so yours set nothing a hold-back may leave to them)
-            user: ed.claude_user_settings.clone().filter(|_| {
-                !crate::claudehome::apart(crate::sandbox::Os::HOST, ed.config.llm.claude_sandbox)
-            }),
+            user: ed.claude_user_settings.clone(),
             env: ed.claude_env.clone(),
         }
     }

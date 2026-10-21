@@ -628,9 +628,6 @@ pub struct Editor {
     pub claude_env: Option<crate::llm::Env>,
     /// What claude's environment leaves out has been said (`llm::env_told`): once since tarae started.
     pub claude_env_told: bool,
-    /// That tarae's claudes keep a login of their own (Linux, claude confined: `claudehome::login_hint`) has been
-    /// said: once since tarae started.
-    pub claude_login_told: bool,
     /// An API session's key helper, a test's stand-in (`billing::Editor::credential`) — None: the Keychain's.
     pub api_key_helper: Option<String>,
     /// How `billing::Editor::api_check` looks for the key, a test's stand-in (in tests one that finds nothing,
@@ -858,7 +855,6 @@ impl Editor {
             },
             claude_env: if cfg!(test) { Some(Default::default()) } else { None },
             claude_env_told: false,
-            claude_login_told: false,
             api_key_helper: None,
             api_key_query: cfg!(test).then(|| ["sh", "-c", "exit 44"].map(String::from).to_vec()),
             api_ready: None,

@@ -8,8 +8,9 @@
 //! later). So a bug in its permission path, or a feature acting by itself, can't write what runs later or loosens
 //! tarae (`~/.config/tarae`, `~/.zshrc`, `~/.local/bin` — its own updater's link too: decision A), nor read
 //! `~/.ssh`. The deny lists are the runs' (`kept_reads`, `key_files`, `protected_writes`), never a copy; paths
-//! only as `-D` parameters. Linux: the same pieces as Landlock rules, claude's folder tarae's (`linux`,
-//! `claudehome.rs` — `~/.claude.json`'s atomic write would need home itself writable: the threat model's G1).
+//! only as `-D` parameters. Linux: the same pieces as Landlock rules and a seccomp filter (`linux`) — `~/.claude`
+//! whole, which holds what your own Claude Code runs later (Landlock can't leave names out of a folder it grants),
+//! and no unix socket (the threat model's G25, G24).
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -20,14 +21,42 @@ use super::{
     user_temp, vars_in,
 };
 
-/// Whether claude itself is confined unless your config says (`llm.claude-sandbox`'s default) on `os`: on macOS,
-/// where Seatbelt keeps it and it still logs in from the keychain as your own claude. Not on Linux (user decision
-/// 2026-10-16): Landlock can't let it refresh `~/.claude/.credentials.json` without all of `~/.claude` (settings,
-/// `CLAUDE.md`, hooks), so confined it needs a folder and a login of its own (`claudehome.rs`) — opt-in. As Claude
-/// Code's and Codex's own sandboxes, the default confines the commands (Claude's runs, the keeper), not the agent;
-/// its edits stay reviewed.
+/// Whether claude itself is confined unless your config says (`llm.claude-sandbox`'s default) on `os`: on both
+/// (user decision 2026-10-16, claudeown), on your own `~/.claude` and login. On Linux its rules grant `~/.claude`
+/// whole: a confined claude refreshes its login there (a lock folder made at its top, the store renamed over —
+/// measured, `target/sb/claudeown-plan.md` §2), which no grant narrower than the folder allows.
 pub fn on_by_default(os: super::Os) -> bool {
-    os == super::Os::Mac
+    let _ = os;
+    true
+}
+
+/// How a claude tarae starts — `start_as`'s answer.
+#[derive(Debug)]
+pub enum Start {
+    /// Under its profile.
+    Confined(Profile),
+    /// As you, and why: said once (the chat's note; the reviewer's log, and one warning since tarae started).
+    Unconfined(String),
+    /// Not at all, and why: `llm.claude-sandbox-required` is on, and it would have run as you.
+    Refused(String),
+}
+
+/// How a claude starts, the one decision (the chat, the reviewer, and a spawn whose rules didn't go on):
+/// `setting` (`llm.claude-sandbox`), `required` (`llm.claude-sandbox-required`), `made`: its profile, or why it
+/// can't have one — asked only with `setting` on. Never a chat that won't open for a sandbox it can't have: as you,
+/// said — unless `required`, where every way to unconfined is a refusal.
+pub fn start_as(setting: bool, required: bool, made: impl FnOnce() -> Result<Profile, String>) -> Start {
+    let why = match setting {
+        false => "llm.claude-sandbox is off".to_string(),
+        true => match made() {
+            Ok(p) => return Start::Confined(p),
+            Err(why) => why,
+        },
+    };
+    match required {
+        true => Start::Refused(format!("claude doesn't start: {why}, and llm.claude-sandbox-required is on")),
+        false => Start::Unconfined(why),
+    }
 }
 
 /// Claude's own folders in home, written (V1b): its settings, conversations, sessions and plugins' marks, and its
@@ -105,8 +134,7 @@ pub struct Profile {
     /// The temp folders (real): `/private/tmp` (V1b: `/tmp/claude-<uid>/`, its socket in `/tmp/cc-socks/`) and
     /// `$TMPDIR`'s parent, as runs'.
     pub temps: Vec<PathBuf>,
-    /// Never read (real): the runs' `kept_reads` less claude's own (`CLAUDES`) and the keychain (`KEYCHAINS`) —
-    /// where claude's folder is tarae's (`place`), with them, and with tarae's state that folder is in.
+    /// Never read (real): the runs' `kept_reads` less claude's own (`CLAUDES`) and the keychain (`KEYCHAINS`).
     pub kept: Vec<PathBuf>,
     /// tarae's log, in tarae's state but read: Claude reads it unasked (#45).
     pub log: Option<PathBuf>,
@@ -115,9 +143,11 @@ pub struct Profile {
     /// What each deny says (`with message`): the refusals' watch finds them by it (`watch`). Linux: the name of
     /// the thread that confines claude (`landlock::thread_name`), which Landlock's audit names.
     pub tag: String,
-    /// Linux: claude's folder, tarae's (`claudehome::Place`) — written whole, your `~/.claude` kept (`linux`).
-    /// None: macOS, claude's own in home (`OWN_DIRS`).
-    pub place: Option<crate::claudehome::Place>,
+    /// The system it's for: macOS's Seatbelt profile (`text`), or Linux's grants (`linux`) — each made on any.
+    pub os: super::Os,
+    /// Linux: where claude keeps its version locks (real) — `~/.local/state/claude`, and `$XDG_STATE_HOME/claude`
+    /// where that's elsewhere (claude may follow it); granted whole. (macOS: in `OWN_DIRS`.)
+    pub locks: Vec<PathBuf>,
     /// Linux: its Landlock rules, made on a worker (`linux::for_chat`). None: macOS, or a stand-in's.
     pub rules: Option<Arc<linux::Rules>>,
 }
@@ -128,16 +158,14 @@ impl Profile {
     pub fn new(root: &Path, home: &Path, writes_project: bool, here: &Here, tag: &str) -> Profile {
         let (root, home) = (profile_path(root), profile_path(home));
         let vars = vars_in(&home, here);
-        // (a profile is made only for a claude confined)
-        let place = crate::claudehome::Place::of(here.os, true, &|n| here.var(n)).ok().flatten();
-        let own: Vec<PathBuf> = match place {
-            Some(_) => Vec::new(),
-            None => CLAUDES.iter().chain(&[KEYCHAINS]).map(|c| profile_path(&home.join(c))).collect(),
+        let own: Vec<PathBuf> =
+            CLAUDES.iter().chain(&[KEYCHAINS]).map(|c| profile_path(&home.join(c))).collect();
+        // (Linux: tarae's state too, wherever `XDG_STATE_HOME` puts it — macOS's profile keeps it by a rule of its own)
+        let all = match here.os {
+            super::Os::Linux => super::kept_places(&home, here),
+            super::Os::Mac => kept_reads(&home, &vars),
         };
-        let mut kept: Vec<PathBuf> =
-            kept_reads(&home, &vars).into_iter().filter(|k| !own.contains(k)).collect();
-        // (claude's folder is in tarae's state, kept but by its own rule — `linux`)
-        kept.extend(place.as_ref().map(|p| profile_path(&p.state)));
+        let mut kept: Vec<PathBuf> = all.into_iter().filter(|k| !own.contains(k)).collect();
         crate::sorting::sort(&mut kept);
         kept.dedup();
         let mut temps = vec![profile_path(Path::new(TMP))];
@@ -147,7 +175,15 @@ impl Profile {
         let log = crate::log::path().map(|l| profile_path(&l));
         let agent = here.path("SSH_AUTH_SOCK").filter(|a| a.is_absolute()).map(|a| profile_path(&a));
         let tag = tag.to_string();
-        Profile { root, home, writes_project, temps, kept, log, agent, tag, place, rules: None }
+        let state = here.path("XDG_STATE_HOME").filter(|s| s.is_absolute());
+        let mut locks: Vec<PathBuf> = std::iter::once(home.join(".local/state"))
+            .chain(state)
+            .map(|s| profile_path(&s.join("claude")))
+            .collect();
+        crate::sorting::sort(&mut locks);
+        locks.dedup();
+        let os = here.os;
+        Profile { root, home, writes_project, temps, kept, log, agent, tag, os, locks, rules: None }
     }
 
     /// Claude's own folders (`OWN_DIRS`, real).
@@ -286,8 +322,8 @@ impl Profile {
     /// Whether the profile lets claude read `real` — its read rules, in Rust: what a Read the user would allow
     /// still can't open (`reads.rs` says so instead of asking).
     pub fn reads_allow(&self, real: &Path) -> bool {
-        if let Some(place) = &self.place {
-            return self.reads_allow_in(place, real);
+        if self.os == super::Os::Linux {
+            return self.reads_allow_in(real);
         }
         if self.log.as_deref() == Some(real) {
             return true;
@@ -328,8 +364,8 @@ impl Profile {
 
     /// Whether the profile lets claude write `real` — its write rules, in Rust.
     pub fn writes_allow(&self, real: &Path) -> bool {
-        if let Some(place) = &self.place {
-            return self.writes_allow_in(place, real);
+        if self.os == super::Os::Linux {
+            return self.writes_allow_in(real);
         }
         // (the profile's order: the later rule on a path wins)
         let in_home = real.starts_with(&self.home);
@@ -527,13 +563,27 @@ pub fn command(profile: &Profile, program: &str) -> Command {
     }
 }
 
-/// `cmd` (`command`'s) started under `profile` — Linux: from a thread confined to its rules (`linux::spawn`);
-/// macOS: `sandbox-exec` is in it already. None: as you.
-pub fn spawn(profile: Option<&Profile>, cmd: &mut Command) -> std::io::Result<std::process::Child> {
+/// `cmd` (`command`'s) started under `profile` — Linux: from a thread confined to its rules and filter
+/// (`linux::spawn`); macOS: `sandbox-exec` is in it already. None: as you. Where Linux's didn't go on, `start_as`
+/// says what then: as you, started from this thread (never the half-confined one), and why beside the child — or,
+/// `required` (`llm.claude-sandbox-required`), nothing started.
+pub fn spawn(
+    profile: Option<&Profile>,
+    required: bool,
+    cmd: &mut Command,
+) -> std::io::Result<(std::process::Child, Option<String>)> {
+    let _ = required;
     match profile {
         #[cfg(target_os = "linux")]
-        Some(p) => linux::spawn(p, cmd),
-        _ => cmd.spawn(),
+        Some(p) => match linux::spawn(p, cmd)? {
+            Ok(child) => Ok((child, None)),
+            Err(why) => match start_as(true, required, || Err(why)) {
+                Start::Unconfined(why) => cmd.spawn().map(|c| (c, Some(why))),
+                Start::Refused(why) => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, why)),
+                Start::Confined(_) => Err(std::io::Error::other("claude's rules didn't go on")),
+            },
+        },
+        _ => cmd.spawn().map(|c| (c, None)),
     }
 }
 

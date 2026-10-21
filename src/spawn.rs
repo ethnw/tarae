@@ -677,7 +677,6 @@ mod tests {
                     Path::new("/"),
                     None,
                     &crate::billing::Credential::Subscription,
-                    None,
                 )
                 .unwrap()
                 .wait_with_output()

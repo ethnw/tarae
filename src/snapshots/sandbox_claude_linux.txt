@@ -6,9 +6,6 @@ $HOME read
     hole $HOME/.cache/uv
     hole $HOME/.cargo/credentials
     hole $HOME/.cargo/credentials.toml
-    hole $HOME/.claude
-    hole $HOME/.claude.json
-    hole $HOME/.claude.json.backup
     hole $HOME/.config/gh
     hole $HOME/.config/git/credentials
     hole $HOME/.docker
@@ -23,11 +20,11 @@ $HOME read
     hole $HOME/.password-store
     hole $HOME/.pypirc
     hole $HOME/.ssh
-    hole $HOME/Library/Keychains
     key $HOME/.npmrc
     key $ROOT/.env
+$HOME/.claude all
+$HOME/.claude.json write the file
 $HOME/.local/state/claude all
-$HOME/.local/state/tarae/claude all
 $STATE/tarae.log read the file
 $TMP all
 / read
@@ -49,9 +46,6 @@ $HOME read
     hole $HOME/.cache/uv
     hole $HOME/.cargo/credentials
     hole $HOME/.cargo/credentials.toml
-    hole $HOME/.claude
-    hole $HOME/.claude.json
-    hole $HOME/.claude.json.backup
     hole $HOME/.config/gh
     hole $HOME/.config/git/credentials
     hole $HOME/.docker
@@ -66,11 +60,11 @@ $HOME read
     hole $HOME/.password-store
     hole $HOME/.pypirc
     hole $HOME/.ssh
-    hole $HOME/Library/Keychains
     key $HOME/.npmrc
     key $ROOT/.env
+$HOME/.claude all
+$HOME/.claude.json write the file
 $HOME/.local/state/claude all
-$HOME/.local/state/tarae/claude all
 $ROOT all
     hole $ROOT/.git
     hole $ROOT/Cargo.toml
