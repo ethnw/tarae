@@ -98,6 +98,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 |---|---|---|---|
 | `session.worktrees` | string | `""` | Where sessions' checkouts go, a folder per repository ("" = $XDG_DATA_HOME/tarae/worktrees) |
 | `session.ended` | list of strings | `[]` | A command, its words, run once a session's checkout is removed (:session-end) — in the checkout tarae started in, outside the sandbox, TARAE_ENDED_CHECKOUT naming the one removed; stopped after 2 minutes; how it ended goes to the log (e.g. ["cargo", "xtask", "linux", "prune"]; [] = none) |
+| `session.keep` | list of strings | `[]` | Folders of a session's checkout ("target/sb") moved into the main checkout's &lt;folder>/sessions/&lt;name>/ when the session ends — only where git ignores that there, 64 MB at most, no links or protected names; the end card says what goes |
 
 ## `[review]`
 

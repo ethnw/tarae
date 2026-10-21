@@ -633,6 +633,18 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "session.keep",
+        kind: Kind::StrList,
+        doc: "Folders of a session's checkout (\"target/sb\") moved into the main checkout's <folder>/sessions/<name>/ when the session ends — only where git ignores that there, 64 MB at most, no links or protected names; the end card says what goes",
+        get: |c| Value::Array(c.session_keep.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            let all: Vec<String> =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+            // (only folders in the checkout — the rest said by `apply`: `sessionkeep::refused`)
+            c.session_keep = all.into_iter().filter(|e| crate::sessionkeep::entry(e).is_ok()).collect();
+        },
+    },
+    Setting {
         path: "review.risky",
         kind: Kind::StrList,
         doc: "Code review: files whose every change is high-risk — looked at by you (space v h) before the review ends or the session is brought. A name matches anywhere, in any case, one * per part (\"sandbox*\"); a path from the project root (\".github/\"). The language packs' patterns (unsafe, spawning…) and the protected names count too. Read from the checkout tarae started in",
@@ -666,6 +678,14 @@ pub fn apply(cfg: &mut EditorConfig, path: &str, v: &Value) -> Result<(), String
     let setting = find(path).ok_or_else(|| format!("unknown setting '{path}'"))?;
     setting.kind.check(v).map_err(|e| format!("{path}: {e}"))?;
     (setting.set)(cfg, v);
+    // (entries it refused — the rest set: said with the config's other warnings, logged with them)
+    if path == "session.keep" {
+        let all: Vec<String> =
+            v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+        if let Some(why) = crate::sessionkeep::refused(&all) {
+            return Err(format!("{path}: {why}"));
+        }
+    }
     Ok(())
 }
 

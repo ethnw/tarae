@@ -438,7 +438,11 @@ fn settled(ed: &mut Editor) {
     ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
 }
 
+/// A card's answer — `C-q` first when the chat has the keys (it keeps them as a card comes: frictions26).
 fn key(ed: &mut Editor, code: crate::key::Code) {
+    if !ed.offers.is_empty() && !ed.card_has_keys() {
+        ed.handle_key("C-q".parse().unwrap());
+    }
     ed.handle_key(crate::key::Key::plain(code));
 }
 

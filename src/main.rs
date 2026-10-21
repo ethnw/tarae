@@ -136,6 +136,7 @@ mod secretnames;
 mod seeing;
 mod selection;
 mod session;
+mod sessionkeep;
 mod settings;
 mod sha256;
 mod share;

@@ -12,6 +12,11 @@ risky = [
 ]
 quiet = ["src/snapshots/", "docs/"]
 
+# A session's plans, measurements and commit drafts (target/sb/, git-ignored) go to the main checkout's
+# target/sb/sessions/<name>/ when it ends — git worktree remove deletes ignored files too
+[session]
+keep = ["target/sb"]
+
 [llm]
 # tarae's own tests (attach.rs, dap.rs, plugin …) connect to their own port-0 listeners — opens every local port,
 # the risky ones too

@@ -127,10 +127,9 @@ pub struct Session {
     /// Cards that came while it was behind, and Claude's that were up when it left — up again when it's in
     /// front · Claude's waiting on one has been said (once while it's behind).
     pub parked: Vec<crate::offer::Offer>,
-    /// The card that took the keys from the chat as it came (`push_offer`): once it's gone and no other is up,
-    /// they go back to the chat (`Editor::chat_lent_sync`).
-    pub chat_lent: Option<u64>,
     pub waiting_told: bool,
+    /// Its cards a warning named after they'd waited `NUDGE_AFTER` behind (`Editor::card_nudge`) — never again.
+    pub nudged: Vec<u64>,
     /// Its Claude ended a turn while it was behind, and it hasn't been in front since: when, and how (stopped
     /// or failed: its words) — its tab says `done` (#86: not the `▲` of a card waiting), a toast says it once,
     /// and `C-q` goes there once nothing waits (the one that ended first, first).
@@ -315,8 +314,8 @@ impl Session {
             turn_review_back: None,
             restorable: None,
             parked: Vec::new(),
-            chat_lent: None,
             waiting_told: false,
+            nudged: Vec::new(),
             turn_end: None,
             asleep: Vec::new(),
             tool_waits: Vec::new(),
@@ -482,6 +481,9 @@ impl Doing {
     }
 }
 
+/// How long a card waits in a session behind before one warning names it (`Editor::card_nudge`).
+pub const NUDGE_AFTER: Duration = Duration::from_secs(120);
+
 impl Editor {
     /// Whether a result of a session behind is being applied (`with_session`): what would take the screen
     /// waits.
@@ -642,6 +644,40 @@ impl Editor {
             0 => "C-q goes there".into(),
             n => format!("C-q goes there after {n} older"),
         }
+    }
+
+    /// Card `card`, parked in session `id` behind: looked at again after `NUDGE_AFTER` (`card_nudge`). Not in
+    /// tests (no clocks there — they call `card_nudge`).
+    pub(crate) fn nudge_later(&self, id: SessionId, card: u64) {
+        if cfg!(test) {
+            return;
+        }
+        self.events.shared_jobs().spawn(move || {
+            std::thread::sleep(NUDGE_AFTER);
+            move |ed: &mut Editor| ed.card_nudge(id, card)
+        });
+    }
+
+    /// Card `card` still waits in session `id` behind, `NUDGE_AFTER` or more since it came: one warning names
+    /// the session and the card — once (frictions26: a change set waited 100 minutes unseen; the tab's `▲ waits`
+    /// and the toast as it came were all that said so). Answered, or its session in front: nothing.
+    pub(crate) fn card_nudge(&mut self, id: SessionId, card: u64) {
+        let Some(l) = self.sessions.iter_mut().find(|l| l.id == id) else {
+            self.unchanged = true;
+            return;
+        };
+        let o = l.parked.iter().find(|o| o.id == card && o.since.elapsed() >= NUDGE_AFTER);
+        let Some((mins, title)) = o
+            .filter(|_| !l.nudged.contains(&card))
+            .map(|o| (o.since.elapsed().as_secs() / 60, o.title.clone()))
+        else {
+            self.unchanged = true;
+            return;
+        };
+        l.nudged.push(card);
+        let name = l.label().to_string();
+        let msg = format!("{name} · waiting {mins} min — {title} · {}", self.c_q_says(id, true));
+        self.said_for(id, crate::editor::ToastKind::Warning, msg);
     }
 
     /// How many sessions behind are possibly stuck (`Doing::Stuck`) — `◦n` where their tabs aren't drawn.
@@ -981,6 +1017,9 @@ impl Editor {
         let (mut mine, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.offers).into_iter().partition(crate::offer::Offer::goes_with_session);
         self.offers = rest;
+        for o in &mine {
+            self.nudge_later(self.session.id, o.id);
+        }
         mine.append(&mut self.session.parked);
         self.session.parked = mine;
         // Left with something waiting (its review up, a card of Claude's): said as it goes — Claude waits on
@@ -1341,6 +1380,10 @@ mod tests {
         session_by_mut(&mut ed, id).parked.push(screen_card(3));
         let row = tabs(&mut ed);
         assert!(row.contains("back ▲ waits"), "{row}");
+        // (two: counted — frictions26)
+        session_by_mut(&mut ed, id).parked.push(screen_card(4));
+        let row = tabs(&mut ed);
+        assert!(row.contains("back ▲2 waits"), "{row}");
         session_by_mut(&mut ed, id).parked.clear();
         // The status line's chip with no chat up counts them apart
         ed.session.chat = None;
@@ -1351,6 +1394,47 @@ mod tests {
         assert!(ed.session_switch(id));
         assert!(ed.session_switch(0));
         assert_eq!(ed.doing(session_by(&ed, id)), Doing::Idle);
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// frictions26: a card waiting in a session behind went unnoticed for 100 minutes. Once it has waited
+    /// `NUDGE_AFTER`, one warning names the session and the card — never again for that card; one that came
+    /// lately, one answered (gone) or one in front: nothing.
+    #[test]
+    fn a_card_waiting_behind_is_named_once_after_a_while() {
+        use crate::editor::ToastKind;
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("nudge");
+        let id = ed.session_open(&back).unwrap();
+        assert!(ed.session_switch(0));
+        let park = |ed: &mut Editor, n: u64, ago: Duration| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            let mut o = Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what);
+            (ed.offer_seq, o.since) = (ed.offer_seq + 1, Instant::now() - ago);
+            o.id = ed.offer_seq;
+            session_by_mut(ed, id).parked.push(o);
+            ed.offer_seq
+        };
+        let old = park(&mut ed, 1, NUDGE_AFTER + Duration::from_secs(70));
+        let fresh = park(&mut ed, 2, Duration::from_secs(10));
+        let warnings = |ed: &Editor| -> Vec<String> {
+            ed.toasts.iter().filter(|t| t.kind == ToastKind::Warning).map(|t| t.text.clone()).collect()
+        };
+        ed.card_nudge(id, fresh);
+        assert!(warnings(&ed).is_empty(), "not yet");
+        ed.card_nudge(id, old);
+        let said = warnings(&ed);
+        assert!(
+            matches!(&said[..], [t] if t == "back · waiting 3 min — Claude asks 1 · C-q goes there"),
+            "{said:?}"
+        );
+        ed.card_nudge(id, old);
+        assert_eq!(warnings(&ed).len(), 1, "never again");
+        // Answered meanwhile (gone), or its session in front: nothing
+        ed.card_nudge(id, 99);
+        assert!(ed.session_switch(id));
+        ed.card_nudge(id, fresh);
+        assert_eq!(warnings(&ed).len(), 1);
         std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 

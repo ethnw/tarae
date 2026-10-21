@@ -95,8 +95,9 @@ card. `llm.screen-terminal = false` leaves the terminal panel out: its rows go b
 To send the screen yourself, use `C-s` (below).
 
 A card that asks something (this one, a command to run, a read outside the project) takes its answer keys in
-the editor. While you're typing in the chat, or in a review, it leaves your keys alone and says
-`C-q to answer it`: `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
+the editor. While you're in the chat — typing, or its input empty as Claude asks mid-turn — or in a review, it
+leaves your keys alone and says `C-q to answer it` (the chat's hints say `C-q answer card`): the first letter of
+a message typed next is the message's, never an answer. `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
 Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what waits behind it — `1/3`: cards
 under it, Claude's calls queued, cards in other sessions — and says it in words: `2 more wait — 1 here, 1 in
 fix-login · space I lists them`.
@@ -175,7 +176,9 @@ warning). Each new wait is news — a card, or an edit of Claude's to review, af
 and so is leaving a session with something waiting (its edit review up): it's said as it goes behind, since
 Claude waits on it and nothing else would come to say so. When something older waits elsewhere, the toast says
 so: `C-q goes there after 2 older`. Its tab over
-the chat (or the status line's chip, with the chat closed) keeps saying `▲ waits` or `done` until you look. Once
+the chat (or the status line's chip, with the chat closed) keeps saying `▲ waits` (`▲2 waits` for two cards) or
+`done` until you look. A card still waiting there two minutes on is named once more, as a warning: `fix-login ·
+waiting 2 min — Claude changes 3 files · C-q goes there` — once for each card, never again. Once
 nothing waits, `C-q` goes to the sessions whose turn ended — the first to end first — and says when. In the front
 session, a turn that ends while the chat is out of sight (something else zoomed with `C-w z`, a review read wide)
 is said the same way: `Claude's turn ended — space l shows it`. A session behind whose Claude
@@ -308,7 +311,8 @@ each one while the chat keeps the keys.
 |---|---|
 | `enter` | Send. While Claude works, it queues the message: the line over the input says `queued …`, and it goes when the turn ends. `↑` in the empty input takes it back to edit or drop |
 | `alt-enter` / `C-j` | New line |
-| `C-c` | Stop the answer (the conversation stays) |
+| `C-c` | Stop the answer (the conversation stays). A command or tests it ran go on; a card offers to stop them (`y`), since the next turn's runs would wait behind them — the chat's row then says `queued 1st, behind a stopped turn's run` and, under it, the run, how long it has run and `space m c stop it` |
+| `C-q` | Give a card that asks mid-turn the keys — the chat keeps them till then |
 | `C-r` | Replace the selection with the answer's code — through the same review |
 | `C-y` | Copy the code |
 | `C-s` | Send the screen with your next message: what you see, as text (`:chat-screen` from anywhere). The line over the input says `screen 140×40 goes with it`; Backspace in the empty input takes it off. The message's row opens a copy of what went |

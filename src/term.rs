@@ -9312,10 +9312,21 @@ fn session_tabs(
     use crate::markdown::Span;
     use crate::session::{Doing, Spot};
     let sessions = editor.sessions_in_order();
+    // (how many of its cards wait: `▲2 waits` from two — frictions26)
+    let cards = |l: &crate::session::Session| match l.id == editor.session.id {
+        true => editor.offers.iter().filter(|o| o.goes_with_session()).count(),
+        false => l.parked.len(),
+    };
     let mark = |l: &crate::session::Session| match editor.doing(l) {
         Doing::Working => Some(Span { text: " ●".into(), style: accent }),
         // (a card waits · a turn ended: said apart — #86, one `▲` meant both)
-        Doing::Waiting => Some(Span { text: " ▲ waits".into(), style: warn }),
+        Doing::Waiting => Some(Span {
+            text: match cards(l) {
+                n @ 2.. => format!(" ▲{n} waits"),
+                _ => " ▲ waits".into(),
+            },
+            style: warn,
+        }),
         Doing::Done => Some(Span { text: " done".into(), style: accent }),
         d @ Doing::Stuck { .. } => Some(Span { text: format!(" ◦ {}", d.said()), style: warn }),
         // (at work, held back in line — dim, not the accent's working nor stuck's warning)
@@ -9369,8 +9380,10 @@ fn session_tabs(
     let count = format!(" {at:>n$}/{}", sessions.len(), n = sessions.len().to_string().len());
     // (its own mark as a glyph, its rebase as main has it, the counts with words while the name keeps its
     // room — else without)
-    let mark =
-        mark(&editor.session).map(|m| if m.text == " ▲ waits" { Span { text: " ▲".into(), ..m } } else { m });
+    let mark = mark(&editor.session).map(|m| match m.text.strip_suffix(" waits") {
+        Some(glyph) if glyph.starts_with(" ▲") => Span { text: glyph.to_string(), ..m },
+        _ => m,
+    });
     let reviewing = editor.session.reviewing().then(|| Span { text: " ¶".into(), style: reviewer });
     let rebasing = rebasing(&editor.session);
     let marks_w = [&mark, &reviewing, &rebasing]
@@ -9599,12 +9612,18 @@ fn draw_chat(
                 // (its command or tests waiting on what isn't their own — another cargo's lock — said under
                 // it, not left looking stuck: #10, `waits.rs`; or printing nothing for minutes — #157)
                 let now = std::time::Instant::now();
+                // (waiting in line: behind what, first — a run a stopped turn left there says so, frictions26)
+                let queued = matches!(look.verb, "run" | "test")
+                    .then(|| crate::queued::chat_said(&editor.session, now))
+                    .flatten();
                 let wait = match look.verb {
+                    _ if queued.is_some() => queued.as_ref().map(|q| q.said.clone()),
+                    // (this turn's — a stopped turn's still going isn't this row's: frictions26)
                     "run" => editor
                         .session
                         .task_run
                         .as_ref()
-                        .filter(|r| r.by_claude && r.state == crate::task::State::Running)
+                        .filter(|r| r.chat.is_some() && r.state == crate::task::State::Running)
                         .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
                     "test" => editor
                         .session
@@ -9616,6 +9635,19 @@ fn draw_chat(
                 };
                 if live && let Some(wait) = wait {
                     lines.push(vec![sp(format!("  {}", fit_ellipsis(&wait, w - 2)), faint)]);
+                    // (the run it waits behind, a stopped turn's: what, how long, the key that stops it — the
+                    // name cut, the time and the key whole)
+                    if let Some((label, ran, key)) = queued.and_then(|q| q.left) {
+                        let ran = format!(" · {ran}");
+                        let hint = hint_spans(&[(key, "stop it")], dim, faint);
+                        let hint_w: usize = hint.iter().map(|s| s.text.width()).sum();
+                        let room = w.saturating_sub(2 + ran.width() + 2 + hint_w);
+                        let mut row =
+                            vec![sp(format!("  {}", fit_ellipsis(&label, room)), dim), sp(ran, faint)];
+                        row.push(sp("  ".into(), faint));
+                        row.extend(hint);
+                        lines.push(row);
+                    }
                 }
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
@@ -9994,6 +10026,10 @@ fn draw_chat(
         hints.push(("space l", "focus"));
         hints.push(("space L", "close"));
     } else if c.busy() {
+        // (a card up asks mid-turn: the chat keeps the keys, `C-q` hands them over — frictions26)
+        if editor.offers.first().is_some_and(|o| !o.installing()) {
+            hints.push(("C-q", "answer card"));
+        }
         // (Enter queues what's typed for this turn's end — #23; ↑ takes it back)
         if !c.input.trim().is_empty() {
             hints.push(("enter", "queue"));
@@ -13861,7 +13897,8 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         let cmd = "cargo test --lib";
         let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
-        (r.state, r.by_claude) = (State::Running, true);
+        // (this turn's: its call waits on it)
+        (r.state, r.by_claude, r.chat) = (State::Running, true, Some(crate::tools::Call::test(1)));
         let packs = crate::waits::Rules::load();
         let now = std::time::Instant::now();
         let hit = packs.hit("    Blocking waiting for file lock on build directory");
@@ -13966,7 +14003,8 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         let cmd = "printf x | some-server";
         let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
-        (r.state, r.by_claude) = (State::Running, true);
+        // (this turn's: its call waits on it)
+        (r.state, r.by_claude, r.chat) = (State::Running, true, Some(crate::tools::Call::test(1)));
         let wake = |ed: &Editor| ed.silent_wake().map(|d| d.as_secs());
         ed.session.task_run = Some(r);
         assert!(wake(&ed).is_some_and(|s| (170..=180).contains(&s)), "a frame when it goes silent");

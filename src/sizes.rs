@@ -608,10 +608,8 @@ impl crate::editor::Editor {
     }
 
     /// Every key and event: the bottom slot's keys go when something else took them (or it emptied),
-    /// `C-w z` ends once what it filled the screen with doesn't have them, and a card that took them from the
-    /// chat gives them back once it's gone (`chat_lent_sync`).
+    /// `C-w z` ends once what it filled the screen with doesn't have them.
     pub fn focus_sync(&mut self) {
-        self.chat_lent_sync();
         self.slot_sync();
         if self.bottom_focus {
             let program = self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible);

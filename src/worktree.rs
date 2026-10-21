@@ -625,12 +625,16 @@ pub struct Ending {
     /// Commits not in the base · commits on no other branch, remote's branch or tag (gone with the branch).
     pub ahead: Vec<(String, String)>,
     pub lost: Vec<(String, String)>,
+    /// `session.keep`'s folders (checked) · what of them, and of its instruction files, is kept in the main
+    /// checkout (`sessionkeep.rs`) — made again as it ends.
+    pub entries: Vec<PathBuf>,
+    pub keep: crate::sessionkeep::Plan,
 }
 
 impl Ending {
-    /// Nothing would be lost: no changes, every commit in the base.
+    /// Nothing would be lost: no changes, every commit in the base, nothing ignored it keeps goes for good.
     pub fn quiet(&self) -> bool {
-        self.changed.is_empty() && self.ahead.is_empty()
+        self.changed.is_empty() && self.ahead.is_empty() && !self.keep.loses()
     }
 
     /// Work in no commit would go with its checkout (no reflog brings it back): the card has no `y` —
@@ -669,6 +673,14 @@ impl Ending {
             decided.end = lines.len();
             lines.push("A squash merge on a forge looks unmerged here.".into());
         }
+        // What it keeps in the main checkout (`session.keep`), a block of its own after what's decided — what
+        // goes with the checkout for good, in the tail
+        let keep = self.keep.lines();
+        let kept: Vec<String> = keep.iter().filter(|k| !k.1).map(|k| k.0.clone()).collect();
+        if !kept.is_empty() && !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(kept);
         // What committing first does, then what removing loses — in the warning color where it's for good
         let mut tail: Vec<(String, bool)> = Vec::new();
         if let (true, Some(b)) = (self.dirty(), &self.branch) {
@@ -677,6 +689,9 @@ impl Ending {
         if self.dirty() {
             tail.push(("Removing throws them away — no reflog keeps them.".into(), true));
         }
+        let lost_from = tail.len();
+        tail.extend(keep.into_iter().filter(|k| k.1));
+        let lost_to = tail.len();
         match (&self.branch, self.lost.len()) {
             (Some(b), 0) => tail
                 .push((format!("Removing both deletes {b} too — its commits are on other branches."), false)),
@@ -692,6 +707,10 @@ impl Ending {
                 tail.push(("Its checkout is on no branch: those commits go with it.".into(), true))
             }
             (None, _) => {}
+        }
+        // (what goes with the checkout is a block of its own: air under it when more follows)
+        if lost_to > lost_from && tail.len() > lost_to {
+            tail.insert(lost_to, (String::new(), false));
         }
         if !tail.is_empty() {
             lines.push(String::new());
@@ -730,8 +749,37 @@ fn changed_row(row: &str) -> String {
     format!("{what:<8} {path}")
 }
 
-/// The checks before ending (on a worker): what's changed, what's not in the base, what only its branch has.
-fn ending(name: String, root: &Path, base: Option<String>, start: &Path) -> Result<Ending, String> {
+/// The repository's main checkout (`git worktree list`'s first, with a `.git` folder of its own) — None: a
+/// bare repository's, or `root` itself.
+fn main_checkout(common: &Path, root: &Path) -> Option<PathBuf> {
+    let first = checkouts(common).into_iter().next()?;
+    (first != root && first.join(".git").is_dir()).then_some(first)
+}
+
+/// Its instruction files git doesn't carry (`instructions`) that differ from `main`'s, or that main lacks.
+fn instructions_differ(root: &Path, main: Option<&Path>) -> Vec<String> {
+    let Some(main) = main else { return Vec::new() };
+    let read = |p: PathBuf| std::fs::read(p).ok();
+    instructions(root).into_iter().filter(|rel| read(main.join(rel)) != read(root.join(rel))).collect()
+}
+
+/// What ending the checkout at `root` keeps (`sessionkeep::plan`) — its main checkout's, its instruction
+/// files compared.
+fn keep_plan(name: &str, root: &Path, common: &Path, entries: &[PathBuf]) -> crate::sessionkeep::Plan {
+    let main = main_checkout(common, root);
+    let differ = instructions_differ(root, main.as_deref());
+    crate::sessionkeep::plan(root, name, entries, main.as_deref(), differ, crate::sessionkeep::KEEP_MAX)
+}
+
+/// The checks before ending (on a worker): what's changed, what's not in the base, what only its branch has,
+/// what it keeps (`entries`: `session.keep`'s).
+fn ending(
+    name: String,
+    root: &Path,
+    base: Option<String>,
+    start: &Path,
+    entries: Vec<PathBuf>,
+) -> Result<Ending, String> {
     let top = top_of(root)?;
     if top != root {
         return Err(format!("{} isn't a checkout's top any more", crate::allow::tilde(root)));
@@ -753,7 +801,20 @@ fn ending(name: String, root: &Path, base: Option<String>, start: &Path) -> Resu
         Some(b) => only_on(root, b)?,
         None => Vec::new(),
     };
-    Ok(Ending { root: root.to_path_buf(), common, name, branch, tip, base, changed, ahead, lost })
+    let keep = keep_plan(&name, root, &common, &entries);
+    Ok(Ending {
+        root: root.to_path_buf(),
+        common,
+        name,
+        branch,
+        tip,
+        base,
+        changed,
+        ahead,
+        lost,
+        entries,
+        keep,
+    })
 }
 
 /// The repository's checkouts (`git worktree list` — the main one, every session's, ones made outside
@@ -776,9 +837,29 @@ fn build_dir_fate(e: &Ending, builds: Option<&Builds>) -> Result<Doomed, BuildDi
     }
 }
 
-/// Its checkout removed (and its branch, `both`, if it's still where the checks saw it) — what that freed,
-/// and then its build dir when nothing else builds there (`build_dir_fate`; `builds`: how to ask).
-fn remove(e: &Ending, both: bool, builds: Option<&Builds>) -> Result<((u64, bool), BuildDir), String> {
+/// What `session.keep` names moved to the main checkout first, as planned again now (`sessionkeep::keep`) —
+/// Err: nothing removed (the card said it's kept, and now it can't be).
+fn keep_first(e: &Ending) -> Result<crate::sessionkeep::Kept, String> {
+    if e.keep.not.is_some() {
+        return Ok(Default::default());
+    }
+    let now = keep_plan(&e.name, &e.root, &e.common, &e.entries);
+    if let Some(why) = now.not.as_ref().filter(|_| now.loses()) {
+        return Err(format!("{why} since the card — nothing removed"));
+    }
+    let Some(main) = main_checkout(&e.common, &e.root) else { return Ok(Default::default()) };
+    crate::sessionkeep::keep(&e.root, &e.name, &now, &main)
+        .map_err(|why| format!("what it keeps couldn't be kept — {why}; nothing removed"))
+}
+
+/// Its checkout removed (and its branch, `both`, if it's still where the checks saw it) — what it keeps moved
+/// out first (`keep_first`), what that freed, and then its build dir when nothing else builds there
+/// (`build_dir_fate`; `builds`: how to ask).
+fn remove(
+    e: &Ending,
+    both: bool,
+    builds: Option<&Builds>,
+) -> Result<((u64, bool), BuildDir, crate::sessionkeep::Kept), String> {
     let branch = e.branch.as_deref().filter(|_| both);
     // (the repository's git folder, named: what runs here outlives the checkout)
     let common = Repo::git_folder(&e.common);
@@ -788,6 +869,7 @@ fn remove(e: &Ending, both: bool, builds: Option<&Builds>) -> Result<((u64, bool
     {
         return Err(format!("{b} moved since the card was shown — nothing removed"));
     }
+    let kept = keep_first(e)?;
     let fate = build_dir_fate(e, builds);
     let freed = disk_size(&e.root, Instant::now() + MEASURE_FOR);
     let root = e.root.to_str().ok_or("a checkout path that isn't UTF-8")?;
@@ -805,7 +887,7 @@ fn remove(e: &Ending, both: bool, builds: Option<&Builds>) -> Result<((u64, bool
         Ok(doomed) => remove_build(&doomed),
         Err(said) => said,
     };
-    Ok((freed, build))
+    Ok((freed, build, kept))
 }
 
 // ── Bringing one into its base ───────────────────────────────────────────────
@@ -1481,9 +1563,10 @@ impl Editor {
             return Err(format!("unsaved changes in {} — save or close them first", unsaved.join(", ")));
         }
         let (base, start) = (session.base.clone(), self.start_root());
+        let entries = crate::sessionkeep::entries(&self.config.session_keep);
         let said = format!("Looking at {name} before it ends…");
         let n = name.clone();
-        let work = move || ending(n, &root, base, &start);
+        let work = move || ending(n, &root, base, &start, entries);
         self.step(self.events.shared_jobs(), "session", said, work, move |ed, found| match found {
             Ok(e) if e.quiet() && !always => ed.session_remove(e, false, None),
             Ok(e) => ed.push_offer(e.card()),
@@ -1506,7 +1589,7 @@ impl Editor {
             move |ed: &mut Editor| {
                 ed.step_done("session");
                 match result {
-                    Ok((mut freed, build)) => {
+                    Ok((mut freed, build, kept)) => {
                         if let Some(id) = card {
                             ed.offer_finished(id, Ok(()));
                         }
@@ -1534,9 +1617,10 @@ impl Editor {
                             BuildDir::Nothing | BuildDir::Failed(_) => {}
                         }
                         ed.set_success(format!(
-                            "Ended {} — {} freed{of_it}{branch}{left}",
+                            "Ended {} — {} freed{of_it}{branch}{left}{}",
                             e.name,
-                            size_text(freed)
+                            size_text(freed),
+                            kept.said(&e.keep)
                         ));
                         if let BuildDir::Failed(why) = build {
                             ed.set_warning(format!("{}'s build dir isn't all removed — {why}", e.name));
@@ -2387,7 +2471,7 @@ mod tests {
         assert!(ed.toasts.iter().all(|t| !t.text.contains("session.ended")), "a pass says nothing");
         // A removal that fails (a file made after the checks — git won't remove it unforced): nothing run
         let kept = new_session(&mut ed, "kept");
-        let e = ending("kept".into(), &kept, Some("main".into()), &repo).unwrap();
+        let e = ending("kept".into(), &kept, Some("main".into()), &repo, Vec::new()).unwrap();
         std::fs::write(kept.join("new.txt"), "made since\n").unwrap();
         ed.session_remove(e, false, None);
         settle_until(&mut ed, |ed| says(ed, "Ended kept") || says(ed, "end kept:"));
@@ -2403,6 +2487,40 @@ mod tests {
         assert!(last.as_ref().is_some_and(|l| l.starts_with("@bad  session.ended  warn  ")), "{last:?}");
         assert!(!read().contains(kept.to_str().unwrap()), "not after a failed removal: {}", read());
         drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions26: `session.keep`'s folders move to the main checkout as a session ends — ignored there
+    /// (`target/`), said on its toast, a quiet session ending with no card all the same. A CLAUDE.md of its own
+    /// with nowhere to keep it: the card names it, warned — it isn't quiet any more.
+    #[test]
+    fn an_ended_sessions_kept_folders_go_to_the_main_checkout() {
+        let (repo, dir) = place("keep");
+        // (as here: CLAUDE.md git-ignored, so a session's own isn't a change)
+        std::fs::write(repo.join(".git/info/exclude"), "/CLAUDE.md\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        ed.config.session_keep = vec!["target/sb".into()];
+        let wt = new_session(&mut ed, "notes");
+        std::fs::create_dir_all(wt.join("target/sb")).unwrap();
+        std::fs::write(wt.join("target/sb/plan.md"), "the plan\n").unwrap();
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Ended notes") || says(ed, "end notes:"));
+        assert!(!wt.exists(), "{}", said(&ed));
+        let kept = repo.join("target/sb/sessions/notes/plan.md");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap_or_default(), "the plan\n", "{}", said(&ed));
+        assert!(says(&ed, "· target/sb kept in ") && says(&ed, "sessions/notes (1 files)"), "{}", said(&ed));
+        // Its own CLAUDE.md, and nothing kept: the card names it
+        ed.config.session_keep.clear();
+        let wt = new_session(&mut ed, "own");
+        std::fs::write(wt.join("CLAUDE.md"), "mine\n").unwrap();
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| !ed.offers.is_empty() || says(ed, "Ended own"));
+        let o = ed.offers.first().unwrap_or_else(|| panic!("a card: {}", said(&ed)));
+        let q = o.question.clone();
+        let line = q.lines().position(|l| l == "  CLAUDE.md  differs from main's");
+        let line = line.unwrap_or_else(|| panic!("{q}"));
+        assert!(o.warning.as_ref().is_some_and(|w| w.contains(&line)), "warned: {:?}", o.warning);
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

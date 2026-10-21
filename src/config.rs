@@ -85,6 +85,8 @@ pub struct EditorConfig {
     pub features_count: bool,
     /// A command (its words) run once a session's checkout is removed (empty = none; `ended.rs`).
     pub session_ended: Vec<String>,
+    /// Folders of a session's checkout kept in the main checkout when it ends (`sessionkeep.rs`).
+    pub session_keep: Vec<String>,
     pub theme: String,
     pub llm: LlmConfig,
     pub lsp: crate::lsp::LspConfig,
@@ -142,6 +144,7 @@ impl Default for EditorConfig {
             session_worktrees: String::new(),
             features_count: false,
             session_ended: Vec::new(),
+            session_keep: Vec::new(),
             theme: "default".into(),
             llm: LlmConfig::default(),
             lsp: crate::lsp::LspConfig { enabled: true, ..Default::default() },

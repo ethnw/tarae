@@ -600,8 +600,10 @@ pub fn tests_done(ed: &mut Editor) {
 }
 
 /// The chat turn ended (stopped) with a run still going: it goes on for the user, unreported — and a
-/// command still waiting for the user's yes is no longer asked about.
-pub fn turn_over(ed: &mut Editor) {
+/// command still waiting for the user's yes is no longer asked about. What the turn's calls left running
+/// (`Left`, for `left_running`).
+pub fn turn_over(ed: &mut Editor) -> Vec<Left> {
+    let left = left_of(&ed.session);
     ed.session.tool_waits.clear();
     crate::queued::turn_over(ed);
     // (nothing waits on a card any more — its cards go below)
@@ -623,6 +625,126 @@ pub fn turn_over(ed: &mut Editor) {
     });
     crate::seeing::turn_over(ed);
     crate::refactor::turn_over(ed);
+    left
+}
+
+/// A run of Claude's a turn's call was waiting on, still going as the turn ended: its slot, when it started (it,
+/// not a later one there), what its row calls it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Left {
+    pub slot: crate::queued::Slot,
+    pub started: Instant,
+    pub label: String,
+}
+
+/// The runs in session `l`'s slots a call of its turn waits on, still going.
+fn left_of(l: &crate::session::Session) -> Vec<Left> {
+    use crate::queued::Slot;
+    let task = l.task_run.as_ref().filter(|r| r.chat.is_some() && r.state == crate::task::State::Running);
+    let tests = l.test_run.as_ref().filter(|r| r.chat.is_some() && r.state == RunState::Running);
+    let task =
+        task.map(|r| Left { slot: Slot::Task, started: r.started, label: crate::task::traced(&r.task.name) });
+    let tests = tests.map(|r| Left {
+        slot: Slot::Tests,
+        started: r.started,
+        label: format!("tests {}", r.target.label),
+    });
+    task.into_iter().chain(tests).collect()
+}
+
+/// Whether `run` still goes in session `l` (the same run: started then).
+fn still_going(l: &crate::session::Session, run: &Left) -> bool {
+    match run.slot {
+        crate::queued::Slot::Task => l
+            .task_run
+            .as_ref()
+            .is_some_and(|r| r.started == run.started && r.state == crate::task::State::Running),
+        crate::queued::Slot::Tests => {
+            l.test_run.as_ref().is_some_and(|r| r.started == run.started && r.state == RunState::Running)
+        }
+    }
+}
+
+/// The user stopped the turn and its runs go on ("a run already going isn't cut short") — the next turn's
+/// would wait behind them (frictions26: a 7-minute grep nobody wanted held `queued 1st`). One light card offers
+/// to stop them; it goes by itself once they've ended (`left_sync`). Nothing about it is kept.
+pub fn left_running(ed: &mut Editor, left: Vec<Left>) {
+    if left.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    let rows: Vec<String> = left
+        .iter()
+        .map(|r| {
+            let at = match r.slot {
+                crate::queued::Slot::Task => "the task panel",
+                crate::queued::Slot::Tests => "the test pane",
+            };
+            let ran = crate::waits::clock(now.saturating_duration_since(r.started));
+            format!("  {} — {at}, running {ran}", r.label)
+        })
+        .collect();
+    let them = if left.len() == 1 { "it" } else { "them" };
+    let q = format!("{}\n\nClaude's next runs there wait behind {them}.", rows.join("\n"));
+    // (its runs at full strength: what the card is about)
+    let rows = 0..left.len();
+    ed.push_offer(
+        crate::offer::Offer::new(
+            "Stop what the stopped turn left running?".into(),
+            &q,
+            "",
+            String::new(),
+            crate::offer::What::LeftRunning { runs: left },
+        )
+        .deciding(rows),
+    );
+}
+
+/// `y` on that card: each of its runs still going stops (as `space m c` / `space x c` do) — what waits in
+/// its slot goes next.
+pub fn left_stop(ed: &mut Editor, runs: &[Left]) {
+    let going: Vec<&Left> = runs.iter().filter(|r| still_going(&ed.session, r)).collect();
+    if going.is_empty() {
+        return ed.set_status("they had ended already");
+    }
+    let said: Vec<&str> = going.iter().map(|r| r.label.as_str()).collect();
+    let said = said.join(", ");
+    for r in going {
+        match r.slot {
+            crate::queued::Slot::Task => ed.task_close(),
+            crate::queued::Slot::Tests => ed.test_close(),
+        }
+    }
+    ed.set_status(format!("Stopped {said}"));
+}
+
+/// A run ended, or a slot freed (`queued::run_next`): the card about runs a stopped turn left goes once none of
+/// them goes on.
+pub fn left_sync(ed: &mut Editor) {
+    let ended = |l: &crate::session::Session, w: &crate::offer::What| matches!(w, crate::offer::What::LeftRunning { runs } if !runs.iter().any(|r| still_going(l, r)));
+    if !ed.session_cards().any(|o| ended(&ed.session, &o.what)) {
+        return;
+    }
+    // (what goes on now, apart from the editor the drop borrows)
+    let l = &ed.session;
+    let going: Vec<Left> = [crate::queued::Slot::Task, crate::queued::Slot::Tests]
+        .into_iter()
+        .filter_map(|slot| {
+            let started = match slot {
+                crate::queued::Slot::Task => l.task_run.as_ref().map(|r| r.started),
+                crate::queued::Slot::Tests => l.test_run.as_ref().map(|r| r.started),
+            }?;
+            let run = Left { slot, started, label: String::new() };
+            still_going(l, &run).then_some(run)
+        })
+        .collect();
+    let gone = move |w: &crate::offer::What| match w {
+        crate::offer::What::LeftRunning { runs } => {
+            !runs.iter().any(|r| going.iter().any(|g| g.slot == r.slot && g.started == r.started))
+        }
+        _ => false,
+    };
+    ed.drop_cards_for(gone, "its runs ended");
 }
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).

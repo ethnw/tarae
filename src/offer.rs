@@ -245,6 +245,9 @@ pub enum What {
     /// takes it until session `session` ends — `message`, the one that failed, goes again · `A` always (your
     /// config) · `n` not asked again this session.
     EnvKey { session: crate::event::SessionId, message: Option<String> },
+    /// The user stopped a turn and the runs its calls waited on go on (`tools::left_running`): `y` stops them ·
+    /// `n` lets them run. Light; it goes by itself once they've ended (`tools::left_sync`). Its session's.
+    LeftRunning { runs: Vec<crate::tools::Left> },
 }
 
 /// Every card's kind (`Offer::kind`) — what `:features` lists, so a card never asked shows as 0
@@ -293,6 +296,7 @@ pub const KINDS: &[&str] = &[
     "environment-key",
     "limit",
     "features-reset",
+    "left-running",
 ];
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
@@ -353,6 +357,8 @@ impl What {
             | What::NotesStale { .. }
             | What::NotesClose { .. }
             | What::Stuck(_)
+            // (its runs end with the restart)
+            | What::LeftRunning { .. }
             // (about containers as they were then: they run on, the restart's tarae doesn't know them)
             | What::Containers(_)
             // (its run ends with the restart)
@@ -806,6 +812,7 @@ impl Offer {
                 self.what,
                 What::ReviewEnd { .. }
                     | What::Stuck(_)
+                    | What::LeftRunning { .. }
                     | What::NotesStale { .. }
                     | What::NotesClose { .. }
                     // (its session's: a key of another session's never answers it)
@@ -984,6 +991,8 @@ impl Offer {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
             W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
+            W::LeftRunning { runs } if runs.len() == 1 => vec![('y', "Stop it"), ('n', "Let it run")],
+            W::LeftRunning { .. } => vec![('y', "Stop them"), ('n', "Let them run")],
             // (`A` only with the network open: cards.md decision 4 — piece C)
             W::Host(a) if a.open => vec![
                 ('y', "This run"),
@@ -1053,6 +1062,7 @@ impl Offer {
             W::NotesClose { .. } => "notes-close",
             W::Recover(_) => "recover",
             W::Stuck(_) => "stuck",
+            W::LeftRunning { .. } => "left-running",
             W::Host(_) => "host",
             W::Containers(_) => "containers",
             W::BillingSwitch { .. } => "billing-switch",
@@ -1132,6 +1142,8 @@ impl crate::editor::Editor {
         // From a session behind: it waits in that session, and comes up when the session is in front (`session_in`)
         if self.background() {
             self.count(crate::features::Area::Card, o.kind());
+            // (still waiting a while later: one warning names it — `card_nudge`)
+            self.nudge_later(self.session.id, o.id);
             return self.session.parked.push(o);
         }
         // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
@@ -1157,18 +1169,8 @@ impl crate::editor::Editor {
         if matches!(o.what, What::PluginPermissions { .. } | What::PluginAsk { .. }) {
             self.plugin_panel_unfocus();
         }
-        // A card that runs something (or shows Claude the screen), while the chat has the keys and nothing is
-        // being typed there (Claude asking mid-turn): the chat gives them to the card — as a review takes them. Mid-message, the
-        // card waits (cards don't take keys from the chat's input — a `n` typed there was a "no"). Not the
-        // project's Claude settings: Claude runs held back beside it, and what's typed next is for Claude
-        if (o.weighty() || matches!(o.what, What::Screen { .. }))
-            && !matches!(o.what, What::ClaudeSettings { .. })
-            && let Some(c) = self.session.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
-        {
-            c.focused = false;
-            // (lent: back to the chat once it's answered — `chat_lent_sync`)
-            self.session.chat_lent.get_or_insert(o.id);
-        }
+        // (the chat keeps its keys, its input empty or not: a card takes them there only by `C-q` — frictions26:
+        // a card that took them from an empty input took the `a` of a message typed next as a grant)
         // (asked: counted once it's stacked — one asked again while it's up only refreshed the one there, above)
         self.count(crate::features::Area::Card, o.kind());
         let at = self.offer_place(&o);
@@ -1191,28 +1193,6 @@ impl crate::editor::Editor {
         let rank = o.rank();
         let behind = self.offers.iter().enumerate().skip(usize::from(held)).find(|(_, x)| x.rank() > rank);
         behind.map_or(self.offers.len(), |(i, _)| i)
-    }
-
-    /// Every event: the keys a card took from the chat (`push_offer`) go back to it once that card is gone —
-    /// after the next one up here, if any, is answered too — when they're still where it left them (the code,
-    /// in normal mode): moved elsewhere since (a panel, insert mode, a review), they stay. They stayed in the
-    /// code: `keys → pane#29 (commands)` after an edit review's, the restart card's or a drafts card's `y`.
-    pub(crate) fn chat_lent_sync(&mut self) {
-        let Some(id) = self.session.chat_lent else { return };
-        if self.offers.iter().any(|o| o.id == id) {
-            return;
-        }
-        if let Some(next) = self.offers.first() {
-            self.session.chat_lent = Some(next.id);
-            return;
-        }
-        self.session.chat_lent = None;
-        let here = self.mode == crate::editor::Mode::Normal
-            && self.pending.is_empty()
-            && self.keys_to().region == crate::uistate::Region::Code;
-        if let Some(c) = self.session.chat.as_mut().filter(|_| here) {
-            c.focused = true;
-        }
     }
 
     /// A card's keys while it has them (`Editor::card_has_keys`) — true if handled (`y` yes · `n` no · `a`/`A`
@@ -1479,6 +1459,10 @@ impl crate::editor::Editor {
             What::Stuck(s) => {
                 self.offer_finished(id, Ok(()));
                 crate::stuck::stop(self, &s);
+            }
+            What::LeftRunning { runs } => {
+                self.offer_finished(id, Ok(()));
+                crate::tools::left_stop(self, &runs);
             }
             What::Host(a) => crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run),
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
@@ -2053,6 +2037,9 @@ impl crate::editor::Editor {
             What::NotesClose { by, ids } => crate::notes::close_by_answer(self, o.id, by, ids, false),
             What::Recover(f) => crate::recovery::not_now(self, *f),
             What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
+            What::LeftRunning { .. } => {
+                self.set_status("left running — space m c stops the task, space x c the tests")
+            }
             What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused),
             What::Containers(a) => crate::containers::answer(self, o.id, *a, false),
             What::BillingSwitch { session, to, .. } => {

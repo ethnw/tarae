@@ -3997,6 +3997,15 @@ mod tests {
         }
     }
 
+    /// `keys` answering the front card from wherever the keys are — `C-q` first when it hasn't them (the
+    /// chat keeps them as a card comes — frictions26).
+    fn answer(ed: &mut Editor, keys: &str) {
+        if !ed.card_has_keys() {
+            feed(ed, "<C-q>");
+        }
+        feed(ed, keys);
+    }
+
     fn editor(text: &str) -> Editor {
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = ropey::Rope::from_str(text);
@@ -6318,7 +6327,7 @@ mod tests {
         };
         feed(&mut ed, "<space>ldo it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
-        assert!(!ed.session.chat.as_ref().unwrap().focused, "the card took the keys from the empty input");
+        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys (frictions26)");
         assert!(ed.session.review.is_none(), "no change of it in review yet");
         let s = screen(&mut ed);
         assert!(s.contains("Claude changes 3 files") && s.contains("replace `old_(\\w+)` → `new_$1`"), "{s}");
@@ -6326,7 +6335,7 @@ mod tests {
         assert!(s.contains("y Accept all") && s.contains("r One by one") && s.contains("v See them"), "{s}");
         settled(&mut ed);
         // `v`: every change, file by file
-        feed(&mut ed, "v");
+        answer(&mut ed, "v");
         settle_for(&mut ed, |ed| card_buffers(ed) == 1);
         let all = text(&ed);
         assert!(all.contains("── src/a.rs (2)") && all.contains("  - fn old_name() {}"), "{all}");
@@ -6335,7 +6344,7 @@ mod tests {
         // `y`: all of them written at once
         screen(&mut ed);
         settled(&mut ed);
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         settle_for(&mut ed, answered);
         assert_eq!(read("src/a.rs"), "fn new_name() {}\nfn x() { new_name() }\n");
         assert_eq!(read("src/deep/c.rs"), "// new_value here\n");
@@ -6354,7 +6363,7 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         screen(&mut ed);
         settled(&mut ed);
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         settle_for(&mut ed, answered);
         let t = tool_answer(&log);
         assert!(t.contains("nothing changed") && t.contains("declined by the user"), "{t}");
@@ -6703,7 +6712,7 @@ mod tests {
         );
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        feed(&mut ed, "a");
+        answer(&mut ed, "a");
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(tool_answer(&log).contains("tarae-marker-content"), "{}", tool_answer(&log));
         assert!(ed.session.chat.as_ref().unwrap().allowed.reads(&marker));
@@ -6821,9 +6830,9 @@ mod tests {
         assert!(s.contains("y Run") && !s.contains("This chat") && !s.contains("Always"), "{s}");
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        feed(&mut ed, "a");
+        answer(&mut ed, "a");
         assert_eq!(ed.offers.len(), 1, "never kept: `a` isn't an answer");
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
         assert!(answer.contains("Ran outside the sandbox"), "{answer}");
@@ -6834,7 +6843,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Claude asks to see the screen: a card first (it takes the keys from an empty chat input), nothing
+    /// Claude asks to see the screen: a card first (`C-q` from the chat answers it — frictions26), nothing
     /// goes before `y`, and what goes is the frame drawn after it — the code and the terminal panel's
     /// output, not the card. The card says the terminal panel is in it; with `llm.screen-terminal` off its
     /// rows are blank and the card says that instead. `a` lets the next call go unasked; `n` tells Claude no.
@@ -6891,11 +6900,11 @@ mod tests {
         let o = ed.offers.first().unwrap();
         assert_eq!(o.title, crate::seeing::TITLE);
         assert!(o.question.contains("Includes the terminal panel ("), "{}", o.question);
-        assert!(!ed.session.chat.as_ref().unwrap().focused, "the card has the keys");
+        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys");
         let s = draw(&mut ed);
         assert!(s.contains("y Once   a This chat   n No"), "{s}");
         assert_eq!(answers(&log), 0, "nothing goes before the answer");
-        feed(&mut ed, "y");
+        feed(&mut ed, "<C-q>y");
         assert!(ed.offers.is_empty());
         settle_drawing(&mut ed, &|ed| !ed.session.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
@@ -6914,7 +6923,7 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
         assert!(q.contains("Not the terminal panel (llm.screen-terminal is off)"), "{q}");
-        feed(&mut ed, "a");
+        feed(&mut ed, "<C-q>a");
         settle_drawing(&mut ed, &|ed| !ed.session.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
         assert!(answer.contains("screen-marker") && !answer.contains("term-marker"), "{answer}");
@@ -6930,7 +6939,7 @@ mod tests {
         draw(&mut ed);
         feed(&mut ed, "<space>lwhat do you see<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
-        feed(&mut ed, "n");
+        feed(&mut ed, "<C-q>n");
         settle_drawing(&mut ed, &|ed| !ed.session.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
         assert!(answer.contains("said no") && answer.contains("isError"), "{answer}");
@@ -8596,7 +8605,7 @@ mod tests {
         assert!(s.contains("marker.txt"), "{s}");
         assert!(s.contains("y Once") && s.contains("a This chat") && s.contains("A Always"), "{s}");
         assert!(s.contains("s This session"), "{s}");
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         let a = answered(&mut ed, "p2");
         assert_eq!(a["behavior"], "deny");
         assert!(a["message"].as_str().unwrap().contains(&marker.display().to_string()), "{a}");
@@ -8605,22 +8614,22 @@ mod tests {
             q.contains(&format!("searches {} and everything in it\nfor tarae-marker", out.display())),
             "{q}"
         );
-        feed(&mut ed, "a");
+        answer(&mut ed, "a");
         assert_eq!(answered(&mut ed, "p3")["behavior"], "allow");
         assert_eq!(answered(&mut ed, "p4")["behavior"], "allow", "in what `a` allowed: unasked");
         let (q, _) = card(&mut ed);
         assert!(q.contains(&format!("lists *.txt in {}", other.display())), "{q}");
-        feed(&mut ed, "A");
+        answer(&mut ed, "A");
         assert_eq!(answered(&mut ed, "p5")["behavior"], "allow");
         let (q, s) = card(&mut ed);
         assert!(q.contains("Only once") && s.contains("y Once") && !s.contains("A Always"), "not kept: {s}");
-        feed(&mut ed, "A");
+        answer(&mut ed, "A");
         assert!(ed.offers.iter().any(|o| o.title == TITLE), "A isn't an answer here");
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p6")["behavior"], "allow");
         // `s`: this session's — not the conversation's, not the project's
         card(&mut ed);
-        feed(&mut ed, "s");
+        answer(&mut ed, "s");
         assert_eq!(answered(&mut ed, "p7")["behavior"], "allow");
         assert!(ed.session.allowed.reads(&sess), "{:?}", ed.session.allowed);
         assert!(!ed.session.chat.as_ref().unwrap().allowed.reads(&sess));
@@ -8705,25 +8714,25 @@ mod tests {
         assert!(q.starts_with(&tls.display().to_string()) && q.contains("It's named like a key."), "{q}");
         assert!(!q.contains("a and A"), "{q}");
         assert!(s.contains("y Once") && !s.contains("a This chat") && !s.contains("A Always"), "{s}");
-        feed(&mut ed, "a");
-        feed(&mut ed, "A");
+        answer(&mut ed, "a");
+        answer(&mut ed, "A");
         assert!(ed.offers.iter().any(|o| o.title == KEYS_TITLE), "a and A aren't answers here");
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p2")["behavior"], "allow");
         card(&mut ed);
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p3")["behavior"], "allow");
         assert!(ed.session.chat.as_ref().unwrap().allowed.keys.is_empty(), "once: nothing opened");
         let (q, _) = card(&mut ed);
         assert!(q.starts_with(&env.display().to_string()), "the same file asks again: {q}");
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         assert_eq!(answered(&mut ed, "p4")["behavior"], "deny");
         let (q, _) = card(&mut ed);
         let named = format!("searches {} and everything in it\nfor TOKEN", project.display());
         assert!(q.starts_with(&named) && q.contains("It opens files named like keys:\n"), "{q}");
         assert!(q.contains("    deploy/prod.pem") && !q.contains("test.key"), "{q}");
         assert!(q.contains("deploy/hosts.yml holds a token-like line"), "its yes reads more: {q}");
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         let a = answered(&mut ed, "p5");
         assert_eq!(a["behavior"], "deny");
         assert!(a["message"].as_str().unwrap().contains(&pem.display().to_string()), "{a}");
@@ -8731,10 +8740,10 @@ mod tests {
         assert_eq!(answered(&mut ed, "p7")["behavior"], "allow", "Glob lists names only");
         let (q, _) = card(&mut ed);
         assert!(q.starts_with(&pem.display().to_string()), "{q}");
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p8")["behavior"], "allow");
         card(&mut ed);
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         assert_eq!(answered(&mut ed, "p9")["behavior"], "deny", "the search asks again");
         // Kept for the project by an earlier build's `A`: a later conversation reads it unasked
         crate::allow::keep(&store, &project, |a| a.add(&crate::allow::Grant::Key(pem.clone()))).unwrap();
@@ -8785,7 +8794,7 @@ mod tests {
         crate::term::render(&mut ed, &mut Vec::new(), 140, 40).unwrap();
         let o = (ed.offers[0].id, ed.offers[0].rev);
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        feed(&mut ed, "n");
+        answer(&mut ed, "n");
         assert_eq!(answered(&mut ed, "p2")["behavior"], "deny");
         settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().state == crate::chat::State::Idle);
         assert!(ed.session.chat.as_ref().unwrap().ran.is_empty(), "the turn's runs are over with it");
@@ -13330,7 +13339,7 @@ mod tests {
         screen(&mut ed);
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         settle_until(&mut ed, |ed| ed.session.task_run.is_some());
         assert!(ed.session.task_run.as_ref().unwrap().output.is_empty(), "nothing printed yet");
         let s = screen(&mut ed);
@@ -13379,7 +13388,7 @@ mod tests {
         let before = y_at(&ed);
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        feed(&mut ed, "y");
+        answer(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits");
         let s = screen(&mut ed);
         assert!(ed.messages.last().is_some_and(|m| m.2.contains("v shows all of it")), "kept in :messages");
@@ -13766,7 +13775,8 @@ mod tests {
 
     /// A card never takes what's typed in the chat (B1: the project-trust card took every `n` of "guard_and_go"
     /// and was dismissed): while the input has the keys they're the message's — a card that comes then waits.
-    /// One that comes while nothing is being typed (Claude asking mid-turn) takes the keys, as a review does.
+    /// One that comes while nothing is being typed (Claude asking mid-turn) leaves them there too — the next
+    /// message's first letter was an answer (frictions26) — and `C-q` hands them over.
     #[test]
     fn a_card_doesnt_take_what_is_typed_in_the_chat() {
         use crate::offer::{Offer, What};
@@ -13799,14 +13809,21 @@ mod tests {
         assert!(ed.session.chat.as_ref().unwrap().focused);
         feed(&mut ed, "n");
         assert_eq!(ed.session.chat.as_ref().unwrap().input, "guard_and_go non");
-        // Nothing being typed: a card that comes takes the keys
-        ed.session.chat.as_mut().unwrap().input.clear();
+        // Nothing being typed: a card that comes leaves the chat the keys — `C-q` hands them over
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.input, c.cursor) = (String::new(), 0);
         ed.offers.clear();
         ed.push_offer(card("Claude wants to run"));
-        assert!(!ed.session.chat.as_ref().unwrap().focused, "the card has the keys");
+        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys");
         settle(&mut ed);
-        feed(&mut ed, "y");
+        feed(&mut ed, "a");
+        assert_eq!((ed.offers.len(), ed.session.chat.as_ref().unwrap().input.as_str()), (1, "a"), "typed");
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.input, c.cursor) = (String::new(), 0);
+        feed(&mut ed, "<C-q>y");
         assert!(ed.offers.is_empty(), "y answered it");
+        // (in the code from here)
+        ed.session.chat.as_mut().unwrap().focused = false;
         // An answer letter the card doesn't take isn't the code's (`a` would start inserting, and the `y` after
         // it would be typed)
         ed.push_offer(card("Only y or n"));

@@ -13,6 +13,15 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 
+/// What a name in a folder is (`Dir::kind`), not followed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Folder,
+    Link,
+    Other,
+}
+
 /// A folder in the project, opened through no link.
 pub struct Dir {
     fd: OwnedFd,
@@ -179,6 +188,69 @@ impl Dir {
             return Err(io::Error::last_os_error());
         }
         self.remove(name)
+    }
+
+    /// A new folder `name` here (`mkdirat` — Err when anything is there already), opened through no link.
+    pub fn make(&self, name: &OsStr) -> io::Result<Dir> {
+        let (cn, at, fd) = (c(name)?, self.at.join(name), self.fd.as_raw_fd());
+        // SAFETY: a folder descriptor of ours and a name, live for the call.
+        if unsafe { libc::mkdirat(fd, cn.as_ptr(), 0o777) } != 0 {
+            let e = io::Error::last_os_error();
+            return Err(io::Error::new(e.kind(), format!("{}: {e}", at.display())));
+        }
+        let opened = open_at(fd, &cn, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .map_err(|e| said(e, fd, &cn, &at))?;
+        Ok(Dir { fd: opened, at })
+    }
+
+    /// What `name` here is, not followed.
+    pub fn kind(&self, name: &OsStr) -> io::Result<Kind> {
+        let cn = c(name)?;
+        // SAFETY: zeroed out-struct, filled by the call; a descriptor of ours and a name, live for the call.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(self.fd.as_raw_fd(), cn.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(match st.st_mode & libc::S_IFMT {
+            libc::S_IFREG => Kind::File,
+            libc::S_IFDIR => Kind::Folder,
+            libc::S_IFLNK => Kind::Link,
+            _ => Kind::Other,
+        })
+    }
+
+    /// The names in it (not `.` and `..`) and what each is, not followed — listed through a descriptor of its
+    /// own (`.` opened from this one: the listing's offset isn't this one's).
+    pub fn entries(&self) -> io::Result<Vec<(OsString, Kind)>> {
+        use std::os::fd::IntoRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+        let own = open_at(self.fd.as_raw_fd(), c".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+        let raw = own.into_raw_fd();
+        // SAFETY: a folder descriptor of ours, handed to the stream (closedir closes it).
+        let dir = unsafe { libc::fdopendir(raw) };
+        if dir.is_null() {
+            let e = io::Error::last_os_error();
+            // SAFETY: the descriptor the stream didn't take.
+            unsafe { libc::close(raw) };
+            return Err(e);
+        }
+        let mut names = Vec::new();
+        loop {
+            // SAFETY: the stream just opened, read to its end, closed below.
+            let ent = unsafe { libc::readdir(dir) };
+            if ent.is_null() {
+                break;
+            }
+            // SAFETY: readdir's entry, its name NUL-terminated, valid until the next call.
+            let name = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                names.push(OsStr::from_bytes(name).to_os_string());
+            }
+        }
+        // SAFETY: the stream, closed once.
+        unsafe { libc::closedir(dir) };
+        names.into_iter().map(|n| self.kind(&n).map(|k| (n, k))).collect()
     }
 
     /// File `name`'s stamp, through no link.

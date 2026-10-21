@@ -317,6 +317,7 @@ fn push_at(ed: &mut Editor, mut what: What, front: bool, trace: Option<crate::tr
 /// A slot freed (a run ended, was closed, or a start came to nothing): the first in its line starts — a call
 /// of Claude's whose turn has ended is dropped on the way.
 pub fn run_next(ed: &mut Editor) {
+    crate::tools::left_sync(ed);
     for slot in [Slot::Task, Slot::Tests] {
         if busy(&ed.session, slot) {
             continue;
@@ -454,6 +455,50 @@ pub fn position(l: &Session) -> Option<usize> {
                 .map(|i| i + 1)
         })
         .min()
+}
+
+/// What Claude's call waiting in line waits behind, as the chat's live row says it (`chat_said`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatWait {
+    /// `queued 1st · behind cargo test · 0:12` — behind a run a stopped turn left, `queued 1st, behind a
+    /// stopped turn's run`.
+    pub said: String,
+    /// That run: what it is, how long it has run, the key that stops it (`space m c`).
+    pub left: Option<(String, String, &'static str)>,
+}
+
+/// Where session `l`'s Claude's first waiting call is in line and behind what, for the chat's live row
+/// (frictions26: a run a stopped turn left going held the next turn's, and the chat said nothing). One no turn
+/// waits on any more is said apart, with how it stops.
+pub fn chat_said(l: &Session, now: Instant) -> Option<ChatWait> {
+    let chat = l.chat.as_ref().filter(|c| c.busy())?;
+    let (slot, pos, n) = [Slot::Task, Slot::Tests].into_iter().find_map(|slot| {
+        line(&l.runs_next, slot)
+            .enumerate()
+            .find(|(_, n)| n.what.calls().iter().any(|c| c.generation() == chat.generation()))
+            .map(|(i, n)| (slot, i + 1, n))
+    })?;
+    let waited = crate::waits::clock(now.saturating_duration_since(n.queued.since));
+    let said = |s: String| ChatWait { said: s, left: None };
+    let Some(holder) = holder(l, slot) else {
+        return Some(said(format!("queued {} · {waited}", ordinal(pos))));
+    };
+    // (Claude's, its call gone: a turn that ended left it — `tools::turn_over`)
+    let orphan = match slot {
+        Slot::Task => l.task_run.as_ref().filter(|r| r.by_claude && r.chat.is_none()).map(|r| r.started),
+        Slot::Tests => l.test_run.as_ref().filter(|r| r.by_claude && r.chat.is_none()).map(|r| r.started),
+    };
+    Some(match orphan {
+        Some(started) => {
+            let ran = crate::waits::clock(now.saturating_duration_since(started));
+            let stop = if slot == Slot::Task { "space m c" } else { "space x c" };
+            ChatWait {
+                said: format!("queued {}, behind a stopped turn's run", ordinal(pos)),
+                left: Some((holder, ran, stop)),
+            }
+        }
+        None => said(format!("queued {} · behind {holder} · {waited}", ordinal(pos))),
+    })
 }
 
 /// `1st` · `2nd` · `3rd` · `11th` …
@@ -792,6 +837,56 @@ mod tests {
         pump(&mut ed, "the first ended", |_| answered(1).is_some());
         assert_eq!(order(&dir), ["slow"], "the one taken out didn't run");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions26: the user stops a turn while its run goes on (a run under way isn't cut short) — one light
+    /// card offers to stop it; the next turn's run waits behind it, and the chat says behind what and how it
+    /// stops; `y` stops it and the waiting one runs. A card whose run ends by itself goes.
+    #[test]
+    fn a_stopped_turns_run_is_offered_to_stop() {
+        let (mut ed, dir, generation) = at_work("left");
+        script(&dir, "slow", 5.0);
+        script(&dir, "fast", 0.0);
+        run(&mut ed, generation, 1, "sh slow.sh");
+        pump(&mut ed, "it started", running);
+        crate::chat::turn_ended(&mut ed, generation, true);
+        let o = ed.offers.first().expect("a card");
+        assert_eq!(o.kind(), "left-running");
+        assert!(o.question.contains("sh slow.sh — the task panel, running 0:0"), "{}", o.question);
+        assert!(!o.weighty(), "light: no settling");
+        assert!(running(&ed), "not cut short");
+        // The next turn's run waits behind it — the chat says so
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        run(&mut ed, generation, 2, "sh fast.sh");
+        let said = super::chat_said(&ed.session, Instant::now()).unwrap();
+        assert_eq!(said.said, "queued 1st, behind a stopped turn's run");
+        assert!(
+            said.left
+                .as_ref()
+                .is_some_and(|(l, ran, k)| l == "sh slow.sh" && ran.starts_with("0:0") && *k == "space m c"),
+            "{said:?}"
+        );
+        // `y`: stopped, and the one in line runs
+        ed.handle_key("y".parse().unwrap());
+        assert!(ed.offers.is_empty());
+        pump(&mut ed, "the waiting one ran", |_| answered(2).is_some());
+        assert_eq!(order(&dir), ["fast"], "the stopped turn's never finished");
+        // A stopped turn's run that ends by itself takes its card with it
+        script(&dir, "short", 0.3);
+        run(&mut ed, generation, 3, "sh short.sh");
+        pump(&mut ed, "it started", running);
+        crate::chat::turn_ended(&mut ed, generation, true);
+        assert_eq!(ed.offers.len(), 1);
+        pump(&mut ed, "it ended", |ed| !running(ed));
+        assert!(ed.offers.is_empty(), "gone with its run");
+        // A turn that ends on its own offers nothing
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        script(&dir, "long", 2.0);
+        run(&mut ed, generation, 4, "sh long.sh");
+        pump(&mut ed, "it started", running);
+        crate::chat::turn_ended(&mut ed, generation, false);
+        assert!(ed.offers.is_empty(), "not stopped: no card");
+        ed.task_close();
     }
 
     #[test]

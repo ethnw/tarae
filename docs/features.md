@@ -381,7 +381,8 @@ your `PATH`.
 
 - **Sessions** `space W` — several branches of work side by side, each a checkout of its own with its own Claude,
   chat, terminal and tests; brought back into main, a rebase's conflicts resolved by that session's Claude
-  ([rebasing a session](claude-integration.md#rebasing-a-session))
+  ([rebasing a session](claude-integration.md#rebasing-a-session)); its git-ignored notes (`session.keep`:
+  `target/sb`) moved to the main checkout's `target/sb/sessions/<name>/` when it ends
 - **Review like a pull request** — Claude's edits hunk by hunk, or all at the turn's end
   ([review at the end](claude-integration.md#review-at-the-end)); any change reviewed over the real buffers, and a
   second Claude reviewing as notes on the lines, `space v c` ([code review](claude-integration.md#code-review))

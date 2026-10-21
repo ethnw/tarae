@@ -20,7 +20,7 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 21] = [
+pub const RISKY: [&str; 22] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -48,6 +48,8 @@ pub const RISKY: [&str; 21] = [
     "session.worktrees",
     // (a command run outside the sandbox at every session's end)
     "session.ended",
+    // (files moved into the main checkout at every session's end)
+    "session.keep",
     // (what a code review holds for a person's look before a bring — `risk.rs`)
     "review.risky",
 ];

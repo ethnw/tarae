@@ -935,6 +935,8 @@ impl Editor {
                     let next = crate::event::Event::Job(Box::new(crate::queued::run_next));
                     let _ = ed.events.sender().send(next);
                 }
+                // (a stopped turn's run: the card offering to stop it goes)
+                crate::tools::left_sync(ed);
                 let Some(r) = ed.session.task_run.as_mut() else { return };
                 let (passed, errors) = (r.state == State::Passed, r.found.0);
                 if crate::restart::built(ed, generation, passed, errors)

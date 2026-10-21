@@ -1430,6 +1430,166 @@ fn sessions_reviewing(w: u16) -> Shot {
     s
 }
 
+/// frictions26 S1: a session's end card when what `session.keep` names is kept — the kept line decided, its own
+/// CLAUDE.md copied beside it — and when nothing can be (over the size): said in the warning colour, with what
+/// goes with the checkout.
+#[test]
+fn snapshot_session_end_keeps_its_notes() {
+    use crate::sessionkeep::{Folder, Plan};
+    let to = PathBuf::from("/private/tmp/tarae/target/sb/sessions/fix-login");
+    let ending = |keep: Plan| crate::worktree::Ending {
+        root: "/private/tmp/sessions/fix-login".into(),
+        common: "/private/tmp/tarae/.git".into(),
+        name: "fix-login".into(),
+        branch: Some("fix-login".into()),
+        tip: "a1b2c3d4e5f60718".into(),
+        base: "main".into(),
+        changed: Vec::new(),
+        ahead: vec![
+            ("a1b2c3d".into(), "Parse hours too".into()),
+            ("9f8e7d6".into(), "Say the hours in the summary".into()),
+        ],
+        lost: Vec::new(),
+        entries: vec!["target/sb".into()],
+        keep,
+    };
+    let folder = Folder { rel: "target/sb".into(), files: 14, bytes: 220 << 10, to: to.clone() };
+    let instructions_to = Some(to.join("instructions"));
+    let differ = vec!["CLAUDE.md".to_string()];
+    let main = Some(PathBuf::from("/private/tmp/tarae"));
+    let kept = Plan {
+        folders: vec![folder.clone()],
+        differ: differ.clone(),
+        instructions_to: instructions_to.clone(),
+        not: None,
+        main: main.clone(),
+    };
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.push_offer(ending(kept).card());
+    s.check("session_end_kept");
+    s.frames_both("session_end_kept");
+    s.ed.offers.clear();
+    let big = Folder { files: 2400, bytes: 310 << 20, ..folder };
+    let not = Some("over 64 MB".to_string());
+    s.ed.push_offer(ending(Plan { folders: vec![big], differ, instructions_to, not, main }).card());
+    s.check("session_end_not_kept");
+    s.frames_both("session_end_not_kept");
+}
+
+/// frictions26 S2: a session behind with two cards waiting — its tab counts them (`▲2 waits`) — and, minutes on,
+/// the one warning that names it.
+#[test]
+fn snapshot_sessions_cards_waiting_behind() {
+    let mut s = Shot::new(120, 30);
+    let root = s.in_project();
+    s.file("src/demo.rs", DEMO_RS);
+    (s.ed.session.name, s.ed.session.git_branch) = ("main".into(), None);
+    let mut chat = crate::chat::Chat::new();
+    chat.focused = false;
+    s.ed.session.chat = Some(chat);
+    let dir = root.with_file_name("fix-login");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = s.ed.session_add(dir);
+    let ago = crate::session::NUDGE_AFTER + Duration::from_secs(60);
+    let card = |ed: &mut Editor, title: &str, what: crate::offer::What| {
+        let mut o = crate::offer::Offer::new(title.into(), "…", "", String::new(), what);
+        (ed.offer_seq, o.since) = (ed.offer_seq + 1, Instant::now() - ago);
+        o.id = ed.offer_seq;
+        let l = ed.sessions.iter_mut().find(|l| l.id == id).unwrap();
+        (l.name, l.git_branch) = ("fix-login".into(), None);
+        l.parked.push(o);
+        ed.offer_seq
+    };
+    let first = card(
+        &mut s.ed,
+        "Claude changes 3 files",
+        crate::offer::What::ChangeSet { generation: 999, ops: false },
+    );
+    card(
+        &mut s.ed,
+        "Claude asks to see the screen",
+        crate::offer::What::Screen { call: crate::tools::Call::test(7) },
+    );
+    s.ed.card_nudge(id, first);
+    // (frozen at full opacity: fully faded in, seconds before the fade-out)
+    let fresh = Instant::now().checked_sub(Duration::from_millis(500)).unwrap();
+    for t in &mut s.ed.toasts {
+        (t.at, t.shown) = (fresh, true);
+    }
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("main │ fix-login ▲2 waits │ +")), "{rows:#?}");
+    s.check("sessions_cards_waiting_behind");
+    s.frames_both("sessions_cards_waiting_behind");
+}
+
+/// frictions26 S4: the user stopped a turn whose command still runs — the light card offering to stop it, what it
+/// is, where, for how long, and why it matters.
+#[test]
+fn snapshot_offer_left_running() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    // (half a second past 7:12 — the clock reads the same however long the frame takes)
+    let started = Instant::now() - Duration::from_millis(432_500);
+    let label = "grep -rn TODO src".to_string();
+    crate::tools::left_running(
+        &mut s.ed,
+        vec![crate::tools::Left { slot: crate::queued::Slot::Task, started, label }],
+    );
+    s.check("offer_left_running");
+    s.frames_both("offer_left_running");
+}
+
+/// frictions26 S4: the next turn's command waits in line behind the run a stopped turn left — the chat's live row
+/// says behind what, whose, and how it stops; the task panel lists it waiting.
+#[test]
+fn snapshot_chat_run_queued_behind_a_stopped_turns() {
+    use crate::chat::{Msg, Role};
+    let mut s = Shot::new(120, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    let cwd = std::env::temp_dir();
+    let task = crate::task::Task {
+        name: "grep -rn TODO src".into(),
+        cmd: "grep -rn TODO src".into(),
+        cwd: cwd.clone(),
+    };
+    let mut r = crate::task::Run::for_test(task);
+    (r.state, r.by_claude) = (crate::task::State::Running, true);
+    r.started = Instant::now() - Duration::from_millis(432_500);
+    r.last_output = Instant::now();
+    s.ed.session.task_run = Some(r);
+    let mut chat = crate::chat::Chat::new();
+    (chat.state, chat.unfolded, chat.focused) = (crate::chat::State::Thinking, true, true);
+    chat.msgs.push(Msg::new(Role::User, "now run the tests", ""));
+    let mut m = Msg::new(Role::Tool, "", "");
+    m.look = Some(crate::chat::Look {
+        verb: "run",
+        what: "cargo test -p tarae".into(),
+        pattern: true,
+        range: String::new(),
+        link: None,
+    });
+    chat.msgs.push(m);
+    let generation = chat.generation();
+    s.ed.session.chat = Some(chat);
+    let call = crate::tools::Call::of(generation, "r1", json!(1));
+    let job = crate::tools::Job::Command("cargo test -p tarae".into(), cwd);
+    let who = crate::tools::For::Claude(call);
+    crate::queued::push(&mut s.ed, crate::queued::What::Guarded { who, job, ride: Default::default() });
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let all = parser.screen().contents();
+    assert!(all.contains("queued 1st, behind a stopped turn's run"), "{all}");
+    // (the name cut to fit, the time and the key whole)
+    assert!(all.contains("  grep -rn TODO ") && all.contains(" · 7:12  space m c stop it"), "{all}");
+    s.check("chat_run_queued_behind_a_stopped_turns");
+    s.frames_both("chat_run_queued_behind_a_stopped_turns");
+}
+
 /// The chat's session tabs have a row of air under them — the layout's, not the first message's: scrolled to the
 /// top, the first message's chip is two rows under the tabs; at the bottom of a long chat the row under them is
 /// still blank, the last message still in sight and the input where one session has it. One session: no tabs,

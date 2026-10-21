@@ -1407,6 +1407,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             let secs = c.started.elapsed().as_secs_f32();
             let (calls, took) = (c.calls.len(), c.started.elapsed());
+            // (the user stopped it: what its runs left going is offered to stop — `tools::left_running`)
+            let stopped = c.stopping;
             c.state = State::Idle;
             c.calls.clear();
             // (refused for money on the key, the turn ending on its error — not stopped, not answered after
@@ -1456,7 +1458,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             crate::follow::on_done(ed);
             crate::edits::turn_over(ed);
-            crate::tools::turn_over(ed);
+            let left = crate::tools::turn_over(ed);
+            if stopped {
+                crate::tools::left_running(ed, left);
+            }
             crate::reads::turn_over(ed);
             checkpoint_turn(ed);
             // (its result came just before — `Spent`: the cache's TTL runs from its last request)
@@ -1895,6 +1900,16 @@ fn control(
     }
     let response = crate::tools::mcp(ed, generation, request_id, &req["message"])?;
     Some(json!({ "mcp_response": response }))
+}
+
+/// Tests: the stream says the turn ended — `stopped` by the user (`C-c`), or answered.
+#[cfg(test)]
+pub(crate) fn turn_ended(ed: &mut Editor, generation: u64, stopped: bool) {
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.stopping = stopped;
+    }
+    let r = if stopped { Err("stopped".to_string()) } else { Ok(String::new()) };
+    on_event(ed, generation, StreamEv::Done(r));
 }
 
 pub fn stop(ed: &mut Editor) {

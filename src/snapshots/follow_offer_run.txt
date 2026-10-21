@@ -7,29 +7,29 @@
 04   2 ▎ Counts how often each word appears.                      ▎ commit it
 05     ▎                                                          ▂▅▆ thinking
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   space l open the chat
+07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   C-c stop  C-f unfollow
 08   6     let mut counts = HashMap::new();                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 09   7     for word in text.split_whitespace() {
 10   8     │   *counts.entry(word).or_insert(0) += 1;
 11   9     }
 12  10     counts
 13  11 }
-14  12
-15  13 fn main() {
-16  14     let text = "the quick brown fox jump▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-17  15     let counts = word_counts(text);      ▎ Claude wants to run — outside the sandbox
-18  16     println!("{} distinct words", counts   git commit -am 'Count words'
-19  17 }
-20                                                Its reason: the hooks sign with the key in your
-21                                                agent
-22
-23                                                Outside the sandbox it runs with all your
-24                                                permissions — your files, your network — this
-25                                                once.
+14  12                                         ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+15  13 fn main() {                              ▎ Claude wants to run — outside the sandbox
+16  14     let text = "the quick brown fox jump   git commit -am 'Count words'
+17  15     let counts = word_counts(text);
+18  16     println!("{} distinct words", counts   Its reason: the hooks sign with the key in your
+19  17 }                                          agent
+20
+21                                                Outside the sandbox it runs with all your
+22                                                permissions — your files, your network — this
+23                                                once.
+24
+25                                                C-q to answer it — what you're typing stays
 26
 27                                                y Run   n No
 28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+29  ▐ CHAT ▌                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -46,8 +46,8 @@
 12
 13
 14
-15
-16
+15                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 17                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 19                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -60,16 +60,16 @@
 26                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 28
-29   AAAAAAAA
+29   AAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 02   A
-03   f                                                            dddddd a aaaaaa               ffff
+03   f                                                            TTTTTT a aaaaaa               ffff
 04   f                                                            a TTTTTT TT
 05                                                                aaa DDDDDDDD
 06
-07   f                                                            DDDDD D ffff fff ffff
+07   f                                                            DDD ffff  DDD ffffffff
 08   f
 09   f
 10   f
@@ -77,21 +77,21 @@
 12  ff
 13  ff
 14  ff
-15  ff
+15  ff                                          a BBBBBB BBBBB BB BBB B BBBBBBB BBB BBBBBBB
 16  ff                gggg ggggg ggggg ggg gggg
-17  ff                                          a BBBBBB BBBBB BB BBB B BBBBBBB BBB BBBBBBB
-18  ff              ggg gggggggg gggggg
-19  ff
-20                                                ddd ddddddd ddd ddddd dddd dddd ddd ddd dd dddd
-21                                                ddddd
-22
-23                                                wwwwwww www wwwwwww ww wwww wwww www wwww
-24                                                wwwwwwwwwww w wwww wwwwww wwww wwwwwww w wwww
-25                                                wwwww
+17  ff
+18  ff              ggg gggggggg gggggg           ddd ddddddd ddd ddddd dddd dddd ddd ddd dd dddd
+19  ff                                            ddddd
+20
+21                                                wwwwwww www wwwwwww ww wwww wwww www wwww
+22                                                wwwwwwwwwww w wwww wwwwww wwww wwwwwww w wwww
+23                                                wwwww
+24
+25                                                ddd dd dddddd dd d dddd dddddd dddddd ddddd
 26
 27                                                A       A dd
 28
-29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+29  a BBBB a                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus  B=bold

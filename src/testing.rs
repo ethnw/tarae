@@ -795,6 +795,8 @@ impl Editor {
                     let next = crate::event::Event::Job(Box::new(crate::queued::run_next));
                     let _ = ed.events.sender().send(next);
                 }
+                // (a stopped turn's run: the card offering to stop it goes)
+                crate::tools::left_sync(ed);
                 crate::tools::tests_done(ed);
             };
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));

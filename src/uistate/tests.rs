@@ -244,6 +244,21 @@ const SCENES: &[Scene] = &[
         frame(ed);
         settle(ed);
     }),
+    // (frictions26: a run card coming mid-turn leaves the empty input the keys — the `a` of a message typed next
+    // was a grant; `C-q` hands them over)
+    ("the chat, empty, a weighty card come mid-turn", |ed| {
+        chat(ed, "");
+        weighty_card(ed);
+        frame(ed);
+        settle(ed);
+    }),
+    ("a weighty card given the keys from the empty chat (C-q)", |ed| {
+        chat(ed, "");
+        weighty_card(ed);
+        frame(ed);
+        settle(ed);
+        feed(ed, &["<C-q>"]);
+    }),
     ("the Claude settings card given the keys from the chat (C-q)", |ed| {
         chat(ed, "");
         settings_card(ed);
@@ -757,47 +772,43 @@ fn the_claude_settings_card_and_the_chat_input_each_keep_their_keys() {
     assert_eq!(ed.offers.len(), 1, "unanswered");
 }
 
-/// Right after a card is answered — one that took the keys from the chat (Claude asking mid-turn, its input
-/// empty): an edit review's `y`, the restart card's `y`, a drafts card's `y` — `tarae state` said
-/// `keys → pane#29 (commands)`: the code's normal-mode commands, while you'd been in the chat and nothing there
-/// had asked for the keys. They go back to the chat — as an edit review's Esc already gave them — unless
-/// another card up takes them, or they were moved elsewhere meanwhile.
+/// frictions26: a card that runs something comes mid-turn while the chat's input is empty — the chat keeps
+/// the keys. A message typed next is typed (its `a` was a grant for the chat when the card took them); `C-q`
+/// hands them to the card, and once it's answered they're the chat's again.
 #[test]
-fn the_keys_go_back_to_the_chat_once_its_card_is_answered() {
-    // A weighty card (as the restart's is) while the chat has the keys, its input empty: the card takes them
+fn a_card_come_mid_turn_leaves_the_empty_chat_its_keys() {
     let mut ed = editor();
     chat(&mut ed, "");
     weighty_card(&mut ed);
     frame(&mut ed);
     settle(&mut ed);
+    assert_eq!(ed.keys_to().region, Region::Chat);
+    feed(&mut ed, &["a", "n", "d"]);
+    frame(&mut ed);
+    assert_eq!(ed.offers.len(), 1, "unanswered");
+    assert_eq!(ed.session.chat.as_ref().unwrap().input, "and", "typed");
+    assert!(shown(&mut ed).contains("C-q to answer it"), "the card says how");
+    // `C-q`: the card's, `n` answers it, the chat has them again
+    ed.session.chat.as_mut().unwrap().input.clear();
+    ed.session.chat.as_mut().unwrap().cursor = 0;
+    feed(&mut ed, &["<C-q>"]);
     assert!(matches!(ed.keys_to().region, Region::Card(_)), "{:?}", ed.keys_to().region);
     feed(&mut ed, &["n"]);
     frame(&mut ed);
     assert!(ed.offers.is_empty(), "answered");
     assert_eq!(ed.keys_to().region, Region::Chat, "back where they were");
+}
+
+/// Right after an edit's review is answered that took the keys from the chat (Claude asking mid-turn, its
+/// input empty) — `tarae state` said `keys → pane#29 (commands)`: the code's normal-mode commands, while you'd
+/// been in the chat. They go back to the chat, as its Esc already gave them.
+#[test]
+fn the_keys_go_back_to_the_chat_once_its_review_is_answered() {
     // (and where they go in the code, the state says it's the code — not a pane called "commands")
     let mut code = editor();
     code.focus_sync();
     let said = code.ui_state().text();
     assert!(said.contains(&format!("keys → pane#{}, the code (commands)", code.session.focus)), "{said}");
-    // Two stacked: the keys stay with the cards until the last is answered
-    weighty_card(&mut ed);
-    light_card(&mut ed);
-    frame(&mut ed);
-    settle(&mut ed);
-    feed(&mut ed, &["n"]);
-    frame(&mut ed);
-    assert!(matches!(ed.keys_to().region, Region::Card(_)), "the next card: {:?}", ed.keys_to().region);
-    feed(&mut ed, &["n"]);
-    frame(&mut ed);
-    assert_eq!(ed.keys_to().region, Region::Chat);
-    // Moved elsewhere meanwhile (the side panel): they stay there
-    weighty_card(&mut ed);
-    frame(&mut ed);
-    ed.sidebar_show(crate::sidebar::Mode::Outline);
-    ed.offer_dismiss();
-    frame(&mut ed);
-    assert!(matches!(ed.keys_to().region, Region::Side(_)), "{:?}", ed.keys_to().region);
     // An edit's review that took them from the chat (`edits::show`): its `y` gives them back too
     let mut ed = editor();
     chat(&mut ed, "");
