@@ -43,6 +43,9 @@ pub struct Offer {
     /// The question's lines that are a diff (`sinceyes.rs`): `+` and `-` lines in the diff's colours, `@@`
     /// faint.
     pub diff: Option<std::ops::Range<usize>>,
+    /// The question's lines that keep their end (`read ~/…/x.patch · 515 B · 2 files`): one row, never wrapped —
+    /// their first word whole, the rest cut on the left (`term::fit_left`) so a path's name and what follows stay.
+    pub ends: Vec<usize>,
     /// When it came (`push_offer`) — `C-q` goes to the session whose card has waited longest (#90).
     pub since: Instant,
     /// When it was first drawn in front (`term::render_frame`) — its `card` line says how long it was up
@@ -186,8 +189,9 @@ pub enum What {
     CloseReviewed { doc: crate::document::DocId, force: bool },
     /// Claude's rename, replace or edit across several files, or with a move or delete (`refactor.rs`, #75):
     /// `y` accepts them all, `r` reviews them one by one (not with `ops` — a move or delete among them, which
-    /// no buffer shows), `v` shows every change, `n` declines them all. `generation` = its chat's.
-    ChangeSet { generation: u64, ops: bool },
+    /// no buffer shows), `v` shows every change, `n` declines them all. `whose`: Claude's (its chat's generation)
+    /// or the user's own (`:session-apply`).
+    ChangeSet { whose: crate::refactor::Whose, ops: bool },
     /// Claude's `commit` (`committool.rs`): `y` commits exactly the tree the card shows on the HEAD it names, no
     /// hooks, `v` shows the whole diff, `n` tells Claude no.
     Commit(Box<crate::committool::Commit>),
@@ -472,6 +476,7 @@ impl Offer {
             warning: None,
             warnings: Vec::new(),
             diff: None,
+            ends: Vec::new(),
             since: crate::clock::now(),
             drawn: Default::default(),
             asked: None,
@@ -527,6 +532,7 @@ impl Offer {
                     | What::NotesClose { .. }
                     | What::BillingSwitch { .. }
                     | What::FeaturesReset
+                    | What::ChangeSet { whose: crate::refactor::Whose::Yours, .. }
             ),
         }
     }
@@ -738,10 +744,10 @@ impl Offer {
         }
     }
 
-    /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
-    pub fn change_set(&self) -> Option<u64> {
+    /// Whose change set's card it is (`r` one by one, `v` every change).
+    pub fn change_set(&self) -> Option<crate::refactor::Whose> {
         match self.what {
-            What::ChangeSet { generation, .. } => Some(generation),
+            What::ChangeSet { whose, .. } => Some(whose),
             _ => None,
         }
     }
@@ -808,7 +814,7 @@ impl Offer {
                     | What::NoSandbox { .. }
                     | What::Read { .. }
                     | What::Screen { .. }
-                    | What::ChangeSet { .. }
+                    | What::ChangeSet { whose: crate::refactor::Whose::Claude(_), .. }
                     | What::Commit(_)
             )
             || matches!(&self.what, What::ProtectedMade { then, .. } if then.call().is_some())
@@ -843,6 +849,8 @@ impl Offer {
                     | What::Limit(_)
                     // (its answer keeps, removes or shows its session's names, and runs there)
                     | What::ProtectedMade { .. }
+                    // (the user's own change set is its session's `applying`)
+                    | What::ChangeSet { .. }
             )
     }
 
@@ -1322,16 +1330,16 @@ impl crate::editor::Editor {
                 return true;
             }
             // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text)
-            if let Some(generation) = o.change_set() {
+            if let Some(whose) = o.change_set() {
                 match key.code {
                     // (refused there when a move or delete is among them: decided on the card only)
                     Code::Char('r') => {
                         let id = o.id;
-                        crate::refactor::one_by_one(self, id, generation);
+                        crate::refactor::one_by_one(self, id, whose);
                         return true;
                     }
                     Code::Char('v') => {
-                        crate::refactor::view_all(self, generation);
+                        crate::refactor::view_all(self, whose);
                         return true;
                     }
                     _ => {}
@@ -1539,7 +1547,7 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.close_reviewed(doc, force);
             }
-            What::ChangeSet { generation, .. } => crate::refactor::accept_all(self, id, generation),
+            What::ChangeSet { whose, .. } => crate::refactor::accept_all(self, id, whose),
             What::Commit(c) => crate::committool::answer(self, id, *c, true),
             What::ReviewEnd { session, started } => {
                 self.offer_finished(id, Ok(()));
@@ -1919,7 +1927,7 @@ impl crate::editor::Editor {
             return self.offer_view_with(more);
         }
         match self.offers.first().and_then(Offer::change_set) {
-            Some(generation) => crate::refactor::view_all(self, generation),
+            Some(whose) => crate::refactor::view_all(self, whose),
             None => self.offer_view_all(),
         }
     }
@@ -1932,8 +1940,8 @@ impl crate::editor::Editor {
             }
             return;
         }
-        if let Some((id, generation)) = self.offers.first().and_then(|o| Some((o.id, o.change_set()?))) {
-            crate::refactor::one_by_one(self, id, generation);
+        if let Some((id, whose)) = self.offers.first().and_then(|o| Some((o.id, o.change_set()?))) {
+            crate::refactor::one_by_one(self, id, whose);
         }
     }
 
@@ -2131,7 +2139,7 @@ impl crate::editor::Editor {
             What::CloseReviewed { .. } => {
                 self.set_status("kept open — Claude's change still waits for y or n")
             }
-            What::ChangeSet { generation, .. } => crate::refactor::decline_all(self, generation),
+            What::ChangeSet { whose, .. } => crate::refactor::decline_all(self, whose),
             What::Commit(c) => crate::committool::answer(self, o.id, *c, false),
             What::ReviewEnd { .. } => self.set_status("still reviewing — space v m marks a file viewed"),
             What::Rebase(m) => {

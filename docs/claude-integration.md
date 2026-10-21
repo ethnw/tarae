@@ -1884,6 +1884,32 @@ changed, or buffers unsaved there) it says which, and that they need a commit or
 Both also take up a rebase tarae didn't start — one begun by hand in the session's terminal, or from before a
 restart.
 
+## Bringing in a patch
+
+`:session-apply [--base <rev>] <patch>` brings a change made in another tree (another agent's checkout, a mail)
+into the session in front as one change set of your own. tarae reads the file you name (`~` works; a project's key
+binding can't run it), reads `git diff`'s and `diff -u`'s form (a mail's headers, a commit message and a diffstat
+before it are skipped), and works out each file:
+
+- **With its base** — `--base dbe7086c`, the commit the patch was made against, or else the diff's own `index`
+  lines — the hunks go on the base exactly, then that's merged three-way with the file as the session has it. A
+  session that moved on since merges cleanly; where both changed the same lines (or neighbouring ones) the file
+  gets a conflict block (`<<<<<<< this session` · `||||||| base dbe7086c` · `=======` · `>>>>>>> x.patch`), resolved
+  in the buffer as a rebase's are.
+- **Without one** each hunk goes on exactly where it says, or at the one place in the file where all its lines
+  are (the card says `hunk 2 laid on 12 lines lower`). Lines in more than one place, or nowhere, refuse it — no
+  fuzz, no whitespace loosened, nothing guessed.
+
+The card says what was read (`read ~/x.patch · 42 KB · 6 files`), how it was merged, each file's conflicts in the
+warning colour, and modes it doesn't set. `y` writes them all, `r` one by one in the buffer, `v` shows every change,
+`n` none; new, renamed and deleted files are on the card only. A file changed after the card came is left alone
+and said. The whole is one step of `space u`, apart from Claude's turns; a Claude turn ending leaves it.
+
+One file that can't be applied refuses the patch and nothing changes — the message names each: a name outside the
+project, inside `.git` or named like a key, a binary change or a copy, a delete or move of a build script or
+manifest, of a link or of a buffer with unsaved edits, a file deleted that changed here since, a new one already
+there with other text.
+
 ## Settings
 
 ```toml

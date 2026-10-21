@@ -283,6 +283,63 @@ pub fn record_all(
     keep_then(ed, then);
 }
 
+/// A change of the user's own across files (`:session-apply`, `refactor::land_yours`): a step of its own for
+/// `space u`, `question` its title — its files join `step` when that's the one it made already (else a new one).
+/// Each `(path, before, after)` as `record_all`'s; `then` once what each was is on disk, before any is written.
+/// The step's id.
+pub fn own(
+    ed: &mut Editor,
+    step: Option<u64>,
+    question: &str,
+    files: Vec<(PathBuf, Option<Rope>, Option<Rope>)>,
+    then: impl FnOnce(&mut Editor) + Send + 'static,
+) -> u64 {
+    let touched = files.into_iter().map(|(path, before, after)| Touched {
+        path,
+        before,
+        gone: after.is_none(),
+        after: after.unwrap_or_default(),
+        ..Default::default()
+    });
+    let list = &mut ed.session.checkpoints.list;
+    let id = match list.iter_mut().find(|c| Some(c.id) == step) {
+        Some(c) => {
+            if let Files::Here(fs) = &mut c.files {
+                for t in touched {
+                    match fs.iter_mut().find(|f| f.path == t.path) {
+                        Some(f) => (f.after, f.gone) = (t.after, t.gone),
+                        None => fs.push(t),
+                    }
+                }
+            }
+            c.id
+        }
+        None => {
+            let c = Checkpoint::new(question.to_string(), touched.collect());
+            let id = c.id;
+            list.push(c);
+            id
+        }
+    };
+    keep_then(ed, then);
+    id
+}
+
+/// `paths` of the user's own step `step` weren't written after all: out of it (and the step, left with none).
+pub fn own_drop(ed: &mut Editor, step: u64, paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let list = &mut ed.session.checkpoints.list;
+    if let Some(c) = list.iter_mut().find(|c| c.id == step)
+        && let Files::Here(fs) = &mut c.files
+    {
+        fs.retain(|t| !paths.contains(&t.path));
+    }
+    list.retain(|c| c.id != step || !c.files.is_empty());
+    keep(ed);
+}
+
 /// What a run of Claude's changed in the checkout (`snapshot.rs`) joins the turn, as written unseen: each
 /// file's text before this turn kept the first time (one the turn touched already keeps its own), a deleted
 /// one marked gone, one that isn't text kept by its blobs. What they are after is read when the turn ends.

@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::editor::Editor;
 use crate::event::Event;
 
+mod applies;
 mod board;
 mod brings;
 mod hosts;

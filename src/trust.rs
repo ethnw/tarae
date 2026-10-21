@@ -84,9 +84,9 @@ pub fn yours_only(setting: &str) -> bool {
     YOURS_ONLY.contains(&setting)
 }
 
-/// `:` commands only your own keys run (or you, typed): they switch who pays for Claude. A project's key binding
-/// to one is left out (`config.rs`).
-pub const YOURS_ONLY_COMMANDS: [&str; 1] = ["session-billing"];
+/// `:` commands only your own keys run (or you, typed): they switch who pays for Claude, or read a file you name
+/// (`session-apply`'s patch). A project's key binding to one is left out (`config.rs`).
+pub const YOURS_ONLY_COMMANDS: [&str; 2] = ["session-billing", "session-apply"];
 
 /// Whether the `:` line `line` (no `:`) runs one of `YOURS_ONLY_COMMANDS`.
 pub fn yours_only_command(line: &str) -> bool {

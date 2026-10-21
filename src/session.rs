@@ -55,6 +55,8 @@ pub struct Session {
     pub checkpoints: crate::checkpoint::Checkpoints,
     /// The in-buffer review (`llm.rs`) — `space i`'s, a chat edit's.
     pub review: Option<crate::llm::Review>,
+    /// The user's own change set landing (`:session-apply`, `refactor::land_yours`) — one at a time.
+    pub applying: Option<crate::refactor::Landing>,
     /// The code review in progress (`codereview.rs`).
     pub code_review: Option<crate::codereview::CodeReview>,
     /// Its edit review and code review as the review record follows them — time on each change, what each
@@ -291,6 +293,7 @@ impl Session {
             notes: Default::default(),
             checkpoints: Default::default(),
             review: None,
+            applying: None,
             code_review: None,
             review_ask: false,
             review_board: false,
@@ -402,6 +405,7 @@ impl Session {
     pub fn waits(&self) -> bool {
         self.parked.iter().any(|o| !o.installing())
             || self.review.as_ref().is_some_and(|r| r.ready)
+            || self.applying.as_ref().is_some_and(|l| !l.review.is_empty())
             || self.chat.as_ref().is_some_and(|c| {
                 !c.edits.queue.is_empty() || c.edits.sets.iter().any(|l| !l.review.is_empty())
             })

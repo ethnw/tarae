@@ -177,6 +177,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),
     c(&["session-end"], Arg::None, "End a session (its checkout goes)"),
     c(&["session-bring"], Arg::None, "Move a session's base up to it (rebase first if it moved)"),
+    c(&["session-apply"], Arg::File, "Bring a patch in as one reviewed change set ([--base <rev>] <patch>)"),
     c(
         &["session-billing"],
         Arg::None,

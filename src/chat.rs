@@ -4046,7 +4046,7 @@ mod tests {
             "q",
             "",
             String::new(),
-            crate::offer::What::ChangeSet { generation, ops: false },
+            crate::offer::What::ChangeSet { whose: crate::refactor::Whose::Claude(generation), ops: false },
         ));
         ed.sessions_sync();
         assert!(ed.session.usage.tally.is_waiting());

@@ -166,6 +166,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "session-end" => editor.session_end(rest),
         "session-bring" => editor.session_bring(rest),
+        "session-apply" => editor.session_apply(rest),
         "session-billing" => editor.session_billing(rest),
         // A session's rebase stopped at a conflict (rebase.rs)
         "rebase-continue" => editor.rebase_by_hand(rest, true),
@@ -665,7 +666,7 @@ fn run_shell(cmd: &str, dir: &std::path::Path) -> Result<Option<String>, String>
 }
 
 /// A path typed after `:open` / `:w`: home spelled out, then from the root.
-fn typed_path(editor: &Editor, p: &str) -> PathBuf {
+pub(crate) fn typed_path(editor: &Editor, p: &str) -> PathBuf {
     editor.path_of(&expand_home(p, crate::allow::home().as_deref()))
 }
 

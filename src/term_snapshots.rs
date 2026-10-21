@@ -1895,7 +1895,7 @@ fn snapshot_sessions_cards_waiting_behind() {
     let first = card(
         &mut s.ed,
         "Claude changes 3 files",
-        crate::offer::What::ChangeSet { generation: 999, ops: false },
+        crate::offer::What::ChangeSet { whose: crate::refactor::Whose::Claude(999), ops: false },
     );
     card(
         &mut s.ed,

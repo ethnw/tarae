@@ -31,6 +31,7 @@ use crate::uistate::{CardState, session_id};
 pub struct Entry {
     /// `card#12` · `edit#s1:review` (an edit in its review) · `edit#s1:<request>` (one waiting for it) ·
     /// `read#s1:<request>` (a read waiting for its card) · `set#s1:<n>` (a change set's files, one by one) ·
+    /// `apply#s1` (the user's own change set's files, one by one) ·
     /// `run#…` (Claude's run gone quiet) · `reviewer#s1` (its reviewer ended while it was behind) ·
     /// `rebase#s1` (its rebase resolved, the card put away).
     pub id: String,
@@ -220,6 +221,22 @@ impl Editor {
                 };
                 v.push(entry(format!("rebase#{s}"), "rebase", asks, since, "put-away"));
             }
+            // The user's own change set (`:session-apply`), its files waiting for their review — on logic's
+            // clock, as a card's
+            if let Some(set) = l.applying.as_ref().filter(|set| set.waiting() > 0) {
+                let ((what, since), n) = (set.what(), set.waiting());
+                let asks = format!("{what} · {n} file{} to review", if n == 1 { "" } else { "s" });
+                let id = format!("apply#{s}");
+                let e = Entry {
+                    id,
+                    session: s.clone(),
+                    kind: "change-set",
+                    asks,
+                    waited_ms: ms(since, now),
+                    up: "queued",
+                };
+                v.push((e, now.saturating_duration_since(since), u64::MAX));
+            }
             let Some(c) = l.chat.as_ref() else { continue };
             for p in &c.edits.queue {
                 let path = crate::chat::resolve(&l.root, p.input["file_path"].as_str().unwrap_or_default());
@@ -238,6 +255,7 @@ impl Editor {
                 v.push(entry(format!("set#{s}:{i}"), "change-set", asks, since, "queued"));
             }
         }
+
         // (the front card here, when the user's own command made it)
         let yours = self
             .offers

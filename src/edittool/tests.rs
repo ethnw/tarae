@@ -319,10 +319,10 @@ fn the_edit_tools_take_effect_with_the_next_chat() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The change set's card, if up: its id, its chat, and whether it has a move or delete.
-fn change_card(ed: &Editor) -> Option<(u64, u64, bool)> {
+/// The change set's card, if up: its id, whose (its chat), and whether it has a move or delete.
+fn change_card(ed: &Editor) -> Option<(u64, crate::refactor::Whose, bool)> {
     ed.offers.iter().find_map(|o| match o.what {
-        crate::offer::What::ChangeSet { generation, ops } => Some((o.id, generation, ops)),
+        crate::offer::What::ChangeSet { whose, ops } => Some((o.id, whose, ops)),
         _ => None,
     })
 }

@@ -19,6 +19,10 @@
 //! in-buffer review, one after another (`next`, every event). A move or a delete is never written unseen: it
 //! is on the change set's card, even alone (`y` · `v` · `n` — nothing to review one by one in a buffer). The
 //! answer says per file what happened.
+//!
+//! The user's own change set (`:session-apply`, `apply.rs` — `land_yours`) lands the same way but as theirs: in
+//! `Session.applying`, always on the card first, never written unseen, a `space u` step of its own, said when done;
+//! a Claude turn's end leaves it.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -113,11 +117,28 @@ enum Stage {
     OneByOne,
 }
 
+/// Whose change a landing is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Whose {
+    /// Claude's call, from the chat process of this generation — answered when its files are done.
+    Claude(u64),
+    /// The user's own (`land_yours`).
+    Yours,
+}
+
 /// A rename, replace or edit landing: its files in review one at a time, what became of each.
 pub struct Landing {
     stage: Stage,
-    call: Call,
-    generation: u64,
+    whose: Whose,
+    /// Claude's call (None: the user's own change).
+    call: Option<Call>,
+    /// Who changes the files, as the card says it (`Claude`, `x.patch`).
+    by: String,
+    /// The user's own change's `space u` step, once one of its files is kept (`checkpoint::own`).
+    step: Option<u64>,
+    /// What was read for it (the user's own: `read ~/x.patch · 515 B · 2 files`) — on the card in one row, its
+    /// end kept; whole in `v`'s view. Empty for Claude's.
+    read: String,
     /// For the review's title and the answer (``rename `a` → `b` ``).
     what: String,
     /// What a place is called in the answer (`place`, `match`).
@@ -188,8 +209,11 @@ pub fn land_told(
     });
     let l = Landing {
         stage: Stage::Fresh,
-        call,
-        generation,
+        whose: Whose::Claude(generation),
+        call: Some(call),
+        by: "Claude".into(),
+        step: None,
+        read: String::new(),
         what,
         noun,
         reason,
@@ -208,6 +232,44 @@ pub fn land_told(
     crate::checkpoint::record_unseen_all(ed, befores, move |ed: &mut Editor| write(ed, l, unseen));
 }
 
+/// The user's own change (`:session-apply`): `files`, all on the card first (`by` changes them — the patch's
+/// name), then as its answers say; never written unseen, nothing of Claude's waits on it. `read` (what was read)
+/// is on the card in one row and whole in `v`'s view; `told` on the card and under each review (how it was worked
+/// out — a line `▲ …` in the warning colour). Said when it's done. One at a time (`Session.applying`): the
+/// caller looks first.
+pub fn land_yours(
+    ed: &mut Editor,
+    by: String,
+    what: String,
+    files: Vec<FileChange>,
+    read: String,
+    told: String,
+) {
+    let files: Vec<FileChange> =
+        files.into_iter().filter(|f| f.before != f.after || f.op != Op::Text).collect();
+    if files.is_empty() {
+        return ed.set_status(format!("nothing to change — {what} leaves every file as it is"));
+    }
+    ed.session.applying = Some(Landing {
+        stage: Stage::Fresh,
+        whose: Whose::Yours,
+        call: None,
+        by,
+        step: None,
+        read,
+        what,
+        noun: "change",
+        reason: String::new(),
+        told,
+        reviews: files.len(),
+        review: files.into(),
+        done: Vec::new(),
+        note: String::new(),
+        since: crate::clock::now(),
+    });
+    next(ed);
+}
+
 /// What a change's file was for `space u`: None — no file (one it makes).
 fn was(f: &FileChange) -> Option<Rope> {
     (f.op != Op::Create).then(|| f.before.clone())
@@ -224,7 +286,7 @@ fn write(ed: &mut Editor, mut l: Landing, unseen: Vec<FileChange>) {
             for (f, r) in written {
                 let outcome = match r {
                     Ok(stamp) => {
-                        landed(ed, &f, stamp);
+                        landed(ed, &f, stamp, l.whose);
                         Outcome::Written
                     }
                     Err(o) => o,
@@ -237,8 +299,14 @@ fn write(ed: &mut Editor, mut l: Landing, unseen: Vec<FileChange>) {
 }
 
 /// A change written: an open buffer takes the new text (a deleted or moved file's buffer closes — it never
-/// has the user's unsaved edits: `edittool` refuses those), what Claude knows of the file is its new stamp.
-fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>) {
+/// has the user's unsaved edits: `edittool` refuses those), what Claude knows of the file is its new stamp
+/// (Claude's change only: of the user's it has seen nothing).
+fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>, whose: Whose) {
+    let saw = |ed: &mut Editor, p: &Path| {
+        if let Whose::Claude(_) = whose {
+            crate::edittool::saw(ed, p, stamp)
+        }
+    };
     let close = |ed: &mut Editor, p: &Path| {
         if let Some(id) = ed.docs.iter().find(|d| d.path.as_deref() == Some(p)).map(|d| d.id) {
             ed.close_doc(id);
@@ -248,14 +316,14 @@ fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>) {
     match &f.op {
         Op::Text | Op::Create => {
             ed.disk_take(&f.path, &f.after, stamp);
-            crate::edittool::saw(ed, &f.path, stamp);
+            saw(ed, &f.path);
         }
         Op::Delete => close(ed, &f.path),
         Op::Move { to, .. } => {
             close(ed, &f.path);
             ed.wrote(to);
             ed.disk_take(to, &f.after, stamp);
-            crate::edittool::saw(ed, to, stamp);
+            saw(ed, to);
         }
     }
 }
@@ -327,30 +395,45 @@ fn write_file_between(
 
 /// Into the chat's queue of landings (answered at once when the chat it came from is gone).
 fn queue(ed: &mut Editor, l: Landing) {
-    match ed.session.chat.as_mut().filter(|c| c.generation() == l.generation) {
+    match ed.session.chat.as_mut().filter(|c| l.whose == Whose::Claude(c.generation())) {
         Some(c) => c.edits.sets.push_back(l),
-        None => return answer(ed, l.call.clone(), Ok(report(&l))),
+        None => return finish(ed, l),
     }
     next(ed);
 }
 
-/// Every event: once no review is up, the front landing's next file in review — or, its files all done,
-/// its answer.
+/// The landing of `whose` in front: the user's own, or the chat's front one when it's that call's.
+fn front(ed: &mut Editor, whose: Whose) -> Option<&mut Landing> {
+    match whose {
+        Whose::Yours => ed.session.applying.as_mut(),
+        Whose::Claude(_) => ed.session.chat.as_mut()?.edits.sets.front_mut().filter(|l| l.whose == whose),
+    }
+}
+
+/// Every event: once no review is up, the front landings' next file in review — or, a landing's files all
+/// done, its answer. The user's own first, then the chat's front one.
 pub fn next(ed: &mut Editor) {
+    let claudes = ed.session.chat.as_ref().and_then(|c| c.edits.sets.front()).map(|l| l.whose);
+    for whose in [Some(Whose::Yours), claudes].into_iter().flatten() {
+        next_of(ed, whose);
+    }
+}
+
+fn next_of(ed: &mut Editor, whose: Whose) {
     if ed.session.review.is_some() {
         return;
     }
     let background = ed.background();
-    let Some(c) = ed.session.chat.as_mut() else { return };
-    let Some(l) = c.edits.sets.front_mut() else { return };
+    let Some(l) = front(ed, whose) else { return };
     // (a session behind: its files wait for their review until it's in front)
     if background && !l.review.is_empty() {
         return;
     }
-    // Several files, or a move or delete: one card for them all first (#75)
+    // Several files, or a move or delete — or the user's own: one card for them all first (#75)
+    let yours = whose == Whose::Yours;
     match l.stage {
         Stage::Asking | Stage::Writing => return,
-        Stage::Fresh if l.review.len() > 1 || l.review.iter().any(FileChange::card_only) => {
+        Stage::Fresh if yours || l.review.len() > 1 || l.review.iter().any(FileChange::card_only) => {
             l.stage = Stage::Asking;
             let mut o = card(l);
             if l.review.iter().any(|f| f.protected) {
@@ -373,19 +456,69 @@ pub fn next(ed: &mut Editor) {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            show(ed, f, title, reason);
+            show(ed, f, whose, title, reason);
         }
         None => {
-            let l = c.edits.sets.pop_front().expect("the front one");
-            answer(ed, l.call.clone(), Ok(report(&l)));
+            let l = match whose {
+                Whose::Yours => ed.session.applying.take(),
+                Whose::Claude(_) => ed.session.chat.as_mut().and_then(|c| c.edits.sets.pop_front()),
+            };
+            finish(ed, l.expect("the front one"));
         }
     }
 }
 
+/// A landing's files all done: Claude's call answered, the user's own said.
+fn finish(ed: &mut Editor, l: Landing) {
+    match l.call.clone() {
+        Some(call) => answer(ed, call, Ok(report(&l))),
+        None => said(ed, &l),
+    }
+}
+
+/// What became of the user's own change, on a toast: how many files it changed, then the rest by what
+/// became of them — a warning when any wasn't as answered.
+fn said(ed: &mut Editor, l: &Landing) {
+    let mut done: Vec<&(String, usize, Outcome)> = l.done.iter().collect();
+    crate::sorting::by(&mut done, |a, b| a.0.cmp(&b.0));
+    let named = |o: fn(&Outcome) -> bool| -> Vec<&str> {
+        done.iter().filter(|d| o(&d.2)).map(|d| d.0.as_str()).collect()
+    };
+    let changed = named(|o| matches!(o, Outcome::Written | Outcome::Accepted | Outcome::Partly));
+    let mut out = match changed.len() {
+        0 => format!("nothing changed — {}", l.what),
+        n => format!("{} — {} changed (space u takes it back)", l.what, nav::count(n, "file")),
+    };
+    let mut line = |head: &str, files: Vec<&str>| {
+        if !files.is_empty() {
+            out.push_str(&format!("\n{head}: {}", files.join(", ")));
+        }
+    };
+    line("in part", named(|o| *o == Outcome::Partly));
+    line("in your buffer, unsaved", named(|o| *o == Outcome::InBuffer));
+    line("declined", named(|o| *o == Outcome::Declined));
+    let wrong = named(|o| matches!(o, Outcome::Changed | Outcome::Failed(_)));
+    line("changed since it was read, left alone", named(|o| *o == Outcome::Changed));
+    for (rel, _, o) in &done {
+        if let Outcome::Failed(why) = o {
+            out.push_str(&format!("\nnot changed: {rel} — {why}"));
+        }
+    }
+    match wrong.is_empty() {
+        true => ed.set_success(out),
+        false => ed.set_warning(out),
+    }
+}
+
 impl Landing {
+    /// Whether its card is up (or parked with its session), waiting for its answer.
+    pub(crate) fn asking(&self) -> bool {
+        self.stage == Stage::Asking
+    }
+
     /// How many of its files wait for their review, not on its card.
     pub(crate) fn waiting(&self) -> usize {
-        if self.stage == Stage::Asking { 0 } else { self.review.len() }
+        if self.asking() { 0 } else { self.review.len() }
     }
 
     /// What it changes (``rename `a` → `b` ``) · when it came.
@@ -429,16 +562,35 @@ fn card(l: &Landing) -> crate::offer::Offer {
     if files.len() > CARD_FILES {
         q.push_str(&format!("\n  … {} more — v shows every change", files.len() - CARD_FILES));
     }
-    if !l.told.is_empty() {
-        q.push_str(&format!("\n\n{}", l.told));
+    // (what was read, its end kept in one row; then what tarae tells of how it was worked out — a `▲` line of
+    // it in the warning colour)
+    let (mut warned, mut ends) = (Vec::new(), Vec::new());
+    let below: Vec<&str> = [l.read.as_str(), l.told.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
+    if !below.is_empty() {
+        q.push_str("\n\n");
+        let at = q.split('\n').count() - 1;
+        if !l.read.is_empty() {
+            ends.push(at);
+        }
+        let lines = below.join("\n");
+        warned
+            .extend(lines.split('\n').enumerate().filter(|(_, t)| t.starts_with("▲ ")).map(|(i, _)| at + i));
+        q.push_str(&lines);
     }
-    crate::offer::Offer::new(
-        format!("Claude changes {}", nav::count(files.len(), "file")),
+    let failed = match l.whose {
+        Whose::Claude(_) => "Claude's change".into(),
+        Whose::Yours => format!("{}'s change", l.by),
+    };
+    let mut o = crate::offer::Offer::new(
+        format!("{} changes {}", l.by, nav::count(files.len(), "file")),
         &q,
         "Writing…",
-        "Claude's change".into(),
-        crate::offer::What::ChangeSet { generation: l.generation, ops },
-    )
+        failed,
+        crate::offer::What::ChangeSet { whose: l.whose, ops },
+    );
+    o.warnings.extend(warned.into_iter().map(|i| i..i + 1));
+    o.ends = ends;
+    o
 }
 
 /// The warnings of a card with a file that runs later outside the sandbox: under what it asks, in the
@@ -454,16 +606,15 @@ fn warn(o: &mut crate::offer::Offer, warned: &[crate::cardwarn::Warned]) {
     o.warnings.push(at..at + lines.len());
 }
 
-/// The front landing, while its card is up (`generation`: the chat it came from).
-fn asking(ed: &mut Editor, generation: u64) -> Option<&mut Landing> {
-    let c = ed.session.chat.as_mut()?;
-    c.edits.sets.front_mut().filter(|l| l.generation == generation && l.stage == Stage::Asking)
+/// The front landing of `whose`, while its card is up.
+fn asking(ed: &mut Editor, whose: Whose) -> Option<&mut Landing> {
+    front(ed, whose).filter(|l| l.stage == Stage::Asking)
 }
 
 /// `y` on the card: every file written at once (on a worker, each only while still the text the change
 /// was worked out against — kept for `space u` first); a file with your unsaved edits still comes up in
 /// the in-buffer review.
-pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
+pub fn accept_all(ed: &mut Editor, id: u64, whose: Whose) {
     ed.offer_finished(id, Ok(()));
     let dirty: Vec<PathBuf> = ed
         .docs
@@ -471,12 +622,13 @@ pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
         .filter(|d| d.is_modified() && !d.unsaved_is_claudes())
         .filter_map(|d| d.path.clone())
         .collect();
-    let Some(l) = asking(ed, generation) else { return };
+    let Some(l) = asking(ed, whose) else { return };
     let (later, now): (Vec<FileChange>, Vec<FileChange>) =
         l.review.drain(..).partition(|f| dirty.contains(&f.path));
     l.reviews = later.len();
     l.review = later.into();
     l.stage = Stage::Writing;
+    let (step, what) = (l.step, l.what.clone());
     // (for `space u`: a deleted file has no text after — undo writes it again; a moved one is gone from its
     // place and made at the new one)
     let mut files = Vec::new();
@@ -491,47 +643,66 @@ pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
         }
     }
     let root = nav::project_root(ed);
-    crate::checkpoint::record_all(ed, files, move |ed: &mut Editor| {
+    let then = move |ed: &mut Editor| {
         ed.events.jobs().spawn(move || {
             let written: Vec<_> = now.into_iter().map(|f| (write_file(&f, &root), f)).collect();
             move |ed: &mut Editor| {
                 let mut done = Vec::new();
+                let mut unwritten = Vec::new();
                 for (r, f) in written {
                     let outcome = match r {
                         Ok(stamp) => {
-                            landed(ed, &f, stamp);
+                            landed(ed, &f, stamp, whose);
                             Outcome::Accepted
                         }
-                        Err(o) => o,
+                        Err(o) => {
+                            unwritten.push(f.path.clone());
+                            unwritten.extend(match &f.op {
+                                Op::Move { to, .. } => Some(to.clone()),
+                                _ => None,
+                            });
+                            o
+                        }
                     };
                     done.push((f.shown(), f.places, outcome));
                 }
-                let Some(c) = ed.session.chat.as_mut() else { return };
-                if let Some(l) = c.edits.sets.front_mut().filter(|l| l.generation == generation) {
-                    l.done.extend(done);
-                    l.stage = Stage::OneByOne;
+                let Some(l) = front(ed, whose) else { return };
+                l.done.extend(done);
+                l.stage = Stage::OneByOne;
+                // (the user's own step: what wasn't written isn't its)
+                if let Some(step) = l.step {
+                    crate::checkpoint::own_drop(ed, step, &unwritten);
                 }
                 next(ed);
             }
         });
-    });
+    };
+    match whose {
+        Whose::Claude(_) => crate::checkpoint::record_all(ed, files, then),
+        Whose::Yours => {
+            let step = crate::checkpoint::own(ed, step, &what, files, then);
+            if let Some(l) = front(ed, whose) {
+                l.step = Some(step);
+            }
+        }
+    }
 }
 
 /// `r` on the card: each file in the in-buffer review, one after another.
-pub fn one_by_one(ed: &mut Editor, id: u64, generation: u64) {
-    if asking(ed, generation).is_some_and(|l| l.review.iter().any(FileChange::card_only)) {
+pub fn one_by_one(ed: &mut Editor, id: u64, whose: Whose) {
+    if asking(ed, whose).is_some_and(|l| l.review.iter().any(FileChange::card_only)) {
         return ed.offer_refused("a move or delete is among them — y accepts all, v shows them, n declines");
     }
     ed.offer_finished(id, Ok(()));
-    if let Some(l) = asking(ed, generation) {
+    if let Some(l) = asking(ed, whose) {
         l.stage = Stage::OneByOne;
     }
     next(ed);
 }
 
 /// `n` on the card (it's gone already): every file left as it was.
-pub fn decline_all(ed: &mut Editor, generation: u64) {
-    if let Some(l) = asking(ed, generation) {
+pub fn decline_all(ed: &mut Editor, whose: Whose) {
+    if let Some(l) = asking(ed, whose) {
         let declined: Vec<_> = l.review.drain(..).map(|f| (f.shown(), f.places, Outcome::Declined)).collect();
         l.done.extend(declined);
         l.stage = Stage::OneByOne;
@@ -541,17 +712,19 @@ pub fn decline_all(ed: &mut Editor, generation: u64) {
 
 /// `v` on the card: every change, file by file, in a buffer of its own (worked out on a worker) — it
 /// closes with the card.
-pub fn view_all(ed: &mut Editor, generation: u64) {
-    let Some(l) = asking(ed, generation) else {
+pub fn view_all(ed: &mut Editor, whose: Whose) {
+    let Some(l) = asking(ed, whose) else {
         return ed.offer_refused("its changes are gone (its chat ended) — n closes the card");
     };
-    let title = format!("{}Claude changes {}", crate::offer::CARD_VIEW, nav::count(l.review.len(), "file"));
+    let title = format!("{}{} changes {}", crate::offer::CARD_VIEW, l.by, nav::count(l.review.len(), "file"));
     let mut files: Vec<FileChange> = l.review.iter().cloned().collect();
     crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
+    // (what was read, whole — the card's row keeps only its end)
+    let read = if l.read.is_empty() { String::new() } else { format!("{}\n\n", l.read) };
     ed.events.jobs().spawn(move || {
-        let text = changes_text(&files);
+        let text = read + &changes_text(&files);
         move |ed: &mut Editor| {
-            if asking(ed, generation).is_none() {
+            if asking(ed, whose).is_none() {
                 return;
             }
             let old: Vec<DocId> =
@@ -601,36 +774,37 @@ fn changes_text(files: &[FileChange]) -> String {
     out
 }
 
-/// What became of a file of the front landing.
-fn done_one(ed: &mut Editor, f: &FileChange, outcome: Outcome) {
-    if let Some(l) = ed.session.chat.as_mut().and_then(|c| c.edits.sets.front_mut()) {
+/// What became of a file of the front landing of `whose`.
+fn done_one(ed: &mut Editor, whose: Whose, f: &FileChange, outcome: Outcome) {
+    if let Some(l) = front(ed, whose) {
         l.done.push((f.shown(), f.places, outcome));
     }
 }
 
 /// One file in the in-buffer review (y/n per change, as an Edit's) — if it's still what the change was
 /// worked out against.
-fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
+fn show(ed: &mut Editor, f: FileChange, whose: Whose, title: String, reason: String) {
     // (a move or delete is decided on the card only — never here)
     if f.card_only() {
-        return done_one(ed, &f, Outcome::Declined);
+        return done_one(ed, whose, &f, Outcome::Declined);
     }
     let warnings = if f.protected { crate::edits::warned(ed) } else { Vec::new() };
     if let Err(e) = ed.open(&f.path) {
-        return done_one(ed, &f, Outcome::Failed(format!("{e:#}")));
+        return done_one(ed, whose, &f, Outcome::Failed(format!("{e:#}")));
     }
     let doc = ed.doc();
     if doc.loading {
-        return done_one(ed, &f, Outcome::Failed("still loading in the editor".into()));
+        return done_one(ed, whose, &f, Outcome::Failed("still loading in the editor".into()));
     }
     if doc.text != f.before {
-        return done_one(ed, &f, Outcome::Changed);
+        return done_one(ed, whose, &f, Outcome::Changed);
     }
+    let claudes = matches!(whose, Whose::Claude(_));
     let dirty = doc.is_modified() && !doc.unsaved_is_claudes();
     let doc_id = doc.id;
     let changes = crate::editdiff::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
-    let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
+    let from_chat = claudes && ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
         c.focused = false;
         c.follow.keep(doc_id);
@@ -640,16 +814,17 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
         doc_id,
         &title,
         changes,
-        Some(Box::new(move |ed: &mut Editor, applied: bool| reviewed(ed, f, doc_id, dirty, applied))),
+        Some(Box::new(move |ed: &mut Editor, applied: bool| reviewed(ed, f, whose, doc_id, dirty, applied))),
     );
     if let Some(r) = &mut ed.session.review {
         r.from_chat = from_chat;
         r.reason = reason;
         r.warnings = warnings;
-        // (its turn in the chat is the step)
+        // (its turn in the chat is the step — the user's own change keeps its own: `reviewed`)
         r.own_turn = false;
         let g = r.generation;
-        if let Some(c) = &mut ed.session.chat {
+        // (a Claude turn's end closes Claude's review, never the user's)
+        if let Some(c) = ed.session.chat.as_mut().filter(|_| claudes) {
             c.edits.review = Some(g);
         }
     }
@@ -657,8 +832,8 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
 }
 
 /// A file's review ended: kept for `space u` and saved (unless the user has unsaved edits there).
-fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied: bool) {
-    if let Some(c) = &mut ed.session.chat {
+fn reviewed(ed: &mut Editor, f: FileChange, whose: Whose, doc_id: DocId, dirty: bool, applied: bool) {
+    if let Some(c) = ed.session.chat.as_mut().filter(|_| matches!(whose, Whose::Claude(_))) {
         c.edits.review = None;
     }
     let now = ed.docs.iter().find(|d| d.id == doc_id).map(|d| d.text.clone());
@@ -667,7 +842,16 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
         None => Outcome::Failed("its buffer was closed".into()),
         Some(now) if now == f.before => Outcome::Declined,
         Some(now) => {
-            crate::checkpoint::record(ed, doc_id, was(&f));
+            match front(ed, whose).filter(|_| whose == Whose::Yours).map(|l| (l.step, l.what.clone())) {
+                Some((step, what)) => {
+                    let file = vec![(f.path.clone(), was(&f), Some(now.clone()))];
+                    let step = crate::checkpoint::own(ed, step, &what, file, |_: &mut Editor| {});
+                    if let Some(l) = front(ed, whose) {
+                        l.step = Some(step);
+                    }
+                }
+                None => crate::checkpoint::record(ed, doc_id, was(&f)),
+            }
             // (saved in the background: its stamp isn't known here — no claim of what Claude has seen)
             crate::edittool::forget(ed, &f.path);
             if dirty {
@@ -675,7 +859,8 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
             } else {
                 // (beneath the project through no link, as a change set's writes)
                 let root = nav::project_root(ed);
-                match ed.save_beneath(doc_id, root, crate::saver::Then::Auto(" · Claude's change")) {
+                let why = if whose == Whose::Yours { " · the patch" } else { " · Claude's change" };
+                match ed.save_beneath(doc_id, root, crate::saver::Then::Auto(why)) {
                     Err(e) => Outcome::Failed(format!("not saved: {e}")),
                     Ok(()) if now == f.after => Outcome::Accepted,
                     Ok(()) => Outcome::Partly,
@@ -683,18 +868,18 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
             }
         }
     };
-    done_one(ed, &f, outcome);
+    done_one(ed, whose, &f, outcome);
     crate::follow::settle(ed);
 }
 
 /// The chat turn ended: landings still going are dropped (nobody waits for their answers; a review still
-/// up was closed by `edits::turn_over`).
+/// up was closed by `edits::turn_over`). The user's own stays.
 pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         c.edits.sets.clear();
     }
     // (and a card for one: nobody waits for its answer)
-    ed.drop_cards(|w| matches!(w, crate::offer::What::ChangeSet { .. }));
+    ed.drop_cards(|w| matches!(w, crate::offer::What::ChangeSet { whose: Whose::Claude(_), .. }));
 }
 
 /// The answer: how many places in how many files changed, then per file what became of it.
@@ -1559,8 +1744,11 @@ mod tests {
         };
         let landing = |told: &str| Landing {
             stage: Stage::Fresh,
-            call: Call::test(1),
-            generation: 1,
+            whose: Whose::Claude(1),
+            call: Some(Call::test(1)),
+            by: "Claude".into(),
+            step: None,
+            read: String::new(),
             what: "edit 2 files".into(),
             noun: "change",
             reason: "edits[0] (x.rs) matched only with trailing whitespace ignored — check it".into(),

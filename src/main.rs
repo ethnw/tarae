@@ -5,6 +5,7 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, reason = "tests: not in the release binary"))]
 
 mod allow;
+mod apply;
 mod attach;
 mod basetree;
 mod beneath;
@@ -101,6 +102,7 @@ mod offer;
 mod outlines;
 mod packs;
 mod pairs;
+mod patch;
 mod paths;
 mod picker;
 mod plan;

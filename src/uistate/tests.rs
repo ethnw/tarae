@@ -110,7 +110,7 @@ fn weighty_card(ed: &mut Editor) {
         q,
         "",
         String::new(),
-        What::ChangeSet { generation: 999, ops: false },
+        What::ChangeSet { whose: crate::refactor::Whose::Claude(999), ops: false },
     ));
 }
 
@@ -911,7 +911,7 @@ fn the_state_as_json_is_pinned() {
             "Claude renames `x`.",
             "",
             String::new(),
-            What::ChangeSet { generation: 7, ops: false },
+            What::ChangeSet { whose: crate::refactor::Whose::Claude(7), ops: false },
         ),
     );
     // (its Claude had a turn: a request writing to the 1h cache, then the result — `usage.rs`)

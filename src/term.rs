@@ -7447,10 +7447,11 @@ impl OfferCard {
         // `widest`, when that takes rows back — the narrowest as short as the widest (piece F: `y Once` made the
         // host card's answers row shorter, and its text wrapped to widows)
         if matches!(o.state, OfferState::Asking) {
-            // (as the card draws them: a diff's line is cut, one row whatever the width)
+            // (as the card draws them: a diff's line, or one that keeps its end, is cut — one row whatever the width)
             let diffs = o.diff.clone().unwrap_or(0..0);
             let rows = |w: usize| {
-                let row = |(k, p): (usize, &str)| if diffs.contains(&k) { 1 } else { card_rows(p, w).len() };
+                let cut = |k: usize| diffs.contains(&k) || o.ends.contains(&k);
+                let row = |(k, p): (usize, &str)| if cut(k) { 1 } else { card_rows(p, w).len() };
                 o.question.split('\n').enumerate().map(row).sum::<usize>()
             };
             let most = (max_inner + CARD_SLACK).min(widest);
@@ -7504,9 +7505,16 @@ impl OfferCard {
                 let diffs = o.diff.clone().unwrap_or(0..0);
                 for (k, part) in o.question.split('\n').enumerate() {
                     // (a diff's line is code: cut to the card, never wrapped — only prose wraps)
-                    let mut rows = match diffs.contains(&k) {
-                        true => vec![(crate::cut::fit(part, max_inner), true)],
-                        false => wrapped(part, most),
+                    let mut rows = match (diffs.contains(&k), o.ends.contains(&k)) {
+                        (true, _) => vec![(crate::cut::fit(part, max_inner), true)],
+                        // (a path's line: its first word, then the rest with its end kept)
+                        (_, true) => {
+                            let (head, rest) = part.split_once(' ').map_or(("", part), |(h, r)| (h, r));
+                            let head = if head.is_empty() { String::new() } else { format!("{head} ") };
+                            let room = max_inner.saturating_sub(head.width());
+                            vec![(format!("{head}{}", fit_path_left(rest, room)), true)]
+                        }
+                        _ => wrapped(part, most),
                     };
                     if decided.contains(&k) {
                         rows.iter_mut().for_each(|r| r.1 = false);
@@ -11532,6 +11540,28 @@ fn pad_right(s: &str, width: usize) -> String {
     format!("{s}{}", " ".repeat(width.saturating_sub(s.width())))
 }
 
+/// `fit_left` for a path and what follows it (`~/x/y/z.patch · 515 B`): its start (`~/`, `/`) kept, the cut
+/// at a folder — `~/…/y/z.patch · 515 B`, never mid-name while a folder's `/` is left to cut at.
+fn fit_path_left(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let lead = ["~/", "/"].into_iter().find(|l| s.starts_with(l)).unwrap_or("");
+    let (rest, room) = (&s[lead.len()..], width.saturating_sub(lead.width()));
+    // (a cell left for the `/` after `…`)
+    let tail = fit_left(rest, room.saturating_sub(1));
+    let kept = tail.strip_prefix('…').unwrap_or(&tail);
+    let kept = match rest[..rest.len() - kept.len()].ends_with('/') {
+        true => Some(kept),
+        false => kept.find('/').map(|i| &kept[i + 1..]),
+    };
+    match kept {
+        Some(kept) => format!("{lead}…/{kept}"),
+        // (no folder left to cut at: mid-name, all the room)
+        None => format!("{lead}{}", fit_left(rest, room)),
+    }
+}
+
 /// Keeps the end (file name) of a path that doesn't fit: `…/editor/mod.rs`. No room at all: nothing (a
 /// lone `…` would still take a cell).
 fn fit_left(s: &str, width: usize) -> String {
@@ -12770,7 +12800,7 @@ mod tests {
         let shown_after = |cols: u16, rows: u16, chat: bool, keys: &[&str]| {
             let mut ed = Editor::new(crate::config::Config::default());
             let q = "Claude renames `a` to `b` in 3 files.\n\nOne review for the set.";
-            let what = What::ChangeSet { generation: 7, ops: false };
+            let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(7), ops: false };
             ed.push_offer(Offer::new("Claude changes 3 files".into(), q, "", String::new(), what));
             // (gone back to the chat while it waits: in 50 columns the chat takes them all — no room for it)
             ed.session.chat = chat.then(|| {
@@ -12855,7 +12885,7 @@ mod tests {
     fn an_error_under_a_picker_is_on_the_status_line_at_any_width() {
         use crate::offer::{Offer, What};
         let mut ed = Editor::new(crate::config::Config::default());
-        let what = What::ChangeSet { generation: 7, ops: false };
+        let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(7), ops: false };
         ed.push_offer(Offer::new(
             "Claude changes 3 files".into(),
             "One review for the set.",
@@ -13599,6 +13629,7 @@ mod tests {
                 warning: None,
                 warnings: Vec::new(),
                 diff: None,
+                ends: Vec::new(),
                 since: std::time::Instant::now(),
                 drawn: Default::default(),
                 asked: None,
@@ -15778,6 +15809,17 @@ mod tests {
         // No room: nothing — a lone `…` would still take a cell past the end
         assert_eq!(fit_ellipsis("exited 1", 0), "");
         assert_eq!(fit_left("src/a.rs", 0), "");
+        // A path and what follows: its start kept, cut at a folder
+        let p = "~/tree/older/its-patches/x.patch · 515 B";
+        assert_eq!(fit_path_left(p, 31), "~/…/its-patches/x.patch · 515 B", "a whole folder fits");
+        assert_eq!(fit_path_left(p, 30), "~/…/x.patch · 515 B", "never `…s-patches`");
+        assert_eq!(fit_path_left("/var/folders/T/x.patch · 1 KB", 20), "/…/T/x.patch · 1 KB");
+        assert_eq!(
+            fit_path_left("~/a-long-name.patch · 1 KB", 18),
+            "~/…me.patch · 1 KB",
+            "no folder: mid-name"
+        );
+        assert_eq!(fit_path_left("~/a/x.patch", 40), "~/a/x.patch", "fits: whole");
         assert_eq!(pad_left("타래", 6), "  타래");
         assert_eq!(duration(0.412), "412ms");
         assert_eq!(duration(f32::INFINITY), "infs", "a report's odd number is drawn, not a panic");
