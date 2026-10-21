@@ -19,6 +19,7 @@ use crate::key::{Code, Key};
 use crate::keymap::Lookup;
 use crate::movement as mv;
 use crate::selection::{Range, Selection};
+use crate::session::At;
 
 /// What has a view mode: the chat's conversation, the terminal's scrollback and screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -184,6 +185,11 @@ pub struct View {
     char_for: String,
     sticky: Option<Vec<usize>>,
     search_origin: Option<usize>,
+    /// Its own search — what `n`/`N` repeat, whether its matches are shown, the matches on its rows: never the
+    /// code's, and the code's never touched by it (`target/sb/panes-plan.md` §2.3).
+    search: Option<String>,
+    search_hl: bool,
+    hits: Option<crate::search::SearchHits>,
     /// A prompt its `/`, `?` or `s` opened is up: its keys apply here.
     pub prompt: bool,
     /// Entered by the wheel: where the keys were.
@@ -347,13 +353,47 @@ fn place_at(laid: &Laid, line: usize) -> Option<(usize, usize)> {
     last
 }
 
+/// Before drawing: the matches the view's search shows on its own rows — the pattern its `/` prompt is typing,
+/// else its last search while shown. Its rows hold still while it lasts, so they're counted once a pattern.
+pub fn refresh_search(ed: &mut Editor) {
+    let typed = ed.prompt.as_ref().filter(|p| matches!(p.kind, crate::editor::PromptKind::Search { .. }));
+    let typed = typed.map(|p| p.text.clone());
+    let Some(v) = ed.session.view.as_mut().filter(|v| v.doc.is_some()) else { return };
+    let pattern = match (v.prompt, typed) {
+        (true, Some(t)) => Some(t).filter(|t| !t.is_empty()),
+        _ => v.search.clone().filter(|_| v.search_hl),
+    };
+    v.hits = match pattern {
+        Some(p) if v.hits.as_ref().is_some_and(|h| h.holds(v.doc(), &p)) => v.hits.take(),
+        Some(p) => crate::search::SearchHits::of(v.doc(), &p),
+        None => None,
+    };
+}
+
+/// `esc` with the view's keys: its matches no longer shown (the code's stay as they are).
+pub fn search_unshown(ed: &mut Editor) {
+    if let Some(v) = ed.session.view.as_mut() {
+        v.search_hl = false;
+    }
+}
+
+impl View {
+    /// The matches its search shows now (`refresh_search`).
+    pub fn hits(&self) -> Option<&crate::search::SearchHits> {
+        self.hits.as_ref()
+    }
+}
+
 /// The surface whose view mode has the keys now.
 pub fn has_keys(ed: &Editor) -> Option<Surface> {
     let v = ed.session.view.as_ref()?;
     match v.surface {
-        Surface::Chat => {
-            ed.session.chat.as_ref().filter(|c| c.focused && !c.compact()).map(|_| Surface::Chat)
-        }
+        Surface::Chat => ed
+            .session
+            .chat
+            .as_ref()
+            .filter(|c| ed.session.is_at(At::Chat) && !c.compact())
+            .map(|_| Surface::Chat),
         Surface::Terminal => terminal_holds(ed, v).then_some(Surface::Terminal),
     }
 }
@@ -361,7 +401,7 @@ pub fn has_keys(ed: &Editor) -> Option<Surface> {
 /// The terminal's view still has its surface: tarae's keys on its panel, in front, the same run.
 fn terminal_holds(ed: &Editor, v: &View) -> bool {
     let run = v.made.map(|m| m.generation);
-    ed.bottom_focus
+    ed.session.is_at(At::Slot)
         && ed.slot() == Some(crate::sizes::Slot::Terminal)
         && ed.session.terminal.as_ref().is_some_and(|t| t.visible && Some(t.generation()) == run)
 }
@@ -380,9 +420,9 @@ pub fn terminal_view_of(ed: &Editor) -> Option<&View> {
 fn was(ed: &Editor) -> Was {
     if let Some(s) = has_keys(ed) {
         Was::View(s)
-    } else if ed.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none()) {
+    } else if ed.session.program_has_keys() {
         Was::Program
-    } else if ed.session.chat.as_ref().is_some_and(|c| c.focused) {
+    } else if ed.session.is_at(At::Chat) && ed.session.chat.is_some() {
         Was::Chat
     } else {
         Was::Code
@@ -391,15 +431,16 @@ fn was(ed: &Editor) -> Was {
 
 /// The keys back where the wheel found them.
 fn give_back(ed: &mut Editor, was: Was) {
-    ed.bottom_focus = false;
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.focused = matches!(was, Was::Chat | Was::View(Surface::Chat));
-    }
-    if let Some(t) = ed.session.terminal.as_mut() {
-        t.focus = was == Was::Program && t.visible && t.exited.is_none();
-        if t.focus {
-            t.parser.screen_mut().set_scrollback(0);
-        }
+    let chat = ed.session.chat.is_some() && matches!(was, Was::Chat | Was::View(Surface::Chat));
+    let program =
+        was == Was::Program && ed.session.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none());
+    ed.session.at = match (chat, program) {
+        (true, _) => At::Chat,
+        (_, true) => At::Program,
+        _ => At::Code,
+    };
+    if program && let Some(t) = ed.session.terminal.as_mut() {
+        t.parser.screen_mut().set_scrollback(0);
     }
     match was {
         Was::View(Surface::Chat) => chat_view(ed),
@@ -432,10 +473,10 @@ pub fn chat_view(ed: &mut Editor) {
         crate::chat::open(ed);
         return want(ed);
     };
-    let from_input = c.focused;
+    let from_input = ed.session.at == At::Chat;
     if c.compact() {
         match from_input {
-            true => c.focused = false,
+            true => ed.session.at = At::Code,
             false => {
                 c.unfolded = true;
                 want(ed);
@@ -444,7 +485,7 @@ pub fn chat_view(ed: &mut Editor) {
         return;
     }
     if c.msgs.is_empty() {
-        c.focused = !from_input;
+        ed.session.at = if from_input { At::Code } else { At::Chat };
         if !from_input {
             ed.set_status("nothing to view yet — the conversation is empty: type a question");
         }
@@ -471,8 +512,8 @@ pub fn chat_view(ed: &mut Editor) {
 /// The chat's view mode asked for before its rows were laid out: made once a frame has (`wanted`).
 fn want(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
-        c.focused = true;
         c.view_wanted = true;
+        ed.session.at = At::Chat;
     }
 }
 
@@ -481,7 +522,7 @@ fn want(ed: &mut Editor) {
 pub fn wanted(ed: &mut Editor) -> bool {
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.view_wanted) else { return false };
     c.view_wanted = false;
-    if !c.focused || ed.screen.chat_view.get().is_none() {
+    if ed.session.at != At::Chat || ed.screen.chat_view.get().is_none() {
         return false;
     }
     // (opened on an empty conversation: the input keeps the keys, said)
@@ -511,9 +552,7 @@ pub fn chat_wheel(ed: &mut Editor, line: Option<usize>, up: bool) {
         let laid = ed.screen.chat_laid.borrow().clone();
         enter(ed, laid, line, Some(was));
     }
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.focused = true;
-    }
+    ed.session.at = At::Chat;
     swap(ed, |ed| ed.scroll_view(if up { -3 } else { 3 }, false));
     // (back down to the end, by the wheel, nothing selected: done reading)
     let Some(v) = ed.session.view.as_ref() else { return };
@@ -550,6 +589,9 @@ fn made(
         char_for: String::new(),
         sticky: None,
         search_origin: None,
+        search: None,
+        search_hl: false,
+        hits: None,
         prompt: false,
         by_wheel,
         after: None,
@@ -570,13 +612,9 @@ fn enter(ed: &mut Editor, laid: Laid, line: Option<usize>, by_wheel: Option<Was>
     doc.set_top(ed.screen.chat_view.get().map_or(0, |a| a.3).min(last));
     let seen = ed.session.chat.as_ref().map_or(0, seen);
     ed.session.view = Some(made(Surface::Chat, doc, laid, seen, by_wheel, None));
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.focused = true;
-    }
     // (the keys are the chat's now — not the program's, nor tarae's on the slot)
-    ed.bottom_focus = false;
-    if let Some(t) = ed.session.terminal.as_mut() {
-        t.focus = false;
+    if ed.session.chat.is_some() {
+        ed.session.at = At::Chat;
     }
     in_sight(ed);
 }
@@ -656,7 +694,6 @@ fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
     take_over(ed, Surface::Terminal);
     let Some(t) = ed.session.terminal.as_mut() else { return };
     t.hold();
-    t.focus = false;
     t.visible = true;
     let screen = t.parser.screen();
     let (size, off, cursor) = (screen.size(), screen.scrollback(), usize::from(screen.cursor_position().0));
@@ -686,11 +723,8 @@ fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
     let mut view = made(Surface::Terminal, doc, Vec::new(), generation, by_wheel, Some(made_of));
     view.wraps = wraps;
     ed.session.view = Some(view);
-    ed.bottom_focus = true;
+    ed.session.at = At::Slot;
     ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.focused = false;
-    }
     in_sight(ed);
 }
 
@@ -859,6 +893,8 @@ fn swap<R>(ed: &mut Editor, f: impl FnOnce(&mut Editor) -> R) -> Option<R> {
         std::mem::swap(&mut ed.char_for, &mut v.char_for);
         std::mem::swap(&mut ed.sticky, &mut v.sticky);
         std::mem::swap(&mut ed.search_origin, &mut v.search_origin);
+        std::mem::swap(&mut ed.search, &mut v.search);
+        std::mem::swap(&mut ed.search_hl, &mut v.search_hl);
     };
     let mut v = ed.session.view.take()?;
     trade(ed, &mut v);
@@ -994,13 +1030,11 @@ fn after(ed: &mut Editor) {
     match (a, surface) {
         (After::Leave, Surface::Chat) => {
             leave(ed);
-            if let Some(c) = ed.session.chat.as_mut() {
-                c.focused = false;
-            }
+            ed.session.leave(At::Chat);
         }
         (After::Leave, Surface::Terminal) => {
             leave(ed);
-            ed.bottom_focus = false;
+            ed.session.leave(At::Slot);
         }
         (After::Input, Surface::Chat) => leave(ed),
         (After::Input, Surface::Terminal) => {
@@ -1008,9 +1042,9 @@ fn after(ed: &mut Editor) {
                 return ed.set_status("its program has ended — q close, esc code");
             }
             leave(ed);
-            ed.bottom_focus = false;
+            ed.session.leave(At::Slot);
             if let Some(t) = ed.session.terminal.as_mut() {
-                t.focus = true;
+                ed.session.at = At::Program;
                 t.parser.screen_mut().set_scrollback(0);
             }
         }
@@ -1253,7 +1287,9 @@ pub fn sync(ed: &mut Editor) {
     }
     if let Some(v) = ed.session.view.as_ref() {
         let gone = match v.surface {
-            Surface::Chat => !ed.session.chat.as_ref().is_some_and(|c| c.focused && !c.compact()),
+            Surface::Chat => {
+                !(ed.session.is_at(At::Chat) && ed.session.chat.as_ref().is_some_and(|c| !c.compact()))
+            }
             Surface::Terminal => !terminal_holds(ed, v),
         };
         if gone {
@@ -1261,7 +1297,7 @@ pub fn sync(ed: &mut Editor) {
         }
     }
     if ed.session.view.is_none()
-        && ed.bottom_focus
+        && ed.session.is_at(At::Slot)
         && ed.slot() == Some(crate::sizes::Slot::Terminal)
         && ed.session.terminal.as_ref().is_some_and(|t| t.visible)
     {

@@ -1136,7 +1136,7 @@ fn resume_due(ed: &mut Editor) {
         && ed.prompt.is_none()
         && ed.picker.is_none()
         && ed.session.review.is_none()
-        && !ed.session.chat.as_ref().is_some_and(|c| c.focused && !c.input.is_empty());
+        && !(ed.session.chat_has_keys() && ed.session.chat.as_ref().is_some_and(|c| !c.input.is_empty()));
     let wait = quiet(ed);
     let Some(f) = follow(ed) else { return };
     f.resume_armed = false;

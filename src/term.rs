@@ -34,6 +34,7 @@ use crate::llm::Review;
 use crate::movement as mv;
 use crate::picker::{Action, Picker};
 use crate::selection::Range;
+use crate::session::At;
 use crate::syntax;
 use crate::theme::{Style, Theme};
 use tree_sitter::QueryCursor;
@@ -501,6 +502,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         spots: Default::default(),
     };
     editor.refresh_search(focus_lay.text_rows);
+    crate::view::refresh_search(editor);
     // Follow took the editor to an edit being written: its rows where the review will show them (`writing.rs`) —
     // the topmost item's, the change the review opens on
     if let Some(line) = editor.doc_mut().writing_align.take() {
@@ -528,7 +530,8 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         && let Some(sb) = editor.session.sidebar.as_mut()
     {
         let depths: Vec<usize> = sb.lines().iter().map(|l| l.depth).collect();
-        sb.fit(sidebar_list_rows(&lay, editor.session.code_review.is_some()), &depths);
+        let keys = editor.session.at == At::Side;
+        sb.fit(sidebar_list_rows(&lay, editor.session.code_review.is_some()), &depths, keys);
     }
     if lay.rail_w > 0
         && editor.review_rail_up()
@@ -536,7 +539,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             editor.session.code_review.as_ref().map(|r| (r.marked(editor), review_rail_list(&lay, editor, r)))
         && let Some(r) = editor.session.code_review.as_mut()
     {
-        r.fit(marked, room.1, room.0);
+        r.fit(marked, room.1, room.0, editor.session.at == At::Rail);
     }
     if let Some(p) = editor.picker.as_mut() {
         let pb = PickerBox::new(&lay, p);
@@ -756,7 +759,7 @@ impl Layout {
         // (the review's rail is the side panel there: an automatic chat narrows beside it — `sizes::chat_beside` —
         // only where the rail is then drawn: one too narrow for it anyway keeps its chat as it was — frictions25
         // fix: at 120 the chat lost 12 columns for a rail that didn't come, and its rows wrapped)
-        let focus = editor.session.code_review.as_ref().is_some_and(|r| r.focus);
+        let focus = editor.session.code_review.is_some() && editor.session.is_at(At::Rail);
         let beside = match editor.session.code_review.as_ref() {
             Some(r) if review && chat_open => {
                 let chat =
@@ -778,10 +781,12 @@ impl Layout {
         let chat_w = widths.chat;
         let edit_w = w as usize - chat_w;
         let rail_w = match editor.session.code_review.as_ref() {
-            Some(r) if review && zoom.is_none() => match review_rail_code_min(edit_w, r.focus) {
-                Some(code_min) => review_rail_w(editor, r, edit_w, code_min),
-                None => widths.side,
-            },
+            Some(r) if review && zoom.is_none() => {
+                match review_rail_code_min(edit_w, editor.session.is_at(At::Rail)) {
+                    Some(code_min) => review_rail_w(editor, r, edit_w, code_min),
+                    None => widths.side,
+                }
+            }
             _ => widths.side,
         };
         Self {
@@ -1087,7 +1092,7 @@ fn draw_debug_panel(
 /// A test's or task's panel: what its keys do there when it has them, else how they come (`C-w j` — how you get
 /// in, uxaudit D6) — first in its header's hints, before the commands that work from anywhere.
 fn slot_hints(editor: &Editor) -> Vec<(&'static str, &'static str)> {
-    if !editor.bottom_focus {
+    if !editor.session.is_at(At::Slot) {
         // (only where `C-w` is the window prefix — the code in normal mode, nothing under way: in insert mode or a
         // draft it deletes a word, in the terminal it's the program's — and from a pane with none below it: from
         // one with a pane below, `C-w j` goes to that one)
@@ -1444,7 +1449,7 @@ fn draw_terminal_panel(
         (bound("wclose", "q"), if t.exited.is_some() { "close" } else { "hide" }),
         (Some("C-w z".into()), zoom),
     ];
-    let mut hints: Vec<(&str, &str)> = match (t.exited, t.focus) {
+    let mut hints: Vec<(&str, &str)> = match (t.exited, editor.session.is_at(At::Program)) {
         _ if view.is_some() => viewing.iter().filter_map(|(k, d)| Some((k.as_deref()?, *d))).collect(),
         (Some(_), _) => vec![("space T", "close")],
         // (the round's key: where it goes next — counted in `esc_says_one_word_per_act_in_every_hint`)
@@ -1528,7 +1533,10 @@ fn draw_terminal_panel(
         queue!(out, Spaces(w.saturating_sub(PAD + x)))?;
     }
     let (cr, cc) = screen.cursor_position();
-    let show = t.focus && t.exited.is_none() && !screen.hide_cursor() && screen.scrollback() == 0;
+    let show = editor.session.is_at(At::Program)
+        && t.exited.is_none()
+        && !screen.hide_cursor()
+        && screen.scrollback() == 0;
     Ok((show && (cr as usize) < rows).then(|| ((x0 + PAD) as u16 + cc, body as u16 + cr)))
 }
 
@@ -1826,7 +1834,7 @@ fn draw_queued(
             queue!(out, Print(fit_ellipsis(&format!("+{more} more queued · :procs lists them"), room)))?;
             continue;
         };
-        let hint = match (&r.stops, editor.bottom_focus) {
+        let hint = match (&r.stops, editor.session.is_at(At::Slot)) {
             (None, _) => Vec::new(),
             (Some(s), true) => hint_spans(&[("enter", &format!("run now — stops {s}"))], key, faint),
             (Some(s), false) => {
@@ -1888,7 +1896,8 @@ fn draw_plugin_panel<W: Write>(
     let title = fit_ellipsis(&clean(&panel.title), (w / 2).max(12));
     let keys: Vec<(String, String)> = panel.keys.iter().map(|(k, d)| (clean(k), clean(d))).collect();
     let mut hints: Vec<(&str, &str)> = keys.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect();
-    hints.push(if st.focus { ("esc", "code") } else { ("click", "keys") });
+    let focus = editor.plugin_panel_focused();
+    hints.push(if focus { ("esc", "code") } else { ("click", "keys") });
     let top = slot_header(out, editor, ui, lay, card, &[(title, strong)], &hints)?;
     // The table, and the status line under it
     let header = !panel.columns.is_empty();
@@ -1933,7 +1942,7 @@ fn draw_plugin_panel<W: Write>(
     let first_row_y = y;
     for i in 0..body {
         match panel.rows.get(scroll + i) {
-            Some(r) => draw_cells(out, y, r, card, st.focus && scroll + i == st.selected)?,
+            Some(r) => draw_cells(out, y, r, card, focus && scroll + i == st.selected)?,
             None => {
                 queue!(out, MoveTo(x0 as u16, y as u16))?;
                 apply(out, card)?;
@@ -1999,7 +2008,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     let total_cpu = (!cpus.is_empty()).then(|| cpus.iter().fold(0.0, |a, c| a + c.max(0.0)));
     let sel = p.rows.get(panel.selected);
     let mut hints: Vec<(&str, &str)> = Vec::new();
-    if panel.focus {
+    if editor.procs_focused() {
         let heading = sel.is_some_and(|r| matches!(r.kind, Kind::Session(_)));
         // (a run waiting in line isn't stopped: it leaves the line)
         match sel.map(|r| &r.kind) {
@@ -2123,7 +2132,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
             line(out, y, &[col(why, w.saturating_sub(4), false, faint)], card, false)?;
             continue;
         };
-        let mark = panel.focus && scroll + i == panel.selected;
+        let mark = editor.procs_focused() && scroll + i == panel.selected;
         let base = if mark { selected } else { card };
         let plain = Style { fg: base.fg, ..card };
         // A session's heading: its name from the pid column on, `●`/`▲` as its tab has them, its checkout,
@@ -5107,7 +5116,7 @@ fn draw_review_header(
     // Esc goes back where the keys were — the chat or the code — unanswered (#70, #118); from
     // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
     // (beside the chat it cut esc's off)
-    let chat = editor.session.chat.as_ref().map(|c| c.focused);
+    let chat = editor.session.chat_has_keys().then_some(true);
     // (inside zellij its twin — worked out only where the header says it: it reads where the keys are and the inbox)
     let c_q = match current && (chat == Some(true) || rev.away) {
         true => editor.key_said("C-q"),
@@ -6859,9 +6868,15 @@ fn draw_statusline(
         right.push(Seg { text: format!("▲ {warnings}"), style: ui.status.patch(warn), keep: 210 });
         right.push(gap(210));
     }
-    if let Some(h) = &editor.search_hits {
+    // (the search of where the keys are: a view mode's its own — its `/` being typed too —, never the code's)
+    let searching = editor.session.view.as_ref().filter(|v| v.prompt).or(view);
+    let (hits, at) = match searching {
+        Some(v) => (v.hits(), v.doc().selection().primary()),
+        None => (editor.search_hits.as_ref(), sel.primary()),
+    };
+    if let Some(h) = hits {
         let n = h.matches.len();
-        let count = match h.current(sel.primary()) {
+        let count = match h.current(at) {
             Some(i) => format!("{i:>w$}/{n}{}", if h.capped { "+" } else { "" }, w = n.to_string().len()),
             None if n == 0 && !h.capped => "no matches".to_string(),
             None => format!("{n}{} matches", if h.capped { "+" } else { "" }),
@@ -7699,7 +7714,7 @@ fn card_short(editor: &Editor, lay: &Layout) -> Option<String> {
         return Some("card needs more rows".into());
     }
     // The chat in hand taking the whole width: `C-q` folds it and the code, the card with it, is back
-    if lay.edit_w == 0 && editor.session.chat.as_ref().is_some_and(|c| c.focused) && lay.width >= edit_w {
+    if lay.edit_w == 0 && editor.session.chat_has_keys() && lay.width >= edit_w {
         return Some(format!("{} shows its card", editor.key_said("C-q")));
     }
     // The window width that leaves the code that much beside the chat as it's laid out (`sizes::widths`)
@@ -8824,7 +8839,7 @@ fn draw_follow_card(
         .map_or(accent, |fg| Style { fg: Some(fg), ..card });
     let gap = inner.saturating_sub(left_w + bare.width() + right_w(doing));
     let title = vec![
-        sp("claude", if c.focused { strong } else { dim }),
+        sp("claude", if editor.session.is_at(At::Chat) { strong } else { dim }),
         sp(badge, if paused { faint } else { accent }),
         sp(bare, warn),
         sp(&" ".repeat(gap), card),
@@ -8845,11 +8860,11 @@ fn draw_follow_card(
         && !crate::codereview::drafting(editor);
     // Its keys: a stop's question after the turn; minimized, how to stop it or bring the panel back; the
     // replay's pair once there are stops (in the code — the chat's input would take them as letters)
-    let stops = c.follow.replay.latest() > 0 && !c.focused;
+    let stops = c.follow.replay.latest() > 0 && !editor.session.is_at(At::Chat);
     let hint = if replaying {
         Some(vec![sp("[r", key), sp(" ", faint), sp("]r", key), sp(" stop by stop", faint)])
     } else if compact {
-        Some(match c.focused {
+        Some(match editor.session.is_at(At::Chat) {
             true => vec![sp("C-c", key), sp(" stop  ", faint), sp("C-f", key), sp(" unfollow", faint)],
             false if stops => {
                 vec![sp("space l", key), sp(" open the chat  ", faint), sp("[r", key), sp(" replay", faint)]
@@ -9083,7 +9098,7 @@ fn draw_sidebar(
     let w = lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1);
     let lines = sb.lines();
     // Unfocused, only the row the editor is on is marked (nothing, on a file outside the list)
-    let mark = if sb.focus { Some(sb.selected) } else { sb.here(editor) };
+    let mark = if editor.session.is_at(At::Side) { Some(sb.selected) } else { sb.here(editor) };
     // Header: the views as tabs (the list's only when there is one), the one showing strong; what it's of
     // at the right
     let tab_style = |m: SMode| if sb.mode == m { strong } else { faint };
@@ -9123,7 +9138,7 @@ fn draw_sidebar(
     };
     // (as many pairs as fit whole — cut, a row ended in a key without its meaning)
     let h = |pairs: &[(&str, &str)]| hint_spans(whole_pairs(pairs, w), key, faint);
-    let hints: [Vec<Span>; 2] = if sb.focus && sb.mode == SMode::Git {
+    let hints: [Vec<Span>; 2] = if editor.session.is_at(At::Side) && sb.mode == SMode::Git {
         // The selected row's keys: a hunk's, a conflict's, else the tab's
         match lines.get(sb.selected).map(|l| &l.target) {
             Some(crate::sidebar::Target::Hunk { .. }) => {
@@ -9137,12 +9152,12 @@ fn draw_sidebar(
                 h(&[("c", "commit"), ("C", "Claude drafts")]),
             ],
         }
-    } else if sb.focus && sb.mode == SMode::Plugin {
+    } else if editor.session.is_at(At::Side) && sb.mode == SMode::Plugin {
         // Its keys, then the panel's
         let keys: Vec<(&str, &str)> =
             side.map(|s| s.keys.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect()).unwrap_or_default();
         [h(&keys), h(&[("enter", "go"), ("esc", "code"), ("tab", "files")])]
-    } else if sb.focus {
+    } else if editor.session.is_at(At::Side) {
         [h(&[("enter", "open"), ("tab", tab.trim_start())]), h(&[("esc", "code"), ("q", "close")])]
     } else if sb.mode == SMode::Git {
         [h(&[("space g", "git")]), h(&[("space e", "files")])]
@@ -9204,7 +9219,7 @@ fn draw_sidebar(
         queue!(out, MoveTo(0, y as u16))?;
         apply(out, card)?;
         if y == 1 {
-            header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), sb.focus)?;
+            header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), editor.session.is_at(At::Side))?;
             gutter_cell(out, ui, lay, card, dragged)?;
             continue;
         }
@@ -9238,7 +9253,7 @@ fn draw_sidebar(
                         + l.label.width()
                         + usize::from(matches!(l.kind, crate::filetree::Kind::Dir { .. }))
                         + state;
-                    if row.selected && sb.focus && whole > w {
+                    if row.selected && editor.session.is_at(At::Side) && whole > w {
                         overflow = Some((y, row.clone(), whole));
                     }
                     // Brought into sight from a link: the row flashes; given or cited: its mark at the right
@@ -9248,8 +9263,17 @@ fn draw_sidebar(
                         id.as_deref().map_or(selected, |id| flashed_selected(ui, editor, id, selected));
                     given = id.as_deref().and_then(|id| ui_mark(ui, editor, id, card));
                     // The row's own background runs on to the padding (its bar in the padding before it)
-                    let used =
-                        draw_list_row(out, &row, w + PAD - 2, editor, ui, base, selected, sb.focus, &[])?;
+                    let used = draw_list_row(
+                        out,
+                        &row,
+                        w + PAD - 2,
+                        editor,
+                        ui,
+                        base,
+                        selected,
+                        editor.session.is_at(At::Side),
+                        &[],
+                    )?;
                     queue!(out, Spaces((w + PAD - 2).saturating_sub(used)))?;
                     w
                 }
@@ -10208,7 +10232,8 @@ fn draw_review_rail(
                 && !g.looked_at(&editor.session.looked)
         })
     });
-    let hints = review_rail_hints(r.focus, turn, drafts, high_here, key, faint, accent);
+    let rail_keys = editor.session.is_at(At::Rail);
+    let hints = review_rail_hints(rail_keys, turn, drafts, high_here, key, faint, accent);
     let fill = lay.body_h.saturating_sub(rows.len() + 1 + hints.len());
     rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
     rows.push((Vec::new(), card, None));
@@ -10218,7 +10243,7 @@ fn draw_review_rail(
     let mut links = editor.screen.review_rail.borrow_mut();
     for (y, (row, bg, file)) in rows.iter().take(lay.body_h).enumerate() {
         if y == 1 {
-            header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), r.focus)?;
+            header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), rail_keys)?;
             gutter_cell(out, ui, lay, card, false)?;
             continue;
         }
@@ -10553,7 +10578,9 @@ fn draw_chat(
             Role::Thought => u64::from(last && c.busy()),
             Role::Tool => u64::from(m.is_call(hand)),
             // (the replay's stops, and its keys — which the chat's focus changes)
-            Role::Note if turn_end(i) => 1 | (u64::from(c.focused) << 1) | ((stops as u64) << 2),
+            Role::Note if turn_end(i) => {
+                1 | (u64::from(editor.session.is_at(At::Chat)) << 1) | ((stops as u64) << 2)
+            }
             Role::Note => 0,
         }
     };
@@ -10671,7 +10698,7 @@ fn draw_chat(
                 // The last turn's end: how to replay its stops (in the code — or `C-]` from here), left
                 // of its time
                 if timing && turn_end(i) && stops > 0 {
-                    let keys = if c.focused { "C-]" } else { "[r ]r" };
+                    let keys = if editor.session.is_at(At::Chat) { "C-]" } else { "[r ]r" };
                     let said = format!(" replay its {stops} stop{}", if stops == 1 { "" } else { "s" });
                     let gap = w.saturating_sub(keys.width() + said.width() + m.text.width());
                     if gap >= 2 {
@@ -10903,7 +10930,7 @@ fn draw_chat(
     let mut y = top;
     // Title
     chat_row_start(out, x0, y, edge(y), card)?;
-    apply(out, if c.focused { strong } else { dim })?;
+    apply(out, if editor.session.is_at(At::Chat) { strong } else { dim })?;
     queue!(out, Print("claude"))?;
     // Its view mode: `● view` — held still; once something came after what it holds, said (`G` catches up)
     let came = view.is_some_and(|v| v.came(crate::view::seen(c)));
@@ -11014,7 +11041,7 @@ fn draw_chat(
     y += 1;
     // Its rule: the accent while the chat has the keys
     chat_row_start(out, x0, y, edge(y), card)?;
-    apply(out, if c.focused { accent } else { Style { fg: ui.window, ..card } })?;
+    apply(out, if editor.session.is_at(At::Chat) { accent } else { Style { fg: ui.window, ..card } })?;
     queue!(out, Print("─".repeat(w)))?;
     chat_row_end(out, card, lay.chat_w, w)?;
     y += 1;
@@ -11194,9 +11221,9 @@ fn draw_chat(
     // The input's border: the accent while it has the keys; without them, what's typed in it is a draft —
     // said at the border's end, so a message half-written isn't lost from sight
     // (in its view mode the input keeps what's typed, faint, its cursor hidden — `i` comes back to it)
-    let typing = c.focused && view.is_none();
+    let typing = editor.session.is_at(At::Chat) && view.is_none();
     let border = if typing { accent } else { Style { fg: ui.window, ..card } };
-    let draft = !c.focused && !c.input.trim().is_empty() && w >= used + 12;
+    let draft = !editor.session.is_at(At::Chat) && !c.input.trim().is_empty() && w >= used + 12;
     let line = w - used - if draft { " draft ──".width() } else { 0 };
     apply(out, border)?;
     queue!(out, Print("─".repeat(line)))?;
@@ -11257,7 +11284,7 @@ fn draw_chat(
     };
     if view.is_some() {
         hints.extend(viewing.iter().filter_map(|(k, d)| Some((k.as_deref()?, *d))));
-    } else if !c.focused {
+    } else if !editor.session.is_at(At::Chat) {
         hints.push(("space l", "focus"));
         hints.push(("space L", "close"));
     } else if c.busy() {
@@ -11619,6 +11646,25 @@ fn view_marks(v: &crate::view::View, line: usize, ui: &Ui, cursor: bool) -> Opti
     let primary = sel.primary_index();
     let mut marks: Vec<(usize, usize, Style)> = Vec::new();
     let mut cursors: Vec<(usize, usize, Style)> = Vec::new();
+    // Its own search's matches (as the code's are drawn): under its selections, the one in hand over them
+    let mut current = None;
+    if let Some(h) = v.hits() {
+        let accent_bg = |t: f32| blend(ui.accent.fg, ui.tint, t);
+        let hit = Style { bg: accent_bg(0.22), ..Style::default() };
+        let p = sel.primary();
+        let from = h.matches.partition_point(|m| m.1 <= ls);
+        for &(a, b) in h.matches[from..].iter().take_while(|m| m.0 <= le) {
+            let (a, b) = (a.max(ls), b.min(le + 1));
+            match (a, b) == (p.from(), p.to()) {
+                true => {
+                    current =
+                        Some((a - ls, b - ls, Style { bg: accent_bg(0.5), bold: true, ..Style::default() }))
+                }
+                false if a < b => marks.push((a - ls, b - ls, hit)),
+                false => {}
+            }
+        }
+    }
     for (i, r) in sel.ranges().iter().enumerate() {
         let first = i == primary;
         let bg = if first { ui.selection_primary.bg } else { ui.selection.bg };
@@ -11633,6 +11679,7 @@ fn view_marks(v: &crate::view::View, line: usize, ui: &Ui, cursor: bool) -> Opti
             cursors.push((c - ls, end - ls, if first { ui.cursor_primary } else { ui.cursor }));
         }
     }
+    marks.extend(current);
     if marks.is_empty() && cursors.is_empty() {
         return None;
     }
@@ -13367,7 +13414,7 @@ fn draw_diagnostic_card(
         || editor.picker.is_some()
         || editor.prompt.is_some()
         || !editor.pending.is_empty()
-        || editor.session.chat.as_ref().is_some_and(|c| c.focused);
+        || editor.session.chat_has_keys();
     if !editor.config.cursor_diagnostics
         || busy
         || editor.diag_card_hidden == Some((editor.doc().id, editor.cursor_line()))
@@ -13826,11 +13873,10 @@ mod tests {
             let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(7), ops: false };
             ed.push_offer(Offer::new("Claude changes 3 files".into(), q, "", String::new(), what));
             // (gone back to the chat while it waits: in 50 columns the chat takes them all — no room for it)
-            ed.session.chat = chat.then(|| {
-                let mut c = crate::chat::Chat::new();
-                c.focused = true;
-                c
-            });
+            ed.session.chat = chat.then(crate::chat::Chat::new);
+            if chat {
+                ed.session.at = At::Chat;
+            }
             let mut bytes = Vec::new();
             render(&mut ed, &mut bytes, cols, rows).unwrap();
             for k in keys {
@@ -14294,8 +14340,7 @@ mod tests {
         assert!(rows[27].contains("some code") && ed.screen.prompt_card.get().is_none());
         // With the side panel up it stays at the screen's bottom left, over the panel's foot: the input
         // right above the mode, its `:` where the mode's word starts
-        let mut side = crate::sidebar::Sidebar::with_files(std::env::temp_dir(), vec!["a.rs".into()]);
-        side.focus = false;
+        let side = crate::sidebar::Sidebar::with_files(std::env::temp_dir(), vec!["a.rs".into()]);
         ed.session.sidebar = Some(side);
         ed.handle_key(":".parse().unwrap());
         let (rows, _) = draw(&mut ed);
@@ -14682,7 +14727,7 @@ mod tests {
             ed.docs[0].set_selection(crate::selection::Selection::point(at));
             if chat {
                 crate::chat::open(&mut ed);
-                ed.session.chat.as_mut().unwrap().focused = false;
+                ed.session.leave(crate::session::At::Chat);
             }
             ed.push_offer(crate::offer::Offer {
                 id: 0,
@@ -15155,8 +15200,8 @@ mod tests {
         ed.open(&path).unwrap();
         let p = ed.doc().path.clone().unwrap();
         crate::chat::open(&mut ed);
+        ed.session.at = At::Code;
         let c = ed.session.chat.as_mut().unwrap();
-        c.focused = false;
         c.follow.on = true;
         c.state = crate::chat::State::Thinking;
         for i in 0..40 {
@@ -15435,7 +15480,7 @@ mod tests {
                 ed.session_switch(0);
             }
             crate::chat::open(&mut ed);
-            ed.session.chat.as_mut().unwrap().focused = false;
+            ed.session.leave(crate::session::At::Chat);
             let mut buf = Vec::with_capacity(1 << 16);
             render(&mut ed, &mut buf, 140, 40).unwrap();
             let mut runs: Vec<Duration> = (0..300)
@@ -15773,8 +15818,9 @@ mod tests {
                 c.input = "a draft".into();
                 c.cursor = c.input.len();
                 // (up beside the code, the keys in the code)
-                c.focused = false;
                 ed.session.chat = Some(c);
+                ed.session.at = crate::session::At::Chat;
+                ed.session.at = At::Code;
                 ed
             };
             let keys = |ed: &mut Editor, keys: &[&str]| {
@@ -15878,6 +15924,7 @@ mod tests {
         // (the panel, not the minimized card following would make of it)
         c.unfolded = true;
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         ed
     }
 
@@ -15936,7 +15983,7 @@ mod tests {
         let (worst, delta) = worst_of_best(&keys, || {
             let mut ed = long_chat(200);
             ed.zellij = true;
-            ed.session.chat.as_mut().unwrap().focused = true;
+            ed.session.at = crate::session::At::Chat;
             let what = crate::offer::What::Screen { call: crate::tools::Call::test(1) };
             ed.push_offer(crate::offer::Offer::new(
                 "Claude asks".into(),
@@ -16128,6 +16175,7 @@ mod tests {
         c.msgs.push(Msg::new(Role::Note, "5.2s", ""));
         c.unfolded = true;
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         ed
     }
 
@@ -16341,8 +16389,9 @@ mod tests {
         // (code to the screen's foot and across it: the card can only float over it)
         let line = format!("{}\n", "x".repeat(90));
         ed.docs[0].text = Rope::from_str(&line.repeat(100));
+        ed.session.at = At::Code;
         let c = ed.session.chat.as_mut().unwrap();
-        (c.unfolded, c.focused) = (false, false);
+        c.unfolded = false;
         c.follow.on = true;
         let look = c.msgs[2].look.clone().unwrap();
         c.follow.replaying = Some(crate::follow::Gaze {
@@ -16615,6 +16664,7 @@ mod tests {
             }
             c.state = states[k];
             ed.session.chat = Some(c);
+            ed.session.at = crate::session::At::Chat;
             ed
         };
         let styled = |ed: &Editor| format!("{:?}", kept_rows(ed));
@@ -17560,6 +17610,7 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         ed.session.sidebar =
             Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, PathBuf::from("/x")));
+        ed.session.at = At::Side;
         let rail = |ed: &Editor, w| Layout::new(ed, w, 40).rail_w;
         assert_eq!(rail(&ed, 112), 32);
         assert_eq!(rail(&ed, 140), 36);
@@ -17755,6 +17806,7 @@ mod tests {
         ed.docs[0].path = Some(root.join("d0/e29/f50.rs"));
         ed.docs[0].text = Rope::from_str("fn main() {}\n");
         ed.session.sidebar = Some(sb);
+        ed.session.at = crate::session::At::Side;
         let rows = ed.session.sidebar.as_ref().unwrap().lines().len();
         let keys = [
             "j", "j", "k", "C-d", "G", "g", "l", "l", "h", "h", "k", "ret", "esc", "j", "w", "x", "i", "a",
@@ -17836,6 +17888,7 @@ mod tests {
         ed.docs[0].text = Rope::from_str("fn main() {}\n");
         ed.session.git_status = Some(status(1));
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, root.clone()));
+        ed.session.at = crate::session::At::Side;
         let (worst, key) = events_to_frames(&mut ed, &["j", "j", "C-d", "G", "k", "g", "esc", "w"], 180, 50);
         measured("git_tab_with_20k_changes", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
@@ -17862,8 +17915,8 @@ mod tests {
                 ed.handle_event(ev);
             }
         }
-        let Some(t) = ed.session.terminal.as_mut() else { panic!("the terminal didn't start") };
-        t.focus = false;
+        ed.session.at = At::Code;
+        assert!(ed.session.terminal.is_some(), "the terminal didn't start");
         let batch: String = (0..200)
             .map(|i| {
                 format!(

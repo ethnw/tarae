@@ -257,10 +257,10 @@ fn settle(ed: &mut Editor) {
 
 fn chat(ed: &mut Editor, draft: &str) {
     let mut c = crate::chat::Chat::new();
-    c.focused = true;
     c.input = draft.into();
     c.cursor = draft.len();
     ed.session.chat = Some(c);
+    ed.session.at = crate::session::At::Chat;
 }
 
 /// Minimized while Claude works (follow on): the panel is a small card, its input not on screen.
@@ -300,15 +300,16 @@ fn terminal(ed: &mut Editor) {
         }
     }
     let t = ed.session.terminal.as_mut().unwrap();
-    (t.visible, t.focus) = (true, true);
+    t.visible = true;
+    ed.session.at = crate::session::At::Program;
     ed.session.slot_front = Some(Slot::Terminal);
 }
 
 fn rail(ed: &mut Editor) {
     let root = ed.session.root.clone();
-    let mut r = crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, root, Vec::new());
-    r.focus = true;
+    let r = crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, root, Vec::new());
     ed.session.code_review = Some(r);
+    ed.session.at = crate::session::At::Rail;
 }
 
 type Scene = (&'static str, fn(&mut Editor));
@@ -970,7 +971,7 @@ fn slip_3_the_minimized_chat_comes_back_before_anything_is_typed() {
     let said = ed.said;
     feed(&mut ed, &[" ", "W"]);
     let c = ed.session.chat.as_ref().unwrap();
-    assert!(!c.compact() && c.focused, "back, with the keys");
+    assert!(!c.compact() && ed.session.is_at(crate::session::At::Chat), "back, with the keys");
     assert_eq!(c.input, "W", "the first key brought it back; the next typed");
     assert!(ed.said > said, "said");
     frame(&mut ed);
@@ -986,7 +987,7 @@ fn the_first_letter_into_the_minimized_chat_is_typed() {
     frame(&mut ed);
     feed(&mut ed, &["h", "i"]);
     let c = ed.session.chat.as_ref().unwrap();
-    assert!(!c.compact() && c.focused, "back, with the keys");
+    assert!(!c.compact() && ed.session.is_at(crate::session::At::Chat), "back, with the keys");
     assert_eq!(c.input, "hi", "the first letter isn't swallowed");
     frame(&mut ed);
     assert!(ed.screen.chat_w > 0, "in sight");
@@ -1144,7 +1145,7 @@ fn the_keys_go_back_to_the_chat_once_its_review_is_answered() {
     let mut ed = editor();
     chat(&mut ed, "");
     edit_review(&mut ed);
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     ed.session.review.as_mut().unwrap().from_chat = true;
     frame(&mut ed);
     assert_eq!(ed.keys_to().region, Region::EditReview);
@@ -1295,6 +1296,7 @@ fn a_sessions_last_turn_is_pinned() {
     c.msgs.push(Msg::tool(look, "t1"));
     c.msgs.push(Msg::new(Role::Assistant, "The token check runs before the refresh: src/login.rs:12.", ""));
     l.chat = Some(c);
+    l.at = crate::session::At::Chat;
     frame(&mut ed);
     let t = ed.chat_turn(&format!("s{id}")).unwrap();
     assert_eq!(ed.chat_turn("fix-login").unwrap().rows, t.rows, "by name too");
@@ -1955,6 +1957,7 @@ fn every_row_the_state_lists_is_on_the_frame() {
     let mut side = crate::sidebar::Sidebar::with_files(dir.clone(), rels);
     side.set_open(["src"], true);
     ed.session.sidebar = Some(side);
+    ed.session.at = crate::session::At::Side;
     task_panel(&mut ed);
     let w = 160;
     let check = |ed: &mut Editor, what: &str| {

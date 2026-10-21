@@ -1687,6 +1687,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = base.join("p");
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
             while !done(ed) {
@@ -1862,6 +1863,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         let mut made = |clock: fn() -> SystemTime| {
             ed.session.chat = Some(crate::chat::Chat::new());
+            ed.session.at = crate::session::At::Chat;
             ed.run_clock = Some(clock);
             run_started(&mut ed, None);
             run_ended(&mut ed);

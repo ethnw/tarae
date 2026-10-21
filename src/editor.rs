@@ -18,6 +18,7 @@ use crate::movement as mv;
 use crate::picker::{Action, Picker};
 use crate::search;
 use crate::selection::{Range, Selection};
+use crate::session::At;
 use crate::syntax;
 use crate::theme::Theme;
 use crate::typed;
@@ -763,10 +764,6 @@ pub struct Editor {
     /// The front card has the keys, given with `C-q` from wherever they were (#24) — the chat's draft, insert
     /// mode, a review stay as they were; an answer or Esc gives them back.
     pub card_keys: bool,
-    /// `C-w z`: what fills the screen — drawn only while it still has the keys (`sizes::Editor::zoomed`).
-    pub zoom: Option<crate::sizes::Zoom>,
-    /// The bottom slot has tarae's keys (`C-w j`, a click): they scroll its output (`sizes::bottom_key`).
-    pub bottom_focus: bool,
     /// The terminal said its focus went elsewhere (CSI ?1004 — tmux passes it on only with `focus-events
     /// on`), and no input came since: the waiting animation rests (`tick_wanted`). A terminal that never
     /// says keeps it going.
@@ -1024,8 +1021,6 @@ impl Editor {
             dragging: None,
             picker_click: None,
             card_keys: false,
-            zoom: None,
-            bottom_focus: false,
             screen_sends: Vec::new(),
             frames: 0,
             ui_asks: Vec::new(),
@@ -1486,23 +1481,49 @@ impl Editor {
         self.focus_view(next);
     }
 
-    /// Between the code's windows only (`C-w e` is the side panel's way in and out).
-    /// `C-w h/j/k/l`: to the pane that way — below the lowest one, the bottom slot (`C-w k` from it, back to
-    /// the code).
+    /// `C-w h/j/k/l`: to the pane that way — between the code's panes; past the code's edge what's beside it on
+    /// screen (the chat on the right, the side panel or the review's rail on the left, below the lowest pane the
+    /// bottom slot); from those, toward the code goes back to it (friction 88: `C-w h` from the chat's input did
+    /// nothing). Nothing that way is said. (P2b makes every surface a pane of the tree, §2.6.)
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
-        if self.bottom_has_keys() {
-            if dy < 0 {
-                self.bottom_focus = false;
-                self.plugin_panel_unfocus();
-                self.procs_unfocus();
-            }
+        let toward_code = match self.session.at {
+            At::Chat => dx < 0,
+            At::Side | At::Rail => dx > 0,
+            _ => self.bottom_has_keys() && dy < 0,
+        };
+        if toward_code {
+            self.session.at = At::Code;
+            self.plugin_panel_unfocus();
+            self.procs_unfocus();
             return;
         }
+        if self.bottom_has_keys() || matches!(self.session.at, At::Chat | At::Side | At::Rail) {
+            return self.nothing_toward(dx, dy);
+        }
+        let chat = self.screen.chat_w > 0 && self.session.chat.as_ref().is_some_and(|c| !c.compact());
+        let side = self.screen.side_w > 0 && !self.side_folded();
         match self.pane_toward(dx, dy) {
             Some(v) => self.focus_view(v),
             None if dy > 0 => self.bottom_take_keys(),
-            None => {}
+            None if dx > 0 && chat => self.session.at = At::Chat,
+            // (the rail as `space e` gives it the keys: on the file in hand)
+            None if dx < 0 && self.review_rail_up() && self.screen.rail_w > 0 => {
+                crate::codereview::rail_focus(self)
+            }
+            None if dx < 0 && side && self.session.sidebar.is_some() => self.side_focus(),
+            None => self.nothing_toward(dx, dy),
         }
+    }
+
+    /// A `C-w h/j/k/l` with nothing that way: said, nothing moved.
+    fn nothing_toward(&mut self, dx: i32, dy: i32) {
+        let way = match (dx.signum(), dy.signum()) {
+            (-1, _) => "to the left",
+            (1, _) => "to the right",
+            (_, -1) => "above",
+            _ => "below",
+        };
+        self.set_status(format!("nothing {way}"));
     }
 
     /// The pane that way from the one in hand, as last drawn — none below: `C-w j` goes to the bottom slot (its
@@ -1515,8 +1536,8 @@ impl Editor {
     /// `C-w e`: to the side panel from wherever the keys are — or back to the code from it. A closed panel
     /// opens at the tab it last showed.
     pub fn side_toggle_focus(&mut self) {
-        match self.session.sidebar.as_mut() {
-            Some(s) if s.focus => s.focus = false,
+        match self.session.sidebar.as_ref() {
+            Some(_) if self.session.at == At::Side => self.session.at = At::Code,
             Some(_) => self.side_focus(),
             None => self.sidebar_show(self.session.side_last),
         }
@@ -1524,11 +1545,11 @@ impl Editor {
 
     /// The keys to the open side panel, its row the one for where the code is.
     fn side_focus(&mut self) {
-        if let Some(c) = self.session.chat.as_mut() {
-            c.focused = false;
+        self.session.leave(At::Chat);
+        if self.session.sidebar.is_none() {
+            return;
         }
-        let Some(s) = self.session.sidebar.as_mut() else { return };
-        s.focus = true;
+        self.session.at = At::Side;
         self.sidebar_sync();
         let here = self.session.sidebar.as_ref().and_then(|s| s.here(self));
         if let (Some(s), Some(h)) = (self.session.sidebar.as_mut(), here) {
@@ -1982,7 +2003,9 @@ impl Editor {
             return;
         }
         // Straight into the chat's input — as keys, its letters could answer a review or an offer first
-        if let Some(c) = self.session.chat.as_mut().filter(|c| c.focused) {
+        if self.session.at == At::Chat
+            && let Some(c) = self.session.chat.as_mut()
+        {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
             c.input.insert_str(c.cursor, &text);
             c.cursor += text.len();
@@ -2018,7 +2041,7 @@ impl Editor {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
             c.input.insert_str(c.cursor, &text);
             c.cursor += text.len();
-            c.focused = true;
+            self.session.at = At::Chat;
             return self.set_status("pasted into the chat — the file is under review (i pastes there)");
         }
         // Normal or select mode: held, not put in (#124 — it went into the file, said only by a toast; a paste
@@ -2198,7 +2221,7 @@ impl Editor {
             // (with the keys, the file in hand follows into sight — as `C-e`/`C-y`; without them it's the code's
             // file and the wheel only looks)
             if by != 0 {
-                return if r.focus { r.scroll_keeping(by) } else { r.scroll_by(by) };
+                return if self.session.at == At::Rail { r.scroll_keeping(by) } else { r.scroll_by(by) };
             }
         }
         if m.kind == K::Down && on_rail {
@@ -2226,8 +2249,10 @@ impl Editor {
         {
             t.selecting = false;
             if !in_terminal {
-                t.focus = false;
                 t.selection = None;
+                if self.session.at == At::Program {
+                    self.session.at = At::Code;
+                }
             }
         }
         // A press there, the wheel there, or the drag and release of a press there (clamped to its edge — a
@@ -2351,7 +2376,7 @@ impl Editor {
                         self.sidebar_activate(r);
                     }
                 }
-                K::ScrollDown | K::ScrollUp if sb.focus => {
+                K::ScrollDown | K::ScrollUp if self.session.at == At::Side => {
                     sb.scroll_keeping(if m.kind == K::ScrollDown { 3 } else { -3 }, rows)
                 }
                 K::ScrollDown => sb.scroll += 3,
@@ -2371,18 +2396,18 @@ impl Editor {
                     Some((.., link)) => crate::chat::jump(self, link.clone()),
                     None => {
                         c.unfolded = true;
-                        c.focused = true;
+                        self.session.at = At::Chat;
                     }
                 }
             }
             return;
         }
-        if let (Some(cx), Some(c)) = (s.chat_x, self.session.chat.as_mut())
+        if let (Some(cx), Some(_)) = (s.chat_x, self.session.chat.as_ref())
             && x >= cx
         {
             match m.kind {
                 K::Down => {
-                    c.focused = true;
+                    self.session.at = At::Chat;
                     // Where a command ran, at its row's end: why, said (cardburden 4b)
                     let ran =
                         s.chat_ran.borrow().iter().find(|l| l.0 == y && (l.1..l.2).contains(&x)).cloned();
@@ -2466,12 +2491,10 @@ impl Editor {
             return;
         }
         let row = y - rect.y - title;
-        if let Some(c) = self.session.chat.as_mut() {
-            c.focused = false;
-        }
+        self.session.leave(At::Chat);
         self.plugin_panel_unfocus();
         self.procs_unfocus();
-        self.bottom_focus = false;
+        self.session.leave(At::Slot);
         self.completion = None;
         self.popup = None;
         let tab = self.config.tab_width;
@@ -3500,8 +3523,8 @@ impl Editor {
             && self.prompt.is_none()
             && self.picker.is_none()
             && self.session.review.is_none()
-            && !self.session.chat.as_ref().is_some_and(|c| c.focused)
-            && !self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none())
+            && !self.session.chat_has_keys()
+            && !self.session.program_has_keys()
     }
 
     /// `C-q` while a card is up — this session's first, then the one that has waited longest (`inbox.rs`) —
@@ -3735,8 +3758,15 @@ impl Editor {
     fn handle_key_inner(&mut self, key: Key) {
         use crate::uistate::{Handler, took};
         self.status = None;
-        // Esc in normal mode = clear search highlight (and still does its other work)
-        if key.code == Code::Esc && self.mode == Mode::Normal && self.prompt.is_none() {
+        // Esc in normal mode = clear search highlight (and still does its other work) — the pane's own: a view
+        // mode's esc clears its matches, the code's only the code's esc (not the chat's, a panel's)
+        if key.code == Code::Esc && self.prompt.is_none() && crate::view::has_keys(self).is_some() {
+            crate::view::search_unshown(self);
+        } else if key.code == Code::Esc
+            && self.mode == Mode::Normal
+            && self.prompt.is_none()
+            && self.session.at == At::Code
+        {
             self.search_hl = false;
             if self.popup.is_none() {
                 self.diag_card_hidden = Some((self.doc().id, self.cursor_line()));
@@ -5024,8 +5054,7 @@ mod tests {
         ed.session.root = dir.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.git_auto = true;
         // (the git tab `space g` opens reads its status in the panel's folder — not this repository)
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
         ed.session.sidebar = Some(sb);
         ed.open(&file).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
@@ -5210,7 +5239,7 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), script];
         feed(&mut ed, "ww<space>l");
-        assert!(ed.session.chat.as_ref().is_some_and(|c| c.focused), "space l = open and focus");
+        assert!(ed.session.chat_has_keys(), "space l = open and focus");
         feed(&mut ed, "explain<ret>");
         let c = ed.session.chat.as_ref().unwrap();
         assert_eq!(c.msgs[0].text, "explain");
@@ -5247,7 +5276,7 @@ mod tests {
         assert_eq!(text(&ed), "foo BAR");
         // esc = its view mode, esc again = back to the code (pane stays), space L = close
         feed(&mut ed, "<space>l<esc><esc>");
-        assert!(ed.session.chat.as_ref().is_some_and(|c| !c.focused));
+        assert!(ed.session.chat.is_some() && !ed.session.is_at(At::Chat));
         feed(&mut ed, "<space>L");
         assert!(ed.session.chat.is_none());
         std::fs::remove_dir_all(&dir).ok();
@@ -5295,7 +5324,7 @@ mod tests {
         assert_eq!(ed.doc().text.byte_to_line(ed.doc().selection().primary().cursor(&ed.doc().text)), 0);
         feed(&mut ed, "<C-g>");
         assert_eq!(ed.doc().text.byte_to_line(ed.doc().selection().primary().cursor(&ed.doc().text)), 1);
-        assert!(ed.session.chat.as_ref().unwrap().focused);
+        assert!(ed.session.is_at(crate::session::At::Chat));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5546,7 +5575,7 @@ mod tests {
         assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "at the answer's reference");
         assert_eq!(cursor_line(&ed), 4);
         assert!(!ed.docs.iter().any(|d| d.path.as_deref() == Some(util.as_path())), "the preview closed");
-        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys");
+        assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
         feed(&mut ed, "<esc><esc><C-o>");
         assert_eq!(ed.doc().path.as_deref(), Some(main.as_path()), "one jump back = before the turn");
         std::fs::remove_dir_all(&dir).ok();
@@ -6251,7 +6280,7 @@ mod tests {
         // Reply in place — the keys stay in the editor
         feed(&mut ed, "<esc><esc><space>nwhy?<ret>");
         assert!(ed.session.notes.list[0].waiting);
-        assert!(!ed.session.chat.as_ref().unwrap().focused, "replying doesn't move the keys to the chat");
+        assert!(!ed.session.is_at(crate::session::At::Chat), "replying doesn't move the keys to the chat");
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         let n = &ed.session.notes.list[0];
         let thread: Vec<_> = n.thread.iter().map(|e| (e.by, e.text.as_str())).collect();
@@ -6620,7 +6649,7 @@ mod tests {
         click(&mut ed, crate::event::MouseKind::Down, x, y);
         let heading = ed.session.task_run.as_ref().unwrap().output.iter().position(|l| l.1 == "── test ──");
         assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, heading, "at the test step's heading");
-        assert!(ed.bottom_focus, "the panel has the keys");
+        assert!(ed.session.is_at(crate::session::At::Slot), "the panel has the keys");
         let s = draw(&mut ed);
         assert!(s.contains("test line 0"), "{s}");
         // The wheel and C-u: further back
@@ -6680,7 +6709,7 @@ mod tests {
         };
         feed(&mut ed, "<space>ldo it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
-        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys (frictions26)");
+        assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys (frictions26)");
         assert!(ed.session.review.is_none(), "no change of it in review yet");
         let s = screen(&mut ed);
         assert!(s.contains("Claude changes 3 files") && s.contains("replace `old_(\\w+)` → `new_$1`"), "{s}");
@@ -6711,7 +6740,7 @@ mod tests {
         // Again, `n`: every file left as it was
         put();
         std::fs::remove_file(&log).unwrap();
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         feed(&mut ed, "again<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         screen(&mut ed);
@@ -6897,7 +6926,7 @@ mod tests {
             again.iter().map(|r| r.again.parts.clone()).collect::<Vec<_>>(),
             [[["basename", "one", "two"]]]
         );
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         let answers = |log: &Path| std::fs::read_to_string(log).unwrap_or_default().matches("\"c7\"").count();
         feed(&mut ed, "again<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty() || answers(&log) == 2);
@@ -7073,7 +7102,7 @@ mod tests {
         assert!(tool_answer(&log).contains("tarae-marker-content"), "{}", tool_answer(&log));
         assert!(ed.session.chat.as_ref().unwrap().allowed.reads(&marker));
         // The next turn, the same command: allowed now, no card
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         feed(&mut ed, "again<ret>");
         let answers = |log: &Path| std::fs::read_to_string(log).unwrap().matches("\"c7\"").count();
         settle_for(&mut ed, |ed| !ed.offers.is_empty() || answers(&log) == 2);
@@ -7243,7 +7272,7 @@ mod tests {
                     .is_some_and(|t| t.parser.screen().contents().contains("term-marker"))
             };
             settle_for(&mut ed, shows);
-            ed.session.terminal.as_mut().unwrap().focus = false;
+            ed.session.leave(crate::session::At::Program);
             draw(&mut ed);
             ed
         };
@@ -7256,7 +7285,7 @@ mod tests {
         let o = ed.offers.first().unwrap();
         assert_eq!(o.title, crate::seeing::TITLE);
         assert!(o.question.contains("Includes the terminal panel ("), "{}", o.question);
-        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys");
+        assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
         let s = draw(&mut ed);
         assert!(s.contains("y Once   a This chat   n No"), "{s}");
         assert_eq!(answers(&log), 0, "nothing goes before the answer");
@@ -7284,7 +7313,7 @@ mod tests {
         let answer = tool_answer(&log);
         assert!(answer.contains("screen-marker") && !answer.contains("term-marker"), "{answer}");
         assert!(answer.contains(crate::seeing::LEFT_OUT), "{answer}");
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         feed(&mut ed, "again<ret>");
         settle_drawing(&mut ed, &|ed| !ed.offers.is_empty() || answers(&log) == 2);
         assert!(ed.offers.is_empty(), "this chat: no card");
@@ -7437,7 +7466,7 @@ mod tests {
         feed(&mut ed, "<space>ltouch it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         // A draft in the chat's input: what's typed is the draft's, the card says how to reach it
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         // (minimized while Claude works: its first letter brings it back, typed — #151 — then the rest)
         assert!(ed.session.chat.as_ref().unwrap().compact());
         feed(&mut ed, "m");
@@ -7450,7 +7479,7 @@ mod tests {
         feed(&mut ed, "<esc><esc>");
         assert_eq!(ed.offers.len(), 1, "Esc never answers a card");
         // Back in the input: C-q — the card has the keys, the draft stays
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         // (the status line's label names where the keys go — #78: it said CHAT while the card had them)
         // (the status line: the screen's last row)
         let label = |s: &str| s.lines().nth(39).unwrap_or_default().to_string();
@@ -7464,7 +7493,7 @@ mod tests {
         // (said on the card, where the eyes are — it was a flash on the status line)
         assert!(draw(&mut ed).contains("x isn't an answer here"), "{:?}", ed.offer_said_now());
         feed(&mut ed, "<esc>");
-        assert!(!ed.card_keys && ed.offers.len() == 1 && ed.session.chat.as_ref().unwrap().focused);
+        assert!(!ed.card_keys && ed.offers.len() == 1 && ed.session.is_at(crate::session::At::Chat));
         assert_eq!(input(&ed), "my draft y", "back where it was");
         assert!(label(&draw(&mut ed)).contains("● chat "), "the chat's again");
         // C-q, y (once the card has been in sight a moment): answered, the keys back in the draft
@@ -7477,7 +7506,7 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(made.exists() && tool_answer(&log).contains("exit 0"));
         assert_eq!(input(&ed), "my draft y");
-        assert!(ed.session.chat.as_ref().unwrap().focused);
+        assert!(ed.session.is_at(crate::session::At::Chat));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -7800,7 +7829,7 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         ed.session.review.as_mut().unwrap().from_chat = true;
         feed(&mut ed, "<tab>");
         let s = draw(&mut ed);
@@ -7813,7 +7842,7 @@ mod tests {
         let s = parser.screen().contents();
         assert!(s.contains("y yes  n no  esc back"), "{s}");
         feed(&mut ed, "<esc>");
-        assert!(ed.session.chat.as_ref().unwrap().focused, "back in the chat");
+        assert!(ed.session.is_at(crate::session::At::Chat), "back in the chat");
         let s = draw(&mut ed);
         assert!(s.contains("C-q answer it — the chat has the keys"), "{s}");
         feed(&mut ed, "yn");
@@ -7839,6 +7868,7 @@ mod tests {
         let file = repo.join("a.txt");
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| s.unstaged.is_empty()));
         let edit = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "e1",
@@ -7872,17 +7902,17 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "fn a() { 1 }\n").unwrap();
         let mut ed = editor("");
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         crate::codereview::start_in(&mut ed, dir.clone(), None);
         settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().review_base.is_some());
         let before = ed.doc().text.to_string();
         ed.handle_paste("meant for the chat".into());
         assert_eq!(ed.doc().text.to_string(), before, "the file under review is as it was");
         let c = ed.session.chat.as_ref().unwrap();
-        assert!(c.focused && c.input == "meant for the chat", "{:?}", c.input);
+        assert!(ed.session.is_at(At::Chat) && c.input == "meant for the chat", "{:?}", c.input);
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("pasted into the chat")), "{:?}", ed.status);
         // Insert mode: typed there on purpose
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         feed(&mut ed, "i");
         ed.handle_paste("X".into());
         assert_ne!(ed.doc().text.to_string(), before);
@@ -7900,7 +7930,7 @@ mod tests {
         feed(&mut ed, "<space>vz");
         assert!(ed.toasts.iter().any(|t| t.text.contains("no review open")), "{:?}", ed.toasts);
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         crate::codereview::start_in(&mut ed, dir.clone(), None);
         settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().review_base.is_some());
         // (the code's columns: its pane's width · the header's row)
@@ -7920,9 +7950,9 @@ mod tests {
         assert_eq!((x, w, chat), (0, 200, 0), "the code has the screen");
         assert!(head.contains("review 1/1 · wide"), "{head}");
         // The chat with the keys: back while it has them
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         assert!(frame(&mut ed).2 > 0, "the chat has the keys: it shows");
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         assert_eq!(frame(&mut ed).2, 0, "and goes again");
         feed(&mut ed, "<space>vz");
         let (x, _, chat, _) = frame(&mut ed);
@@ -8766,7 +8796,7 @@ mod tests {
         };
         assert!(screen(&mut ed).contains("space m s open it"), "the panel says the key");
         // The list: the folders, widest last, then running it outside
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         feed(&mut ed, " ms");
         settle_for(&mut ed, |ed| ed.picker.is_some());
         let rows: Vec<String> = ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect();
@@ -8904,7 +8934,7 @@ mod tests {
         let n = &ed.session.notes.list[0];
         assert_eq!((n.lines.clone(), n.waiting), (1..2, true));
         assert!(
-            ed.session.chat.as_ref().is_some_and(|c| !c.focused),
+            ed.session.chat.is_some() && !ed.session.is_at(At::Chat),
             "the chat opens without taking the keys"
         );
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
@@ -9402,7 +9432,7 @@ mod tests {
         let log = fake_edit(&mut ed, &dir, "Edit", input, false);
         feed(&mut ed, "<space>lshout line 2<ret>");
         settle_until(&mut ed, |ed| ed.session.review.is_some());
-        assert!(!ed.session.chat.as_ref().unwrap().focused, "the keys go to the review");
+        assert!(!ed.session.is_at(crate::session::At::Chat), "the keys go to the review");
         feed(&mut ed, "y");
         let a = permission_answer(&log);
         assert_eq!(a["behavior"], "allow", "{a}");
@@ -9817,7 +9847,7 @@ mod tests {
         fake(&mut ed, false);
         std::fs::remove_file(&argv).ok();
         feed(&mut ed, ":chat-new<ret>");
-        assert!(ed.session.chat.as_ref().is_some_and(|c| c.focused), "the chat, open, with the keys");
+        assert!(ed.session.chat_has_keys(), "the chat, open, with the keys");
         let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
         assert!(said.contains("New conversation"), "{said}");
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().past.is_empty());
@@ -10093,7 +10123,7 @@ mod tests {
         let log = fake_edit(&mut ed, &dir, "Edit", input, false);
         feed(&mut ed, "<space>lshout<ret>");
         // Typing in another file before Claude's ask comes in
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         ed.open(&util).unwrap();
         feed(&mut ed, "ityping");
         settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().edits.queue.len() == 1);
@@ -10230,7 +10260,7 @@ mod tests {
         feed(&mut ed, "y");
         assert_eq!(permission_answer(&log)["behavior"], "allow");
         let (_, version) = ed.doc().agent_writes.expect("waiting for Claude's write");
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         feed(&mut ed, "ggiX<esc>");
         ed.agent_write_missed(id, version);
         assert!(ed.flush_saves());
@@ -10370,7 +10400,7 @@ mod tests {
         feed(&mut ed, "y");
         // (the answer gave the keys back to the chat: Esc to the code, then typed — before p2 is read, events
         // wait for settle_until)
-        assert!(ed.session.chat.as_ref().unwrap().focused, "back in the chat");
+        assert!(ed.session.is_at(crate::session::At::Chat), "back in the chat");
         feed(&mut ed, "<esc>ggiX<esc>");
         settle_until(&mut ed, |ed| ed.session.review.is_some());
         feed(&mut ed, "y");
@@ -10426,7 +10456,7 @@ mod tests {
         ed.offer_accept();
         assert!(crate::edits::at_end(&ed));
         let c = ed.session.chat.as_ref().expect("the chat it's for");
-        assert!(!c.focused, "the keys stay in the editor");
+        assert!(!ed.session.is_at(At::Chat), "the keys stay in the editor");
         assert!(c.msgs.iter().any(|m| m.text.contains("space v a turns it off")));
         assert!(chat_title(&mut ed).contains("review at end"), "{}", chat_title(&mut ed));
         assert_eq!(ed.session.checkpoints.tell.len(), 1);
@@ -10457,7 +10487,7 @@ mod tests {
         crate::chat::close(&mut ed);
         crate::chat::open(&mut ed);
         assert!(crate::edits::at_end(&ed), "a chat opened later starts so");
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         feed(&mut ed, ":review-at-end on<ret>:review-at-end off<ret>");
         assert!(ed.offers.is_empty(), "off takes the card away");
         crate::chat::reset(&mut ed);
@@ -10667,7 +10697,7 @@ mod tests {
         // Taken up: a move in the code pane while it's in front — it stays when the turn ends
         ed.open(&outside).unwrap();
         ed.doc_mut().aside = true;
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         for k in [":", "esc"] {
             ed.handle_event(Event::Key(k.parse().unwrap()));
         }
@@ -10733,6 +10763,7 @@ mod tests {
             ed.open(&theirs).unwrap();
             ed.doc_mut().aside = true;
             ed.session.chat = Some(crate::chat::Chat::new());
+            ed.session.at = crate::session::At::Chat;
             crate::edits::turn_over(ed);
         });
         assert!(!open(&ed, &theirs), "its own aside file goes with its turn");
@@ -10822,7 +10853,7 @@ mod tests {
         let (mut ed, dir, [main, lib, new]) = turn_of_three("turn-review", None);
         settle_until(&mut ed, reviewing);
         let c = ed.session.chat.as_ref().unwrap();
-        assert!(!c.busy() && !c.focused, "the keys went to the review");
+        assert!(!c.busy() && !ed.session.is_at(At::Chat), "the keys went to the review");
         assert!(c.msgs.iter().any(|m| m.text == "changed 3 files · reviewing them now"));
         // The chat beside it leaves no room for the rail: the header says which file of the review this is
         let mut bytes = Vec::new();
@@ -11142,7 +11173,8 @@ mod tests {
         feed(&mut ed, "<space>o");
         let s = screen(&mut ed);
         assert!(
-            ed.session.sidebar.as_ref().is_some_and(|s| s.focus && s.mode == crate::sidebar::Mode::Outline)
+            ed.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Outline)
+                && ed.session.is_at(At::Side)
         );
         assert!(!ed.review_rail_up() && ed.screen.side_w > 0, "the outline is drawn: {s}");
         assert!(s.contains("review behind") && !s.contains("undo the whole turn"), "{s}");
@@ -11160,8 +11192,7 @@ mod tests {
     fn space_g_back_to_the_review_shows_the_rail_on_a_narrow_screen() {
         let (mut ed, dir, _) = turn_of_three("turn-review-narrow", None);
         settle_until(&mut ed, reviewing);
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
         ed.session.sidebar = Some(sb);
         let screen = |ed: &mut Editor| {
             let mut bytes = Vec::new();
@@ -11178,10 +11209,7 @@ mod tests {
         assert!(s.contains("review behind") && s.contains("space g back"), "{s}");
         feed(&mut ed, "<space>g");
         let s = screen(&mut ed);
-        assert!(
-            ed.review_rail_up() && ed.session.code_review.as_ref().unwrap().focus,
-            "the rail has the keys"
-        );
+        assert!(ed.review_rail_up() && ed.session.is_at(crate::session::At::Rail), "the rail has the keys");
         assert!(ed.screen.rail_w > 0 && !ed.screen.review_rail.borrow().is_empty(), "and it's drawn: {s}");
         assert!(!s.contains("review behind"), "{s}");
         // A file opened from it: the keys go to the code, and so do the columns
@@ -11200,8 +11228,7 @@ mod tests {
         let (mut ed, dir, _) = turn_of_three("turn-review-space-g", None);
         settle_until(&mut ed, reviewing);
         // (the tab rooted in the test's folder, not this repository)
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
         ed.session.sidebar = Some(sb);
         let screen = |ed: &mut Editor| {
             let mut bytes = Vec::new();
@@ -11216,7 +11243,10 @@ mod tests {
         feed(&mut ed, "<space>g");
         let s = screen(&mut ed);
         assert!(ed.session.code_review.is_some() && !ed.review_rail_up(), "the review open, behind the tab");
-        assert!(ed.session.sidebar.as_ref().is_some_and(|s| s.focus && s.mode == crate::sidebar::Mode::Git));
+        assert!(
+            ed.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git)
+                && ed.session.is_at(At::Side)
+        );
         assert!(s.contains("review behind") && s.contains("space g back"), "{s}");
         assert!(!s.contains("undo the whole turn"), "the rail gave the column: {s}");
         assert!(s.contains("review 1/3"), "the status line says which file: {s}");
@@ -11224,11 +11254,8 @@ mod tests {
         assert_eq!(text(&ed), before, "the keys are the tab's");
         // `space g` again: the rail, with the keys
         feed(&mut ed, "<space>g");
-        assert!(
-            ed.review_rail_up() && ed.session.code_review.as_ref().unwrap().focus,
-            "the rail has the keys"
-        );
-        assert!(!ed.session.sidebar.as_ref().unwrap().focus);
+        assert!(ed.review_rail_up() && ed.session.is_at(crate::session::At::Rail), "the rail has the keys");
+        assert!(!ed.session.is_at(crate::session::At::Side));
         let s = screen(&mut ed);
         assert!(s.contains("m viewed, next  q end") && !s.contains("review behind"), "{s}");
         feed(&mut ed, "d");
@@ -11237,7 +11264,7 @@ mod tests {
         feed(&mut ed, "<esc><space>g");
         assert!(!ed.review_rail_up());
         feed(&mut ed, "<esc>");
-        assert!(ed.review_rail_up() && ed.session.code_review.as_ref().unwrap().focus, "Esc: the rail again");
+        assert!(ed.review_rail_up() && ed.session.is_at(crate::session::At::Rail), "Esc: the rail again");
         // The tab closed (`q`): the rail is back by itself
         feed(&mut ed, "<esc><space>gq");
         assert!(ed.session.sidebar.is_none() && ed.review_rail_up());
@@ -11856,7 +11883,7 @@ mod tests {
         ed.session_switch(0);
         waits_for_you(&mut ed, two);
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         let rows = |ed: &mut Editor, w: u16| -> Vec<String> {
             let mut bytes = Vec::new();
             crate::term::render(ed, &mut bytes, w, 24).unwrap();
@@ -11923,6 +11950,7 @@ mod tests {
         crate::gitrepo::answered(&r.config_file(), r.local.digest(), true);
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
         let rows = |ed: &mut Editor| -> Vec<String> {
@@ -11960,7 +11988,7 @@ mod tests {
         );
         std::fs::remove_file(&seen).ok();
         // b.txt: untracked — the first d asks, the second deletes
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         ed.session.sidebar.as_mut().unwrap().selected = 1;
         feed(&mut ed, "d");
         assert!(repo.join("b.txt").exists());
@@ -12352,7 +12380,7 @@ mod tests {
         ed.git_refresh();
         settle_until(&mut ed, |ed| status(ed).ahead == 1 && status(ed).behind == 1);
         // P: the card, listing the remote's commit that would go
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "P");
         settle_until(&mut ed, |ed| forcing(ed) == 1);
         let q = ed.offers[0].question.clone();
@@ -12390,7 +12418,7 @@ mod tests {
         assert_eq!(git_out(&bare, &["rev-parse", "main"]), theirs, "the lease kept theirs");
         // Asked again: the colleague's two are named as not yours — first, warned, counted in the title — then
         // ours as it was before the amend; y replaces exactly what it listed
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "P");
         settle_until(&mut ed, |ed| forcing(ed) == 1);
         let q = ed.offers[0].question.clone();
@@ -12436,7 +12464,7 @@ mod tests {
         commit_in(&work, "a.txt", "one\ntwo\nthree\n", "ours later");
         ed.git_refresh();
         settle_until(&mut ed, |ed| status(ed).ahead == 2 && status(ed).behind == 0);
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "P");
         settle_until(&mut ed, |ed| forcing(ed) == 1);
         let q = ed.offers[0].question.clone();
@@ -12508,7 +12536,7 @@ mod tests {
         crate::chat::open(&mut ed);
         draw(&mut ed, 140);
         assert_eq!(ed.screen.chat_w, 56);
-        assert!(ed.session.chat.as_ref().unwrap().focused);
+        assert!(ed.session.is_at(crate::session::At::Chat));
         feed(&mut ed, "<C-w>>");
         draw(&mut ed, 140);
         assert_eq!((ed.sizes.chat, ed.screen.chat_w), (Some(60), 60));
@@ -12543,7 +12571,8 @@ mod tests {
         // The side panel, with the keys: its own width
         crate::chat::close(&mut ed);
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, dir.clone()));
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
+        ed.session.at = crate::session::At::Side;
         draw(&mut ed, 140);
         let side = ed.screen.side_w;
         feed(&mut ed, "<C-w>>");
@@ -12557,7 +12586,7 @@ mod tests {
         });
         run.output = vec![(false, "one".into())];
         ed.session.task_run = Some(run);
-        ed.session.sidebar.as_mut().unwrap().focus = false;
+        ed.session.leave(crate::session::At::Side);
         draw(&mut ed, 140);
         assert_eq!(ed.screen.bottom_h, 4, "its own: a small one (its title, rule, two rows)");
         feed(&mut ed, "<C-w>+<C-w>+");
@@ -12589,7 +12618,7 @@ mod tests {
         };
         let mouse = |ed: &mut Editor, kind, x: u16, y: u16| ed.handle_mouse(Mouse { kind, x, y, alt: false });
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         draw(&mut ed);
         // The chat's edge: at column 140 - 56; dragged 10 to the left, 10 wider
         let edge = (140 - ed.screen.chat_w) as u16;
@@ -12619,6 +12648,7 @@ mod tests {
         // The side panel's edge (its last column)
         crate::chat::close(&mut ed);
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, dir.clone()));
+        ed.session.at = crate::session::At::Side;
         draw(&mut ed);
         let side = ed.screen.side_w as u16;
         mouse(&mut ed, K::Down, side - 1, 5);
@@ -12670,7 +12700,7 @@ mod tests {
             crate::term::render(ed, &mut bytes, 140, 40).unwrap();
         };
         feed(&mut ed, "<C-w>j");
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
         assert!(ed.toasts.iter().any(|t| t.text.starts_with("nothing at the bottom")));
         task_of_40_lines(&mut ed);
         draw(&mut ed);
@@ -12679,7 +12709,7 @@ mod tests {
         let top = |ed: &Editor| ed.session.task_run.as_ref().unwrap().top(rows);
         assert_eq!(top(&ed), end, "its end in sight");
         feed(&mut ed, "<C-w>j");
-        assert!(ed.bottom_focus);
+        assert!(ed.session.is_at(crate::session::At::Slot));
         feed(&mut ed, "kkk");
         assert_eq!(top(&ed), end - 3, "scrolled back");
         feed(&mut ed, "xdi");
@@ -12698,23 +12728,23 @@ mod tests {
         assert!(head.contains(" ok "), "{head}");
         assert!(screen.lines().any(|l| l.starts_with(" ● task ")), "{screen}");
         feed(&mut ed, "<esc>j");
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
         assert_eq!(ed.cursor_line(), 1, "the code's again");
         feed(&mut ed, "<C-w>j<C-w>k");
-        assert!(!ed.bottom_focus, "C-w k: back up");
+        assert!(!ed.session.is_at(crate::session::At::Slot), "C-w k: back up");
         // A click on the panel, then one in the code
         let y = ed.screen.task_panel.get().unwrap().0 as u16 + 2;
         ed.handle_mouse(Mouse { kind: K::Down, x: 20, y, alt: false });
-        assert!(ed.bottom_focus);
+        assert!(ed.session.is_at(crate::session::At::Slot));
         let line_1 = ed.screen.text_top as u16 + 1;
         ed.handle_mouse(Mouse { kind: K::Down, x: 20, y: line_1, alt: false });
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
         assert_eq!(ed.cursor_line(), 1);
         // The panel gone: so are its keys
         feed(&mut ed, "<C-w>j");
         ed.session.task_run = None;
         feed(&mut ed, "j");
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
         assert_eq!(ed.cursor_line(), 2);
     }
 
@@ -12735,14 +12765,13 @@ mod tests {
         // Alone: nothing to hide
         draw(&mut ed);
         feed(&mut ed, "<C-w>z");
-        assert_eq!(ed.zoom, None);
+        assert_eq!(ed.session.zoom, None);
         assert!(ed.toasts.iter().any(|t| t.text == "the code has the whole screen already"));
         // The chat, the side panel, a task, two panes
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
         ed.session.sidebar =
             Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, std::env::temp_dir()));
-        ed.session.sidebar.as_mut().unwrap().focus = false;
+        ed.session.at = At::Code;
         task_of_40_lines(&mut ed);
         feed(&mut ed, "<C-w>v");
         draw(&mut ed);
@@ -12771,9 +12800,9 @@ mod tests {
         );
         feed(&mut ed, "<esc>");
         draw(&mut ed);
-        assert_eq!((ed.zoom, shown(&ed)), (None, all), "the keys went to the code: it ended");
+        assert_eq!((ed.session.zoom, shown(&ed)), (None, all), "the keys went to the code: it ended");
         // The chat (its empty input lets C-w through)
-        ed.session.chat.as_mut().unwrap().focused = true;
+        ed.session.at = crate::session::At::Chat;
         feed(&mut ed, "<C-w>z");
         draw(&mut ed);
         assert_eq!((ed.screen.chat_w, ed.screen.bottom_h), (140, 0));
@@ -12782,14 +12811,14 @@ mod tests {
         draw(&mut ed);
         assert_eq!(shown(&ed), all);
         // The side panel
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "<C-w>z");
         draw(&mut ed);
         assert_eq!((ed.screen.side_w, ed.screen.chat_w, ed.screen.bottom_h), (140, 0, 0));
         feed(&mut ed, "<C-w>z");
         draw(&mut ed);
         assert_eq!(shown(&ed), all);
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "back, the keys where they were");
+        assert!(ed.session.is_at(crate::session::At::Side), "back, the keys where they were");
         assert_eq!(ed.sizes, sizes, "nothing kept changed");
     }
 
@@ -12800,9 +12829,10 @@ mod tests {
         let repo = git_repo("amend", &[("a.txt", "one\n")]);
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "A");
         settle_until(&mut ed, |ed| ed.session.committing.is_some());
         assert_eq!(ed.doc().display_name_short(), "COMMIT_EDITMSG");
@@ -12822,7 +12852,7 @@ mod tests {
         git_in(&repo, &["add", "a.txt"]);
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| !s.staged.is_empty()));
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "c");
         settle_until(&mut ed, |ed| ed.session.committing.is_some());
         assert_eq!(ed.mode, Mode::Insert);
@@ -12895,11 +12925,12 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
         for key in ["C", "c"] {
             ed.status = None;
-            ed.session.sidebar.as_mut().unwrap().focus = true;
+            ed.session.at = crate::session::At::Side;
             feed(&mut ed, key);
             settle_until(&mut ed, |ed| ed.status.is_some());
             let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
@@ -12925,20 +12956,21 @@ mod tests {
         }
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| s.unstaged.len() == 4));
+        ed.session.at = At::Side;
         let sb = ed.session.sidebar.as_mut().unwrap();
-        sb.focus = true;
         // (the last row: a file, not the heading)
         sb.selected = sb.lines().len() - 1;
         assert!(!sb.lines()[sb.selected].label.contains("Changes"));
         let counts = |ed: &Editor| ed.session.git_status.as_ref().map(|s| (s.staged.len(), s.unstaged.len()));
         feed(&mut ed, "S");
         settle_until(&mut ed, |ed| counts(ed) == Some((4, 0)));
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "S");
         assert_eq!(ed.status.as_ref().map(|s| s.0.as_str()), Some("nothing to stage"));
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "U");
         settle_until(&mut ed, |ed| counts(ed) == Some((0, 4)));
         std::fs::remove_dir_all(&repo).ok();
@@ -12962,6 +12994,7 @@ mod tests {
             format!("read -r line; printf '%s\\n' \"$line\" > '{}'; printf '%s\\n' '{reply}'", log.display()),
         ];
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
         ed.sidebar_sync();
@@ -13012,6 +13045,7 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "read -r line; sleep 30".into()];
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
         ed.sidebar_sync();
@@ -13031,7 +13065,7 @@ mod tests {
         // Esc stops it
         feed(&mut ed, "C");
         settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| !r.ready));
-        ed.session.sidebar.as_mut().unwrap().focus = false;
+        ed.session.leave(crate::session::At::Side);
         assert!(crate::llm::esc_stops(&ed), "Esc stops it, and the card says so");
         let mut screen = Vec::new();
         crate::term::render(&mut ed, &mut screen, 120, 40).unwrap();
@@ -13086,13 +13120,13 @@ mod tests {
         ed.session.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
         feed(&mut ed, " e");
         let r = ed.session.code_review.as_ref().unwrap();
-        assert!(r.focus && r.selected == 0, "on the file being read");
+        assert!(ed.session.is_at(At::Rail) && r.selected == 0, "on the file being read");
         // The rail's order: src/ (b, c) then a.rs
         feed(&mut ed, "j");
         assert_eq!(ed.session.code_review.as_ref().unwrap().selected, 2, "src/c.rs");
         feed(&mut ed, "<ret>");
         assert_eq!(ed.doc().path.as_deref(), Some(dir.join("src/c.rs").as_path()));
-        assert!(!ed.session.code_review.as_ref().unwrap().focus, "the code has the keys");
+        assert!(!ed.session.is_at(crate::session::At::Rail), "the code has the keys");
         feed(&mut ed, " ek");
         assert_eq!(ed.session.code_review.as_ref().unwrap().selected, 0);
         feed(&mut ed, "m");
@@ -13103,7 +13137,7 @@ mod tests {
         assert!(r.viewed(&ed, &r.files[0]), "b.rs viewed");
         assert_eq!(r.selected, 2, "on to the next");
         feed(&mut ed, "<esc>");
-        assert!(!ed.session.code_review.as_ref().unwrap().focus);
+        assert!(!ed.session.is_at(crate::session::At::Rail));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -13137,7 +13171,7 @@ mod tests {
         assert!(asked(&ed), "two files not viewed: the end asks");
         assert!(ed.session.code_review.is_some(), "not ended unasked");
         ed.offers.clear();
-        ed.session.code_review.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Rail;
         feed(&mut ed, "<C-w>");
         assert!(!ed.pending.is_empty(), "C-w waits for its window key");
         assert!(ed.status.as_ref().is_none_or(|s| !s.0.contains("does nothing")), "{:?}", ed.status);
@@ -13145,7 +13179,7 @@ mod tests {
         assert!(asked(&ed), "C-w q from the rail: its end, asked");
         // Every file viewed: `q` ends it at once, nothing to ask
         ed.offers.clear();
-        ed.session.code_review.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Rail;
         ed.session.code_review.as_mut().unwrap().selected = 0;
         let viewed = |ed: &Editor, i: usize| {
             let r = ed.session.code_review.as_ref().unwrap();
@@ -13153,10 +13187,10 @@ mod tests {
         };
         feed(&mut ed, "m");
         settle_until(&mut ed, |ed| viewed(ed, 0));
-        ed.session.code_review.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Rail;
         feed(&mut ed, "m");
         settle_until(&mut ed, |ed| viewed(ed, 1));
-        ed.session.code_review.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Rail;
         feed(&mut ed, "q");
         assert!(ed.session.code_review.is_none(), "all viewed: ended");
         assert!(!asked(&ed), "nothing asked");
@@ -13179,7 +13213,7 @@ mod tests {
         ed.session.task_run.as_mut().unwrap().state = crate::task::State::Running;
         head(&mut ed);
         feed(&mut ed, "<C-w>j");
-        assert!(ed.bottom_focus);
+        assert!(ed.session.is_at(crate::session::At::Slot));
         let h = head(&mut ed);
         assert!(h.contains("esc code") && !h.contains("q close"), "{h}");
         feed(&mut ed, "q");
@@ -13190,7 +13224,7 @@ mod tests {
         assert!(h.contains("q close"), "{h}");
         feed(&mut ed, "q");
         assert!(ed.session.task_run.is_none(), "ended: q closes it");
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
         // `C-w q` in it: the same
         task_of_40_lines(&mut ed);
         head(&mut ed);
@@ -13198,7 +13232,7 @@ mod tests {
         assert!(ed.session.task_run.is_none(), "C-w q closed the panel");
         // The side panel
         feed(&mut ed, " e");
-        assert!(ed.session.sidebar.as_ref().is_some_and(|s| s.focus));
+        assert!(ed.session.is_at(crate::session::At::Side));
         feed(&mut ed, "<C-w>q");
         assert!(ed.session.sidebar.is_none(), "C-w q closed the side panel");
         // The code: its pane, as ever
@@ -13227,14 +13261,14 @@ mod tests {
         ed.session.test_run = Some(run);
         draw(&mut ed);
         feed(&mut ed, "<C-w>j");
-        assert!(ed.bottom_focus);
+        assert!(ed.session.is_at(crate::session::At::Slot));
         feed(&mut ed, "q");
         assert!(ed.session.test_run.is_some(), "tests under way aren't stopped by q");
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("space x c stops")), "{:?}", ed.status);
         ed.session.test_run.as_mut().unwrap().state = RunState::NoTests;
         feed(&mut ed, "q");
         assert!(ed.session.test_run.is_none(), "ended (no test ran): q closes it");
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
     }
 
     /// `C-w q` from `:procs` closes it, as its `q` does; from the chat it closes nothing and says `space L` does
@@ -13249,7 +13283,7 @@ mod tests {
         feed(&mut ed, "<C-w>q");
         assert!(ed.procs.panel.is_none(), "C-w q closed :procs");
         feed(&mut ed, " l");
-        assert!(ed.session.chat.as_ref().is_some_and(|c| c.focused));
+        assert!(ed.session.chat_has_keys());
         feed(&mut ed, "<C-w>q");
         assert!(ed.session.chat.is_some(), "the chat stays");
         assert!(
@@ -13279,8 +13313,7 @@ mod tests {
         feed(&mut ed, "4ggmiwcFOUR<esc>:w<ret>");
         ed.flush_saves();
         settle_until(&mut ed, |ed| ed.doc().git_hunks.len() == 1);
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
         ed.session.sidebar = Some(sb);
         feed(&mut ed, " g");
         settle_until(&mut ed, |ed| {
@@ -13290,32 +13323,32 @@ mod tests {
         let at = |ed: &Editor| ed.session.sidebar.as_ref().unwrap().selected;
         let start = at(&ed);
         feed(&mut ed, "k");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "the tab keeps the keys after one k");
+        assert!(ed.session.is_at(crate::session::At::Side), "the tab keeps the keys after one k");
         feed(&mut ed, "kk");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "and after three");
+        assert!(ed.session.is_at(crate::session::At::Side), "and after three");
         assert!(at(&ed) < start, "k walked up the tab's rows: {} → {}", start, at(&ed));
         assert_eq!(text(&ed), text_before, "no key landed in the code");
         feed(&mut ed, "jjj");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus);
+        assert!(ed.session.is_at(crate::session::At::Side));
         // A tab key that isn't one of the quick ones (refresh) leaves it a tab — the keys stay
         feed(&mut ed, "<esc>");
         feed(&mut ed, " g");
         settle_until(&mut ed, |ed| ed.session.sidebar.as_ref().unwrap().aim.is_none());
         feed(&mut ed, "r");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "r refreshed it and the tab still has the keys");
+        assert!(ed.session.is_at(crate::session::At::Side), "r refreshed it and the tab still has the keys");
         feed(&mut ed, "k");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus);
+        assert!(ed.session.is_at(crate::session::At::Side));
         assert_eq!(text(&ed), text_before);
         // Pressed before git has answered (the tab still empty): the same
         feed(&mut ed, "<esc>");
         ed.session.git_status = None;
         feed(&mut ed, " gk");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "a k before the rows are in");
+        assert!(ed.session.is_at(crate::session::At::Side), "a k before the rows are in");
         settle_until(&mut ed, |ed| {
             ed.session.git_status.is_some() && ed.session.sidebar.as_ref().unwrap().aim.is_none()
         });
         feed(&mut ed, "kk");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "and the ones after");
+        assert!(ed.session.is_at(crate::session::At::Side), "and the ones after");
         assert_eq!(text(&ed), text_before, "no key landed in the code");
         // #50: on the change itself, a file opened from the editor just before — `s` stages it there, and
         // the `j`/`k` after it are still the tab's
@@ -13329,10 +13362,10 @@ mod tests {
         let b_before = text(&ed);
         feed(&mut ed, "s");
         settle_until(&mut ed, |ed| ed.doc().git_hunks.is_empty());
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "the tab keeps the keys after s");
+        assert!(ed.session.is_at(crate::session::At::Side), "the tab keeps the keys after s");
         // (`o` would open a line in the code)
         feed(&mut ed, "jjko");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "the tab has the keys");
+        assert!(ed.session.is_at(crate::session::At::Side), "the tab has the keys");
         assert_eq!(ed.mode, Mode::Normal);
         let b = ed.docs.iter().find(|d| d.path.as_ref().is_some_and(|p| p.ends_with("b.txt"))).unwrap();
         assert_eq!(b.text.to_string(), b_before, "none landed in the code");
@@ -13352,8 +13385,7 @@ mod tests {
         feed(&mut ed, "miwcFOUR<esc>:w<ret>");
         ed.flush_saves(); // (on disk before git's status reads it)
         settle_until(&mut ed, |ed| ed.doc().git_hunks.len() == 2);
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
         ed.session.sidebar = Some(sb);
         // From the code, the cursor in the second hunk
         feed(&mut ed, " g");
@@ -13380,7 +13412,7 @@ mod tests {
             .unwrap();
         let staged = String::from_utf8_lossy(&staged.stdout);
         assert!(staged.contains("+FOUR") && !staged.contains("+ONE"), "that hunk alone: {staged}");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "the tab keeps the keys (#50)");
+        assert!(ed.session.is_at(crate::session::At::Side), "the tab keeps the keys (#50)");
         // In the panel: onto the other hunk (the editor goes there), `d` puts it back
         feed(&mut ed, "<esc> g");
         settle_until(&mut ed, |ed| ed.session.sidebar.as_ref().unwrap().aim.is_none());
@@ -13397,7 +13429,7 @@ mod tests {
         // Stash and back
         feed(&mut ed, ":w<ret>");
         ed.flush_saves(); // (on disk before git stashes it)
-        ed.session.sidebar.as_mut().unwrap().focus = true;
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "z");
         settle_until(&mut ed, |_| {
             std::fs::read_to_string(&file).unwrap_or_default() == "one\ntwo\nthree\nfour\nfive\n"
@@ -13417,8 +13449,7 @@ mod tests {
         let mut ed = editor("");
         ed.open(&repo.join("m.txt")).unwrap();
         ed.handle_event(crate::event::Event::Resize);
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
         ed.session.sidebar = Some(sb);
         feed(&mut ed, "gg g");
         settle_until(&mut ed, |ed| {
@@ -13449,15 +13480,14 @@ mod tests {
         ed.git_auto = true;
         ed.open(&repo.join("a.txt")).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
-        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
-        sb.focus = false;
+        let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
         ed.session.sidebar = Some(sb);
         feed(&mut ed, "<space>g");
         settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| !s.unstaged.is_empty()));
         feed(&mut ed, "s");
         settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| !s.staged.is_empty()));
         assert_eq!(ed.session.git_status.as_ref().unwrap().staged[0].rel, "b.txt");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus, "the tab keeps the keys");
+        assert!(ed.session.is_at(crate::session::At::Side), "the tab keeps the keys");
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -13471,6 +13501,7 @@ mod tests {
         std::fs::write(repo.join("b.txt"), "b\n").unwrap();
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
         ed.sidebar_sync();
@@ -13491,8 +13522,7 @@ mod tests {
         let repo = git_repo("conflicts", &[("a.txt", "a\n")]);
         let in_repo = |text: &str| {
             let mut ed = editor(text);
-            let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
-            sb.focus = false;
+            let sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
             ed.session.sidebar = Some(sb);
             ed
         };
@@ -13596,7 +13626,7 @@ mod tests {
         ed.config.llm.args = vec!["-c".into(), format!("{}; cat > /dev/null", pwd("claude"))];
         crate::chat::open(&mut ed);
         ran_in(&mut ed, "claude", &root);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         crate::typed::execute(&mut ed, &format!("sh {}", pwd("sh"))).unwrap();
         ran_in(&mut ed, "sh", &root);
         ed.shell_pipe(crate::shell::Pipe::To, &pwd("pipe"));
@@ -13732,7 +13762,7 @@ mod tests {
             assert!(sent.contains(want), "{want} in {sent}");
         }
         // Ending it with files not viewed: asked first, on a card naming them (#10) — n keeps reviewing
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         feed(&mut ed, "<space>vq");
         assert!(ed.session.code_review.is_some(), "not ended without a word");
         let card = ed.offers.first().map(|o| (o.title.clone(), o.question.clone())).unwrap();
@@ -14091,7 +14121,7 @@ mod tests {
         use crate::sidebar::Mode;
         let mut ed = editor("x\n");
         feed(&mut ed, "<C-w>v");
-        let focus = |ed: &Editor| ed.session.sidebar.as_ref().map(|s| (s.mode, s.focus));
+        let focus = |ed: &Editor| ed.session.sidebar.as_ref().map(|s| (s.mode, ed.session.is_at(At::Side)));
         feed(&mut ed, "<C-w>e");
         assert_eq!(focus(&ed), Some((Mode::Files, true)), "closed: opens, at files the first time");
         feed(&mut ed, "<C-w>e");
@@ -14467,11 +14497,11 @@ mod tests {
         assert!(screen(&mut ed).contains("more lines · y waits — v shows all of it"), "said on the card");
         // `v`: all of it in a buffer — opened isn't read: `y` still waits until its end has been on screen.
         // The keys go to it (#55: the side panel or the review's rail kept them, and keys did nothing)
-        let mut side = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, test_root());
-        side.focus = true;
+        let side = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, test_root());
         ed.session.sidebar = Some(side);
+        ed.session.at = crate::session::At::Side;
         feed(&mut ed, "v");
-        assert!(!ed.session.sidebar.as_ref().unwrap().focus, "the code has the keys");
+        assert!(!ed.session.is_at(crate::session::At::Side), "the code has the keys");
         ed.session.sidebar = None;
         assert!(text(&ed).contains("line 80 of what it runs") && text(&ed).starts_with("Trust this project"));
         assert_eq!(ed.mode, Mode::Normal, "v didn't start a selection");
@@ -14795,7 +14825,9 @@ mod tests {
         screen(&mut ed);
         crate::typed::execute(&mut ed, "chat-screen").unwrap();
         let c = ed.session.chat.as_ref().expect("opened");
-        assert!(c.focused && c.screen.as_ref().is_some_and(|s| s.text.contains("fn other() {}")));
+        assert!(
+            ed.session.is_at(At::Chat) && c.screen.as_ref().is_some_and(|s| s.text.contains("fn other() {}"))
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -14822,7 +14854,7 @@ mod tests {
         ed.push_offer(card("Trust this project's settings?"));
         settle(&mut ed);
         feed(&mut ed, "<space>l");
-        assert!(ed.session.chat.as_ref().unwrap().focused);
+        assert!(ed.session.is_at(crate::session::At::Chat));
         feed(&mut ed, "guard_and_go no");
         assert_eq!(
             ed.session.chat.as_ref().unwrap().input,
@@ -14832,7 +14864,7 @@ mod tests {
         assert_eq!(ed.offers.len(), 1, "the card is still there, unanswered");
         // A card that comes mid-message waits; the keys stay the message's
         ed.push_offer(card("Second"));
-        assert!(ed.session.chat.as_ref().unwrap().focused);
+        assert!(ed.session.is_at(crate::session::At::Chat));
         feed(&mut ed, "n");
         assert_eq!(ed.session.chat.as_ref().unwrap().input, "guard_and_go non");
         // Nothing being typed: a card that comes leaves the chat the keys — `C-q` hands them over
@@ -14840,7 +14872,7 @@ mod tests {
         (c.input, c.cursor) = (String::new(), 0);
         ed.offers.clear();
         ed.push_offer(card("Claude wants to run"));
-        assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys");
+        assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
         settle(&mut ed);
         feed(&mut ed, "a");
         assert_eq!((ed.offers.len(), ed.session.chat.as_ref().unwrap().input.as_str()), (1, "a"), "typed");
@@ -14849,7 +14881,7 @@ mod tests {
         feed(&mut ed, "<C-q>y");
         assert!(ed.offers.is_empty(), "y answered it");
         // (in the code from here)
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         // An answer letter the card doesn't take isn't the code's (`a` would start inserting, and the `y` after
         // it would be typed)
         ed.push_offer(card("Only y or n"));
@@ -16481,6 +16513,7 @@ q = \"delete_selection\"\n",
         let mut ed = editor("");
         ed.open(&dir.join("src/ui/card.rs")).unwrap();
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, dir.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.sidebar_list_files();
         settle_until(&mut ed, |ed| ed.session.sidebar.as_ref().is_some_and(|s| !s.loading));
         let rows = |ed: &Editor| -> Vec<String> {
@@ -16492,15 +16525,15 @@ q = \"delete_selection\"\n",
         assert_eq!(sel(&ed), Some(2), "on the file being edited");
         feed(&mut ed, "j<ret>");
         assert_eq!(ed.doc().display_name_short(), "a.rs");
-        assert!(!ed.session.sidebar.as_ref().unwrap().focus, "the code has the keys again");
+        assert!(!ed.session.is_at(crate::session::At::Side), "the code has the keys again");
         feed(&mut ed, " e");
-        assert!(ed.session.sidebar.as_ref().unwrap().focus);
+        assert!(ed.session.is_at(crate::session::At::Side));
         feed(&mut ed, "kkh");
         assert_eq!(rows(&ed), ["src", "  ui", "  a.rs", "b.md"], "ui folded");
         feed(&mut ed, "l");
         assert_eq!(rows(&ed).len(), 5);
         feed(&mut ed, "<esc>");
-        assert!(ed.session.sidebar.as_ref().is_some_and(|s| !s.focus), "still showing");
+        assert!(ed.session.sidebar.is_some() && !ed.session.is_at(At::Side), "still showing");
         feed(&mut ed, " e e");
         assert!(ed.session.sidebar.is_none(), "space e on the focused panel closes it");
         std::fs::remove_dir_all(&dir).ok();

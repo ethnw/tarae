@@ -17,6 +17,30 @@ use crate::editor::{Editor, Mode, View};
 use crate::event::SessionId;
 use crate::key::{Code, Key};
 
+/// Where a session's keys are — one value (panes P2a, `target/sb/panes-plan.md` §2.3): the code, a surface
+/// beside it, or the left rail's two. Inside a surface its own sub-state says the rest (the chat's input or its
+/// view mode, `Session.view`). P2b makes every surface a pane and this its id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum At {
+    /// The code pane `Session.focus`.
+    #[default]
+    Code,
+    /// The chat: its input, or its view mode.
+    Chat,
+    /// The terminal's program.
+    Program,
+    /// The slot's panel with tarae's keys: the test run's, the task's, the terminal's view mode.
+    Slot,
+    /// `:procs`' panel.
+    Procs,
+    /// A plugin's panel in the slot.
+    Plugin,
+    /// The side panel.
+    Side,
+    /// The code review's rail.
+    Rail,
+}
+
 pub struct Session {
     pub id: SessionId,
     /// The checkout, links resolved: where git, the terminal, tasks, Claude, pickers and searches run, what
@@ -38,7 +62,12 @@ pub struct Session {
     /// (synced every event).
     pub views: Vec<View>,
     pub split: crate::split::Split,
+    /// The code pane last focused — what `doc()` means, wherever the keys are (`at`).
     pub focus: crate::split::ViewId,
+    /// Where the keys are: one value (`At`) — never a flag on each surface.
+    pub at: At,
+    /// `C-w z`: what fills the screen, while it keeps the keys (`Editor::zoomed`).
+    pub zoom: Option<crate::sizes::Zoom>,
     /// While it's behind: the document its focused pane shows (in front, that's `Editor.current`).
     pub current_doc: DocId,
     /// The blank scratch it opened with, until a document is added in it — the first file opened takes
@@ -295,6 +324,8 @@ impl Session {
             views: Vec::new(),
             split: crate::split::Split::Leaf(view),
             focus: view,
+            at: At::Code,
+            zoom: None,
             current_doc: 0,
             scratch: None,
             docs: Vec::new(),
@@ -378,6 +409,28 @@ impl Session {
             proxy_id,
             reviews: Default::default(),
         }
+    }
+
+    /// The keys are `at`'s.
+    pub fn is_at(&self, at: At) -> bool {
+        self.at == at
+    }
+
+    /// The keys leave `at` for the code — nothing when they were elsewhere.
+    pub fn leave(&mut self, at: At) {
+        if self.at == at {
+            self.at = At::Code;
+        }
+    }
+
+    /// The chat has the keys (its input, minimized or not, or its view mode).
+    pub fn chat_has_keys(&self) -> bool {
+        self.at == At::Chat && self.chat.is_some()
+    }
+
+    /// The terminal's program has the keys: it's shown and runs.
+    pub fn program_has_keys(&self) -> bool {
+        self.at == At::Program && self.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none())
     }
 
     /// The hosts its `s` let through, at their ports — what its runs' rules carry (`caps::Basis`).
@@ -1487,8 +1540,8 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("unsent")), "{rows:#?}");
         // The front's chat minimized while Claude works: its draft on the status line
         let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.focused, c.follow.on, c.state) =
-            ("half a thought\nmore".into(), false, true, crate::chat::State::Thinking);
+        (c.input, c.follow.on, c.state) = ("half a thought\nmore".into(), true, crate::chat::State::Thinking);
+        ed.session.at = At::Code;
         let rows = screen(&mut ed, 160, 24);
         let status = rows.iter().find(|r| r.contains("● normal")).unwrap_or_else(|| panic!("{rows:#?}"));
         assert!(status.contains("unsent half a thought"), "{status}");
@@ -1920,7 +1973,8 @@ mod tests {
         ed.with_session(back, |ed| {
             crate::chat::open(ed);
             let c = ed.session.chat.as_mut().unwrap();
-            (c.state, c.focused) = (crate::chat::State::Thinking, false);
+            c.state = crate::chat::State::Thinking;
+            ed.session.at = At::Code;
             generation = c.generation();
             for id in [1, 2] {
                 let (id, tool, since, after) = (json!(id), "symbols", Instant::now(), STUCK_AFTER);

@@ -571,7 +571,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         (ed, dir, generation)
     }
@@ -863,7 +863,7 @@ mod tests {
         run(&mut ed, generation, 3, "sh slow.sh");
         pump(&mut ed, "Claude's started", running);
         ed.task_start(mine);
-        ed.bottom_focus = true;
+        ed.session.at = crate::session::At::Slot;
         assert!(screen(&mut ed).contains("enter run now — stops sh slow.sh"));
         ed.handle_key("ret".parse().unwrap());
         pump(&mut ed, "the user's ran", |ed| order(&dir) == ["mine"] && !running(ed));

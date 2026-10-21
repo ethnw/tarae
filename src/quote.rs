@@ -273,7 +273,7 @@ pub fn add(ed: &mut Editor, taken: Vec<Taken>) {
         crate::chat::open(ed);
     }
     let Some(c) = ed.session.chat.as_mut() else { return };
-    c.focused = true;
+    ed.session.at = crate::session::At::Chat;
     c.unfolded = true;
     let mut left = 0;
     for t in taken {

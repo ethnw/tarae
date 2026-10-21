@@ -609,8 +609,7 @@ impl Editor {
             Some(s) if s.mode == mode => {}
             Some(s) => s.switch_to(mode),
             None => {
-                let mut s = crate::sidebar::Sidebar::new(mode, self.session.root.clone());
-                s.focus = false;
+                let s = crate::sidebar::Sidebar::new(mode, self.session.root.clone());
                 self.session.sidebar = Some(s);
                 if mode == M::Files {
                     self.sidebar_list_files();

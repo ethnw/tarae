@@ -198,6 +198,7 @@ fn a_chat_answer_is_taken_back_when_the_conversation_ends() {
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     ed.session.chat = Some(crate::chat::Chat::new());
+    ed.session.at = crate::session::At::Chat;
     let front = dir.join("front");
     let session = session_of(&front);
     for h in [HOST, "kept.example.invalid"] {
@@ -405,6 +406,7 @@ fn each_answer_reaches_as_far_as_its_key() {
 fn a_hosts_answer_records_the_key_that_gave_it() {
     let (mut ed, dir, _, run, _) = two("keys-recorded");
     ed.session.chat = Some(crate::chat::Chat::new());
+    ed.session.at = crate::session::At::Chat;
     let front = dir.join("front");
     for (h, k) in
         [("chat.example.invalid", 'a'), ("session.example.invalid", 's'), ("project.example.invalid", 'A')]
@@ -669,6 +671,7 @@ fn a_cut_card_with_five_answers_keeps_its_width_once_read() {
 fn the_card_stays_when_its_run_ends_and_y_is_for_the_next_run() {
     let (mut ed, dir, _, run, _) = two("ends");
     ed.session.chat = Some(crate::chat::Chat::new());
+    ed.session.at = crate::session::At::Chat;
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     asked(&mut ed, ask(&dir.join("front"), run, HOST));

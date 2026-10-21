@@ -26,6 +26,7 @@ use crate::editor::Editor;
 use crate::key::{Code, Key};
 use crate::llm::{self, StreamEv};
 use crate::markdown::Span;
+use crate::session::At;
 
 pub(crate) const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
 (your current directory). Explore it with tarae's own code tools — look at the code you need \
@@ -401,7 +402,6 @@ pub struct Chat {
     pub input: String,
     /// Cursor within the input (bytes).
     pub cursor: usize,
-    pub focused: bool,
     pub state: State,
     pub started: Instant,
     /// How many lines scrolled up from the bottom (0 = follow the bottom).
@@ -819,7 +819,6 @@ impl Chat {
             msgs: Vec::new(),
             input: String::new(),
             cursor: 0,
-            focused: true,
             state: State::Idle,
             started: Instant::now(),
             scroll: 0,
@@ -1134,8 +1133,8 @@ impl Drop for Chat {
 pub fn open(ed: &mut Editor) {
     match &mut ed.session.chat {
         Some(c) => {
-            c.focused = true;
             c.unfolded = true;
+            ed.session.at = At::Chat;
         }
         None => {
             let mut c = Chat::new();
@@ -1150,6 +1149,7 @@ pub fn open(ed: &mut Editor) {
                 });
             }
             ed.session.chat = Some(c);
+            ed.session.at = At::Chat;
             ed.caps_sync();
             crate::edits::at_end_new_chat(ed);
             crate::reads::kept_keys_load(ed);
@@ -1299,10 +1299,12 @@ pub fn restore(ed: &mut Editor, r: Restored) {
     c.follow.on = r.follow;
     c.cursor = if r.input.is_char_boundary(r.cursor) { r.cursor } else { r.input.len() };
     c.input = r.input;
-    c.focused = r.focused;
     c.edits.at_end = r.at_end;
     c.edits.at_end_yours = r.at_end_yours;
     ed.session.chat = Some(c);
+    if r.focused {
+        ed.session.at = At::Chat;
+    }
     let spawn = !r.lazy;
     let (Some(id), Some(dir)) = (r.conversation, ed.chats_dir.clone()) else {
         if spawn {
@@ -1408,7 +1410,8 @@ pub fn reset(ed: &mut Editor) {
         return ed.set_status(said);
     };
     c.started_new = true;
-    (c.focused, c.unfolded) = (true, true);
+    c.unfolded = true;
+    ed.session.at = At::Chat;
     c.kill();
     // The one just left is an earlier one now (the empty chat lists it)
     if let Some(id) = c.conversation.take() {
@@ -2170,10 +2173,10 @@ pub fn attach_screen(ed: &mut Editor) -> Result<(), String> {
         open(ed);
     }
     let c = ed.session.chat.as_mut().ok_or("no chat")?;
-    c.focused = true;
     c.screen = Some(Shot { text, cols, rows });
     c.with.retain(|w| *w != With::Screen);
     c.with.push(With::Screen);
+    ed.session.at = At::Chat;
     Ok(())
 }
 
@@ -2642,9 +2645,7 @@ pub fn turn_gathered(ed: &mut Editor, n: Option<String>) {
         }
         if open {
             // (the keys go to the review, as with an edit's)
-            if let Some(c) = &mut ed.session.chat {
-                c.focused = false;
-            }
+            ed.session.leave(At::Chat);
             crate::codereview::start_turn(ed, ed.session.checkpoints.list.len() - 1);
         }
     }
@@ -3279,7 +3280,10 @@ pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
     if !ed.pending.is_empty() {
         return false;
     }
-    let Some(c) = ed.session.chat.as_mut().filter(|c| c.focused && c.compact()) else { return false };
+    if ed.session.at != At::Chat {
+        return false;
+    }
+    let Some(c) = ed.session.chat.as_mut().filter(|c| c.compact()) else { return false };
     // (as `key`: from an empty input `C-w` is the windows')
     if acts_unseen(key) || (key.ctrl && key.code == Code::Char('w') && c.input.is_empty()) {
         return false;
@@ -3314,7 +3318,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     let page = page(ed);
     let half = crate::key::half(page) as usize;
-    let Some(c) = ed.session.chat.as_mut().filter(|c| c.focused) else { return false };
+    if ed.session.at != At::Chat {
+        return false;
+    }
+    let Some(c) = ed.session.chat.as_mut() else { return false };
     // An empty input: `C-w` is the windows' (sizes — `C-w >` widens the chat), nothing to delete
     if key.ctrl && key.code == Code::Char('w') && c.input.is_empty() {
         return false;
@@ -3327,7 +3334,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     let ch = |c: &Chat| c.input[..c.cursor].chars().next_back().map_or(0, char::len_utf8);
     match (key.code, key.ctrl, key.alt) {
-        (Code::Esc, ..) => c.focused = false,
+        (Code::Esc, ..) => ed.session.at = At::Code,
         (Code::Enter, false, true) | (Code::Char('j'), true, _) => {
             c.input.insert(c.cursor, '\n');
             c.cursor += 1;
@@ -3475,9 +3482,7 @@ pub fn apply_code(ed: &mut Editor) {
     let old = doc.text.byte_slice(r.from()..r.to()).to_string();
     let new = llm::match_trailing_newline(&old, code);
     let doc_id = doc.id;
-    if let Some(c) = &mut ed.session.chat {
-        c.focused = false;
-    }
+    ed.session.leave(At::Chat);
     llm::review_with(ed, doc_id, "apply code from chat", vec![(r.from(), r.to(), old, new)], None);
 }
 
@@ -3553,6 +3558,7 @@ mod tests {
         ));
         c.msgs.push(m);
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
         let (y, x0, x1, call) = ed.screen.chat_ran.borrow().first().cloned().expect("the mark's spot");
@@ -3630,6 +3636,7 @@ mod tests {
             let mut c = Chat::new();
             (c.resume, c.conversation) = (Some("s-1".into()), Some("s-1".into()));
             ed.session.chat = Some(c);
+            ed.session.at = crate::session::At::Chat;
             ensure_proc(&mut ed);
             // (it starts once what it waits on is read — and nothing after: its exit stays unheard)
             settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().proc.is_some());
@@ -3713,6 +3720,7 @@ mod tests {
         let first = stand_in(&mut c);
         c.resume = Some("s-1".into());
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let taken = |t: String| crate::quote::Taken {
             attrs: vec![("from", "terminal".into())],
             label: t.clone(),
@@ -3822,9 +3830,9 @@ mod tests {
     #[test]
     fn page_keys_page_the_chat() {
         let mut ed = editor("");
-        let mut c = Chat::new();
-        c.focused = true;
+        let c = Chat::new();
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         // (12 rows of conversation in sight)
         ed.screen.chat_view.set(Some((0, 60, 12, 0)));
         let press = |ed: &mut Editor, k: &str| assert!(key(ed, k.parse().unwrap()), "{k} is the chat's");
@@ -3886,6 +3894,7 @@ mod tests {
         let mut c = Chat::new();
         c.kept_keys = Some(Vec::new());
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         ed.open(&env).unwrap();
         let n = ed.doc().text.len_bytes();
         ed.doc_mut().set_selection(Selection::single(Range::new(0, n)));
@@ -3931,6 +3940,7 @@ mod tests {
             c.kept_keys = Some(Vec::new());
             open(&mut c, &env);
             ed.session.chat = Some(c);
+            ed.session.at = crate::session::At::Chat;
             let pass = crate::reads::input_pass(&ed);
             let (ctx, chip, _, withheld) = context(&ed, None, &pass, &[]);
             assert!(
@@ -4036,14 +4046,15 @@ mod tests {
         point_at(&mut ed, &pane);
         answer_card(&mut ed, "y");
         let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.focused) = ("with the key".into(), true);
+        c.input = "with the key".into();
+        ed.session.at = At::Chat;
         send(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         assert_eq!(c.queued_pointed, std::slice::from_ref(&pane), "its chip waits with it");
         // (one pointed at since, then taken off: the queued one's `y` stays)
         c.pointed.push("card#77".into());
         c.with.push(With::Pointed);
-        c.focused = true;
+        ed.session.at = At::Chat;
         assert!(key(&mut ed, "backspace".parse().unwrap()));
         assert!(ed.session.chat.as_ref().unwrap().key_pass.iter().any(|(id, _)| *id == pane), "its y stays");
         let went = |ed: &Editor| ed.session.chat.as_ref().is_some_and(|c| !c.busy() && c.queued.is_none());
@@ -4105,7 +4116,7 @@ mod tests {
         // The chip taken off: its card goes with it — and so does a `y` already given for it
         let chip_off = |ed: &mut Editor| {
             // (the card took the keys from the empty input — back in the chat)
-            ed.session.chat.as_mut().unwrap().focused = true;
+            ed.session.at = crate::session::At::Chat;
             assert!(key(ed, "backspace".parse().unwrap()));
         };
         point(&mut ed);
@@ -4233,6 +4244,7 @@ mod tests {
         let mut c = Chat::new();
         c.kept_keys = Some(Vec::new());
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         ed.open(&env).unwrap();
         ed.split_view(crate::split::Dir::Horizontal);
         ed.open(&plain).unwrap();
@@ -4346,6 +4358,8 @@ mod tests {
         assert!(listed.contains("plain words"), "{listed}");
         assert!(side(&ed.ui_state()).contains("API_KEY=tarae-fake-token"), "the user's own state");
         ed.session.chat.as_mut().unwrap().allowed.keys.push(env.clone());
+        // (the list with the keys again, its row whole: `C-s` gave them to the chat)
+        ed.session.at = At::Side;
         for s in shots(&mut ed) {
             assert!(s.contains("API_KEY=tarae-fake-token") && !s.contains("not sent]"), "opened: {s}");
         }
@@ -4483,6 +4497,7 @@ mod tests {
         let mut ed = editor("");
         let root = ed.session.root.clone();
         ed.session.chat = Some(Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation;
         let pending = |f: &str| crate::reads::Pending {
             request_id: f.into(),
@@ -4565,6 +4580,7 @@ mod tests {
         let mut ed = editor("");
         (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
         ed.session.chat = Some(Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation;
         let until = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -4692,6 +4708,7 @@ mod tests {
         }
         let mut ed = editor("");
         ed.session.chat = Some(Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let ask = |ed: &mut Editor, id: &str, f: &str| {
             let req = serde_json::json!({"tool_name": "Read", "input": {"file_path": shots.join(f)}});
             crate::reads::request(ed, id, &req);
@@ -4779,6 +4796,7 @@ mod tests {
         }
         c.calls.push(Called { id: "r1".into(), name: "mcp__tarae__rename".into(), input: edit.clone() });
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let other = json!({"edits": []});
         assert_eq!(claim_call(&mut ed, "mcp__tarae__edit", &other), None, "another input");
         assert_eq!(claim_call(&mut ed, "mcp__tarae__edit", &edit).as_deref(), Some("t1"));
@@ -4809,6 +4827,7 @@ mod tests {
         c.msgs.push(Msg::tool(r, "t1"));
         let generation = c.generation;
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let text = "exit 101 in 2.0s\n$ cargo test -p tarae\n".to_string();
         on_event(&mut ed, generation, StreamEv::ToolResult { id: "t1".into(), text, error: false });
         let c = ed.session.chat.as_ref().unwrap();
@@ -4912,6 +4931,7 @@ mod tests {
         c.state = State::Thinking;
         let generation = c.generation;
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let root = ed.session.root.clone();
         let read = serde_json::json!({ "file_path": root.join("src/a.rs"), "offset": 1, "limit": 40 });
         let calls = [

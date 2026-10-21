@@ -203,7 +203,7 @@ impl Editor {
                     })
                 })
                 .collect();
-            p.side = Some((tab.to_string(), sb.focus, rows, lines.len()));
+            p.side = Some((tab.to_string(), self.session.is_at(crate::session::At::Side), rows, lines.len()));
         }
         // The code review: its rail's file rows as drawn
         if let Some(r) = self.session.code_review.as_ref() {
@@ -229,7 +229,7 @@ impl Editor {
                 files: r.files.len(),
                 viewed: r.files.iter().filter(|f| r.viewed(self, f)).count(),
                 file: marked.and_then(|i| r.files.get(i)).map(|f| f.rel.clone()),
-                focused: r.focus,
+                focused: self.session.is_at(crate::session::At::Rail),
                 rows,
                 high: r
                     .high_unseen(self)
@@ -304,7 +304,7 @@ impl Editor {
         }
         if let Some(c) = self.session.chat.as_ref() {
             p.chat = Some(Chat {
-                focused: c.focused,
+                focused: self.session.is_at(crate::session::At::Chat),
                 minimized: c.compact(),
                 busy: c.busy(),
                 queued: c.queued.is_some() || !c.sends.is_empty(),

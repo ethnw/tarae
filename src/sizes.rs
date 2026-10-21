@@ -19,6 +19,7 @@
 //! terminal's: its view mode, `view.rs`).
 
 use crate::key::{Code, Key};
+use crate::session::At;
 
 use std::path::{Path, PathBuf};
 
@@ -224,9 +225,10 @@ impl crate::editor::Editor {
         match slot {
             Slot::Terminal => {
                 if let Some(t) = self.session.terminal.as_mut() {
-                    (t.visible, t.focus) = (false, false);
+                    t.visible = false;
                 }
-                self.bottom_focus = false;
+                self.session.leave(At::Program);
+                self.session.leave(At::Slot);
             }
             // A rebase stopped at its conflicts isn't running: it waits on them, and its panel with it — `space m c`
             // isn't the way out there (it drops the run the rebase is), `:rebase-abort` is
@@ -248,11 +250,11 @@ impl crate::editor::Editor {
             }
             Slot::Test => {
                 self.test_close();
-                self.bottom_focus = false;
+                self.session.leave(At::Slot);
             }
             Slot::Task => {
                 self.task_close();
-                self.bottom_focus = false;
+                self.session.leave(At::Slot);
             }
             Slot::Procs => self.procs_close(),
             Slot::Debug | Slot::Plugin => {}
@@ -289,7 +291,7 @@ impl crate::editor::Editor {
 /// to the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
 /// may not be in sight). False = not the slot's.
 pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
-    if !ed.bottom_focus
+    if !ed.session.is_at(At::Slot)
         || ed.mode != crate::editor::Mode::Normal
         || !ed.pending.is_empty()
         || ed.prompt.is_some()
@@ -297,7 +299,7 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         return false;
     }
     let Some(slot) = ed.slot().filter(|s| matches!(s, Slot::Terminal | Slot::Test | Slot::Task)) else {
-        ed.bottom_focus = false;
+        ed.session.leave(At::Slot);
         return false;
     };
     if slot == Slot::Terminal {
@@ -316,7 +318,7 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
             return true;
         }
         (Code::Esc, _) => {
-            ed.bottom_focus = false;
+            ed.session.leave(At::Slot);
             return true;
         }
         (Code::Char('q'), false) => {
@@ -383,10 +385,10 @@ impl crate::editor::Editor {
     fn sized(&self) -> Option<Which> {
         let chat = self.screen.chat_w > 0 && self.session.chat.as_ref().is_some_and(|c| !c.compact());
         let side = self.session.sidebar.is_some() && !self.review_rail_up();
-        if chat && self.session.chat.as_ref().is_some_and(|c| c.focused) {
+        if chat && self.session.is_at(At::Chat) {
             return Some(Which::Chat);
         }
-        if side && self.session.sidebar.as_ref().is_some_and(|s| s.focus) {
+        if side && self.session.is_at(At::Side) {
             return Some(Which::Side);
         }
         if chat { Some(Which::Chat) } else { side.then_some(Which::Side) }
@@ -546,8 +548,11 @@ impl crate::editor::Editor {
     /// A card that took them (`C-q` — #201: in 50 columns its keys went to a card nobody could see) has them,
     /// not the chat: the code is there, with the card on it; Esc or its answer brings the chat back.
     pub fn chat_panel(&self, total: usize) -> bool {
-        let Some(c) = self.session.chat.as_ref().filter(|c| !c.compact()) else { return false };
-        (c.focused && !self.card_keys) || widths(total, true, false, self.sizes).chat < total
+        if !self.session.chat.as_ref().is_some_and(|c| !c.compact()) {
+            return false;
+        }
+        (self.session.is_at(At::Chat) && !self.card_keys)
+            || widths(total, true, false, self.sizes).chat < total
     }
 
     /// `C-w =` — every size automatic again.
@@ -597,16 +602,14 @@ impl crate::editor::Editor {
         .max(1)
     }
 
-    /// Whether the bottom slot has the keys — tarae's (`bottom_focus`), or the terminal's program, or a
+    /// Whether the bottom slot has the keys — tarae's (`At::Slot`), or the terminal's program, or a
     /// plugin panel's.
     pub fn bottom_has_keys(&self) -> bool {
         match self.slot() {
-            Some(Slot::Terminal) => {
-                self.bottom_focus || self.session.terminal.as_ref().is_some_and(|t| t.focus)
-            }
+            Some(Slot::Terminal) => self.session.is_at(At::Slot) || self.session.is_at(At::Program),
             Some(Slot::Plugin) => self.plugin_panel_focused(),
             Some(Slot::Procs) => self.procs_focused(),
-            Some(Slot::Test | Slot::Task) => self.bottom_focus,
+            Some(Slot::Test | Slot::Task) => self.session.is_at(At::Slot),
             Some(Slot::Debug) | None => false,
         }
     }
@@ -622,19 +625,7 @@ impl crate::editor::Editor {
             Some(Slot::Plugin) => self.plugin_panel_click(None),
             Some(Slot::Procs) => self.procs_click(None),
             Some(_) => {
-                if let Some(c) = self.session.chat.as_mut() {
-                    c.focused = false;
-                }
-                if let Some(s) = self.session.sidebar.as_mut() {
-                    s.focus = false;
-                }
-                if let Some(r) = self.session.code_review.as_mut() {
-                    r.focus = false;
-                }
-                if let Some(t) = self.session.terminal.as_mut() {
-                    t.focus = false;
-                }
-                self.bottom_focus = true;
+                self.session.at = At::Slot;
                 // (the terminal's: its view mode, at once — what has the keys is said before the next key)
                 crate::view::sync(self);
             }
@@ -644,31 +635,32 @@ impl crate::editor::Editor {
     /// What has the keys, as `C-w z` would fill the screen with it — None: the review's file list (it keeps
     /// its width).
     pub fn focused_area(&self) -> Option<Zoom> {
-        if self.session.chat.as_ref().is_some_and(|c| c.focused && !c.compact()) {
+        let s = &self.session;
+        if s.is_at(At::Chat) && s.chat.as_ref().is_some_and(|c| !c.compact()) {
             return Some(Zoom::Chat);
         }
         let rail = self.review_rail_up();
-        if rail && self.session.code_review.as_ref().is_some_and(|r| r.focus) {
+        if rail && s.is_at(At::Rail) && s.code_review.is_some() {
             return None;
         }
-        if !rail && self.session.sidebar.as_ref().is_some_and(|s| s.focus) {
+        if !rail && s.is_at(At::Side) && s.sidebar.is_some() {
             return Some(Zoom::Side);
         }
         if self.bottom_has_keys() {
             return Some(Zoom::Bottom);
         }
-        Some(Zoom::Code(self.session.focus))
+        Some(Zoom::Code(s.focus))
     }
 
     /// What fills the screen now: `C-w z`'s, while it still has the keys.
     pub fn zoomed(&self) -> Option<Zoom> {
-        self.zoom.filter(|z| Some(*z) == self.focused_area())
+        self.session.zoom.filter(|z| Some(*z) == self.focused_area())
     }
 
     /// `C-w z` — what has the keys fills the screen; again, back as it was.
     pub fn zoom_toggle(&mut self) {
         if self.zoomed().is_some() {
-            self.zoom = None;
+            self.session.zoom = None;
             return;
         }
         let Some(z) = self.focused_area() else {
@@ -683,39 +675,36 @@ impl crate::editor::Editor {
         if matches!(z, Zoom::Code(_)) && alone {
             return self.set_status("the code has the whole screen already");
         }
-        self.zoom = Some(z);
+        self.session.zoom = Some(z);
     }
 
-    /// Every key and event: the bottom slot's keys go when something else took them (or it emptied),
-    /// `C-w z` ends once what it filled the screen with doesn't have them.
+    /// Every key and event: the keys are still where `Session.at` says — what it names is still there (the
+    /// chat open, the terminal shown and running, the slot showing a panel that takes them), else they're the
+    /// code's; `C-w z` ends once what it filled the screen with doesn't have them.
     pub fn focus_sync(&mut self) {
         self.slot_sync();
-        if self.bottom_focus {
-            let program = self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible);
-            let other = self.session.chat.as_ref().is_some_and(|c| c.focused)
-                || self.session.sidebar.as_ref().is_some_and(|s| s.focus)
-                || self.session.code_review.as_ref().is_some_and(|r| r.focus);
-            let slot = matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task));
-            if program || other || !slot {
-                self.bottom_focus = false;
-            }
+        let s = &self.session;
+        let there = match s.at {
+            At::Code => true,
+            At::Chat => s.chat.is_some(),
+            At::Program => s.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()),
+            At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task)),
+            At::Procs => self.procs.panel.is_some(),
+            At::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
+            At::Side => s.sidebar.is_some(),
+            At::Rail => s.code_review.is_some(),
+        };
+        if !there {
+            self.session.at = At::Code;
         }
-        // `:procs`' panel: the same, when another place took the keys — and it gives the slot to the terminal
-        // given them (`C-\`), which it covered
-        if self.procs_up() && self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible) {
+        // `:procs`' panel gives the slot to the terminal given the keys (`C-\`), which it covered
+        if self.procs_up() && self.session.program_has_keys() {
             self.procs_close();
-        }
-        if self.procs_focused()
-            && (self.session.chat.as_ref().is_some_and(|c| c.focused)
-                || self.session.sidebar.as_ref().is_some_and(|s| s.focus)
-                || self.session.code_review.as_ref().is_some_and(|r| r.focus))
-        {
-            self.procs_unfocus();
         }
         // (a view whose surface lost the keys ends; the terminal given tarae's keys is in its view mode)
         crate::view::sync(self);
-        if self.zoom.is_some() && self.zoomed().is_none() {
-            self.zoom = None;
+        if self.session.zoom.is_some() && self.zoomed().is_none() {
+            self.session.zoom = None;
         }
     }
 
@@ -734,6 +723,41 @@ mod tests {
 
     const AUTO: Sizes = Sizes { chat: None, side: None, bottom: None };
 
+    /// Panes P2a: where the keys are is one value (`Session.at`) — once what it names is gone (the chat closed,
+    /// the side panel closed, the terminal hidden, the slot showing nothing that takes them) the next event
+    /// gives them to the code; a pane still there keeps them; `C-w z` ends with them.
+    #[test]
+    fn the_keys_go_to_the_code_once_what_had_them_is_gone() {
+        use crate::session::At;
+        let dir = crate::scratch::Scratch::new("keys-gone");
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.path().to_path_buf();
+        let key = |ed: &mut crate::editor::Editor| ed.handle_key(Key::plain(Code::Char('l')));
+        ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = At::Chat;
+        ed.focus_sync();
+        assert_eq!(ed.session.at, At::Chat);
+        ed.session.chat = None;
+        ed.focus_sync();
+        assert_eq!(ed.session.at, At::Code, "the chat closed");
+        ed.sidebar_show(crate::sidebar::Mode::Files);
+        assert_eq!(ed.session.at, At::Side);
+        key(&mut ed);
+        assert_eq!(ed.session.at, At::Side, "a pane still there keeps them");
+        ed.session.sidebar = None;
+        key(&mut ed);
+        assert_eq!(ed.session.at, At::Code, "the side panel closed");
+        let _sent = crate::terminal::stand_in(&mut ed, 10, 80, 100);
+        ed.session.zoom = ed.focused_area();
+        assert_eq!((ed.session.at, ed.zoomed()), (At::Program, Some(Zoom::Bottom)));
+        ed.session.terminal.as_mut().unwrap().visible = false;
+        ed.focus_sync();
+        assert_eq!((ed.session.at, ed.session.zoom), (At::Code, None), "hidden: the code's, the zoom over");
+        ed.session.at = At::Slot;
+        ed.focus_sync();
+        assert_eq!(ed.session.at, At::Code, "nothing in the slot takes them");
+    }
+
     /// cardburden 4b: `K` in the task panel says where Claude's command in it ran and why — its run's record,
     /// as a click on its chat row's mark does; its hint on the panel's header. A run that isn't Claude's says
     /// so. (The run is the test's own `sleep`, stopped at the end.)
@@ -749,7 +773,7 @@ mod tests {
         assert!(
             ed.task_start_for(task, crate::tools::For::User("t".into()), None, Default::default()).is_ok()
         );
-        ed.bottom_focus = true;
+        ed.session.at = crate::session::At::Slot;
         let k: Key = "K".parse().unwrap();
         let said = |ed: &crate::editor::Editor| ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
         assert!(bottom_key(&mut ed, k));

@@ -2169,9 +2169,7 @@ mod tests {
     /// The sessions' tabs over the front session's chat (opened, no process).
     fn tabs(ed: &mut Editor) -> String {
         if ed.session.chat.is_none() {
-            let mut c = crate::chat::Chat::new();
-            c.focused = false;
-            ed.session.chat = Some(c);
+            ed.session.chat = Some(crate::chat::Chat::new());
         }
         let rows = rows(ed);
         rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
@@ -2565,7 +2563,6 @@ mod tests {
         ed.config.llm.args.extend(["--resume".into(), "author-c1".into(), "--continue".into()]);
         let mut chat = crate::chat::Chat::new();
         chat.conversation = Some("author-c1".into());
-        chat.focused = false;
         chat.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "AUTHOR-ONLY-MARKER", ""));
         ed.session.chat = Some(chat);
         reviewed(&mut ed, &repo);
@@ -3795,7 +3792,7 @@ mod tests {
         settle_with(&mut ed, |ed| next(ed) && !ed.session.reviewer.as_ref().unwrap().reading(), false);
         // Another conversation: asked again, `n` starts none
         let mut chat = crate::chat::Chat::new();
-        (chat.conversation, chat.focused) = (Some("conv-2".into()), false);
+        chat.conversation = Some("conv-2".into());
         ed.session.chat = Some(chat);
         keys(&mut ed, &["space", "v", "C"]);
         settle_with(&mut ed, |ed| card(ed).is_some(), false);

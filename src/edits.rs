@@ -152,9 +152,11 @@ pub fn at_end_follow_config(ed: &mut Editor) {
 pub fn at_end_set(ed: &mut Editor, on: bool) {
     // (opened as it was set — it's told below)
     if ed.session.chat.is_none() {
+        // (opened without the keys: they stay where they were)
+        let at = ed.session.at;
         crate::chat::open(ed);
+        ed.session.at = at;
         if let Some(c) = &mut ed.session.chat {
-            c.focused = false;
             c.unfolded = false;
         }
     }
@@ -501,9 +503,9 @@ fn show(ed: &mut Editor, p: Pending) {
     }
     let warnings = if p.protected == Some(true) { warned(ed) } else { Vec::new() };
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
-    let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
+    let from_chat = ed.session.chat_has_keys();
+    ed.session.leave(crate::session::At::Chat);
     if let Some(c) = &mut ed.session.chat {
-        c.focused = false;
         c.follow.keep(doc_id);
     }
     let row = p.row.clone();

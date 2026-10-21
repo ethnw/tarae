@@ -1405,7 +1405,6 @@ pub struct Panel {
     pub selected: usize,
     /// The first row in sight (drawing keeps the selected one in sight).
     pub scroll: std::cell::Cell<usize>,
-    pub focus: bool,
     /// The tallest it's been (`term::procs_panel_h` — it doesn't shrink while it's open).
     pub tall: std::cell::Cell<usize>,
 }
@@ -1740,20 +1739,13 @@ impl Editor {
 
     /// `:procs` — the panel, with the keys, looked at every second while it's open; again: closed.
     pub fn procs_toggle(&mut self) {
-        if self.procs.panel.as_ref().is_some_and(|p| p.focus) {
+        if self.procs_focused() {
             return self.procs_close();
         }
-        match self.procs.panel.as_mut() {
-            Some(p) => p.focus = true,
-            None => {
-                self.procs.panel = Some(Panel {
-                    selected: 0,
-                    scroll: Default::default(),
-                    focus: true,
-                    tall: Default::default(),
-                });
-                self.procs_wake(Wake::Open(true));
-            }
+        if self.procs.panel.is_none() {
+            self.procs.panel =
+                Some(Panel { selected: 0, scroll: Default::default(), tall: Default::default() });
+            self.procs_wake(Wake::Open(true));
         }
         self.procs_took_keys();
     }
@@ -1765,36 +1757,23 @@ impl Editor {
 
     /// The panel took the keys: nothing else keeps them.
     fn procs_took_keys(&mut self) {
-        if let Some(c) = self.session.chat.as_mut() {
-            c.focused = false;
-        }
-        if let Some(s) = self.session.sidebar.as_mut() {
-            s.focus = false;
-        }
-        if let Some(t) = self.session.terminal.as_mut() {
-            t.focus = false;
-        }
-        self.bottom_focus = false;
-        self.plugin_panel_unfocus();
+        self.session.at = crate::session::At::Procs;
     }
 
     /// Whether the panel has the keys.
     pub fn procs_focused(&self) -> bool {
-        self.procs.panel.as_ref().is_some_and(|p| p.focus)
+        self.session.is_at(crate::session::At::Procs) && self.procs.panel.is_some()
     }
 
     /// The panel gives the keys back (the code was clicked, another place took them).
     pub fn procs_unfocus(&mut self) {
-        if let Some(p) = self.procs.panel.as_mut() {
-            p.focus = false;
-        }
+        self.session.leave(crate::session::At::Procs);
     }
 
     /// A click on the panel's row `row` (None: its header): the keys, that row selected.
     pub fn procs_click(&mut self, row: Option<usize>) {
         let n = self.procs.rows.len();
         let Some(p) = self.procs.panel.as_mut() else { return };
-        p.focus = true;
         if let Some(r) = row.filter(|&r| r < n) {
             p.selected = r;
         }
@@ -2412,7 +2391,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     let n = ed.procs.rows.len();
     let rows = ed.screen.procs_panel.get().map_or(0, |a| a.shown);
-    let Some(p) = ed.procs.panel.as_mut().filter(|p| p.focus) else { return false };
+    if !ed.session.is_at(crate::session::At::Procs) {
+        return false;
+    }
+    let Some(p) = ed.procs.panel.as_mut() else { return false };
     if let Some(m) = crate::key::list_move(key, rows) {
         p.selected = match m {
             // (`C-e`/`C-y`: the view, the selection staying unless it would leave it)
@@ -2427,7 +2409,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     match (key.code, key.ctrl, key.alt) {
         (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
-        (Code::Esc, ..) => p.focus = false,
+        (Code::Esc, ..) => ed.session.at = crate::session::At::Code,
         (Code::Char('q'), false, false) => ed.procs_close(),
         (Code::Char('s'), false, false) => ed.procs_stop(),
         (Code::Char('r'), false, false) => ed.procs_restart(),

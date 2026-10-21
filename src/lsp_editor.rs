@@ -3779,7 +3779,7 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut ed);
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         // (alone: messages said together keep their card)
         ed.toasts.clear();
         ed.set_success("Saved src/sidebar.rs · 1204 lines");
@@ -5821,7 +5821,8 @@ mod tests {
         assert!(kept.iter().all(|(b, unseen)| *unseen && originals.contains(b)), "{kept:?}");
         // One at a time: a review per file — accepted, declined, and into a buffer with unsaved edits
         let c = ed.session.chat.as_mut().unwrap();
-        (c.edits.at_end, c.focused) = (None, false);
+        c.edits.at_end = None;
+        ed.session.at = crate::session::At::Code;
         ed.open(&third).unwrap();
         feed(&mut ed, "A // mine<esc>");
         ed.open(&file).unwrap();

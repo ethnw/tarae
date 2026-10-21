@@ -512,6 +512,7 @@ mod tests {
         ed.session.root = root.clone();
         ed.allow_path = Some(s.path().join("sandbox.json"));
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         (ed, root, s.path().join("sandbox.json"))
     }
 
@@ -633,6 +634,7 @@ mod tests {
         assert_eq!(of(&got, "reach db.example.invalid:5432"), Some('s'));
         // (the project's alone: the conversation's copy of the `A` gone — read from `sandbox.json`)
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         assert!(std::fs::read_to_string(&store).unwrap().contains("\"key\": \"A\""), "written with its key");
         assert_eq!(of(&stamps(&mut ed), "connect to port 5432"), Some('A'), "read back");
         // An entry kept with no key: no stamp
@@ -903,6 +905,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         open(&mut ed);
         let listed = rows(&ed);
         let at =
@@ -936,6 +939,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         crate::allow::grant_reads(&mut ed, std::slice::from_ref(&outside), Scope::Always);
         until(&mut ed, "kept", |_| crate::allow::Store::read(Some(&store)).get(&wt).reads(&outside));
         let main_id = ed.session.id;

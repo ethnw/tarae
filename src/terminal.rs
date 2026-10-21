@@ -19,11 +19,10 @@ use std::sync::mpsc::Sender;
 use crate::editor::Editor;
 use crate::event::MouseKind;
 use crate::key::{Code, Key};
+use crate::session::At;
 
 pub struct Terminal {
     pub parser: vt100::Parser,
-    /// Keys go to it.
-    pub focus: bool,
     /// Showing in the bottom panel (hidden, it keeps running).
     pub visible: bool,
     /// What runs (`zsh`, `claude`).
@@ -387,7 +386,6 @@ fn spawn(
     let title = Path::new(&argv[0]).file_name().map_or(argv[0].clone(), |n| n.to_string_lossy().into_owned());
     Ok(Terminal {
         parser: vt100::Parser::new(rows, cols, 5000),
-        focus: true,
         visible: true,
         title,
         exited: None,
@@ -468,8 +466,9 @@ fn ended(ed: &mut Editor, generation: u64, code: i32) {
     if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation == generation) {
         t.exited = Some(code);
         // (filling the screen, it goes on doing so — its last lines to read)
-        if std::mem::take(&mut t.focus) && ed.zoom == Some(crate::sizes::Zoom::Bottom) {
-            ed.bottom_focus = true;
+        if ed.session.is_at(At::Program) {
+            let full = ed.session.zoom == Some(crate::sizes::Zoom::Bottom);
+            ed.session.at = if full { At::Slot } else { At::Code };
         }
     } else if ed.session.terminal_run == generation {
         ed.session.terminal_early.1 = Some(code);
@@ -480,9 +479,10 @@ fn ended(ed: &mut Editor, generation: u64, code: i32) {
 fn install(ed: &mut Editor, mut t: Terminal) {
     let (bytes, exited) = std::mem::take(&mut ed.session.terminal_early);
     t.take(&bytes);
-    if let Some(code) = exited {
-        t.exited = Some(code);
-        t.focus = false;
+    // (the keys its program's — unless it ended already)
+    match exited {
+        Some(code) => t.exited = Some(code),
+        None => ed.session.at = At::Program,
     }
     ed.session.terminal = Some(t);
 }
@@ -531,22 +531,20 @@ impl Editor {
     /// the keys behind them). From the program's keys `space T` is the program's.
     pub fn terminal_toggle(&mut self) {
         let front = self.slot() == Some(crate::sizes::Slot::Terminal);
-        let inside = front && self.bottom_focus;
+        let inside = front && self.session.is_at(At::Slot);
         if !inside && self.session.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()) {
             self.session.slot_front = Some(crate::sizes::Slot::Terminal);
-            if let Some(t) = self.session.terminal.as_mut() {
-                t.focus = true;
-            }
+            self.session.at = At::Program;
             return;
         }
         match self.session.terminal.as_mut() {
             Some(t) if t.visible => {
                 t.visible = false;
-                t.focus = false;
+                self.session.leave(At::Program);
             }
             Some(t) if t.exited.is_none() => {
                 t.visible = true;
-                t.focus = true;
+                self.session.at = At::Program;
             }
             _ => {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -560,7 +558,7 @@ impl Editor {
         match self.session.terminal.as_mut() {
             Some(t) if t.exited.is_none() => {
                 t.visible = true;
-                t.focus = true;
+                self.session.at = At::Program;
                 self.session.slot_front = Some(crate::sizes::Slot::Terminal);
             }
             _ => self.terminal_toggle(),
@@ -576,7 +574,7 @@ impl Editor {
             // Asked for a replacement explicitly? Only for an exited one — a live shell is never dropped here
             if let Some(t) = self.session.terminal.as_mut() {
                 t.visible = true;
-                t.focus = true;
+                self.session.at = At::Program;
             }
             self.session.slot_front = Some(crate::sizes::Slot::Terminal);
             return false;
@@ -610,7 +608,7 @@ impl Editor {
     /// mode); `S-pageup`/`S-pagedown` scroll its past a page, as every terminal emulator's do (uxaudit Z2 — the
     /// next key the program gets brings it back down); the rest go to the program.
     pub fn terminal_key(&mut self, key: Key) -> bool {
-        if !self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none()) {
+        if !self.session.program_has_keys() {
             return false;
         }
         if let Some(cmds) = self.keymaps.terminal_takes(key) {
@@ -652,10 +650,10 @@ impl Editor {
     /// (a shell then doesn't run each line as it comes); newlines as the Enter key sends them. False if it
     /// isn't the terminal's.
     pub fn terminal_paste(&mut self, text: &str) -> bool {
-        let Some(t) = self.session.terminal.as_mut().filter(|t| t.focus && t.visible && t.exited.is_none())
-        else {
+        if !self.session.program_has_keys() {
             return false;
-        };
+        }
+        let Some(t) = self.session.terminal.as_mut() else { return false };
         t.parser.screen_mut().set_scrollback(0);
         t.selection = None;
         let body = text.replace("\r\n", "\r").replace('\n', "\r");
@@ -702,7 +700,7 @@ impl Editor {
         let ours = alt && kind == MouseKind::Down;
         if live && !t.selecting && !ours && mode != vt100::MouseProtocolMode::None {
             if kind == MouseKind::Down {
-                t.focus = true;
+                self.session.at = At::Program;
             }
             // (what its mode doesn't ask for is dropped)
             if let Some(bytes) = cell.and_then(|c| mouse_bytes(mode, encoding, kind, c)) {
@@ -723,7 +721,11 @@ impl Editor {
                 }
             }
             MouseKind::Down => {
-                t.focus = live;
+                match live {
+                    true => self.session.at = At::Program,
+                    false => self.session.leave(At::Program),
+                }
+                let Some(t) = self.session.terminal.as_mut() else { return };
                 t.selection = cell.map(|c| (c, c));
                 t.selecting = cell.is_some();
             }
@@ -768,7 +770,6 @@ pub(crate) fn stand_in(
     ed.session.terminal_run = ed.terminal_generation;
     ed.session.terminal = Some(Terminal {
         parser: vt100::Parser::new(rows, cols, scrollback),
-        focus: true,
         visible: true,
         title: "sh".into(),
         exited: None,
@@ -784,6 +785,7 @@ pub(crate) fn stand_in(
         pid: 0,
     });
     ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
+    ed.session.at = At::Program;
     sent
 }
 
@@ -839,7 +841,7 @@ mod tests {
         let screen = t.parser.screen();
         assert!(screen.contents().starts_with("hello tarae"), "{:?}", screen.contents());
         assert!(screen.cell(0, 6).is_some_and(|c| c.bold()), "bold");
-        assert!(!t.focus, "an exited program gives the keys back");
+        assert!(!ed.session.is_at(At::Program), "an exited program gives the keys back");
     }
 
     /// A program that asks the terminal what it is (Primary Device Attributes — fish does, and waits 10 s for
@@ -890,9 +892,11 @@ mod tests {
             ed.handle_key(crate::key::Key::plain(crate::key::Code::Char(' ')));
             ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('T')));
         };
-        let state = |ed: &Editor| ed.session.terminal.as_ref().map(|t| (t.visible, t.focus)).unwrap();
+        let state = |ed: &Editor| {
+            ed.session.terminal.as_ref().map(|t| (t.visible, ed.session.is_at(At::Program))).unwrap()
+        };
         // Shown, in front, the keys back in the code
-        ed.session.terminal.as_mut().unwrap().focus = false;
+        ed.session.leave(At::Program);
         assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));
         space_t(&mut ed);
         assert_eq!(state(&ed), (true, true), "shown without the keys: given them, not hidden");
@@ -1293,27 +1297,27 @@ mod tests {
         assert!(seen(&ed), "{:?}", ed.session.terminal.as_ref().map(|t| t.parser.screen().contents()));
         let ctrl_backslash = Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false };
         ed.handle_key(ctrl_backslash);
-        assert!(!ed.session.terminal.as_ref().unwrap().focus);
+        assert!(!ed.session.is_at(crate::session::At::Program));
         assert!(crate::view::terminal_viewed(&ed), "its view mode");
         ed.handle_key(ctrl_backslash);
-        assert!(!crate::view::terminal_viewed(&ed) && !ed.bottom_focus);
+        assert!(!crate::view::terminal_viewed(&ed) && !ed.session.is_at(crate::session::At::Slot));
         ed.handle_key(key('i'));
         assert_eq!(ed.mode, crate::editor::Mode::Insert, "the code has the keys again");
         ed.handle_key(Key::plain(Code::Esc));
         // C-\\ from the code gives the keys back to it; `q` in its view mode hides it, the shell running on — as
         // every list or output panel's `q` closes it (uxaudit D2); `space T` shows it with the keys (#144)
         ed.handle_key(ctrl_backslash);
-        assert!(ed.session.terminal.as_ref().unwrap().focus);
+        assert!(ed.session.is_at(crate::session::At::Program));
         ed.handle_key(ctrl_backslash);
         ed.handle_key(key('q'));
         let t = ed.session.terminal.as_ref().unwrap();
         assert!(!t.visible && t.exited.is_none(), "hidden, running");
-        assert!(!ed.bottom_focus);
+        assert!(!ed.session.is_at(crate::session::At::Slot));
         for k in [' ', 'T'] {
             ed.handle_key(key(k));
         }
         let t = ed.session.terminal.as_ref().unwrap();
-        assert!(t.visible && t.focus, "shown with the keys, the same shell");
+        assert!(t.visible && ed.session.is_at(At::Program), "shown with the keys, the same shell");
         // `C-w q` in its view mode too (D3)
         ed.handle_key(ctrl_backslash);
         ed.handle_key(Key { code: Code::Char('w'), ctrl: true, alt: false, shift: false });
@@ -1360,7 +1364,7 @@ mod tests {
         assert_eq!(back(&ed), 2 * page, "two pages back");
         ed.handle_key("S-pagedown".parse().unwrap());
         assert_eq!(back(&ed), page, "one forward");
-        assert!(ed.session.terminal.as_ref().unwrap().focus, "the keys still the program's");
+        assert!(ed.session.is_at(crate::session::At::Program), "the keys still the program's");
         ed.handle_key("pageup".parse().unwrap());
         assert_eq!(back(&ed), 0, "a key the program gets: back down");
         // A full-screen program (its alternate screen keeps no past): the key is the program's, as a terminal
@@ -1636,23 +1640,23 @@ mod tests {
         };
         let key = |c: char| Key { code: Code::Char(c), ctrl: false, alt: false, shift: false };
         let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false, shift: false };
-        let focus = |ed: &Editor| ed.session.terminal.as_ref().unwrap().focus;
+        let focus = |ed: &Editor| ed.session.is_at(crate::session::At::Program);
         draw(&mut ed);
         let small = ed.screen.bottom_h;
         // `C-\\` and Esc: back to the code
         ed.handle_key(ctrl('\\'));
         ed.handle_key(Key::plain(Code::Esc));
-        assert!(!focus(&ed) && !ed.bottom_focus);
+        assert!(!focus(&ed) && !ed.session.is_at(crate::session::At::Slot));
         for k in [ctrl('w'), key('j'), ctrl('w'), key('z')] {
             ed.handle_key(k);
         }
-        assert!(ed.bottom_focus && !focus(&ed), "tarae's keys on it");
+        assert!(ed.session.is_at(crate::session::At::Slot) && !focus(&ed), "tarae's keys on it");
         assert!(crate::view::terminal_viewed(&ed), "its view mode");
         draw(&mut ed);
         assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
         assert_eq!(ed.screen.bottom_h, ed.screen.body_h, "all the rows");
         ed.handle_key(key('i'));
-        assert!(focus(&ed) && !ed.bottom_focus, "the program's keys");
+        assert!(focus(&ed) && !ed.session.is_at(crate::session::At::Slot), "the program's keys");
         for c in "echo zoomed-in".chars() {
             ed.handle_key(key(c));
         }
@@ -1660,11 +1664,14 @@ mod tests {
         assert_eq!(ed.doc().text.to_string(), "", "the buffer never saw them");
         assert_eq!(ed.zoomed(), Some(Zoom::Bottom), "typing in it, it still fills the screen");
         ed.handle_key(ctrl('\\'));
-        assert!(!focus(&ed) && ed.bottom_focus, "C-\\: the keys stay on it, its view mode");
+        assert!(
+            !focus(&ed) && ed.session.is_at(crate::session::At::Slot),
+            "C-\\: the keys stay on it, its view mode"
+        );
         assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
         ed.handle_key(Key::plain(Code::Esc));
-        assert!(!ed.bottom_focus);
-        assert_eq!(ed.zoom, None, "back to the code: it ended");
+        assert!(!ed.session.is_at(crate::session::At::Slot));
+        assert_eq!(ed.session.zoom, None, "back to the code: it ended");
         draw(&mut ed);
         assert_eq!(ed.screen.bottom_h, small);
     }

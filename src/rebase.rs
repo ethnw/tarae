@@ -914,8 +914,8 @@ impl Editor {
     pub fn rebase_held_show(&mut self, h: Held) {
         let Some(id) = self.session_at(&h.moved.root) else { return };
         self.session_switch(id);
-        let shown =
-            self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus);
+        let shown = self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git)
+            && self.session.is_at(crate::session::At::Side);
         if !shown {
             self.sidebar_show(crate::sidebar::Mode::Git);
         }
@@ -1050,9 +1050,11 @@ impl Editor {
     /// answering something else, once that turn ends.
     fn rebase_ask(&mut self, a: Ask) {
         if self.session.chat.is_none() {
+            let at = self.session.at;
             crate::chat::open(self);
+            self.session.at = at;
             if let Some(c) = &mut self.session.chat {
-                (c.focused, c.unfolded) = (false, false);
+                c.unfolded = false;
             }
         }
         let Some(r) = self.session.rebase.as_mut() else { return };
@@ -1105,9 +1107,7 @@ impl Editor {
         match stop.commit {
             // (the card once the review is open — it's about what the review shows)
             Some((sha, short, subject)) => {
-                if let Some(c) = &mut self.session.chat {
-                    c.focused = false;
-                }
+                self.session.leave(crate::session::At::Chat);
                 let root = self.session.root.clone();
                 let label = format!("{short} {subject}");
                 crate::codereview::start_replay(

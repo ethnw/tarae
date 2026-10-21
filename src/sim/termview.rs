@@ -231,7 +231,7 @@ fn held(ed: &Editor, world: &World) -> Result<(), String> {
                 return Err(format!("row {r}: on the panel {row:?}, the document's line {line} {doc:?}"));
             }
         }
-        if !(ed.bottom_focus && ed.slot() == Some(crate::sizes::Slot::Terminal)) {
+        if !(ed.session.is_at(crate::session::At::Slot) && ed.slot() == Some(crate::sizes::Slot::Terminal)) {
             return Err("viewed, its panel without tarae's keys".into());
         }
     }

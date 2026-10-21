@@ -846,6 +846,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation();
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -908,6 +909,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation();
         let settle = |ed: &mut Editor| {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -952,6 +954,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.session.chat = Some(crate::chat::Chat::new());
+        ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation();
         let o = outside.join("o.txt");
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {

@@ -361,8 +361,8 @@ impl Editor {
             t.visible = true;
         }
         self.session.slot_front = Some(s);
-        if let Some(t) = self.session.terminal.as_mut().filter(|_| s != Slot::Terminal) {
-            t.focus = false;
+        if s != Slot::Terminal {
+            self.session.leave(crate::session::At::Program);
         }
         if s != Slot::Procs {
             self.procs_unfocus();
@@ -416,10 +416,8 @@ impl Editor {
             }
         }
         self.session.slot_seen = now;
-        if self.slot() != Some(Slot::Terminal)
-            && let Some(t) = self.session.terminal.as_mut().filter(|t| t.focus)
-        {
-            t.focus = false;
+        if self.slot() != Some(Slot::Terminal) {
+            self.session.leave(crate::session::At::Program);
         }
     }
 }

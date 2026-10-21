@@ -44,10 +44,10 @@ fn card(ed: &mut Editor) {
 /// A chat with a conversation, its input holding the keys.
 fn chatting(ed: &mut Editor) {
     let mut c = Chat::new();
-    c.focused = true;
     c.msgs.push(Msg::new(Role::User, "hi", ""));
     c.msgs.push(Msg::new(Role::Assistant, "hello", ""));
     ed.session.chat = Some(c);
+    ed.session.at = crate::session::At::Chat;
 }
 
 /// Keys, a frame after each (the chat's view mode is laid out of the last frame).
@@ -73,9 +73,9 @@ fn the_chats_command_twins_run_the_command() {
         match said {
             true => chatting(&mut ed),
             false => {
-                let mut c = Chat::new();
-                c.focused = true;
+                let c = Chat::new();
                 ed.session.chat = Some(c);
+                ed.session.at = crate::session::At::Chat;
             }
         }
         drawn(&mut ed, 160, 40);
@@ -138,7 +138,7 @@ fn a_card_holding_the_keys_lets_go_first() {
     assert!(c.input.is_empty() && c.msgs.len() == 2, "nothing typed, nothing sent");
     assert_eq!(ed.offers.len(), 1, "the card waits, unanswered");
     // Given the keys again, then back: said the chat's way
-    ed.session.chat.as_mut().unwrap().focused = true;
+    ed.session.at = crate::session::At::Chat;
     keys(&mut ed, "C-q C-q");
     assert!(!ed.card_keys);
     assert!(said(&ed).contains("keys back — the card waits, esc esc answers it"), "{}", said(&ed));
@@ -178,7 +178,7 @@ fn the_edit_review_left_for_the_code_says_the_inbox_and_it_brings_it_back() {
 fn the_edit_review_left_for_the_chat_says_the_chats_way_and_it_brings_it_back() {
     let mut ed = editor(true);
     chatting(&mut ed);
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     reviewing(&mut ed);
     ed.session.review.as_mut().unwrap().from_chat = true;
     keys(&mut ed, "esc");
@@ -212,9 +212,9 @@ fn an_aside_card_is_the_inboxs() {
 #[test]
 fn the_chat_taking_the_screen_says_its_way_back_to_the_card() {
     let mut ed = editor(true);
-    let mut c = Chat::new();
-    c.focused = true;
+    let c = Chat::new();
     ed.session.chat = Some(c);
+    ed.session.at = crate::session::At::Chat;
     let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(7), ops: false };
     ed.push_offer(Offer::new(
         "Claude changes 3 files".into(),
@@ -347,9 +347,9 @@ fn the_keys_zellij_takes_are_the_settings() {
         }
         let at = if mine { "session on C-y" } else { "zellij's defaults" };
         // The chat's `C-o point`: zellij's own default takes it, a `C-y` config leaves it
-        let mut c = Chat::new();
-        c.focused = true;
+        let c = Chat::new();
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let s = drawn(&mut ed, 160, 40);
         let point = if mine { "C-o point" } else { "esc :chat-point" };
         assert!(s.contains(point), "{at}: {point}\n{s}");
@@ -455,11 +455,11 @@ fn the_chats_twin_of_c_q_gives_the_card_the_keys() {
     for zellij in [false, true] {
         let mut ed = editor(zellij);
         let mut c = Chat::new();
-        c.focused = true;
         c.state = State::Thinking;
         c.msgs.push(Msg::new(Role::User, "hi", ""));
         c.msgs.push(Msg::new(Role::Assistant, "hello", ""));
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         card(&mut ed);
         let s = drawn(&mut ed, 160, 40);
         let says = if zellij { "esc esc answer card" } else { "C-q answer card" };
@@ -509,10 +509,10 @@ fn the_chats_message_waiting_on_its_card_says_the_way_to_it() {
     for zellij in [false, true] {
         let mut ed = editor(zellij);
         let mut c = Chat::new();
-        c.focused = true;
         c.input = "look at this".into();
         c.cursor = c.input.len();
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let key_file = ed.session.root.join(".env");
         crate::reads::ask_own(&mut ed, vec![key_file], crate::reads::Own::Chip("pane#1".into()));
         assert!(crate::reads::pointing_asks(&ed), "its card");
@@ -575,9 +575,9 @@ fn insert_modes_twin_of_c_q_is_esc() {
 fn the_empty_chat_says_its_commands_inside_zellij() {
     for zellij in [false, true] {
         let mut ed = editor(zellij);
-        let mut c = Chat::new();
-        c.focused = true;
+        let c = Chat::new();
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let s = drawn(&mut ed, 160, 40);
         // (a `:` command says what it does: alone, never `:model for another model`; from the chat's input the
         // way back to the code first — nothing said yet, one `esc`)

@@ -28,10 +28,10 @@ fn card(ed: &mut Editor, title: &str) -> u64 {
 
 fn chat(ed: &mut Editor, draft: &str) {
     let mut c = crate::chat::Chat::new();
-    c.focused = true;
     c.input = draft.into();
     c.cursor = draft.len();
     ed.session.chat = Some(c);
+    ed.session.at = crate::session::At::Chat;
 }
 
 fn frame(ed: &mut Editor) -> String {
@@ -117,6 +117,7 @@ fn claudes_level_holds_back_unsent_text_and_other_sessions() {
     c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "q", ""));
     c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Assistant, "their own answer", ""));
     l.chat = Some(c);
+    l.at = crate::session::At::Chat;
     card(&mut ed, "End the review?");
     frame(&mut ed);
     let full = ed.ui_state().text();
@@ -172,7 +173,8 @@ fn the_ui_tool_answers_at_once_and_gives_what_it_names() {
     let id = card(&mut ed, "End the review?");
     let files = vec!["a.rs".into(), "b.rs".into()];
     ed.session.sidebar = Some(crate::sidebar::Sidebar::with_files(ed.session.root.clone(), files));
-    ed.session.sidebar.as_mut().unwrap().focus = false;
+    ed.session.at = crate::session::At::Side;
+    ed.session.leave(crate::session::At::Side);
     frame(&mut ed);
     let msg = serde_json::json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call",
         "params": { "name": "ui", "arguments": {} } });
@@ -246,15 +248,14 @@ fn a_link_to_a_row_shows_its_tab_without_the_keys() {
     let mut ed = editor();
     chat(&mut ed, "");
     let files: Vec<String> = (0..80).map(|i| format!("f{i:02}.rs")).collect();
-    let mut sb = crate::sidebar::Sidebar::with_files(ed.session.root.clone(), files);
-    sb.focus = false;
+    let sb = crate::sidebar::Sidebar::with_files(ed.session.root.clone(), files);
     ed.session.sidebar = Some(sb);
     frame(&mut ed);
     ed.ui_jump("files:f70.rs");
     assert!(ed.ui_flashing("files:f70.rs"));
     let text = frame(&mut ed);
     assert!(text.contains("f70.rs"), "scrolled into sight:\n{text}");
-    assert!(ed.session.chat.as_ref().unwrap().focused, "the keys stay the chat's");
+    assert!(ed.session.is_at(crate::session::At::Chat), "the keys stay the chat's");
     assert_eq!(ed.keys_to().region, crate::uistate::Region::Chat);
     ed.ui_flash = None;
     ed.ui_jump("files:nope.rs");
@@ -368,7 +369,7 @@ fn pointing_puts_an_elements_id_in_the_chat() {
     assert!(ed.session.chat.as_ref().unwrap().pointed.is_empty(), "taken off");
     ed.handle_key(key("<C-o>"));
     ed.handle_key(key("<esc>"));
-    assert!(ed.pointing.is_none() && ed.session.chat.as_ref().unwrap().focused);
+    assert!(ed.pointing.is_none() && ed.session.is_at(crate::session::At::Chat));
 }
 
 /// A click while labels are up picks the element under it — here a side panel's row, by its content.
@@ -376,9 +377,7 @@ fn pointing_puts_an_elements_id_in_the_chat() {
 fn pointing_by_a_click() {
     let mut ed = editor();
     chat(&mut ed, "");
-    let mut sb =
-        crate::sidebar::Sidebar::with_files(ed.session.root.clone(), vec!["a.rs".into(), "b.rs".into()]);
-    sb.focus = false;
+    let sb = crate::sidebar::Sidebar::with_files(ed.session.root.clone(), vec!["a.rs".into(), "b.rs".into()]);
     ed.session.sidebar = Some(sb);
     frame(&mut ed);
     crate::uistate::point::start(&mut ed);

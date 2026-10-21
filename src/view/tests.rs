@@ -30,10 +30,10 @@ fn chat_with(config: Config, msgs: Vec<Msg>) -> Editor {
     ed.docs[0].text = ropey::Rope::from_str("fn main() {}\nlet code = 1;\n");
     let mut c = Chat::new();
     c.msgs = msgs;
-    c.focused = true;
     c.input = "a draft".into();
     c.cursor = c.input.len();
     ed.session.chat = Some(c);
+    ed.session.at = crate::session::At::Chat;
     frame(&mut ed);
     ed
 }
@@ -95,6 +95,132 @@ fn region(ed: &Editor) -> String {
     ed.keys_to().region.name()
 }
 
+/// Each pane its own search (panes P2a, `target/sb/panes-plan.md` §2.3): the chat's view mode's `/` searches its
+/// rows only — its matches there while typed and after, `n` moving there; the code's pattern, highlights and
+/// selection as they were (they leaked: the view's `/` was the editor's register, its preview counted and
+/// scrolled the code). `esc` clears the view's matches, not the code's. And the other way round: the code's
+/// `n` repeats the code's search, a view's `n` never the code's.
+#[test]
+fn a_view_modes_search_is_its_own_and_the_codes_stays_the_codes() {
+    let mut ed = editor();
+    ed.docs[0].text = ropey::Rope::from_str("let code = 1;\nlet more = code;\n");
+    ed.session.at = crate::session::At::Code;
+    feed(&mut ed, "/code<ret>");
+    let code_sel = ed.doc().selection().primary();
+    let code_search = |ed: &Editor| {
+        let hits = ed.search_hits.as_ref().map(|h| (h.pattern.clone(), h.matches.len()));
+        (ed.search.clone(), ed.search_hl, hits)
+    };
+    let before = code_search(&ed);
+    assert_eq!(before, (Some("code".into()), true, Some(("code".into(), 2))), "the code's search");
+    ed.session.at = crate::session::At::Chat;
+    feed(&mut ed, "<esc>");
+    assert_eq!(region(&ed), "view:chat");
+    // Typing: the view's rows previewed, the code's untouched
+    feed(&mut ed, "/need");
+    assert_eq!(view(&ed).hits().map(|h| (h.pattern.as_str(), h.matches.len())), Some(("need", 2)));
+    assert_eq!(code_search(&ed), before, "the code's search while the view's is typed");
+    assert_eq!(ed.doc().selection().primary(), code_sel);
+    feed(&mut ed, "le<ret>");
+    assert_eq!(at(&ed).1, "needle", "the view's selection on its match");
+    let first = view(&ed).doc().selection().primary();
+    assert_eq!(view(&ed).hits().map(|h| h.matches.len()), Some(2), "its matches shown there");
+    assert_eq!(code_search(&ed), before, "the code's search after the view's");
+    // `n`: the view's next match — the code's selection where it was
+    feed(&mut ed, "n");
+    assert_eq!(at(&ed).1, "needle");
+    assert_ne!(view(&ed).doc().selection().primary(), first, "n moved in the view");
+    assert_eq!((ed.doc().selection().primary(), code_search(&ed)), (code_sel, before.clone()));
+    // `esc`: the selection collapses, the view's matches go — the code's stay
+    feed(&mut ed, "<esc>");
+    assert_eq!(region(&ed), "view:chat");
+    assert!(view(&ed).hits().is_none(), "the view's matches unshown");
+    assert_eq!(code_search(&ed), before, "the code's highlights stay");
+    // The other way round: back in the code (the view's `esc` with nothing selected), `n` is the code's search
+    feed(&mut ed, "<esc>");
+    assert_eq!(region(&ed), "code");
+    feed(&mut ed, "n");
+    let d = ed.doc();
+    let r = d.selection().primary();
+    assert_eq!(d.text.byte_slice(r.from()..r.to()).to_string(), "code", "the code's n: its own pattern");
+    assert_ne!(r, code_sel, "n moved in the code");
+    // …and a view made again has a search of its own: none yet, said — never the code's
+    ed.session.at = crate::session::At::Chat;
+    feed(&mut ed, "<esc>");
+    let was = view(&ed).doc().selection().primary();
+    feed(&mut ed, "n");
+    assert_eq!(view(&ed).doc().selection().primary(), was, "nothing to repeat in the view");
+    let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+    assert!(said.contains("no previous search"), "{said}");
+    assert_eq!(code_search(&ed), (Some("code".into()), true, Some(("code".into(), 2))));
+}
+
+/// Friction 88 (the user walk of 2026-10-21): `C-w h` from the chat's input — the code is to its left — goes to the
+/// code (it did nothing and said nothing); `C-w l` from the code's rightmost pane comes back. A hop with nothing that
+/// way is said.
+#[test]
+fn c_w_h_from_the_chats_input_goes_to_the_code_on_its_left() {
+    let mut ed = editor();
+    ed.session.chat.as_mut().unwrap().input.clear();
+    ed.session.chat.as_mut().unwrap().cursor = 0;
+    assert_eq!(region(&ed), "chat");
+    feed(&mut ed, "<C-w>h");
+    assert_eq!(region(&ed), "code", "the code, on the chat's left");
+    feed(&mut ed, "<C-w>l");
+    assert_eq!(region(&ed), "chat", "and back: the chat, right of the code");
+    feed(&mut ed, "<C-w>l");
+    assert_eq!(region(&ed), "chat");
+    let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+    assert!(said.contains("nothing to the right"), "{said}");
+    // The side panel on the code's left: `C-w h` from the code reaches it, `C-w l` comes back
+    let dir = crate::scratch::Scratch::new("c-w-side");
+    ed.session.root = dir.path().to_path_buf();
+    ed.sidebar_show(crate::sidebar::Mode::Files);
+    feed(&mut ed, "<C-w>l");
+    assert_eq!(region(&ed), "code");
+    feed(&mut ed, "<C-w>h");
+    assert!(region(&ed).starts_with("side"), "{}", region(&ed));
+    feed(&mut ed, "<C-w>l");
+    assert_eq!(region(&ed), "code");
+    // A review's rail in the side panel's place: `C-w h` gives it the keys on the file in hand (as `space e`),
+    // `C-w l` back
+    // (three files, the code on the last of them in the rail's order; the rail's selection on the first)
+    ed.session.sidebar = None;
+    let files: Vec<crate::codereview::File> = ["a.rs", "b.rs", "c.rs"]
+        .iter()
+        .map(|rel| {
+            let path = dir.path().join(rel);
+            std::fs::write(&path, "fn f() {}\n").unwrap();
+            crate::codereview::File {
+                rel: rel.to_string(),
+                path,
+                added: 1,
+                removed: 0,
+                new: false,
+                gone: false,
+                binary: false,
+            }
+        })
+        .collect();
+    let r = crate::codereview::CodeReview::for_test(
+        crate::codereview::Base::Head,
+        dir.path().to_path_buf(),
+        files,
+    );
+    assert_eq!(r.rail_order(), [0, 1, 2]);
+    ed.session.code_review = Some(r);
+    ed.open(&dir.path().join("c.rs")).unwrap();
+    frame(&mut ed);
+    assert!(ed.screen.rail_w > 0, "the rail drawn");
+    assert_eq!(ed.session.code_review.as_ref().unwrap().selected, 0, "the rail's row: the first file");
+    feed(&mut ed, "<C-w>h");
+    assert_eq!(region(&ed), "review", "the rail (its region's name)");
+    assert_eq!(ed.session.code_review.as_ref().unwrap().selected, 2, "on the file in hand: c.rs");
+    feed(&mut ed, "<C-w>l");
+    assert_eq!(region(&ed), "code");
+    ed.session.code_review = None;
+}
+
 /// `esc` from the chat's input: its view mode, the draft kept, the keys the view's (`view:chat`, the status
 /// line's `● view · chat`); `i`, `a`, `enter` each back to the input with the draft as it was.
 #[test]
@@ -135,7 +261,7 @@ fn it_lands_on_the_last_answer_then_where_you_were() {
     // (to the code and back again, by the input)
     feed(&mut ed, "<esc>");
     assert_eq!(region(&ed), "code");
-    ed.session.chat.as_mut().unwrap().focused = true;
+    ed.session.at = crate::session::At::Chat;
     feed(&mut ed, "<esc>");
     assert_eq!(at(&ed).0, there_now);
 }
@@ -282,7 +408,7 @@ pub(crate) fn viewing(keys: &str) -> Editor {
 #[test]
 fn the_wheel_enters_view_mode_and_leaves_it_at_the_end() {
     let mut ed = chat_with(Config::default(), long());
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     frame(&mut ed);
     let (y0, _, rows, first) = ed.screen.chat_view.get().unwrap();
     let x = ed.screen.chat_x.unwrap() + 4;
@@ -298,7 +424,7 @@ fn the_wheel_enters_view_mode_and_leaves_it_at_the_end() {
     assert!(ed.session.view.is_none(), "back at the end: done reading");
     assert_eq!(region(&ed), "code", "the keys where they were");
     // (entered by a key, it stays)
-    ed.session.chat.as_mut().unwrap().focused = true;
+    ed.session.at = crate::session::At::Chat;
     feed(&mut ed, "<esc>");
     wheel(&mut ed, crate::event::MouseKind::ScrollUp);
     wheel(&mut ed, crate::event::MouseKind::ScrollDown);
@@ -334,11 +460,11 @@ fn your_keys_remap_view_mode_and_its_hints() {
 #[test]
 fn ctrl_w_q_in_the_chats_view_is_said_and_closes_no_pane() {
     let mut ed = editor();
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     feed(&mut ed, "<C-w>v");
     let panes = ed.session.views.len();
     assert!(panes >= 2, "two panes");
-    ed.session.chat.as_mut().unwrap().focused = true;
+    ed.session.at = crate::session::At::Chat;
     feed(&mut ed, "<esc><C-w>q");
     assert_eq!(ed.session.views.len(), panes, "no pane closed");
     assert_eq!(
@@ -377,7 +503,7 @@ fn the_chats_chords_work_in_view_mode() {
 #[test]
 fn space_gt_views_the_conversation_from_the_code() {
     let mut ed = editor();
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     frame(&mut ed);
     assert_eq!(region(&ed), "code");
     feed(&mut ed, " >");
@@ -397,9 +523,9 @@ fn space_gt_views_the_conversation_from_the_code() {
     assert!(said.starts_with("nothing to view yet"), "{said}");
     // The chat open but not drawn (the code fills the screen): viewed with the next frame
     let mut ed = editor();
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     frame(&mut ed);
-    ed.zoom = Some(crate::sizes::Zoom::Code(ed.session.focus));
+    ed.session.zoom = Some(crate::sizes::Zoom::Code(ed.session.focus));
     frame(&mut ed);
     assert!(ed.screen.chat_view.get().is_none(), "the chat isn't drawn");
     feed(&mut ed, " >");

@@ -5636,6 +5636,7 @@ mod tests {
         };
         c.msgs.push(crate::chat::Msg::tool(look, "c1"));
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let task = crate::task::Task { name: "true".into(), cmd: "true".into(), cwd: dir.clone() };
         let who = super::For::Claude(super::Call::test(41));
         let toasts = |ed: &crate::editor::Editor| {
@@ -5698,7 +5699,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         let lines = || crate::cards::logged_lines("card cardlines · ");
         // (its card, through the worker it may ask on — the call the chat's, or the card is moot)
@@ -5774,7 +5775,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         // (the same command holds the slot a second: the others come while it runs, as parallel calls do)
         let same = "sleep 1; touch same.txt";
@@ -5828,7 +5829,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         let called = |id: &str, name: &str, input: serde_json::Value| Called {
             id: id.into(),
@@ -5913,7 +5914,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let call = super::Call::of(c.generation(), "r1", json!(41));
         let cmd = "printf '    Blocking waiting for file lock on build directory\\n' >&2; sleep 0.5; \
                    printf '   Compiling stand-in\\n' >&2; echo built";
@@ -6001,7 +6002,7 @@ mod tests {
         assert!(crate::chat::submit(&mut ed, "where do the tokens go?", None, None), "sent");
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         // Two answered at once
         let mut sent = Vec::new();
@@ -7334,7 +7335,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         let ask = |ed: &mut crate::editor::Editor, n: u64, command: &str| {
             let args =
@@ -8023,7 +8024,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         let line =
             |n: u32| format!("sh target/x/setup.sh && env TARAE_BACKGROUND=dark echo shot target/x/{n}.png");
@@ -8124,7 +8125,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         let answered = |id: &str| {
             super::ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| *i == json!(id)).map(|(_, r)| r.clone()))
@@ -8196,7 +8197,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.focused = false;
+        ed.session.at = crate::session::At::Code;
         let generation = c.generation();
         let line = |t: &str| format!("touch ran && echo cargo xtask linux test -- {t}");
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
@@ -8482,6 +8483,7 @@ mod tests {
         let mut c = crate::chat::Chat::new();
         c.conversation = Some("c1".into());
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let report = |blocked: bool, guarantees: Option<u64>| crate::sandbox::Report {
             text: String::new(),
             blocked,
@@ -8800,6 +8802,7 @@ mod tests {
         let mut c = crate::chat::Chat::new();
         c.conversation = Some("c1".into());
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         let e = crate::sandbox::runenv::RunEnv {
             tokens: vec!["GITHUB_TOKEN".into()],
             others: vec!["DATABASE_URL".into()],

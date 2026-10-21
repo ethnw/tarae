@@ -562,7 +562,7 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         return v;
     };
     c.state = crate::chat::State::Thinking;
-    c.focused = false;
+    ed.session.at = crate::session::At::Code;
     let id = json!(format!("compat-{n}"));
     let call = crate::tools::Call::of(c.generation(), &format!("compat{n}"), id.clone());
     // (what it's let change outside the project, and what's the harness's own)

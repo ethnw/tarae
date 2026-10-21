@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::editor::{Editor, Mode};
 use crate::key::{Code, Key};
+use crate::session::At;
 use crate::sizes::Slot;
 
 /// The schema's version: a field removed, renamed or meaning something else bumps it; one added doesn't.
@@ -366,8 +367,7 @@ impl Editor {
             v.push(shortcut(Region::NextCard, Filter::Only(vec![ctrl('q')])));
         }
         // `terminal_key`: the program has them all
-        let program =
-            self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none());
+        let program = self.session.program_has_keys();
         if !modal && program {
             v.push(layer(Region::Program, Filter::All));
         }
@@ -384,7 +384,7 @@ impl Editor {
         let pending = !self.pending.is_empty();
         // `llm::review_key`: back in the chat or the code, only `C-q` returns to it
         if let Some(rev) = self.session.review.as_ref().filter(|r| r.ready && !modal && !pending) {
-            let chat = self.session.chat.as_ref().is_some_and(|c| c.focused);
+            let chat = self.session.chat_has_keys();
             v.push(match chat || rev.away {
                 true => shortcut(Region::EditReview, Filter::Only(vec![ctrl('q')])),
                 false => layer(Region::EditReview, Filter::Except(vec![ch(' '), ch(':'), ctrl('w')])),
@@ -419,7 +419,8 @@ impl Editor {
         }
         // `chat::unfold_key`: minimized, what would type brings it back — its own keys (and `C-w` from an
         // empty input) go on
-        if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && c.compact() && !pending) {
+        let chat = self.session.chat.as_ref().filter(|_| self.session.is_at(At::Chat));
+        if let Some(c) = chat.filter(|c| c.compact() && !pending) {
             let mut passes: Vec<Key> = [
                 Key::plain(Code::Esc),
                 ctrl('c'),
@@ -440,7 +441,7 @@ impl Editor {
             v.push(layer(Region::Unfold, Filter::Except(passes)));
         }
         // `chat::key` — before the prompt: it doesn't ask whether one is open
-        if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && !pending && viewing.is_none()) {
+        if let Some(c) = chat.filter(|_| !pending && viewing.is_none()) {
             v.push(match c.input.is_empty() {
                 true => layer(Region::Chat, Filter::Except(vec![ctrl('w'), Key { alt: true, ..ctrl('w') }])),
                 false => layer(Region::Chat, Filter::All),
@@ -453,21 +454,21 @@ impl Editor {
                 v.extend_from_slice(more);
                 Filter::Except(v)
             };
-            if self.review_rail_up() && self.session.code_review.as_ref().is_some_and(|r| r.focus) {
+            let at = |a| self.session.is_at(a);
+            if self.review_rail_up() && at(At::Rail) && self.session.code_review.is_some() {
                 v.push(layer(Region::Rail, editors(&[ctrl('w')])));
             }
-            if let Some(s) = self.session.sidebar.as_ref().filter(|s| s.focus && !self.side_folded()) {
+            if let Some(s) = self.session.sidebar.as_ref().filter(|_| at(At::Side) && !self.side_folded()) {
                 v.push(layer(Region::Side(s.mode), editors(&[ctrl('w')])));
             }
             if self.procs_focused() {
                 v.push(layer(Region::Slot(Slot::Procs), editors(&[ctrl('w')])));
             }
-            if !self.session.sidebar.as_ref().is_some_and(|s| s.focus) && self.plugin_panel_focused() {
+            if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
             // (the terminal's are its view mode's, above)
-            if let Some(s) = self.slot().filter(|s| self.bottom_focus && matches!(s, Slot::Test | Slot::Task))
-            {
+            if let Some(s) = self.slot().filter(|s| at(At::Slot) && matches!(s, Slot::Test | Slot::Task)) {
                 v.push(layer(Region::Slot(s), editors(&[ch('['), ch(']'), ctrl('w')])));
             }
         }

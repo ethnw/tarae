@@ -23,8 +23,7 @@ fn scene(name: &str) -> (Editor, crate::scratch::Scratch, u64) {
     let _ = crate::chat::stand_in(&mut c);
     c.state = State::Thinking;
     c.follow.on = true;
-    // (you in the code while Claude works)
-    c.focused = false;
+    // (you in the code while Claude works: the keys stay `At::Code`)
     let g = c.generation();
     ed.session.chat = Some(c);
     (ed, dir, g)
@@ -158,7 +157,7 @@ fn an_edit_is_drawn_as_it_is_written() {
     // (to the middle of the second line it writes)
     let mid = input.find("let c").unwrap() + "let c = a".len();
     // (its place in sight: nothing moves — the cursor where you left it, the keys in the chat or not)
-    ed.session.chat.as_mut().unwrap().focused = true;
+    ed.session.at = crate::session::At::Chat;
     frame(&mut ed, 100, 30);
     let mut w = Writer::new("t1", Tool::Edit);
     w.send(&mut ed, g, &input[..mid], &[20, 60], false);
@@ -166,7 +165,7 @@ fn an_edit_is_drawn_as_it_is_written() {
     frame(&mut ed, 100, 30);
     w.send(&mut ed, g, "", &[], false);
     assert_eq!(ed.doc().selection().primary().head, 0, "the cursor where it was");
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     crate::term::WET_SEEN.with_borrow_mut(Vec::clear);
     let rows = frame(&mut ed, 100, 30);
     let at =

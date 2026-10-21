@@ -139,6 +139,37 @@ pub struct SearchHits {
 }
 
 impl SearchHits {
+    /// `pattern`'s matches in `doc` (none counted past `HIGHLIGHT_MAX`) — None: not a regex.
+    pub fn of(doc: &crate::document::Document, pattern: &str) -> Option<SearchHits> {
+        let re = Regex::new(pattern).ok()?;
+        let (matches, capped) = if doc.text.len_bytes() <= HIGHLIGHT_MAX {
+            let s = doc.text.to_string();
+            let mut v: Vec<(usize, usize)> = re
+                .find_iter(&s)
+                .filter(|m| !m.is_empty())
+                .take(COUNT_MAX + 1)
+                .map(|m| (m.start(), m.end()))
+                .collect();
+            let capped = v.len() > COUNT_MAX;
+            v.truncate(COUNT_MAX);
+            (v, capped)
+        } else {
+            (Vec::new(), true)
+        };
+        Some(SearchHits {
+            pattern: pattern.to_string(),
+            doc: doc.id,
+            version: doc.version(),
+            matches,
+            capped,
+        })
+    }
+
+    /// Still `pattern`'s in `doc` as it is.
+    pub fn holds(&self, doc: &crate::document::Document, pattern: &str) -> bool {
+        self.pattern == pattern && self.doc == doc.id && self.version == doc.version()
+    }
+
     /// Number of the match the primary selection is on (from 1).
     pub fn current(&self, sel: Range) -> Option<usize> {
         let (a, b) = (sel.from(), sel.to());
@@ -147,13 +178,17 @@ impl SearchHits {
 }
 
 impl Editor {
+    /// The code's `/`·`?` being typed — not a view mode's (its prompt searches its own rows, `view::refresh_search`).
+    fn code_search_prompt(&self) -> Option<&crate::editor::Prompt> {
+        let viewing = self.session.view.as_ref().is_some_and(|v| v.prompt);
+        self.prompt.as_ref().filter(|p| !viewing && matches!(p.kind, PromptKind::Search { .. }))
+    }
+
     /// Pattern to show: typed text while entering `/`·`?` (preview), else the last search if highlighting.
     fn shown_pattern(&self) -> Option<String> {
-        match &self.prompt {
-            Some(p) if matches!(p.kind, PromptKind::Search { .. }) && !p.text.is_empty() => {
-                Some(p.text.clone())
-            }
-            Some(p) if matches!(p.kind, PromptKind::Search { .. }) => None,
+        match self.code_search_prompt() {
+            Some(p) if !p.text.is_empty() => Some(p.text.clone()),
+            Some(_) => None,
             _ if self.search_hl => self.search.clone(),
             _ => None,
         }
@@ -167,33 +202,13 @@ impl Editor {
             return;
         };
         let doc = self.doc();
-        let stale = self
-            .search_hits
-            .as_ref()
-            .is_none_or(|h| h.pattern != pat || h.doc != doc.id || h.version != doc.version());
-        if stale {
-            self.search_hits = Regex::new(&pat).ok().map(|re| {
-                let (matches, capped) = if doc.text.len_bytes() <= HIGHLIGHT_MAX {
-                    let s = doc.text.to_string();
-                    let mut v: Vec<(usize, usize)> = re
-                        .find_iter(&s)
-                        .filter(|m| !m.is_empty())
-                        .take(COUNT_MAX + 1)
-                        .map(|m| (m.start(), m.end()))
-                        .collect();
-                    let capped = v.len() > COUNT_MAX;
-                    v.truncate(COUNT_MAX);
-                    (v, capped)
-                } else {
-                    (Vec::new(), true)
-                };
-                SearchHits { pattern: pat.clone(), doc: doc.id, version: doc.version(), matches, capped }
-            });
+        if !self.search_hits.as_ref().is_some_and(|h| h.holds(doc, &pat)) {
+            self.search_hits = SearchHits::of(doc, &pat);
         }
         // Preview: if the first match after the cursor is off screen, center it
-        let reverse =
-            matches!(self.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Search { reverse: true }));
-        if matches!(self.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Search { .. }))
+        let typing = self.code_search_prompt().map(|p| p.kind);
+        let reverse = matches!(typing, Some(PromptKind::Search { reverse: true }));
+        if typing.is_some()
             && let Some(h) = &self.search_hits
         {
             let doc = self.doc();

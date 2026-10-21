@@ -252,6 +252,10 @@ side git · 4 rows · in hand git:src/term.rs
   - `chat`: open, focused, minimized, busy, queued count, conversation, plan step, last call. Draft length
     (full level adds its text).
   - `follow`: on, paused, the gaze.
+  - Where the keys are is one value, the session's `at` (panes P2a, `session::At`: the code, the chat, the
+    terminal's program, the slot, `:procs`, a plugin's panel, the side panel, the review's rail): `side`'s,
+    `review`'s and `chat`'s `focused` and `slot`'s has-the-keys read it, so at most one is true — the one `keys`
+    names. A code pane's `focused` is the pane the code means (`Session.focus`), wherever the keys are.
 - **`runs`** — task, tests, preflight steps, Claude's runs, and queued ones (`runs_next`).
   - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `quiet` (cardburden 5: a run of
     Claude's printing nothing, held from the stuck card — under its own time limit still to come, or its work

@@ -625,7 +625,7 @@ impl Editor {
             self.close_doc(id);
         }
         self.open_virtual(title, &text);
-        self.bottom_focus = false;
+        self.session.leave(crate::session::At::Slot);
         let at = lines
             .iter()
             .rposition(|l| l.contains("FAILED") || l.contains("panicked") || l.starts_with("error"));
@@ -1576,14 +1576,14 @@ mod tests {
             }
         }
         // The panel has the keys (a click on it, `C-w j`): `o`
-        ed.bottom_focus = true;
+        ed.session.at = crate::session::At::Slot;
         ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('o')));
         let title = ed.doc().title.clone();
         assert_eq!(title.as_deref(), Some("preflight · test"), "{:?}", ed.messages.last());
         let text = ed.doc().text.to_string();
         assert_eq!(text, "running 3 tests\ntest a ... ok\ntest b ... FAILED\nfailures:\n", "its lines alone");
         assert_eq!(ed.cursor_line(), 2, "on its failure");
-        assert!(!ed.bottom_focus, "the keys in the buffer");
+        assert!(!ed.session.is_at(crate::session::At::Slot), "the keys in the buffer");
         // Any step by name
         crate::typed::execute(&mut ed, "preflight-output test bundled").unwrap();
         assert_eq!(ed.doc().title.as_deref(), Some("preflight · test bundled"));

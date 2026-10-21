@@ -39,6 +39,7 @@ fn run(choices: Choices) -> Vec<String> {
     ed.allow_path = Some(root.join("state/sandbox.json"));
     // (the conversation whose runs they are: an ended card's `y` is its next run's)
     ed.session.chat = Some(crate::chat::Chat::new());
+    ed.session.at = crate::session::At::Chat;
     let granted = std::cell::RefCell::new(Vec::new());
     let check = |ed: &Editor| held(ed, &granted.borrow());
     let mut runs = Vec::new();

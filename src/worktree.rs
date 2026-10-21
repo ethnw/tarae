@@ -1762,9 +1762,6 @@ impl Editor {
                     }
                     ed.session_switch(session);
                     crate::chat::open(ed);
-                    if let Some(c) = ed.session.chat.as_mut() {
-                        c.focused = true;
-                    }
                     ed.set_success(format!("Session {} — from {}", m.branch, m.base_said()));
                     if !failed.is_empty() {
                         ed.set_warning(format!("not copied into it: {}", failed.join(", ")));
@@ -2626,9 +2623,7 @@ mod tests {
         let sessions = ed.sessions.len();
         ed.offer_accept();
         settle_until(ed, |ed| ed.sessions.len() > sessions);
-        if let Some(c) = ed.session.chat.as_mut() {
-            c.focused = false;
-        }
+        ed.session.leave(crate::session::At::Chat);
         ed.session.root.clone()
     }
 
@@ -2676,11 +2671,11 @@ mod tests {
             (ed.session.name.as_str(), ed.session.branch.as_deref(), ed.session.base.as_deref()),
             ("fix-login", Some("fix-login"), Some("main"))
         );
-        assert!(ed.session.chat.as_ref().is_some_and(|c| c.focused), "its chat open, with the keys");
+        assert!(ed.session.chat_has_keys(), "its chat open, with the keys");
         assert!(says(&ed, &format!("Session fix-login — from main ({})", &main[..7])), "{}", said(&ed));
         assert!(ed.offers.is_empty());
         // Taken names: a branch there is (checked out in the session's checkout), and one git refuses
-        ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.leave(crate::session::At::Chat);
         feed(&mut ed, ":session-switch 0<ret>:session-new fix-login<ret>");
         settle_until(&mut ed, |ed| says(ed, "new session: there's a branch fix-login already"));
         assert!(says(&ed, "already, checked out in "), "says where: {}", said(&ed));
@@ -4273,9 +4268,7 @@ mod tests {
         // Untouched here, changed there: taken, said, told — as the session's claude starts (a new conversation)
         std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\n").unwrap();
         crate::chat::reset(&mut ed);
-        if let Some(c) = ed.session.chat.as_mut() {
-            c.focused = false;
-        }
+        ed.session.leave(crate::session::At::Chat);
         settle_until(&mut ed, |ed| says(ed, "updated from the main checkout") || says(ed, "not updated"));
         assert!(says(&ed, "CLAUDE.md updated from the main checkout"), "{}", said(&ed));
         assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\n");
@@ -5104,7 +5097,8 @@ mod tests {
         assert_eq!(card_in_sight(&mut ed), ['g', 'n']);
         feed(&mut ed, "g");
         assert!(card(&ed, held).is_none());
-        let git_tab = ed.session.sidebar.as_ref().map(|s| (s.mode, s.focus));
+        let git_tab =
+            ed.session.sidebar.as_ref().map(|s| (s.mode, ed.session.is_at(crate::session::At::Side)));
         assert_eq!(git_tab, Some((crate::sidebar::Mode::Git, true)));
         feed(&mut ed, ":w<ret>");
         ed.flush_saves(); // (saving is in the background: on disk before git commits it)

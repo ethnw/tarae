@@ -1085,9 +1085,10 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
 pub fn send(ed: &mut Editor, id: u64, text: &str, fresh: bool, why: Option<String>, lines: Option<bool>) {
     // The chat panel carries the conversation — opened in the background if closed; the keys stay here
     if ed.session.chat.is_none() {
+        let at = ed.session.at;
         crate::chat::open(ed);
+        ed.session.at = at;
         if let Some(c) = &mut ed.session.chat {
-            c.focused = false;
             c.unfolded = false;
         }
     }

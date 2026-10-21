@@ -410,7 +410,7 @@ fn a_shuttles_key_doesnt_pause_follow() {
     let mut ed = editor();
     let id = connect_for_test(&mut ed, "t", Level::Light);
     let mut c = crate::chat::Chat::new();
-    (c.follow.on, c.focused) = (true, false);
+    c.follow.on = true;
     ed.session.chat = Some(c);
     assert!(to(&ed).starts_with("pane#"), "the code has the keys");
     crate::follow::watch(&mut ed);

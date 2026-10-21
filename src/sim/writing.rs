@@ -61,7 +61,6 @@ fn run(choices: Choices) -> Vec<String> {
     let mut c = crate::chat::Chat::new();
     let _claude = crate::chat::stand_in(&mut c);
     c.follow.on = true;
-    c.focused = false;
     ed.session.chat = Some(c);
     crate::term::render(&mut ed, &mut Vec::new(), 100, 32).unwrap();
     let world = RefCell::new(World::default());

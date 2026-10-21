@@ -25,6 +25,7 @@ use crate::editor::Editor;
 use crate::key::{Code, Key};
 use crate::notes::By;
 use crate::risk::Grade;
+use crate::session::At;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Base {
@@ -95,8 +96,7 @@ pub struct CodeReview {
     /// Once this document's diff arrives, select its first (or, going back, last) change — or the one at a
     /// line (`]h`).
     land: Option<(DocId, Land)>,
-    /// The rail has the keys (`space e` during a review) · the file selected there.
-    pub focus: bool,
+    /// The file selected on the rail (the keys there: `At::Rail` — `space e` during a review).
     pub selected: usize,
     /// The rail's first file row shown (the wheel moves it) · the file it last scrolled to (`fit`).
     pub scroll: usize,
@@ -186,7 +186,6 @@ impl CodeReview {
             pending: Vec::new(),
             docs: Vec::new(),
             land: None,
-            focus: false,
             selected: 0,
             scroll: 0,
             shown: None,
@@ -528,15 +527,16 @@ impl CodeReview {
 
     /// The file the rail marks: its selection while it has the keys, else the file in hand.
     pub fn marked(&self, ed: &Editor) -> Option<usize> {
-        if self.focus { Some(self.selected) } else { self.in_hand(ed) }
+        if ed.session.is_at(At::Rail) { Some(self.selected) } else { self.in_hand(ed) }
     }
 
     /// Before drawing `room` rows of the rail, its files from screen row `top`: scroll only when the marked
     /// file changed and is out of sight — just into view while the rail has the keys, else centered — so a
     /// click doesn't slide the list under the pointer, and the wheel's scroll stays. Its head grown or shrunk
     /// (a row said, the reviewer's verdict), a list longer than its rows moves the other way: each file stays
-    /// on its row (one that fits them all moves down with the head — none hidden to keep it still).
-    pub fn fit(&mut self, marked: Option<usize>, room: usize, top: usize) {
+    /// on its row (one that fits them all moves down with the head — none hidden to keep it still). `keys`: the
+    /// rail has them.
+    pub fn fit(&mut self, marked: Option<usize>, room: usize, top: usize, keys: bool) {
         self.room = room;
         let rows = self.rail_rows();
         let end = rows.len().saturating_sub(room);
@@ -553,7 +553,7 @@ impl CodeReview {
                 && !(self.scroll..self.scroll + room).contains(&at)
             {
                 self.past = 0;
-                self.scroll = match (self.focus, at < self.scroll) {
+                self.scroll = match (keys, at < self.scroll) {
                     (true, true) => at,
                     (true, false) => at + 1 - room,
                     (false, _) => at.saturating_sub(room / 2),
@@ -2265,7 +2265,6 @@ fn open_at(
         pending: Vec::new(),
         docs: Vec::new(),
         land: None,
-        focus: false,
         selected: 0,
         scroll: 0,
         shown: None,
@@ -2645,9 +2644,7 @@ fn show_as_brought(ed: &mut Editor, card: u64, missing: Vec<Held>) {
     }
     let version = ed.docs.iter().find(|d| d.id == doc).map_or(0, |d| d.version());
     ed.session.held_view = Some(HeldView { doc, version, blocks, drawn: Default::default() });
-    if let Some(r) = ed.session.code_review.as_mut() {
-        r.focus = false;
-    }
+    ed.session.leave(At::Rail);
 }
 
 /// `space v h` in the buffer of a bring's changes (`HeldView`): the block under the cursor looked at — every
@@ -3863,8 +3860,8 @@ fn binary_open(ed: &mut Editor, i: usize, f: &File, read: BinaryRead) {
     let version = ed.docs.iter().find(|d| d.id == doc).map_or(0, |d| d.version());
     if let Some(r) = ed.session.code_review.as_mut() {
         r.binary_shown = Some(BinaryView { file: i, doc, version, head, keys, said, stale });
-        r.focus = false;
     }
+    ed.session.leave(At::Rail);
     if stale {
         ed.set_warning(format!(
             "{} isn't what the review graded — changed since it opened: a new review (space v v) grades it again",
@@ -4593,13 +4590,10 @@ pub fn rail_focus(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.as_mut() else { return };
     if !up {
         r.behind = false;
-        r.focus = false;
-        if let Some(s) = ed.session.sidebar.as_mut() {
-            s.focus = false;
-        }
+        ed.session.at = At::Code;
     }
-    r.focus = !r.focus;
-    if r.focus {
+    ed.session.at = if ed.session.at == At::Rail { At::Code } else { At::Rail };
+    if ed.session.at == At::Rail {
         r.selected = current.or_else(|| r.rail_order().first().copied()).unwrap_or(0);
     }
 }
@@ -4617,7 +4611,10 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     // (the files drawn: the hand moves a file at a time, so `C-d` is half the files in sight and `C-f` all of them —
     // counting the folders' rows too would carry it past the screen; `C-e`/`C-y` scroll rows, `room` below)
     let rows = ed.screen.review_rail.borrow().len();
-    let Some(r) = ed.session.code_review.as_mut().filter(|r| r.focus) else { return false };
+    if ed.session.at != At::Rail {
+        return false;
+    }
+    let Some(r) = ed.session.code_review.as_mut() else { return false };
     let order = r.rail_order();
     let at = order.iter().position(|&i| i == r.selected).unwrap_or(0);
     let pick = |k: usize| order.get(k.min(order.len().saturating_sub(1))).copied();
@@ -4635,7 +4632,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
         (Code::Enter | Code::Char('l') | Code::Right, false) => {
             let i = r.selected;
-            r.focus = false;
+            ed.session.at = At::Code;
             show(ed, i, false);
         }
         // (as every list panel's `q`: it closes — the review ends, asked first when files are unviewed)
@@ -4648,7 +4645,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
                 r.selected = pick(at + 1).unwrap_or(i);
             }
         }
-        (Code::Esc, false) => r.focus = false,
+        (Code::Esc, false) => ed.session.at = At::Code,
         // (the next file not viewed, selected — enter opens it; `U` the one before)
         (Code::Char(c @ ('u' | 'U')), false) => {
             let selected = r.selected;
@@ -4678,8 +4675,8 @@ impl Editor {
     /// Whether the review reads wide now (`space v z`): on, and neither the rail (`space e`) nor the chat
     /// has the keys — going to one brings it back while it has them.
     pub fn review_wide(&self) -> bool {
-        self.session.code_review.as_ref().is_some_and(|r| r.wide && !r.focus)
-            && !self.session.chat.as_ref().is_some_and(|c| c.focused)
+        self.session.code_review.as_ref().is_some_and(|r| r.wide)
+            && !matches!(self.session.at, At::Rail | At::Chat)
     }
 }
 
@@ -4691,11 +4688,9 @@ pub fn wide_toggle(ed: &mut Editor) {
         return ed.set_warning("no review open — space v v starts one");
     };
     r.wide = !r.wide;
-    r.focus = false;
     let wide = r.wide;
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.focused = false;
-    }
+    ed.session.leave(At::Rail);
+    ed.session.leave(At::Chat);
     ed.set_status(match wide {
         true => "review wide: the rail and the chat give way — space v z brings them back",
         false => "the review's rail and the chat are back",
@@ -4781,9 +4776,11 @@ pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
         ));
     }
     if ed.session.chat.is_none() {
+        // (opened without the keys: they stay where they were)
+        let at = ed.session.at;
         crate::chat::open(ed);
+        ed.session.at = at;
         if let Some(c) = &mut ed.session.chat {
-            c.focused = false;
             c.unfolded = false;
         }
     }
@@ -5369,11 +5366,9 @@ mod tests {
     fn space_e_under_a_review_counts_the_files_tab() {
         let (mut ed, dir) = reviewing("count-files", &[("a.txt", "one\n", "two\n")]);
         ed.config.features_count = true;
-        if let Some(r) = ed.session.code_review.as_mut() {
-            r.focus = false;
-        }
+        ed.session.leave(At::Rail);
         feed(&mut ed, "<space>e");
-        assert!(ed.session.code_review.as_ref().is_some_and(|r| r.focus), "the rail has the keys");
+        assert!(ed.session.is_at(At::Rail), "the rail has the keys");
         let pending = ed.features.pending();
         assert!(pending.iter().any(|(k, c)| k == "panel:files" && c.n == 1), "{pending:?}");
         std::fs::remove_dir_all(&dir).ok();
@@ -5685,6 +5680,7 @@ mod tests {
         let mut c = crate::chat::Chat::new();
         c.state = crate::chat::State::Thinking;
         ed.session.chat = Some(c);
+        ed.session.at = crate::session::At::Chat;
         assert!(commit(&mut ed).unwrap_err().contains("Claude is working"));
         ed.session.chat = None;
         // A file of the review's for the message: refused (left out, its change would go uncommitted)

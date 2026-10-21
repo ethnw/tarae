@@ -166,7 +166,7 @@ fn pick(ed: &mut Editor, id: String) {
         crate::chat::open(ed);
     }
     let Some(c) = ed.session.chat.as_mut() else { return };
-    c.focused = true;
+    ed.session.at = crate::session::At::Chat;
     c.unfolded = true;
     if !c.pointed.contains(&id) {
         c.pointed.push(id.clone());

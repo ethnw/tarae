@@ -25,6 +25,7 @@ use crate::editor::Editor;
 use crate::event::{Apply, Event};
 use crate::key::{Code, Key};
 use crate::selection::{Range, Selection};
+use crate::session::At;
 use crate::transaction::{Assoc, Change, Transaction};
 
 /// Speed options: no tools (pure transform), skip MCP·user settings, no conversation kept by claude (keeps /resume clean).
@@ -1533,7 +1534,7 @@ pub fn esc_stops(ed: &Editor) -> bool {
         && ed.picker.is_none()
         && ed.prompt.is_none()
         && ed.pending.is_empty()
-        && !ed.session.chat.as_ref().is_some_and(|c| c.focused)
+        && !ed.session.chat_has_keys()
 }
 
 /// The answer being waited for (of `generation`, or any) is stopped — its process killed, nothing applied —
@@ -1821,7 +1822,7 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
         return false;
     }
     let page = ed.viewport.0.max(2) as isize;
-    let chat = ed.session.chat.as_ref().map(|c| c.focused);
+    let chat = ed.session.chat_has_keys();
     // Still waiting for the answer: Esc stops it (the card says so)
     if key == Key::plain(Code::Esc) && esc_stops(ed) {
         stop_waiting(ed, None, "stopped — nothing changed");
@@ -1830,12 +1831,10 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
     let c_q = key.ctrl && !key.alt && key.code == Code::Char('q');
     // Back in the chat: its keys are the chat's until `C-q`
-    if chat == Some(true) {
+    if chat {
         if c_q {
             rev.away = false;
-            if let Some(c) = ed.session.chat.as_mut() {
-                c.focused = false;
-            }
+            ed.session.at = At::Code;
             return true;
         }
         return false;
@@ -1860,8 +1859,8 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('y'), true, false) => scroll(rev, -1),
         (Code::Esc, ..) => {
             match ed.session.chat.as_mut().filter(|_| rev.from_chat) {
-                Some(c) => {
-                    c.focused = true;
+                Some(_) => {
+                    ed.session.at = At::Chat;
                     let key = ed.key_said("C-q");
                     ed.set_status(format!(
                         "back to the chat — the change waits unanswered, {key} answers it"
@@ -1987,11 +1986,8 @@ fn finish(ed: &mut Editor) {
     crate::reviews::edit_ended(ed, &rev, false, applied);
     // Answered here, the keys go back to the chat it took them from — as its Esc gives them (they stayed in
     // the code: `keys → pane#29 (commands)` after an edit review's `y`)
-    if rev.from_chat
-        && !rev.away
-        && let Some(c) = ed.session.chat.as_mut()
-    {
-        c.focused = true;
+    if rev.from_chat && !rev.away && ed.session.chat.is_some() {
+        ed.session.at = At::Chat;
     }
     // A step `space u` takes back on its own
     if applied

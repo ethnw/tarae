@@ -123,7 +123,6 @@ fn code() -> (Editor, std::sync::mpsc::Receiver<String>) {
     let mut c = crate::chat::Chat::new();
     let claude = crate::chat::stand_in(&mut c);
     // (the keys the code's)
-    c.focused = false;
     ed.session.chat = Some(c);
     frame(&mut ed);
     (ed, claude)
@@ -359,7 +358,7 @@ fn a_yes_for_a_pointed_key_stays_with_its_element() {
 #[test]
 fn a_queued_message_keeps_its_own_quotes() {
     let (mut ed, claude) = code();
-    let unfocus = |ed: &mut Editor| ed.session.chat.as_mut().unwrap().focused = false;
+    let unfocus = |ed: &mut Editor| ed.session.leave(crate::session::At::Chat);
     feed(&mut ed, "x >first<ret>");
     assert!(ed.session.chat.as_ref().unwrap().busy(), "Claude works");
     unfocus(&mut ed);
@@ -380,7 +379,7 @@ fn a_queued_message_keeps_its_own_quotes() {
     assert!(c.queued_quotes.is_empty());
     // `↑`: the queued message back, its quote ahead of the one quoted since
     let (mut ed, _claude) = code();
-    let unfocus = |ed: &mut Editor| ed.session.chat.as_mut().unwrap().focused = false;
+    let unfocus = |ed: &mut Editor| ed.session.leave(crate::session::At::Chat);
     feed(&mut ed, "x >first<ret>");
     unfocus(&mut ed);
     feed(&mut ed, "jx >again<ret>");
@@ -475,7 +474,7 @@ fn the_screen_goes_only_with_the_inputs_message() {
     crate::chat::stand_in_done(&mut ed);
     let c = ed.session.chat.as_mut().unwrap();
     assert_eq!(c.with_chips(), ["screen 80×24"], "it stays");
-    c.focused = true;
+    ed.session.at = crate::session::At::Chat;
     feed(&mut ed, "mine<ret>");
     let sent = sent(&claude);
     assert!(!sent[0].contains("the screen as seen") && sent[1].contains("the screen as seen"), "{sent:?}");
@@ -525,12 +524,11 @@ fn enter_with_nothing_typed_says_so() {
 fn a_quote_keeps_out_only_its_own_buffers_selection() {
     let (mut ed, claude) = code();
     feed(&mut ed, "jx >");
-    ed.session.chat.as_mut().unwrap().focused = false;
+    ed.session.leave(crate::session::At::Chat);
     ed.new_scratch();
     ed.doc_mut().text = Rope::from_str("fn main() {}\nlet code = 1;\nlet more = 2;\n");
     feed(&mut ed, "jx");
-    let c = ed.session.chat.as_mut().unwrap();
-    c.focused = true;
+    ed.session.at = crate::session::At::Chat;
     feed(&mut ed, "why?<ret>");
     let sent = sent(&claude);
     assert!(sent[0].contains("<selection lines=\"2-2\">") && sent[0].contains("<quoted id="), "{}", sent[0]);

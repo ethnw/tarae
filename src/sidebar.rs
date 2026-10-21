@@ -15,6 +15,7 @@ use crate::document::DocId;
 use crate::editor::{Editor, Mode as EdMode};
 use crate::filetree::{Kind, Tree};
 use crate::key::{Code, Key};
+use crate::session::At;
 use crate::syntax::Def;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,8 +78,6 @@ type GitOf = (u64, Option<PathBuf>, Vec<(String, u64, u64)>);
 
 pub struct Sidebar {
     pub mode: Mode,
-    /// Keys go to the panel.
-    pub focus: bool,
     /// Row selected (focused) / the editor's row (unfocused).
     pub selected: usize,
     pub scroll: usize,
@@ -140,7 +139,6 @@ impl Sidebar {
     pub fn new(mode: Mode, root: PathBuf) -> Self {
         Sidebar {
             mode,
-            focus: true,
             selected: 0,
             scroll: 0,
             shown: None,
@@ -268,7 +266,7 @@ impl Sidebar {
     /// Before drawing `rows` list rows (`depths` = each line's): scroll to the selection when it moved —
     /// just into view when focused, centered when following the editor — and work out the folders pinned
     /// over the top, never over the selection.
-    pub fn fit(&mut self, rows: usize, depths: &[usize]) {
+    pub fn fit(&mut self, rows: usize, depths: &[usize], keys: bool) {
         let n = depths.len();
         if n == 0 || rows == 0 {
             self.scroll = 0;
@@ -280,7 +278,7 @@ impl Sidebar {
         let center = self.shown.is_none(); // just opened or switched: the selection mid-list
         self.shown = Some(self.selected);
         if follow && (self.selected < self.scroll || self.selected >= self.scroll + rows) {
-            self.scroll = match (self.focus && !center, self.selected < self.scroll) {
+            self.scroll = match (keys && !center, self.selected < self.scroll) {
                 (true, true) => self.selected,
                 (true, false) => self.selected + 1 - rows,
                 (false, _) => self.selected.saturating_sub(rows / 2),
@@ -640,35 +638,35 @@ impl Editor {
         }
         // Another tab (`space o`, `space q`) goes in front of the rail, as the git tab does — #154: it had the
         // keys while the rail stayed drawn in its place (`space g` gives the column back)
+        let on =
+            self.session.is_at(At::Side) && self.session.sidebar.as_ref().is_some_and(|s| s.mode == mode);
         if let Some(r) = self.session.code_review.as_mut()
-            && !self.session.sidebar.as_ref().is_some_and(|s| s.mode == mode && s.focus && r.behind)
+            && !(on && r.behind)
         {
             r.behind = true;
-            r.focus = false;
-            if let Some(s) = self.session.sidebar.as_mut() {
-                s.focus = false;
+            if matches!(self.session.at, At::Rail | At::Side) {
+                self.session.at = At::Code;
             }
         }
-        if !self.session.sidebar.as_ref().is_some_and(|s| s.mode == mode && s.focus) {
+        let on =
+            self.session.is_at(At::Side) && self.session.sidebar.as_ref().is_some_and(|s| s.mode == mode);
+        if !on {
             self.count(crate::features::Area::Panel, crate::features::panel(mode));
         }
         match self.session.sidebar.as_mut() {
-            Some(s) if s.mode == mode && s.focus => {
+            Some(_) if on => {
                 self.session.sidebar = None;
                 return;
             }
             Some(s) => {
                 s.switch_to(mode);
-                s.focus = true;
                 s.shown = None;
                 s.list_of = None; // another view may have used the rows
                 s.git_of = None;
             }
             None => self.session.sidebar = Some(Sidebar::new(mode, self.session.root.clone())),
         }
-        if let Some(c) = self.session.chat.as_mut() {
-            c.focused = false;
-        }
+        self.session.at = At::Side;
         if mode == Mode::Files {
             self.sidebar_list_files();
         }
@@ -868,7 +866,7 @@ impl Editor {
             }
         }
         let Some(s) = self.session.sidebar.as_ref() else { return };
-        if !s.focus
+        if self.session.at != At::Side
             && let Some(h) = s.here(self)
         {
             self.session.sidebar.as_mut().unwrap().selected = h;
@@ -887,18 +885,20 @@ impl Editor {
                 s.set_open([d.as_str()], open);
             }
             Target::File(p) => {
-                s.focus = false;
+                self.session.leave(At::Side);
                 if let Err(e) = self.open(&p) {
                     self.set_error(format!("{e:#}"));
                 }
             }
             Target::Item(i) => {
-                s.focus = false;
+                self.session.leave(At::Side);
                 self.qlist_goto(i);
             }
             // A changed file (not new): open to its hunks and conflicts — it shows in the editor, the
             // panel keeps the keys; closed again the same way
-            Target::Change { rel, file: true, staged: false, untracked: false } if s.focus => {
+            Target::Change { rel, file: true, staged: false, untracked: false }
+                if self.session.at == At::Side =>
+            {
                 if s.expanded.remove(&rel) {
                     return;
                 }
@@ -918,14 +918,14 @@ impl Editor {
                 if !path.exists() {
                     return self.set_warning(format!("{rel} is deleted — nothing to open"));
                 }
-                s.focus = false;
+                self.session.leave(At::Side);
                 if let Err(e) = self.open(&path) {
                     self.set_error(format!("{e:#}"));
                 }
             }
             // A hunk or conflict: there in the code, which gets the keys
             Target::Hunk { .. } | Target::Conflict { .. } => {
-                s.focus = false;
+                self.session.leave(At::Side);
                 self.git_reveal(&line.target);
             }
             // A plugin's row: where it's defined (there, in the code), or the plugin's to act on
@@ -937,7 +937,7 @@ impl Editor {
                     .and_then(|(_, side)| side.rows.get(i)?.at.clone());
                 match at {
                     Some((path, line, _)) => {
-                        s.focus = false;
+                        self.session.leave(At::Side);
                         let goto =
                             crate::picker::Action::Goto { path: path.into(), line: line as usize, col: 0 };
                         self.run_picker_action(goto);
@@ -947,7 +947,9 @@ impl Editor {
             }
             Target::None | Target::Change { .. } => {}
             Target::At(at) => {
-                s.focus = false;
+                if self.session.at == At::Side {
+                    self.session.at = At::Code;
+                }
                 let fresh = s.outline_of.is_some_and(|o| o == (self.doc().id, self.doc().version()));
                 if !fresh {
                     return self.set_status("the outline is catching up — try again");
@@ -1058,9 +1060,7 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
                 ed.set_error(format!("{e:#}"));
                 return true;
             }
-            if let Some(s) = ed.session.sidebar.as_mut() {
-                s.focus = false;
-            }
+            ed.session.leave(At::Side);
             if c == 'D'
                 && let Err(e) = ed.diff_against("")
             {
@@ -1068,9 +1068,7 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
             }
         }
         ('e', Some(t @ (Target::Hunk { .. } | Target::Conflict { .. })), _) => {
-            if let Some(s) = ed.session.sidebar.as_mut() {
-                s.focus = false;
-            }
+            ed.session.leave(At::Side);
             ed.git_reveal(t);
         }
         // `l` / `h` open and close a changed file's hunks, like a folder
@@ -1146,9 +1144,12 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     // Folded away (the terminal is too narrow for it and the code): the keys are the code's
     let folded = ed.side_folded();
-    let Some(s) = ed.session.sidebar.as_mut().filter(|s| s.focus) else { return false };
+    if ed.session.at != At::Side {
+        return false;
+    }
+    let Some(s) = ed.session.sidebar.as_mut() else { return false };
     if folded {
-        s.focus = false;
+        ed.session.at = At::Code;
         return false;
     }
     // A key here: the selection is the user's — `space g`'s aim at the row under the code's cursor goes (#187:
@@ -1242,7 +1243,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
                 Mode::Git if plugin => Mode::Plugin,
                 Mode::Git | Mode::Plugin => Mode::Files,
             };
-            s.focus = false; // so sidebar_show switches instead of closing
+            ed.session.at = At::Code; // so sidebar_show switches instead of closing
             ed.sidebar_show(mode);
             if mode == Mode::Git {
                 ed.git_refresh();
@@ -1252,13 +1253,13 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Esc, _) if ed.session.code_review.as_ref().is_some_and(|r| r.behind) => {
             crate::codereview::rail_focus(ed)
         }
-        (Code::Esc, _) => s.focus = false,
+        (Code::Esc, _) => ed.session.at = At::Code,
         (Code::Char('q'), false) => ed.session.sidebar = None,
         _ => ed.key_unused(key, "the side panel", "esc code"),
     }
     // Moving onto a hunk or conflict shows it in the code
-    if let Some(s) =
-        ed.session.sidebar.as_ref().filter(|s| s.mode == Mode::Git && s.focus && Some(s.selected) != before)
+    if let Some(s) = ed.session.sidebar.as_ref().filter(|s| s.mode == Mode::Git && Some(s.selected) != before)
+        && ed.session.at == At::Side
         && let Some(t) = s.lines().get(s.selected).map(|l| l.target.clone())
         && matches!(t, Target::Hunk { .. } | Target::Conflict { .. })
     {

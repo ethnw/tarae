@@ -404,9 +404,7 @@ impl Editor {
         crate::refactor::next(self);
         if let Some(r) = self.session.review.as_mut() {
             r.away = false;
-            if let Some(c) = self.session.chat.as_mut() {
-                c.focused = false;
-            }
+            self.session.leave(crate::session::At::Chat);
         }
         // (one behind another of its kind: it comes once that one is answered — said)
         if self.inbox().iter().any(|x| x.id == e.id && x.up == "queued") {

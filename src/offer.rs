@@ -2351,19 +2351,10 @@ impl crate::editor::Editor {
         self.offer_views.retain(|(d, _)| *d != doc);
         self.offer_views.push((doc, id));
         // The code has the keys, to read it (#55: the review's rail kept them, and keys did nothing)
-        if let Some(c) = self.session.chat.as_mut() {
-            c.focused = false;
+        // (a panel in the slot `:procs`, a plugin's, keeps them as it did)
+        if !matches!(self.session.at, crate::session::At::Procs | crate::session::At::Plugin) {
+            self.session.at = crate::session::At::Code;
         }
-        if let Some(s) = self.session.sidebar.as_mut() {
-            s.focus = false;
-        }
-        if let Some(r) = self.session.code_review.as_mut() {
-            r.focus = false;
-        }
-        if let Some(t) = self.session.terminal.as_mut() {
-            t.focus = false;
-        }
-        self.bottom_focus = false;
         // The card keeps the keys while it's read: the keys that read reach the buffer through it (`card_reads`),
         // its answers answer it. In its buffer those are the card's only while it holds them — Esc gives them
         // back, and then `y` is a yank, not a yes; `C-q` gives them again (frictions15 review)

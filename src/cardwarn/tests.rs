@@ -457,7 +457,8 @@ fn chat_in(name: &str, project: &str) -> (crate::editor::Editor, u64, PathBuf) {
     ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     crate::chat::open(&mut ed);
     let c = ed.session.chat.as_mut().unwrap();
-    (c.state, c.focused) = (crate::chat::State::Thinking, false);
+    c.state = crate::chat::State::Thinking;
+    ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     (ed, generation, dir)
 }

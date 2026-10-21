@@ -297,10 +297,10 @@ fn inside_zellij_c_qs_twin_reaches_what_c_q_goes_to() {
     let (mut ed, dir, back, third) = three("zellij-twin");
     ed.zellij = true;
     let mut c = crate::chat::Chat::new();
-    c.focused = true;
     c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "hi", ""));
     c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Assistant, "hello", ""));
     ed.session.chat = Some(c);
+    ed.session.at = crate::session::At::Chat;
     park(&mut ed, back, claudes(1, 20));
     assert_eq!(ed.key_said("C-q"), "esc esc space I");
     screen(&mut ed, 160, 30);
@@ -333,9 +333,9 @@ fn inside_zellij_or_not_the_toast_for_a_session_left_waiting_says_its_key() {
         // (the session switched to has its chat holding the keys: a way back made into the toast would say
         // `esc esc space I` — read later, from anywhere, the toast names only the inbox)
         let mut c = crate::chat::Chat::new();
-        c.focused = true;
         c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "hi", ""));
         session(&mut ed, back).chat = Some(c);
+        session(&mut ed, back).at = crate::session::At::Chat;
         up(&mut ed, claudes(1, 20));
         assert!(ed.session_switch(back));
         let says = if twins {
@@ -375,7 +375,6 @@ fn c_q_from_a_chat_holding_the_keys_reaches_the_card() {
     let (mut ed, dir, back, _) = three("chat-cq");
     let chat = |busy: bool| {
         let mut c = crate::chat::Chat::new();
-        c.focused = true;
         if busy {
             (c.state, c.follow.on, c.unfolded) = (crate::chat::State::Thinking, true, false);
         }
@@ -383,10 +382,12 @@ fn c_q_from_a_chat_holding_the_keys_reaches_the_card() {
     };
     // The chat open and focused here; the card parked behind
     ed.session.chat = Some(chat(false));
+    ed.session.at = crate::session::At::Chat;
     park(&mut ed, back, claudes(1, 20));
     assert!(ed.ui_state().text().contains("keys → chat"), "{}", ed.ui_state().text());
     // (that session's own chat holding the keys too)
     session(&mut ed, back).chat = Some(chat(false));
+    session(&mut ed, back).at = crate::session::At::Chat;
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, back, "C-q went to the card's session");
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
@@ -396,6 +397,7 @@ fn c_q_from_a_chat_holding_the_keys_reaches_the_card() {
     assert!(ed.session.chat.as_ref().unwrap().input.is_empty(), "nothing typed into the chat there");
     // Minimized while Claude works, holding the keys: a card up here
     ed.session.chat = Some(chat(true));
+    ed.session.at = crate::session::At::Chat;
     assert!(ed.session.chat.as_ref().unwrap().compact());
     up(&mut ed, claudes(2, 5));
     feed(&mut ed, "<C-q>n");

@@ -757,9 +757,7 @@ pub fn view_all(ed: &mut Editor, whose: Whose) {
                 ed.close_doc(d);
             }
             ed.open_virtual(&title, &text);
-            if let Some(c) = ed.session.chat.as_mut() {
-                c.focused = false;
-            }
+            ed.session.leave(crate::session::At::Chat);
         }
     });
 }
@@ -829,9 +827,9 @@ fn show(ed: &mut Editor, f: FileChange, whose: Whose, title: String, reason: Str
     let answers = front(ed, whose).and_then(|l| l.row.clone());
     let changes = crate::editdiff::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
-    let from_chat = claudes && ed.session.chat.as_ref().is_some_and(|c| c.focused);
+    let from_chat = claudes && ed.session.chat_has_keys();
+    ed.session.leave(crate::session::At::Chat);
     if let Some(c) = &mut ed.session.chat {
-        c.focused = false;
         c.follow.keep(doc_id);
     }
     crate::llm::review_with(

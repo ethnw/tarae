@@ -733,8 +733,7 @@ fn a_chat_starts_held_back_while_its_card_waits() {
         "{q}"
     );
     assert!(!q.contains("theirs-zq7.invalid"), "a variable's value isn't shown: {q}");
-    let c = ed.session.chat.as_ref().unwrap();
-    assert!(c.focused && !ed.card_has_keys(), "the chat keeps its keys beside the card");
+    assert!(ed.session.chat_has_keys() && !ed.card_has_keys(), "the chat keeps its keys beside the card");
     // Typed before any answer: it goes to claude
     ed.session.chat.as_mut().unwrap().input = "hello from the test".into();
     crate::chat::send(&mut ed);

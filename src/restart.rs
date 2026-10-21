@@ -1109,10 +1109,13 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
             json!({ "id": v.id, "doc": index(doc), "top": top, "left": left })
         })
         .collect();
-    let sidebar =
-        l.sidebar.as_ref().and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
+    use crate::session::At;
+    let sidebar = l
+        .sidebar
+        .as_ref()
+        .and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": l.is_at(At::Side) })));
     let chat = l.chat.as_ref().map(|c| {
-        json!({ "conversation": c.conversation, "input": c.input, "cursor": c.cursor, "focused": c.focused,
+        json!({ "conversation": c.conversation, "input": c.input, "cursor": c.cursor, "focused": l.is_at(At::Chat),
                 "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end,
                 "at_end_yours": c.edits.at_end_yours })
     });
@@ -1347,9 +1350,10 @@ fn restore_session(ed: &mut Editor, v: &Value, behind: bool, back: &mut Back) {
     }
     let sidebar = &v["sidebar"];
     if let Some(mode) = sidebar["mode"].as_str().and_then(mode_of) {
+        let at = ed.session.at;
         ed.sidebar_show(mode);
-        if let Some(s) = ed.session.sidebar.as_mut() {
-            s.focus = sidebar["focus"].as_bool().unwrap_or(false);
+        if !sidebar["focus"].as_bool().unwrap_or(false) {
+            ed.session.at = at;
         }
     }
     let chat = &v["chat"];
@@ -1668,7 +1672,10 @@ mod tests {
             ed.session.chat.as_ref().unwrap().msgs.iter().any(|m| m.text == "Hello back.")
         });
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!((c.input.as_str(), c.cursor, c.focused, c.scroll), ("half 한", 5, true, 2));
+        assert_eq!(
+            (c.input.as_str(), c.cursor, ed.session.is_at(crate::session::At::Chat), c.scroll),
+            ("half 한", 5, true, 2)
+        );
         assert!(!c.follow.on);
         assert_eq!(c.edits.at_end.as_deref(), Some(dir.as_path()), "review at the end stays on");
         assert_eq!(c.conversation.as_deref(), Some("s-1"));
@@ -1818,6 +1825,7 @@ mod tests {
             let mut c = crate::chat::Chat::new();
             (c.conversation, c.input, c.cursor) = (Some("c-back".into()), "half a thought".into(), 4);
             ed.session.chat = Some(c);
+            ed.session.at = crate::session::At::Chat;
         });
         let state = snapshot(&mut ed);
         drop(ed);
@@ -1862,6 +1870,7 @@ mod tests {
             let mut c = crate::chat::Chat::new();
             c.conversation = Some("c-back".into());
             ed.session.chat = Some(c);
+            ed.session.at = crate::session::At::Chat;
         });
         let state = snapshot(&mut ed);
         drop(ed);
@@ -1915,6 +1924,7 @@ mod tests {
             c
         };
         ed.session.chat = Some(chat("c-front", "in front"));
+        ed.session.at = crate::session::At::Chat;
         let id = ed.session_add(back.clone());
         ed.session_by_id(id).unwrap().chat = Some(chat("c-back", "behind"));
         crate::chat::keep_now(&ed);

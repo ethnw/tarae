@@ -997,6 +997,7 @@ fn frictions36_frames() {
                 c.settings.reading_since(crate::clock::now() - std::time::Duration::from_millis(1200));
             }
             s.ed.session.chat = Some(c);
+            s.ed.session.at = crate::session::At::Chat;
         };
         let mut s = shot();
         chat(&mut s, false);
@@ -1279,7 +1280,7 @@ fn frames_of_frictions30() {
         let mut s = shot();
         s.ed.config.llm.sandbox = false;
         let mut c = crate::chat::Chat::new();
-        (c.state, c.focused) = (crate::chat::State::Thinking, false);
+        c.state = crate::chat::State::Thinking;
         c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "run the steps", ""));
         let generation = c.generation();
         s.ed.session.chat = Some(c);
@@ -1302,12 +1303,13 @@ fn frames_of_frictions30() {
         // 18: Claude answering; two messages and the review's notes wait for its turn's end
         let mut s = shot();
         let mut c = crate::chat::Chat::new();
-        (c.focused, c.unfolded, c.state) = (true, true, crate::chat::State::Thinking);
+        (c.unfolded, c.state) = (true, crate::chat::State::Thinking);
         c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "why does insert clone the name?", ""));
         c.queue("and keep the first one".into(), false);
         c.queue("then add a test for it".into(), false);
         c.sends.push(crate::chat::Later::Review(None));
         s.ed.session.chat = Some(c);
+        s.ed.session.at = crate::session::At::Chat;
         s.frame();
         s.frames_both(&format!("f30_queued-{w}"));
         // 16: a host card whose run ended before it was answered (the network closed)
@@ -1333,6 +1335,7 @@ fn frames_of_frictions30() {
         let (root, repo) =
             (PathBuf::from("/Users/me/src/tarae"), PathBuf::from("/Users/me/src/sandbox-runtime"));
         s.ed.session.chat = Some(crate::chat::Chat::new());
+        s.ed.session.at = crate::session::At::Chat;
         let input = json!({ "file_path": repo.join("README.md") });
         let mut look = crate::reads::look("Read", &input, &root);
         look.at = Some(repo.join("README.md"));
@@ -1383,6 +1386,7 @@ fn frames_of_the_read_card_with_its_repository() {
         let caps = crate::caps::Caps { root: root.clone(), here, ..Default::default() };
         s.ed.session.caps = Some((1, std::sync::Arc::new(caps)));
         s.ed.session.chat = Some(crate::chat::Chat::new());
+        s.ed.session.at = crate::session::At::Chat;
         let input = json!({ "file_path": repo.join("src/layout/flex.rs") });
         let mut look = crate::reads::look("Read", &input, &root);
         look.at = Some(repo.join("src/layout/flex.rs"));
@@ -1974,8 +1978,7 @@ fn sessions_reviewing(w: u16) -> Shot {
         |root: &std::path::Path, state| Reviewer::for_test(root.to_path_buf(), state, Vec::new(), "");
     (s.ed.session.name, s.ed.session.git_branch) = ("main".into(), None);
     s.ed.session.reviewer = Some(reviewer(&root, State::Reading));
-    let mut chat = crate::chat::Chat::new();
-    chat.focused = false;
+    let chat = crate::chat::Chat::new();
     s.ed.session.chat = Some(chat);
     // (behind, named so: their folders beside the project's)
     let behind = |ed: &mut Editor, name: &str| -> PathBuf {
@@ -1990,6 +1993,7 @@ fn sessions_reviewing(w: u16) -> Shot {
     let mut chat = crate::chat::Chat::new();
     chat.state = crate::chat::State::Thinking;
     l.chat = Some(chat);
+    l.at = crate::session::At::Chat;
     l.reviewer = Some(reviewer(&dir, State::Reading));
     let dir = behind(&mut s.ed, "docs");
     let mut done = reviewer(&dir, State::Done);
@@ -2089,8 +2093,7 @@ fn snapshot_sessions_cards_waiting_behind() {
     let root = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
     (s.ed.session.name, s.ed.session.git_branch) = ("main".into(), None);
-    let mut chat = crate::chat::Chat::new();
-    chat.focused = false;
+    let chat = crate::chat::Chat::new();
     s.ed.session.chat = Some(chat);
     let dir = root.with_file_name("fix-login");
     std::fs::create_dir_all(&dir).unwrap();
@@ -2166,7 +2169,7 @@ fn snapshot_chat_run_queued_behind_a_stopped_turns() {
     r.last_output = Instant::now();
     s.ed.session.task_run = Some(r);
     let mut chat = crate::chat::Chat::new();
-    (chat.state, chat.unfolded, chat.focused) = (crate::chat::State::Thinking, true, true);
+    (chat.state, chat.unfolded) = (crate::chat::State::Thinking, true);
     chat.msgs.push(Msg::new(Role::User, "now run the tests", ""));
     let look = crate::chat::Look {
         verb: "run",
@@ -2179,6 +2182,7 @@ fn snapshot_chat_run_queued_behind_a_stopped_turns() {
     chat.msgs.push(Msg::tool(look, "toolu_r1"));
     let generation = chat.generation();
     s.ed.session.chat = Some(chat);
+    s.ed.session.at = crate::session::At::Chat;
     let call = crate::tools::Call::of(generation, "r1", json!(1));
     let job = crate::tools::Job::Command("cargo test -p tarae".into(), cwd);
     let who = crate::tools::For::Claude(call);
@@ -2202,7 +2206,6 @@ fn the_chats_session_tabs_have_a_row_of_air_under_them() {
     use crate::chat::{Msg, Role};
     let mut s = Shot::new(120, 24);
     let mut chat = crate::chat::Chat::new();
-    chat.focused = false;
     chat.msgs.push(Msg::new(Role::User, "Parse hours too.", "lib.rs"));
     for i in 0..30 {
         chat.msgs.push(Msg::new(Role::Assistant, format!("answer line {i}"), ""));
@@ -2240,9 +2243,7 @@ fn the_chats_session_tabs_have_a_row_of_air_under_them() {
     // An empty chat's start text taller than its room (16 rows): from its first line, two rows under the tabs —
     // what doesn't fit is its end (the suggestions, the model's key), never its heading
     let mut e = Shot::new(120, 16);
-    let mut chat = crate::chat::Chat::new();
-    chat.focused = false;
-    e.ed.session.chat = Some(chat);
+    e.ed.session.chat = Some(crate::chat::Chat::new());
     e.ed.session_add(std::env::temp_dir().join("tarae-chat-air-other"));
     let empty = rows(&mut e, 0);
     let tabs = at(&empty, " │ +").expect("the sessions' tabs");
@@ -4262,9 +4263,9 @@ fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
         Vec::new(),
         "Two risks.",
     ));
-    let mut chat = crate::chat::Chat::new();
-    chat.focused = true;
+    let chat = crate::chat::Chat::new();
     s.ed.session.chat = Some(chat);
+    s.ed.session.at = crate::session::At::Chat;
     for name in ["b", "c", "d", "e"] {
         let other = dir.join(format!("session-{name}"));
         std::fs::create_dir_all(&other).unwrap();
@@ -4585,7 +4586,7 @@ fn the_chat_narrows_for_the_review_rail_only_where_the_rail_is_drawn() {
         s.ed.config.llm.command = "sh".into();
         s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut s.ed);
-        s.ed.session.chat.as_mut().unwrap().focused = false;
+        s.ed.session.leave(crate::session::At::Chat);
         s.ed.open(&files[0].path).unwrap();
         s.frame();
         let alone = s.ed.screen.chat_w;
@@ -4635,7 +4636,7 @@ fn review_rail_with_80_files_scrolls_and_keeps_its_counts() {
         s.ed.config.llm.command = "sh".into();
         s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut s.ed);
-        s.ed.session.chat.as_mut().unwrap().focused = false;
+        s.ed.session.leave(crate::session::At::Chat);
         s.ed.open(&dir.join(rel(0))).unwrap();
         let turn = Base::Turn { at: 0, question: "split the modules".into() };
         s.ed.session.code_review = Some(CodeReview::for_test(turn, dir.clone(), files.clone()));
@@ -4770,7 +4771,7 @@ fn review_rail_scrolls_by_click_and_marks_by_click() {
     };
     assert_eq!(viewed(&s), 1, "marked once, not toggled back");
     // A click on its name opens it, nothing more; `space v m` keeps the mark (set-only), `space v M` takes it back
-    s.ed.session.chat.as_mut().unwrap().focused = false;
+    s.ed.session.leave(crate::session::At::Chat);
     s.keys(" vm");
     assert_eq!(viewed(&s), 1, "space v m only marks");
     s.keys(" vM");
@@ -4845,8 +4846,7 @@ fn snapshot_side_panel_files() {
         "src/ui/theme.rs",
         "tests/e2e.rs",
     ];
-    let mut sb = crate::sidebar::Sidebar::with_files(root, rels.iter().map(|r| r.to_string()).collect());
-    sb.focus = false;
+    let sb = crate::sidebar::Sidebar::with_files(root, rels.iter().map(|r| r.to_string()).collect());
     s.ed.session.sidebar = Some(sb);
     s.keys("j");
     s.check("side_panel_files");
@@ -5001,6 +5001,7 @@ fn snapshot_side_panel_git() {
     st.generation = 1;
     s.ed.session.git_status = Some(st.with_rows());
     s.ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, cwd));
+    s.ed.session.at = crate::session::At::Side;
     s.keys("j");
     s.check("side_panel_git");
 }
@@ -5046,7 +5047,7 @@ fn the_draft_card_stays_in_the_codes_room() {
         s.ed.config.llm.args = vec!["-c".into(), "read -r line; sleep 5".into()];
         if side.is_none() {
             crate::chat::open(&mut s.ed);
-            s.ed.session.chat.as_mut().unwrap().focused = false;
+            s.ed.session.leave(crate::session::At::Chat);
         }
         crate::llm::draft(&mut s.ed, doc, "a commit message", "draft it", 0, 0).unwrap();
         let mut vt = vt100::Parser::new(h, w, 0);
@@ -5209,9 +5210,7 @@ fn snapshot_granted() {
     let scene = |w: u16, h: u16, answers: [&Allowed; 3], hosts: &[(String, u16)]| {
         let mut s = Shot::new(w, h);
         s.file("src/demo.rs", DEMO_RS);
-        let mut c = crate::chat::Chat::new();
-        c.focused = false;
-        s.ed.session.chat = Some(c);
+        s.ed.session.chat = Some(crate::chat::Chat::new());
         s.ed.session.caps = Some((1, std::sync::Arc::new(caps(answers))));
         s.ed.session.hosts = hosts.to_vec();
         s
@@ -5551,7 +5550,7 @@ fn snapshot_terminal_panel() {
     at(&mut s, K::Down, 10, 3);
     assert!(
         s.ed.session.terminal.as_ref().unwrap().selection.is_none()
-            && !s.ed.session.terminal.as_ref().unwrap().focus
+            && !s.ed.session.is_at(crate::session::At::Program)
     );
     at(&mut s, K::Drag, 10, y + 1);
     at(&mut s, K::Up, 10, y + 1);
@@ -5752,7 +5751,6 @@ fn a_long_name_shows_whole_when_selected() {
     let long = "src/components/user_profile_settings_view_controller.tsx";
     let mut sb = crate::sidebar::Sidebar::with_files(root, vec![long.to_string(), "src/demo.rs".into()]);
     sb.set_open(["src", "src/components"], true);
-    sb.focus = false;
     s.ed.session.sidebar = Some(sb);
     let text = |s: &mut Shot| {
         let bytes = s.frame();
@@ -5772,8 +5770,8 @@ fn a_long_name_shows_whole_when_selected() {
             .iter()
             .position(|l| l.label.ends_with(".tsx"))
             .unwrap();
+    s.ed.session.at = crate::session::At::Side;
     let sb = s.ed.session.sidebar.as_mut().unwrap();
-    sb.focus = true;
     sb.selected = row;
     assert!(text(&mut s).contains("user_profile_settings_view_controller.tsx"), "whole when selected");
 }
@@ -5883,9 +5881,7 @@ fn the_panels_follow_one_set_of_rules() {
     let mut s = Shot::new(w, h);
     let cwd = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
-    let mut sb =
-        crate::sidebar::Sidebar::with_files(cwd.clone(), vec!["src/demo.rs".into(), "README.md".into()]);
-    sb.focus = false;
+    let sb = crate::sidebar::Sidebar::with_files(cwd.clone(), vec!["src/demo.rs".into(), "README.md".into()]);
     s.ed.session.sidebar = Some(sb);
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -5997,8 +5993,7 @@ fn every_panel_starts_its_text_the_same_distance_in() {
     let cwd = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
     let rels = vec!["src/demo.rs".into(), "README.md".into()];
-    let mut sb = crate::sidebar::Sidebar::with_files(cwd.clone(), rels);
-    sb.focus = false;
+    let sb = crate::sidebar::Sidebar::with_files(cwd.clone(), rels);
     s.ed.session.sidebar = Some(sb);
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -6072,8 +6067,7 @@ fn the_gutters_hold_at_their_edges() {
         source: 0,
     }];
     let rels = ["Cargo.toml", "README.md", "src/demo.rs"].map(String::from).to_vec();
-    let mut sb = crate::sidebar::Sidebar::with_files(cwd, rels);
-    sb.focus = false;
+    let sb = crate::sidebar::Sidebar::with_files(cwd, rels);
     s.ed.session.sidebar = Some(sb);
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -6276,7 +6270,7 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
         ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("hi"))
     });
     s.ed.terminal_focus();
-    let typing = |ed: &Editor| ed.session.terminal.as_ref().is_some_and(|t| t.focus);
+    let typing = |ed: &Editor| ed.session.is_at(crate::session::At::Program);
     assert!(typing(&s.ed));
     // A task started meanwhile (harmless: a pause and a failure) — a tab, running
     let cwd = std::env::temp_dir();
@@ -6312,13 +6306,16 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
         alt: false,
     }));
     s.frame();
-    assert_eq!((s.ed.slot(), s.ed.bottom_focus, typing(&s.ed)), (Some(Slot::Task), true, false));
+    assert_eq!(
+        (s.ed.slot(), s.ed.session.is_at(crate::session::At::Slot), typing(&s.ed)),
+        (Some(Slot::Task), true, false)
+    );
     // `C-w t`: the next tab, round to the first; `tab` while the slot has the keys too
     s.keys("<C-w>t");
     assert_eq!(s.ed.slot(), Some(Slot::Terminal));
     s.keys("<tab>");
     assert_eq!(s.ed.slot(), Some(Slot::Task));
-    assert!(s.ed.bottom_focus, "the keys stayed in the slot");
+    assert!(s.ed.session.is_at(crate::session::At::Slot), "the keys stayed in the slot");
     s.ed.session.terminal = None; // hangs it up
 }
 
@@ -6489,6 +6486,7 @@ fn the_git_tab_opens_on_a_file() {
     st.generation = 1;
     s.ed.session.git_status = Some(st.with_rows());
     s.ed.session.sidebar = Some(Sidebar::new(Mode::Git, root));
+    s.ed.session.at = crate::session::At::Side;
     s.ed.sidebar_sync();
     s.frame();
     let sb = s.ed.session.sidebar.as_ref().unwrap();
@@ -6542,9 +6540,8 @@ fn the_git_tab_reopened_starts_fresh_or_keeps_your_row() {
     assert!(matches!(on(&s), Target::Change { file: true, .. }), "a link in: {:?}", on(&s));
     // A tab built while it hadn't the keys (`:restart`, a link) and never had them: on a file too
     s.ed.session.sidebar = None;
-    let mut sb = crate::sidebar::Sidebar::new(Mode::Git, s.root.clone());
-    sb.focus = false;
-    s.ed.session.sidebar = Some(sb);
+    s.ed.session.sidebar = Some(crate::sidebar::Sidebar::new(Mode::Git, s.root.clone()));
+    s.ed.session.at = crate::session::At::Code;
     s.ed.sidebar_sync();
     s.ed.sidebar_show(Mode::Git);
     s.frame();

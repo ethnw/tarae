@@ -567,22 +567,18 @@ impl Editor {
     /// review the tab and the review's rail take turns in the column: again = the rail back, with the keys
     /// (so the next one doesn't land in the code — `d` there would delete the selected change).
     pub fn git_panel(&mut self) {
+        use crate::session::At;
         if self.session.code_review.is_some() && !self.review_rail_up() {
             return crate::codereview::rail_focus(self);
         }
         let review = self.session.code_review.is_some();
         if let Some(r) = self.session.code_review.as_mut() {
             r.behind = true;
-            r.focus = false;
             // (a tab focused behind the rail would close instead of coming to the front)
-            if let Some(s) = self.session.sidebar.as_mut() {
-                s.focus = false;
-            }
-        } else if self
-            .session
-            .sidebar
-            .as_ref()
-            .is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus)
+            self.session.leave(At::Rail);
+            self.session.leave(At::Side);
+        } else if self.session.is_at(At::Side)
+            && self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git)
         {
             self.session.sidebar = None;
             return;
@@ -943,9 +939,7 @@ impl Editor {
                     doc.set_selection(crate::selection::Selection::point(0));
                     let id = doc.id;
                     ed.session.committing = Some(Committing { doc: id, top, amend, then_end });
-                    if let Some(s) = ed.session.sidebar.as_mut() {
-                        s.focus = false;
-                    }
+                    ed.session.leave(crate::session::At::Side);
                     // A new message: typed at once. Amending: the last message is there to change, not to
                     // type over the top of — normal mode
                     if draft {
@@ -2028,6 +2022,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone()));
+        ed.session.at = crate::session::At::Side;
         ed.session.git_status = Some(st.with_rows());
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();

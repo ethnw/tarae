@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::config::Config;
+use crate::session::At;
 use crate::terminal::output;
 
 const W: u16 = 120;
@@ -55,6 +56,116 @@ fn region(ed: &Editor) -> String {
     ed.keys_to().region.name()
 }
 
+/// The user walk of 2026-10-21, key by key (main's `target/sb/userwalk-2026-10-21.md`): `/tests` in the code, `C-\`
+/// `C-\` into the terminal's view mode, `/Cargo` there with `Cargo.toml` on its screen — found, counted there (86:
+/// it said `no matches`: the status line counted the code's), then out to the code by `esc`s, each one a step in
+/// sight (87: three, the second changing nothing), and the code's `n` repeats `/tests` (85: it said
+/// `/Cargo  no matches`, one register for every pane).
+#[test]
+fn the_walks_search_in_the_terminal_leaves_the_codes_alone() {
+    let (mut ed, _sent) = term(Config::default(), 3);
+    ed.docs[0].text = ropey::Rope::from_str("fn tests() {}\n// the tests\nmod tests;\n");
+    ed.session.at = At::Code;
+    feed(&mut ed, "/tests<ret>");
+    let status = |ed: &mut Editor| frame(ed).lines().last().unwrap_or_default().to_string();
+    assert!(status(&mut ed).contains("1/3"), "{}", status(&mut ed));
+    let first = ed.doc().selection().primary();
+    feed(&mut ed, "<C-\\><C-\\>");
+    assert_eq!(region(&ed), "view:terminal");
+    // (as `ls` prints, while the keys are tarae's: it comes once the view lets go)
+    print(&mut ed, "");
+    feed(&mut ed, "i");
+    print(&mut ed, "ls\r\nCargo.toml  README.md  src\r\n$ ");
+    feed(&mut ed, "<C-\\>/Cargo<ret>");
+    assert_eq!(view_selected(&ed), "Cargo", "found on the screen");
+    let s = status(&mut ed);
+    assert!(s.contains("/Cargo") && s.contains("1/1"), "its count, not the code's: {s}");
+    // Out: each `esc` a step in sight — the match let go (its highlights and count gone), then the code
+    let frames = [frame(&mut ed), String::new()];
+    feed(&mut ed, "<esc>");
+    let after_one = frame(&mut ed);
+    assert_ne!(after_one, frames[0], "the first esc changes what's in sight");
+    assert!(!status(&mut ed).contains("/Cargo"), "the view's search let go");
+    assert_eq!(region(&ed), "view:terminal");
+    feed(&mut ed, "<esc>");
+    assert_eq!(region(&ed), "code", "two escs: the code");
+    feed(&mut ed, "n");
+    assert_eq!(ed.search.as_deref(), Some("tests"), "the code's own search");
+    assert_ne!(ed.doc().selection().primary(), first, "n moved to the next `tests`");
+    assert!(status(&mut ed).contains("2/3"), "{}", status(&mut ed));
+}
+
+/// `C-w` from the terminal's view mode (the slot's keys): `k` back to the code above it, `j` there again; a way
+/// with nothing there is said and the keys stay.
+#[test]
+fn c_w_from_the_terminals_view_goes_up_to_the_code_and_says_the_rest() {
+    let (mut ed, _sent) = term(Config::default(), 3);
+    feed(&mut ed, "<C-\\>");
+    assert_eq!(region(&ed), "view:terminal");
+    feed(&mut ed, "<C-w>h");
+    assert_eq!(region(&ed), "view:terminal", "nothing to its left: the keys stay");
+    let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+    assert!(said.contains("nothing to the left"), "{said}");
+    feed(&mut ed, "<C-w>k");
+    assert_eq!(region(&ed), "code", "the code above it");
+    feed(&mut ed, "<C-w>j");
+    assert_eq!(region(&ed), "view:terminal", "and down again");
+}
+
+/// The view's selected text.
+fn view_selected(ed: &Editor) -> String {
+    let d = view(ed).doc();
+    let r = d.selection().primary();
+    d.text.byte_slice(r.from()..r.to()).to_string()
+}
+
+/// The terminal's view mode searches its own rows (panes P2a, `target/sb/panes-plan.md` §2.3): `/` there leaves
+/// the code's pattern, highlights and selection as they were, its matches and count are the view's (the status
+/// line says them while it has the keys), `n` moves there; `esc` clears them, the code's stay. And the code's
+/// search, back in the code, is still the code's.
+#[test]
+fn the_terminals_view_mode_searches_its_own_rows() {
+    let (mut ed, _sent) = term(Config::default(), 40);
+    ed.docs[0].text = ropey::Rope::from_str("fn main() {}\nfn line() {}\n");
+    ed.session.at = At::Code;
+    feed(&mut ed, "/main<ret>");
+    let code_sel = ed.doc().selection().primary();
+    let code = |ed: &Editor| {
+        let hits = ed.search_hits.as_ref().map(|h| (h.pattern.clone(), h.matches.len()));
+        (ed.search.clone(), ed.search_hl, hits, ed.doc().selection().primary())
+    };
+    let before = code(&ed);
+    assert_eq!(
+        (before.0.as_deref(), before.1, before.2.clone()),
+        (Some("main"), true, Some(("main".into(), 1)))
+    );
+    ed.session.at = At::Program;
+    feed(&mut ed, "<C-\\>");
+    assert_eq!(region(&ed), "view:terminal");
+    feed(&mut ed, "/line 3");
+    assert_eq!(code(&ed), before, "typed: the code's search untouched");
+    assert_eq!(view(&ed).hits().map(|h| h.matches.len()), Some(11), "line 3, line 30 … 39");
+    feed(&mut ed, "<ret>");
+    let status = |ed: &mut Editor| frame(ed).lines().last().unwrap_or_default().to_string();
+    let s = status(&mut ed);
+    assert!(s.contains("/line 3") && s.contains("/11"), "the view's count: {s}");
+    let first = view(&ed).doc().selection().primary();
+    feed(&mut ed, "n");
+    assert_ne!(view(&ed).doc().selection().primary(), first, "n moved in the view");
+    assert_eq!(code(&ed), before, "n: the code's search and selection untouched");
+    feed(&mut ed, "<esc>");
+    assert!(view(&ed).hits().is_none(), "esc: the view's matches go");
+    assert_eq!(code(&ed), before, "the code's stay");
+    // Back in the code: its own search, its `n`
+    feed(&mut ed, "<esc>");
+    assert_eq!(region(&ed), "code");
+    let s = status(&mut ed);
+    assert!(s.contains("/main"), "the code's search on the status line again: {s}");
+    feed(&mut ed, "n");
+    assert_eq!(ed.search.as_deref(), Some("main"));
+    assert_eq!(ed.doc().selection().primary(), code_sel, "the one match: n wraps onto it");
+}
+
 fn view(ed: &Editor) -> &View {
     terminal_view_of(ed).expect("in the terminal's view mode")
 }
@@ -72,7 +183,7 @@ fn status(shown: &str) -> String {
 }
 
 fn program(ed: &Editor) -> bool {
-    ed.session.terminal.as_ref().unwrap().focus
+    ed.session.is_at(crate::session::At::Program)
 }
 
 /// `C-s` sends the screen as the `screen` tool sees it: with `llm.screen-terminal` off the terminal's rows are left
@@ -112,7 +223,7 @@ fn enter_quotes_the_selected_rows_to_the_chat() {
     assert_eq!(shown.lines().filter(|l| l.contains("enter quote")).count(), 2, "{shown}");
     feed(&mut ed, "<ret>");
     assert_eq!(region(&ed), "chat");
-    assert!(ed.session.view.is_none() && !ed.bottom_focus, "the view left");
+    assert!(ed.session.view.is_none() && !ed.session.is_at(crate::session::At::Slot), "the view left");
     let q = &ed.session.chat.as_ref().unwrap().quotes[0];
     assert!(q.text.contains(&format!("\n{long}\n{spaced}\n$")), "joined, its space kept: {:?}", q.text);
     assert!(q.text.starts_with("line 1\nline 2\n") && q.text.ends_with('$'), "{:?}", q.text);
@@ -156,7 +267,7 @@ fn ctrl_backslash_goes_round() {
     assert!(ed.session.view.is_none());
     feed(&mut ed, "<C-\\><C-\\>");
     assert_eq!(region(&ed), "code", "the view's C-\\: the code");
-    assert!(ed.session.view.is_none() && !ed.bottom_focus);
+    assert!(ed.session.view.is_none() && !ed.session.is_at(crate::session::At::Slot));
     feed(&mut ed, "<C-\\>");
     assert_eq!(region(&ed), "terminal-program", "the code's C-\\: the program");
     feed(&mut ed, "<C-\\><esc>");
@@ -197,6 +308,7 @@ fn the_wheel_crosses_surfaces_and_back_to_the_view_it_left() {
         })
         .collect();
     ed.session.chat = Some(c);
+    // (the keys the terminal's program's)
     frame(&mut ed);
     let chat_wheel = |ed: &mut Editor, kind| {
         let (y0, ..) = ed.screen.chat_view.get().unwrap();
@@ -215,7 +327,7 @@ fn the_wheel_crosses_surfaces_and_back_to_the_view_it_left() {
     assert_eq!(region(&ed), "view:terminal", "back at the end: the view the keys were in");
     // (the other way: the chat's view mode, the terminal's wheel, back)
     feed(&mut ed, "<esc>");
-    ed.session.chat.as_mut().unwrap().focused = true;
+    ed.session.at = crate::session::At::Chat;
     feed(&mut ed, "<esc>");
     assert_eq!(region(&ed), "view:chat");
     ed.terminal_mouse(K::ScrollUp, Some((2, 0)), false);
