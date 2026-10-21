@@ -111,6 +111,10 @@ pub struct Caps {
     pub terminals: Vec<Source>,
     /// Files named like keys inside the project, each that file.
     pub keys: Vec<Entry<PathBuf>>,
+    /// Every port on this machine (`Grant::Localhost`) — each answer that opened them.
+    pub localhost: Vec<Source>,
+    /// The user's variables passed whole, by name (`Grant::Env`).
+    pub env: Vec<Entry<String>>,
     /// Outside home is read by default, as runs read it (D3) — but others' homes and volumes (`cards::class`).
     /// Off in tests (`Editor.read_outside`).
     pub outside: bool,
@@ -153,7 +157,14 @@ impl Caps {
             // (piece C, cards.md decision 4: the network is grantable up to this session at most — always is
             // `llm.sandbox-network`, with a host list's `A` on the proxy's own card)
             Grant::Host(..) => Scope::Session,
-            Grant::Read(_) | Grant::Write(_) | Grant::Port(_) | Grant::Terminals => Scope::Always,
+            // (a name for a secret: never written to the project's kept answers — its value is a token's)
+            Grant::Env(n) if crate::tokens::secret_name(n) => Scope::Session,
+            Grant::Read(_)
+            | Grant::Write(_)
+            | Grant::Port(_)
+            | Grant::Terminals
+            | Grant::Localhost
+            | Grant::Env(_) => Scope::Always,
         }
     }
 
@@ -183,6 +194,10 @@ impl Caps {
             self.terminals.push(source);
         }
         self.keys.extend(entries(&a.keys, source));
+        if a.localhost {
+            self.localhost.push(source);
+        }
+        self.env.extend(entries(&a.env, source));
     }
 
     /// The answers, as a run's policy is widened by them (`tools::with_allowed`): the kept ones first, then this
@@ -200,6 +215,8 @@ impl Caps {
             );
             out.extend(self.terminals.contains(&s).then_some(Grant::Terminals));
             out.extend(self.keys.iter().filter(|e| of(e.source)).map(|e| Grant::Key(e.what.clone())));
+            out.extend(self.localhost.contains(&s).then_some(Grant::Localhost));
+            out.extend(self.env.iter().filter(|e| of(e.source)).map(|e| Grant::Env(e.what.clone())));
         }
         out
     }
@@ -576,6 +593,13 @@ mod tests {
             // (piece C, cards.md decision 4: always is `llm.sandbox-network`)
             (Grant::Host("example.invalid".into(), 443), Scope::Session),
             (Grant::Terminals, Scope::Always),
+            (Grant::Localhost, Scope::Always),
+            (Grant::Env("DATABASE_URL".into()), Scope::Always),
+            // (a name for a secret: this session at most, whatever was answered)
+            (Grant::Env("GITHUB_TOKEN".into()), Scope::Session),
+            (Grant::Env("DB_PASSWORD".into()), Scope::Session),
+            (Grant::Env("NPM_CONFIG__AUTH".into()), Scope::Session),
+            (Grant::Env("GIT_AUTHOR_NAME".into()), Scope::Always),
         ] {
             assert_eq!(s(g.clone()), top, "{g:?}");
         }

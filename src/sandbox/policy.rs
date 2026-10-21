@@ -637,7 +637,44 @@ impl Policy {
                 }
             }
         }
+        let rules = &crate::sandboxpack::get().refused_connect;
+        let rules: Vec<_> = rules
+            .iter()
+            .filter(|r| r.when.as_ref().is_none_or(|w| output.iter().any(|(_, l)| w.is_match(l.trim_end()))))
+            .collect();
+        for (_, l) in output {
+            for d in self.connect_said_in(&rules, l) {
+                // (the kernel's names no address: one on the same port is this one)
+                let port = |s: &Denial| s.target.rsplit_once(':').map(|(_, p)| p.to_string());
+                if !seen.iter().chain(&out).any(|s| s.op == d.op && port(s) == port(&d)) {
+                    out.push(d);
+                }
+            }
+        }
         out.truncate(DENIALS_KEPT);
+        out
+    }
+
+    /// A connect refused as `line` says it (the packs' `refused-connect` whose `when` the output holds: macOS's nc,
+    /// Gradle's daemon), as the kernel's report would give it — its program, `network-outbound`,
+    /// `remote:<host>:<port>` — where this run's rules refuse it: a port here closed (not every port open, nor that
+    /// one), any host beyond this machine (only tarae's proxy is).
+    fn connect_said_in(&self, rules: &[&crate::sandboxpack::RefusedConnect], line: &str) -> Vec<Denial> {
+        let mut out = Vec::new();
+        for r in rules {
+            let Some(c) = r.line.captures(line.trim_end()) else { continue };
+            let host = match &c["host"] {
+                h if h.contains(':') => format!("[{h}]"),
+                h => h.to_string(),
+            };
+            let target = format!("remote:{host}:{}", &c["port"]);
+            let process = r.process.clone().unwrap_or_else(|| c["process"].to_string());
+            let d = Denial { process, op: "network-outbound".into(), target };
+            let open = d.port_here().is_some_and(|n| self.localhost || self.ports.contains(&n));
+            if !open {
+                out.push(d);
+            }
+        }
         out
     }
 

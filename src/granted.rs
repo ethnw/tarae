@@ -36,6 +36,8 @@ fn label(g: &Grant) -> String {
         Grant::Host(h, p) => format!("reach {h}:{p}"),
         Grant::Terminals => "open terminals, yours too".into(),
         Grant::Key(k) => format!("read {}, named like a key", t(k)),
+        Grant::Localhost => "connect to every port here, the risky ones too".into(),
+        Grant::Env(n) => format!("have your variable {n}"),
     }
 }
 
@@ -47,6 +49,8 @@ fn taken_as(g: &Grant) -> String {
         Grant::Socket(s) => format!("socket {}", s.display()),
         Grant::Host(h, p) => crate::hosts::listed(Kind::Host, h, *p),
         Grant::Terminals => crate::allow::TERMINALS_LISTED.into(),
+        Grant::Localhost => crate::allow::LOCALHOST_LISTED.into(),
+        Grant::Env(n) => format!("env {n}"),
     }
 }
 
@@ -332,6 +336,51 @@ mod tests {
             !labels.iter().any(|l| ["always", "this session", "this chat"].contains(&l.as_str())),
             "{labels:?}"
         );
+    }
+
+    /// A variable and every port here (piece D): an `A` on a token-like name lasts this session — never in the
+    /// project's kept answers —, any other name is kept; each reaches the next run's settings (the whole name,
+    /// as one `llm.sandbox-env` entry) and `:sandbox-disallow` takes each back. Names only, never a value.
+    #[test]
+    fn a_token_like_variable_is_never_kept_past_the_session() {
+        let s = crate::scratch::Scratch::new("granted-env");
+        let (mut ed, _, store) = editor(&s);
+        crate::allow::grant(&mut ed, &Grant::Env("GITHUB_TOKEN".into()), Scope::Always);
+        crate::allow::grant(&mut ed, &Grant::Env("DATABASE_URL".into()), Scope::Always);
+        crate::allow::grant(&mut ed, &Grant::Localhost, Scope::Always);
+        // (an `A` is the chat's meanwhile, until it's kept)
+        let always = Source::Grant(Scope::Always);
+        until(&mut ed, "kept", |ed| {
+            ed.session.caps().is_some_and(|c| {
+                c.localhost.contains(&always)
+                    && c.env.iter().any(|e| e.what == "DATABASE_URL" && e.source == always)
+            })
+        });
+        let caps = ed.session.caps().unwrap().clone();
+        let of = |n: &str| caps.env.iter().filter(|e| e.what == n).map(|e| e.source).collect::<Vec<_>>();
+        assert!(!of("GITHUB_TOKEN").contains(&always), "{:?}", caps.env);
+        assert!(of("GITHUB_TOKEN").contains(&Source::Grant(Scope::Session)), "{:?}", caps.env);
+        let kept = std::fs::read_to_string(&store).unwrap();
+        assert!(kept.contains("DATABASE_URL") && !kept.contains("GITHUB_TOKEN"), "{kept}");
+        let w = next_run(&ed);
+        assert!(w.llm.sandbox_localhost, "every port here");
+        assert!(["GITHUB_TOKEN", "DATABASE_URL"].iter().all(|n| w.llm.sandbox_env.iter().any(|e| e == n)));
+        open(&mut ed);
+        let rows = rows(&ed);
+        for l in ["have your variable GITHUB_TOKEN", "connect to every port here, the risky ones too"] {
+            assert!(rows.iter().any(|r| r.0 == l), "{l} in {rows:?}");
+        }
+        ed.picker = None;
+        ed.sandbox_disallow("env DATABASE_URL").unwrap();
+        ed.sandbox_disallow("localhost").unwrap();
+        until(&mut ed, "taken back", |ed| {
+            let kept = std::fs::read_to_string(&store).unwrap_or_default();
+            !kept.contains("DATABASE_URL")
+                && !kept.contains("localhost")
+                && ed.session.caps().is_some_and(|c| c.localhost.is_empty())
+        });
+        let w = next_run(&ed);
+        assert!(!w.llm.sandbox_localhost && !w.llm.sandbox_env.iter().any(|e| e == "DATABASE_URL"));
     }
 
     /// The defaults come first, each saying why; the answers under the longest they last, each once (an `A` is

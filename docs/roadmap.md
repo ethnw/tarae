@@ -174,9 +174,11 @@ Done so far, under way, and the order after it (2026-10-16):
     grant, the user's `y` is. For Rust and Go, tarae's own fetch as well (`cargo fetch`, `go mod download` with
     `GOTOOLCHAIN=local`): it runs outside the sandbox and runs no project code, so the toolchain caches stay
     closed to Claude's commands. Pack data; the core names no tool.
-  - **D**: every refusal Claude can ask for has its `also`. Gradle's loopback gets a card at or before the first
-    refusal, with `s`/`A` (no pack default). A rerun from `space m s` sends its end to Claude by itself, only with
-    the chat idle, in the same conversation, for the last turn's failed run; the card says so.
+  - **D** — under way: every refusal Claude can ask for has its `also` (`localhost`, `env`, `terminals` beside
+    `read`, `write`, `port`; `space m s` lists every port and the variables the output names). Gradle's loopback
+    gets its card at the first refusal, holding Claude's call, with `s`/`A` (no pack default). A rerun from
+    `space m s` sends its end to Claude by itself, only with the chat idle, in the same conversation, for the
+    last turn's failed run; the card says so. Follow-up once C is on main: Gradle's card before the first run.
   - **F**: words and memory — a hook's yes remembered (a rewritten hook asks again), one vocabulary for the
     answer rows, manifest tools (`cargo add`) said before they run, the docs.
   - **H**: Claude's `commit {message, paths}` tool. The card shows the message and the diff; `y` commits through

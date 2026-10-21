@@ -237,11 +237,24 @@ env = { JAVA_TOOL_OPTIONS = { value = "-Djava.net.preferIPv4Stack=true", on = "v
 registries = [
     "repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "services.gradle.org", "downloads.gradle.org",
 ]
-# A JVM refused a port on this machine: Gradle's client and its daemon
+# A JVM refused a port on this machine: Gradle's client and its daemon — every port here, not one (they're picked
+# as the daemon starts). The user's card for it comes at once while Claude's call waits (`card`)
 refused-port = { process = "java", said = """Java was refused a port on this machine: Gradle's client talks to \
 its build daemon and test workers over this machine's ports, so a Gradle build can't run while they're closed. \
-Tell the user: llm.sandbox-localhost (in the project's .tarae.toml) opens them. Their own Gradle daemons stay \
-out of reach — the registry that names them is kept from your commands.""" }
+To ask for them, run it again with also {"localhost": true} and your reason — the user decides on a card. Their \
+own Gradle daemons stay out of reach — the registry that names them is kept from your commands.""", card = """\
+Java was refused a port on this machine. Gradle's client talks to its build daemon and test workers over ports \
+picked as they start, so a Gradle build needs every port here — one port won't do.""", beyond = """\
+Java was refused a port below 1024: not Gradle's daemon, whose ports are picked from 1024 up, but a host beyond \
+this machine (a download straight to 443 or 80). The network is closed to your commands; once the user opens it \
+(llm.sandbox-network) they reach beyond this machine only through tarae's proxy, which Gradle and Maven are given. \
+If the build needs to fetch, tell the user.""" }
+# Gradle's client refused its daemon's port, as Gradle says it (measured: Gradle 9.8.1, OpenJDK 27, Darwin 27,
+# localhost closed, 4 of 4 — `target/sb/pieceD-gradle-measure.out`; the kernel reported none of them): it failed,
+# then the daemon log's last lines name the address the daemon gave its clients. Its failing line names no port;
+# a JVM's `SocketException` none either (`--stacktrace` only)
+refused-connect = [{ when = '^Could not connect to the Gradle daemon\.$', process = "java", line = '''
+Advertising the daemon address to the clients: \[[\w-]+ port:(?P<port>\d+), addresses:\[[^/\]]*/(?P<host>[0-9A-Fa-f.:]+)[,\]]''' }]
 
 [sandbox.homes]
 gradle = { env = "GRADLE_USER_HOME", else = "~/.gradle" }

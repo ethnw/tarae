@@ -541,6 +541,7 @@ pub fn tests_done(ed: &mut Editor) {
     let Some(r) = ed.session.test_run.as_mut() else { return };
     let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known, !failed));
     let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
+    let loopback = said.as_ref().filter(|_| failed).and_then(|s| loopback_of(&s.open));
     if let Some(head) = r.tell.take() {
         let text = report(&ed.session.root, r, Waited::No) + &guard;
         rules_told(ed, said.as_ref());
@@ -560,13 +561,26 @@ pub fn tests_done(ed: &mut Editor) {
         .collect();
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
     let label = format!("tests: {}", r.target.label);
+    let job = Job::Tests(Box::new(r.target.clone()));
+    let key = crate::blocked::RunKey { tests: true, generation: r.generation() };
+    let ended_failed = matches!(r.state, RunState::Failed(_));
     let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
     rules_told(ed, said.as_ref());
     crate::reads::run_ended(ed);
     let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;
+    if ended_failed {
+        failed_in_turn(ed, key);
+    }
     let told = move |ed: &mut Editor, changed: String| {
-        answer(ed, call, Ok(format!("{text}{changed}")));
+        let report = format!("{text}{changed}");
+        let held = match loopback {
+            Some(card) => loopback_card(ed, &card, job, call, report.clone()),
+            None => Err(call),
+        };
+        if let Err(call) = held {
+            answer(ed, call, Ok(report));
+        }
         for (c, text) in others {
             answer(ed, c, Ok(format!("{text}{changed}")));
         }
@@ -664,7 +678,7 @@ pub(crate) fn run_schema() -> Value {
                 "cwd": { "type": "string", "description": "The folder it runs in, inside the project (relative to its root); the root if left out" },
                 "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
                 "unix_socket": { "type": "string", "description": "Ask the user to let it connect to this one unix socket (its path; with reason) — the rest stays sandboxed" },
-                "also": { "type": "object", "description": "One thing past the sandbox it needs, that its report said was blocked (with reason) — {\"read\": path} · {\"write\": folder} · {\"port\": n} on this machine" },
+                "also": { "type": "object", "description": "One thing past the sandbox it needs, that its report said was blocked (with reason) — {\"read\": path} · {\"write\": folder} · {\"port\": n} on this machine · {\"localhost\": true} every port here · {\"env\": NAME} a variable left out · {\"terminals\": true}" },
                 "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with also, outside_sandbox or unix_socket; the user reads it" },
                 "base": { "type": "string", "description": "A commit (HEAD, a branch, a sha): run this check on its tree instead — a copy apart from the project, removed after; to tell a failure already there from yours. Checks only, one command" }
             },
@@ -679,18 +693,23 @@ const REASON_MAX: usize = 300;
 /// Cards `also` puts up in a turn, at most (cardauto P3) — past them, Claude tells the user what's needed.
 pub const ALSO_MAX: usize = 3;
 
-/// What `also` asks for, as Claude gave it: a place to read, a folder to write in, a port on this machine.
+/// What `also` asks for, as Claude gave it: a place to read, a folder to write in, a port on this machine, every
+/// port here, a variable left out of its environment, the terminals.
 #[derive(Clone, Debug)]
 enum AlsoAsk {
     Read(String),
     Write(String),
     Port(u16),
+    Localhost,
+    Env(String),
+    Terminals,
 }
 
 /// The run's `also` and its reason — None when it has none; Err says what's wrong with it (to Claude).
 fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
     let Some(also) = args.get("also").filter(|v| !v.is_null()) else { return Ok(None) };
-    let one = "also names one thing: {\"read\": path} · {\"write\": folder} · {\"port\": n}";
+    let one = "also names one thing: {\"read\": path} · {\"write\": folder} · {\"port\": n} · {\"localhost\": true} · \
+               {\"env\": NAME} · {\"terminals\": true}";
     let o = also.as_object().filter(|o| o.len() == 1).ok_or(one)?;
     let path = |v: &Value| v.as_str().map(str::trim).filter(|p| !p.is_empty()).map(String::from).ok_or(one);
     let ask = match o.iter().next() {
@@ -699,6 +718,9 @@ fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
         Some((k, v)) if k == "port" => {
             AlsoAsk::Port(v.as_u64().and_then(|n| u16::try_from(n).ok()).filter(|n| *n > 0).ok_or(one)?)
         }
+        Some((k, v)) if k == "localhost" && v.as_bool() == Some(true) => AlsoAsk::Localhost,
+        Some((k, v)) if k == "terminals" && v.as_bool() == Some(true) => AlsoAsk::Terminals,
+        Some((k, v)) if k == "env" => AlsoAsk::Env(path(v)?.trim_start_matches('$').to_string()),
         _ => return Err(one.into()),
     };
     if args["outside_sandbox"].as_bool() == Some(true)
@@ -720,12 +742,14 @@ fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
 
 /// What `ask` would open for a run from `cwd` in a session that may do `caps` — as a grant card for what the
 /// sandbox blocked offers it (`blocked::choices`: never home or above, keys, what runs later …): None when it's
-/// open already (`open_port`: the settings' ports), Err when no card opens it (said to Claude).
+/// open already (`open_port`: the settings' ports; `localhost`: every one), Err when no card opens it (said to
+/// Claude). A variable by the environment of the session's last run (`env`): one passed already runs.
 fn also_grant(
     ask: &AlsoAsk,
     cwd: &Path,
     caps: &crate::caps::Caps,
-    open_port: &dyn Fn(u16) -> bool,
+    (open_port, localhost): (&dyn Fn(u16) -> bool, bool),
+    env: Option<&crate::sandbox::runenv::RunEnv>,
 ) -> Result<Option<crate::allow::Grant>, String> {
     use crate::allow::Grant;
     let real = |p: &str| {
@@ -750,9 +774,17 @@ fn also_grant(
                     "port {n} is one no card opens ({why}) — if the command needs it, tell the user"
                 ));
             }
-            let open = open_port(*n) || caps.ports.iter().any(|e| e.what == *n);
+            let open = open_port(*n) || caps.ports.iter().any(|e| e.what == *n) || !caps.localhost.is_empty();
             return Ok((!open).then_some(Grant::Port(*n)));
         }
+        AlsoAsk::Localhost => {
+            return Ok((!localhost && caps.localhost.is_empty()).then_some(Grant::Localhost));
+        }
+        AlsoAsk::Terminals if !cfg!(target_os = "macos") => {
+            return Err("only macOS's sandbox closes the terminals — they aren't what blocked it here".into());
+        }
+        AlsoAsk::Terminals => return Ok(caps.terminals.is_empty().then_some(Grant::Terminals)),
+        AlsoAsk::Env(n) => return also_env(n, caps, env),
         AlsoAsk::Read(p) => ("file-read-data", real(p)?),
         AlsoAsk::Write(p) => {
             let r = real(p)?;
@@ -789,6 +821,50 @@ fn also_grant(
         false => grants.into_iter().find(|g| matches!(g, Grant::Write(_))),
     };
     found.map(Some).ok_or_else(|| never(&target))
+}
+
+/// The environment the session's last sandboxed run got (its command's or its tests', the newer) — what `also`'s
+/// variable is judged by.
+fn last_run_env(ed: &Editor) -> Option<crate::sandbox::runenv::RunEnv> {
+    let task = ed.session.task_run.as_ref().and_then(|r| Some((r.started, r.guard.as_ref()?.run_env()?)));
+    let test = ed.session.test_run.as_ref().and_then(|r| Some((r.started, r.guard.as_ref()?.run_env()?)));
+    let newest = match (task, test) {
+        (Some(a), Some(b)) => Some(if a.0 >= b.0 { a.1 } else { b.1 }),
+        (a, b) => a.or(b).map(|t| t.1),
+    };
+    newest.cloned()
+}
+
+/// `also`'s variable `n`: None when the session passes it already (an answer, or the last run had it), the grant
+/// when that run left it out, Err when no card passes it or there's no value to pass.
+fn also_env(
+    n: &str,
+    caps: &crate::caps::Caps,
+    env: Option<&crate::sandbox::runenv::RunEnv>,
+) -> Result<Option<crate::allow::Grant>, String> {
+    if !crate::readonly::env_allowed(n) {
+        return Err(format!(
+            "{n} is a variable no card passes — it finds programs, runs or loads code, or a toolchain's own is \
+             set for your commands. If the command needs it, tell the user"
+        ));
+    }
+    if caps.env.iter().any(|e| e.what == n) {
+        return Ok(None);
+    }
+    let env = env.ok_or(
+        "no run of yours yet in this session — run it without also first; its report says what's left out of its \
+         environment",
+    )?;
+    if env.left_out().any(|l| l == n) {
+        return Ok(Some(crate::allow::Grant::Env(n.to_string())));
+    }
+    match env.vars.iter().any(|(k, ..)| k == n) {
+        true => Ok(None),
+        false => Err(format!(
+            "{n} isn't set where tarae started — there's no value of the user's to pass. If the command needs it, \
+             tell the user"
+        )),
+    }
 }
 
 /// Claude's `also` (cardauto P3): the one thing past the session's capabilities its command asks for — after a
@@ -832,10 +908,11 @@ fn also_ask(
     // (its card runs the command on any answer but `n`: what `in_sandbox` looks at for a run is looked at for it —
     // D4's warnings that ask, and where a move takes an unseen file)
     let (unseen, reach, root) = (unseen_now(ed), could_reach_out(ed, false), ed.session.root.clone());
+    let env = last_run_env(ed);
     ed.events.jobs().spawn(move || {
         let caps = basis.build();
         let open = |n: u16| localhost || ports.contains(&n);
-        let grant = also_grant(&ask, &cwd, &caps, &open);
+        let grant = also_grant(&ask, &cwd, &caps, (&open, localhost), env.as_ref());
         // (a place to read: its card says first what looks like a token there)
         let tokens = match &grant {
             Ok(Some(crate::allow::Grant::Read(p))) => crate::tokens::found_in(p).said(p),
@@ -892,7 +969,7 @@ fn also_ask(
             };
             call.step("grant card up");
             let job = Job::Command(cmd.clone(), cwd);
-            let run = crate::blocked::BlockedRun { job, denials: Vec::new(), from: None, claude: Some(call) };
+            let run = crate::blocked::BlockedRun { claude: Some(call), ..crate::blocked::BlockedRun::of(job) };
             ed.push_offer(crate::blocked::also_card(g, &reason, &cmd, Box::new(run), tokens, asks));
         }
     });
@@ -2626,10 +2703,43 @@ fn not_started(ed: &mut Editor, who: For, joined: Vec<crate::queued::Joined>, wh
     fail(ed, who, joined, said)
 }
 
-/// A run the user started again ended: Claude reads how with the next message — the panel shows it now.
+/// A run the user started again ended: when it ran again Claude's last turn's failed run, in the same
+/// conversation, with the chat idle (piece D3, the user's Q2), it goes to Claude now as a message by itself — a
+/// turn the user didn't type; otherwise Claude reads how with the next message. The panel shows it now.
 fn told(ed: &mut Editor, head: String, report: String) {
-    ed.session.checkpoints.tell.push(format!("{head}\n{report}"));
+    let key = ed.session.chat.as_mut().and_then(|c| {
+        let at = c.reruns.iter().position(|(h, _)| *h == head)?;
+        Some(c.reruns.remove(at).1)
+    });
+    let text = format!("{head}\n{report}");
+    if key.is_some_and(|k| goes_on(ed, k)) {
+        let message = format!("{text}\n{SENT_BY_ITSELF}");
+        if crate::chat::submit(ed, &message, None, None) {
+            return ed.note("how it ended went to Claude, which goes on");
+        }
+    }
+    ed.session.checkpoints.tell.push(text);
     ed.note("Claude hears how it ended with your next message");
+}
+
+/// What the message a rerun's end sends by itself says last (`told`).
+const SENT_BY_ITSELF: &str = "(tarae sent this when the run ended — the user typed nothing. Go on from it.)";
+
+/// Whether the user's run again of `key` goes on to Claude by itself as it ends (piece D3): it was a failed run of
+/// Claude's last turn, the conversation is the one it ran in, and the chat is idle.
+pub fn goes_on(ed: &Editor, key: crate::blocked::RunKey) -> bool {
+    ed.session.chat.as_ref().is_some_and(|c| {
+        !c.busy() && c.queued.is_none() && c.failed.0 == c.conversation && c.failed.1.contains(&key)
+    })
+}
+
+/// Claude's run `key` failed in the turn in flight (`Chat.failed`).
+fn failed_in_turn(ed: &mut Editor, key: crate::blocked::RunKey) {
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    if c.failed.0 != c.conversation {
+        c.failed = (c.conversation.clone(), Vec::new());
+    }
+    c.failed.1.push(key);
 }
 
 /// What a run may do besides what's allowed (`allow.rs`): a grant just this once, or no sandbox at all — and
@@ -2694,7 +2804,10 @@ pub fn with_allowed(
             Grant::Host(h, p) if !w.hosts.contains(&(h.clone(), *p)) => w.hosts.push((h.clone(), *p)),
             Grant::Terminals => w.terminals = true,
             Grant::Key(k) if !w.keys.contains(k) => w.keys.push(k.clone()),
-            Grant::Read(_) | Grant::Socket(_) | Grant::Host(..) | Grant::Key(_) => {}
+            Grant::Localhost => w.llm.sandbox_localhost = true,
+            // (a whole name: passed even when it looks like a token — `runenv::of`)
+            Grant::Env(n) if !w.llm.sandbox_env.contains(n) => w.llm.sandbox_env.push(n.clone()),
+            Grant::Read(_) | Grant::Socket(_) | Grant::Host(..) | Grant::Key(_) | Grant::Env(_) => {}
         }
         let said = g.shown();
         if !w.granted.contains(&said) {
@@ -3591,6 +3704,7 @@ pub fn run_done(ed: &mut Editor) {
     };
     let below: Vec<&Path> = std::iter::once(ed.session.root.as_path()).chain(run_dir.as_deref()).collect();
     let candidates = said.as_ref().map(|s| also_candidates(failed, &s.open, &below)).unwrap_or_default();
+    let loopback = said.as_ref().filter(|_| failed).and_then(|s| loopback_of(&s.open));
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
         let r = &*r;
@@ -3635,6 +3749,8 @@ pub fn run_done(ed: &mut Editor) {
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let (label, cmd) = (r.task.name.clone(), r.task.cmd.clone());
+    let job = Job::Command(cmd.clone(), r.task.cwd.clone());
+    let key = crate::blocked::RunKey { tests: false, generation: r.generation() };
     let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
     // (its chat row says where it ran, and what it warned of — the run's own record, cardburden 4)
     if let Some(ran) = r.ran.clone() {
@@ -3644,8 +3760,18 @@ pub fn run_done(ed: &mut Editor) {
     crate::reads::run_ended(ed);
     let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;
+    if failed {
+        failed_in_turn(ed, key);
+    }
     let told = move |ed: &mut Editor, changed: String| {
-        answer(ed, call, Ok(format!("{text}{changed}")));
+        let report = format!("{text}{changed}");
+        let held = match loopback {
+            Some(card) => loopback_card(ed, &card, job, call, report.clone()),
+            None => Err(call),
+        };
+        if let Err(call) = held {
+            answer(ed, call, Ok(report));
+        }
         for (c, text) in others {
             answer(ed, c, Ok(format!("{text}{changed}")));
         }
@@ -3675,7 +3801,7 @@ pub fn run_done(ed: &mut Editor) {
 /// passed needed none of them (a test binary's own probes, a formatter's look at `~`). A read or write of a place,
 /// a port on this machine; never a read of a folder above where it works (`below`: the project, the run's own
 /// folder — a tool walking up for its settings: taplo's `~`, `~/.cache`), a unix socket (`unix_socket`'s:
-/// mDNSResponder), a host (the proxy's own card), the terminals. Pure: what it opens is `also_line`'s.
+/// mDNSResponder), a host (the proxy's own card). A terminal opened (macOS). Pure: what it opens is `also_line`'s.
 fn also_candidates(
     failed: bool,
     open: &[crate::sandbox::Denial],
@@ -3688,7 +3814,7 @@ fn also_candidates(
         let read = d.op.starts_with("file-read") || d.op == crate::sandbox::EITHER;
         let write = d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER;
         let walk = read && !write && below.iter().any(|b| b.starts_with(&d.target));
-        d.target.starts_with('/') && (read || write) && !walk && !d.terminal()
+        d.target.starts_with('/') && (read || write) && !walk
     };
     open.iter()
         .filter(|d| place(d) || (!d.target.starts_with('/') && d.port_here().is_some()))
@@ -3698,22 +3824,27 @@ fn also_candidates(
 
 /// What `also` could ask for of `candidates` (`also_candidates`) in a session that may do `caps`, said under the
 /// report — a grant card's choices (`blocked::choices`: never what no card opens), at most `ALSO_SAID`, but a port
-/// open already (`open_port`; Seatbelt names no address: that refusal was a host beyond this machine). Empty:
-/// nothing to ask. On a worker (the choices look at the disk).
+/// open already (`open_port`; Seatbelt names no address: that refusal was a host beyond this machine). A port
+/// refused to a program the packs say picks its ports as it starts (`refused-port`: Gradle's JVM) is every port
+/// here (`localhost`), not that one. Empty: nothing to ask. On a worker (the choices look at the disk).
 fn also_line(
     candidates: &[crate::sandbox::Denial],
     caps: &crate::caps::Caps,
     open_port: &dyn Fn(u16) -> bool,
 ) -> String {
     use crate::allow::Grant;
+    let closed =
+        |n: u16| !open_port(n) && !caps.ports.iter().any(|e| e.what == n) && caps.localhost.is_empty();
+    let every = localhost_ports(candidates);
     let mut said: Vec<String> = Vec::new();
     for g in crate::blocked::choices(candidates, caps).into_iter().map(|c| c.grant) {
         let one = match &g {
             Grant::Read(p) | Grant::Key(p) => format!("{{\"read\": \"{}\"}}", crate::allow::tilde(p)),
             Grant::Write(p) => format!("{{\"write\": \"{}\"}}", crate::allow::tilde(p)),
-            Grant::Port(n) if !open_port(*n) && !caps.ports.iter().any(|e| e.what == *n) => {
-                format!("{{\"port\": {n}}}")
-            }
+            // (not a port a pack's `refused-port` program picks: `choices` offers every port for it, not that one)
+            Grant::Port(n) if closed(*n) => format!("{{\"port\": {n}}}"),
+            Grant::Localhost if every.iter().any(|n| closed(*n)) => "{\"localhost\": true}".into(),
+            Grant::Terminals if caps.terminals.is_empty() => "{\"terminals\": true}".into(),
             _ => continue,
         };
         if !said.contains(&one) && said.len() < ALSO_SAID {
@@ -3728,6 +3859,50 @@ fn also_line(
          and your reason; the user decides on a card.\n",
         said.join(" · ")
     )
+}
+
+/// The card words of the first program the packs' `refused-port` names that `open` (a failed run's denials) says
+/// was refused a port here — Gradle's loopback (piece D2); None: none was.
+pub(crate) fn loopback_of(open: &[crate::sandbox::Denial]) -> Option<String> {
+    let packs = crate::sandboxpack::get();
+    open.iter().find_map(|d| packs.refused_port.iter().find(|r| r.picks(d)).map(|r| r.card.clone()))
+}
+
+/// Gradle's loopback (piece D2): `card` (`loopback_of`) up for Claude's failed `job` — at its first refusal, its
+/// call held with its `report` — unless every port here is open already, Claude's turn no longer waits for `call`, or
+/// the user said no to them in this chat: then Err gives the call back, to be answered as usual.
+fn loopback_card(ed: &mut Editor, card: &str, job: Job, call: Call, report: String) -> Result<(), Call> {
+    use crate::allow::Grant;
+    let open = ed.config.llm.sandbox_localhost || ed.session.caps().is_some_and(|c| !c.localhost.is_empty());
+    let waits = |c: &crate::chat::Chat| {
+        c.generation() == call.generation && c.busy() && !c.also_refused.contains(&Grant::Localhost)
+    };
+    if open || !ed.session.chat.as_ref().is_some_and(waits) {
+        return Err(call);
+    }
+    call.step("every port's card up");
+    let cmd = match &job {
+        Job::Command(c, _) => c.clone(),
+        Job::Tests(t) => format!("tests: {}", t.label),
+    };
+    let run = crate::blocked::BlockedRun {
+        claude: Some(call),
+        report: Some(report),
+        ..crate::blocked::BlockedRun::of(job)
+    };
+    ed.push_offer(crate::blocked::loopback_card(card, &cmd, Box::new(run)));
+    Ok(())
+}
+
+/// The ports of `denials` refused to a program the packs' `refused-port` names — one that picks its ports as it
+/// starts, so what it needs is every port here (Gradle's client and daemon).
+pub(crate) fn localhost_ports(denials: &[crate::sandbox::Denial]) -> Vec<u16> {
+    let packs = crate::sandboxpack::get();
+    denials
+        .iter()
+        .filter(|d| packs.refused_port.iter().any(|r| r.picks(d)))
+        .filter_map(crate::sandbox::Denial::port_here)
+        .collect()
 }
 
 /// What `also_line` names at most.
@@ -5557,6 +5732,137 @@ mod tests {
         assert!(r.as_ref().is_err_and(|e| e.contains("isn't looked at yet")), "{r:?}");
     }
 
+    /// Gradle's loopback (piece D2): a port refused to what the packs say picks its ports as it starts gets every
+    /// port's card at once, in the pack's words, Claude's call waiting on it — `y` runs it again as Claude's run
+    /// with them open; `n` gives Claude the run's report and the no, which sticks for the chat; open already, the
+    /// turn over or a no before: no card, the call answered as usual. (Stand-ins: `true`; no port listened on.)
+    #[test]
+    fn gradles_loopback_gets_every_ports_card_holding_claudes_call() {
+        use serde_json::json;
+
+        use crate::allow::Grant;
+        use crate::sandbox::Denial;
+        let scratch = crate::scratch::Scratch::new("loopback");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        let port = |process: &str| Denial {
+            process: process.into(),
+            op: "network-outbound".into(),
+            target: "remote:*:52113".into(),
+        };
+        let card = super::loopback_of(&[port("java")]).expect("the Java pack's words");
+        assert_eq!(super::loopback_of(&[port("node")]), None, "one port is that port's");
+        let job = super::Job::Command("true".into(), dir.clone());
+        let call = |n: u64| super::Call::of(generation, &format!("g{n}"), json!(n));
+        let answered = |n: u64| {
+            super::ANSWERED
+                .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+        };
+        // `y`: Claude's call runs it again, every port here open this once
+        assert!(super::loopback_card(&mut ed, &card, job.clone(), call(1), "REPORT-1".into()).is_ok());
+        let o = &ed.offers[0];
+        assert!(o.question.contains("one port won't do") && o.question.contains("failed for it and waits"));
+        assert!(o.question.contains("2375 Docker API"), "the risky ports named: {}", o.question);
+        assert_eq!(
+            o.answers(false),
+            [('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+        );
+        ed.offer_accept();
+        let extra = super::ADMITTED.with(|a| a.borrow().last().map(|(_, e)| e.grant.clone()));
+        assert_eq!(extra, Some(Some(Grant::Localhost)), "this run's grant");
+        assert_eq!(answered(1), None, "its call goes with the run again");
+        ed.session.task_run = None;
+        // `n`: Claude hears how the run ended, then the no — asked no more in this chat
+        assert!(super::loopback_card(&mut ed, &card, job.clone(), call(2), "REPORT-2".into()).is_ok());
+        ed.offer_dismiss();
+        let no = answered(2).expect("answered").expect("a report, not an error");
+        assert!(no.starts_with("REPORT-2") && no.contains("said no"), "{no}");
+        assert!(super::loopback_card(&mut ed, &card, job.clone(), call(3), "R".into()).is_err(), "said no");
+        // Open already, or the turn over: no card
+        ed.session.chat.as_mut().unwrap().also_refused.clear();
+        ed.config.llm.sandbox_localhost = true;
+        assert!(super::loopback_card(&mut ed, &card, job.clone(), call(4), "R".into()).is_err(), "open");
+        ed.config.llm.sandbox_localhost = false;
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        assert!(super::loopback_card(&mut ed, &card, job, call(5), "R".into()).is_err(), "its turn over");
+        assert!(ed.offers.is_empty());
+    }
+
+    /// A rerun from what the sandbox blocked (piece D3, the user's Q2): when it ran again Claude's last turn's
+    /// failed run, in the same conversation, with the chat idle, its end goes to Claude as one message by itself
+    /// (the stand-in claude reads it); busy, in another conversation, or after a newer turn: none — it waits for
+    /// the next message, as before. The card says which by the state as it's made; the end looks again.
+    #[test]
+    fn a_rerun_of_the_last_turns_failed_run_goes_on_to_claude_by_itself() {
+        use crate::blocked::{BlockedRun, RunKey};
+        let scratch = crate::scratch::Scratch::new("rerun-goes-on");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > sent.log".into()];
+        crate::chat::open(&mut ed);
+        let key = RunKey { tests: false, generation: 7 };
+        let run =
+            BlockedRun { key: Some(key), ..BlockedRun::of(super::Job::Command("true".into(), dir.clone())) };
+        // Claude's turn: its run failed, in conversation c1; then the turn ended
+        let c = ed.session.chat.as_mut().unwrap();
+        c.conversation = Some("c1".into());
+        c.state = crate::chat::State::Thinking;
+        super::failed_in_turn(&mut ed, key);
+        assert_eq!(crate::blocked::then_said(&ed, &run), crate::blocked::NEXT_MESSAGE, "busy");
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        assert_eq!(crate::blocked::then_said(&ed, &run), crate::blocked::GOES_ON);
+        let sent = || std::fs::read_to_string(dir.join("sent.log")).unwrap_or_default();
+        let rerun = |ed: &mut crate::editor::Editor, n: u32| {
+            let head = format!("The user ran `true` again (#{n}). How it ended:");
+            ed.session.chat.as_mut().unwrap().reruns.push((head.clone(), key));
+            super::told(ed, head, format!("REPORT-{n}"));
+        };
+        // Idle, the same conversation: one message, now — nothing left for the next
+        rerun(&mut ed, 1);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !sent().contains("REPORT-1") {
+            assert!(std::time::Instant::now() < end, "the stand-in claude read nothing: {}", sent());
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(sent().contains("the user typed nothing"), "{}", sent());
+        assert!(
+            ed.session.checkpoints.tell.is_empty() && ed.session.chat.as_ref().unwrap().reruns.is_empty()
+        );
+        // Busy (that message's turn): none — it's told with the next message
+        assert!(ed.session.chat.as_ref().unwrap().busy(), "the message is a turn");
+        rerun(&mut ed, 2);
+        assert!(ed.session.checkpoints.tell.iter().any(|t| t.contains("REPORT-2")));
+        // That turn was a newer one: the failed run is no longer the last turn's, idle or not
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        ed.session.checkpoints.tell.clear();
+        assert_eq!(crate::blocked::then_said(&ed, &run), crate::blocked::NEXT_MESSAGE, "a newer turn");
+        rerun(&mut ed, 3);
+        assert!(ed.session.checkpoints.tell.iter().any(|t| t.contains("REPORT-3")));
+        // Another conversation: none
+        ed.session.checkpoints.tell.clear();
+        super::failed_in_turn(&mut ed, key);
+        ed.session.chat.as_mut().unwrap().conversation = Some("c2".into());
+        assert_eq!(
+            crate::blocked::then_said(&ed, &run),
+            crate::blocked::NEXT_MESSAGE,
+            "another conversation"
+        );
+        rerun(&mut ed, 4);
+        assert!(ed.session.checkpoints.tell.iter().any(|t| t.contains("REPORT-4")));
+        assert!(!["REPORT-2", "REPORT-3", "REPORT-4"].iter().any(|r| sent().contains(r)), "{}", sent());
+    }
+
     /// Review of piece 4 (1): an `also` card goes with its turn, as the run cards do; an answer that comes for a
     /// call nobody waits on any more (its turn over) stores no grant and records no refusal — nothing runs.
     /// (Stand-ins: `true`; ports nothing listens on.)
@@ -5589,10 +5895,8 @@ mod tests {
         // An answer for a call whose turn is over: no grant kept, no refusal, nothing run
         let before = super::ADMITTED.with(|a| a.borrow().len());
         let run = |n: u64| crate::blocked::BlockedRun {
-            job: super::Job::Command("true".into(), dir.clone()),
-            denials: Vec::new(),
-            from: None,
             claude: Some(super::Call::of(generation, &format!("t{n}"), json!(n))),
+            ..crate::blocked::BlockedRun::of(super::Job::Command("true".into(), dir.clone()))
         };
         let port = crate::allow::Grant::Port(47012);
         crate::blocked::grant_answer(&mut ed, 0, port.clone(), run(2), Some(crate::allow::Scope::ThisChat));
@@ -5650,6 +5954,67 @@ mod tests {
         let line = super::also_line(&c, &caps, &|n| n == 5432);
         assert!(!line.contains("port"), "open already: {line}");
         assert_eq!(super::also_line(&[], &caps, &|_| false), "", "nothing: no line");
+        // (piece D) a port refused to what picks its ports as it starts (the Java pack's `refused-port`) is every
+        // port here, never that one port; a terminal is the terminals (macOS)
+        let gradle = d("java", "network-outbound", "remote:*:52113".into());
+        let tty = d("script", "file-read-data", "/dev/ttys012".into());
+        let c = super::also_candidates(true, &[gradle, tty], &below);
+        assert_eq!(c.len(), 2, "{c:?}");
+        let line = super::also_line(&c, &caps, &|_| false);
+        assert!(line.contains("{\"localhost\": true}") && !line.contains("52113"), "{line}");
+        assert!(line.contains("{\"terminals\": true}"), "{line}");
+        let mut open = caps.clone();
+        open.localhost.push(crate::caps::Source::Grant(crate::allow::Scope::Session));
+        open.terminals.push(crate::caps::Source::Grant(crate::allow::Scope::Session));
+        assert_eq!(super::also_line(&c, &open, &|_| false), "", "answered already: nothing to ask");
+    }
+
+    /// `also` takes every port here, a variable and the terminals (piece D): each a grant when it's closed, none
+    /// when it's open already; a variable judged by the session's last run — left out: its card; passed: it runs;
+    /// not set or one no card passes: said to Claude.
+    #[test]
+    fn also_asks_for_localhost_a_variable_and_the_terminals() {
+        use serde_json::{Value, json};
+
+        use crate::allow::Grant;
+        use crate::sandbox::runenv::RunEnv;
+        let of = |v: Value| super::also_of(&json!({ "command": "x", "also": v, "reason": "r" }));
+        let ask = |v: Value| of(v).unwrap().unwrap().0;
+        assert!(matches!(ask(json!({ "localhost": true })), super::AlsoAsk::Localhost));
+        assert!(matches!(ask(json!({ "terminals": true })), super::AlsoAsk::Terminals));
+        assert!(
+            matches!(ask(json!({ "env": "$DATABASE_URL" })), super::AlsoAsk::Env(n) if n == "DATABASE_URL")
+        );
+        for bad in [json!({ "localhost": false }), json!({ "env": "" }), json!({ "terminals": 1 })] {
+            assert!(of(bad.clone()).is_err(), "{bad}");
+        }
+        let caps = crate::caps::Caps::at(std::path::Path::new("/h"), std::path::Path::new("/h/p"));
+        let dir = std::path::Path::new("/h/p");
+        let closed = |_: u16| false;
+        let grant = |a: super::AlsoAsk, localhost: bool, env: Option<&RunEnv>| {
+            super::also_grant(&a, dir, &caps, (&closed, localhost), env)
+        };
+        assert_eq!(grant(super::AlsoAsk::Localhost, false, None), Ok(Some(Grant::Localhost)));
+        assert_eq!(grant(super::AlsoAsk::Localhost, true, None), Ok(None), "the setting opens them");
+        let terminals = grant(super::AlsoAsk::Terminals, false, None);
+        match cfg!(target_os = "macos") {
+            true => assert_eq!(terminals, Ok(Some(Grant::Terminals))),
+            false => assert!(terminals.is_err()),
+        }
+        let env = RunEnv {
+            vars: vec![("LANG".into(), "C".into(), crate::sandbox::runenv::By::Floor)],
+            tokens: vec!["GITHUB_TOKEN".into()],
+            others: vec!["DATABASE_URL".into()],
+        };
+        let var = |n: &str, e: Option<&RunEnv>| grant(super::AlsoAsk::Env(n.into()), false, e);
+        assert_eq!(var("DATABASE_URL", Some(&env)), Ok(Some(Grant::Env("DATABASE_URL".into()))));
+        assert_eq!(var("GITHUB_TOKEN", Some(&env)), Ok(Some(Grant::Env("GITHUB_TOKEN".into()))));
+        assert_eq!(var("LANG", Some(&env)), Ok(None), "passed already: it runs");
+        assert!(var("NOT_SET_ANYWHERE", Some(&env)).is_err_and(|e| e.contains("isn't set")));
+        assert!(var("DATABASE_URL", None).is_err_and(|e| e.contains("run it without also first")));
+        for never in ["PATH", "RUSTFLAGS", "LD_PRELOAD", "GIT_SSH_COMMAND"] {
+            assert!(var(never, Some(&env)).is_err_and(|e| e.contains("no card passes")), "{never}");
+        }
     }
 
     /// #119: Claude asks for one unix socket past the sandbox, not the sandbox off: the card names that file,
@@ -5806,12 +6171,7 @@ mod tests {
             String::new(),
             crate::offer::What::Grant {
                 grant: g,
-                run: Box::new(crate::blocked::BlockedRun {
-                    job: super::Job::Command(first.into(), dir.clone()),
-                    denials: Vec::new(),
-                    from: None,
-                    claude: None,
-                }),
+                run: Box::new(crate::blocked::BlockedRun::of(super::Job::Command(first.into(), dir.clone()))),
             },
         );
         assert_eq!(card.answers(false), [('y', "This run"), ('n', "No")]);

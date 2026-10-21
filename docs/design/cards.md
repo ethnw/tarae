@@ -638,7 +638,11 @@ beside them:
   when a warning that `asks` could come true (D4: the network open) or the line moves a file Claude wrote unseen,
   a worker builds `Caps` (`Basis::build`), reads the scripts for the warnings, and carries the unseen mark
   (`carry`) first. `Outward` → today's run card. Not sandboxed: today's gate, unchanged, until piece 5.
-- **`also`** (`also_of`, `also_ask`, `also_grant`): one of `{read}`, `{write}`, `{port}` with a reason. Resolved on
+- **`also`** (`also_of`, `also_ask`, `also_grant`): one of `{read}`, `{write}`, `{port}` with a reason — and since
+  piece D `{localhost}` (every port here, `Grant::Localhost`: its card names the risky ports it opens too),
+  `{env: NAME}` (one variable left out, passed whole — `Grant::Env`; never a name `readonly::env_allowed` keeps
+  off; judged by the session's last run's environment; a token-like name this session at most) and
+  `{terminals}` (macOS). Resolved on
   a worker against `Caps` as a grant card for a blocked run offers it (`blocked::choices`): open already → runs;
   no card opens it (home, keys, what runs later, a risky port, a protected name in the project) → said, no card;
   else the Grant card (`blocked::also_card`, `Why::Also`, Claude's call waits on it — `BlockedRun.claude`).
@@ -646,8 +650,26 @@ beside them:
   `ALSO_MAX` (3) cards a turn (`Chat.also_asked`, new each turn).
 - **The report** (`also_candidates`, `also_line`): only a run that *failed* gets the `also` line (§8.4: a
   passing cargo test of this repository reports taplo walking up from its folder, mDNSResponder and the test
-  binary's own probes); and only for a read or write of a place, or a port the settings don't open — never a
-  look at a folder above the project or the run's own folder, a socket, a host, the terminals.
+  binary's own probes); and only for a read or write of a place, a port the settings don't open, a terminal —
+  never a look at a folder above the project or the run's own folder, a socket, a host. A port refused to a
+  program a pack's `refused-port` names (Gradle's JVM, which picks its ports as it starts) is `{localhost}`,
+  not that port — but below `PICKED_FROM` (1024, never a picked port: Seatbelt names no address, so it's a host
+  beyond this machine) neither that card nor `{localhost}`: the report says the refusal, and with the network
+  closed the pack's `beyond` line; a variable left out that the output names is `{env}` (`RunEnv::named_in`).
+- **Gradle's loopback** (piece D2, `tools::loopback_card`): that refusal in a failed run of Claude's puts every
+  port's card up at once, in the pack's `card` words, Claude's call waiting on it with the run's report
+  (`BlockedRun.report`): `y`/`a`/`s`/`A` run it again as Claude's run; `n` gives Claude the report and the no.
+  Open already, the turn over, or a no in this chat: no card. Follow-up once piece C is on main: before the
+  first run, by pack data naming what needs loopback. The kernel's report of that refusal is often lost (the
+  shots: 3 or 4 of 6 under load; real Gradle with localhost closed: 0 of 4, `pieceD-gradle-measure.out`), so a
+  connect is also read from the output as the kernel would have said it (`Policy::connect_said_in`, the packs'
+  `refused-connect`): only words naming the port — macOS's nc, and Gradle's "Could not connect to the Gradle
+  daemon." with the address its daemon gave its clients in the log tail it prints (`when` + `line`). A JVM's
+  own `SocketException: Operation not permitted` names none.
+- **A rerun from `space m s`** (piece D3, the user's Q2): when it runs again a failed run of Claude's last
+  turn (`Chat.failed`, cleared as a turn starts), in the same conversation, with the chat idle, its end goes to
+  Claude as a message by itself (`tools::told`, `chat::submit`); the card says so (`blocked::then_said`) by the
+  state as it's made, and the end looks again. Otherwise, with the next message.
 - **Kept for the cards P3 keeps** (outside, socket, and no sandbox): `named`, `showable`, `read_scripts`,
   `carry`/`moved` — `tools::the_frictions_commands_run_unasked_in_the_sandbox` checks the outside card still
   shows a script written unseen this turn, and refuses one too long to show.

@@ -246,7 +246,8 @@ impl RunEnv {
         Some(format!(
             "Your commands' environment holds PATH, HOME, the locale and the toolchains' own variables — not the \
              rest of the user's. Left out (names only) — {}. A command that needs one of them fails without it: \
-             tell the user — llm.sandbox-env passes one (:sandbox-env lists them all); don't work around it.{}",
+             run it again with also {{\"env\": NAME}} and your reason — the user decides on a card (:sandbox-env \
+             lists them all); don't work around it.{}",
             parts.join("; "),
             others_read
         ))
@@ -255,6 +256,34 @@ impl RunEnv {
     /// The names left out that the run's `output` names as a whole word (`DATABASE_URL not set`, `$MYAPP_KEY`)
     /// — said every time: it may be why the run failed. None: none.
     pub fn named_in(&self, output: &[(bool, String)]) -> Option<String> {
+        let named = self.named(output);
+        let (asked, told): (Vec<&String>, Vec<&String>) =
+            named.iter().partition(|n| crate::readonly::env_allowed(n));
+        let mut parts = Vec::new();
+        if !asked.is_empty() {
+            let also: Vec<String> = asked.iter().map(|n| format!("{{\"env\": \"{n}\"}}")).collect();
+            parts.push(format!(
+                "if that's why it failed, run it again with also {} and your reason — the user decides on a card",
+                also.join(" · ")
+            ));
+        }
+        if !told.is_empty() {
+            parts.push(format!(
+                "no card passes {} — if the command needs it, tell the user",
+                told.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        (!named.is_empty()).then(|| {
+            format!(
+                "Its output names {}, left out of your commands' environment — {}.",
+                named.join(", "),
+                parts.join("; ")
+            )
+        })
+    }
+
+    /// The names left out that `output` names as a whole word, in `left_out`'s order.
+    pub fn named(&self, output: &[(bool, String)]) -> Vec<String> {
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         let names = |l: &str, n: &str| {
             l.match_indices(n).any(|(i, _)| {
@@ -262,15 +291,7 @@ impl RunEnv {
                     && !l[i + n.len()..].chars().next().is_some_and(word)
             })
         };
-        let named: Vec<&str> =
-            self.left_out().filter(|n| output.iter().any(|(_, l)| names(l, n))).map(String::as_str).collect();
-        (!named.is_empty()).then(|| {
-            format!(
-                "Its output names {}, left out of your commands' environment — if that's why it failed, tell the \
-                 user: llm.sandbox-env passes a variable.",
-                named.join(", ")
-            )
-        })
+        self.left_out().filter(|n| output.iter().any(|(_, l)| names(l, n))).cloned().collect()
     }
 
     /// `:sandbox-env`'s page: what goes in and why, then what's left out — names only.
@@ -418,7 +439,7 @@ mod tests {
             ),
             "{first}"
         );
-        assert!(first.contains("llm.sandbox-env") && first.contains(":sandbox-env"), "{first}");
+        assert!(first.contains("also {\"env\": NAME}") && first.contains(":sandbox-env"), "{first}");
         // (F2: on macOS the first time also says other processes' environments are within reach — never on
         // Linux, where Landlock keeps them in)
         assert!(first.ends_with(OTHERS_READ), "{first}");
@@ -437,6 +458,12 @@ mod tests {
         assert!(named.starts_with("Its output names NEW_ONE, left out"), "{named}");
         assert_eq!(more.named_in(&out("X_NEW_ONE and NEW_ONES")), None);
         assert!(more.named_in(&out("$GITHUB_TOKEN is empty")).is_some_and(|s| s.contains("GITHUB_TOKEN")));
+        // (piece D) what a card passes is asked for with also; what none passes is the user's to tell
+        assert!(named.contains("also {\"env\": \"NEW_ONE\"}"), "{named}");
+        let never = RunEnv { others: vec!["NEW_ONE".into(), "RUSTFLAGS".into()], ..e.clone() };
+        let named = never.named_in(&out("NEW_ONE, RUSTFLAGS")).unwrap();
+        assert!(!named.contains("\"RUSTFLAGS\"") && named.contains("no card passes RUSTFLAGS"), "{named}");
+        assert_eq!(never.named(&out("RUSTFLAGS")), ["RUSTFLAGS"]);
     }
 
     #[test]

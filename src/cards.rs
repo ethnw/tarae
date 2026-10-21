@@ -262,6 +262,8 @@ pub enum Verb {
     Write,
     Port,
     Terminals,
+    Localhost,
+    Env,
 }
 
 /// Whether Claude's commands run in a sandbox here: `llm.sandbox` on and one that holds — a partial one (Linux
@@ -333,6 +335,8 @@ impl Decision {
             Decision::Grant(Verb::Write) => "grant:write",
             Decision::Grant(Verb::Port) => "grant:port",
             Decision::Grant(Verb::Terminals) => "grant:terminals",
+            Decision::Grant(Verb::Localhost) => "grant:localhost",
+            Decision::Grant(Verb::Env) => "grant:env",
             Decision::Socket => "socket",
             Decision::Outside => "outside",
             Decision::NoSandbox => "no-sandbox",
@@ -371,6 +375,8 @@ pub fn decide(r: &Request, caps: &crate::caps::Caps) -> Decision {
         Request::Grant(crate::allow::Grant::Write(_)) => Decision::Grant(Verb::Write),
         Request::Grant(crate::allow::Grant::Port(_)) => Decision::Grant(Verb::Port),
         Request::Grant(crate::allow::Grant::Terminals) => Decision::Grant(Verb::Terminals),
+        Request::Grant(crate::allow::Grant::Localhost) => Decision::Grant(Verb::Localhost),
+        Request::Grant(crate::allow::Grant::Env(_)) => Decision::Grant(Verb::Env),
         Request::Grant(crate::allow::Grant::Socket(_)) => Decision::Socket,
         Request::Grant(crate::allow::Grant::Host(..)) => Decision::Host,
         Request::Host(_) => Decision::Host,

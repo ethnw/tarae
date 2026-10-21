@@ -8,6 +8,16 @@
 
 [sandbox]
 pass = ["MISE_*", "ASDF_*", "VOLTA_*", "SDKMAN_*"]
+# A connect the sandbox refused, as a program's own line says it — read as the kernel's report of it would be
+# (`Policy::said_in_output`): that report is lost when the system is busy (piece D's shots, 2026-10-17: 4 and 3 of 6 never
+# reported, the kernel's stream full of others' duplicate reports). Named groups: `process` (the program its line
+# starts with), `host`, `port`; or a table: `line` (those groups), `when` (a line the output holds too), `process`
+# (where the line doesn't say it). Only words that name the address and the port: macOS's nc (`nc -z -v`, measured
+# on Darwin 27), Gradle's (the Java pack). Not a JVM's: `java.net.SocketException: Operation not permitted`
+# (measured, OpenJDK 27, `Socket` and `SocketChannel`) names neither, the same for a host beyond this machine
+refused-connect = [
+    '^(?P<process>[\w.+-]+): connectx to (?P<host>[0-9A-Fa-f.:]+) port (?P<port>\d+) \(tcp\) failed: Operation not permitted$',
+]
 
 # What a run card of Claude's warns of (`cardwarn.rs`, cardburden 4) — the tools no one language has. Each is a
 # line in the warning colour under what the card asks, said as this pack's; `asks = true`: `a` on an earlier card

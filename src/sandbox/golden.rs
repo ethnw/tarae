@@ -353,7 +353,7 @@ fn the_report_is_pinned() {
     let denials = [
         file("file-write-create", home.join(".cargo/registry/src/index/x-1.0/new.rs")),
         file("file-write-create", home.join(".gradle/caches/transforms-4/x")),
-        Denial { process: "java".into(), op: "network-outbound".into(), target: "remote:*:9".into() },
+        Denial { process: "java".into(), op: "network-outbound".into(), target: "remote:*:52113".into() },
         file("file-read-data", home.join(".gitconfig")),
         file("file-read-data", home.join(".cargo/credentials.toml")),
         // (Go's telemetry: quiet at its place for the process's home on this system, as `quiet` reads it —

@@ -65,7 +65,10 @@
 //!   there), `files` (in the order it reads them; `{ first = [folders], file }`: in the first folder that's
 //!   there, else the last), `form` (`lines`, `ini`), `copy` (the copy's name in the run's folder); or no
 //!   `copy` and `tell`: it takes none — the user is told once (`{them}`, the files).
-//! - `refused-port = { process, said }`: what Claude reads when that process was refused a port here.
+//! - `refused-port = { process, said, card, beyond }`: what Claude reads when that process was refused a port
+//!   it picks here, what the card that opens every port here says to the user (`blocked::loopback_card`), and
+//!   what Claude reads instead for one below `PICKED_FROM` with the network closed (a host beyond this
+//!   machine).
 //!
 //! `[claude]`:
 //! - `run-allow`: commands Claude runs unasked, by whole words (git's read-only ones are the core's).
@@ -126,6 +129,8 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     ("settings", Reach::BuiltIn),
     // (what Claude reads)
     ("refused-port", Reach::BuiltIn),
+    // (a line of output read as a refusal — a card can follow it: tarae's own words only)
+    ("refused-connect", Reach::BuiltIn),
     // (what a run with a proxy URL is told: where its tools go out)
     ("proxy", Reach::BuiltIn),
     // (what the user reads on the host card)
@@ -235,6 +240,45 @@ pub struct RunHome {
     /// A file in it that's tarae's whole, its lines for a run with a proxy URL (`proxy`).
     pub proxy: Option<ProxyLines>,
     pub said: String,
+}
+
+/// A connect refused as a program's own output says it (`refused-connect`): a pattern, or a table of `line`,
+/// `when` and `process`.
+#[derive(Clone, Debug)]
+pub struct RefusedConnect {
+    /// The line naming it: its `host` and `port` named groups, and `process` unless the rule names it.
+    pub line: regex::Regex,
+    /// A line the output holds too where it was a refusal — Gradle says it failed, then its daemon's address.
+    pub when: Option<regex::Regex>,
+    /// Its program, where the line doesn't say it.
+    pub process: Option<String>,
+}
+
+/// A program that picks this machine's ports as it starts (`refused-port`): refused one, it needs them all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusedPort {
+    /// Its process's name, as the denials say it (`java`).
+    pub process: String,
+    /// What Claude reads under the run's report.
+    pub said: String,
+    /// Why it needs them, as the card that opens every port here says it to the user.
+    pub card: String,
+    /// What Claude reads when it was refused a port below `PICKED_FROM` with the network closed: a host beyond
+    /// this machine, not its own ports.
+    pub beyond: String,
+}
+
+/// The lowest port a program picks as it starts — picked ports are never privileged ones (Gradle's daemon and
+/// workers: from 1024 up). Seatbelt names no address, so a port below it refused to such a program is a host's
+/// beyond this machine (a JVM fetching straight from 443), not its own: no card for every port here (the user,
+/// 2026-10-17).
+pub const PICKED_FROM: u16 = 1024;
+
+impl RefusedPort {
+    /// Whether `d` is this program refused one of the ports it picks here.
+    pub fn picks(&self, d: &crate::sandbox::Denial) -> bool {
+        d.process == self.process && d.port_here().is_some_and(|n| n >= PICKED_FROM)
+    }
 }
 
 /// A file's lines for a run with a proxy URL: `{proxy.<value>}` in them (`proxy::URL_VALUES`).
@@ -384,7 +428,10 @@ pub struct Packs {
     pub bins: Vec<String>,
     pub quiet_writes: Vec<String>,
     pub settings: Vec<Setting>,
-    pub refused_port: Vec<(String, String)>,
+    pub refused_port: Vec<RefusedPort>,
+    /// A connect refused as a program's own output says it (`refused-connect`) — read as the kernel's report of it
+    /// would be (`Policy::said_in_output`).
+    pub refused_connect: Vec<RefusedConnect>,
     pub proxy: Proxy,
     /// The hosts each pack's tools fetch from: (pack, the hosts) — words on the host card, never a grant.
     pub registries: Vec<(String, crate::sandbox::proxy::egress::Pattern)>,
@@ -733,11 +780,48 @@ fn read_key_of(
                 }
             }
         }
+        ("sandbox", "refused-connect") => {
+            let named = |re: &regex::Regex, g: &str| re.capture_names().flatten().any(|n| n == g);
+            let re = |p: &str| regex::Regex::new(p).map_err(|e| format!("`{p}`: {e}"));
+            let rule = |item: &Value| match item {
+                Value::String(p) => Ok(RefusedConnect { line: re(p)?, when: None, process: None }),
+                Value::Table(t) => {
+                    known(t, &["line", "when", "process"], "`refused-connect`")?;
+                    let text =
+                        |k: &str| t.get(k).map(|v| v.as_str().ok_or(format!("`{k}` isn't text"))).transpose();
+                    Ok(RefusedConnect {
+                        line: re(&need(t, "line", "`refused-connect`")?)?,
+                        when: text("when")?.map(re).transpose()?,
+                        process: text("process")?.map(str::to_string),
+                    })
+                }
+                _ => Err(format!("`{key}` lists a pattern or a table")),
+            };
+            for item in v.as_array().ok_or(format!("`{key}` isn't a list"))? {
+                match rule(item) {
+                    Ok(r)
+                        if named(&r.line, "host")
+                            && named(&r.line, "port")
+                            && (r.process.is_some() || named(&r.line, "process")) =>
+                    {
+                        out.refused_connect.push(r)
+                    }
+                    Ok(r) => {
+                        wrong.push(format!("`{}` doesn't name `process`, `host` and `port`", r.line.as_str()))
+                    }
+                    Err(e) => wrong.push(e),
+                }
+            }
+        }
         ("sandbox", "refused-port") => {
             let r = tab(v)?;
-            known(&r, &["process", "said"], "`refused-port`")?;
-            out.refused_port
-                .push((need(&r, "process", "`refused-port`")?, need(&r, "said", "`refused-port`")?));
+            known(&r, &["process", "said", "card", "beyond"], "`refused-port`")?;
+            out.refused_port.push(RefusedPort {
+                process: need(&r, "process", "`refused-port`")?,
+                said: need(&r, "said", "`refused-port`")?,
+                card: need(&r, "card", "`refused-port`")?,
+                beyond: need(&r, "beyond", "`refused-port`")?,
+            });
         }
         ("claude", "run-allow") => {
             for c in list(v)? {

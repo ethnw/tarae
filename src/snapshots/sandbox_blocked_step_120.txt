@@ -2,7 +2,7 @@
 ## text
 00
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02    ›                                                                                    what the sandbox blocked  5/5
+02    ›                                                                                    what the sandbox blocked  6/6
 03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 04     tier C  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
 05     AppArmor blocks user namespaces
@@ -11,9 +11,9 @@
 08   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache                                  …/_cacache/index-v5
 09     ◦ allow writing in /private/tmp/tarae-shot-blocked                                  …/npm-cache/_cacache/index-v5
 10     ◦ allow port 5432 on this machine                                                                  npm connecting
-11     ▲ run it outside the sandbox, once                                                                       npm test
-12     ◦ copy the step that makes this tier A+                                            needs sudo, then restart tarae
-13
+11     ◦ allow every port on this machine — the risky ones too                                            npm connecting
+12     ▲ run it outside the sandbox, once                                                                       npm test
+13     ◦ copy the step that makes this tier A+                                            needs sudo, then restart tarae
 14
 15
 16
@@ -73,9 +73,9 @@
 08   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT                                  ddddddddddddddddddd
 09     d                                                                                   ddddddddddddddddddddddddddddd
 10     d                                                                                                  ddd dddddddddd
-11     w                                                                                                        ddd dddd
-12     d                                                                                  ddddd ddddd dddd ddddddd ddddd
-13
+11     d                                                                                                  ddd dddddddddd
+12     w                                                                                                        ddd dddd
+13     d                                                                                  ddddd ddddd dddd ddddddd ddddd
 14
 15
 16

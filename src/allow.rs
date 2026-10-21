@@ -34,6 +34,11 @@ pub struct Allowed {
     /// Files named like keys inside the project Claude's commands may read — each that file, by its real path
     /// (`Grant::Key`; macOS 7a, Linux 7b).
     pub keys: Vec<PathBuf>,
+    /// Every port on this machine, the risky ones too (`Grant::Localhost` — as `llm.sandbox-localhost`).
+    pub localhost: bool,
+    /// Variables of the user's passed to Claude's commands, each by its whole name (`Grant::Env` — as an
+    /// `llm.sandbox-env` entry).
+    pub env: Vec<String>,
     /// When each was answered (seconds since the epoch) — what `:granted` says. One kept before times were (an
     /// old `sandbox.json`) has its file's time.
     pub granted: BTreeMap<Grant, u64>,
@@ -103,6 +108,18 @@ impl Allowed {
                     self.stamp(g.clone());
                 }
             }
+            Grant::Localhost => {
+                if !self.localhost {
+                    self.localhost = true;
+                    self.stamp(Grant::Localhost);
+                }
+            }
+            Grant::Env(n) => {
+                if !self.env.contains(n) {
+                    self.env.push(n.clone());
+                    self.stamp(g.clone());
+                }
+            }
         }
     }
 
@@ -120,6 +137,8 @@ impl Allowed {
         out.extend(self.hosts.iter().cloned().map(|(h, p)| Grant::Host(h, p)));
         out.extend(self.terminals.then_some(Grant::Terminals));
         out.extend(self.keys.iter().cloned().map(Grant::Key));
+        out.extend(self.localhost.then_some(Grant::Localhost));
+        out.extend(self.env.iter().cloned().map(Grant::Env));
         out
     }
 
@@ -179,6 +198,12 @@ impl Allowed {
         if what == TERMINALS_LISTED {
             self.terminals = false;
         }
+        if what == LOCALHOST_LISTED {
+            self.localhost = false;
+        }
+        if let Some(n) = what.strip_prefix("env ") {
+            self.env.retain(|e| e != n);
+        }
         let at = Path::new(what);
         self.read.retain(|p| p != at);
         self.write.retain(|p| p != at);
@@ -202,11 +227,16 @@ impl Allowed {
             && self.hosts.is_empty()
             && !self.terminals
             && self.keys.is_empty()
+            && !self.localhost
+            && self.env.is_empty()
     }
 }
 
 /// How `:granted` lists `Grant::Terminals` for `:sandbox-disallow` to take it back.
 pub const TERMINALS_LISTED: &str = "terminals";
+
+/// How `:granted` lists `Grant::Localhost` for `:sandbox-disallow` to take it back.
+pub const LOCALHOST_LISTED: &str = "localhost";
 
 /// `host:port` as a kept answer or `:sandbox-disallow` writes it: one name (as the proxy reads names) at its
 /// port — None for anything else (a pattern, an address, no port).
@@ -245,6 +275,12 @@ pub enum Grant {
     /// Read that file in the project, named like a key (`sandbox::key_named_in`) — that one file, its real path
     /// (macOS 7a, Linux 7b).
     Key(PathBuf),
+    /// Every port on this machine, `sandbox::RISKY_PORTS` too (as `llm.sandbox-localhost`: Seatbelt can't open
+    /// `localhost:*` but some) — Gradle's client and daemon talk over ports chosen as they start.
+    Localhost,
+    /// Pass the user's variable of that name, whole (as one `llm.sandbox-env` entry) — never a name
+    /// `readonly::env_allowed` keeps off; its value is on no card and in no record.
+    Env(String),
 }
 
 impl Grant {
@@ -258,6 +294,8 @@ impl Grant {
             Grant::Host(h, p) => format!("reach {h}:{p} through tarae's proxy"),
             Grant::Terminals => "open terminals (/dev/ttys*) — every one, yours too".into(),
             Grant::Key(k) => format!("read {}, named like a key — that one file", tilde(k)),
+            Grant::Localhost => "connect to every port on this machine".into(),
+            Grant::Env(n) => format!("have your variable {n} (its value is never shown)"),
         }
     }
 
@@ -277,6 +315,8 @@ impl Grant {
             Grant::Host(h, p) => ("host", Some(format!("{h}:{p}"))),
             Grant::Terminals => ("terminals", None),
             Grant::Key(k) => ("key", s(k)),
+            Grant::Localhost => ("localhost", None),
+            Grant::Env(n) => ("env", Some(n.clone())),
         })
     }
 
@@ -290,6 +330,8 @@ impl Grant {
             "host" => host_port(what?).map(|(h, p)| Grant::Host(h, p))?,
             "terminals" => Grant::Terminals,
             "key" => Grant::Key(path()?),
+            "localhost" => Grant::Localhost,
+            "env" => Some(what?).filter(|n| crate::readonly::env_allowed(n)).map(|n| Grant::Env(n.into()))?,
             _ => return None,
         })
     }
@@ -301,17 +343,30 @@ impl Grant {
     }
 
     /// What yes risks beyond what the grant says, on its card (`warning` in `warning`, the terminals').
-    pub fn risk(&self) -> Option<&'static str> {
+    pub fn risk(&self) -> Option<String> {
         match self {
             Grant::Terminals => Some(
                 "macOS's sandbox can't tell a terminal a command made from yours: its commands could read what \
-                 you type in your shells, tarae's and other sessions', and type into them.",
+                 you type in your shells, tarae's and other sessions', and type into them."
+                    .into(),
             ),
             Grant::Key(_) => Some(
                 "Its commands read what's in it — a key or a token, by its name — and what they print reaches \
-                 Claude.",
+                 Claude."
+                    .into(),
             ),
-            _ => self.warning(),
+            Grant::Localhost => {
+                let risky: Vec<String> = crate::sandbox::RISKY_PORTS
+                    .iter()
+                    .map(|(p, why)| format!("{p} {}", why.split_once(" — ").map_or(*why, |(name, _)| name)))
+                    .collect();
+                Some(format!(
+                    "The risky ones too, where what listens runs what it's asked to outside the sandbox: {}.",
+                    risky.join(" · ")
+                ))
+            }
+            Grant::Env(_) => Some("Its commands read its value, and what they print reaches Claude.".into()),
+            _ => self.warning().map(String::from),
         }
     }
 
@@ -910,11 +965,13 @@ impl crate::editor::Editor {
             && !what.starts_with("port ")
             && !what.starts_with("socket /")
             && what != TERMINALS_LISTED
+            && what != LOCALHOST_LISTED
+            && !what.starts_with("env ")
             && host.is_none()
         {
             return Err(
-                "usage: :sandbox-disallow <path | port N | socket path | terminals | host name:port | raw \
-                        name:port | lookup name> — as :granted lists it"
+                "usage: :sandbox-disallow <path | port N | socket path | terminals | localhost | env NAME | host \
+                        name:port | raw name:port | lookup name> — as :granted lists it"
                     .into(),
             );
         }

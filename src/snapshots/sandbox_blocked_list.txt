@@ -2,15 +2,15 @@
 ## text
 00
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02    ›                                                                what the sandbox blocked  4/4
+02    ›                                                                what the sandbox blocked  5/5
 03    ──────────────────────────────────────────────────────────────────────────────────────────────
 04     sandbox Seatbelt  shared processes, System V shared memory, POSIX shared memory
 05
 06   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache              …/_cacache/index-v5
 07     ◦ allow writing in /private/tmp/tarae-shot-blocked              …/npm-cache/_cacache/index-v5
 08     ◦ allow port 5432 on this machine                                              npm connecting
-09     ▲ run it outside the sandbox, once                                                   npm test
-10
+09     ◦ allow every port on this machine — the risky ones too                        npm connecting
+10     ▲ run it outside the sandbox, once                                                   npm test
 11
 12
 13
@@ -71,8 +71,8 @@
 06   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT              ddddddddddddddddddd
 07     d                                                               ddddddddddddddddddddddddddddd
 08     d                                                                              ddd dddddddddd
-09     w                                                                                    ddd dddd
-10
+09     d                                                                              ddd dddddddddd
+10     w                                                                                    ddd dddd
 11
 12
 13

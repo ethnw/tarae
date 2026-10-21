@@ -2,7 +2,7 @@
 ## text
 00
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02    ›                        what the sandbox blocked  5/5
+02    ›                        what the sandbox blocked  6/6
 03    ──────────────────────────────────────────────────────
 04     tier C  shared processes, signals, System V IPC +1
 05     AppArmor blocks user namespaces
@@ -11,9 +11,9 @@
 08   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/n…
 09     ◦ allow writing in /private/tmp/tarae-shot-blocked
 10     ◦ allow port 5432 on this machine      npm connecting
-11     ▲ run it outside the sandbox, once           npm test
-12     ◦ copy the step that makes this tier A+  needs sudo,…
-13
+11     ◦ allow every port on this machine — the risky ones …
+12     ▲ run it outside the sandbox, once           npm test
+13     ◦ copy the step that makes this tier A+  needs sudo,…
 14
 15
 16
@@ -61,9 +61,9 @@
 08   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
 09     d
 10     d                                      ddd dddddddddd
-11     w                                            ddd dddd
-12     d                                        ddddd dddddd
-13
+11     d
+12     w                                            ddd dddd
+13     d                                        ddddd dddddd
 14
 15
 16

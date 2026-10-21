@@ -399,6 +399,12 @@ pub struct Chat {
     /// card · how many such cards this turn put up (`tools::ALSO_MAX` at most).
     pub also_refused: Vec<crate::allow::Grant>,
     pub also_asked: usize,
+    /// Claude's runs that failed in the turn in flight, or the last one once it ended — and the conversation they
+    /// were in (piece D3): one the user runs again from what the sandbox blocked goes on by itself
+    /// (`tools::told`). Cleared as a turn starts.
+    pub failed: (Option<String>, Vec<crate::blocked::RunKey>),
+    /// The user's runs again of those (`blocked::grant_answer`), each by the head its end is told with.
+    pub reruns: Vec<(String, crate::blocked::RunKey)>,
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
     pub queued: Option<String>,
@@ -623,6 +629,8 @@ impl Chat {
             cited: Vec::new(),
             pointed: Vec::new(),
             env_said: (None, Vec::new()),
+            failed: (None, Vec::new()),
+            reruns: Vec::new(),
             rules_said: (None, Default::default()),
             settings: Default::default(),
             confine: Default::default(),
@@ -1987,6 +1995,8 @@ fn submit_as(
     }
     c.sent.extend(sent);
     c.hop = 0;
+    // (a new turn: the last one's failed runs are no longer what Claude ended on)
+    c.failed.1.clear();
     c.follow.new_turn();
     c.unfolded = false;
     // (a switch's cost is this message's now — the line over the input goes)

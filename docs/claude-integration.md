@@ -875,8 +875,15 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   read, `d` taking one back. Some places are never offered, only set by hand in `llm.sandbox-write`: home and
   above it, folders that hold keys, folders on your `PATH`, shell, git and tarae settings, launch agents, the
   project's `.git`. Neither are the ports in the table above. Running it outside is a weighty card of its own,
-  and only ever once. These runs are yours, not Claude's: Claude hears how one ended with your next message,
-  and from then on its results say what you opened
+  and only ever once. These runs are yours, not Claude's: when one runs again a command that failed in
+  Claude's last turn, and the chat is idle in the same conversation, how it ended goes to Claude at once and
+  Claude goes on (the card says so — a turn you didn't type, so it uses some of your plan); otherwise Claude
+  hears how it ended with your next message. From then on its results say what you opened. The list also
+  offers every port on this machine (after a port — the risky ones too, named on its card; for Gradle only every
+  port, since it picks new ones each time it starts) and a variable your
+  environment has that the command's output names (its name only, never its value; a name for a secret lasts
+  this session at most). Claude can ask for each of these itself (`also`). When Gradle is refused a port, that
+  card comes at once while Claude waits
 - **Claude can ask to run a command outside the sandbox**, when one can't work in it (it needs the network,
   say), but only with a reason. Its card always asks, even for a command that would otherwise run at once.
   It shows the command, Claude's reason, and that it runs with all your permissions, this once: `y` or `n`,

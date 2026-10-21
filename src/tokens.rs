@@ -123,6 +123,12 @@ fn key_secret(lower: &str) -> bool {
     value.len() >= 4 && !value.starts_with('$') && !placeholder
 }
 
+/// Whether a variable's `name` alone names a secret (`GITHUB_TOKEN`, `DB_PASSWORD`, `NPM_CONFIG__AUTH`) —
+/// `key_secret`'s rule on the name, whatever its value.
+pub fn secret_name(name: &str) -> bool {
+    key_secret(&format!("{}=value", name.to_ascii_lowercase()))
+}
+
 /// A token by its known prefix, with at least 16 characters after it.
 fn prefixed(s: &str) -> bool {
     PREFIXES.iter().any(|p| {

@@ -314,6 +314,11 @@ pub struct TestRun {
 }
 
 impl TestRun {
+    /// Which run this is (each spawn a new one).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Indices of the failed ones.
     pub fn failures(&self) -> Vec<usize> {
         use crate::test_results::Status;

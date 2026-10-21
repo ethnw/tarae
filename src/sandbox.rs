@@ -464,6 +464,7 @@ impl Guard {
         let (mut names, mut git, mut caches, mut all) = (Vec::new(), false, Vec::new(), true);
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
         let (mut homes, mut ports, mut keys) = (Vec::new(), Vec::new(), Vec::new());
+        let mut beyond = Vec::new();
         let refused_port = &crate::sandboxpack::get().refused_port;
         let (mut entries, mut signals, mut looks, mut attaches) = (false, false, false, false);
         for d in seen {
@@ -478,14 +479,16 @@ impl Guard {
                     _ if d.op == "signal" => signals = true,
                     _ if d.op == "process-info-pidinfo" => looks = true,
                     _ if d.op == "mach-priv-task-port" => attaches = true,
-                    // (a process the packs say needs this machine's ports refused one: Gradle's JVM)
+                    // (a process the packs say needs this machine's ports refused one: Gradle's JVM — below
+                    // `PICKED_FROM`, a host beyond this machine instead)
                     w if w.starts_with("connecting to port")
-                        && refused_port.iter().any(|(n, _)| *n == d.process) =>
+                        && refused_port.iter().any(|r| r.process == d.process) =>
                     {
                         // (the open network isn't this machine's ports: it goes through tarae's proxy)
-                        let closed = !p.localhost;
-                        let of = refused_port.iter().position(|(n, _)| *n == d.process);
-                        ports.extend(of.filter(|i| closed && !ports.contains(i)));
+                        let of = refused_port.iter().position(|r| r.picks(d));
+                        ports.extend(of.filter(|i| !p.localhost && !ports.contains(i)));
+                        let far = refused_port.iter().position(|r| r.process == d.process && !r.picks(d));
+                        beyond.extend(far.filter(|i| !p.network && !beyond.contains(i)));
                         all = false;
                     }
                     _ => all = false,
@@ -590,7 +593,10 @@ impl Guard {
             s.push_str(&format!("{}\n", h.said.replace("{home}", &crate::allow::tilde(&h.user))));
         }
         for i in ports {
-            s.push_str(&format!("{}\n", refused_port[i].1));
+            s.push_str(&format!("{}\n", refused_port[i].said));
+        }
+        for i in beyond {
+            s.push_str(&format!("{}\n", refused_port[i].beyond));
         }
         if entries {
             s.push_str(
@@ -1990,6 +1996,9 @@ pub struct Watch {
     claimed: std::sync::atomic::AtomicBool,
     /// Its run's own process is gone: what the run left running tells the project's next run since (`tell`).
     ended: std::sync::atomic::AtomicBool,
+    /// When it was made, and its run's times since (`Marks`) — said with what its stream gave as that ends.
+    born: std::time::Instant,
+    marks: std::sync::Arc<Mutex<Marks>>,
     /// Linux: the thread that confined its run (`owned_by`) — its audit records name it.
     #[cfg(target_os = "linux")]
     owner: std::sync::Arc<Mutex<Option<linux::Owner>>>,
@@ -2013,6 +2022,38 @@ impl PartialEq for Watch {
 
 impl Eq for Watch {}
 
+/// A watch's run's times, from when the watch was made: started, seen gone, finished (`Watch::finish`).
+#[derive(Clone, Copy, Debug, Default)]
+struct Marks {
+    started: Option<std::time::Duration>,
+    gone: Option<std::time::Duration>,
+    finished: Option<std::time::Duration>,
+}
+
+/// What a watch's stream gave, as it ends — one log line: its marks, when the stream said anything first and
+/// ended, its lines and denials, those that came once the run was finished (`late`: its report made without
+/// them), and what it said on stderr. A denial missed is told from one heard late.
+fn stream_said(
+    tag: &str,
+    m: Marks,
+    (first, ended): (Option<std::time::Duration>, std::time::Duration),
+    (lines, denials, late): (usize, usize, usize),
+    err: &str,
+) -> String {
+    let ms = |d: Option<std::time::Duration>| d.map_or("—".to_string(), |d| format!("{}ms", d.as_millis()));
+    let err = err.lines().find(|l| !l.trim().is_empty()).map(|l| format!(" · stderr: {}", l.trim()));
+    format!(
+        "watch {tag} · first line {} · run started {} · gone {} · finished {} · stream ended {} · {lines} lines, \
+         {denials} denials, {late} late{}",
+        ms(first),
+        ms(m.started),
+        ms(m.gone),
+        ms(m.finished),
+        ms(Some(ended)),
+        err.unwrap_or_default()
+    )
+}
+
 impl Watch {
     /// A watch with nothing behind it — the denials come from `record` (tests), or never.
     pub fn quiet(tag: &str) -> std::sync::Arc<Watch> {
@@ -2023,6 +2064,8 @@ impl Watch {
             stopped: Default::default(),
             claimed: Default::default(),
             ended: Default::default(),
+            born: std::time::Instant::now(),
+            marks: Default::default(),
             #[cfg(target_os = "linux")]
             owner: Default::default(),
             #[cfg(target_os = "linux")]
@@ -2062,6 +2105,7 @@ impl Watch {
     /// whoever still holds the watch.
     pub fn run_started(self: &std::sync::Arc<Self>, pid: u32) {
         self.claimed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.marks().started = Some(self.born.elapsed());
         let w = std::sync::Arc::downgrade(self);
         crate::event::thread("tarae-watch", move || {
             // SAFETY: signal 0 only asks whether the process is there.
@@ -2077,6 +2121,7 @@ impl Watch {
             }
             if let Some(w) = w.upgrade() {
                 w.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+                w.marks().gone = Some(w.born.elapsed());
             }
             std::thread::sleep(WATCH_LAST);
             if let Some(w) = w.upgrade() {
@@ -2134,22 +2179,32 @@ impl Watch {
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
         let (blocked, stopped) = (self.blocked.clone(), self.stopped.clone());
+        let (marks, born, tag) = (self.marks.clone(), self.born, self.tag.clone());
         crate::event::thread("tarae-deny-read", move || {
             use std::io::{BufRead, Read};
+            let (mut first, mut lines, mut denials, mut late) = (None, 0, 0, 0);
             for line in std::io::BufReader::new(stdout.expect("piped")).lines().map_while(Result::ok) {
+                first = first.or(Some(born.elapsed()));
+                lines += 1;
                 for d in parse(&line) {
+                    denials += 1;
+                    late += usize::from(stopped.load(std::sync::atomic::Ordering::SeqCst));
                     blocked.lock().unwrap_or_else(|e| e.into_inner()).add(d);
                 }
             }
+            let ended = born.elapsed();
+            let mut said = String::new();
+            if let Some(mut e) = stderr {
+                let _ = e.read_to_string(&mut said);
+            }
             // Ended without being stopped: why, from what it said
             if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                let mut said = String::new();
-                if let Some(mut e) = stderr {
-                    let _ = e.read_to_string(&mut said);
-                }
                 let why = said.lines().find(|l| !l.trim().is_empty()).unwrap_or("it ended").trim();
                 blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(format!("{name}: {why}"));
             }
+            let m = *marks.lock().unwrap_or_else(|e| e.into_inner());
+            let line = stream_said(&tag, m, (first, ended), (lines, denials, late), &said);
+            crate::log::line("sandbox", "info", &line);
         });
         self.unless_claimed_within(WATCH_UNCLAIMED);
     }
@@ -2173,6 +2228,10 @@ impl Watch {
         self.blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(why);
     }
 
+    fn marks(&self) -> std::sync::MutexGuard<'_, Marks> {
+        self.marks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn blocked(&self) -> Blocked {
         self.blocked.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -2190,6 +2249,7 @@ impl Watch {
 
     /// The run is done: no more watching (its last denials have had `WATCH_LAST`).
     pub fn finish(&self) {
+        self.marks().finished.get_or_insert(self.born.elapsed());
         self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = c.kill();
@@ -7332,6 +7392,130 @@ mod tests {
         assert!(open.caches.is_empty());
     }
 
+    /// A connect refused as the program's own line says it (the packs' `refused-connect`: macOS's nc) is the entry
+    /// the kernel's report would have been — that report is lost when the system is busy (piece D's shots: 3 or 4 of 6)
+    /// — so Gradle's loopback card and the panel go by it; once when the kernel said it too; none where this run's
+    /// rules let it through; a JVM's words (no port) and a port nothing listens on aren't one.
+    #[test]
+    fn a_refused_connect_its_output_says_is_read_as_the_kernels_report() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let line = |s: &str| vec![(true, s.to_string())];
+        let nc = line("java: connectx to 127.0.0.1 port 52113 (tcp) failed: Operation not permitted");
+        let java = |target: &str| Denial {
+            process: "java".into(),
+            op: "network-outbound".into(),
+            target: target.into(),
+        };
+        // (the kernel's report lost: the output is all there is — the same entry, the card's port with it)
+        let report = |p: &Policy, out: &[(bool, String)], seen: &[Denial]| {
+            let w = Watch::quiet("g.");
+            for d in seen {
+                w.record(d.clone());
+            }
+            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(
+                out,
+                Told::default(),
+                false,
+            )
+        };
+        let r = report(&p, &nc, &[]);
+        assert_eq!(r.open, [java("remote:127.0.0.1:52113")]);
+        assert_eq!(crate::tools::localhost_ports(&r.open), [52113], "Gradle's loopback card goes by it");
+        assert!(r.text.contains("Its output says one thing was refused"), "{}", r.text);
+        // Said by the kernel too: once
+        assert_eq!(report(&p, &nc, &[java("remote:*:52113")]).open, [java("remote:*:52113")]);
+        // Let through by this run's rules: not the sandbox's
+        assert!(p.said_in_output(&nc, &[]).len() == 1);
+        assert!(Policy { localhost: true, ..p.clone() }.said_in_output(&nc, &[]).is_empty());
+        assert!(Policy { ports: vec![52113], ..p.clone() }.said_in_output(&nc, &[]).is_empty());
+        // Beyond this machine: refused whatever's open here (only tarae's proxy is) — no port here
+        let far = line("nc: connectx to 192.0.2.1 port 9 (tcp) failed: Operation not permitted");
+        let said = Policy { localhost: true, network: true, ..p.clone() }.said_in_output(&far, &[]);
+        assert_eq!(
+            said.iter().map(|d| (d.port_here(), d.process.as_str())).collect::<Vec<_>>(),
+            [(None, "nc")]
+        );
+        // IPv6 as Linux's supervisor names it; a JVM's words name no port; nothing listening isn't a refusal
+        let v6 = line("java: connectx to ::1 port 9 (tcp) failed: Operation not permitted");
+        assert_eq!(p.said_in_output(&v6, &[])[0].port_here(), Some(9));
+        for other in [
+            "java.net.SocketException: Operation not permitted",
+            "java: connectx to 127.0.0.1 port 52113 (tcp) failed: Connection refused",
+        ] {
+            assert!(p.said_in_output(&line(other), &[]).is_empty(), "{other}");
+        }
+    }
+
+    /// Gradle's client refused its daemon's port, as Gradle says it (the Java pack's `refused-connect`, measured:
+    /// `target/sb/pieceD-gradle-measure.out`, the kernel reporting none): it failed, then the daemon log's tail names
+    /// the address the daemon gave its clients — that port, Gradle's card with it; the same address with no
+    /// failure (a `--debug` build) isn't one, nor where this run's rules let it through.
+    #[test]
+    fn gradles_own_words_for_its_daemons_refused_port_are_read_as_the_kernels_report() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let lines = |ls: &[&str]| ls.iter().map(|l| (true, l.to_string())).collect::<Vec<_>>();
+        let failed = "Could not connect to the Gradle daemon.";
+        let tail = [
+            "2026-10-17T09:21:33.235+0900 [DEBUG] [org.gradle.internal.remote.internal.inet.TcpIncomingConnector] \
+             Listening on [d2c6fcae-c4a8-450e-b5d0-af83e2b7777f port:50440, addresses:[localhost/127.0.0.1]].",
+            "2026-10-17T09:21:33.237+0900 [INFO] [org.gradle.launcher.daemon.server.DaemonRegistryUpdater] \
+             Advertising the daemon address to the clients: \
+             [d2c6fcae-c4a8-450e-b5d0-af83e2b7777f port:50440, addresses:[localhost/127.0.0.1]]",
+        ];
+        let mut said = vec!["FAILURE: Build failed with an exception.", "", "* What went wrong:", failed];
+        said.extend(tail);
+        let gradle = lines(&said);
+        let w = Watch::quiet("g.");
+        let r = Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(
+            &gradle,
+            Told::default(),
+            false,
+        );
+        let java = Denial {
+            process: "java".into(),
+            op: "network-outbound".into(),
+            target: "remote:127.0.0.1:50440".into(),
+        };
+        assert_eq!(r.open, [java]);
+        assert_eq!(crate::tools::localhost_ports(&r.open), [50440], "Gradle's loopback card goes by it");
+        // The address alone isn't a refusal; every port open, it isn't the sandbox's
+        assert!(p.said_in_output(&lines(&tail), &[]).is_empty());
+        assert!(Policy { localhost: true, ..p.clone() }.said_in_output(&gradle, &[]).is_empty());
+    }
+
+    /// A JVM refused a port below 1024 isn't Gradle's loopback (its daemon's ports are picked from 1024 up):
+    /// Seatbelt names no address, so it's a host beyond this machine — no every-port card (`localhost_ports`,
+    /// which the card and `also` go by), the pack's `beyond` line instead of Gradle's while the network is closed;
+    /// a port it picks is Gradle's as before.
+    #[test]
+    fn a_jvm_refused_a_port_below_1024_is_beyond_this_machine_not_gradles_loopback() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let java = |port: u16| Denial {
+            process: "java".into(),
+            op: "network-outbound".into(),
+            target: format!("remote:*:{port}"),
+        };
+        let report = |p: &Policy, d: Denial| {
+            let w = Watch::quiet("g.");
+            w.record(d);
+            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(
+                &[],
+                Told::default(),
+                false,
+            )
+        };
+        let (gradle, beyond) = ("a Gradle build can't run while they're closed", "not Gradle's daemon");
+        let r = report(&p, java(443));
+        assert!(crate::tools::localhost_ports(&r.open).is_empty(), "no every-port card: {:?}", r.open);
+        assert!(r.text.contains("connecting to port 443") && r.text.contains(beyond), "{}", r.text);
+        assert!(!r.text.contains(gradle), "{}", r.text);
+        let open = report(&Policy { network: true, ..p.clone() }, java(443));
+        assert!(!open.text.contains(beyond), "said only with the network closed: {}", open.text);
+        let r = report(&p, java(52113));
+        assert_eq!(crate::tools::localhost_ports(&r.open), [52113]);
+        assert!(r.text.contains(gradle) && !r.text.contains(beyond), "{}", r.text);
+    }
+
     /// What Claude reads about Gradle (Java under P2): its writes in the user's Gradle home — the read-only
     /// dependency cache's index, measured in every build — are expected and said so, not offered to open; a
     /// JVM refused a port on this machine says Gradle needs this machine's ports, only while they're closed — the
@@ -7748,6 +7932,37 @@ mod tests {
             r#"{{"eventMessage":"Sandbox: touch(2) deny(1) file-write-create \/private\/tmp\/x\n{tag}","processID":0}}"#
         );
         assert_eq!(parse_denial(&raw, tag).map(|d| d.target), Some("/private/tmp/x".into()));
+    }
+
+    /// A watch's stream says, as it ends, its run's times and what it gave — the denials heard once the run was
+    /// finished (`late`) apart, and the first thing it said on stderr; a time never reached is `—`.
+    #[test]
+    fn a_watchs_stream_says_when_it_heard_what() {
+        let ms = |n: u64| Some(std::time::Duration::from_millis(n));
+        let m = Marks { started: ms(150), gone: ms(1180), finished: ms(1330) };
+        let line = super::stream_said(
+            "tarae-7-1.",
+            m,
+            (ms(1400), std::time::Duration::from_millis(1410)),
+            (2, 1, 1),
+            "",
+        );
+        assert_eq!(
+            line,
+            "watch tarae-7-1. · first line 1400ms · run started 150ms · gone 1180ms · finished 1330ms · stream \
+             ended 1410ms · 2 lines, 1 denials, 1 late"
+        );
+        let line = super::stream_said(
+            "t.",
+            Marks::default(),
+            (None, Default::default()),
+            (0, 0, 0),
+            "\nlog: oops\n",
+        );
+        assert!(
+            line.contains("first line — · run started —") && line.ends_with(" · stderr: log: oops"),
+            "{line}"
+        );
     }
 
     /// Every deny in the profile carries the run's tag — the network closed or open (the ones it has

@@ -26,9 +26,37 @@ pub struct BlockedRun {
     /// Claude's call waiting on the card, when Claude asked for it (`also` — `tools::also_ask`): the run is its,
     /// not the user's run again, and a no is said to it.
     pub claude: Option<crate::tools::Call>,
+    /// The variables left out of its environment that its output names (`RunEnv::named`) — names only.
+    pub env: Vec<String>,
+    /// Claude's run's report, held while the card about it waits (Gradle's loopback — `loopback_card`): a no
+    /// gives Claude that.
+    pub report: Option<String>,
+    /// Which run it was (the panel's) — the user's run again of it goes on by itself when it was Claude's last
+    /// turn's failed one (piece D3, `Chat.failed`).
+    pub key: Option<RunKey>,
+}
+
+/// A run of the session's: its command's or its tests', and which of them (`generation`: each spawn a new one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunKey {
+    pub tests: bool,
+    pub generation: u64,
 }
 
 impl BlockedRun {
+    /// `job`, nothing blocked in it known, nobody waiting.
+    pub fn of(job: Job) -> BlockedRun {
+        BlockedRun {
+            job,
+            denials: Vec::new(),
+            from: None,
+            claude: None,
+            env: Vec::new(),
+            report: None,
+            key: None,
+        }
+    }
+
     /// What ran, as the cards and Claude say it.
     pub fn label(&self) -> String {
         match &self.job {
@@ -118,7 +146,14 @@ pub fn choices(denials: &[Denial], caps: &crate::caps::Caps) -> Vec<Choice> {
             && !crate::sandbox::RISKY_PORTS.iter().any(|(p, _)| *p == n)
         {
             let why = format!("{} was connecting to it", d.process);
-            found.push(Choice { grant: Grant::Port(n), hint: format!("{} connecting", d.process), why });
+            let hint = format!("{} connecting", d.process);
+            // (every port here: what picks its ports as it starts — Gradle's client and daemon — needs them all;
+            // the one it was refused, picked anew at its next start, would only fail again: not offered)
+            let picked = crate::sandboxpack::get().refused_port.iter().any(|r| r.picks(d));
+            if !picked {
+                found.push(Choice { grant: Grant::Port(n), hint: hint.clone(), why: why.clone() });
+            }
+            found.push(Choice { grant: Grant::Localhost, hint, why });
         } else if d.op == "network-outbound" && file {
             // A unix socket (#119): that file, by its real path — one that's there and is a socket
             use std::os::unix::fs::FileTypeExt as _;
@@ -141,6 +176,21 @@ pub fn choices(denials: &[Denial], caps: &crate::caps::Caps) -> Vec<Choice> {
     out
 }
 
+/// What could open for the variables `names` (left out of a run's environment, named in its output): each one
+/// passed whole — never a name `readonly::env_allowed` keeps off (what finds programs, runs or loads code, the
+/// packs' own).
+pub fn env_choices(names: &[String]) -> Vec<Choice> {
+    names
+        .iter()
+        .filter(|n| crate::readonly::env_allowed(n))
+        .map(|n| Choice {
+            grant: Grant::Env(n.clone()),
+            hint: "named in its output".into(),
+            why: format!("Its output names {n}, left out of your commands' environment"),
+        })
+        .collect()
+}
+
 /// The folders on `PATH` (real paths) — never opened for writing: a program put there runs as the user.
 pub fn path_dirs() -> Vec<PathBuf> {
     std::env::var_os("PATH")
@@ -152,7 +202,10 @@ impl Editor {
     /// The run of Claude's whose denials `which` means, if the sandbox blocked anything in it — what the
     /// kernel reported, and what its output says (`Policy::said_in_output`: the kernel's report gets lost).
     fn blocked_run(&self, which: Which) -> Option<BlockedRun> {
-        let denials = |g: Option<&crate::sandbox::Guard>, output: &[(bool, String)]| -> Option<Vec<Denial>> {
+        // (what it was refused, and the variables left out its output names — None: neither)
+        let denials = |g: Option<&crate::sandbox::Guard>,
+                       output: &[(bool, String)]|
+         -> Option<(Vec<Denial>, Vec<String>)> {
             let g = g?;
             let mut seen = g.watch().map(|w| w.blocked().seen).unwrap_or_default();
             if let crate::sandbox::Guard::In(p) = g {
@@ -160,7 +213,8 @@ impl Editor {
                 let rest = p.merge_made(&mut seen, said);
                 seen.extend(rest);
             }
-            (!seen.is_empty()).then_some(seen)
+            let env = g.run_env().map(|e| e.named(output)).unwrap_or_default();
+            (!seen.is_empty() || !env.is_empty()).then_some((seen, env))
         };
         let from = |g: Option<&crate::sandbox::Guard>| match g {
             Some(crate::sandbox::Guard::In(p)) => p.denials_from(),
@@ -169,21 +223,24 @@ impl Editor {
         // (a run on a commit's tree: not offered — its tree is gone, so neither a grant nor a run outside could
         // run it again where it ran — review of #212)
         let task = self.session.task_run.as_ref().filter(|r| r.base.is_none()).and_then(|r| {
+            let (denials, env) = denials(r.guard.as_ref(), &r.output)?;
             Some((
                 r.started,
                 BlockedRun {
-                    claude: None,
-                    job: Job::Command(r.task.cmd.clone(), r.task.cwd.clone()),
-                    denials: denials(r.guard.as_ref(), &r.output)?,
+                    denials,
                     from: from(r.guard.as_ref()),
+                    env,
+                    key: Some(RunKey { tests: false, generation: r.generation() }),
+                    ..BlockedRun::of(Job::Command(r.task.cmd.clone(), r.task.cwd.clone()))
                 },
             ))
         });
         let test = self.session.test_run.as_ref().and_then(|r| {
             let job = Job::Tests(Box::new(r.target.clone()));
             let from = from(r.guard.as_ref());
-            let denials = denials(r.guard.as_ref(), &r.output)?;
-            Some((r.started, BlockedRun { job, denials, from, claude: None }))
+            let (denials, env) = denials(r.guard.as_ref(), &r.output)?;
+            let key = Some(RunKey { tests: true, generation: r.generation() });
+            Some((r.started, BlockedRun { denials, from, env, key, ..BlockedRun::of(job) }))
         });
         match which {
             Which::Task => task.map(|t| t.1),
@@ -218,7 +275,8 @@ impl Editor {
         // places never opened are looked for)
         let basis = self.caps_basis();
         self.events.jobs().spawn(move || {
-            let list = choices(&run.denials, &basis.build());
+            let mut list = choices(&run.denials, &basis.build());
+            list.extend(env_choices(&run.env));
             move |ed: &mut Editor| ed.blocked_open(Some(run), list)
         });
     }
@@ -238,6 +296,8 @@ impl Editor {
                     Grant::Host(h, p) => format!("allow reaching {h}:{p}"),
                     Grant::Terminals => "allow opening terminals — yours too".into(),
                     Grant::Key(k) => format!("allow reading {} — that file only", crate::allow::tilde(k)),
+                    Grant::Localhost => "allow every port on this machine — the risky ones too".into(),
+                    Grant::Env(n) => format!("allow passing your variable {n}"),
                 },
                 action: Action::Grant(i.to_string()),
                 hint: c.hint.clone(),
@@ -292,13 +352,14 @@ impl Editor {
             self.session.blocked.clone().ok_or("nothing blocked to act on — space m s on a run's panel")?;
         use crate::cards::{Asked, Past, Request, Why};
         let cmd = run.label();
+        let then = then_said(self, &run);
         let run = Box::new(run);
         let card = match arg.trim() {
             "outside" => crate::offer::Offer::new(
                 OUTSIDE_TITLE.into(),
                 &format!(
                     "{cmd}\n\nOutside the sandbox it runs with all your permissions — your files, your network — \
-                     this once. Claude hears how it ended with your next message."
+                     this once. {then}"
                 ),
                 "",
                 String::new(),
@@ -321,13 +382,16 @@ impl Editor {
                     n.parse::<usize>().ok().and_then(|i| list.get(i).cloned()).ok_or("no such row")?;
                 // A read: its card says first what looks like a token there — looked through on a worker
                 let Grant::Read(place) = &grant else {
-                    self.push_offer(grant_card(grant, &why, &cmd, run, None));
+                    self.push_offer(grant_card(grant, &why, &cmd, run, None, then));
                     return Ok(());
                 };
                 let place = place.clone();
                 self.events.jobs().spawn(move || {
                     let said = crate::tokens::found_in(&place).said(&place);
-                    move |ed: &mut Editor| ed.push_offer(grant_card(grant, &why, &cmd, run, said))
+                    move |ed: &mut Editor| {
+                        let then = then_said(ed, &run);
+                        ed.push_offer(grant_card(grant, &why, &cmd, run, said, then))
+                    }
                 });
                 return Ok(());
             }
@@ -338,16 +402,21 @@ impl Editor {
 }
 
 /// The card that opens `grant` for what was blocked in `run` (`why`, in `cmd`) — warning what it opens
-/// (Docker's socket; a place holding a token-like line: `tokens`).
+/// (Docker's socket; a place holding a token-like line: `tokens`); `then`: how Claude hears its end (`then_said`).
 fn grant_card(
     grant: Grant,
     why: &str,
     cmd: &str,
     run: Box<BlockedRun>,
     tokens: Option<String>,
+    then: &str,
 ) -> crate::offer::Offer {
     use crate::cards::{Asked, Request, Why};
-    let said = format!("{why}, in `{cmd}` — which runs again now with it open, whichever you choose.");
+    // (every port for what picks its ports: the pack's words, as on the card Claude's turn held — `loopback_card`)
+    let said = match (&grant, crate::tools::loopback_of(&run.denials)) {
+        (Grant::Localhost, Some(card)) => loopback_said(&card, cmd, Some(then)),
+        _ => format!("{why}, in `{cmd}` — which runs again now with it open, whichever you choose. {then}"),
+    };
     let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone())).about(cmd);
     grant_offer(grant, said, asked, run, tokens, Vec::new())
 }
@@ -371,6 +440,29 @@ pub fn also_card(
     grant_offer(grant, said, asked, run, tokens, lines)
 }
 
+/// Gradle's loopback (piece D2): Claude's `cmd` failed because a program the packs say picks its ports as it
+/// starts was refused one (`refused-port`) — every port's card at once, in the pack's words (`card`), Claude's
+/// call waiting on it (`run.claude`) with the run's report (`run.report`): any answer but `n` runs it again with
+/// them open, as Claude's run; `n` gives Claude the report.
+pub fn loopback_card(card: &str, cmd: &str, run: Box<BlockedRun>) -> crate::offer::Offer {
+    use crate::cards::{Asked, Request, Why};
+    let said = loopback_said(card, cmd, None);
+    let asked = Asked::new(Why::Blocked, Request::Grant(Grant::Localhost)).about(cmd);
+    grant_offer(Grant::Localhost, said, asked, run, None, Vec::new())
+}
+
+/// Gradle's loopback card's words, Claude's turn holding it or not: the pack's `card`, then what failed and runs
+/// again — Claude waiting on it (`then` None), or how it hears the end (`then_said`; the panel's card).
+fn loopback_said(card: &str, cmd: &str, then: Option<&str>) -> String {
+    let (waits, then) = match then {
+        None => (" and waits", String::new()),
+        Some(t) => ("", format!(" {t}")),
+    };
+    format!(
+        "{card}\n\nClaude's `{cmd}` failed for it{waits}: it runs again now with them open, whichever you choose.{then}"
+    )
+}
+
 /// A grant's card: what it lets, `said` (why, and what runs), how long it lasts, what it warns of (the grant's
 /// risk, `tokens`, then the command's own: `warned`).
 fn grant_offer(
@@ -385,9 +477,8 @@ fn grant_offer(
     // everything else stays in the sandbox)
     let lasts = match (&grant, crate::caps::Caps::storable(&grant)) {
         (Grant::Host(..), _) => "This chat lasts until the conversation ends, this session until you quit.",
-        (_, Scope::Always | Scope::Session) => {
-            "s lasts until this session ends, A until :granted takes it back."
-        }
+        (_, Scope::Always) => "s lasts until this session ends, A until :granted takes it back.",
+        (_, Scope::Session) => "s lasts until this session ends — a name for a secret is never kept.",
         (_, Scope::ThisChat) => {
             "Everything else stays in the sandbox; it's never kept past this conversation."
         }
@@ -397,7 +488,7 @@ fn grant_offer(
     if let Some(from) = &run.from {
         question.push_str(&format!("\n\nWhat it refused was read {from}."));
     }
-    let warn: Vec<String> = grant.risk().map(String::from).into_iter().chain(tokens).chain(warned).collect();
+    let warn: Vec<String> = grant.risk().into_iter().chain(tokens).chain(warned).collect();
     let warning = (!warn.is_empty()).then(|| {
         question.push_str("\n\n");
         let at = question.split('\n').count() - 1;
@@ -459,7 +550,11 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun,
                  again. If the command can't work without it, tell the user what it needs.",
                 grant.shown()
             );
-            return crate::tools::answer(ed, call, Err(no));
+            // (a card tarae raised on the run's refusal: Claude hears how the run ended, then the no)
+            return match run.report.take() {
+                Some(report) => crate::tools::answer(ed, call, Ok(format!("{report}\n{no}\n"))),
+                None => crate::tools::answer(ed, call, Err(no)),
+            };
         };
         crate::allow::grant(ed, &grant, scope);
         let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
@@ -479,9 +574,31 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun,
         grant.shown(),
         if scope == Scope::Once { " this once" } else { "" }
     );
+    rerun_of(ed, &run, &head);
     let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
     crate::tools::guard_and_go(ed, For::User(head), run.job, true, extra);
 }
+
+/// The user's run again of `run` is told with `head` as it ends (`tools::told`): which run it was, for whether it
+/// goes on to Claude by itself.
+fn rerun_of(ed: &mut Editor, run: &BlockedRun, head: &str) {
+    if let (Some(key), Some(c)) = (run.key, ed.session.chat.as_mut()) {
+        c.reruns.retain(|(h, _)| h != head);
+        c.reruns.push((head.to_string(), key));
+    }
+}
+
+/// What a card that runs Claude's command again says of how Claude hears its end (piece D3): by itself now, or
+/// with the next message — by the state as the card is made; the end looks again (`tools::told`).
+pub(crate) fn then_said(ed: &Editor, run: &BlockedRun) -> &'static str {
+    match run.key.is_some_and(|k| crate::tools::goes_on(ed, k)) {
+        true => GOES_ON,
+        false => NEXT_MESSAGE,
+    }
+}
+
+pub const GOES_ON: &str = "Claude goes on when it ends.";
+pub const NEXT_MESSAGE: &str = "Claude hears how it ended with your next message.";
 
 /// The answer on the run-outside card: `y` runs it now, outside the sandbox — the user's run.
 pub fn outside_answer(ed: &mut Editor, id: u64, run: BlockedRun, yes: bool) {
@@ -490,6 +607,7 @@ pub fn outside_answer(ed: &mut Editor, id: u64, run: BlockedRun, yes: bool) {
         return ed.set_status("not run — the sandbox stays as it was");
     }
     let head = format!("The user ran `{}` again outside the sandbox, this once. How it ended:", run.label());
+    rerun_of(ed, &run, &head);
     crate::tools::guard_and_go(
         ed,
         For::User(head),
@@ -615,9 +733,11 @@ mod tests {
                 Grant::Write(home.join("data/cache")),
                 Grant::Write(home.join("data")),
                 Grant::Port(5432),
+                Grant::Localhost,
                 Grant::Port(8080)
             ],
-            "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once"
+            "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once \
+             and every port here once, after the first port"
         );
     }
 
@@ -660,6 +780,68 @@ mod tests {
         assert!(w.terminals && w.granted == [g.shown()], "{:?}", w.granted);
         crate::allow::keep(&store, Path::new("/p"), |a| a.remove(crate::allow::TERMINALS_LISTED)).unwrap();
         assert_eq!(crate::allow::Store::read(Some(&store)).get(Path::new("/p")), Default::default());
+    }
+
+    /// A port refused here offers that port, then every port; one a pack's `refused-port` program picks as it
+    /// starts (Gradle's `java`) only every port — the one it was refused is picked anew next time — and that card
+    /// says the pack's words, as the card Claude's turn held does, ending with how Claude hears the end. Every
+    /// port's card names the risky ones it opens too. A variable the output names offers it by name — never one no
+    /// card passes, and its value is on no card.
+    #[test]
+    fn a_port_offers_every_port_too_and_a_variable_its_name_only() {
+        let caps = crate::caps::Caps::at(Path::new("/Users/u"), Path::new("/Users/u/p"));
+        let port = |process: &str, n: u16| Denial {
+            process: process.into(),
+            op: "network-outbound".into(),
+            target: format!("remote:*:{n}"),
+        };
+        let grants = |d: Denial| choices(&[d], &caps).into_iter().map(|c| c.grant).collect::<Vec<_>>();
+        assert_eq!(grants(port("psql", 5432)), [Grant::Port(5432), Grant::Localhost]);
+        assert_eq!(grants(port("java", 52113)), [Grant::Localhost], "Gradle's: one port won't do");
+        let gradle = BlockedRun {
+            denials: vec![port("java", 52113)],
+            ..BlockedRun::of(Job::Command("bin/gradle build".into(), PathBuf::from("/Users/u/p")))
+        };
+        let c = choices(&gradle.denials, &caps).remove(0);
+        let card = grant_card(c.grant, &c.why, "bin/gradle build", Box::new(gradle.clone()), None, GOES_ON);
+        let held = loopback_card(&crate::tools::loopback_of(&gradle.denials).unwrap(), "bin/gradle build", {
+            Box::new(gradle)
+        });
+        let (q, h) = (&card.question, &held.question);
+        assert!(q.contains("one port won't do") && !q.contains("connecting to it"), "{q}");
+        let tail = "Claude's `bin/gradle build` failed for it: it runs again now with them open, whichever you choose. \
+                    Claude goes on when it ends.";
+        assert!(q.contains(tail), "{q}");
+        assert_eq!(q.split("failed for it").next(), h.split("failed for it").next(), "the held card's words");
+        let risky = Grant::Localhost.risk().unwrap();
+        for (n, _) in crate::sandbox::RISKY_PORTS {
+            assert!(risky.contains(&n.to_string()), "{n}: {risky}");
+        }
+        assert!(Grant::Localhost.keepable() && !Grant::Localhost.as_outside());
+        let docker =
+            Denial { process: "curl".into(), op: "network-outbound".into(), target: "remote:*:2375".into() };
+        assert!(choices(&[docker], &caps).is_empty(), "a risky port: by hand only");
+        // (a value tarae has, as a run's environment holds it — a fake token)
+        let value = "tarae-fake-token-4f9a1c";
+        let env = crate::sandbox::runenv::RunEnv {
+            vars: Vec::new(),
+            tokens: vec!["MY_API_TOKEN".into()],
+            others: vec!["RUSTFLAGS".into(), "DATABASE_URL".into()],
+        };
+        let said = format!("MY_API_TOKEN={value} refused; RUSTFLAGS and DATABASE_URL unset");
+        let named = env.named(&[(true, said)]);
+        let list = env_choices(&named);
+        let got: Vec<&Grant> = list.iter().map(|c| &c.grant).collect();
+        assert_eq!(got, [&Grant::Env("MY_API_TOKEN".into()), &Grant::Env("DATABASE_URL".into())]);
+        let run = BlockedRun {
+            env: named,
+            ..BlockedRun::of(Job::Command("psql".into(), PathBuf::from("/Users/u/p")))
+        };
+        let c = list[0].clone();
+        let card = grant_card(c.grant, &c.why, "psql", Box::new(run), None, NEXT_MESSAGE);
+        let text = card.question.clone();
+        assert!(text.contains("MY_API_TOKEN") && !text.contains(value), "{text}");
+        assert!(text.contains("s lasts until this session ends") && !text.contains("A until"), "{text}");
     }
 
     /// A file named like a key refused in the project (macOS, 7a) offers that one file, once — never a folder of
@@ -848,12 +1030,7 @@ mod tests {
             std::fs::write(base.join(f), text).unwrap();
         }
         let mut ed = Editor::new(crate::config::Config::default());
-        let run = BlockedRun {
-            job: Job::Command("cat x".into(), base.clone()),
-            denials: Vec::new(),
-            from: None,
-            claude: None,
-        };
+        let run = BlockedRun::of(Job::Command("cat x".into(), base.clone()));
         let choice = |dir: &str| Choice {
             grant: Grant::Read(base.join(dir)),
             hint: String::new(),
@@ -895,13 +1072,8 @@ mod tests {
         let base = scratch.to_path_buf();
         let home = crate::allow::home().expect("a home");
         let card = |g: Grant| {
-            let run = BlockedRun {
-                job: Job::Command("true".into(), base.clone()),
-                denials: Vec::new(),
-                from: None,
-                claude: None,
-            };
-            grant_card(g, "it was refused", "true", Box::new(run), None)
+            let run = BlockedRun::of(Job::Command("true".into(), base.clone()));
+            grant_card(g, "it was refused", "true", Box::new(run), None, NEXT_MESSAGE)
         };
         let all = "yasAn";
         for (g, keys) in [
