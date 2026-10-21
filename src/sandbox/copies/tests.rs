@@ -358,3 +358,44 @@ fn the_scans_let_a_closed_socket_go_within_two_intervals() {
     let _ = (&ours).write_all(b"x");
     assert_eq!(c.len(), 0);
 }
+
+/// A descriptor's link is a socket only in the kernel's word for one, `socket:[inode]`: any inode reads back, and
+/// nothing else is one — not with a path before it, a space or a newline around it, a sign or a zero before the
+/// number (`u64`'s parse takes those; the kernel never writes them). Seeded links mutated 20,000 times.
+#[test]
+fn only_the_kernels_word_for_a_socket_is_one() {
+    use crate::mutate::{self, Rng};
+    let mut rng = Rng(0x5eed_0add_7e55_0107);
+    for n in [0, 1, u64::from(u32::MAX), u64::MAX].into_iter().chain((0..1000).map(|_| rng.next())) {
+        assert_eq!(socket_inode(&format!("socket:[{n}]")), Some(n));
+    }
+    let seeds = ["socket:[123]", "/tmp/socket:[1]", "pipe:[9]", "anon_inode:[eventfd]", "/dev/null"];
+    let words = ["socket:[", "]", "/", " ", "+", "\n"];
+    for _ in 0..20_000 {
+        let mut link = rng.pick(&seeds).to_string();
+        mutate::text(&mut rng, &mut link, &words);
+        if let Some(n) = socket_inode(&link) {
+            assert_eq!(link, format!("socket:[{n}]"), "read as socket {n}");
+        }
+    }
+}
+
+/// The kernel's own links: a socket's names its inode, and a file of the test's own named like one
+/// (`socket:[1]`, made in its scratch folder) is no socket — a file's link starts with `/`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_named_like_a_socket_isnt_one() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let dir = crate::scratch::Scratch::new("socket-named");
+    let link =
+        |fd: i32| std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap().to_string_lossy().into_owned();
+    let (a, _b) = UnixStream::pair().unwrap();
+    let ino = std::fs::metadata(format!("/proc/self/fd/{}", a.as_raw_fd())).unwrap().ino();
+    assert_eq!(socket_inode(&link(a.as_raw_fd())), Some(ino));
+    for name in ["socket:[1]", "socket:[2]]"] {
+        let f = std::fs::File::create(dir.join(name)).unwrap();
+        let l = link(f.as_raw_fd());
+        assert!(l.starts_with('/') && socket_inode(&l).is_none(), "{l}");
+    }
+}

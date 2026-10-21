@@ -655,6 +655,55 @@ mod tests {
         d
     }
 
+    /// Whatever a test run prints, each pack's rules read it line by line without a panic — a place at line 0, a
+    /// status no rule names, a name of nothing — and a case's place, where one is read, is a file that's there.
+    /// The runners' own words mutated, 20,000 lines a pack.
+    #[test]
+    fn a_test_runs_output_is_read_without_a_panic() {
+        use crate::mutate::{self, Rng};
+        let d = crate::scratch::Scratch::new("results-loop");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/math.rs"), "x").unwrap();
+        let seeds = [
+            "running 3 tests".to_string(),
+            "test math::tests::adds ... ok".into(),
+            "test math::tests::divides ... FAILED".into(),
+            "test math::tests::slow ... ignored, takes long".into(),
+            "---- math::tests::divides stdout ----".into(),
+            "thread 'math::tests::divides' panicked at src/math.rs:21:9:".into(),
+            "thread 'math::tests::x' panicked at src/math.rs:0:1:".into(),
+            "test result: FAILED. 1 passed; 1 failed; 0 ignored".into(),
+            "=== RUN   TestAdd".into(),
+            "--- FAIL: TestAdd (0.00s)".into(),
+            "    math_test.go:12: got 3".into(),
+            "ok  \texample.com/m\t0.002s".into(),
+            "tests/test_a.py::test_y FAILED".into(),
+            "FAILED tests/test_a.py::test_y - assert 1 == 2".into(),
+            format!("{SELF_SKIP}math::tests::x — needs y"),
+        ];
+        let words = ["::", " ... ", "ok", "FAILED", ":0:", "src/math.rs", " — ", SELF_SKIP];
+        let mut rng = Rng(0x5eed_0add_7e55_010e);
+        let mut read = 0;
+        for lang in ["rust", "go", "python", "java", "javascript", "typescript"] {
+            let Some(rules) = Rules::builtin(lang) else { continue };
+            let mut p = Parser::new(Some(rules));
+            let mut cases = Vec::new();
+            for i in 0..20_000 {
+                if i % 200 == 0 {
+                    cases.clear();
+                }
+                let mut l = rng.pick(&seeds).clone();
+                mutate::text(&mut rng, &mut l, &words);
+                p.line(d.path(), &l, &mut cases);
+                for c in &cases {
+                    assert!(c.at.as_ref().is_none_or(|(f, _)| f.exists()), "{lang}: {c:?} after {l:?}");
+                }
+                read += usize::from(!cases.is_empty());
+            }
+        }
+        assert!(read > 10_000, "{read}");
+    }
+
     #[test]
     fn reads_libtest_output() {
         let d = tmp_with("rust", &["src/math.rs"]);

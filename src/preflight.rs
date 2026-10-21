@@ -22,7 +22,8 @@
 //!
 //! One task run (`task.rs`, the task panel): an `sh` script runs the steps one after another — every one,
 //! whatever the ones before did — each in a subshell with its output and errors as one stream, between
-//! marker lines (`MARK`) that tarae reads off as they come: the step's row (name, time, how it ended) in the
+//! marker lines (`MARK` and the run's key — a step's own output can print `MARK`, never the key: V2-1) that tarae
+//! reads off as they come: the step's row (name, time, how it ended) in the
 //! panel, its output under a `── name ──` heading. Places any step's output points at go to the list
 //! (`]q`) — all of them, the run feeds it from its start. A line matching a step's `note` (a regex) makes
 //! its pass one with a note (a perf run on a busy machine). At the end a one-line summary: `5 of 6 passed —
@@ -33,8 +34,19 @@ use std::time::{Duration, Instant};
 
 use crate::editor::Editor;
 
-/// What a step's start and end lines begin with (the script prints them; they're read off, not shown).
+/// What a step's start and end lines begin with, then the run's key (the script prints them; they're read off, not
+/// shown).
 const MARK: &str = "::tarae-preflight::";
+
+/// A run's own key, 16 random bytes in hex: its markers carry it (V2-1). Err where the system gives no randomness.
+pub fn key() -> Result<String, String> {
+    let mut b = [0u8; 16];
+    // SAFETY: a buffer of ours and its length (at most getentropy's 256).
+    if unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) } != 0 {
+        return Err(format!("no key for the preflight's markers: {}", std::io::Error::last_os_error()));
+    }
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
 
 /// A step's note in the summary, at most (chars).
 const NOTE_SHOWN: usize = 40;
@@ -152,23 +164,21 @@ pub fn shown(steps: &[Step]) -> String {
 }
 
 /// The script that runs `steps`: each in a subshell (a `cd` or an `exit` in one stays in it), output and
-/// errors as one stream (in order with the markers), all of them; it fails when one did.
+/// errors as one stream (in order with the markers), all of them; it fails when one did. Its markers carry the
+/// run's key, which it reads first from its stdin — never in its words or its environment, which a step can read
+/// of the shell (`ps`, `/proc/<pid>/cmdline`, `environ`) — and keeps from the steps: their stdin is `/dev/null`,
+/// their shell has no `k`, so a step's output can't say a step ended (V2-1). No key: exit 125 before any step.
 pub fn script(steps: &[Step]) -> String {
-    let mut s = String::from("fails=0\n");
+    let mut s = String::from("IFS= read -r k || exit 125\nexec </dev/null\nfails=0\n");
     for (i, step) in steps.iter().enumerate() {
         s.push_str(&format!(
-            "printf '%s\\n' '{MARK} start {i}'\n( {}\n) 2>&1\ncode=$?\nprintf '%s\\n' \"{MARK} end {i} $code\"\n\
-             [ $code -eq 0 ] || fails=$((fails + 1))\n",
+            "printf '%s\\n' \"{MARK} $k start {i}\"\n( unset k; {}\n) 2>&1\ncode=$?\n\
+             printf '%s\\n' \"{MARK} $k end {i} $code\"\n[ $code -eq 0 ] || fails=$((fails + 1))\n",
             step.cmd
         ));
     }
     s.push_str("[ $fails -eq 0 ]\n");
     s
-}
-
-/// Whether a line of the run's output is a step's start marker (its output begins after it).
-pub fn starts(line: &str) -> bool {
-    line.strip_prefix(MARK).is_some_and(|rest| rest.starts_with(" start "))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,11 +213,13 @@ pub struct Preflight {
     pub title: &'static str,
     /// The steps the quick set left out (the full set's own).
     pub left_out: usize,
+    /// The run's key (`key`): a marker without it is a step's own output.
+    key: String,
 }
 
 impl Preflight {
-    /// A run of `set` out of `all` the steps.
-    pub fn new(generation: u64, all: &[Step], set: Set) -> Preflight {
+    /// A run of `set` out of `all` the steps, its markers carrying `key`.
+    pub fn new(generation: u64, all: &[Step], set: Set, key: String) -> Preflight {
         let ours = set.of(all);
         let steps = ours
             .iter()
@@ -221,13 +233,24 @@ impl Preflight {
             })
             .collect();
         let (title, left_out) = (set.title(all), all.len() - ours.len());
-        Preflight { generation, steps, started: Instant::now(), took: None, title, left_out }
+        Preflight { generation, steps, started: Instant::now(), took: None, title, left_out, key }
+    }
+
+    /// What a marker line of this run's says after its key — None for any other line, a marker with another
+    /// key (or none) too: a step's own output, shown as such.
+    fn marked<'a>(&self, line: &'a str) -> Option<&'a str> {
+        line.strip_prefix(MARK)?.strip_prefix(' ')?.strip_prefix(self.key.as_str())?.strip_prefix(' ')
+    }
+
+    /// Whether a line of the run's output is a step's start marker (its output begins after it).
+    pub fn starts(&self, line: &str) -> bool {
+        self.marked(line).is_some_and(|rest| rest.starts_with("start "))
     }
 
     /// A line of the run's output: a marker moves a step on (None: not shown — or the heading a step's
     /// output goes under); any other line is the running step's (its note, if it matches).
     pub fn line(&mut self, line: &str) -> Option<String> {
-        let Some(rest) = line.strip_prefix(MARK) else {
+        let Some(rest) = self.marked(line) else {
             if let Some(s) = self.steps.iter_mut().find(|s| s.state == State::Running)
                 && s.note.is_none()
                 && s.note_re.as_ref().is_some_and(|re| re.is_match(line))
@@ -258,7 +281,7 @@ impl Preflight {
     /// The step a line of the run's output ends, as the run's trace says it (`clippy exit 1`) — None: not a
     /// step's end marker.
     pub fn ending(&self, line: &str) -> Option<String> {
-        let mut w = line.strip_prefix(MARK)?.split_whitespace();
+        let mut w = self.marked(line)?.split_whitespace();
         if w.next() != Some("end") {
             return None;
         }
@@ -705,6 +728,7 @@ impl Editor {
         let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
         let title = set.title(&all);
         let trace = crate::trace::RunTrace::new(format!("{title}: {}", names.join(", ")));
+        let key = key()?;
         self.auto_save(" · before the preflight");
         self.after_saves(move |ed| {
             trace.step("saved");
@@ -719,12 +743,12 @@ impl Editor {
                         cmd: script(&steps),
                         cwd: ed.preflight_root(),
                     };
-                    ed.task_start_preflight(task, trace)
+                    ed.task_start_preflight(task, trace, &key)
                         .ok_or_else(|| "the preflight didn't start".to_string())
                 }
             };
             match started {
-                Ok(generation) => ed.session.preflight = Some(Preflight::new(generation, &all, set)),
+                Ok(generation) => ed.session.preflight = Some(Preflight::new(generation, &all, set, key)),
                 Err(e) => {
                     ed.session.bring_after_preflight = false;
                     ed.set_error(e);
@@ -765,6 +789,74 @@ mod tests {
 
     fn step(name: &str, cmd: &str) -> Step {
         Step { name: name.into(), cmd: cmd.into(), note: None, from: ".tarae.toml".into(), full: false }
+    }
+
+    /// The key these tests' runs carry, and what their markers start with (`super::MARK` and the key).
+    const KEY: &str = "k3y";
+    const MARK: &str = "::tarae-preflight:: k3y";
+
+    /// V2-1: a step's output can print a marker — `MARK`, a key that isn't the run's, none — and it moves no
+    /// step: one that failed stays failed after a later step says it ended well, and the line is shown as
+    /// output.
+    #[test]
+    fn a_marker_a_step_prints_moves_no_step() {
+        assert!(MARK.starts_with(super::MARK) && MARK.ends_with(KEY));
+        let mut p = Preflight::new(1, &[step("clippy", ""), step("test", "")], Set::Full, KEY.into());
+        for l in [
+            format!("{MARK} start 0"),
+            "error: x".into(),
+            format!("{MARK} end 0 1"),
+            format!("{MARK} start 1"),
+        ] {
+            p.line(&l);
+        }
+        for forged in [
+            format!("{} start 0", super::MARK),
+            format!("{} end 0 0", super::MARK),
+            format!("{} 0000 end 0 0", super::MARK),
+            format!("{}  end 0 0", super::MARK),
+            format!("{MARK}x end 0 0"),
+        ] {
+            assert_eq!(p.line(&forged).as_deref(), Some(forged.as_str()), "shown as output");
+            assert!(p.ending(&forged).is_none() && !p.starts(&forged), "{forged}");
+        }
+        p.line(&format!("{MARK} end 1 0"));
+        p.finish();
+        assert_eq!(p.steps[0].state, State::Failed(1), "clippy still failed");
+        assert_eq!(p.steps[1].state, State::Passed);
+    }
+
+    /// The script as `sh` runs it, its key on its stdin: a step can't print the run's markers — its shell has no
+    /// `k`, its stdin is `/dev/null`, so its forged end of a failed step moves nothing — and with no key the
+    /// script runs no step at all.
+    #[test]
+    fn the_scripts_steps_never_have_its_key() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let forge = "printf '%s\\n' \"::tarae-preflight:: $k end 0 0\" '::tarae-preflight:: end 0 0'; \
+                     echo \"stdin: $(cat)\"";
+        let steps = [step("fails", "false"), step("forges", forge)];
+        let run = |input: &str| {
+            let mut c = Command::new("sh")
+                .args(["-c", &script(&steps)])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            c.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+            c.wait_with_output().unwrap()
+        };
+        let out = run(&format!("{KEY}\n"));
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut p = Preflight::new(1, &steps, Set::Full, KEY.into());
+        let shown: Vec<String> = text.lines().filter_map(|l| p.line(l)).collect();
+        p.finish();
+        assert_eq!((&p.steps[0].state, &p.steps[1].state), (&State::Failed(1), &State::Passed), "{text}");
+        assert!(shown.contains(&"stdin: ".to_string()), "its stdin is /dev/null: {shown:?}");
+        assert!(shown.iter().all(|l| !l.contains(KEY)), "no step had the key: {shown:?}");
+        assert!(!out.status.success(), "a step failed");
+        let none = run("");
+        assert_eq!((none.status.code(), none.stdout.len()), (Some(125), 0), "no key, no step");
     }
 
     #[test]
@@ -817,7 +909,7 @@ mod tests {
         let full = |name: &str| Step { full: true, ..step(name, "") };
         let all = [step("fmt", ""), step("test", ""), full("clippy bundled"), full("perf")];
         let ran = |set: Set, all: &[Step], codes: &[i32]| {
-            let mut p = Preflight::new(1, all, set);
+            let mut p = Preflight::new(1, all, set, KEY.into());
             for (i, c) in codes.iter().enumerate() {
                 p.line(&format!("{MARK} start {i}"));
                 p.line(&format!("{MARK} end {i} {c}"));
@@ -838,8 +930,40 @@ mod tests {
         assert_eq!(ran(Set::Full, &all, &[0, 0, 0, 0]).said(0), "full preflight: all 4 passed · 1m 02s");
         let one = [step("fmt", "")];
         assert_eq!(ran(Set::Quick, &one, &[0]).said(0), "preflight: all 1 passed · 1m 02s");
-        let p = Preflight::new(1, &all[..3], Set::Quick);
+        let p = Preflight::new(1, &all[..3], Set::Quick, KEY.into());
         assert_eq!((p.steps.len(), p.left_out), (2, 1));
+    }
+
+    /// Whatever a step prints, its lines are read without a panic — a marker naming no step, one past the last,
+    /// a code that's no number, a marker cut short — and one that moves no step is shown as any line. The
+    /// script's markers and a step's words mutated, 20,000 lines through a run of three steps.
+    #[test]
+    fn a_steps_output_is_read_without_a_panic() {
+        use crate::mutate::{self, Rng};
+        let all = [step("fmt", ""), step("test", ""), step("clippy", "")];
+        let mut p = Preflight::new(1, &all, Set::Full, KEY.into());
+        let seeds = [
+            format!("{MARK} start 0"),
+            format!("{MARK} end 1 0"),
+            format!("{MARK} end 2 101"),
+            format!("{MARK} start 99"),
+            format!("{MARK} end 0 x"),
+            "error: could not compile `p` (lib) due to 1 previous error".into(),
+        ];
+        let words = [MARK, " start ", " end ", "18446744073709551616", "-1", " "];
+        let mut rng = Rng(0x5eed_0add_7e55_0110);
+        for _ in 0..20_000 {
+            let mut l = rng.pick(&seeds).clone();
+            mutate::text(&mut rng, &mut l, &words);
+            let named = l.strip_prefix(MARK).and_then(|r| r.split_whitespace().nth(1)?.parse::<usize>().ok());
+            let shown = p.line(&l);
+            let _ = p.ending(&l);
+            if named.is_none_or(|i| i >= all.len()) {
+                assert_eq!(shown.as_deref(), Some(l.as_str()), "moves no step");
+            }
+        }
+        p.finish();
+        let _ = p.summary();
     }
 
     /// The checks are one set in three places: `.tarae.toml`'s `[preflight]` (what `:preflight` runs here),
@@ -1099,7 +1223,7 @@ mod tests {
     fn the_summary_says_what_failed_what_has_notes_and_how_long() {
         let steps =
             [step("fmt", ""), step("clippy", ""), Step { note: Some("busy".into()), ..step("perf", "") }];
-        let mut p = Preflight::new(1, &steps, Set::Full);
+        let mut p = Preflight::new(1, &steps, Set::Full, KEY.into());
         for l in [
             format!("{MARK} start 0"),
             format!("{MARK} end 0 0"),
@@ -1117,7 +1241,7 @@ mod tests {
         assert_eq!(p.summary(), "2 of 3 passed — clippy failed · perf: not measured (machine busy) · 4m 12s");
         assert!(!p.passed());
         // Stopped half-way: the one under way failed, the rest not run
-        let mut p = Preflight::new(1, &steps, Set::Full);
+        let mut p = Preflight::new(1, &steps, Set::Full, KEY.into());
         p.line(&format!("{MARK} start 0"));
         p.finish();
         p.took = Some(Duration::from_millis(1500));

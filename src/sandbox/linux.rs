@@ -3618,4 +3618,79 @@ mod tests {
         }
         crate::sandbox::end_leftovers(None);
     }
+
+    /// A value a run picks (a path, its program, its name) as audit writes it (`audit_log_untrustedstring`):
+    /// quoted where it's printable ASCII with no space or `"`, else hex, uppercase.
+    fn audit_encoded(b: &[u8]) -> String {
+        match b.iter().all(|&c| (0x21..0x7f).contains(&c) && c != b'"') {
+            true => format!("\"{}\"", String::from_utf8_lossy(b)),
+            false => b.iter().map(|c| format!("{c:02X}")).collect(),
+        }
+    }
+
+    /// Whatever path a run is refused at, its access record's target reads back as those bytes (lossy where they
+    /// aren't UTF-8) — quoted or hex as audit writes it, a space, a `"`, `path=` or ` domain=` in it never another
+    /// word — and its domain's record, whatever program and name the run gives it, is read as this run's by the
+    /// thread's own name. Seeded paths mutated 10,000 times.
+    #[test]
+    fn an_audit_records_path_reads_back_as_the_run_named_it() {
+        use crate::mutate::{self, Rng};
+        let mut a =
+            Audit { owner: Some(Owner { pid: 0, comm: "tl-loop-audit".into() }), ..Default::default() };
+        let exe = audit_encoded(b"/tmp/x pid=1 comm=\"tl-loop-audit\" \xff");
+        let domain = format!(
+            "audit: type=1424 audit(1:1): domain=5eed0a status=allocated mode=enforcing pid=300 uid=0 exe={exe} \
+             comm=\"tl-loop-audit\""
+        );
+        assert!(a.line(&domain).is_empty(), "nothing waited");
+        let seeds: [&[u8]; 6] = [
+            b"/w/p/build.rs",
+            b"/home/u/a b",
+            b"/tmp/\"q\"",
+            b"/w/p/\xff\xfe",
+            b"/x path=/y",
+            b"/x domain=1 blockers=x",
+        ];
+        let words: [&[u8]; 5] = [b" ", b"\"", b"path=", b" domain=7 ", b"\xc3\xa9"];
+        let mut rng = Rng(0x5eed_0add_7e55_0104);
+        for _ in 0..10_000 {
+            let mut path = rng.pick(&seeds).to_vec();
+            mutate::bytes(&mut rng, &mut path, &words);
+            let line = format!(
+                "audit: type=1423 audit(1:2): domain=5eed0a blockers=fs.write_file path={} dev=\"vda2\" ino=9",
+                audit_encoded(&path)
+            );
+            let d = a.line(&line);
+            let want = String::from_utf8_lossy(&path);
+            assert!(d.len() == 1 && d[0].target == want, "{d:?} for {path:?}: {line}");
+        }
+    }
+
+    /// Whatever an audit line holds, it's read without a panic, and a value read is its own word's — a quoted
+    /// one up to its closing quote, a path's hex its bytes, any other the word as it is. The records above and
+    /// auditd's, mutated 20,000 times (an owner no line names: nothing is kept for later runs).
+    #[test]
+    fn the_audit_reader_never_panics() {
+        use crate::mutate::{self, Rng};
+        let mut a =
+            Audit { owner: Some(Owner { pid: 0, comm: "tl-loop-none".into() }), ..Default::default() };
+        let mut seeds = vm_records(301, "tl-1", Path::new("/home/wq/p/Cargo.toml")).to_vec();
+        seeds.push(
+            "audit: type=1423 audit(1:2): domain=1a blockers=fs.read_file path=2F686F6D652F752F612062 ino=9"
+                .into(),
+        );
+        seeds.push("audit: type=1400 apparmor=\"DENIED\"".into());
+        let words = ["domain=", "blockers=", "path=", "pid=", "status=", "comm=", "\"", " ", "=", "4", "é"];
+        let mut rng = Rng(0x5eed_0add_7e55_0105);
+        for _ in 0..20_000 {
+            let mut line = rng.pick(&seeds).clone();
+            mutate::text(&mut rng, &mut line, &words);
+            a.line(&line);
+            for key in ["domain", "blockers", "path", "pid", "status", "comm"] {
+                let Some(v) = audit_value(&line, key) else { continue };
+                let hex = key == "path" && !v.is_empty() && !line.contains(&format!("{key}={v}"));
+                assert!(line.contains(&v) || hex, "{key}: {v:?} of {line:?}");
+            }
+        }
+    }
 }

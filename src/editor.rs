@@ -6222,7 +6222,8 @@ mod tests {
                 full: false,
             })
             .collect();
-        ed.session.preflight = Some(crate::preflight::Preflight::new(0, &steps, crate::preflight::Set::Full));
+        ed.session.preflight =
+            Some(crate::preflight::Preflight::new(0, &steps, crate::preflight::Set::Full, "k".into()));
         let draw = |ed: &mut Editor| {
             let mut bytes = Vec::new();
             crate::term::render(ed, &mut bytes, 120, 40).unwrap();

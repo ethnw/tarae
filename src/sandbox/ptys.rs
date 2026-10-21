@@ -411,9 +411,9 @@ pub fn holders(tree: u32) -> Option<HashMap<u32, Held>> {
             match link.to_str() {
                 Some("/dev/ptmx" | "/dev/pts/ptmx") => {
                     let fd = e.file_name();
-                    let info =
-                        std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{}", fd.to_string_lossy()));
-                    if let Some(n) = info.ok().as_deref().and_then(tty_index) {
+                    // (as bytes, as the supervisor reads it: only the number's line is the kernel's to word)
+                    let info = std::fs::read(format!("/proc/{pid}/fdinfo/{}", fd.to_string_lossy()));
+                    if let Some(n) = info.ok().and_then(|i| tty_index(&String::from_utf8_lossy(&i))) {
                         held.entry(n).or_default().master = true;
                     }
                 }
@@ -579,5 +579,36 @@ mod tests {
             median(gone)
         );
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    }
+
+    /// A master's number is its `fdinfo`'s `tty-index:` — the kernel's, for a pty of the test's own, is the one
+    /// its other end's name says; and any `fdinfo`, mutated 20,000 times, is read without a panic, a number only
+    /// from a `tty-index:` line's start.
+    #[test]
+    fn a_ptys_number_is_its_fdinfos() {
+        use crate::mutate::{self, Rng};
+        // SAFETY: a new descriptor, owned at once.
+        let fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: just made, ours alone.
+        let master = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut name = [0 as libc::c_char; 64];
+        // SAFETY: room for the name and its NUL.
+        assert_eq!(unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) }, 0);
+        // SAFETY: NUL-terminated by the call.
+        let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned();
+        let n: u32 = name.strip_prefix("/dev/pts/").unwrap().parse().unwrap();
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", master.as_raw_fd())).unwrap();
+        assert_eq!(tty_index(&info), Some(n), "{name}: {info}");
+        let words = ["tty-index:", "\t", "\n", " ", "flags:", "4294967296"];
+        let mut rng = Rng(0x5eed_0add_7e55_0108);
+        for _ in 0..20_000 {
+            let mut t = info.clone();
+            mutate::text(&mut rng, &mut t, &words);
+            if let Some(got) = tty_index(&t) {
+                let line = t.lines().find(|l| l.starts_with("tty-index:"));
+                assert!(line.is_some_and(|l| l.contains(&got.to_string())), "{got} of {t:?}");
+            }
+        }
     }
 }

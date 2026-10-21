@@ -229,3 +229,63 @@ fn an_upstreams_answer_is_read_by_its_status() {
     );
     assert!(!said.contains("tarae-fake-token"));
 }
+
+/// What an upstream proxy answers is read the same however it comes — at every cut of it as on the whole: an
+/// answer read from a part is the whole's (its head's length within the part and ending at its blank line), one
+/// refused is refused whole; a SOCKS5 reply's length its address type's (4, the address, 2) within the part.
+/// Seeded answers and replies mutated 10,000 times each, every one read at each of its cuts.
+#[test]
+fn an_upstreams_answer_reads_the_same_however_it_comes() {
+    use crate::mutate::{self, Rng};
+    let heads: [&[u8]; 4] = [
+        b"HTTP/1.1 200 Connection established\r\n\r\n",
+        b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"x\", Negotiate\r\n\r\n",
+        b"HTTP/1.0 502 Bad Gateway\r\nContent-Length: 4\r\n\r\nbody",
+        b"SSH-2.0-x\r\n",
+    ];
+    let replies: [&[u8]; 4] = [
+        &[5, 0, 0, 1, 127, 0, 0, 1, 0x1f, 0x90],
+        &[5, 0, 0, 3, 4, b'h', b'o', b's', b't', 0, 80, b'H'],
+        &[5, 4, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 80],
+        &[4, 0, 0, 1],
+    ];
+    let words: [&[u8]; 4] = [b"\r\n\r\n", b"\r\n", b"Proxy-Authenticate: ", &[5, 0, 0, 3, 255]];
+    let mut rng = Rng(0x5eed_0add_7e55_010d);
+    let (mut heads_read, mut replies_read) = (0, 0);
+    for _ in 0..10_000 {
+        let mut b = rng.pick(&heads).to_vec();
+        mutate::bytes(&mut rng, &mut b, &words);
+        let whole = answer(&b);
+        heads_read += usize::from(matches!(whole, Ok(Some(_))));
+        for cut in 0..=b.len() {
+            match answer(&b[..cut]) {
+                Ok(Some(a)) => {
+                    assert!(a.len <= cut && b[..a.len].ends_with(b"\r\n\r\n"), "{a:?} of {b:?}");
+                    assert_eq!(whole, Ok(Some(a)), "cut at {cut}: {b:?}");
+                }
+                Err(e) => assert!(whole.is_err(), "cut at {cut} refused ({e}), whole {whole:?}: {b:?}"),
+                Ok(None) => {}
+            }
+        }
+        let mut b = rng.pick(&replies).to_vec();
+        mutate::bytes(&mut rng, &mut b, &words);
+        let whole = socks_reply(&b);
+        replies_read += usize::from(matches!(whole, Ok(Some(_))));
+        for cut in 0..=b.len() {
+            match socks_reply(&b[..cut]) {
+                Ok(Some((rep, len))) => {
+                    let addr = match b[3] {
+                        1 => 4,
+                        4 => 16,
+                        _ => 1 + usize::from(b[4]),
+                    };
+                    assert!(len == 4 + addr + 2 && len <= cut && rep == b[1], "{len} of {b:?}");
+                    assert_eq!(whole, Ok(Some((rep, len))), "cut at {cut}: {b:?}");
+                }
+                Err(e) => assert!(whole.is_err(), "cut at {cut} refused ({e}), whole {whole:?}: {b:?}"),
+                Ok(None) => {}
+            }
+        }
+    }
+    assert!(heads_read > 2000 && replies_read > 2000, "{heads_read} heads, {replies_read} replies");
+}

@@ -702,3 +702,78 @@ fn a_sweep_reads_the_kernels_list_with_the_table_let_go() {
     assert_eq!(reads.get(), 1, "one sweep at a time");
     assert_eq!((o.of(7), o.of(8)), (3, 1));
 }
+
+/// An address as `/proc/net` prints it: each 32-bit word of it in this machine's order, `%08X`; the port `%04X`.
+fn printed(a: SocketAddr) -> String {
+    let octets = match a.ip() {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
+    };
+    let words: String =
+        octets.chunks(4).map(|w| format!("{:08X}", u32::from_ne_bytes(w.try_into().unwrap()))).collect();
+    format!("{words}:{:04X}", a.port())
+}
+
+/// A row as the kernel prints it (`udp4_format_sock`, `tcp4_seq_show` and their v6 twins), in state `st`.
+fn row_line(local: SocketAddr, remote: SocketAddr, st: &str, inode: u64) -> String {
+    format!(
+        "  12: {} {} {st} 00000000:00000000 00:00000000 00000000  1000        0 {inode} 2 0000000000000000 0",
+        printed(local),
+        printed(remote)
+    )
+}
+
+/// Rows as the kernel prints them read back as they were — the addresses, the port, the inode, whether a call may
+/// land on it — for 2,000 random sockets of both families; and any table, mutated 20,000 times, is read without a
+/// panic.
+#[test]
+fn a_tables_rows_read_back_as_the_kernel_printed_them() {
+    use crate::mutate::{self, Rng};
+    let mut rng = Rng(0x5eed_0add_7e55_0109);
+    let any = |rng: &mut Rng, v6: bool| -> SocketAddr {
+        let ip = match v6 {
+            true => IpAddr::V6(Ipv6Addr::from(u128::from(rng.next()) << 64 | u128::from(rng.next()))),
+            false => IpAddr::V4(Ipv4Addr::from(rng.next() as u32)),
+        };
+        SocketAddr::new(ip, rng.next() as u16)
+    };
+    for i in 0..2_000 {
+        let (v6, tcp) = (i % 2 == 0, i % 3 == 0);
+        let (local, inode) = (any(&mut rng, v6), rng.next() >> 1);
+        let remote = if rng.below(2) == 0 { any(&mut rng, v6) } else { SocketAddr::new(local.ip(), 0) };
+        let st = if tcp { ["0A", "01"][rng.below(2)] } else { "07" };
+        let table = format!("  sl  local_address rem_address   st\n{}\n", row_line(local, remote, st, inode));
+        let got = rows(&table, tcp);
+        let open = match tcp {
+            true => st == "0A",
+            false => remote.ip().is_unspecified() && remote.port() == 0,
+        };
+        let peer = (remote.port() != 0).then_some(remote);
+        assert_eq!(got, [Row { local, inode, cookie: None, open, v6only: false, peer }], "{table}");
+    }
+    let words = [":", " ", "\n", "0A", "FFFFFFFF", "+", "éééé"];
+    for _ in 0..20_000 {
+        let mut t = [UDP, TCP, TCP6][rng.below(3)].to_string();
+        mutate::text(&mut rng, &mut t, &words);
+        for r in rows(&t, rng.below(2) == 0) {
+            assert!(t.contains(&r.inode.to_string()), "{r:?} of {t:?}");
+        }
+    }
+}
+
+/// The kernel's own table holds a UDP socket of the test's own as it's bound: its address, its inode, open to calls.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_kernels_table_reads_as_the_socket_is() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let ino = std::fs::metadata(format!("/proc/self/fd/{}", s.as_raw_fd())).unwrap().ino();
+    let found = rows(&std::fs::read_to_string("/proc/net/udp").unwrap(), false);
+    let ours: Vec<&Row> = found.iter().filter(|r| r.inode == ino).collect();
+    assert!(
+        matches!(&ours[..], [r] if r.local == s.local_addr().unwrap() && r.open && r.peer.is_none()),
+        "{ours:?} for {:?}",
+        s.local_addr()
+    );
+}

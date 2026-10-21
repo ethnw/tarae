@@ -590,7 +590,7 @@ impl Editor {
             if !force && crate::queued::claudes_running(&ed.session, crate::queued::Slot::Task) {
                 return crate::queued::again(ed, crate::queued::What::Task(task), Some(trace));
             }
-            ed.task_spawn(task, None, None, true, false, &[], trace);
+            ed.task_spawn(task, None, None, true, false, &[], trace, None);
         });
     }
 
@@ -656,7 +656,7 @@ impl Editor {
             });
             crate::chat::Ran::of(g, ride.card, ride.reason.as_deref(), warned)
         });
-        self.task_spawn(task, None, policy, feeds, true, &[], trace);
+        self.task_spawn(task, None, policy, feeds, true, &[], trace, None);
         match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 match who {
@@ -684,15 +684,21 @@ impl Editor {
         }
         let before = self.task_generation;
         let trace = crate::trace::RunTrace::new(format!("restart's build: {}", traced(&task.cmd)));
-        self.task_spawn(task, None, None, true, false, &[], trace);
+        self.task_spawn(task, None, None, true, false, &[], trace, None);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
     /// `:preflight`'s run (`preflight.rs`), `trace` from its ask: not the task `space m m` runs again; every
     /// step's places go to the list. Its generation; None if it didn't start.
-    pub(crate) fn task_start_preflight(&mut self, task: Task, trace: crate::trace::RunTrace) -> Option<u64> {
+    /// `key` goes to its stdin (`preflight::script`).
+    pub(crate) fn task_start_preflight(
+        &mut self,
+        task: Task,
+        trace: crate::trace::RunTrace,
+        key: &str,
+    ) -> Option<u64> {
         let before = self.task_generation;
-        self.task_spawn(task, None, None, true, false, &[], trace);
+        self.task_spawn(task, None, None, true, false, &[], trace, Some(format!("{key}\n")));
         (self.task_generation != before).then_some(self.task_generation)
     }
 
@@ -702,7 +708,7 @@ impl Editor {
     pub(crate) fn task_start_git(&mut self, task: Task, env: &[(String, String)]) -> Option<u64> {
         let before = self.task_generation;
         let trace = crate::trace::RunTrace::new(format!("tarae's git: {}", traced(&task.cmd)));
-        self.task_spawn(task, None, None, false, false, env, trace);
+        self.task_spawn(task, None, None, false, false, env, trace, None);
         let r = self.session.task_run.as_mut().filter(|_| self.task_generation != before)?;
         r.git = true;
         Some(self.task_generation)
@@ -712,13 +718,14 @@ impl Editor {
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
         let trace = crate::trace::RunTrace::new(format!("install: {}", traced(&task.cmd)));
-        self.task_spawn(task, Some(after), None, false, false, &[], trace);
+        self.task_spawn(task, Some(after), None, false, false, &[], trace, None);
     }
 
     /// `feeds`: its places make the list (`]q`) — the run takes it over from its start. `claudes`: a
     /// command of Claude's — without `CDPATH`, so a `cd` lands where `readonly::outside` resolved it (with
     /// it set, `cd src` may go to another `src` on it, and the line read there unasked). `env`: variables it
-    /// runs with besides tarae's own. `trace`: its way so far, logged at its end.
+    /// runs with besides tarae's own. `trace`: its way so far, logged at its end. `input`: what its stdin reads
+    /// (a preflight's key; unsandboxed runs only), else `/dev/null`.
     #[allow(clippy::too_many_arguments)]
     fn task_spawn(
         &mut self,
@@ -729,6 +736,7 @@ impl Editor {
         claudes: bool,
         env: &[(String, String)],
         trace: crate::trace::RunTrace,
+        input: Option<String>,
     ) {
         // (a configured task's folder is as written — from the root, the root itself when it says none)
         let task = Task { cwd: self.path_of(&task.cwd), ..task };
@@ -760,7 +768,16 @@ impl Editor {
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
         let acts = if claudes { crate::spawn::Acts::Claude } else { crate::spawn::Acts::User };
-        let child = match crate::sandbox::spawn_as(sandbox, &cmd, acts) {
+        let spawned = match (&input, sandbox) {
+            // (a pipe of its own, a few bytes in it: the write never waits; one that fails leaves the script
+            // without its input, which it says by its exit)
+            (Some(text), None) => crate::spawn::setsid_fed_as(&cmd, acts).map(|(c, mut w)| {
+                let _ = std::io::Write::write_all(&mut w, text.as_bytes());
+                c
+            }),
+            _ => crate::sandbox::spawn_as(sandbox, &cmd, acts),
+        };
+        let child = match spawned {
             Ok(c) => c,
             Err(e) => {
                 trace.end(format!("didn't spawn: {e}"));
@@ -835,7 +852,7 @@ impl Editor {
                         r.trace.step_at(ended, at);
                     }
                     // (a step's start: its output kept as its own — `Run::keep`)
-                    let step = preflight.is_some() && crate::preflight::starts(&line);
+                    let step = preflight.as_deref().is_some_and(|p| p.starts(&line));
                     let shown = match preflight.as_deref_mut() {
                         Some(p) => p.line(&line),
                         None => Some(line),
@@ -1038,6 +1055,44 @@ pub fn read_batches(
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
+
+    /// Whatever a task prints, a line is shown as a terminal leaves it — the end of it, after its last carriage
+    /// return, with none in it — and read through the built-in packs' rules without a panic (a `:` with no digits,
+    /// a place at line 0, a long run), a place read a file that's there. Compilers' and linters' words mutated,
+    /// 20,000 lines.
+    #[test]
+    fn a_tasks_output_is_read_without_a_panic() {
+        use crate::mutate::{self, Rng};
+        let d = crate::scratch::Scratch::new("task-loop");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/main.rs"), "x").unwrap();
+        let seeds = [
+            "error[E0425]: cannot find value `x` in this scope",
+            "  --> src/main.rs:3:5",
+            "src/main.rs:3:5: error: x",
+            "src/main.rs:0: warning: y",
+            "Traceback (most recent call last):",
+            "  File \"src/main.rs\", line 3, in <module>",
+            "main.go:12:2: undefined: x",
+            "Rebasing (2/2)\rSuccessfully rebased",
+            "src/main.rs(3,5): error TS2304: Cannot find name 'x'.",
+        ];
+        let words = [":", ":0:", "\r", "src/main.rs", "error", "warning: ", "-->"];
+        let mut m = Matcher::builtin();
+        let mut rng = Rng(0x5eed_0add_7e55_010f);
+        let mut placed = 0;
+        for _ in 0..20_000 {
+            let mut l = rng.pick(&seeds).to_string();
+            mutate::text(&mut rng, &mut l, &words);
+            let shown = as_shown(&l);
+            assert!(l.trim_end_matches('\r').ends_with(shown) && !shown.contains('\r'), "{shown:?} of {l:?}");
+            if let Some(item) = m.line(d.path(), shown) {
+                assert!(item.path.exists(), "{item:?} of {l:?}");
+                placed += 1;
+            }
+        }
+        assert!(placed > 1000, "{placed}");
+    }
 
     /// Progress redrawn in place shows as a terminal leaves it: the text after the last carriage return.
     #[test]

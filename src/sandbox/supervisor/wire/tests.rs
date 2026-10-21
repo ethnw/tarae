@@ -292,6 +292,10 @@ fn only_a_buffer_tarae_built_goes_out() {
     assert_eq!(msg.control, [rights(&ours[..2]), rights(&ours[2..])].concat());
 }
 
+#[cfg(target_os = "linux")]
+#[path = "kernel.rs"]
+mod kernel;
+
 /// A small fixed-seed generator: the loops are the same every run.
 struct Rng(u64);
 

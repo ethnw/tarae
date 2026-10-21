@@ -96,6 +96,21 @@ pub fn setsid_git(cmd: &Command) -> io::Result<Spawned> {
     start(cmd, false, Limit::Raised).map(|(s, _)| s)
 }
 
+/// `setsid_as` with a pipe for its stdin (a preflight's key — `preflight::script`): the end to write it, to drop
+/// once written.
+pub fn setsid_fed_as(cmd: &Command, acts: Acts) -> io::Result<(Spawned, PipeWriter)> {
+    let fed = || {
+        let (s, input) = start(cmd, true, Limit::Original)?;
+        Ok((s, input.ok_or_else(|| io::Error::other("no stdin pipe"))?))
+    };
+    #[cfg(target_os = "linux")]
+    if acts.kept_here() {
+        return crate::seccomp::outside(fed);
+    }
+    let _ = acts;
+    fed()
+}
+
 /// `setsid_git` with a pipe for its stdin (tarae's git fed a buffer's text — `gitrepo`): the end to write it,
 /// to drop once written.
 pub fn setsid_fed(cmd: &Command) -> io::Result<(Spawned, PipeWriter)> {

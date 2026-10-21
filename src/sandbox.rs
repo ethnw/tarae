@@ -51,6 +51,8 @@ mod handed;
 pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(test)]
+mod loops;
 // (6d: the session's marks — which run a connection is — given on Linux; the table built and tested everywhere)
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod marks;

@@ -320,7 +320,9 @@ pub fn inode(fd: &OwnedFd) -> io::Result<u64> {
 
 /// What a descriptor's link names (`/proc/<pid>/fd/<n>`): a socket's inode (`socket:[123]`), else None.
 pub fn socket_inode(link: &str) -> Option<u64> {
-    link.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+    // (digits only, no sign or leading zero: as the kernel writes it, `u64`'s parse takes more)
+    let n = link.strip_prefix("socket:[")?.strip_suffix(']')?;
+    n.parse().ok().filter(|i: &u64| i.to_string() == n)
 }
 
 /// What a failed read of a process's `/proc` says: `Gone` — it ended meanwhile (`ENOENT`, `ESRCH`), it holds

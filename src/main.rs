@@ -87,6 +87,8 @@ mod markdown;
 mod mcp;
 mod models;
 mod movement;
+#[cfg(test)]
+mod mutate;
 mod nav;
 mod nofile;
 mod notes;

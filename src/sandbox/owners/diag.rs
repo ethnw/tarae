@@ -160,7 +160,7 @@ fn dumped(fd: &OwnedFd, seq: u32, rows: &mut Vec<Row>) -> io::Result<()> {
                     libc::NLMSG_DONE => return Ok(()),
                     libc::NLMSG_ERROR => {
                         let code = i32::from_ne_bytes(at[16..20].try_into().unwrap_or_default());
-                        return Err(io::Error::from_raw_os_error(-code));
+                        return Err(io::Error::from_raw_os_error(code.checked_neg().unwrap_or(libc::EPROTO)));
                     }
                     _ if kind == BY_FAMILY => rows.extend(row(&at[16..len])),
                     _ => {}
@@ -204,4 +204,74 @@ fn row(m: &[u8]) -> Option<Row> {
     let (local, inode, cookie) = (SocketAddr::new(ip, port), u64::from(inode), Some(cookie));
     let peer = (peer_port != 0).then(|| SocketAddr::new(peer, peer_port));
     Some(Row { local, inode, cookie, open: true, v6only, peer })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mutate::{self, Rng};
+
+    /// An `inet_diag_msg` as the kernel writes one (`inet_diag_msg_common_fill`, `sock_diag_save_cookie`): the
+    /// family, the ports in network order, the addresses (an IPv4 one in the first four bytes), the cookie low word
+    /// first, the inode at 68 — then `INET_DIAG_SKV6ONLY`, as an IPv6 socket's answer carries it.
+    fn msg(local: SocketAddr, peer: SocketAddr, cookie: u64, inode: u32, v6only: bool) -> Vec<u8> {
+        let mut m = vec![0u8; MSG];
+        m[0] = if local.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 } as u8;
+        m[4..6].copy_from_slice(&local.port().to_be_bytes());
+        m[6..8].copy_from_slice(&peer.port().to_be_bytes());
+        for (at, ip) in [(8, local.ip()), (24, peer.ip())] {
+            let o = match ip {
+                IpAddr::V4(v4) => v4.octets().to_vec(),
+                IpAddr::V6(v6) => v6.octets().to_vec(),
+            };
+            m[at..at + o.len()].copy_from_slice(&o);
+        }
+        m[44..48].copy_from_slice(&(cookie as u32).to_ne_bytes());
+        m[48..52].copy_from_slice(&((cookie >> 32) as u32).to_ne_bytes());
+        m[68..72].copy_from_slice(&inode.to_ne_bytes());
+        if local.is_ipv6() {
+            m.extend(5u16.to_ne_bytes());
+            m.extend(SKV6ONLY.to_ne_bytes());
+            m.extend([u8::from(v6only), 0, 0, 0]);
+        }
+        m
+    }
+
+    /// A socket's message as the kernel writes it reads back as that socket — 2,000 random ones of both families —
+    /// and any message, mutated 20,000 times (a length past the end, an attribute cut short), is read without a
+    /// panic, its inode from the message's own bytes.
+    #[test]
+    fn a_diag_message_reads_back_and_any_reads_without_a_panic() {
+        let mut rng = Rng(0x5eed_0add_7e55_010a);
+        let mut seeds = Vec::new();
+        for i in 0..2_000 {
+            let ip = |rng: &mut Rng| match i % 2 {
+                0 => IpAddr::V4(Ipv4Addr::from(rng.next() as u32)),
+                _ => IpAddr::V6(Ipv6Addr::from(u128::from(rng.next()) << 64 | u128::from(rng.next()))),
+            };
+            let local = SocketAddr::new(ip(&mut rng), rng.next() as u16);
+            let peer = SocketAddr::new(ip(&mut rng), [0, rng.next() as u16][rng.below(2)]);
+            let (cookie, inode, v6only) =
+                (rng.next(), rng.next() as u32, local.is_ipv6() && rng.below(2) == 0);
+            let m = msg(local, peer, cookie, inode, v6only);
+            let want = Row {
+                local,
+                inode: u64::from(inode),
+                cookie: Some(cookie),
+                open: true,
+                v6only,
+                peer: (peer.port() != 0).then_some(peer),
+            };
+            assert_eq!(row(&m), Some(want), "{m:?}");
+            seeds.push(m);
+        }
+        let words: [&[u8]; 3] = [&[5, 0, 11, 0, 1], &[0xff, 0xff], &[4, 0]];
+        for _ in 0..20_000 {
+            let mut m = rng.pick(&seeds).clone();
+            mutate::bytes(&mut rng, &mut m, &words);
+            if let Some(r) = row(&m) {
+                assert_eq!(r.inode, u64::from(u32::from_ne_bytes(m[68..72].try_into().unwrap())));
+            }
+        }
+    }
 }

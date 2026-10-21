@@ -701,3 +701,44 @@ fn a_read_claudes_profile_refuses_is_said_not_asked() {
     assert!(crate::reads::kept_from_claude(&p, &at(".claude/settings.json")).is_none(), "its own");
     assert!(p.reads_allow(Path::new("/private/etc/ssl/cert.pem")), "the system's certificates");
 }
+
+/// Whatever claude's tool result says, a refusal read from it is the profile's: reading, writing or either as its
+/// rules refuse that path, never a path they allow both ways, and a path the text names (its last part there).
+/// Node's words for a key, the project, temp, a move — mutated 10,000 times (each path made real: a few `stat`s).
+#[test]
+fn a_refusal_read_from_claudes_result_is_the_profiles() {
+    use crate::mutate::{self, Rng};
+    let h = Home::new("said-loop");
+    let p = h.profile(false);
+    let (home, root) = (h.home.display().to_string(), h.root.display().to_string());
+    let tmp = profile_path(&std::env::temp_dir()).display().to_string();
+    let seeds = [
+        format!("EPERM: operation not permitted, open '{root}/src/a.rs.tmp.93827.3ad8'"),
+        format!("EPERM: operation not permitted, open '{home}/.ssh/id_x'"),
+        format!("EACCES: permission denied, mkdir '{home}/.claude/projects/x'"),
+        format!("EXDEV: cross-device link not permitted, rename '{root}/build.rs' -> '{tmp}/b'"),
+        format!("Error: EPERM: operation not permitted, open '{tmp}/x'\n    at Object.openSync"),
+        "ENOENT: no such file or directory, open '/x'".to_string(),
+    ];
+    let words = ["'", " -> '", "EPERM: operation not permitted, open ", "\n", &home, &root, "/../", "/.ssh/"];
+    let mut rng = Rng(0x5eed_0add_7e55_0103);
+    let mut said = 0;
+    for _ in 0..10_000 {
+        let mut text = rng.pick(&seeds).clone();
+        mutate::text(&mut rng, &mut text, &words);
+        let Some(d) = p.said_in_result(&text) else { continue };
+        said += 1;
+        let real = Path::new(&d.target);
+        let (reads, writes) = (p.reads_allow(real), p.writes_allow(real));
+        let profiles = match d.op.as_str() {
+            "file-write*" => reads && !writes,
+            "file-read-data" => !reads && writes,
+            crate::sandbox::EITHER => !reads && !writes,
+            _ => false,
+        };
+        assert!(d.process == "claude" && profiles, "{d:?} (reads {reads}, writes {writes}) from {text:?}");
+        let name = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        assert!(text.contains(&name), "{d:?}: {name} isn't in {text:?}");
+    }
+    assert!(said > 1000, "{said} said");
+}

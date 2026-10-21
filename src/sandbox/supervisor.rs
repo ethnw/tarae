@@ -682,12 +682,8 @@ impl Caller {
     /// itself undumpable): refused.
     fn open(l: &Listener, n: &libc::seccomp_notif) -> Result<Caller, i32> {
         let tid = n.pid as i32;
-        let status = std::fs::read_to_string(format!("/proc/{tid}/status")).map_err(|_| libc::ESRCH)?;
-        let tgid = status
-            .lines()
-            .find_map(|l| l.strip_prefix("Tgid:"))
-            .and_then(|v| v.trim().parse().ok())
-            .ok_or(libc::ESRCH)?;
+        let status = status_of(tid).map_err(|_| libc::ESRCH)?;
+        let tgid = proc_value(&status, "Tgid:").and_then(|v| v.parse().ok()).ok_or(libc::ESRCH)?;
         let mem = std::fs::OpenOptions::new().read(true).write(true).open(format!("/proc/{tid}/mem"));
         let mem =
             mem.map_err(|e| if e.kind() == io::ErrorKind::NotFound { libc::ESRCH } else { libc::EPERM })?;
@@ -725,13 +721,9 @@ impl Caller {
     /// opened without waiting for a reader), close-on-exec, never creating or truncating.
     fn reopen(&self, n: u64) -> Result<OwnedFd, i32> {
         let n = i32::try_from(n).map_err(|_| libc::EBADF)?;
-        let info =
-            std::fs::read_to_string(format!("/proc/{}/fdinfo/{n}", self.tid)).map_err(|_| libc::EBADF)?;
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| i32::from_str_radix(f.trim(), 8).ok())
-            .ok_or(libc::EBADF)?;
+        let info = std::fs::read(format!("/proc/{}/fdinfo/{n}", self.tid)).map_err(|_| libc::EBADF)?;
+        let flags =
+            proc_value(&info, "flags:").and_then(|f| i32::from_str_radix(f, 8).ok()).ok_or(libc::EBADF)?;
         let keep = libc::O_ACCMODE | libc::O_APPEND | libc::O_PATH;
         let open = (flags & keep) | libc::O_CLOEXEC | libc::O_NOCTTY | libc::O_NONBLOCK;
         let path = std::ffi::CString::new(format!("/proc/{}/fd/{n}", self.tid)).map_err(|_| libc::EINVAL)?;
@@ -754,7 +746,7 @@ impl Caller {
 
     /// What signal waits for it (`pending`, from its `/proc/<tid>/status`).
     fn pending(&self) -> Pending {
-        pending(&std::fs::read_to_string(format!("/proc/{}/status", self.tid)).unwrap_or_default())
+        pending(&status_of(self.tid).unwrap_or_default())
     }
 
     /// The folder it works in (a relative socket path is from there).
@@ -762,10 +754,11 @@ impl Caller {
         std::fs::read_link(format!("/proc/{}/cwd", self.tid)).map_err(|_| libc::ENOENT)
     }
 
-    /// Its program's name, as a denial says it (`java`).
+    /// Its program's name, as a denial says it (`java`) — the run's own bytes, shown (lossy where they aren't
+    /// UTF-8).
     fn name(&self) -> String {
-        let comm = std::fs::read_to_string(format!("/proc/{}/comm", self.tgid)).unwrap_or_default();
-        match comm.trim() {
+        let comm = std::fs::read(format!("/proc/{}/comm", self.tgid)).unwrap_or_default();
+        match String::from_utf8_lossy(&comm).trim() {
             "" => "the run".into(),
             c => c.into(),
         }
@@ -1252,10 +1245,9 @@ fn carry(from: &OwnedFd, to: &OwnedFd, domain: i32, kind: i32) -> Result<(), i32
 
 /// Whether the caller's descriptor `n` is close-on-exec (`/proc/<tgid>/fdinfo/<n>`'s `flags:`, octal).
 fn cloexec(c: &Caller, n: u64) -> bool {
-    let info = std::fs::read_to_string(format!("/proc/{}/fdinfo/{n}", c.tgid)).unwrap_or_default();
-    info.lines()
-        .find_map(|l| l.strip_prefix("flags:"))
-        .and_then(|f| u32::from_str_radix(f.trim(), 8).ok())
+    let info = std::fs::read(format!("/proc/{}/fdinfo/{n}", c.tgid)).unwrap_or_default();
+    proc_value(&info, "flags:")
+        .and_then(|f| u32::from_str_radix(f, 8).ok())
         .is_some_and(|f| f & libc::O_CLOEXEC as u32 != 0)
 }
 
@@ -1568,8 +1560,9 @@ fn pty_ioctl(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let (fd, request, arg) = (u64::from(args[0] as u32), args[1] as u32, args[2]);
     let c = Caller::open(l, n)?;
     let master = matches!(c.link(fd)?.as_str(), "/dev/ptmx" | "/dev/pts/ptmx");
-    let info = std::fs::read_to_string(format!("/proc/{}/fdinfo/{fd}", c.tid)).map_err(|_| libc::EBADF)?;
-    let index = super::ptys::tty_index(&info).filter(|_| master).ok_or(libc::ENOTTY)?;
+    let info = std::fs::read(format!("/proc/{}/fdinfo/{fd}", c.tid)).map_err(|_| libc::EBADF)?;
+    let index =
+        super::ptys::tty_index(&String::from_utf8_lossy(&info)).filter(|_| master).ok_or(libc::ENOTTY)?;
     l.valid(n.id).map_err(|_| libc::ESRCH)?;
     let at = match ptys.known(index) {
         true => index,
@@ -1696,9 +1689,24 @@ enum Pending {
     Shared(u64),
 }
 
+/// The value of a `/proc` file's `key` line (`Tgid:` in `status`, `flags:` in `fdinfo`), trimmed: the first line
+/// that starts with it. Read as bytes, only the value decoded: a run's own words there (its thread's name,
+/// `status`'s first line) come with their newlines escaped by the kernel — never a line of their own — but their
+/// bytes past ASCII as they are, so the file as a whole needn't be UTF-8 (V2-3,
+/// `a_threads_name_never_makes_a_proc_line`).
+fn proc_value<'a>(text: &'a [u8], key: &str) -> Option<&'a str> {
+    let value = text.split(|&b| b == b'\n').find_map(|l| l.strip_prefix(key.as_bytes()))?;
+    std::str::from_utf8(value).ok().map(str::trim)
+}
+
+/// A thread's `/proc/<tid>/status`, as bytes (`proc_value` reads it).
+fn status_of(tid: i32) -> io::Result<Vec<u8>> {
+    std::fs::read(format!("/proc/{tid}/status"))
+}
+
 /// `Pending` from a thread's `/proc/<tid>/status`; signals it blocks don't count.
-fn pending(status: &str) -> Pending {
-    let field = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)).map(str::trim);
+fn pending(status: &[u8]) -> Pending {
+    let field = |key: &str| proc_value(status, key);
     let mask = |key: &str| field(key).and_then(|v| u64::from_str_radix(v, 16).ok()).unwrap_or(0);
     let open = !mask("SigBlk:");
     let (own, shared) = (mask("SigPnd:") & open, mask("ShdPnd:") & open);
@@ -2318,6 +2326,7 @@ mod tests {
     fn a_signal_is_the_callers_only_where_the_kernel_surely_woke_it() {
         let status = |own: &str, shared: &str, blocked: &str, threads: u32| {
             format!("Threads:\t{threads}\nSigPnd:\t{own}\nShdPnd:\t{shared}\nSigBlk:\t{blocked}\n")
+                .into_bytes()
         };
         let usr1 = "0000000000000200";
         let none = "0000000000000000";
@@ -2406,6 +2415,53 @@ mod tests {
             assert_eq!(netlink_reads(&bytes), want.map_err(String::from), "{what}");
         }
         assert_eq!(netlink_reads(&[]), Err("a message cut short".into()), "nothing");
+    }
+
+    /// A run names its threads as it likes (`PR_SET_NAME`: 15 bytes, a newline, `Tgid:`, a tab, a byte past
+    /// ASCII, UTF-8 cut short), and that name is `status`'s first line: the kernel escapes its newlines there, so
+    /// it never makes a line of its own, and writes its other bytes as they are — `status` read as `Caller::open`
+    /// reads it gives the thread's own `Tgid:` and `Pid:`, and `pending` reads it. 10,000 names, seeded, on a
+    /// thread of the test's own (only its name is set). V2-3's regression test: read as UTF-8, the file failed
+    /// for a name cut inside a character (`wörker-éééé` at 15 bytes) and every call from the thread got `ESRCH`.
+    #[test]
+    fn a_threads_name_never_makes_a_proc_line() {
+        use crate::mutate::{self, Rng};
+        let tgid = std::process::id();
+        let named = std::thread::spawn(move || {
+            // SAFETY: a plain call.
+            let tid = unsafe { libc::gettid() };
+            let seeds: [&[u8]; 5] = [
+                b"\nTgid:\t1",
+                b"x\nPid:\t7\n",
+                b"Tgid:\t9",
+                b"w\xc3\xb6rker-\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9",
+                b"a\\nb\tc",
+            ];
+            let words: [&[u8]; 4] = [b"\nTgid:\t1\n", b"\n", b"\\", b"\xff"];
+            let mut rng = Rng(0x5eed_0add_7e55_0106);
+            let mut wrong = Vec::new();
+            for _ in 0..10_000 {
+                let mut name = rng.pick(&seeds).to_vec();
+                mutate::bytes(&mut rng, &mut name, &words);
+                name.truncate(15);
+                name.push(0);
+                // SAFETY: a NUL-terminated name of ours; the call names this thread only.
+                unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
+                let status = status_of(tid);
+                let read =
+                    status.as_deref().map(|s| (proc_value(s, "Tgid:"), proc_value(s, "Pid:"), pending(s)));
+                let (t, p) = (tgid.to_string(), tid.to_string());
+                if !matches!(read, Ok((Some(a), Some(b), _)) if a == t && b == p) && wrong.len() < 10 {
+                    wrong.push(format!(
+                        "{name:?}: {:?}",
+                        read.map(|r| (r.0.map(str::to_string), r.1.map(str::to_string)))
+                    ));
+                }
+            }
+            wrong
+        });
+        let wrong = named.join().unwrap();
+        assert!(wrong.is_empty(), "misread with these names:\n{}", wrong.join("\n"));
     }
 
     /// Addresses as the kernel lays them out — read as it reads them; too short for the family, refused.

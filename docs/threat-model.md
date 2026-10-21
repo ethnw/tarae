@@ -410,6 +410,13 @@ Not kept:
   `sandbox::proxy::parse::tests::the_sni_parser_never_panics`); the supervisor's memory readers aren't fuzzed yet
   ([roadmap](roadmap.md): fuzzing). Moving them into a confined process of their own is
   [D21](design/sandbox-keeper.md#decisions), later. **A reviewer's first target.**
+- **A denial's words are partly the run's** (macOS, V2-2): the log's line `Sandbox: <name>(<pid>) deny(1) <op>
+  <target>` holds two things the run picks, its program's name and the target's path, and nothing marks where
+  either ends. A program named `a(1) deny(1) file-read-data /x ` makes its own denial read with that operation and
+  target, so the run's report and `space m s`'s choices name those. No parsing can tell the two apart; it gains a
+  run nothing an attempt at the access wouldn't, since the denial it fakes is one it could cause (user decision
+  2026-10-16: written down, not fixed). What's read is always in the line's message, never from elsewhere.
+  test: `sandbox::loops::a_denial_read_from_the_log_is_in_its_message`
 - **The keeper's birth** (`clone3` with raw system calls until exec, id maps written from outside) is the other
   part of Linux's sandbox not covered by Landlock or seccomp. A reviewer's second target.
 
