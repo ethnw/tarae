@@ -3236,8 +3236,12 @@ fn sgr_color(out: &mut impl Write, on: &[u8], c: Color) -> io::Result<()> {
 }
 
 /// Does the terminal grok undercurl/underline color (`CSI 4:3 m`, `CSI 58…`)? Unknown terminals print them
-/// as text ("3m") — so only where certain, plain underline elsewhere. Force with `TARAE_UNDERCURL=1/0`.
+/// as text ("3m") — so only where certain, plain underline elsewhere. Force with `TARAE_UNDERCURL=1/0`. Never in
+/// tests: a frame mustn't depend on the terminal the tests run in (as `zellij::inside`).
 fn undercurl_supported() -> bool {
+    if cfg!(test) {
+        return false;
+    }
     static S: OnceLock<bool> = OnceLock::new();
     *S.get_or_init(|| {
         let env = |k: &str| std::env::var(k).unwrap_or_default();
