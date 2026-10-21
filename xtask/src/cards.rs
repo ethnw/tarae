@@ -54,7 +54,7 @@ fn state_cards() -> Option<PathBuf> {
 }
 
 /// `p` itself, or the `.jsonl` files in it, oldest month first.
-fn jsonl_in(p: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn jsonl_in(p: &Path) -> Result<Vec<PathBuf>> {
     if !p.is_dir() {
         return Ok(vec![p.to_path_buf()]);
     }
@@ -66,7 +66,7 @@ fn jsonl_in(p: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// A field as text ("" when absent).
-fn s<'a>(e: &'a Value, k: &str) -> &'a str {
+pub(crate) fn s<'a>(e: &'a Value, k: &str) -> &'a str {
     e[k].as_str().unwrap_or("")
 }
 
@@ -91,16 +91,16 @@ fn stamped(e: &Value) -> bool {
     timed(e).is_some_and(|ms| ms <= STAMP_MS)
 }
 
-fn median(mut v: Vec<u64>) -> Option<u64> {
+pub(crate) fn median(mut v: Vec<u64>) -> Option<u64> {
     v.sort_unstable();
     v.get(v.len() / 2).copied().filter(|_| !v.is_empty())
 }
 
-fn secs(ms: u64) -> String {
+pub(crate) fn secs(ms: u64) -> String {
     format!("{:.1} s", ms as f64 / 1000.0)
 }
 
-fn pct(n: usize, of: usize) -> String {
+pub(crate) fn pct(n: usize, of: usize) -> String {
     (n * 100 + of / 2).checked_div(of).map_or_else(|| "—".into(), |p| format!("{p} %"))
 }
 
@@ -116,7 +116,7 @@ fn answers(es: &[&Value]) -> String {
 }
 
 /// A Markdown table, its columns padded to line up in a terminal too.
-fn table(head: &[&str], rows: &[Vec<String>]) -> String {
+pub(crate) fn table(head: &[&str], rows: &[Vec<String>]) -> String {
     let w: Vec<usize> = (0..head.len())
         .map(|c| {
             rows.iter().map(|r| r[c].chars().count()).chain([head[c].chars().count()]).max().unwrap_or(0)

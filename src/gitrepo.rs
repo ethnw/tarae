@@ -695,9 +695,13 @@ impl Repo {
 fn base(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
-    // (tests never read the machine's own config — it's the user's, and can hold tokens: a stand-in instead)
+    // (tests never read the machine's own config — it's the user's, and can hold tokens: a stand-in instead —
+    // nor its own ignore and attributes, read from `$XDG_CONFIG_HOME/git` or `~/.config/git` with no config at
+    // all: under `/dev/null` they can't be)
     #[cfg(test)]
-    cmd.env("GIT_CONFIG_GLOBAL", test_global(dir)).env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", test_global(dir))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("XDG_CONFIG_HOME", "/dev/null");
     #[cfg(test)]
     for (k, v) in test_env(dir) {
         cmd.env(k, v);

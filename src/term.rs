@@ -206,6 +206,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
     // (quitting waited for them already — this covers any other way out)
     editor.flush_saves();
     editor.features_flush();
+    editor.reviews_flush();
     editor.cards_flush();
     Ok(())
 }
@@ -378,6 +379,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     // `screen` once the user said yes)
     editor.last_frame = Some((frame, w, h));
     editor.frames += 1;
+    // (the reviews under way: what of them this frame shows — the review record's time)
+    crate::reviews::after_frame(editor);
     crate::seeing::after_frame(editor);
     // (snapshots of the UI state asked over its socket: as of this frame)
     crate::uistate::after_frame(editor);

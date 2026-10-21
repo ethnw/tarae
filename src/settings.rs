@@ -682,6 +682,13 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "review.record",
+        kind: Kind::Bool,
+        doc: "Keep, for every change you review, how long it was on screen with you there and what it ended as (accepted, rejected, undone, looked at…) in reviews/<month>.jsonl in tarae's state folder, on this machine only — its file, an id and counts, never its code (cargo xtask reviews sums them up). Only your own config changes it",
+        get: |c| Value::from(c.review_record),
+        set: |c, v| c.review_record = b(v),
+    },
+    Setting {
         path: "review.quiet",
         kind: Kind::StrList,
         doc: "Code review: files that are tests, docs or snapshots — their changes graded quiet (never over a high-risk one). Names and paths as review.risky",

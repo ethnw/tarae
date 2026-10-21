@@ -1,0 +1,11 @@
+{"v":1,"at":"2026-10-20 10:00:00","session":"main","review":"r1-1","kind":"edit","entry":"change","file":"a.rs","change":"aa","lines":{"added":1,"removed":1},"drawn_ms":40,"active_ms":4000,"in_hand_ms":4000,"outcome":"accepted"}
+{"v":1,"at":"2026-10-20 10:00:00","session":"main","review":"r1-1","kind":"edit","entry":"change","file":"a.rs","change":"ab","lines":{"added":1,"removed":1},"drawn_ms":40,"active_ms":6000,"in_hand_ms":6000,"outcome":"rejected"}
+{"v":1,"at":"2026-10-20 10:00:00","session":"main","review":"r1-1","kind":"edit","entry":"review","changes":2,"lines":{"added":2,"removed":2},"active_ms":10000}
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"change","file":"b.rs","change":"ba","lines":{"added":8,"removed":2},"grade":"behaviour","drawn_ms":10,"active_ms":30000,"in_hand_ms":20000,"outcome":"viewed"}
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"change","file":"b.rs","change":"bb","lines":{"added":2},"grade":"high","rule":"rust pack #0","drawn_ms":900,"active_ms":12000,"in_hand_ms":9000,"outcome":"looked"}
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"change","file":"c.rs","change":"bc","lines":{"added":1,"removed":1},"grade":"high","rule":"rust pack #0","drawn_ms":1200,"active_ms":8000,"in_hand_ms":8000,"outcome":"undone"}
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"change","file":"d.md","change":"bd","lines":{"added":1},"grade":"quiet","active_ms":0,"outcome":"left"}
+{"v":1,"at":"2026-10-20 11:00:
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"finding","file":"b.rs","change":"bb","finding":{"by":"reviewer","sent":true,"answered":false}}
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"finding","file":"e.rs","finding":{"by":"reviewer","sent":false,"answered":false}}
+{"v":1,"at":"2026-10-20 11:00:00","session":"main","review":"r1-2","kind":"turn","entry":"review","changes":4,"total":5,"lines":{"added":12,"removed":3},"active_ms":50000,"findings":1,"unsent":0}

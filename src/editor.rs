@@ -706,6 +706,8 @@ pub struct Editor {
     /// (`sim/board.rs`: a process's reader threads aren't the simulation's).
     #[cfg(test)]
     pub reviewer_stand_in: bool,
+    /// The review record's folder (`reviews.rs`, `$state/reviews`) — None in tests: nothing written.
+    pub reviews_dir: Option<PathBuf>,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
@@ -950,6 +952,11 @@ impl Editor {
             reviewer_pressure: crate::share::Pressure::Unknown,
             #[cfg(test)]
             reviewer_stand_in: false,
+            reviews_dir: if cfg!(test) {
+                None
+            } else {
+                crate::config::state_dir().map(|d| d.join(crate::reviews::DIR))
+            },
             features: crate::features::Counts::new(if cfg!(test) {
                 None
             } else {
@@ -1858,7 +1865,14 @@ impl Editor {
     /// into the buffer as one edit; in normal or select mode held in the register for `p`/`P` (a `:` line: the
     /// command line).
     pub fn handle_paste(&mut self, text: String) {
+        let begun = crate::document::input_begin();
+        self.handle_paste_now(text);
+        self.typed(begun);
+    }
+
+    fn handle_paste_now(&mut self, text: String) {
         self.input_seq += 1;
+        self.review_input();
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_paste(&text) {
             return;
         }
@@ -1960,6 +1974,7 @@ impl Editor {
         // panel, moves nothing — counted, a reload in the same moment read as you taking over.
         if matches!(m.kind, K::Down | K::Drag) {
             self.input_seq += 1;
+            self.review_input();
         }
         let (x, y) = (m.x as usize, m.y as usize);
         // Labels up for pointing: a click picks the element under it, or stops pointing; nothing else moves
@@ -2334,6 +2349,7 @@ impl Editor {
         };
         if matches!(m.kind, K::ScrollUp | K::ScrollDown) {
             self.input_seq += 1;
+            self.review_input();
         }
         if matches!(m.kind, K::Down | K::ScrollUp | K::ScrollDown) {
             self.focus_view(pid);
@@ -3379,8 +3395,28 @@ fn card_reads(key: Key, pending: &[Key]) -> bool {
 
 impl Editor {
     pub fn handle_key(&mut self, key: Key) {
+        let begun = crate::document::input_begin();
+        self.handle_key_now(key);
+        self.typed(begun);
+    }
+
+    /// A key or paste (`begun` by this call) is handled: what it edited is yours, but what said it wasn't
+    /// (`Own::not_yours`) — in any document (a replace across files too).
+    fn typed(&mut self, begun: bool) {
+        if !begun {
+            return;
+        }
+        for id in crate::document::input_end() {
+            if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
+                d.own.input_end();
+            }
+        }
+    }
+
+    fn handle_key_now(&mut self, key: Key) {
         use crate::uistate::{Handler, took};
         self.input_seq += 1;
+        self.review_input();
         // (each handler below that takes the key says so — the routing test holds `keys_to` to it)
         took(Handler::Code);
         self.session_store.keyed = true;

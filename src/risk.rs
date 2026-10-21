@@ -197,24 +197,8 @@ pub fn lang_of(rel: &str) -> Option<&'static str> {
 /// Hunk `h` of file `rel` (from the repository's root; `lang` its language) graded by `rules`; `in_test`: it
 /// lies wholly inside a test (the document's tree says).
 pub fn grade(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules, in_test: bool) -> (Grade, String) {
-    // (a permission: `mode_change` gives only the modes that matter)
-    if let Some((_, new)) = &h.mode {
-        let what = if new == "120000" { "now a symlink" } else { "now executable" };
-        return (Grade::High, what.into());
-    }
-    if let Some(e) = rules.risky.iter().find(|e| path_matches(rel, e)) {
-        return (Grade::High, format!("{} (.tarae.toml)", e.trim()));
-    }
-    let parts: Vec<&std::ffi::OsStr> = Path::new(rel).iter().collect();
-    if let Some(&i) = crate::sandbox::protected_at(&parts).first() {
-        return (Grade::High, format!("{} (protected)", parts[i].to_string_lossy()));
-    }
-    for p in rules.packs_of(lang) {
-        for line in h.removed.iter().chain(&h.added) {
-            if let Some(m) = p.risky.iter().find_map(|re| re.find(line)) {
-                return (Grade::High, format!("{} ({} pack)", m.as_str().trim(), p.name));
-            }
-        }
+    if let Some((why, _)) = high(rel, lang, h, rules) {
+        return (Grade::High, why);
     }
     if let Some(e) = rules.quiet.iter().find(|e| path_matches(rel, e)) {
         return (Grade::Quiet, format!("{} (.tarae.toml)", e.trim()));
@@ -233,6 +217,43 @@ pub fn grade(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules, in_test: bo
         return (Grade::Quiet, "formatting".into());
     }
     (Grade::Behaviour, String::new())
+}
+
+/// What makes hunk `h` of `rel` high, if anything: (why, as the review shows it — a pack's match quotes the
+/// line; the rule, by its name alone — `rule`).
+fn high(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules) -> Option<(String, String)> {
+    // (a permission: `mode_change` gives only the modes that matter)
+    if let Some((_, new)) = &h.mode {
+        let what = if new == "120000" { "now a symlink" } else { "now executable" };
+        return Some((what.into(), what.into()));
+    }
+    if let Some(e) = rules.risky.iter().find(|e| path_matches(rel, e)) {
+        let why = format!("{} (.tarae.toml)", e.trim());
+        return Some((why.clone(), why));
+    }
+    let parts: Vec<&std::ffi::OsStr> = Path::new(rel).iter().collect();
+    if let Some(&i) = crate::sandbox::protected_at(&parts).first() {
+        let why = format!("{} (protected)", parts[i].to_string_lossy());
+        return Some((why.clone(), why));
+    }
+    for p in rules.packs_of(lang) {
+        for line in h.removed.iter().chain(&h.added) {
+            if let Some((k, m)) = p.risky.iter().enumerate().find_map(|(k, re)| Some((k, re.find(line)?))) {
+                return Some((
+                    format!("{} ({} pack)", m.as_str().trim(), p.name),
+                    format!("{} pack #{k}", p.name),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The rule that makes hunk `h` of `rel` high, by its name alone — never the text it matched (the review
+/// record keeps it): `now executable`, a `.tarae.toml` entry, a protected name, a pack's pattern by its place
+/// in the pack's list (`bash pack #1`). None: nothing makes it high.
+pub fn rule(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules) -> Option<String> {
+    high(rel, lang, h, rules).map(|(_, rule)| rule)
 }
 
 /// `h` of `rel` graded, with its keys.

@@ -209,6 +209,18 @@
       "doing": "waiting",
       "id": "s0",
       "name": "main",
+      "review": {
+        "active_s": 0,
+        "changes": 1,
+        "decided": 0,
+        "in_hand": {
+          "file": "",
+          "line": 1,
+          "s": 0
+        },
+        "kind": "edit",
+        "looked": null
+      },
       "root": "tarae-uistate-main",
       "sandbox": {
         "abi": 8,

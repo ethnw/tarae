@@ -683,7 +683,7 @@ pub fn read_record(dir: &Path) -> Vec<Value> {
 }
 
 /// The record's writes on a worker not done yet — tarae's way out waits for them (`wait_written`).
-static WRITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static WRITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The most tarae's way out waits for the record's writes.
 const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(1);

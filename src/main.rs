@@ -125,6 +125,7 @@ mod repotrust;
 mod restart;
 mod restore;
 mod reviewer;
+mod reviews;
 mod risk;
 mod runhomes;
 mod runtime;
@@ -370,6 +371,16 @@ fn main() -> Result<()> {
                 log::line("cards", "info", &format!("record pruned: {}", gone.join(", ")))
             }
             Err(e) => log::line("cards", "warn", &format!("{}: pruning the record: {e}", dir.display())),
+            _ => {}
+        });
+    }
+    // The review record's months past `cards::KEEP_MONTHS` (a worker's)
+    if let Some(dir) = editor.reviews_dir.clone() {
+        editor.events.jobs().background(move || match reviews::prune(&dir, clock::system()) {
+            Ok(gone) if !gone.is_empty() => {
+                log::line("reviews", "info", &format!("record pruned: {}", gone.join(", ")))
+            }
+            Err(e) => log::line("reviews", "warn", &format!("{}: pruning the record: {e}", dir.display())),
             _ => {}
         });
     }

@@ -599,6 +599,7 @@ impl Editor {
             Some(sel) => doc.apply_with(&tx, sel),
             None => doc.apply(&tx),
         }
+        doc.own.not_yours();
         doc.commit_undo(before);
         // A plugin's own edit isn't reported to `changed` subscribers (no plugin and edit calling each other)
         let (id, v) = (doc.id, doc.version());

@@ -148,6 +148,12 @@ side git · 4 rows · in hand git:src/term.rs
     its review was of.
   - `news`: it ended behind, and the session hasn't been in front since.
 
+  And `review`, its review under way as the review record follows it (`reviews.rs`; an edit's review if one
+  is up, else its code review's; absent: none): `kind` (`edit` · `turn` · `uncommitted` · `branch` ·
+  `replay`), `changes` seen so far, `decided` (answered, or undone), `looked` (`{looked, high}`, a code review
+  in front; else null), `active_s` (on screen with you there), `in_hand` (`{file, line, s}`). Never at Claude's
+  level.
+
   Claude's level keeps every session's state and counts, its own session's too, and never the reviewer's
   words (`verdict`, `why`, `of`). Nothing of the reviewer reaches the author until you send its findings
   (`space v s`), and its verdict never does; its `reviewer:` line says when findings aren't sent yet, and how
@@ -375,6 +381,7 @@ A snapshot is one question. An event stream tells you about change without polli
 | `card-gone` | id, how: `answered y` · `declined` · `lost` · `replaced` · `turn-ended` | explicit, at `offer_finished`/`offer_dismiss`/`asking_sync`/`drop_cards` (a diff can't tell how) |
 | `session` | id, doing old → new, `reviewer` (its reviewer reading: `idle → idle · reviewing`) | diff |
 | `reviewer` | session, `reviewer_run` (above), `was`: its state before (`reading` → `done`); only when it starts, ends or stops | diff |
+| `review` | session, `what`: `began` (kind) · `decided` (an edit review's change answered: file, its number in the review, outcome) · `ended` (changes, `active_ms`, outcomes counted) | explicit, at `reviews.rs`'s frame and ends |
 | `turn` | session, `started` / `ended` (`chat` Done), calls, edits | explicit |
 | `run` | id, `queued` · `started` · `waiting <what>` · `ended <how> <took>` | explicit, beside the `RunTrace` steps phase 0 already logs (and `Waiting::line`) |
 | `toast` | the toast | diff |

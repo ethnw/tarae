@@ -1949,12 +1949,24 @@ impl Editor {
 
     // ── Applying edits (shared by code actions, rename, format) ─────────────
 
-    /// TextEdit[] → one transaction (one undo per doc). Ranges use this server's position encoding.
+    /// TextEdit[] → one transaction (one undo per doc). Ranges use this server's position encoding. A
+    /// server's edit — never yours, though a key of yours asked for it (`Own::not_yours`).
     pub(crate) fn apply_text_edits(
         &mut self,
         doc_id: DocId,
         enc: Encoding,
         edits: &[Value],
+    ) -> Result<(), String> {
+        self.apply_edits(doc_id, enc, edits, false)
+    }
+
+    /// `apply_text_edits`, `yours` or not (`space /`'s replace: what you typed).
+    pub(crate) fn apply_edits(
+        &mut self,
+        doc_id: DocId,
+        enc: Encoding,
+        edits: &[Value],
+        yours: bool,
     ) -> Result<(), String> {
         let doc = self.docs.iter_mut().find(|d| d.id == doc_id).ok_or("buffer closed")?;
         if doc.loading {
@@ -1963,6 +1975,9 @@ impl Editor {
         let changes = text_edit_changes(&doc.text, enc, edits);
         let before = doc.snapshot();
         doc.apply(&crate::transaction::Transaction::new(changes));
+        if !yours {
+            doc.own.not_yours();
+        }
         doc.commit_undo(before);
         Ok(())
     }
@@ -2618,7 +2633,12 @@ impl Editor {
 
     /// Format-on-save's edits: only on the lines changed since the file was saved
     /// (`editdiff::format_only_touched`) — the rest of the file stays as it is. One transaction, one undo.
-    fn apply_format_on_save(&mut self, doc_id: DocId, enc: Encoding, edits: &[Value]) -> Result<(), String> {
+    pub(crate) fn apply_format_on_save(
+        &mut self,
+        doc_id: DocId,
+        enc: Encoding,
+        edits: &[Value],
+    ) -> Result<(), String> {
         let doc = self.docs.iter_mut().find(|d| d.id == doc_id).ok_or("buffer closed")?;
         // (the saved text gone from the undo history: the formatter's edits as they are)
         let Some(saved) = doc.saved_text().filter(|_| !doc.loading) else {
@@ -2634,6 +2654,7 @@ impl Editor {
         };
         let before = doc.snapshot();
         doc.apply(&crate::transaction::Transaction::new(vec![change]));
+        doc.own.not_yours();
         doc.commit_undo(before);
         Ok(())
     }

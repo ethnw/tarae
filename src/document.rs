@@ -16,6 +16,102 @@ use crate::selection::{Range, Selection};
 use crate::syntax::Syntax;
 use crate::transaction::{Assoc, Edit, Transaction};
 
+thread_local! {
+    /// While a key or paste is handled (`Editor::handle_key`, `handle_paste`): the documents it edited.
+    static INPUT: std::cell::RefCell<Option<Vec<DocId>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A key or paste begins to be handled — false: one already is (a macro's keys are the key's that replays it).
+pub fn input_begin() -> bool {
+    INPUT.with(|i| {
+        let mut i = i.borrow_mut();
+        let begun = i.is_none();
+        i.get_or_insert_with(Vec::new);
+        begun
+    })
+}
+
+/// The key or paste `input_begin` began is handled: the documents it edited.
+pub fn input_end() -> Vec<DocId> {
+    INPUT.with(|i| i.borrow_mut().take()).unwrap_or_default()
+}
+
+/// What a code review needs to tell your own edits from the rest (`reviews.rs`) — kept only while a review
+/// follows the document: the changes it last found (at that version; their byte ranges, moved with every
+/// edit since), and where your own keys and pastes changed it since. An edit made on a key of yours but not by
+/// you — a reset (`space v u`, the git tab's `d`), a reload, an accepted edit review, a checkpoint's step, a
+/// formatter's, a server's or a plugin's — says so right after it (`not_yours`).
+#[derive(Clone, Debug, Default)]
+pub struct Own {
+    pub found: Option<(u64, Vec<std::ops::Range<usize>>)>,
+    pub typed: Vec<std::ops::Range<usize>>,
+    /// The edits of the key or paste being handled · how many of them came before the last one.
+    now: Vec<std::ops::Range<usize>>,
+    last: usize,
+}
+
+impl Own {
+    /// A review follows the document.
+    pub fn followed(&self) -> bool {
+        self.found.is_some()
+    }
+
+    /// Edit `tx` was made in document `id`: every range moves with it, and while a key or paste is handled its
+    /// ranges are that key's.
+    fn edited(&mut self, id: DocId, tx: &Transaction) {
+        if !self.followed() {
+            return;
+        }
+        let map = |r: &mut std::ops::Range<usize>| {
+            let start = tx.map_pos(r.start, Assoc::After);
+            *r = start..tx.map_pos(r.end, Assoc::Before).max(start);
+        };
+        let found = self.found.iter_mut().flat_map(|f| f.1.iter_mut());
+        found.chain(&mut self.typed).chain(&mut self.now).for_each(map);
+        let keyed = INPUT.with(|i| {
+            let mut i = i.borrow_mut();
+            let docs = i.as_mut()?;
+            if !docs.contains(&id) {
+                docs.push(id);
+            }
+            Some(())
+        });
+        if keyed.is_some() {
+            self.last = self.now.len();
+            self.now.extend(tx.changed());
+        }
+    }
+
+    /// An edit that changed nothing: it is the last one, with no ranges.
+    fn unchanged(&mut self) {
+        self.last = self.now.len();
+    }
+
+    /// The last edit wasn't yours, though a key of yours made it.
+    pub fn not_yours(&mut self) {
+        self.now.truncate(self.last);
+    }
+
+    /// The key or paste is handled: its edits are yours (one range for those that touch).
+    pub fn input_end(&mut self) {
+        let now = std::mem::take(&mut self.now);
+        self.last = 0;
+        if !self.followed() || now.is_empty() {
+            return;
+        }
+        self.typed.extend(now);
+        crate::sorting::by_key(&mut self.typed, |r| (r.start, r.end));
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.typed.len());
+        for r in self.typed.drain(..) {
+            match merged.last_mut() {
+                Some(m) if r.start <= m.end => m.end = m.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        self.typed = merged;
+    }
+}
+
 /// One attached server's side of a document: what it hasn't been sent yet — each server has its own, since
 /// each gets ready on its own time and may count columns differently.
 pub struct Link {
@@ -207,6 +303,8 @@ pub struct Document {
     /// A scan for this version is out (on a worker).
     pub conflicts_asked: Option<u64>,
     pub git_version: u64,
+    /// Where your own keys and pastes changed it since a code review last found its changes (`Own`).
+    pub own: Own,
     /// Display name of an unnamed buffer (tutorial etc.) · disposable (quit isn't blocked as "unsaved").
     pub title: Option<String>,
     pub throwaway: bool,
@@ -313,6 +411,7 @@ impl Document {
             conflicts_of: u64::MAX,
             conflicts_asked: None,
             git_version: u64::MAX,
+            own: Own::default(),
             title: None,
             throwaway: false,
             wrap: None,
@@ -379,6 +478,8 @@ impl Document {
     /// Change the text; the selection is whatever the caller decided.
     pub fn apply_with(&mut self, tx: &Transaction, sel: Selection) {
         if tx.is_empty() {
+            // (an edit of nothing is the last one too: a `not_yours` after it drops nothing of yours)
+            self.own.unchanged();
             self.set_selection(sel);
             return;
         }
@@ -402,6 +503,7 @@ impl Document {
         for (_, m) in &mut self.marks {
             *m = tx.map_selection(m);
         }
+        self.own.edited(self.id, tx);
         self.set_selection(sel);
         self.next_version += 1;
         self.version = self.next_version;
@@ -529,8 +631,12 @@ impl Document {
         // The trees follow the text as one edit (the span between what's common at its ends) — what didn't
         // change keeps its colors at once, the rest within a reparse, from the tree as it is: nothing kept
         // per undo step (#36). (A parse under way gets the edit too, as for a key.)
-        let edit = crate::disk::minimal_change(&self.text, &snap.text)
-            .map(|c| crate::syntax::input_edit(&self.text, c.from, c.to, &c.insert));
+        let change = crate::disk::minimal_change(&self.text, &snap.text);
+        let edit = change.as_ref().map(|c| crate::syntax::input_edit(&self.text, c.from, c.to, &c.insert));
+        // (`u` and `U` are keys of yours too: what they change is yours as a key's edit is)
+        if let Some(c) = change.filter(|_| self.own.followed()) {
+            self.own.edited(self.id, &Transaction::new(vec![c]));
+        }
         self.text = snap.text;
         self.selection = snap.selection;
         self.version = snap.version;

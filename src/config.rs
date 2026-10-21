@@ -83,6 +83,9 @@ pub struct EditorConfig {
     pub session_worktrees: String,
     /// Count which features get used, on this machine only (`features.rs`) — only your own config turns it on.
     pub features_count: bool,
+    /// Keep how long each reviewed change was looked at and what it ended as (`reviews.rs`:
+    /// `$state/reviews/`) — only your own config sets it (`trust::YOURS_ONLY`).
+    pub review_record: bool,
     /// A command (its words) run once a session's checkout is removed (empty = none; `ended.rs`).
     pub session_ended: Vec<String>,
     /// Folders of a session's checkout kept in the main checkout when it ends (`sessionkeep.rs`).
@@ -150,6 +153,7 @@ impl Default for EditorConfig {
             scrollbar: true,
             session_worktrees: String::new(),
             features_count: false,
+            review_record: true,
             session_ended: Vec::new(),
             session_keep: Vec::new(),
             theme: "default".into(),

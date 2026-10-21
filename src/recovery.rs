@@ -681,6 +681,7 @@ fn put(ed: &mut Editor, id: DocId, f: &Found) {
         let tx = crate::transaction::Transaction::new(vec![change]);
         let sel = tx.map_selection(doc.selection());
         doc.apply_with(&tx, sel);
+        doc.own.not_yours();
         doc.commit_undo(before);
     }
     let name = doc.display_name_short();

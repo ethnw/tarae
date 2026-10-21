@@ -614,6 +614,8 @@ pub(crate) fn reload_text(doc: &mut crate::document::Document, body: &Rope) -> b
     doc.apply_with(&tx, sel);
     doc.commit_undo(before); // u = back to before the disk change
     doc.mark_saved();
+    // (not your edit, though `:reload` is your key)
+    doc.own.not_yours();
     true
 }
 

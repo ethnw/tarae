@@ -304,3 +304,17 @@ fn a_submodule_file_takes_the_submodules_recorded_repository() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A test's git reads no global ignore, not even from its default place, which git reads with no config at all
+/// (`~/.config/git/ignore`): with a stand-in home whose ignore lists `.env`, `.env` isn't ignored.
+#[test]
+fn a_tests_git_reads_no_global_ignore_from_its_default_place() {
+    let dir = temp("xdg");
+    git_in(&dir, &["init", "-q"]);
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".config/git")).unwrap();
+    std::fs::write(home.join(".config/git/ignore"), ".env\n").unwrap();
+    let out = base(&dir).env("HOME", &home).args(["check-ignore", "-q", ".env"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "not ignored: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).ok();
+}

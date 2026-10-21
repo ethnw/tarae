@@ -1301,6 +1301,7 @@ pub fn close_review(ed: &mut Editor) {
     {
         kill(pid);
     }
+    crate::reviews::edit_ended(ed, &rev, true, false);
     if let Some(cb) = rev.on_done.take() {
         cb(ed, false);
     }
@@ -1930,6 +1931,7 @@ fn finish(ed: &mut Editor) {
         }
     }
     let applied = apply_accepted(ed, &rev);
+    crate::reviews::edit_ended(ed, &rev, false, applied);
     // Answered here, the keys go back to the chat it took them from — as its Esc gives them (they stayed in
     // the code: `keys → pane#29 (commands)` after an edit review's `y`)
     if rev.from_chat
@@ -1970,7 +1972,12 @@ fn apply_accepted(ed: &mut Editor, rev: &Review) -> bool {
         })
         .collect();
     let n = ranges.len();
-    ed.with_group(|cx| cx.editor.doc_mut().apply_with(&tx, Selection::new(ranges, 0)));
+    ed.with_group(|cx| {
+        let doc = cx.editor.doc_mut();
+        doc.apply_with(&tx, Selection::new(ranges, 0));
+        // (on your `y`, Claude's lines — not your edit)
+        doc.own.not_yours();
+    });
     ed.set_status(format!("claude: applied {n} change(s) — u to undo"));
     true
 }

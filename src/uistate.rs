@@ -801,6 +801,9 @@ pub struct SessionState {
     /// Its reviewer's last run, how it went (`ReviewerState`) — while it reads and after, whether or not its
     /// review is open (cardburden 7: a driver read the findings off the rail).
     pub reviewer_run: Option<ReviewerState>,
+    /// Its review under way as the review record follows it (`reviews::Run`): changes seen, decided, time on
+    /// them, the one in hand — None: none.
+    pub review: Option<crate::reviews::Run>,
     pub cards: usize,
     pub rebasing: Option<String>,
     pub reloaded: usize,
@@ -1173,6 +1176,7 @@ impl Editor {
             doing: self.doing_said(l),
             reviewer: crate::reviewer::session_said(self, l),
             reviewer_run: ReviewerState::of(self, l),
+            review: crate::reviews::Run::of(self, l, is_front),
             cards: if is_front { self.offers.len() + l.parked.len() } else { l.parked.len() },
             rebasing: l.rebase.as_ref().map(|r| r.said()),
             reloaded: l.reloaded,
@@ -1380,6 +1384,9 @@ impl UiState {
                 if let Some(r) = &s.reviewer_run {
                     v["reviewer_run"] = r.json();
                 }
+                if let Some(r) = &s.review {
+                    v["review"] = r.json();
+                }
                 if let Some(r) = &s.rebasing {
                     v["rebasing"] = json!(r);
                 }
@@ -1502,6 +1509,9 @@ impl UiState {
             }
             if let Some(r) = &s.reviewer_run {
                 out.push(format!("reviewer {}: {}", s.id, r.text()));
+            }
+            if let Some(r) = &s.review {
+                out.push(format!("review {}: {}", s.id, r.text()));
             }
             if let Some(g) = &s.sandbox {
                 out.push(format!("sandbox {}: {}", s.id, g.line_after_label()));

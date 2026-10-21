@@ -549,7 +549,7 @@ fn quote(question: &str) -> String {
 }
 
 /// One file from `from` to `to` over what it is now (None = no file). (changed, changes kept).
-fn file(
+pub(crate) fn file(
     ed: &mut Editor,
     path: &Path,
     from: Option<&Rope>,
@@ -594,6 +594,8 @@ fn file(
         let doc = cx.editor.doc_mut();
         let sel = tx.map_selection(doc.selection());
         doc.apply_with(&tx, sel);
+        // (a turn stepped back on your key — not your edit)
+        doc.own.not_yours();
     });
     // The disk matches again (unsaved edits of the user's stay unsaved)
     if clean {

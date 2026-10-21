@@ -400,6 +400,7 @@ impl Editor {
             insert: shown(text),
         }]);
         doc.apply(&tx);
+        doc.own.not_yours();
         // (the plugin's text, not an edit of yours: nothing to save)
         doc.mark_saved();
         if following {

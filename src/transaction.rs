@@ -109,6 +109,14 @@ impl Transaction {
         edits
     }
 
+    /// What each change wrote, in the text after it: byte ranges (empty where it only deleted).
+    pub fn changed(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.changes.iter().enumerate().map(|(k, c)| {
+            let start = (c.from as isize + if k == 0 { 0 } else { self.shift[k - 1] }) as usize;
+            start..start + c.insert.len()
+        })
+    }
+
     pub fn map_pos(&self, pos: usize, assoc: Assoc) -> usize {
         // The changes wholly before `pos` are a prefix (sorted, apart): they shift it. An insertion right at
         // it counts as before only with `After`; one that ends at it after deleting counts always.

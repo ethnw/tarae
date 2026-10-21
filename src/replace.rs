@@ -199,7 +199,7 @@ impl crate::editor::Editor {
                 skipped.push(format!("{} changed", f.path.display()));
                 continue;
             }
-            match self.apply_text_edits(id, Encoding::Utf8, &f.edits) {
+            match self.apply_edits(id, Encoding::Utf8, &f.edits, true) {
                 Ok(()) => (done, matches) = (done + 1, matches + f.count),
                 Err(e) => skipped.push(format!("{}: {e}", f.path.display())),
             }

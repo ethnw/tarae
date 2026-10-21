@@ -57,6 +57,9 @@ pub struct Session {
     pub review: Option<crate::llm::Review>,
     /// The code review in progress (`codereview.rs`).
     pub code_review: Option<crate::codereview::CodeReview>,
+    /// Its edit review and code review as the review record follows them — time on each change, what each
+    /// ended as (`reviews.rs`).
+    pub reviews: crate::reviews::Watches,
     /// The review being opened is for the reviewer (`space v c`) — asked once it's open; for the board
     /// (`space v C`) when `review_board` too.
     pub review_ask: bool,
@@ -358,6 +361,7 @@ impl Session {
             caps_asked: 0,
             sandbox: None,
             proxy_id,
+            reviews: Default::default(),
         }
     }
 

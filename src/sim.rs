@@ -25,6 +25,7 @@ use crate::editor::Editor;
 use crate::event::Event;
 
 mod board;
+mod reviews;
 mod sessions;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

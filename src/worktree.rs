@@ -1932,6 +1932,8 @@ impl Editor {
         if self.session.id == id {
             self.session_switch(0);
         }
+        // (its reviews under way kept as quitting keeps them — graded, each change as it ended)
+        self.with_session(id, Editor::reviews_end);
         let i = self.sessions.iter().position(|l| l.id == id)?;
         let session = self.sessions.remove(i);
         // (the proxy's answers for it go with it)

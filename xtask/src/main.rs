@@ -24,6 +24,9 @@
 //!   [`trace`]).
 //! - `cards [PATH …]` — the card record (`$state/cards/`) as cardauto's tables: the P3 table, what P3 removes,
 //!   its wrong yeses with their commands, the stamp rate, runs refused with no card (see [`cards`]).
+//! - `reviews [PATH …]` — the review record (`$state/reviews/`) as the review lens measures it: time per change by
+//!   grade and size, what changes ended as, lens on and off, each high-risk rule's marks and what came of them
+//!   (see [`reviews`]).
 //! - `turns [PATH …]` — the call-order record (`$state/calls/`) as code mode's baseline: turns by kind, round
 //!   trips in a row, which tools follow which, large results, the gate for a `code` tool (see [`turns`]).
 //! - `claude-stub serve|drive|summary` — what the `claude` program touches, measured against a fake API: the
@@ -51,6 +54,7 @@ mod perf;
 // (tarae's own: a pty close-on-exec from the start)
 #[path = "../../src/pty.rs"]
 mod pty;
+mod reviews;
 mod scenes;
 mod shot;
 mod stream;
@@ -75,11 +79,12 @@ fn main() {
         Some("trace") => trace::run(&args[1..]),
         Some("claude-stub") => claudestub::run(&args[1..]),
         Some("cards") => cards::run(&args[1..]),
+        Some("reviews") => reviews::run(&args[1..]),
         Some("turns") => turns::run(&args[1..]),
         Some("compat") => compat::run(&args[1..]),
         Some("glyphs") => glyphs::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | turns [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | reviews [PATH …] | turns [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
                 .into(),
         ),
     };

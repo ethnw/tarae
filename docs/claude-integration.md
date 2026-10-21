@@ -1570,6 +1570,23 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   goes only to the changes new since the mark and says how much (`2 lines new · 1 line taken out since you
   marked it viewed`). `space v m` marks it again as it is now. `space v q` ends the review (with files not
   viewed it asks first, on a card naming them), and the gutter goes back to comparing against the index
+- Every review — this one, a turn's, an edit's y/n — is kept in the review record, on this machine only:
+  `reviews/<month>.jsonl` in tarae's state folder, a line per change you saw, one per finding of the
+  reviewer's and one per review. A line has the change's file, an id (an HMAC of its file and lines under a key
+  kept beside the record, so a short line can't be guessed back from it; none at all for a file named like a
+  key or a line that looks like a token — never the code), its counts, its grade and, high, the rule by name
+  (`bash pack #1`, never what it matched), how long it was on screen with you there (a key, click, wheel or paste within 20 s; lunch and time
+  in another session don't count), how long it was in hand, and what it ended as: accepted, rejected, undone
+  (`space v u`, the git tab's `d`, the palette's "Undo this change"), edited (your own keys or pastes on its
+  lines, or taking it out by hand — never a reload, a formatter, a server's or a plugin's edit, an accepted
+  edit review or `space u`), commented, looked at, viewed or left (an edit review closed or open at quit
+  applies nothing: left; a session ended keeps its reviews as quitting does; `:restart` ends the reviews under
+  way, each said `restarted`, and a review it opens again is a new one). A file made executable or a symlink
+  is a change line of its own, by its rule's name. Past about 250 alike changes in one file (the same lines
+  changed the same way), its changes are no longer told apart: each says `unpaired`, as it was then.
+  `cargo xtask reviews` sums it up; `tarae state` says the review under way (`review s1: turn · 3 changes ·
+  1 decided · active 1m 12s · in hand a.rs:10 (18s)`). `review.record = false` in your own config keeps
+  nothing
 
 ### A second Claude reviews your changes
 

@@ -327,8 +327,13 @@ impl Editor {
         self.popup = Some(lines);
     }
 
-    /// `d` on a hunk in the git tab (`space g d` from the code) — put its index lines back (one undo step).
+    /// `d` on a hunk in the git tab (`space g d` from the code, `space v u`, the palette's "Undo this change")
+    /// — put its index lines back (one undo step). A code review's record takes it as taken back, whichever.
     pub fn git_reset_hunk(&mut self) {
+        crate::reviews::undo_asked(self, Self::git_reset_hunk_now);
+    }
+
+    fn git_reset_hunk_now(&mut self) {
         if let Some(of) = self.doc().diff_of.clone() {
             return self.set_warning(format!("these are changes against {of} — :diff-off first"));
         }
@@ -343,6 +348,8 @@ impl Editor {
             }]);
             let sel = crate::selection::Selection::point(tx.map_pos(from, crate::transaction::Assoc::Before));
             doc.apply_with(&tx, sel);
+            // (on your key, not your edit — a review counts it taken back, not `edited`)
+            doc.own.not_yours();
         });
         self.note("hunk reset");
     }

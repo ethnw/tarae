@@ -70,8 +70,10 @@ impl World {
     }
 }
 
-/// The scenario's own git (the world's changes, not tarae's): the user's global and system settings left out —
-/// two runs of a seed see the same git, wherever they run — and no hook, the repository's or anyone's.
+/// The scenario's own git (the world's changes, not tarae's): the user's global and system settings left out, and
+/// their global ignore and attributes in the default place too (`$XDG_CONFIG_HOME/git/`, read with no config
+/// at all) — two runs of a seed see the same git, wherever they run — and no hook, the repository's or anyone's.
+/// The board's and the review record's scenarios' too (`sim/board.rs`, `sim/reviews.rs`).
 pub(super) fn git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
         .args(["-c", "core.hooksPath=/dev/null", "-C"])
@@ -79,6 +81,7 @@ pub(super) fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("XDG_CONFIG_HOME", "/dev/null")
         .env("GIT_AUTHOR_DATE", DATE)
         .env("GIT_COMMITTER_DATE", DATE)
         .output()

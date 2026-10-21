@@ -137,6 +137,13 @@ pub struct Choice {
 }
 
 impl Restart {
+    /// Tests: one gone ahead, the loop ending to run `bin`.
+    #[cfg(test)]
+    pub fn ready_to(bin: PathBuf) -> Restart {
+        let stage = Stage::Ready(bin);
+        Restart { id: 0, build: false, stage, target: None, kept: None, anyway: Vec::new() }
+    }
+
     /// The binary to run once the loop has ended.
     pub fn ready(&self) -> Option<&Path> {
         match &self.stage {

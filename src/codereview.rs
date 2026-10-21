@@ -3162,6 +3162,8 @@ pub fn close(ed: &mut Editor) {
 
 /// The review ends (closed, or another one taking its place).
 fn end(ed: &mut Editor) {
+    // (the review record: each change's time, grade and what it ended as — read before the review goes)
+    crate::reviews::code_ended(ed);
     let Some(r) = ed.session.code_review.take() else { return };
     // (its reviewer's members still waiting their turn never start)
     crate::reviewer::review_ended(ed, r.started);
