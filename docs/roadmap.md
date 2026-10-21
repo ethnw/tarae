@@ -426,7 +426,7 @@ main that has what it waits for, and the user says go:
   value — `Session.at`, the six flags gone; one search and selection per pane — the user's friction 84 replayed as a
   test; `C-w h/j/k/l` from every surface, said where nothing is that way; the `C-w`-inside-a-terminal decision in
   the plan's §2.6), view P3 (`1b988324`). Order from here: design pass 2's D2/D3 (under way) → **P2b** surfaces as
-  leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program; part 1 `e6d8891c`: the tree holding every surface, the layout from it, hops of any kind, zoom, the code splits' sizes, `C-w` inside a terminal's program, restart and the state's panes) → **P2c** text surfaces
+  leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program; part 1 `e6d8891c`: the tree holding every surface, the layout from it, hops of any kind, zoom, the code splits' sizes, `C-w` inside a terminal's program, restart and the state's panes; part 2 `e131542c`: floating panes under the one focus — `At::Float`, the pane under remembered —, the tests panel as two linked panes under one header, `C-w H J K L`/`t`/`w` over every kind, the layout kept across quit and start in `$state/layouts.json`, the divider lit beside the pane with the keys; four panes' key-to-frame 0.48 ms) → **P2c** text surfaces
   as documents (the user, 2026-10-21: the chat's transcript, the run panels' output and later the terminal as
   buffers under the editor's keys — view mode becomes normal mode on a read-only document) → **P3** panes of their own (the tests panel
   the first linked group) → **P3b** tabs and the task list → the terminal line: several terminals → the engine →
