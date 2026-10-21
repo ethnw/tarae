@@ -3775,7 +3775,7 @@ pub fn confined(mut p: Policy) -> Policy {
     let key = policy_key(&p);
     let made = keeper::ready(&p.root, Some(&key), ns).and_then(|k| {
         let made = crate::landlock::abi().and_then(|abi| {
-            linux::confine(&p, abi, linux::audit_readable(abi), true, Some(&k), linux::served_here())
+            linux::confine(&p, abi, linux::audit_readable(abi), true, Some(&k), linux::served_here(k.ns.user))
         });
         let mut c = made.map_err(|e| format!("the sandbox couldn't be made: {e}"))?;
         c.keeper = Some(k);

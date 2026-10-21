@@ -437,9 +437,18 @@ Not kept:
 
 | Tier | When | What it means |
 |---|---|---|
-| own | unprivileged user namespaces work, and tarae serves a run's sockets | the session's own processes, loopback, IPC, `/dev/shm`, terminals; where `/proc` is masked (Docker's default) no PID namespace: processes shared (command lines, priority) |
+| own | unprivileged user namespaces work, and tarae serves a run's sockets (at Yama's `ptrace_scope` 2 too) | the session's own processes, loopback, IPC, `/dev/shm`, terminals; where `/proc` is masked (Docker's default) no PID namespace: processes shared (command lines, priority) |
 | host | no user namespaces (Ubuntu's restriction without tarae's profile; a container), sockets served | files and signals kept; loopback this machine's, other sessions' sockets refused; processes, SysV IPC, `/dev/shm` shared |
-| offline | tarae can't serve a run's sockets (Yama 2/3, inside another seccomp listener), with the session's namespaces or none | no network; with the namespaces its own loopback, IPC, `/dev/shm`, terminals; without, no socket at all and those shared |
+| offline | tarae can't serve a run's sockets (Yama 3, Yama 2 without the session's namespaces, inside another seccomp listener, `pidfd_getfd` refused), with the session's namespaces or none | no network; with the namespaces its own loopback, IPC, `/dev/shm`, terminals; without, no socket at all and those shared |
+
+Yama's `ptrace_scope` 2 asks for `CAP_SYS_PTRACE` in a run's user namespace, and tarae holds every capability in
+the session's, which it made: there it serves a run's sockets (tier own; the tier probe tries it on a run of its own
+keeper's, test: `sandbox::tier::tests::at_yama_2_the_probe_serves_the_sessions_namespaces` in `cargo xtask linux` on a
+scope 2 machine). Without the session's namespaces (host) it can't, and the session is offline, said with the way
+out: user namespaces. **tarae gets no capability for it, and no privileged helper does it** (user decision
+2026-10-18): `CAP_SYS_PTRACE` in this system's namespace would let tarae — and whatever took it over — read and
+write every process here, root's too, which is what scope 2 is set to stop. Only if a user asks, and then as a piece
+of its own.
 
 The tier is said to Claude once a conversation (test: `sandbox::golden::the_report_says_the_tier_once`), to the
 run as `TARAE_SANDBOX_STATUS` (test: `sandbox::golden::the_status_is_the_tier_and_the_abi`), and to you (the
@@ -483,6 +492,12 @@ Kept:
   test: `sandbox::golden::the_policy_is_pinned` (rule only)
 
 Not kept:
+- **Your other programs can trace a session's runs** (Linux): in the session's namespaces at Yama's `ptrace_scope`
+  0, 1 and 2 — Yama asks for `CAP_SYS_PTRACE` in a run's user namespace (at 1 as one way past its descendants-only
+  rule, at 2 as the only way), and any process of yours owns that namespace as tarae does, so it reaches a run there
+  as tarae's supervisor does; without them (host) at 0 any process of yours, at 1 only tarae and the processes it
+  descends from (your shell); at 3 none. True of every user namespace a program of yours makes; tarae opens nothing more (the rule:
+  `sandbox::supervisor::tests::reaches_answers_as_yama_does`).
 - **Command lines and priority**: visible and lowerable (renice) where processes are shared — Linux without a PID
   namespace of the session's (host, and own or offline where `/proc` is masked). (macOS: neither — the profile's
   default refuses `setpriority`, a run's own too, and §1.4.)

@@ -49,6 +49,7 @@ files and decided each address it reached. It left four things open:
 | D-e | ~~Tier host goes out by the same swap~~ (2026-10-07) — superseded: tier host goes out by the proxy's variable and the pair (step 5; kept in 6f, F2) |
 | D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused without one (2026-10-07) |
 | D-g | **No serving by copies** (2026-10-17): where `pidfd_getfd` is refused (Docker's default profile, no `CAP_SYS_PTRACE`) tarae can't serve a run's calls, and the session is tier offline, said with the way out (`guarantees::PIDFD_REFUSED`: `--cap-add SYS_PTRACE`). 6f′'s copies went: reopening a passed descriptor through `/proc/<tid>/fd/<n>` as tarae, with the flags read from `fdinfo` a moment before, let a thread that swapped the descriptor for an `O_PATH` of a file outside the sandbox receive it read-write, past Landlock; and its `accept`, signals and late close were tarae's emulation, not the kernel's. A session's namespaces always come with their netns (N1 went with it) |
+| D-h | **Yama's `ptrace_scope` 2** (2026-10-18): served per keeper — in the session's user namespace (tarae owns it, and Yama asks the capability in the run's) as the tier probe's run was, after its exec; without one offline, said with the way out (`guarantees::YAMA_2_WITHOUT_NS`). No capability on tarae, no privileged helper (user decision) — §Yama's `ptrace_scope` 2 |
 
 ## The shape
 
@@ -230,7 +231,7 @@ The keeper's `Started` message carries the run's pidfd: tarae reads its own numb
 namespace) and kills a run it can't number through it. It goes no further than that — what `Keeper::start` returns
 (`keeper::Started`) has no pidfd since 6f′ (it was the handoff's), and the supervisor opens a pidfd of its own per
 served call (`Caller::open`) for `pidfd_getfd`. Yama 1 holds: tarae → keeper → run, and what runs leave stays below
-the keeper.
+the keeper — and in the session's user namespace Yama 1 and 2 let tarae through wherever a run went (D-h).
 
 ### What runs leave
 
@@ -448,12 +449,34 @@ narrowed to it: refused, said, nothing taken in; the sender's own session takes 
 ### Where `pidfd_getfd` is refused (D-g)
 
 Docker's default profile refuses `pidfd_getfd` without `CAP_SYS_PTRACE` (a dev container started the usual way), so
-the supervisor can't take a run's socket to make a call on it. The probe (`supervisor::unavailable`) says so —
+the supervisor can't take a run's socket to make a call on it. The probe (`supervisor::served`, its system part) says so —
 `guarantees::PIDFD_REFUSED`, the way out with it — and the session is tier offline: its runs' filter is `Plain`, no
 socket at all but netlink's routing one (no network, no port on this machine, not even the project's unix sockets).
 The panel says it in two rows (`not served: pidfd_getfd refused · --cap-add SYS_PTRACE serves the calls`); Claude's
 report, `tarae state` and the log whole. With `--cap-add SYS_PTRACE` the session is served (tier host: Docker's
 profile refuses new user namespaces too).
+
+### Yama's `ptrace_scope` 2 (D-h)
+
+The supervisor's two calls on a run — opening `/proc/<tid>/mem` (`Caller::open`) and `pidfd_getfd` (`Caller::fd`) —
+are the kernel's `PTRACE_MODE_ATTACH`, the only mode Yama narrows; what else it reads of a run (`fd`, `cwd` and `ns`
+links, `fdinfo`, `status`, `comm`, `net`) is `READ` or unguarded. At scope 2 Yama asks for `CAP_SYS_PTRACE` in the
+run's user namespace (`security/yama/yama_lsm.c`, the same since 5.14), and the owner of a user namespace holds every
+capability in it: tarae, who made the session's, is let through for a run there or in one below it (7d's covers),
+undumpable or not. So `supervisor::served` is per keeper: with the session's user namespace served, without not
+(`guarantees::YAMA_2_WITHOUT_NS`, the way out said: user namespaces); scope 3 refuses all. Not computed but tried:
+where scope 2 decides (`supervisor::asks_session`), the tier probe's keeper holds a `sleep`, and once it has exec'd
+(`comm`: before its exec a run is a copy of its keeper — not dumpable, its memory the keeper's, which the supervisor
+never reads) tarae makes both calls on it (`supervisor::reaches`); that answer is the session's.
+
+No capability on tarae for tier host, and no privileged helper (user decision 2026-10-18): `CAP_SYS_PTRACE` in this
+system's namespace reads every process, root's too. Serving without reading a run's memory or taking its descriptors
+(srt's shape: the session's netns and a forwarder to the proxy) is a roadmap item of its own. Measured on the
+`tarae-yama2` colima VM (6.8, scope 2): by hand, a child in a user namespace it made, and one further down, are
+reached, a plain child refused; `cargo xtask linux --userns test --as-user sandbox::` serves every run (tier own),
+without `--userns` the session is offline in those words. Tests: `supervisor::tests::yama_decides_whether_a_runs_calls_can_be_read`,
+`at_yama_2_a_keeper_is_served_only_in_the_sessions_namespaces`, `reaches_answers_as_yama_does` (`TARAE_EXPECT_YAMA`),
+`tier::tests::served_is_asked_for_the_namespaces_found`, `at_yama_2_the_probe_serves_the_sessions_namespaces`.
 
 ## The egress proxy
 
@@ -500,7 +523,7 @@ address nothing goes (no rule names an address).
 |---|---|---|---|---|
 | **own** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`); where `/proc` can't be mounted fresh (Docker's masked `/proc`), no pid and no fresh `/proc` (D12) — processes shared, said | serving | the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill (without one, the keeper's tree) |
 | **host** | none (no unprivileged user namespaces) | serving | the proxy's variable and the pair (6f's F2) | the keeper's tree |
-| **offline** | as own, or none | plain (Yama 2/3, inside another listener, `pidfd_getfd` refused — D-g) | nothing: no socket at all but netlink | as own, or the keeper's tree |
+| **offline** | as own, or none | plain (Yama 3, Yama 2 without the session's namespaces — D-h, inside another listener, `pidfd_getfd` refused — D-g) | nothing: no socket at all but netlink | as own, or the keeper's tree |
 
 The tier is what a user can tell apart: whether a command reaches the network at all (served or offline), and whether
 its loopback, IPC, `/dev/shm` and terminals are the session's own (own) or this machine's (host). The rest — a PID
@@ -685,7 +708,7 @@ the step's commit message. "Ran" is where the whole suite passed.
 
 Later, each its own step: `:sandbox-expose <port>` (D3); the supervisor and the proxy as one confined process per
 session (D21). The roadmap's "Sandbox validation" comes next: a threat model, fuzzing, a must-be-refused suite on
-several kernels, Yama 2, a speed comparison.
+several kernels, a speed comparison (Yama 2: D-h).
 
 ## Measured
 

@@ -81,6 +81,16 @@ pub const PIDFD_REFUSED: &str =
 /// `PIDFD_REFUSED` in the sandbox panel's few words (`Guarantees.brief`): two parts, each a row where it's narrow.
 const PIDFD_REFUSED_BRIEF: &str = "not served: pidfd_getfd refused · --cap-add SYS_PTRACE serves the calls";
 
+/// Why tarae can't serve its runs' calls under Yama's `ptrace_scope` 2 where the session has no namespaces of its own
+/// (`supervisor::served_from`): Yama lets tarae read only the runs in a user namespace it made — the way out said with
+/// it. Then the session is tier offline; with the namespaces, tier own.
+pub const YAMA_2_WITHOUT_NS: &str = "Yama's ptrace_scope 2 lets tarae read a run's calls only in namespaces it made \
+     for the session, and this session has none — with them its runs are served";
+
+/// `YAMA_2_WITHOUT_NS` in the sandbox panel's few words: two parts, each a row where it's narrow.
+const YAMA_2_WITHOUT_NS_BRIEF: &str =
+    "not served: Yama's ptrace_scope 2 · the session's namespaces serve the calls";
+
 /// A tier (§Tiers): whether the keeper has the session's namespaces, and whether tarae serves the runs' calls —
 /// what a user can tell apart. The rest (a PID namespace, how the network goes) is the rows' and `why`'s to say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,7 +259,7 @@ pub struct Guarantees {
 pub struct Found {
     /// The keeper's namespaces (`Keeper.ns`, read from its links at birth).
     pub ns: Ns,
-    /// Whether tarae serves its runs' calls — or why not (`supervisor::unavailable`).
+    /// Whether tarae serves its runs' calls — or why not (`supervisor::served`, for this keeper's namespaces).
     pub served: Result<(), String>,
     pub abi: u32,
     /// Where its runs open only the ptys they make (3b, `Ns::serves_ptys`): how many at a time.
@@ -364,6 +374,7 @@ impl Guarantees {
         let mut brief: Vec<String> = f.brief.into_iter().collect();
         match &f.served {
             Err(w) if w == PIDFD_REFUSED => brief.push(PIDFD_REFUSED_BRIEF.into()),
+            Err(w) if w == YAMA_2_WITHOUT_NS => brief.push(YAMA_2_WITHOUT_NS_BRIEF.into()),
             Err(w) => brief.push(format!("not served: {w}")),
             Ok(()) => {}
         }
@@ -739,6 +750,36 @@ mod tests {
             assert!(h.said.starts_with(&format!("Claude's commands run in tier {tier} here")), "{}", h.said);
             assert!(h.said.contains("To give them namespaces of their own, run once"), "{}", h.said);
             assert_eq!(g.hint_brief().as_deref(), Some(HINT_BRIEF), "probed in {probed:?}");
+        }
+    }
+
+    /// A refusal with a way out is said whole in `why` and in its own few words in `brief` — Docker's `pidfd_getfd`
+    /// and Yama's scope 2 without namespaces; any other refusal in `brief` as it is.
+    #[test]
+    fn a_refusal_with_a_way_out_says_it_in_few_words() {
+        let run = |why: &str| {
+            Guarantees::landlock(Found {
+                ns: Ns::NONE,
+                served: Err(why.into()),
+                abi: 6,
+                ptys: None,
+                lo_missing: Vec::new(),
+                short: None,
+                brief: None,
+                hint: None,
+                network: false,
+            })
+        };
+        for (why, brief) in [
+            (PIDFD_REFUSED, PIDFD_REFUSED_BRIEF),
+            (YAMA_2_WITHOUT_NS, YAMA_2_WITHOUT_NS_BRIEF),
+            ("Yama's ptrace_scope 3 keeps tarae from reading its runs' calls", ""),
+        ] {
+            let g = run(why);
+            assert_eq!(g.tier(), Some(Tier::Offline));
+            assert_eq!(g.why.as_deref(), Some(format!("tarae can't serve its calls: {why}").as_str()));
+            let brief = if brief.is_empty() { format!("not served: {why}") } else { brief.into() };
+            assert_eq!(g.brief, Some(brief));
         }
     }
 

@@ -106,6 +106,15 @@ options above, and partial Landlock. An Ubuntu 26.10 VM (7.3, ABI 11) gives host
 lifted or tarae's profile installed. Point
 `DOCKER_HOST` at a VM's Docker to run there.
 
+Yama's `ptrace_scope` 2 is the kernel's, one value for everything on it, so it gets a VM of its own: a colima profile
+(`colima start -p tarae-yama2 --cpu 4 --memory 8 --activate=false` — `--activate=false`, or every Docker command
+goes there), then in it `sudo sysctl -w kernel.yama.ptrace_scope=2` and, for own,
+`kernel.apparmor_restrict_unprivileged_userns=0` (neither kept past a restart). Never 3: only a reboot undoes it. Run
+as a user (`--as-user`: root in the container holds `CAP_SYS_PTRACE`, which Yama lets through):
+`DOCKER_CONTEXT=colima-tarae-yama2 cargo xtask linux --env TARAE_EXPECT_TIER=own --env TARAE_EXPECT_YAMA=2 --userns
+test --as-user sandbox::` serves every run; without `--userns` and with `TARAE_EXPECT_TIER=offline` the session is
+offline. `TARAE_EXPECT_YAMA` fails where the scope is another. `colima stop -p tarae-yama2` after.
+
 The keepers' memory with many sessions (1 to 32, idle and each keeping a run) is a `perf_` test, so it needs an
 optimized build: `cargo xtask linux [--env TARAE_EXPECT_TIER=own --userns] test --profile perf --bin tarae --
 --exact sandbox::keeper::tests::perf_keepers_memory_per_session --nocapture`. The numbers it gave are in the

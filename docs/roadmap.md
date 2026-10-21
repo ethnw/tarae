@@ -153,7 +153,10 @@ The aim is to state what the sandbox guarantees and show that it holds.
    `setsockopt` is unchanged (its own rights).
 3. **A "must be refused" property suite**, run on several kernels on a schedule: nothing a run does changes the
    session's rules, and nothing is reached but through tarae's proxy and sockets.
-4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there, and the session is tier offline.
+4. **Yama ptrace scope 2** — done (2026-10-18, D-h): Yama asks for `CAP_SYS_PTRACE` in a run's user namespace,
+   which tarae owns in the session's, so tier own is served at scope 2 (the tier probe tries it on its keeper's
+   run); without namespaces the session stays offline, said with the way out. No capability on tarae, no privileged
+   helper (user decision).
 5. **A speed comparison** against a bubblewrap-style sandbox.
 
 ### 3. Frictions, and lighter cards and reviews

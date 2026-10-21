@@ -6,7 +6,9 @@
 //! network one when its policy opens nothing (`for_policy`: until step 4's routing, an opened port or the
 //! network would reach the session's empty loopback); where a fresh `/proc` can't be mounted (Docker's masked
 //! `/proc`), the same without the PID namespace (D12); without user namespaces none. Served, the first two are
-//! tier own, the last host; not serving (`supervisor::unavailable`), any of them is offline.
+//! tier own, the last host; not serving (`supervisor::served`), any of them is offline. Where Yama's `ptrace_scope`
+//! 2 decides, the probe's keeper also holds a run while tarae tries the supervisor's two calls on it
+//! (`supervisor::reaches`): served in the session's namespaces is what that found.
 
 use std::io;
 use std::path::Path;
@@ -428,7 +430,7 @@ pub struct Probed {
     /// The same in a few words (`brief`; the sandbox panel's, 9e) — without why it isn't served, which the guarantees
     /// say themselves.
     pub brief: Option<String>,
-    /// Whether tarae serves its runs' calls here (`supervisor::unavailable`).
+    /// Whether tarae serves the calls of runs in the namespaces found (`supervisor::served`).
     pub served: Result<(), String>,
     /// Ubuntu's restriction kept the namespaces from a tarae under no profile: why, and the step (`hint`).
     pub hint: Option<super::guarantees::Hint>,
@@ -457,7 +459,7 @@ pub fn get() -> &'static Probed {
         // (a measurement's other half, in the same process: no namespaces asked — `measure_gradle_pairs`)
         #[cfg(test)]
         if std::env::var_os("TARAE_TEST_NO_NS").is_some() {
-            let served = super::supervisor::unavailable().map_or(Ok(()), Err);
+            let served = super::supervisor::served(false);
             return Probed {
                 ns: Ns::NONE,
                 short: Some("none asked (TARAE_TEST_NO_NS)".into()),
@@ -519,21 +521,23 @@ pub fn in_shm(p: &super::Policy) -> bool {
 }
 
 /// A keeper made with every namespace, and a `true` through it; one whose `/proc` didn't mount (D12), again
-/// without the PID namespace; any other failure, none — and why.
+/// without the PID namespace; any other failure, none — and why. Served as `supervisor::served` says for what was
+/// found — where Yama's scope 2 decides, after the keeper's run was tried (`supervisor::asks_session`).
 fn probe() -> Probed {
-    let served = match super::supervisor::unavailable() {
-        None => Ok(()),
-        Some(why) => Err(why),
-    };
-    probe_with(served, tried)
+    let asks = super::supervisor::asks_session();
+    probe_with(super::supervisor::served, |ns| tried(ns, asks))
 }
 
-/// `probe` where serving is `served` and a keeper's birth and run is `tried` (tests stand in).
-fn probe_with(served: Result<(), String>, mut tried: impl FnMut(Ns) -> Result<(), Failed>) -> Probed {
+/// `probe` where serving a keeper with the session's user namespace or without is `served` (asked once a birth
+/// was tried: a keeper's run tried there decides it) and a keeper's birth and run is `tried` (tests stand in).
+fn probe_with(
+    served: impl Fn(bool) -> Result<(), String>,
+    mut tried: impl FnMut(Ns) -> Result<(), Failed>,
+) -> Probed {
     let all = Ns::session(true, true);
     // (no namespaces: why, and the hint where Ubuntu's restriction is why — for the binary running)
     let without = |e: Failed| {
-        let tier = Tier::of(Ns::NONE, served.is_ok());
+        let tier = Tier::of(Ns::NONE, served(false).is_ok());
         let place = || super::apparmor::place_of(&std::env::current_exe().unwrap_or_default());
         let hint = match &e {
             Failed::Birth(b) => hint(&Seen::now(*b), tier, &place()),
@@ -554,7 +558,7 @@ fn probe_with(served: Result<(), String>, mut tried: impl FnMut(Ns) -> Result<()
         }
         Err(e) => without(e),
     };
-    Probed { ns, short, brief: brief_said, served, hint }
+    Probed { ns, short, brief: brief_said, served: served(ns.user), hint }
 }
 
 /// How a probe's keeper failed.
@@ -589,22 +593,40 @@ impl Failed {
 }
 
 /// A keeper born with `ns` and a `true` run through it, all within `PROBE_WITHIN` (on a thread: what hangs is left
-/// to it, said as late).
-fn tried(ns: Ns) -> Result<(), Failed> {
+/// to it, said as late) — and where `asks` (Yama's scope 2), a held run tried as the supervisor would read it.
+fn tried(ns: Ns, asks: bool) -> Result<(), Failed> {
     let (tx, rx) = std::sync::mpsc::channel();
     crate::event::thread("tarae-nsprobe", move || {
-        let _ = tx.send(true_through(ns));
+        let _ = tx.send(true_through(ns, asks));
     });
     rx.recv_timeout(PROBE_WITHIN).unwrap_or(Err(Failed::Late))
 }
 
-/// `true` run by a keeper born with `ns` for a root no session has, which ends after.
-fn true_through(ns: Ns) -> Result<(), Failed> {
+/// `true` run by a keeper born with `ns` for a root no session has, which ends after. Where `asks` and `ns` has the
+/// session's user namespace, first a `sleep` it holds, tried with the supervisor's two calls and ended
+/// (`held_read`): what was found kept (`supervisor::tried_in_session`).
+fn true_through(ns: Ns, asks: bool) -> Result<(), Failed> {
+    let (ran, read) = true_through_holding(ns, (asks && ns.user).then_some("sleep"));
+    if let Some(read) = read {
+        crate::log::line("sandbox", "info", &format!("a run in the session's namespaces, read: {read:?}"));
+        super::supervisor::tried_in_session(read);
+    }
+    ran
+}
+
+/// `true_through`, the run held and read first being `held` (tests name one that doesn't start) — what was read
+/// beside how `true` went, kept by nobody: a held run that didn't start is an answer of its own, never the
+/// namespaces failing (review C2: a `sleep` not found, `true` there, gave the session none).
+fn true_through_holding(ns: Ns, held: Option<&str>) -> (Result<(), Failed>, Option<Result<(), String>>) {
+    let mut read = None;
     let root = std::env::temp_dir().join(format!("tarae-nsprobe-{}", std::process::id()));
-    let k = super::keeper::born_for_probe(&root, ns).map_err(|e| match BirthError::of(&e) {
-        Some(b) => Failed::Birth(b),
-        None => Failed::Run(e.to_string()),
-    })?;
+    let k = match super::keeper::born_for_probe(&root, ns) {
+        Ok(k) => k,
+        Err(e) => match BirthError::of(&e) {
+            Some(b) => return (Err(Failed::Birth(b)), None),
+            None => return (Err(Failed::Run(e.to_string())), None),
+        },
+    };
     let ran = match crate::landlock::abi() {
         // (no Landlock here: the birth is what's probed — the sandbox itself is missing anyway)
         Err(_) => Ok(()),
@@ -615,6 +637,9 @@ fn true_through(ns: Ns) -> Result<(), Failed> {
                 _ => crate::landlock::Ruleset::new(abi)?,
             };
             rules.allow(Path::new("/"), crate::landlock::ALL)?;
+            if let Some(program) = held {
+                read = Some(held_read(&k, program, rules.fd(), net));
+            }
             let cmd = std::process::Command::new("true");
             let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), net)?;
             let status = crate::spawn::wait(s.spawned.pid)?;
@@ -626,7 +651,31 @@ fn true_through(ns: Ns) -> Result<(), Failed> {
         .map_err(|e: io::Error| Failed::Run(e.to_string())),
     };
     k.end();
-    ran
+    (ran, read)
+}
+
+/// `program` held by keeper `k` (`program 30`) and tried with the supervisor's two calls (`supervisor::reaches`, by
+/// its pidfd), then ended by its keeper, which reaps it (`keeper::signal`) — never by its number, which a run that
+/// ended before its exec may have given to another process (review C1/C3). One that didn't start is said so.
+fn held_read(
+    k: &super::keeper::Keeper,
+    program: &str,
+    rules: std::os::fd::BorrowedFd<'_>,
+    net: RunNet,
+) -> Result<(), String> {
+    let mut held = std::process::Command::new(program);
+    held.arg("30");
+    let s = k
+        .start(&held, &crate::landlock::thread_name(), rules, net)
+        .map_err(|e| format!("a run held to be read didn't start: {e}"))?;
+    let pid = s.spawned.pid;
+    let read = match super::keeper::pidfd(pid) {
+        Some(pidfd) => super::supervisor::reaches(pid, std::os::fd::AsFd::as_fd(&*pidfd), program),
+        None => Err("its pidfd isn't known".into()),
+    };
+    super::keeper::signal(pid, libc::SIGKILL);
+    let _ = crate::spawn::wait(pid);
+    read
 }
 
 #[cfg(test)]
@@ -686,10 +735,13 @@ mod tests {
     fn the_probe_always_asks_the_sessions_network_namespace() {
         let asked = |served: Result<(), String>| {
             let mut asked = Vec::new();
-            let p = probe_with(served, |ns: Ns| {
-                asked.push(ns.netns());
-                Ok(())
-            });
+            let p = probe_with(
+                |_| served.clone(),
+                |ns: Ns| {
+                    asked.push(ns.netns());
+                    Ok(())
+                },
+            );
             (asked, p)
         };
         let (taken, p) = asked(Ok(()));
@@ -699,6 +751,58 @@ mod tests {
         let (taken, p) = asked(Err(super::super::guarantees::PIDFD_REFUSED.into()));
         assert_eq!(taken, [true]);
         assert_eq!(p.tier(), Tier::Offline);
+    }
+
+    /// Served is asked for the namespaces found: where only a keeper with the session's user namespace is served
+    /// (Yama's scope 2), the probe that gets them is tier own, the one that falls back to none offline — in
+    /// `YAMA_2_WITHOUT_NS`'s words. (Keepers stood in for.)
+    #[test]
+    fn served_is_asked_for_the_namespaces_found() {
+        let without = super::super::guarantees::YAMA_2_WITHOUT_NS;
+        let served = |user: bool| if user { Ok(()) } else { Err(without.to_string()) };
+        let p = probe_with(served, |_| Ok(()));
+        assert_eq!((p.tier(), p.served.clone()), (Tier::Own, Ok(())));
+        let clone = BirthError { step: BirthStep::Clone, errno: libc::EPERM };
+        let p = probe_with(served, |ns| if ns.user { Err(Failed::Birth(clone)) } else { Ok(()) });
+        assert_eq!((p.tier(), p.served), (Tier::Offline, Err(without.into())));
+    }
+
+    /// A held run that doesn't start (a program not found where `true` is) is the read's answer — said, kept as not
+    /// read — and the probe goes on to `true`: never the namespaces failing, which gave the session none (review C2).
+    /// A real keeper in the session's namespaces, where this system gives them and Landlock is there.
+    #[test]
+    fn a_held_run_that_doesnt_start_isnt_the_namespaces_failing() {
+        let ns = get().ns;
+        if !ns.user || crate::landlock::abi().is_err() {
+            let why = if ns.user { "no Landlock" } else { "no user namespaces here" };
+            let test = "sandbox::tier::tests::a_held_run_that_doesnt_start_isnt_the_namespaces_failing";
+            let line = format!("{}{test} — {why}\n", crate::test_results::SELF_SKIP);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            return;
+        }
+        let (ran, read) = true_through_holding(ns, Some("tarae-no-such-program"));
+        if let Err(e) = ran {
+            panic!("`true` didn't run: {}", e.said());
+        }
+        let read = read.expect("a read was asked").unwrap_err();
+        assert!(read.starts_with("a run held to be read didn't start"), "{read}");
+    }
+
+    /// On the scope 2 VM (`TARAE_EXPECT_YAMA=2`, `TARAE_EXPECT_TIER=own`: CONTRIBUTING's colima recipe) the probe reads its
+    /// keeper's run and the session is served — tier own, never offline for a run tried before its exec. Elsewhere
+    /// nothing to check: the scope decides nothing, or the tier is another.
+    #[test]
+    fn at_yama_2_the_probe_serves_the_sessions_namespaces() {
+        let at = |name: &str, value: &str| std::env::var(name).is_ok_and(|v| v == value);
+        if !(at("TARAE_EXPECT_YAMA", "2") && at("TARAE_EXPECT_TIER", "own")) {
+            return;
+        }
+        let p = get();
+        assert_eq!((p.tier(), &p.served), (Tier::Own, &Ok(())), "{:?}", p.short);
+        assert_eq!(
+            super::super::supervisor::served(false),
+            Err(super::super::guarantees::YAMA_2_WITHOUT_NS.into())
+        );
     }
 
     /// A keeper is what its `/proc/<pid>/ns/` links say (`Ns::of_pid`), not what its birth asked: the session's user
@@ -771,7 +875,7 @@ mod tests {
     /// other's place); a run that failed or a keeper that didn't answer in their own few words. (Keepers stood in for.)
     #[test]
     fn the_probe_says_in_a_few_words_what_it_says_whole() {
-        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(Ok(()), fail);
+        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(|_| Ok(()), fail);
         let p = probe(&|_| Ok(()));
         assert_eq!((p.short, p.brief), (None, None), "every namespace: nothing to say");
         let proc = BirthError { step: BirthStep::Proc, errno: libc::EPERM };

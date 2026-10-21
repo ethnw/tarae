@@ -1144,10 +1144,12 @@ macOS (Seatbelt). A test keeps this table equal to the code:
     filter refuses the call tarae takes a command's socket with (`pidfd_getfd`). For the network and this
     machine's ports (a Gradle build, a test against a local server), add `"runArgs": ["--cap-add=SYS_PTRACE"]`
     to `devcontainer.json` — the session's commands are then on the container's loopback (tier host)
-  - with Yama's `ptrace_scope` at 2 (unless tarae holds `CAP_SYS_PTRACE`) or 3: tarae can't read a command's
-    calls. At 1, the default on Ubuntu, a process has to stay below tarae — so tarae is the last parent of
-    what its programs leave running (a *child subreaper*): a daemon that detached itself from a command comes
-    to tarae, not to init, and its connections are served after the command is over
+  - with Yama's `ptrace_scope` at 3, or at 2 where the session has no namespaces of its own (unless tarae holds
+    `CAP_SYS_PTRACE`): tarae can't read a command's calls. In the session's namespaces it can at 2 too — Yama
+    asks for the capability in the command's user namespace, which tarae made. At 1, the default on Ubuntu,
+    a process outside them has to stay below tarae — so tarae is the last parent of what its programs leave
+    running (a *child subreaper*): a daemon that detached itself from a command comes to tarae, not to init,
+    and its connections are served after the command is over
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
 - **Ubuntu and user namespaces.** From 23.10 on, Ubuntu lets a program make user namespaces only through an
   AppArmor profile that names it. Without one, tarae gives a session no namespaces of its own (tier host), and the

@@ -23,18 +23,21 @@
 //! over this machine's, run as root) — so tarae makes one for a run only where a sender without it may: a
 //! batch of reads (`netlink_reads`), to the kernel's address, joining no group that asks the capability.
 //!
-//! What it needs from the system (`unavailable` says what's missing): a seccomp listener (none inside
-//! another one's filter — a sandboxed tarae). Reading a run's memory takes what ptrace takes: under Yama's
-//! `ptrace_scope` 1 (the default on Ubuntu) a process that left tarae's tree — reparented away — gets every such
-//! call refused; at 2 without `CAP_SYS_PTRACE`, or 3, no run can be served (`yama_allows`). Nor where `pidfd_getfd`
-//! is refused (Docker's default filter, without `CAP_SYS_PTRACE`: `guarantees::PIDFD_REFUSED`) — tier offline.
+//! What it needs from the system (`served` says what's missing): a seccomp listener (none inside another one's
+//! filter — a sandboxed tarae), and `pidfd_getfd` (Docker's default filter refuses it without `CAP_SYS_PTRACE`:
+//! `guarantees::PIDFD_REFUSED`). Reading a run's memory and taking its descriptors take what attaching a debugger
+//! takes, which Yama narrows (`yama_says`): Yama asks for `CAP_SYS_PTRACE` in the run's user namespace, and tarae
+//! holds every capability in the session's, which it made — so a run in the session's namespaces (tier own) is read
+//! at `ptrace_scope` 1 wherever it went and at 2 too (tried on the tier probe's own run: `reaches`); one in this
+//! system's namespace (tier host) at 1 only while it stays below tarae, at 2 only where tarae holds the capability;
+//! at 3 none. Not served: tier offline.
 
 use std::io;
 use std::mem::MaybeUninit;
 #[cfg(test)]
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,14 +55,114 @@ use super::{Denial, Policy};
 /// A call's answer: what it returns, or the errno it fails with.
 type Answer = Result<i64, i32>;
 
-/// Why tarae can't serve its runs' calls here — None when it can. Asked once (a worker's: it starts a thread).
+/// Whether tarae serves the calls of a keeper's runs here — or why not: `user`, whether the keeper has the
+/// session's user namespace. The system's part is asked once (a worker's: it starts a thread), Yama's read once;
+/// at `ptrace_scope` 2 a keeper in the session's namespaces is served as the tier probe found (`tried_in_session`).
+/// Never the tier probe's own answer (`tier::get`): a keeper says its tier with this while the probe is under way.
+pub fn served(user: bool) -> Result<(), String> {
+    static SYSTEM: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    static YAMA: std::sync::OnceLock<Yama> = std::sync::OnceLock::new();
+    let system = SYSTEM.get_or_init(probe).clone();
+    let yama = YAMA.get_or_init(|| {
+        let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok();
+        yama_says(scope.as_deref(), &std::fs::read_to_string("/proc/self/status").unwrap_or_default())
+    });
+    served_from(system, yama, user, IN_SESSION.get())
+}
+
+/// Tests: `served` for the keepers this system gives a session (the tier probe's namespaces) — `Some(why)` where
+/// they aren't served.
+#[cfg(test)]
 pub fn unavailable() -> Option<String> {
-    static WHY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    WHY.get_or_init(|| probe().err()).clone()
+    served(super::tier::get().ns.user).err()
+}
+
+/// Whether the tier probe should try reading a run in the session's namespaces (`reaches`): only where that
+/// decides — the system lets tarae serve and Yama's scope is 2.
+pub fn asks_session() -> bool {
+    served(true).is_err_and(|why| why == NOT_TRIED)
+}
+
+/// What the tier probe found reading a run in the session's namespaces (`reaches`) — the first answer kept.
+pub fn tried_in_session(reached: Result<(), String>) {
+    let _ = IN_SESSION.set(reached);
+}
+
+static IN_SESSION: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+/// `served`'s answer while the tier probe hasn't read a run in the session's namespaces yet (its own keeper's line).
+const NOT_TRIED: &str = "Yama's ptrace_scope 2: a run in the session's namespaces not tried yet";
+
+/// `served` from what it found: the system's answer first (`probe`), then Yama's; at scope 2 a keeper without the
+/// session's user namespace isn't served (`YAMA_2_WITHOUT_NS`), one with it as the tier probe's run was
+/// (`in_session`, None: not tried).
+fn served_from(
+    system: Result<(), String>,
+    yama: &Yama,
+    user: bool,
+    in_session: Option<&Result<(), String>>,
+) -> Result<(), String> {
+    system?;
+    match (yama, user, in_session) {
+        (Yama::Allows, _, _) => Ok(()),
+        (Yama::Refuses(why), _, _) => Err(why.clone()),
+        (Yama::InSession, false, _) => Err(super::guarantees::YAMA_2_WITHOUT_NS.into()),
+        (Yama::InSession, true, None) => Err(NOT_TRIED.into()),
+        (Yama::InSession, true, Some(r)) => r.clone().map_err(|e| {
+            format!("Yama's ptrace_scope 2 kept tarae from a run in the session's namespaces: {e}")
+        }),
+    }
+}
+
+/// Whether tarae may do to the run `pid` what serving its calls does: open its memory (`Caller::open`) and take a
+/// descriptor (`Caller::fd`, through `pidfd`, the run's) — tried by the tier probe on its keeper's run, where Yama's
+/// `ptrace_scope` 2 decides. Tried once it runs `program` (its exec done: the name the kernel gives it then, `comm`,
+/// which no ptrace rule guards): the supervisor reads only calls made after a run's exec, and before it a run is a
+/// copy of its keeper — not dumpable, its memory the keeper's. What's read by its number counts only while `pidfd`
+/// says it's there — its number is it then; one that ended (before its exec: a step of its child failed) may have
+/// given its number to another process, never read as it. Its descriptor 0 not there (`EBADF`) is reached all the
+/// same: the kernel asks the permission first.
+pub fn reaches(pid: u32, pidfd: BorrowedFd<'_>, program: &str) -> Result<(), String> {
+    let ended = || Err("it ended before its exec".to_string());
+    let until = std::time::Instant::now() + EXEC_WITHIN;
+    loop {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if exited(pidfd) {
+            return ended();
+        }
+        if comm.trim_end() == program {
+            break;
+        }
+        if std::time::Instant::now() >= until {
+            return Err(format!("it wasn't running {program} within {} ms", EXEC_WITHIN.as_millis()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let mem = std::fs::OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem"));
+    if exited(pidfd) {
+        return ended();
+    }
+    drop(mem.map_err(|e| format!("its memory: {e}"))?);
+    match pidfd_getfd(pidfd, 0) {
+        Ok(_) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EBADF) => Ok(()),
+        Err(e) => Err(format!("its descriptors: {e}")),
+    }
+}
+
+/// How long `reaches` waits for a run's exec.
+const EXEC_WITHIN: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Whether the process `pidfd` is of has ended (a pidfd turns readable then, reaped or not).
+fn exited(pidfd: BorrowedFd<'_>) -> bool {
+    let mut p = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: one pollfd, live for the call; no wait.
+    unsafe { libc::poll(&mut p, 1, 0) > 0 && p.revents & libc::POLLIN != 0 }
 }
 
 /// A listener on a filter of a short-lived thread's own (refused under another listener: `EBUSY`), a pidfd, and a
-/// descriptor of tarae's own taken through it (a container's filter refuses `pidfd_getfd`: no serving).
+/// descriptor of tarae's own taken through it (a container's filter refuses `pidfd_getfd`: no serving). Yama's word
+/// isn't in it: the kernel lets a process take its own descriptors whatever Yama says.
 fn probe() -> Result<(), String> {
     let listener = crate::event::thread("tarae-seccomp", || -> io::Result<()> {
         let mut allow = [libc::sock_filter {
@@ -89,33 +192,38 @@ fn probe() -> Result<(), String> {
     // SAFETY: getpid has no preconditions.
     let taken = pidfd_open(unsafe { libc::getpid() })
         .map_err(|e| format!("pidfd_open: {e}"))
-        .map(|pidfd| pidfd_getfd(&pidfd, pidfd.as_raw_fd()).map(drop));
-    let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok();
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    decided(listener, taken, yama_allows(scope.as_deref(), &status))
+        .map(|pidfd| pidfd_getfd(pidfd.as_fd(), pidfd.as_raw_fd()).map(drop));
+    decided(listener, taken)
 }
 
 /// The probe's answer from what it found: a listener of a thread's own (or why not — `EBUSY`: inside another
 /// supervisor's filter), a descriptor of tarae's own taken through its pidfd (or why not — refused: Docker's
-/// default filter refuses `pidfd_getfd` without `CAP_SYS_PTRACE`, `PIDFD_REFUSED`) — and Yama's word on reading a
-/// run's memory.
-fn decided(
-    listener: io::Result<()>,
-    taken: Result<io::Result<()>, String>,
-    yama: Result<(), String>,
-) -> Result<(), String> {
+/// default filter refuses `pidfd_getfd` without `CAP_SYS_PTRACE`, `PIDFD_REFUSED`).
+fn decided(listener: io::Result<()>, taken: Result<io::Result<()>, String>) -> Result<(), String> {
     listener.map_err(|e| match e.raw_os_error() {
         Some(libc::EBUSY) => "tarae itself runs under another supervisor's filter".to_string(),
         _ => format!("no seccomp listener: {e}"),
     })?;
-    taken?.map_err(|_| super::guarantees::PIDFD_REFUSED.to_string())?;
-    yama
+    taken?.map_err(|_| super::guarantees::PIDFD_REFUSED.to_string())
 }
 
-/// Whether Yama (`ptrace_scope`, absent: no Yama) lets tarae read its own runs' memory: 0 and 1 do (a run is
-/// tarae's child — 1 refuses only what left its tree), 2 only with `CAP_SYS_PTRACE` (in `status`'s `CapEff`),
-/// 3 never.
-fn yama_allows(scope: Option<&str>, status: &str) -> Result<(), String> {
+/// What Yama lets tarae do to its runs (`yama_says`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Yama {
+    /// Read every run's calls: no Yama, `ptrace_scope` 0 or 1 (a run in this system's namespace is read while it
+    /// stays below tarae — the keeper is its subreaper), or 2 with `CAP_SYS_PTRACE`.
+    Allows,
+    /// `ptrace_scope` 2 without the capability: only runs in a user namespace tarae made — the session's.
+    InSession,
+    /// None, why said: `ptrace_scope` 3.
+    Refuses(String),
+}
+
+/// What Yama (`ptrace_scope`, absent: no Yama) lets tarae do to its runs. Yama asks `CAP_SYS_PTRACE` in the run's
+/// user namespace (`security/yama/yama_lsm.c`, the same since 5.14), and the owner of a user namespace holds every
+/// capability in it: at 2 tarae — holding it in its own (`status`'s `CapEff`: root in a container given it) or not —
+/// reads the runs in the session's namespaces, which it made; at 3 nothing.
+fn yama_says(scope: Option<&str>, status: &str) -> Yama {
     const CAP_SYS_PTRACE: u32 = 19;
     let cap = status
         .lines()
@@ -123,9 +231,9 @@ fn yama_allows(scope: Option<&str>, status: &str) -> Result<(), String> {
         .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
         .is_some_and(|caps| caps & (1 << CAP_SYS_PTRACE) != 0);
     match scope.map(str::trim) {
-        Some("2") if !cap => Err("Yama's ptrace_scope 2 keeps tarae from reading its runs' calls".into()),
-        Some("3") => Err("Yama's ptrace_scope 3 keeps tarae from reading its runs' calls".into()),
-        _ => Ok(()),
+        Some("2") if !cap => Yama::InSession,
+        Some("3") => Yama::Refuses("Yama's ptrace_scope 3 keeps tarae from reading its runs' calls".into()),
+        _ => Yama::Allows,
     }
 }
 
@@ -140,7 +248,7 @@ fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
 }
 
 /// The caller's descriptor `n`, as one of tarae's own (the same open socket — close-on-exec).
-pub(super) fn pidfd_getfd(pidfd: &OwnedFd, n: RawFd) -> io::Result<OwnedFd> {
+pub(super) fn pidfd_getfd(pidfd: BorrowedFd<'_>, n: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: plain call; a descriptor it makes is ours.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd.as_raw_fd(), n, 0u32) };
     if fd < 0 {
@@ -583,7 +691,7 @@ impl Caller {
     /// Its descriptor `n`, as tarae's own.
     fn fd(&self, n: u64) -> Result<OwnedFd, i32> {
         let n = i32::try_from(n).map_err(|_| libc::EBADF)?;
-        pidfd_getfd(&self.pidfd, n).map_err(|e| errno(&e))
+        pidfd_getfd(self.pidfd.as_fd(), n).map_err(|e| errno(&e))
     }
 
     /// What its descriptor `n` names (`/proc/<tid>/fd/<n>`: `socket:[…]`, `pipe:[…]`, a path …) — none there: `EBADF`.
@@ -1876,20 +1984,47 @@ mod tests {
     }
 
     /// The probe: a listener and `pidfd_getfd` working → served; `pidfd_getfd` refused (Docker's default filter) →
-    /// can't serve, said with the way out (`PIDFD_REFUSED`); no listener (inside another supervisor's filter), no
-    /// pidfd at all, or Yama refusing → can't serve, said.
+    /// can't serve, said with the way out (`PIDFD_REFUSED`); no listener (inside another supervisor's filter) or no
+    /// pidfd at all → can't serve, said. The system's refusal is said before Yama's.
     #[test]
     fn the_probe_cant_serve_where_pidfd_getfd_is_refused() {
         let refused = || Err(io::Error::from_raw_os_error(libc::EPERM));
-        assert_eq!(decided(Ok(()), Ok(Ok(())), Ok(())), Ok(()));
+        assert_eq!(decided(Ok(()), Ok(Ok(()))), Ok(()));
         let pidfd = Err(super::super::guarantees::PIDFD_REFUSED.to_string());
-        assert_eq!(decided(Ok(()), Ok(refused()), Ok(())), pidfd);
+        assert_eq!(decided(Ok(()), Ok(refused())), pidfd);
         let busy = Err(io::Error::from_raw_os_error(libc::EBUSY));
-        assert!(decided(busy, Ok(refused()), Ok(())).is_err_and(|e| e.contains("another supervisor")));
-        assert!(decided(Ok(()), Err("pidfd_open: no".into()), Ok(())).is_err());
-        let yama = Err("Yama's ptrace_scope 3".to_string());
-        assert_eq!(decided(Ok(()), Ok(Ok(())), yama.clone()), yama);
-        assert_eq!(decided(Ok(()), Ok(refused()), yama), pidfd, "the descriptors' refusal said first");
+        assert!(decided(busy, Ok(refused())).is_err_and(|e| e.contains("another supervisor")));
+        assert!(decided(Ok(()), Err("pidfd_open: no".into())).is_err());
+        let three = Yama::Refuses("Yama's ptrace_scope 3".into());
+        assert_eq!(
+            served_from(pidfd.clone(), &three, true, None),
+            pidfd,
+            "the descriptors' refusal said first"
+        );
+        assert_eq!(served_from(pidfd.clone(), &Yama::InSession, true, Some(&Ok(()))), pidfd);
+    }
+
+    /// At `ptrace_scope` 2 a keeper is served only in the session's namespaces, and there as the tier probe's run
+    /// was: reached → served; refused → not, said with the kernel's word; not tried yet → not. Without them: not,
+    /// in `YAMA_2_WITHOUT_NS`'s words. Yama allowing or refusing decides alone.
+    #[test]
+    fn at_yama_2_a_keeper_is_served_only_in_the_sessions_namespaces() {
+        let reached = Ok(());
+        let refused = Err("its memory: Permission denied (os error 13)".to_string());
+        assert_eq!(served_from(Ok(()), &Yama::InSession, true, Some(&reached)), Ok(()));
+        let why = served_from(Ok(()), &Yama::InSession, true, Some(&refused)).unwrap_err();
+        assert!(why.starts_with("Yama's ptrace_scope 2") && why.ends_with("(os error 13)"), "{why}");
+        assert_eq!(served_from(Ok(()), &Yama::InSession, true, None), Err(NOT_TRIED.into()));
+        let without = Err(super::super::guarantees::YAMA_2_WITHOUT_NS.to_string());
+        assert_eq!(served_from(Ok(()), &Yama::InSession, false, Some(&reached)), without);
+        for user in [true, false] {
+            assert_eq!(served_from(Ok(()), &Yama::Allows, user, Some(&refused)), Ok(()));
+            let three = Yama::Refuses("Yama's ptrace_scope 3".into());
+            assert_eq!(
+                served_from(Ok(()), &three, user, Some(&reached)),
+                Err("Yama's ptrace_scope 3".into())
+            );
+        }
     }
 
     /// A run's netlink send goes to the kernel only when every message in it is a read: an `RTM_GET…` (every
@@ -2044,17 +2179,93 @@ mod tests {
         assert!(!listening_on("garbage\n 0: x y z\n", 53, None));
     }
 
-    /// Yama: tarae serves its runs at `ptrace_scope` 0 and 1 (and without Yama), at 2 only holding
-    /// `CAP_SYS_PTRACE`, never at 3 — said why.
+    /// Yama: tarae serves its runs at `ptrace_scope` 0 and 1 (and without Yama); at 2 holding `CAP_SYS_PTRACE`
+    /// all of them, without it those in the session's namespaces; never at 3 — said why.
     #[test]
     fn yama_decides_whether_a_runs_calls_can_be_read() {
         let (none, ptrace) = ("Name:\ttarae\nCapEff:\t0000000000000000\n", "CapEff:\t00000000a80c25fb\n");
         for scope in [None, Some("0\n"), Some("1\n")] {
-            assert_eq!(yama_allows(scope, none), Ok(()), "{scope:?}");
+            assert_eq!(yama_says(scope, none), Yama::Allows, "{scope:?}");
         }
-        assert!(yama_allows(Some("2\n"), none).is_err_and(|why| why.contains("ptrace_scope 2")));
-        assert_eq!(yama_allows(Some("2\n"), ptrace), Ok(()), "root in a container with the capability");
-        assert!(yama_allows(Some("3"), ptrace).is_err_and(|why| why.contains("ptrace_scope 3")));
+        assert_eq!(yama_says(Some("2\n"), none), Yama::InSession);
+        assert_eq!(yama_says(Some("2\n"), ptrace), Yama::Allows, "root in a container with the capability");
+        assert!(matches!(yama_says(Some("3"), ptrace), Yama::Refuses(why) if why.contains("ptrace_scope 3")));
+    }
+
+    /// What the tier probe tries (`reaches`) answers as the kernel does for the supervisor's own two calls: a child of
+    /// tarae's in this system's namespace is reached where Yama lets tarae read it (`yama_says`, at 1 a descendant),
+    /// refused at 2 without the capability; one in a user namespace it made itself is reached at 2 too. Each as a
+    /// `sleep` (descriptor 0 `/dev/null`). `TARAE_EXPECT_YAMA=N` fails where the scope is another (the scope 2 VM's
+    /// runs: CONTRIBUTING's colima recipe). Where the system refuses `pidfd_getfd` whatever Yama says (Docker's
+    /// default profile, `--docker-default`: `super::probe`), Yama isn't what answers — the test says it skips itself.
+    #[test]
+    fn reaches_answers_as_yama_does() {
+        let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok();
+        if let Ok(want) = std::env::var("TARAE_EXPECT_YAMA") {
+            assert_eq!(scope.as_deref().map(str::trim), Some(want.as_str()), "Yama's ptrace_scope");
+        }
+        if let Err(why) = super::probe() {
+            let test = "sandbox::supervisor::tests::reaches_answers_as_yama_does";
+            let line = format!("{}{test} — {why}\n", crate::test_results::SELF_SKIP);
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        }
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let yama = yama_says(scope.as_deref(), &status);
+        let sleep = |own: bool| {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30").stdin(std::process::Stdio::null());
+            if own {
+                // SAFETY: between fork and exec: one raw call.
+                unsafe {
+                    std::os::unix::process::CommandExt::pre_exec(&mut c, || {
+                        match libc::unshare(libc::CLONE_NEWUSER) {
+                            0 => Ok(()),
+                            _ => Err(io::Error::last_os_error()),
+                        }
+                    });
+                }
+            }
+            c.spawn()
+        };
+        // (a child of this process's, unreaped: its number is it, its pidfd opened by that)
+        let tried = |c: &std::process::Child| {
+            let pidfd = pidfd_open(c.id() as i32).unwrap();
+            reaches(c.id(), pidfd.as_fd(), "sleep")
+        };
+        let mut here = sleep(false).unwrap();
+        let got = tried(&here);
+        let _ = (here.kill(), here.wait());
+        match &yama {
+            Yama::Allows => assert_eq!(got, Ok(()), "{yama:?}"),
+            _ => assert!(got.is_err_and(|e| e.starts_with("its memory")), "{yama:?}"),
+        }
+        // (a user namespace of its own: where this system makes none, not tried)
+        let Ok(mut own) = sleep(true) else { return };
+        let got = tried(&own);
+        let _ = (own.kill(), own.wait());
+        match &yama {
+            Yama::Refuses(_) => assert!(got.is_err(), "{yama:?}"),
+            _ => assert_eq!(got, Ok(()), "{yama:?}: a run in a user namespace tarae's process made"),
+        }
+    }
+
+    /// A run that ended before its exec is never read by its number (review C1/C3): its number may be another
+    /// process's by then, so `reaches` says it ended — as its pidfd says — rather than waiting out `EXEC_WITHIN` on
+    /// the number and reading what holds it. Here a `true` that ended (left unreaped, its number still its own, which
+    /// the pidfd's word doesn't need), never the `sleep` asked for.
+    #[test]
+    fn a_run_that_ended_is_never_read_by_its_number() {
+        let mut done = std::process::Command::new("true").spawn().unwrap();
+        let pidfd = pidfd_open(done.id() as i32).unwrap();
+        while !exited(pidfd.as_fd()) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let started = std::time::Instant::now();
+        let got = reaches(done.id(), pidfd.as_fd(), "sleep");
+        let _ = done.wait();
+        assert_eq!(got, Err("it ended before its exec".into()));
+        assert!(started.elapsed() < EXEC_WITHIN, "said at once, not after the wait for its exec");
     }
 
     /// A real path is opened as it is: a link anywhere on the way (one swapped in since the path was

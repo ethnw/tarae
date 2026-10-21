@@ -234,6 +234,17 @@ pub fn wait(pid: u32) -> Option<io::Result<std::process::ExitStatus>> {
     }
 }
 
+/// A keeper's run's pidfd (its keeper's, from `Started`) — None: `pid` isn't one that started. What reads a run by
+/// its number counts the read only while this says the run is there (`supervisor::reaches`).
+pub fn pidfd(pid: u32) -> Option<Arc<OwnedFd>> {
+    let (k, id) = run_of(pid)?;
+    let s = lock(&k.state);
+    match s.runs.get(&id)?.started.as_ref()? {
+        Ok((_, pidfd)) => Some(pidfd.clone()),
+        Err(_) => None,
+    }
+}
+
 /// `dap::term_group` for a keeper's run: `sig` to its process group, by its keeper — only while it hasn't
 /// reaped it (after, nothing: the group may be another's). False: `pid` isn't a keeper's run.
 pub fn signal(pid: u32, sig: i32) -> bool {
@@ -390,7 +401,7 @@ impl Keeper {
     /// Its tier and namespaces in words (`:procs`, the log): `own (user net ipc pid mnt)`, and a mirror its `lo`
     /// couldn't take (`lo_missing`). Not `tier::get`'s: the probe's own keeper says this while the probe is under way.
     pub fn said(&self) -> String {
-        let served = super::supervisor::unavailable().is_none();
+        let served = super::supervisor::served(self.ns.user).is_ok();
         let tier = super::tier::Tier::of(self.ns, served).said();
         let missing: Vec<&str> = [(self.lo_missing.v4, "IPv4"), (self.lo_missing.v6, "IPv6")]
             .into_iter()
@@ -3112,7 +3123,8 @@ mod tests {
         keeper: Option<&Keeper>,
         files: &[&str],
     ) -> (super::super::Policy, super::super::linux::Confine, PathBuf) {
-        project_served(name, ports, keeper, files, super::super::linux::served_here())
+        let user = keeper.map_or(super::super::tier::get().ns.user, |k| k.ns.user);
+        project_served(name, ports, keeper, files, super::super::linux::served_here(user))
     }
 
     /// `project_in`, served or not as `serve` says.
@@ -3207,9 +3219,10 @@ mod tests {
         if open_rules("perf_a_run_through_the_keeper").is_none() {
             return;
         }
-        let served = super::super::supervisor::unavailable().is_none();
         let mut said = Vec::new();
         for ns in measured_in() {
+            // (served as this keeper's namespaces are: at Yama's scope 2 the session's only — review C4)
+            let served = super::super::supervisor::served(ns.user).is_ok();
             let k = keeper_in("perf", ns);
             let (p, c, root) = project_in("perf", Vec::new(), Some(&k), &[]);
             let (_, plain, _) =
@@ -5629,7 +5642,8 @@ mod tests {
 
         fn of(name: &str, policy: super::super::Policy, root: PathBuf) -> Apart {
             let keeper = keeper_in(name, super::super::tier::for_policy(&policy));
-            let (abi, served) = (crate::landlock::abi().unwrap(), super::super::linux::served_here());
+            let (abi, served) =
+                (crate::landlock::abi().unwrap(), super::super::linux::served_here(keeper.ns.user));
             let confine = super::super::linux::confine(
                 &policy,
                 abi,
@@ -6741,7 +6755,7 @@ mod tests {
             let g = c.guarantees.expect("a keeper's run has its guarantees");
             (g.way, g.line(), g.brief)
         };
-        let served = super::super::linux::served_here();
+        let served = super::super::linux::served_here(k.ns.user);
         let ways = [way(served.clone()), way(Err("no supervisor for this run".into())), way(served.clone())];
         for k in of(Some(&root)) {
             k.end();
@@ -7604,17 +7618,18 @@ mod tests {
     }
 
     /// The served tiers here, each run's keeper born in them (`keeper_for`): tier host's (no namespaces); the
-    /// session's netns where this system gives one, whose runs go out by the proxy's variable and the pair (6f's F3).
-    /// None where nothing's served.
+    /// session's netns where this system gives one, whose runs go out by the proxy's variable and the pair (6f's F3) —
+    /// each where it's served (`supervisor::served`: at Yama's scope 2 the session's only). None where nothing's served.
     fn served_tiers(test: &str) -> Option<Vec<(&'static str, Ns)>> {
         if super::super::supervisor::unavailable().is_some() || open_rules(test).is_none() {
             return None;
         }
-        let mut tiers = vec![("c", Ns::NONE)];
-        if ns().net {
-            tiers.push(("netns", ns()));
-        }
-        Some(tiers)
+        let served = |ns: Ns| super::super::supervisor::served(ns.user).is_ok();
+        let tiers: Vec<_> = [("c", Ns::NONE), ("netns", ns())]
+            .into_iter()
+            .filter(|&(tier, n)| (tier == "c" || n.net) && served(n))
+            .collect();
+        (!tiers.is_empty()).then_some(tiers)
     }
 
     /// A keeper for `test`, born with `ns`.

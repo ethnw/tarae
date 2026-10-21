@@ -3196,7 +3196,7 @@ fn sys_probes() -> Vec<(&'static str, Probe)> {
         Ok(()) => Probe::Done,
         Err(e) => Probe::Refused(e.raw_os_error().unwrap_or(0)),
     };
-    let mut all = vec![
+    let all = vec![
         ("new_listener", new_listener),
         ("precedence", precedence),
         ("plain_filter", plain_filter),
@@ -3206,8 +3206,9 @@ fn sys_probes() -> Vec<(&'static str, Probe)> {
         ("packet", socket(libc::AF_PACKET, libc::SOCK_RAW, 0)),
         ("netlink_diag", socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_SOCK_DIAG)),
     ];
+    // (another ABI's calls only where there is one: x86_64's i386)
     #[cfg(target_arch = "x86_64")]
-    all.push(("foreign_arch", foreign_arch));
+    let all = [all, vec![("foreign_arch", foreign_arch)]].concat();
     all
 }
 

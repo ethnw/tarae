@@ -1079,9 +1079,10 @@ pub(super) fn ruleset_for(net: RunNet, abi: u32) -> io::Result<Ruleset> {
     }
 }
 
-/// Whether tarae's supervisor serves runs here — or why not (`supervisor::unavailable`).
-pub fn served_here() -> Result<(), String> {
-    super::supervisor::unavailable().map_or(Ok(()), Err)
+/// Whether tarae's supervisor serves the runs of a keeper here — with the session's user namespace (`user`) or
+/// without — or why not (`supervisor::served`).
+pub fn served_here(user: bool) -> Result<(), String> {
+    super::supervisor::served(user)
 }
 
 /// The rights `DEVICES` grants, on a session keeper's own device places — `devices`, the handles it opened in
