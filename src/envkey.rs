@@ -32,7 +32,7 @@ pub fn offered(ed: &Editor, env: &crate::llm::ClaudeEnv) -> bool {
 
 /// The session in front's chat failed for want of a login: the card, when it's `offered` and none is up.
 pub fn ask(ed: &mut Editor) {
-    let env = crate::llm::ClaudeEnv::as_read(ed.claude_env.as_ref(), crate::llm::keeps_key(ed));
+    let env = crate::llm::ClaudeEnv::of(ed.claude_env.as_ref(), crate::llm::keeps_key(ed));
     let keys = env.keys();
     if !offered(ed, &env) || ed.session_cards().any(|o| matches!(o.what, What::EnvKey { .. })) {
         return;
@@ -138,13 +138,11 @@ mod tests {
         settle_for(ed, answered);
         let lines = std::fs::read_to_string(log).unwrap();
         let lines: Vec<&str> = lines.lines().collect();
-        // (inside a Claude Code session the key is the host's, whatever the answer: tarae's tests may run there)
-        let nested = crate::llm::ClaudeEnv::of(None, true).nested;
-        assert_eq!(lines.len(), 2, "{lines:?}");
-        assert_eq!(lines[0], "key= hello", "held back first");
-        assert!(
-            nested || lines[1] == "key=set hello",
-            "the next claude has it, the message again: {lines:?}"
+        // (the stand-in is the whole environment judged: the same where the tests run inside a Claude Code session)
+        assert_eq!(
+            lines,
+            ["key= hello", "key=set hello"],
+            "held back, then the next claude has it, the message again"
         );
         let c = ed.session.chat.as_ref().unwrap();
         assert_eq!(c.msgs.iter().filter(|m| m.role == Role::User).count(), 1, "one row of it");

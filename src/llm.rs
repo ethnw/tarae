@@ -300,8 +300,8 @@ pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
 /// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there),
 /// with tarae's environment less what `claude_env` leaves out, on `cred` (`billing.rs`: an API session's key helper
 /// laid into its `--settings`). `given`: `Editor::claude_env` — a test's stand-in for tarae's environment, laid
-/// over the process's as if inherited (None: the process's own); what's left out is judged on both, all the child
-/// would inherit. `confine`: under claude's own profile (`sandbox::claude`, the chat's — `sandbox-exec` execs
+/// over the process's as if inherited (None: the process's own); what's left out is judged on it alone, and the
+/// process's names those rules judge aren't inherited (`judged`). `confine`: under claude's own profile (`sandbox::claude`, the chat's — `sandbox-exec` execs
 /// claude, so the pid is claude's; Linux: started from a thread confined to its rules); None: as you.
 pub fn spawn(
     cfg: &LlmConfig,
@@ -350,6 +350,10 @@ pub fn command(
     };
     cmd.current_dir(dir).args(&args).args(extra);
     if let Some(given) = given {
+        // (a stand-in is the whole of what the rules judge — `ClaudeEnv::of`: the process's own such names stay out)
+        for name in process_names().into_iter().filter(|n| judged(n) && !given.contains_key(n)) {
+            cmd.env_remove(name);
+        }
         cmd.envs(given);
     }
     // claude doesn't update itself from tarae (decision A): its updater writes a folder of programs on PATH
@@ -536,19 +540,25 @@ fn process_names() -> Vec<String> {
     std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect()
 }
 
-impl ClaudeEnv {
-    /// The rules over every name claude would inherit — the process's, and `given`'s laid over them (`spawn`). A
-    /// test's stand-ins alone wouldn't do: tests run where the process holds a Claude Code session's variables
-    /// too (tarae's own checks, run from inside one).
-    pub fn of(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
-        let mut names = process_names();
-        names.extend(given.into_iter().flat_map(|g| g.keys().cloned()));
-        claude_env(names.iter().map(String::as_str), keep_keys)
-    }
+/// Whether a rule of `claude_env` judges `name` — what a stand-in's claude never inherits from the process
+/// (`command`): the process's own such names (tarae's tests run inside a Claude Code session too) would be judged
+/// on nothing.
+fn judged(name: &str) -> bool {
+    CREDENTIALS.contains(&name)
+        || SET_FOR_CHILDREN.contains(&name)
+        || SET_FOR_CHILDREN_FAMILIES.iter().any(|f| name.starts_with(f))
+        || THE_HOSTS.contains(&name)
+        || NESTED_BY.contains(&name)
+        || name == SCOPES.0
+        || name == SCOPES.1
+}
 
-    /// The rules over tarae's environment as it reads it to say what's left out: `given`'s alone (a test's —
-    /// what's said never depends on where the tests run), else the process's.
-    pub(crate) fn as_read(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
+impl ClaudeEnv {
+    /// The rules over tarae's environment — the process's, or `given`, a test's stand-in (`Editor::claude_env`),
+    /// alone: what's left out, what's said and what the key card offers never depend on where the tests run, and
+    /// what claude inherits of the process's names the rules judge goes (`command`), so a stand-in is the whole of
+    /// it there too.
+    pub fn of(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
         let names = given.map_or_else(process_names, |g| g.keys().cloned().collect());
         claude_env(names.iter().map(String::as_str), keep_keys)
     }
@@ -613,7 +623,7 @@ pub fn env_told(ed: &mut Editor) -> Option<String> {
         return None;
     }
     ed.claude_env_told = true;
-    let said = ClaudeEnv::as_read(ed.claude_env.as_ref(), keeps_key(ed)).said()?;
+    let said = ClaudeEnv::of(ed.claude_env.as_ref(), keeps_key(ed)).said()?;
     crate::log::line("claude", "info", &said);
     Some(said)
 }
@@ -629,7 +639,7 @@ pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
     let confined = ed.config.llm.claude_sandbox;
     let place = crate::claudehome::Place::of(crate::sandbox::Os::HOST, confined, &var).ok().flatten();
     let own = crate::claudehome::login_hint(error, place.as_ref(), &mut ed.claude_login_told);
-    let env = ClaudeEnv::as_read(ed.claude_env.as_ref(), keeps_key(ed));
+    let env = ClaudeEnv::of(ed.claude_env.as_ref(), keeps_key(ed));
     let keys = env.keys();
     if keys.is_empty() {
         return own;
@@ -2253,8 +2263,9 @@ pub(crate) mod tests {
     /// stand-in claude got them all while every test passed. The variables are set only in a process of its own
     /// (`process_env_in_its_own_process`) — this one's is never changed.
     /// The same from a process outside any Claude Code session (its marks taken out of the child's environment,
-    /// wherever the tests run) with `llm.environment-key = "keep"`: the key goes on — `spawn` reads the setting —
-    /// and `CLAUDECODE` (an IDE terminal's, say) still doesn't.
+    /// wherever the tests run) with `llm.environment-key = "keep"`: the stand-in's key goes on — `spawn` reads the
+    /// setting — and `CLAUDECODE` (an IDE terminal's, say) still doesn't. A stand-in is the whole of what's
+    /// judged (`ClaudeEnv::of`): the process's own key never reaches its claude.
     #[test]
     fn what_the_process_itself_holds_never_reaches_claude() {
         let run = |how: &str, env: &[(&str, &str)]| {
@@ -2288,8 +2299,8 @@ pub(crate) mod tests {
     ];
 
     /// `what_the_process_itself_holds_never_reaches_claude`'s child: a stand-in claude started as every test
-    /// starts one (`given` empty), from a process holding `PROCESS_ENV` (`drop`) or a key outside any session
-    /// with the key kept (`keep`).
+    /// starts one (`given` empty), from a process holding `PROCESS_ENV` (`drop`) — or, with the key kept, the
+    /// stand-in holding one (`keep`).
     #[test]
     #[ignore]
     fn process_env_in_its_own_process() {
@@ -2298,7 +2309,11 @@ pub(crate) mod tests {
         let dir = scratch.to_path_buf();
         let mut cfg = LlmConfig { keep_env_key: how == "keep", ..LlmConfig::default() };
         recording(&mut cfg);
-        let mut child = spawn(&cfg, &[], &dir, Some(&Env::new()), &Credential::Subscription, None).unwrap();
+        let given = match how == "keep" {
+            true => Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-2".into())]),
+            false => Env::new(),
+        };
+        let mut child = spawn(&cfg, &[], &dir, Some(&given), &Credential::Subscription, None).unwrap();
         drop(child.stdin.take());
         child.wait().unwrap();
         let names = std::fs::read_to_string(dir.join("env.names")).unwrap();
