@@ -540,6 +540,9 @@ pub struct Editor {
     pub offer_read: std::cell::RefCell<std::collections::HashSet<u64>>,
     /// Whether to show offers (off in tests — so they don't swallow y/n keys).
     pub offer_popups: bool,
+    /// 번짐: the head of text being written drawn as ink not yet dry (`term::wet`) — off in tests, as the
+    /// animation is (a test that looks at it turns it on).
+    pub wet_ink: bool,
     /// Diagnostic card closed with Esc on this line (doc, line) — back once the cursor leaves the line.
     pub diag_card_hidden: Option<(DocId, usize)>,
     cmd_loading: std::collections::HashSet<std::path::PathBuf>,
@@ -821,6 +824,7 @@ impl Editor {
             offer_seq: 0,
             hook_waits: Vec::new(),
             offer_popups: !cfg!(test),
+            wet_ink: !cfg!(test),
             diag_card_hidden: None,
             cmd_loading: Default::default(),
             watches: Vec::new(),

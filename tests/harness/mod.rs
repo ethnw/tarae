@@ -515,6 +515,17 @@ impl Term {
         Screen { rows: s.rows(0, cols).collect() }
     }
 
+    /// The foreground colour the screen shows `needle`'s first character in (None: not on screen).
+    pub fn fg_of(&self, needle: &str) -> Option<vt100::Color> {
+        use unicode_width::UnicodeWidthStr;
+        let o = lock(&self.out);
+        let s = o.parser.screen();
+        let (_, cols) = s.size();
+        let (r, row) = s.rows(0, cols).enumerate().find(|(_, row)| row.contains(needle))?;
+        let col = row[..row.find(needle)?].width();
+        Some(s.cell(r as u16, col as u16)?.fgcolor())
+    }
+
     pub fn raw(&self) -> Vec<u8> {
         lock(&self.out).raw.clone()
     }

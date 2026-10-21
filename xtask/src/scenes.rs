@@ -54,11 +54,29 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@?entry(first", "@1"],
     },
+    // (the panel, its answer stopping in a list after a quote — a line in a script without spaces at its head)
     Scene {
         name: "chatpanel",
-        claude: "mid",
+        claude: "midlist",
         files: MAIN,
-        keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@?entry(first", "\x06", "@1"],
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?keeps the first",
+            "\x06",
+            "@1",
+        ],
+    },
+    // (`space i` on a line: its card while the answer is written)
+    Scene {
+        name: "ask",
+        claude: "ask",
+        files: MAIN,
+        keys: &["@1", "9", "G", "x", " ", "i", "@1", "keep the first strand", "\r", "@?claude writing", "@1"],
     },
     // (Claude's edit: its review; accepted and the turn's end; then `space v t` on that turn)
     Scene {
@@ -376,7 +394,8 @@ fn demo_crate(dir: &Path) -> Result<()> {
 /// Reads tarae's lines from `input` and answers each user message (the line that starts `{"message"` — tarae's
 /// JSON has its keys sorted) with `script`'s turn on `out`, `pause` after each piece of text: `full` explains,
 /// reads and edits (its calls wait for tarae's answers); `mid` stops in the middle of its code block and waits
-/// for tarae to go; `card` asks to run outside the sandbox; `idle` never answers.
+/// for tarae to go; `midlist` stops in a list after a quote, on a line in Japanese; `ask` answers `space i` and
+/// stops mid-line; `card` asks to run outside the sandbox; `idle` never answers.
 fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Duration) -> io::Result<()> {
     let mut lines = input.lines();
     while let Some(line) = lines.next() {
@@ -387,6 +406,8 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
         match script {
             "full" => turn.explain(true)?,
             "mid" => turn.explain(false)?,
+            "midlist" => turn.explain_listed()?,
+            "ask" => turn.rewrite()?,
             "card" => turn.ask_outside()?,
             _ => {}
         }
@@ -461,6 +482,34 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         self.words("Done — **main.rs** now keeps the first strand when a name repeats.")?;
         self.words("Nothing else reads the map, so no other change is needed.")?;
         self.line(json!({"type": "result", "result": "done"}))
+    }
+
+    /// `explain`'s start, then a quote and a list, stopping in its last item — and waiting until tarae goes.
+    fn explain_listed(&mut self) -> io::Result<()> {
+        self.words("The name is cloned because **insert** takes the key by value.")?;
+        self.text("\n\n> ")?;
+        self.words("같은 이름은 한 가닥으로 남는다.")?;
+        self.text("\n\n- ")?;
+        self.words("`insert` replaces the value")?;
+        self.text("\n- ")?;
+        self.words("`entry` keeps the first:")?;
+        // (characters the shots' fonts all have)
+        for c in ["同じ", "名前は", "一本", "だ"] {
+            self.text(c)?;
+        }
+        self.lines.by_ref().try_for_each(|l| l.map(drop))
+    }
+
+    /// `space i`'s answer (`<r i="1">` …): the line rewritten, stopping mid-line — and holding there a minute (a
+    /// shot's time): tarae closes this process's input once it has sent the message, so there's nothing to wait
+    /// on, and an exit would end the answer.
+    fn rewrite(&mut self) -> io::Result<()> {
+        self.text("<r i=\"1\">")?;
+        for t in ["    threads", ".entry(first.name", ".clone())", ".or_insert("] {
+            self.text(t)?;
+        }
+        std::thread::sleep(Duration::from_secs(60));
+        Ok(())
     }
 
     fn ask_outside(&mut self) -> io::Result<()> {

@@ -484,8 +484,27 @@ pub fn wrap(lines: &[Line], width: usize, rule: Style) -> Vec<Vec<Span>> {
 
 /// `wrap`, with a stacked table's header names in `label` (a step above `rule` when the rules are faint).
 pub fn wrap_with(lines: &[Line], width: usize, rule: Style, label: Style) -> Vec<Vec<Span>> {
+    wrap_drawn(lines, width, rule, label).0
+}
+
+/// What of a laid-out row the layout drew rather than the text wrote: all of it (a rule, a table's rule), its
+/// first `lead` characters (a list item's bullet or number, a quote's bar — merged into the text's span when
+/// they share its style), its last `tail` (a cut code row's `…` and padding); `code`: a code row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Drawn {
+    pub whole: bool,
+    pub lead: usize,
+    pub tail: usize,
+    pub code: bool,
+}
+
+/// `wrap_with`, and what of each row it drew (`Drawn`), row for row.
+pub fn wrap_drawn(lines: &[Line], width: usize, rule: Style, label: Style) -> (Vec<Vec<Span>>, Vec<Drawn>) {
     let mut out = Vec::new();
+    let mut drawn = Vec::new();
     for line in lines {
+        let from = out.len();
+        let mut lead = 0;
         match line {
             Line::Blank => out.push(Vec::new()),
             Line::Rule => out.push(vec![Span { text: "─".repeat(width), style: rule }]),
@@ -494,13 +513,40 @@ pub fn wrap_with(lines: &[Line], width: usize, rule: Style, label: Style) -> Vec
                 let lead = spans.iter().flat_map(|s| s.text.chars()).take_while(|c| *c == ' ').count();
                 wrap_row(spans, lead, width, &mut out);
             }
-            Line::Text { spans, indent } => wrap_row(spans, *indent, width, &mut out),
+            Line::Text { spans, indent } => {
+                wrap_row(spans, *indent, width, &mut out);
+                // (a list item's or a quote's head: the first row's first `indent` cells — `render` makes it
+                // exactly that wide; a paragraph has none)
+                let mut cells = 0;
+                for c in out.get(from).into_iter().flatten().flat_map(|s| s.text.chars()) {
+                    if cells >= *indent {
+                        break;
+                    }
+                    cells += c.width().unwrap_or(0);
+                    lead += 1;
+                }
+            }
             Line::Table { aligns, header, rows } => {
                 table(aligns, header, rows, width, (rule, label), &mut out)
             }
         }
+        for (k, row) in out[from..].iter().enumerate() {
+            let whole = match line {
+                Line::Rule => true,
+                // (a table's rule under its header: nothing but `─` and the gaps between columns)
+                Line::Table { .. } => {
+                    row.iter().any(|s| s.text.contains('─'))
+                        && row.iter().all(|s| {
+                            s.style == rule && s.text.chars().all(|c| c == '─') || s.text.trim().is_empty()
+                        })
+                }
+                _ => false,
+            };
+            let code = matches!(line, Line::Code(_));
+            drawn.push(Drawn { whole, lead: if k == 0 { lead } else { 0 }, tail: 0, code });
+        }
     }
-    out
+    (out, drawn)
 }
 
 /// One line's spans into rows of `width`, broken at the last space (else after a word's last `/` — a path

@@ -1384,6 +1384,75 @@ fn a_watcher_hears_a_turn_begin_and_end() {
     );
 }
 
+/// 번짐 asks no frame of its own: an answer streamed in parts, its head wet as it comes (on in the binary: the
+/// head in other ink than the words before it while the answer waits mid-way), then the turn's end — the head
+/// in the ink of the rest, and after that frame nothing is drawn.
+#[test]
+fn wet_ink_draws_no_frame_after_the_turn() {
+    let sb = Sandbox::new("wet-ink");
+    let delta = |t: &str| {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":"{t}"}}}}}}"#
+        )
+    };
+    let lines = [
+        r#"{"type":"system","subtype":"init","session_id":"c1","model":"claude-opus-5-5"}"#.to_string(),
+        delta("The name is cloned "),
+        delta("because insert takes "),
+        delta("the key by value."),
+        r#"{"type":"result","subtype":"success","result":"done","session_id":"c1"}"#.to_string(),
+    ];
+    // (each part a moment after the one before: frames drawn with the head wet; mid-way it waits a while)
+    let body: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("  printf '%s\\n' '{l}'; sleep {}\n", if i == 2 { "3" } else { "0.2" }))
+        .collect();
+    let fake = format!(
+        "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n{}done\n",
+        body.concat()
+    );
+    let script = sb.write("fake-claude.sh", &fake);
+    sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
+    sb.write("a.txt", "one\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.send(" l");
+    t.wait_state("the chat has the keys", |s| s["keys"]["region"] == "chat");
+    t.send("why?\r");
+    // (single words: the follow card or the panel may wrap the line anywhere)
+    t.wait_for("the answer mid-way", |s| s.contains("takes"));
+    let (dry, wet) = (t.fg_of("cloned"), t.fg_of("takes"));
+    assert!(
+        dry.is_some() && wet != dry,
+        "mid-way, the head in other ink: {wet:?} after {dry:?}\n{}",
+        t.screen()
+    );
+    t.wait_for("the answer, whole", |s| s.contains("the key by value."));
+    t.wait_state("the turn ended", |s| s["sessions"][0]["doing"] == "idle");
+    t.wait_for("the answer in the panel", |s| s.contains("value.") && !s.contains("C-c stop"));
+    let (head, rest) = (t.fg_of("value."), t.fg_of("cloned"));
+    assert_eq!(head, rest, "the turn ended: the head in the ink of the rest\n{}", t.screen());
+    // Settled (the frame that draws it dry, what lands late) — then nothing: no tick for the ink drying
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let frames = t.frames();
+        std::thread::sleep(Duration::from_secs(1));
+        if t.frames() == frames || std::time::Instant::now() > end {
+            break;
+        }
+    }
+    // (nor a wake: a tick that draws nothing new is no frame, but it wakes the loop — at rest it's a few
+    // switches in 2 s, a 100 ms tick ~100, as `an_idle_editor_draws_nothing_and_sleeps` measures)
+    let (frames, before) = (t.frames(), t.usage());
+    std::thread::sleep(Duration::from_secs(2));
+    let (drawn, used) = (t.frames() - frames, t.usage() - before);
+    assert!(
+        drawn == 0 && used.switches < 30,
+        "after the turn's end: {drawn} frames, {used:?}\n{}",
+        t.screen()
+    );
+}
+
 /// A chat turn's usage on screen: a stand-in claude streaming what claude does (a request writing 4k to
 /// the 5m cache, its result with the conversation's cost and the model's window) — the line under the chat
 /// says until when the cache stays warm, the context's share, the turn's cost; `:usage` lists the turn; the

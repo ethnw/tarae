@@ -8138,15 +8138,36 @@ fn draw_ask_stream(
         .map(|s| s.lang.name.clone());
     let preview = crate::llm::preview(&rev.streamed, ROWS);
     let code = crate::markdown::code_lines(&preview.join("\n"), lang.as_deref(), &editor.theme);
+    let mut code: Vec<Vec<crate::markdown::Span>> = code
+        .into_iter()
+        .map(|l| match l {
+            crate::markdown::Line::Code(spans) => spans,
+            _ => Vec::new(),
+        })
+        .collect();
+    // (the code's room: from the rail's edge — a cell of it kept — to the code's right edge)
+    let room = lay.edit_w.saturating_sub(lay.rail_w + 1);
+    let inner = (lay.edit_w / 2).clamp(30, 72).min(room.saturating_sub(5));
+    // (each line cut to the card first: a line wider than it shows its start, and its wet head is the end of
+    // what shows)
+    for row in &mut code {
+        let mut used = 0;
+        for s in row.iter_mut() {
+            s.text = fit(&s.text, inner.saturating_sub(used));
+            used += s.text.width();
+        }
+    }
+    // (번짐: the head of what it writes, ink not yet dry)
+    if !rev.thinking && editor.wet_ink {
+        let drawn = vec![crate::markdown::Drawn { code: true, ..Default::default() }; code.len()];
+        wet_head("ask", &mut code, &drawn, ui, card);
+    }
     // (how to stop it, when Esc does — `llm::esc_stops`: a row of its own under the text)
     let faint = Style { fg: ui.linenr.fg, ..card };
     let stop = match crate::llm::esc_stops(editor) {
         true => hint_spans(&[("esc", "stop")], Style { fg: ui.virt.fg, ..card }, faint),
         false => Vec::new(),
     };
-    // (the code's room: from the rail's edge — a cell of it kept — to the code's right edge)
-    let room = lay.edit_w.saturating_sub(lay.rail_w + 1);
-    let inner = (lay.edit_w / 2).clamp(30, 72).min(room.saturating_sub(5));
     let body = if rev.streamed.is_empty() { 0 } else { code.len().min(ROWS) };
     let hint = usize::from(!stop.is_empty());
     let h = 1 + body + hint + 2 * pad;
@@ -8183,13 +8204,11 @@ fn draw_ask_stream(
         apply(out, card)?;
         queue!(out, Print("  "))?;
         let mut used = 0;
-        if let crate::markdown::Line::Code(spans) = line {
-            for sp in spans {
-                let t = fit(&sp.text, inner - used);
-                apply(out, card.patch(sp.style))?;
-                queue!(out, Print(&t))?;
-                used += t.width();
-            }
+        for sp in line {
+            let t = fit(&sp.text, inner - used);
+            apply(out, card.patch(sp.style))?;
+            queue!(out, Print(&t))?;
+            used += t.width();
         }
         // End of last line = where it's writing
         if i + 1 == body && used < inner {
@@ -8366,7 +8385,13 @@ fn draw_follow_card(
                 } else {
                     let text = crate::chat::displayed(&m.text);
                     let rendered = crate::markdown::render(text.trim(), &editor.theme, lang.as_deref());
-                    chat_markdown(&rendered, inner, (faint, dim), ui.base.bg)
+                    let (mut rows, drawn) = chat_markdown_drawn(&rendered, inner, (faint, dim), ui.base.bg);
+                    // (번짐: the answer being written, its head ink not yet dry)
+                    let head = c.msgs.last().is_some_and(|l| std::ptr::eq(l, m));
+                    if head && c.state == crate::chat::State::Writing && editor.wet_ink {
+                        wet_head("follow", &mut rows, &drawn, ui, card);
+                    }
+                    rows
                 };
                 while rows.last().is_some_and(|r| blank(r)) {
                     rows.pop();
@@ -9821,7 +9846,13 @@ fn draw_chat(
     // What every message is drawn in — the theme as read, the chat's styles: one of them changed, every message
     // is laid out again. The language a code block with none is coloured as only those that have one
     // (`Laid.lang`)
-    let look = hash_of((t.id, [card, dim, faint, accent, strong, string, warn_fg], ui.base.bg));
+    let look = hash_of((
+        t.id,
+        [card, dim, faint, accent, strong, string, warn_fg],
+        ui.base.bg,
+        ui.tint,
+        editor.wet_ink,
+    ));
     let lang_hash = hash_of(&lang);
     // (the last turn's end: no question after it and Claude done — its time row offers the replay)
     let last_user = c.msgs.iter().rposition(|m| m.role == Role::User);
@@ -9878,11 +9909,14 @@ fn draw_chat(
             Role::Assistant => {
                 lines.push(ChatRow::default());
                 let rendered = md::render_reading(&crate::chat::displayed(&m.text), t, lang.as_deref(), read);
-                lines.extend(chat_markdown(&rendered, w, (faint, dim), ui.base.bg).into_iter().map(plain));
-                if i + 1 == n
-                    && c.state == State::Writing
-                    && let Some(l) = lines.last_mut()
-                {
+                let (mut rows, drawn) = chat_markdown_drawn(&rendered, w, (faint, dim), ui.base.bg);
+                let writing = i + 1 == n && c.state == State::Writing;
+                // (번짐: its head ink not yet dry while it's written — laid out again as text comes, dry at the end)
+                if writing && editor.wet_ink {
+                    wet_head("chat", &mut rows, &drawn, ui, card);
+                }
+                lines.extend(rows.into_iter().map(plain));
+                if writing && let Some(l) = lines.last_mut() {
                     l.spans.push(sp("▍".into(), accent));
                 }
             }
@@ -10608,11 +10642,23 @@ fn usage_spans(
 fn chat_markdown(
     lines: &[crate::markdown::Line],
     w: usize,
-    (rule, label): (Style, Style),
+    styles: (Style, Style),
     well: Option<crossterm::style::Color>,
 ) -> Vec<Vec<crate::markdown::Span>> {
-    use crate::markdown::{self as md, Line, Span};
+    chat_markdown_drawn(lines, w, styles, well).0
+}
+
+/// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what wet ink
+/// leaves alone.
+fn chat_markdown_drawn(
+    lines: &[crate::markdown::Line],
+    w: usize,
+    (rule, label): (Style, Style),
+    well: Option<crossterm::style::Color>,
+) -> (Vec<Vec<crate::markdown::Span>>, Vec<crate::markdown::Drawn>) {
+    use crate::markdown::{self as md, Drawn, Line, Span};
     let mut out = Vec::new();
+    let mut drawn = Vec::new();
     for l in lines {
         match l {
             Line::Code(spans) => {
@@ -10633,16 +10679,25 @@ fn chat_markdown(
                     });
                     used += 1;
                 }
-                row.push(Span {
-                    text: " ".repeat(inner.saturating_sub(used) + 1),
-                    style: Style { bg: well, ..Style::default() },
-                });
+                let pad = inner.saturating_sub(used) + 1;
+                row.push(Span { text: " ".repeat(pad), style: Style { bg: well, ..Style::default() } });
                 out.push(row);
+                // (its well's first cell, and its end: the `…` of a cut row and the padding)
+                drawn.push(Drawn {
+                    whole: false,
+                    lead: 1,
+                    tail: pad + usize::from(full > inner),
+                    code: true,
+                });
             }
-            other => out.extend(md::wrap_with(std::slice::from_ref(other), w, rule, label)),
+            other => {
+                let (rows, d) = md::wrap_drawn(std::slice::from_ref(other), w, rule, label);
+                out.extend(rows);
+                drawn.extend(d);
+            }
         }
     }
-    out
+    (out, drawn)
 }
 
 /// Colors of a trail row.
@@ -10834,6 +10889,175 @@ fn log_cut(body: &[Vec<crate::markdown::Span>], max: usize) -> usize {
 
 fn blank(row: &[crate::markdown::Span]) -> bool {
     row.iter().all(|s| s.text.trim().is_empty())
+}
+
+/// Units at the head of text being written that are ink not yet dry (`wet`, `Unit`).
+const WET_WORDS: usize = 2;
+/// The most of them wet, in cells — a long run with no break (a URL, a hash) wets only its end.
+const WET_CELLS: usize = 12;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the spans `wet_head` drew wet, by surface (`chat`, `follow`, `ask`) — test frames carry no colour.
+    static WET_SEEN: std::cell::RefCell<Vec<(&'static str, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `wet` as every surface draws it: the dim level is `ui.virtual`'s, the paper the card's ground or `ui.tint`.
+/// `drawn`: what of each row its layout drew (never wet).
+fn wet_head(
+    surface: &'static str,
+    rows: &mut [Vec<crate::markdown::Span>],
+    drawn: &[crate::markdown::Drawn],
+    ui: &Ui,
+    card: Style,
+) {
+    wet(surface, rows, drawn, wet_ink(card.fg, ui.virt.fg, card.bg.or(ui.tint)));
+}
+
+/// 번짐 (S1): the head of text being written as ink not yet dry — its last `WET_WORDS` words restyled by `to`
+/// (`wet_ink`). A function of where the stream's head is, never of time: it moves only as text comes, asks no
+/// frame of its own, and the frame that ends the turn draws it dry. A row's end is a space between words.
+/// (`_surface` names it for the tests' record, `WET_SEEN`.)
+fn wet(
+    _surface: &'static str,
+    rows: &mut [Vec<crate::markdown::Span>],
+    drawn: &[crate::markdown::Drawn],
+    to: impl Fn(Style) -> Style,
+) {
+    use crate::markdown::Span;
+    // Each row's characters: (char, its unit's first index — None: not a unit's), from what the text wrote
+    let units_of = |r: usize, row: &[Span]| -> Vec<(char, Option<usize>)> {
+        let d = drawn.get(r).copied().unwrap_or_default();
+        let chars: Vec<char> = row.iter().flat_map(|s| s.text.chars()).collect();
+        let n = chars.len();
+        let written = |i: usize| !d.whole && i >= d.lead && i + d.tail < n;
+        let mut out: Vec<(char, Option<usize>)> = Vec::with_capacity(n);
+        // (the unit the character before is in: its kind and first index)
+        let mut prev: Option<(Unit, usize)> = None;
+        for (i, &c) in chars.iter().enumerate() {
+            let class = if written(i) { unit_of(c, d.code) } else { Unit::Space };
+            if class == Unit::Space {
+                prev = None;
+                out.push((c, None));
+                continue;
+            }
+            // (a combining mark is its base's)
+            let joins = c.width() == Some(0);
+            let unit = match prev {
+                Some(p) if joins => p,
+                Some((k, s)) if k == class && class != Unit::Alone => (k, s),
+                _ => (class, i),
+            };
+            prev = Some(unit);
+            out.push((c, Some(unit.1)));
+        }
+        out
+    };
+    // From the end: the first character of the last `WET_WORDS` units, at most `WET_CELLS` cells of them
+    let (mut units, mut cells) = (0, 0);
+    let mut unit: Option<(usize, usize)> = None;
+    let mut from: Option<(usize, usize)> = None;
+    'rows: for (r, row) in rows.iter().enumerate().rev() {
+        let chars = units_of(r, row);
+        for (i, &(c, start)) in chars.iter().enumerate().rev() {
+            let Some(start) = start else { continue };
+            if unit != Some((r, start)) {
+                units += 1;
+                if units > WET_WORDS {
+                    break 'rows;
+                }
+                unit = Some((r, start));
+            }
+            cells += c.width().unwrap_or(0);
+            if cells > WET_CELLS {
+                break 'rows;
+            }
+            from = Some((r, i));
+        }
+    }
+    let Some((r0, i0)) = from else { return };
+    let seen = |_text: &str| {
+        #[cfg(test)]
+        WET_SEEN.with_borrow_mut(|w| w.push((_surface, _text.to_string())));
+    };
+    // What the text wrote from there on is wet, the spaces between too; what the layout drew stays
+    for (r, row) in rows.iter_mut().enumerate().skip(r0) {
+        let d = drawn.get(r).copied().unwrap_or_default();
+        let n: usize = row.iter().map(|s| s.text.chars().count()).sum();
+        let wet_at = |i: usize| !d.whole && i >= d.lead && i + d.tail < n && (r > r0 || i >= i0);
+        let mut out: Vec<Span> = Vec::with_capacity(row.len() + 2);
+        let mut at = 0;
+        for s in std::mem::take(row) {
+            let mut run = String::new();
+            let mut run_wet = None;
+            for c in s.text.chars() {
+                let w = wet_at(at);
+                if run_wet.is_some_and(|x| x != w) {
+                    let text = std::mem::take(&mut run);
+                    if !w {
+                        seen(&text);
+                    }
+                    out.push(Span { text, style: if w { s.style } else { to(s.style) } });
+                }
+                run_wet = Some(w);
+                run.push(c);
+                at += 1;
+            }
+            if !run.is_empty() {
+                let w = run_wet == Some(true);
+                if w {
+                    seen(&run);
+                }
+                out.push(Span { text: run, style: if w { to(s.style) } else { s.style } });
+            }
+        }
+        *row = out;
+    }
+}
+
+/// What a character is to wet ink's units (`wet`): prose is words between spaces; code is tokens — an
+/// identifier, a run of punctuation, a word in a string; a script written without spaces (Chinese, Japanese)
+/// is a character each.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Space,
+    Word,
+    Punct,
+    Alone,
+}
+
+fn unit_of(c: char, code: bool) -> Unit {
+    let spaceless = matches!(c, '\u{3000}'..='\u{30ff}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}'
+        | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}' | '\u{20000}'..='\u{2fa1f}');
+    match c {
+        c if c.is_whitespace() => Unit::Space,
+        _ if spaceless => Unit::Alone,
+        c if !code || c.is_alphanumeric() || c == '_' => Unit::Word,
+        _ => Unit::Punct,
+    }
+}
+
+/// What ink not yet dry looks like (`wet`): a span's colour (`ink` where it has none) moved toward the paper it's
+/// on until it has the contrast `ui.virtual` has there — the dim level, a coloured span keeping its hue; one
+/// already at it or fainter (a comment, a quote) stays as it is: never a third dim level. `paper` is the span's
+/// own ground (a code block's well), else the card's, else `ui.tint` (a transparent theme paints none). Named
+/// colours: `ui.virtual` for the ink, the rest as they are.
+fn wet_ink(ink: Option<Color>, virt: Option<Color>, paper: Option<Color>) -> impl Fn(Style) -> Style {
+    use crate::chrome::{contrast, fade, rgb};
+    move |st: Style| {
+        let fg = st.fg.or(ink);
+        let to = match (fg.and_then(rgb), virt.and_then(rgb), st.bg.or(paper).and_then(rgb)) {
+            (Some(f), Some(v), Some(p)) => {
+                // (the step is the span's own: at the dim level or below it, kept whole — `fade` never brightens)
+                let (have, want) = (contrast(f, p), contrast(v, p));
+                let [r, g, b] = fade(f, p, ((want - 1.0) / (have - 1.0).max(1e-6)).clamp(0.0, 1.0));
+                Some(Color::Rgb { r, g, b })
+            }
+            _ if st.fg.is_none() => virt,
+            _ => fg,
+        };
+        Style { fg: to, ..st }
+    }
 }
 
 /// Thinking summary → rows: italic in the dim tone (bold kept — summaries title their steps in bold).
@@ -13975,6 +14199,8 @@ mod tests {
         let keys: Vec<&str> = deltas.iter().map(String::as_str).collect();
         let (worst, delta) = worst_of_best(&keys, || {
             let mut ed = long_chat(200);
+            // (번짐 as a user sees it: the head of the answer being written wet)
+            ed.wet_ink = true;
             let mut buf = Vec::with_capacity(1 << 16);
             render(&mut ed, &mut buf, 160, 45).unwrap();
             assert!(String::from_utf8_lossy(&buf).contains("Starting"), "the chat's panel is drawn");
@@ -14064,6 +14290,224 @@ mod tests {
         chat_frame(&mut ed, 140);
         let untagged = laid_again(&narrower, &kept_rows(&ed));
         assert_eq!(untagged, [2, 10, 18, 26, 34], "a Rust file in front: the answers with untagged code");
+    }
+
+    /// 번짐: the last two words of text being written — across spans and rows, a span split where the wet part
+    /// starts; trailing space isn't a word; a row's end is a space between words.
+    #[test]
+    fn the_last_two_words_are_wet() {
+        let th = crate::theme::Theme::builtin();
+        let (rule, label) = (th.get("ui.linenr"), th.get("ui.virtual"));
+        // (an answer laid out as the chat lays it out — what's wet, a run at a time, `|` between)
+        let wet_of = |md: &str, w: usize| -> String {
+            let lines = crate::markdown::render(md, &th, None);
+            let (mut rows, drawn) = chat_markdown_drawn(&lines, w, (rule, label), None);
+            WET_SEEN.with_borrow_mut(Vec::clear);
+            wet("test", &mut rows, &drawn, |s| Style { underline: true, ..s });
+            for (row, d) in rows.iter().zip(&drawn) {
+                let chars: Vec<(char, bool)> =
+                    row.iter().flat_map(|s| s.text.chars().map(move |c| (c, s.style.underline))).collect();
+                let n = chars.len();
+                for (i, &(c, u)) in chars.iter().enumerate() {
+                    let laid = d.whole || i < d.lead || i + d.tail >= n;
+                    assert!(!(u && laid), "{md:?}: {c:?}, drawn by the layout, wet");
+                }
+            }
+            WET_SEEN.with_borrow(|w| w.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("|"))
+        };
+        assert_eq!(wet_of("Starting the answer so far", 40), "so far");
+        assert_eq!(wet_of("alone", 40), "alone", "fewer than two: all of it");
+        // (a row's end parts words)
+        assert_eq!(wet_of("alpha beta gamma", 11), "beta|gamma");
+        // (what the layout drew is never wet nor a word: a list's bullets and numbers, a quote's bar, a table's
+        // rule, a cut code row's `…`)
+        assert_eq!(wet_of("- one\n- two", 40), "one|two");
+        assert_eq!(wet_of("1. one\n2. two", 40), "one|two");
+        assert_eq!(wet_of("> quoted words", 40), "quoted words");
+        // (a table's gaps are spans of their own)
+        assert_eq!(wet_of("| a | b |\n|---|---|\n| one | two |", 40), "one|  |two");
+        assert_eq!(wet_of("| a | b |\n|---|---|", 40), "a|  |b", "a table ending on its rule: the header");
+        let cut = wet_of("```\nlet total = items.iter().map(|x| x * 2).sum();\n```", 24);
+        assert!(!cut.is_empty() && !cut.contains('…'), "{cut:?}");
+        // (code: tokens — an identifier, a punctuation run, a string's word)
+        assert_eq!(wet_of("```\nlet n = parse(text);\n```", 40), "text);");
+        assert_eq!(wet_of("```\nsay(\"hello wide world\");\n```", 40), "world\");");
+        // (a script written without spaces: a character each; a long run: its end, at most `WET_CELLS`)
+        assert_eq!(wet_of("這是一個很長的句子", 40), "句子");
+        assert_eq!(wet_of("これは長い文です", 40), "です");
+        assert_eq!(wet_of("see https://example.com/a/very/long/path/to/somewhere", 80), "to/somewhere");
+    }
+
+    /// What `wet_head` drew wet in a frame of `ed`, by surface.
+    fn wet_in_frame(ed: &mut Editor, surface: &str) -> Vec<String> {
+        WET_SEEN.with_borrow_mut(Vec::clear);
+        chat_frame(ed, 160);
+        WET_SEEN.with_borrow(|w| w.iter().filter(|(s, _)| *s == surface).map(|(_, t)| t.clone()).collect())
+    }
+
+    /// Follow's card while the answer is written (the chat minimized): its newest answer's head wet; once the
+    /// turn ends, nothing wet.
+    #[test]
+    fn the_follow_cards_answer_has_its_head_wet() {
+        let mut ed = long_chat(4);
+        ed.wet_ink = true;
+        // (some code, not the start screen: the card sits on it)
+        ed.docs[0].text = Rope::from_str("fn main() {}\n");
+        let c = ed.session.chat.as_mut().unwrap();
+        c.unfolded = false;
+        c.follow.on = true;
+        assert!(c.compact(), "follow's card, the chat minimized");
+        c.msgs[4].text = "Starting the answer so far".into();
+        let wet = wet_in_frame(&mut ed, "follow");
+        assert_eq!(wet, ["so far"], "the head of the answer being written");
+        // (an older answer of the turn, shown above it, stays dry)
+        ed.session.chat.as_mut().unwrap().msgs.push(crate::chat::Msg::new(
+            crate::chat::Role::Note,
+            "4.6s",
+            "",
+        ));
+        assert_eq!(wet_in_frame(&mut ed, "follow"), [""; 0], "no longer the head");
+        ed.session.chat.as_mut().unwrap().msgs.pop();
+        // (Claude thinking again, the answer still last: the card is up, its words dry)
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        assert_eq!(wet_in_frame(&mut ed, "follow"), [""; 0], "not being written: dry");
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        assert_eq!(wet_in_frame(&mut ed, "follow"), [""; 0], "the turn ended: dry");
+    }
+
+    /// `space i`'s card while it writes: the head of the code wet; while it thinks, nothing.
+    #[test]
+    fn the_ask_cards_code_has_its_head_wet() {
+        let mut ed = Editor::new(Config::default());
+        ed.wet_ink = true;
+        let mut rev = crate::llm::Review::new(1, ed.docs[0].id, "name it", Vec::new());
+        rev.streamed = "fn total(a: u32) -> u32 {\n    a + 1\n".into();
+        rev.thinking = false;
+        ed.session.review = Some(rev);
+        // (no grammar for the scratch buffer: the line is one span, `+ 1` its wet part)
+        assert_eq!(wet_in_frame(&mut ed, "ask"), ["+ 1"], "`a + 1`'s last two words");
+        // (a line wider than the card: the end of what shows of it is wet, not the end past the cut)
+        let line =
+            "    let numbers = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];";
+        ed.session.review.as_mut().unwrap().streamed = format!("{line}\n");
+        let wet = wet_in_frame(&mut ed, "ask").concat();
+        let shown = &line[..72];
+        assert!(
+            line.len() > 72 && !wet.is_empty() && shown.ends_with(&wet),
+            "{wet:?} not the end of {shown:?}"
+        );
+        ed.session.review.as_mut().unwrap().thinking = true;
+        assert_eq!(wet_in_frame(&mut ed, "ask"), [""; 0], "thinking: nothing written to be wet");
+    }
+
+    /// Wet ink keeps `ui.virtual`'s contrast with the paper it's on — the card's ground, a code well's own,
+    /// `ui.tint` where a transparent theme paints none — a coloured span its hue; named colours: `ui.virtual`.
+    #[test]
+    fn wet_ink_is_the_dim_level_against_its_paper() {
+        use crate::chrome::{contrast, rgb};
+        let c = |r, g, b| Color::Rgb { r, g, b };
+        let virt = c(130, 126, 118);
+        // (meok's light ink on dark paper, hanji's dark ink on light; a code well a tone sunk in each)
+        for (ink, paper, well, hue) in [
+            // (a well far from its paper: what fades toward one isn't at the dim level against the other)
+            (c(220, 214, 200), c(24, 24, 28), c(90, 90, 100), c(250, 160, 110)),
+            (c(40, 38, 34), c(244, 238, 222), c(170, 165, 150), c(150, 50, 10)),
+        ] {
+            let to = wet_ink(Some(ink), Some(virt), Some(paper));
+            let p = rgb(paper).unwrap();
+            let fg = rgb(to(Style::default()).fg.unwrap()).unwrap();
+            let want = contrast(rgb(virt).unwrap(), p) / contrast(rgb(ink).unwrap(), p);
+            let got = contrast(fg, p) / contrast(rgb(ink).unwrap(), p);
+            assert!((got - want).abs() < 0.1, "plain text at the dim level: {got} against {want}");
+            // (a code span on its well fades toward the well, not the card)
+            let on_well = to(Style { fg: Some(hue), bg: Some(well), ..Style::default() });
+            assert_eq!(on_well.bg, Some(well));
+            let [r, g, b] = rgb(on_well.fg.unwrap()).unwrap();
+            assert!(r > g && g > b, "its hue kept: {r} {g} {b}");
+            // (at the dim level against its well)
+            let (wl, v) = (rgb(well).unwrap(), rgb(virt).unwrap());
+            let got = contrast([r, g, b], wl);
+            assert!((got - contrast(v, wl)).abs() < 0.05, "against its well: {got} for {}", contrast(v, wl));
+            // (moved toward the well, not the card: on the line from its colour to the well's — the same
+            // luminance would come of either, the hue tells them apart)
+            let h = rgb(hue).unwrap();
+            let t = (h[0] as f64 - r as f64) / (h[0] as f64 - wl[0] as f64);
+            for (k, got) in [(1, g), (2, b)] {
+                let on = h[k] as f64 + (wl[k] as f64 - h[k] as f64) * t;
+                assert!((got as f64 - on).abs() <= 3.0, "toward its well: {r} {g} {b} (t {t:.2})");
+            }
+            // (a span already at the dim level or fainter — a comment, a quote — stays: no third level)
+            let faint = if p[0] < 128 { c(70, 70, 76) } else { c(196, 190, 176) };
+            assert!(contrast(rgb(faint).unwrap(), p) < contrast(rgb(virt).unwrap(), p));
+            let st = Style { fg: Some(faint), italic: true, ..Style::default() };
+            assert_eq!(to(st), st, "fainter than the dim level: as it is");
+        }
+        let named = wet_ink(Some(Color::White), Some(Color::DarkGrey), None);
+        assert_eq!(named(Style::default()).fg, Some(Color::DarkGrey), "named colours: ui.virtual");
+    }
+
+    /// The chat's answer being written has its head wet — the last two words in other ink than the rest — and
+    /// the frame that ends the turn draws it dry, as a conversation drawn first after it has it; nothing asks a
+    /// frame for it. In both papers, transparent too.
+    #[test]
+    fn an_answer_dries_when_its_turn_ends() {
+        for theme in ["meok", "hanji", "meok-transparent", "hanji-transparent"] {
+            let at = |state| {
+                let mut ed = long_chat(4);
+                ed.wet_ink = true;
+                ed.theme = crate::theme::load(theme).unwrap();
+                let c = ed.session.chat.as_mut().unwrap();
+                c.state = state;
+                c.msgs[4].text = "Starting the answer so far".into();
+                ed
+            };
+            let head = |ed: &Editor| -> Vec<(String, Option<Color>)> {
+                let rows = kept_rows(ed)[4].clone().unwrap();
+                rows.iter().flat_map(|r| &r.spans).map(|s| (s.text.clone(), s.style.fg)).collect()
+            };
+            let mut ed = at(crate::chat::State::Writing);
+            chat_frame(&mut ed, 160);
+            let writing = head(&ed);
+            let texts: Vec<&str> = writing.iter().map(|s| s.0.as_str()).collect();
+            assert_eq!(texts, ["Starting the answer ", "so far", "▍"], "{theme}");
+            assert_ne!(writing[1].1, writing[0].1, "{theme}: the head in ink not yet dry");
+            ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+            chat_frame(&mut ed, 160);
+            let mut fresh = at(crate::chat::State::Idle);
+            chat_frame(&mut fresh, 160);
+            let styled = |ed: &Editor| format!("{:?}", kept_rows(ed));
+            assert_eq!(styled(&ed), styled(&fresh), "{theme}: dry once the turn ended");
+            assert_eq!(
+                head(&ed),
+                [("Starting the answer so far".to_string(), writing[0].1)],
+                "{theme}: all dry"
+            );
+            assert_eq!(ed.tick_wanted(), None, "{theme}: no frame asked for it");
+        }
+        // (cards that paint no ground on a transparent theme: the paper is `ui.tint`, never the absent base)
+        use crate::chrome::{contrast, rgb};
+        let mut th = crate::theme::load("meok-transparent").unwrap();
+        th.set("ui.popup", Style { fg: th.get("ui.popup").fg, ..Style::default() });
+        let tint = rgb(th.try_get("ui.tint").and_then(|s| s.bg).unwrap()).unwrap();
+        let virt = rgb(th.get("ui.virtual").fg.unwrap()).unwrap();
+        let mut ed = long_chat(4);
+        ed.wet_ink = true;
+        ed.theme = th;
+        ed.session.chat.as_mut().unwrap().msgs[4].text = "Starting the answer so far".into();
+        chat_frame(&mut ed, 160);
+        let rows = kept_rows(&ed)[4].clone().unwrap();
+        let wet = rows.iter().flat_map(|r| &r.spans).find(|s| s.text == "so far").unwrap();
+        let got = contrast(rgb(wet.style.fg.unwrap()).unwrap(), tint);
+        assert!(
+            (got - contrast(virt, tint)).abs() < 0.2,
+            "against ui.tint: {got} for {}",
+            contrast(virt, tint)
+        );
+        assert_ne!(
+            rgb(wet.style.fg.unwrap()),
+            Some(virt),
+            "the ink faded toward ui.tint, not ui.virtual's own colour"
+        );
     }
 
     /// An answer whose code block was painted plain, its grammar not loaded yet, is laid out again once it
