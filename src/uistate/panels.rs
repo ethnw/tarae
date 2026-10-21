@@ -94,6 +94,8 @@ pub struct Chat {
     pub minimized: bool,
     pub busy: bool,
     pub queued: bool,
+    /// What waits for the turn's end, said (`2 messages queued` — `Chat::queued_said`).
+    pub queued_said: Option<String>,
     pub draft: String,
     pub follow: bool,
     pub paused: bool,
@@ -291,7 +293,8 @@ impl Editor {
                 focused: c.focused,
                 minimized: c.compact(),
                 busy: c.busy(),
-                queued: c.queued.is_some(),
+                queued: c.queued.is_some() || !c.sends.is_empty(),
+                queued_said: c.queued_said().map(|q| q.0),
                 draft: c.input.clone(),
                 follow: c.follow.on,
                 paused: c.follow.paused,
@@ -493,7 +496,7 @@ impl Panels {
             let mut s = vec!["chat".to_string()];
             s.extend(c.minimized.then(|| "minimized".to_string()));
             s.extend(c.busy.then(|| "working".to_string()));
-            s.extend(c.queued.then(|| "a message queued".to_string()));
+            s.extend(c.queued_said.clone());
             s.extend((!c.draft.is_empty()).then(|| format!("draft of {} chars", c.draft.chars().count())));
             out.push(s.join(" · "));
         }

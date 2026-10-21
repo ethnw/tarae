@@ -45,6 +45,10 @@ pub struct Ask {
     pub hosts: crate::llm::Hosts,
     /// A host's: the pack's other registries when it's one (as written, `*.crates.io`) — a yes grants them too.
     pub also: Vec<String>,
+    /// Its run ended while the card waited (the tool gave up first — npm's ~20 s): the card stays, and `y` lets
+    /// the session's next run reach it (frictions29 16: the card went with the run, and the chat worked around
+    /// the host rather than asking again).
+    pub ended: bool,
 }
 
 impl Ask {
@@ -119,7 +123,7 @@ pub fn asked(ed: &mut Editor, ask: FromProxy) {
     };
     let also = suggested(&crate::sandboxpack::get().registries, &host, port);
     let (open, hosts) = (ed.config.llm.sandbox_network, ed.config.llm.sandbox_hosts.clone());
-    let a = Ask { session, run, host, port, process, label, users, left, open, hosts, also };
+    let a = Ask { session, run, host, port, process, label, users, left, open, hosts, also, ended: false };
     ed.with_session(id, move |ed| {
         let front = !ed.background();
         let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
@@ -129,8 +133,10 @@ pub fn asked(ed: &mut Editor, ask: FromProxy) {
             {
                 // (another run's)
                 if h.run != a.run {
+                    // (whole: an ended card's extra line moved what's decided and the warning's row)
                     let fresh = card(a);
-                    (o.question, o.what, o.asked) = (fresh.question, fresh.what, fresh.asked);
+                    (o.question, o.what, o.asked, o.decided, o.warning) =
+                        (fresh.question, fresh.what, fresh.asked, fresh.decided, fresh.warning);
                     o.rev += 1;
                 }
                 return;
@@ -180,8 +186,14 @@ pub fn card(a: Ask) -> Offer {
             a.also.join(", ")
         ),
     };
-    let question = format!("on port {}, through tarae's proxy\n{by}{named}\n\n{waits} {lasting}", a.port);
-    let decided = 2 + usize::from(pack.is_some());
+    // (its run over, no connection waits for the answer: the wait isn't said)
+    let (ended, waits) = match a.ended {
+        true => (format!("\n{ENDED}"), String::new()),
+        false => (String::new(), format!("{waits} ")),
+    };
+    let question =
+        format!("on port {}, through tarae's proxy\n{by}{named}{ended}\n\n{waits}{lasting}", a.port);
+    let decided = 2 + usize::from(pack.is_some()) + usize::from(a.ended);
     // (what a yes gives besides the host: what's read can go there — the network open, the caches are)
     let warn = format!("What your commands read can be sent to {} too.", a.host);
     let at = question.split('\n').count() + 1;
@@ -193,6 +205,9 @@ pub fn card(a: Ask) -> Offer {
         .warning(at..at + 1)
         .asked(asked)
 }
+
+/// A card whose run ended, said under what asked.
+const ENDED: &str = "Its run ended before this was answered — y lets the next run reach it.";
 
 /// The pack whose `registries` name `host:port` (Q6: words on the card, never a grant) — at the port a registry
 /// lists, else 443 (`REGISTRY_PORT`): the same name on another port is no registry — None: none does.
@@ -246,6 +261,9 @@ fn closed_card(a: Ask) -> Offer {
         (false, false) => ("Claude's", format!("{}, in `{}`", a.process, a.label)),
     };
     let mut lines = vec![format!("{by} · port {} · through tarae's proxy", a.port)];
+    if a.ended {
+        lines.push(ENDED.into());
+    }
     lines.extend(pack.as_deref().map(|p| registry_line(p, &a.also)));
     let decided = lines.len();
     let gists = pack.as_deref().map(|p| cache_gists(&packs.caches, p)).unwrap_or_default();
@@ -266,11 +284,11 @@ fn closed_card(a: Ask) -> Offer {
         .asked(asked)
 }
 
-/// The line naming pack `pack`'s registry and `also`, what a yes lets in with it — the pack's name starts it:
-/// `Rust's registry` (58 cells with its others, inside the 60 a host card's answers make it).
+/// The line naming pack `pack`'s registry and `also`, what a yes lets in with it — the language's own name starts it
+/// (`grammar::pretty`, its pack's `title`: `JavaScript`, not the folder's name capitalised): `Rust's registry` (58
+/// cells with its others, inside the 60 a host card's answers make it).
 fn registry_line(pack: &str, also: &[String]) -> String {
-    let mut c = pack.chars();
-    let p: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+    let p = crate::grammar::pretty(pack);
     match also.is_empty() {
         true => format!("{p}'s registry"),
         false => format!("{p}'s registry: a yes also lets in {}", also.join(", ")),
@@ -316,7 +334,11 @@ pub fn grant_said(host: &str, port: u16, closed: bool) -> (Option<String>, Strin
 /// What the closed host card leaves to `v` — after its text in the card's buffer: the wait and when an answer
 /// counts, how long a yes lasts, a pack's caches in full.
 pub fn details(a: &Ask) -> String {
-    let mut s = format!("{}\n\n{CLOSED_LASTS}", waits());
+    // (its run over, no connection waits for the answer: the wait isn't said)
+    let mut s = match a.ended {
+        true => CLOSED_LASTS.to_string(),
+        false => format!("{}\n\n{CLOSED_LASTS}", waits()),
+    };
     let packs = crate::sandboxpack::get();
     if let Some(pack) = registry_of(&packs.registries, &a.host, a.port) {
         let caches = caches_of(&packs.caches, &pack);
@@ -353,6 +375,10 @@ fn caches_of(caches: &[crate::sandboxpack::Caches], pack: &str) -> Vec<String> {
 /// reaches, said — and Claude hears it with the next message (but a run's own `y`).
 pub fn answer(ed: &mut Editor, id: u64, a: Ask, scope: Scope) {
     ed.offer_finished(id, Ok(()));
+    // (its run over: `y` is for the next one — it carries the host in its rules, then it's spent)
+    if a.ended && scope == Scope::Run {
+        return next_run(ed, &a);
+    }
     // (Q6: a yes grants the registries the card listed with it; a no is for the host asked alone)
     let also = if scope == Scope::Refused { &[][..] } else { &a.also[..] };
     let scope = if scope == Scope::Project && !a.open { Scope::Session } else { scope };
@@ -446,8 +472,11 @@ fn keep_one(ed: &mut Editor, session: u64, host: &str, port: u16, scope: Scope) 
 
 /// The session in front's conversation ends (a new one, `C-l`; the chat closed): the hosts its `a` let through go
 /// from the proxy — but those the session's `s` holds too. (The proxy keeps a conversation's answers as its
-/// session's: right while a session has one conversation at a time, as it does.)
-pub fn chat_ended(ed: &Editor) {
+/// session's: right while a session has one conversation at a time, as it does.) A card whose run of Claude's
+/// ended goes too — its `y` was for that conversation's next run; what one already gave goes with the chat's
+/// `hosts_next` (`Chat::conversation_left`).
+pub fn chat_ended(ed: &mut Editor) {
+    ed.drop_cards(|w| matches!(w, What::Host(h) if h.ended));
     let Some(c) = ed.session.chat.as_ref() else { return };
     let session = ed.session.proxy_id();
     for (host, port) in &c.allowed.hosts {
@@ -473,13 +502,44 @@ pub fn granted(ed: &mut Editor, host: &str, port: u16, scope: crate::allow::Scop
     }
 }
 
-/// Run `run` ended (reaped — its panel's end, in its session): a card for it goes, and the proxy is told — a
-/// question asked for it goes to whoever still waits on it (another run's connection, or one of a process it
-/// left), asked again: a card for that one comes.
+/// `y` on a card whose run ended: the host (and the registries listed with it) for the next run of this
+/// conversation's Claude that starts, once (`Chat.hosts_next`, taken in `tools::guard_then_go`) — Claude hears it
+/// with the next message, never a run it didn't ask for (user decision 2026-10-19). Its conversation over, the card
+/// went with it (`chat_ended`).
+fn next_run(ed: &mut Editor, a: &Ask) {
+    let hosts: Vec<String> = std::iter::once(&a.host).chain(&a.also).cloned().collect();
+    let ours = ed.session.proxy_id() == a.session;
+    let Some(c) = ed.session.chat.as_mut().filter(|_| ours) else { return };
+    for h in &hosts {
+        if !c.hosts_next.iter().any(|(n, p)| n == h && *p == a.port) {
+            c.hosts_next.push((h.clone(), a.port));
+        }
+    }
+    let doing = format!("reach {}:{}", a.host, a.port);
+    ed.session.checkpoints.tell.push(format!(
+        "The user let your next command {doing} — its run had ended before they answered. Run it again if you \
+         still need it."
+    ));
+    ed.set_success(format!("Claude's next run may {doing}"));
+}
+
+/// Run `run` ended (reaped — its panel's end, in its session): a card for a run of Claude's stays, saying so — `y`
+/// lets Claude's next run reach the host (frictions29 16); one for the user's own run goes, as before (they run it
+/// again themselves, and its card comes). The proxy is told: a question asked for it goes to whoever still waits on
+/// it (another run's connection, or one of a process it left), asked again: that one's card takes it.
 pub fn run_ended(ed: &mut Editor, run: Option<u64>) {
     let Some(run) = run else { return };
-    let its = |w: &What| matches!(w, What::Host(h) if h.run == run);
-    ed.drop_cards_for(its, "its run ended");
+    let yours = |w: &What| matches!(w, What::Host(h) if h.run == run && h.users && !h.left);
+    ed.drop_cards_for(yours, "its run ended");
+    let front = !ed.background();
+    let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
+    for o in cards {
+        let Some(a) = o.host().filter(|h| h.run == run && !h.ended && !h.left).cloned() else { continue };
+        let fresh = card(Ask { ended: true, ..a });
+        (o.question, o.what, o.asked, o.decided, o.warning) =
+            (fresh.question, fresh.what, fresh.asked, fresh.decided, fresh.warning);
+        o.rev += 1;
+    }
     send(ToProxy::RunEnded { run });
 }
 

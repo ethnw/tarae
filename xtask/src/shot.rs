@@ -629,7 +629,7 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
         }
     }
     // 2) Glyphs
-    let mut glyphs: HashMap<(Face, char), (fontdue::Metrics, Vec<u8>)> = HashMap::new();
+    let mut glyphs: HashMap<(Face, char, bool), (fontdue::Metrics, Vec<u8>)> = HashMap::new();
     for y in 0..rows {
         for x in 0..cols {
             let Some(c) = cell(y, x) else { continue };
@@ -658,6 +658,10 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
                 continue;
             }
             let mut pen = px as f32;
+            // (a wide character alone in its cell: drawn to fill both cells and centred across them — at the font's
+            // own size, from the first cell's edge, `실타래` read `실 타 래`, frictions29 8; centring alone only moved
+            // the gap, the glyph's ink 12 px of the cells' 18)
+            let centred = c.is_wide() && text.chars().count() == 1;
             for chr in text.chars() {
                 let face = match (c.bold(), c.italic()) {
                     _ if chr as u32 > 0x2e80 && fonts.wide.is_some() => Face::Wide,
@@ -676,11 +680,26 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
                     face
                 };
                 let font = fonts.face(face);
-                let (m, bitmap) = glyphs.entry((face, chr)).or_insert_with(|| font.rasterize(chr, size));
+                let (m, bitmap) = glyphs.entry((face, chr, centred)).or_insert_with(|| match centred {
+                    true => font.rasterize(chr, size * wide_scale(font.metrics(chr, size).advance_width, cw)),
+                    false => font.rasterize(chr, size),
+                });
                 // (the 1× baseline's, times the scale)
                 let baseline = (py + baseline1 * s) as i64;
-                let top = baseline - m.ymin as i64 - m.height as i64;
-                let left = pen.round() as i64 + m.xmin as i64;
+                let top = match centred {
+                    // (drawn bigger: its middle where the font's own size has it, not grown up from the baseline —
+                    // it sat high beside the Latin letters)
+                    true => {
+                        let m0 = font.metrics(chr, size);
+                        let middle = baseline - m0.ymin as i64 - m0.height as i64 / 2;
+                        middle - m.height as i64 / 2
+                    }
+                    false => baseline - m.ymin as i64 - m.height as i64,
+                };
+                let left = match centred {
+                    true => (px + (2 * cw).saturating_sub(m.width) / 2) as i64,
+                    false => pen.round() as i64 + m.xmin as i64,
+                };
                 for (i, a) in bitmap.iter().enumerate() {
                     cv.blend(left + (i % m.width.max(1)) as i64, top + (i / m.width.max(1)) as i64, fg, *a);
                 }
@@ -706,6 +725,21 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
 /// The 1× baseline, in pixels from the top of a cell `ch1` tall: `font`'s line (ascent, descent, line gap)
 /// centred in the cell, as a terminal places it (Ghostty, kitty) — one for every face of a row, a fallback's
 /// glyphs on it too. (frictions28: `3 + ascent` put it about 3 px low in a 21 px cell.)
+/// How much bigger than the font's size a wide character is drawn so its advance fills its two cells (`cw` a
+/// cell, in pixels) as a terminal's does — never smaller, at most `WIDE_SCALE_MAX` (a line's height holds it).
+fn wide_scale(advance: f32, cw: usize) -> f32 {
+    match advance > 0.0 {
+        true => (WIDE_FILL * (2 * cw) as f32 / advance).clamp(1.0, WIDE_SCALE_MAX),
+        false => 1.0,
+    }
+}
+
+/// The share of its two cells a wide character's advance fills, drawn.
+const WIDE_FILL: f32 = 0.98;
+
+/// A wide character is drawn at most this much bigger than the font's size.
+const WIDE_SCALE_MAX: f32 = 1.3;
+
 fn baseline(font: &fontdue::Font, ch1: usize) -> usize {
     let at = font.horizontal_line_metrics(SIZE).map_or(SIZE, |l| {
         let line = l.ascent - l.descent + l.line_gap;
@@ -868,6 +902,31 @@ mod tests {
                 let (i, j) = ((y * w * 2 + x) * 3, ((y / 2) * w + x / 2) * 3);
                 assert_eq!(two.2[i..i + 3], one.2[j..j + 3], "at ({x}, {y})");
             }
+        }
+    }
+
+    /// A wide character's glyph sits in the middle of its two cells, as wide as a terminal draws it — `실타래`
+    /// reads as one word, not `실 타 래` (frictions29 8: each glyph was drawn from its first cell's left edge).
+    /// (Skipped without JetBrains Mono or a CJK face.)
+    #[test]
+    fn a_wide_characters_glyph_is_centred_across_its_two_cells() {
+        let Ok(f) = Fonts::load(1) else { return };
+        if f.wide.is_none() {
+            return;
+        }
+        let mut vt = vt100::Parser::new(1, 8, 0);
+        vt.process("\x1b[?25l실타래".as_bytes());
+        let (w, h, px) = render(vt.screen(), &f, 1);
+        let cw = f.regular.metrics('M', SIZE).advance_width as usize;
+        let inked = |x: usize| (0..h).any(|y| px[(y * w + x) * 3..(y * w + x) * 3 + 3] != BG);
+        for (i, c) in ['실', '타', '래'].into_iter().enumerate() {
+            let (x0, x1) = (PAD + 2 * i * cw, PAD + 2 * (i + 1) * cw);
+            let ink: Vec<usize> = (x0..x1).filter(|&x| inked(x)).collect();
+            let (Some(&a), Some(&b)) = (ink.first(), ink.last()) else { panic!("{c}: no ink") };
+            let (left, right) = (a - x0, x1 - 1 - b);
+            assert!(left.abs_diff(right) <= 1, "{c}: {left} px of air on its left, {right} on its right");
+            // (and as wide as a terminal draws it: the gap to the next one no wider than a stroke)
+            assert!(left + right <= 3, "{c}: {left} + {right} px of air in its {} px", x1 - x0);
         }
     }
 

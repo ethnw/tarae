@@ -335,6 +335,7 @@ fn a_hosts_always_in_a_repository_is_every_checkouts_and_says_so() {
         open: true,
         hosts: Default::default(),
         also: Vec::new(),
+        ended: false,
     };
     ed.push_offer(card(a.clone()));
     let q = ed.offers[0].question.clone();
@@ -514,10 +515,17 @@ fn a_registry_is_named_on_the_hosts_card() {
             open: false,
             hosts: Default::default(),
             also: Vec::new(),
+            ended: false,
         })
     };
     let (named, plain) = (card_at("static.crates.io", 443), card_at(HOST, 443));
     assert!(named.question.contains("\nRust's registry\n"), "{}", named.question);
+    // (the language as it spells itself — its pack's `title` — never the folder's name capitalised: the shots said
+    // "Javascript's registry")
+    let npm = card_at("registry.npmjs.org", 443);
+    assert!(npm.question.contains("\nJavaScript's registry"), "{}", npm.question);
+    assert_eq!(registry_line("typescript", &[]), "TypeScript's registry");
+    assert_eq!(registry_line("python", &[]), "Python's registry", "no title of its own: its name");
     assert!(!plain.question.contains("registry"), "{}", plain.question);
     let odd = card_at("static.crates.io", 22);
     assert!(!odd.question.contains("registry"), "another port is no registry: {}", odd.question);
@@ -552,6 +560,7 @@ fn the_open_cards_words_follow_the_hosts_setting() {
             open: true,
             hosts,
             also: Vec::new(),
+            ended: false,
         };
         card(a).question
     };
@@ -565,20 +574,110 @@ fn the_open_cards_words_follow_the_hosts_setting() {
     assert!(list.contains(want) && !list.contains(old), "{list}");
 }
 
-/// Its run reaped, the card for it goes, and the proxy is told (`RunEnded`): whoever else still waits on that
-/// host — another run's connection, a process it left — is asked about again, so a card for that one comes
-/// (`proxy::tests::a_run_ended_hands_its_question_to_whoever_still_waits`). Another run's card stays.
+/// frictions30's review (7): a cut card whose answers are its widest row (five of them) keeps its width once it's
+/// been read whole and `y` has its meaning back — it doesn't narrow under the pointer, its `y` where it was.
 #[test]
-fn the_card_goes_when_its_run_ends() {
+fn a_cut_card_with_five_answers_keeps_its_width_once_read() {
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.offer_popups = true;
+    let a = Ask {
+        session: ed.session.proxy_id(),
+        run: 1,
+        host: HOST.into(),
+        port: 443,
+        process: "curl".into(),
+        label: "curl".into(),
+        users: false,
+        left: false,
+        open: false,
+        hosts: Default::default(),
+        also: Vec::new(),
+        ended: false,
+    };
+    // (taller than the screen: cut)
+    let question: String = (1..=60).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    ed.push_offer(Offer::new("Let it reach?".into(), &question, "", String::new(), What::Host(Box::new(a))));
+    let draw = |ed: &mut Editor| {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, 120, 30).unwrap();
+        let mut p = vt100::Parser::new(30, 120, 0);
+        p.process(&bytes);
+        p.screen().contents()
+    };
+    let y_at = |ed: &Editor| ed.screen.offer_buttons.iter().find(|b| b.3 == 'y').map(|b| (b.0, b.1));
+    let s = draw(&mut ed);
+    assert!(s.contains("more lines") && (s.contains("y read it first") || s.contains("y after v")), "{s}");
+    let waiting = y_at(&ed);
+    ed.offer_whole.set(ed.offers.first().map(|o| (o.id, o.rev)));
+    let s = draw(&mut ed);
+    assert!(s.contains("y Once"), "{s}");
+    assert_eq!(y_at(&ed), waiting, "no narrower once read:\n{s}");
+}
+
+/// Its run reaped, the proxy is told (`RunEnded`): whoever else still waits on that host — another run's
+/// connection, a process it left — is asked about again (`proxy::tests::a_run_ended_hands_its_question_to_whoever
+/// _still_waits`). The card stays, saying its run ended (frictions29 16: npm gave up in ~20 s, the card went
+/// with it, and the chat worked around the host), and no longer says its connection waits: `y` then lets the next
+/// run of the conversation's Claude reach it — once, the registries listed with it too, Claude told — nothing run
+/// again; `n` refuses it as ever. A new run asking takes the card back as its own, whole (what's decided and the
+/// warning's row a fresh card's). The conversation over, an ended card and what its `y` gave go with it. A card for
+/// the user's own run goes with the run, as before. Another run's card is untouched.
+#[test]
+fn the_card_stays_when_its_run_ends_and_y_is_for_the_next_run() {
     let (mut ed, dir, _, run, _) = two("ends");
+    ed.session.chat = Some(crate::chat::Chat::new());
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     asked(&mut ed, ask(&dir.join("front"), run, HOST));
     let other = running(&mut ed.session, "cargo test");
     asked(&mut ed, ask(&dir.join("front"), other, "other.example.invalid"));
     assert_eq!(hosts_cards(&ed.offers).len(), 2);
     let _ = sent();
     run_ended(&mut ed, Some(run));
-    let left: Vec<u64> = hosts_cards(&ed.offers).iter().map(|a| a.run).collect();
-    assert_eq!(left, [other]);
+    let left: Vec<(u64, bool)> = hosts_cards(&ed.offers).iter().map(|a| (a.run, a.ended)).collect();
+    assert_eq!(left, [(run, true), (other, false)], "both up, the ended one said so");
     assert!(matches!(&sent()[..], [ToProxy::RunEnded { run: r }] if *r == run), "the proxy told");
+    let q = &ed.offers[0].question;
+    assert!(q.contains("Its run ended before this was answered") && !q.contains("waits up to"), "{q}");
+    let closed = Ask { open: false, ..hosts_cards(&ed.offers)[0].clone() };
+    assert!(!details(&closed).contains("waits up to"), "its v either");
+    assert!(details(&Ask { ended: false, ..closed }).contains("waits up to"));
+    // Ended again (a second reap): said once
+    let q = ed.offers[0].question.clone();
+    run_ended(&mut ed, Some(run));
+    assert_eq!(ed.offers[0].question, q);
+    let _ = sent();
+    // `y`: the next run's, nothing sent for the run that's over, Claude told
+    settled(&mut ed);
+    key(&mut ed, 'y');
+    assert_eq!(hosts_cards(&ed.offers).iter().map(|a| a.run).collect::<Vec<_>>(), [other]);
+    let c = ed.session.chat.as_ref().unwrap();
+    assert_eq!(c.hosts_next, [(HOST.to_string(), 443)]);
+    assert!(sent().iter().all(|m| answered(m).is_none()), "no answer for a run that's over");
+    assert!(ed.session.checkpoints.tell.iter().any(|t| t.contains("next command reach") && t.contains(HOST)));
+    assert!(ed.session.hosts.is_empty() && c.allowed.hosts.is_empty(), "nothing wider than the next run");
+    // Another ended card, then a new run asks for that host: the card is the new run's again — whole
+    let third = running(&mut ed.session, "npm install");
+    asked(&mut ed, ask(&dir.join("front"), third, "third.example.invalid"));
+    run_ended(&mut ed, Some(third));
+    let fourth = running(&mut ed.session, "npm install");
+    asked(&mut ed, ask(&dir.join("front"), fourth, "third.example.invalid"));
+    let o = ed.offers.iter().find(|o| o.host().is_some_and(|a| a.host == "third.example.invalid")).unwrap();
+    let a = o.host().unwrap().clone();
+    assert_eq!((a.run, a.ended), (fourth, false));
+    let fresh = card(a);
+    assert_eq!((&o.question, &o.decided, &o.warning), (&fresh.question, &fresh.decided, &fresh.warning));
+    // Ended again; then the conversation ends: the ended card goes, and what the first `y` gave
+    run_ended(&mut ed, Some(fourth));
+    crate::chat::reset(&mut ed);
+    assert!(hosts_cards(&ed.offers).iter().all(|a| !a.ended), "{:?}", hosts_cards(&ed.offers));
+    assert!(ed.session.chat.as_ref().unwrap().hosts_next.is_empty());
+    // The user's own run: its card goes with the run
+    let mine = running(&mut ed.session, "curl x");
+    ed.session.task_run.as_mut().unwrap().tell = Some("the user ran it again".into());
+    asked(&mut ed, ask(&dir.join("front"), mine, "mine.example.invalid"));
+    assert!(hosts_cards(&ed.offers).iter().any(|a| a.host == "mine.example.invalid" && a.users));
+    run_ended(&mut ed, Some(mine));
+    assert!(!hosts_cards(&ed.offers).iter().any(|a| a.host == "mine.example.invalid"));
     std::fs::remove_dir_all(&dir).ok();
 }

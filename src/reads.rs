@@ -77,6 +77,9 @@ pub struct Pending {
     pub found: crate::tokens::Found,
     /// The repository outside the project it reads in, `a`/`A` may allow whole (`repository_of`, piece J).
     pub repository: Option<PathBuf>,
+    /// The repository it reads in that `a`/`A` don't offer whole, and why (`repository_or_why`) — its card
+    /// says so (frictions29 11).
+    pub not_whole: Option<(PathBuf, String)>,
     /// Not Claude's call: what the user's own act would send with a file named like a key (`Own`) — no call
     /// waits on it.
     pub own: Option<Own>,
@@ -115,6 +118,7 @@ pub struct Ask {
     class: crate::cards::Class,
     found: crate::tokens::Found,
     repository: Option<PathBuf>,
+    not_whole: Option<(PathBuf, String)>,
 }
 
 impl Ask {
@@ -172,8 +176,8 @@ impl Gate {
             return Ok(());
         }
         let found = look.at.as_deref().map(crate::tokens::found_in).unwrap_or_default();
-        let repository = look.at.as_deref().and_then(|at| repository_of(at, &caps));
-        Err(Box::new(Ask { look, class, found, repository }))
+        let (repository, not_whole) = split(look.at.as_deref().and_then(|at| repository_or_why(at, &caps)));
+        Err(Box::new(Ask { look, class, found, repository, not_whole }))
     }
 }
 
@@ -183,7 +187,7 @@ pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else {
         return crate::tools::answer(ed, then.call, Err("the chat it came from is gone".into()));
     };
-    let Ask { look, class, found, repository } = ask;
+    let Ask { look, class, found, repository, not_whole } = ask;
     c.reads.push_back(Pending {
         request_id: String::new(),
         generation,
@@ -193,6 +197,7 @@ pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
         since: std::time::Instant::now(),
         found,
         repository,
+        not_whole,
         own: None,
         then: Some(then),
     });
@@ -831,6 +836,7 @@ pub fn ask_own(ed: &mut Editor, keys: Vec<PathBuf>, own: Own) {
         since: std::time::Instant::now(),
         found: Default::default(),
         repository: None,
+        not_whole: None,
         own: Some(own),
         then: None,
     };
@@ -946,8 +952,8 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         let ok = covered || by_default(class, &caps);
         // (asked: its card says first what looks like a token there — a folder in the project too: its yes
         // reads more than the keys it names)
-        let (found, repository) = match (ok, &look.at) {
-            (false, Some(at)) => (crate::tokens::found_in(at), repository_of(at, &caps)),
+        let (found, (repository, not_whole)) = match (ok, &look.at) {
+            (false, Some(at)) => (crate::tokens::found_in(at), split(repository_or_why(at, &caps))),
             _ => Default::default(),
         };
         Box::new(move |ed: &mut Editor| {
@@ -966,6 +972,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
                 since,
                 found,
                 repository,
+                not_whole,
                 own,
                 then: None,
             });
@@ -1143,20 +1150,51 @@ fn refold(ed: &mut Editor) {
         })
         .collect();
     for (id, p) in alone {
-        let Some((f, found)) = folder_for(ed, &p, &others, home.as_deref()) else { continue };
-        let (mut q, warning) = card_text(&p, true, Some((&f, &found)));
-        let what = crate::offer::What::Read { pending: Box::new(p), keep: true, folder: Some(f.clone()) };
+        let offered = folder_for(ed, &p, &others, home.as_deref());
+        // (none offered yet, but why not its repository is known now — its look through for tokens came back)
+        let why = not_whole(ed, &p, offered.as_ref().map(|(f, _)| f.as_path()));
+        if offered.is_none() && why.is_none() {
+            continue;
+        }
+        let (mut q, warning) =
+            card_text(&p, true, offered.as_ref().map(|(f, found)| (f.as_path(), found)), why.as_deref());
+        let f = offered.map(|(f, _)| f);
+        let what = crate::offer::What::Read { pending: Box::new(p), keep: true, folder: f.clone() };
         if let Some(line) = ed.always_line(&what) {
             q.push_str(&format!("\n\n{line}"));
         }
         let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
-        for o in cards.filter(|o| o.id == id) {
+        for o in cards.filter(|o| o.id == id && o.question != q) {
             let crate::offer::What::Read { folder, .. } = &mut o.what else { continue };
             (o.question, o.warning) = (q.clone(), warning.clone());
-            *folder = Some(f.clone());
+            *folder = f.clone();
             o.rev += 1;
         }
     }
+}
+
+/// Why `a`/`A` on `p`'s card don't open the repository it reads in, as the card says it — `folder`: what they
+/// open instead (None: its place alone). None: they open the repository, or there's none to speak of, or the
+/// read is a key's (opened one by one). frictions29 11: a reference repository came a card per path, and
+/// nothing said why it wasn't offered whole.
+fn not_whole(ed: &Editor, p: &Pending, folder: Option<&Path>) -> Option<String> {
+    let at = p.look.at.as_ref().filter(|_| p.look.keys.is_empty())?;
+    if p.class == crate::cards::Class::Secret || crate::secretnames::named_secret(at) {
+        return None;
+    }
+    if let Some((top, why)) = &p.not_whole {
+        return Some(format!("Not offered whole, the repository {}: {why}.", crate::allow::tilde(top)));
+    }
+    let r = p.repository.as_ref().filter(|r| folder != Some(r.as_path()))?;
+    let found = ed.session.chat.as_ref()?.scanned.get(r)?.as_ref()?;
+    let n = found.files.len() + found.named.len();
+    let why = match (found.cut, n) {
+        (true, _) => "too big to look through for tokens".to_string(),
+        (false, 0) => return None,
+        (false, 1) => "a file in it looks like it holds a token".to_string(),
+        (false, n) => format!("{n} files in it look like they hold a token"),
+    };
+    Some(format!("Not offered whole, the repository {}: {why}.", crate::allow::tilde(r)))
 }
 
 /// What `a`/`A` allow on `p`'s card besides its place, once looked through for tokens (`scanned` — till then
@@ -1189,8 +1227,17 @@ fn folder_for(
 /// repository's (git's links both ways — `allow::common_dir`), `at`'s folder or above, neither the project nor
 /// holding it, not home or above, not in or holding a place that holds keys or that runs never read
 /// (`allow::keepable`, `caps.kept`), nor where what's there runs later (`caps.later`). Whether it holds what looks
-/// like a token is looked at before it's offered (`folder_for`). A worker's: it reads the disk.
+/// like a token is looked at before it's offered (`folder_for`). A worker's: it reads the disk. (Tests' form of
+/// `repository_or_why`.)
+#[cfg(test)]
 pub fn repository_of(at: &Path, caps: &crate::caps::Caps) -> Option<PathBuf> {
+    repository_or_why(at, caps)?.ok()
+}
+
+/// The repository `at` is in that `a`/`A` may allow whole (`repository_of`'s rules) — and when there's one it
+/// doesn't offer, which and why (Err): the read card says it (frictions29 11). None: no repository to speak of
+/// (none, the project's, or the place read is its top).
+pub fn repository_or_why(at: &Path, caps: &crate::caps::Caps) -> Option<Result<PathBuf, (PathBuf, String)>> {
     let home = caps.home.as_deref();
     if caps.root.as_os_str().is_empty() || at.starts_with(&caps.root) {
         return None;
@@ -1205,12 +1252,30 @@ pub fn repository_of(at: &Path, caps: &crate::caps::Caps) -> Option<PathBuf> {
     if top == at {
         return None;
     }
-    let open = crate::allow::common_dir(top).is_some()
-        && !caps.root.starts_with(top)
-        && crate::allow::keepable(top, home)
-        && !caps.kept.iter().any(|k| k.starts_with(top) || top.starts_with(k))
-        && caps.later.refuses(top).is_none();
-    open.then(|| top.to_path_buf())
+    let why = if crate::allow::common_dir(top).is_none() {
+        Some("its git folder doesn't name it as one of its checkouts".to_string())
+    } else if caps.root.starts_with(top) {
+        Some("it holds this project".into())
+    } else if !crate::allow::keepable(top, home) {
+        Some("it's a place whose reads are never kept".into())
+    } else if caps.kept.iter().any(|k| k.starts_with(top) || top.starts_with(k)) {
+        Some("it's in or holds a place commands never read".into())
+    } else {
+        caps.later.refuses(top)
+    };
+    Some(match why {
+        None => Ok(top.to_path_buf()),
+        Some(why) => Err((top.to_path_buf(), why)),
+    })
+}
+
+/// `repository_or_why`'s answer as a pending read keeps it: what `a`/`A` may open whole, what they don't and why.
+fn split(r: Option<Result<PathBuf, (PathBuf, String)>>) -> (Option<PathBuf>, Option<(PathBuf, String)>) {
+    match r {
+        Some(Ok(top)) => (Some(top), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
+    }
 }
 
 /// What folder `f` holds that looks like a token, once it's been looked through; else None — and it's
@@ -1239,9 +1304,13 @@ pub fn card_text(
     p: &Pending,
     keep: bool,
     folder: Option<(&Path, &crate::tokens::Found)>,
+    not_whole: Option<&str>,
 ) -> (String, Option<std::ops::Range<usize>>) {
     let whole = folder.map(|(f, _)| (f, p.repository.as_deref() == Some(f)));
     let mut q = question(&p.look, keep, whole);
+    if let Some(why) = not_whole.filter(|_| keep) {
+        q.push_str(&format!("\n\n{why}"));
+    }
     let said =
         [p.look.at.as_deref().and_then(|at| p.found.said(at)), folder.and_then(|(f, found)| found.said(f))];
     let mut lines = Vec::new();
@@ -1291,7 +1360,9 @@ pub fn next(ed: &mut Editor) {
     // once it's been looked through for tokens — till then the place alone: `refold`)
     let others = others(c);
     let folder = keep.then(|| folder_for(ed, &p, &others, home.as_deref())).flatten();
-    let (q, warning) = card_text(&p, keep, folder.as_ref().map(|(f, found)| (f.as_path(), found)));
+    let why = not_whole(ed, &p, folder.as_ref().map(|(f, _)| f.as_path()));
+    let (q, warning) =
+        card_text(&p, keep, folder.as_ref().map(|(f, found)| (f.as_path(), found)), why.as_deref());
     let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class))
         .about(&p.look.given);
     // (a file named like a key — in the project, or outside it by its name: the key card, `y` once)
@@ -1475,7 +1546,7 @@ pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         waiting.extend(c.reads.drain(..).filter_map(|p| p.then));
         c.ran.clear();
-        c.also_asked = 0;
+        (c.also_asked, c.also_yes) = (0, false);
     }
     // (a call of tarae's tools is always answered — its card's going answers the one up: `asking_sync`)
     for t in waiting {
@@ -1860,6 +1931,18 @@ mod tests {
         let later = crate::sandbox::RunsLater { homes: vec![refr.clone()], ..Default::default() };
         let later = crate::caps::Caps { later, ..caps.clone() };
         assert_eq!(repository_of(&file(&refr), &later), None, "a toolchain's home");
+        // Each refusal says why, for the card (frictions29 11); no repository, the project's: nothing to say
+        let why = |at: &Path, caps: &crate::caps::Caps| match repository_or_why(at, caps) {
+            Some(Err((top, why))) => Some((top, why)),
+            _ => None,
+        };
+        assert_eq!(why(&file(&keys), &caps).map(|w| w.0), Some(keys.clone()), "in ~/.ssh");
+        assert_eq!(why(&home.join("work/x"), &caps).map(|w| w.1).as_deref(), Some("it holds this project"));
+        let kept_why = why(&file(&refr), &kept).map(|w| w.1);
+        assert_eq!(kept_why.as_deref(), Some("it's in or holds a place commands never read"));
+        assert!(why(&file(&refr), &later).is_some_and(|w| w.1 == later.later.refuses(&refr).unwrap()));
+        assert_eq!(why(&file(&plain), &caps), None, "no repository");
+        assert_eq!(why(&file(&project), &caps), None, "in the project");
         // A folder searched that's a repository's top itself: nothing wider; a file in it: that one (review J 7)
         init(&refr.join("sub"));
         assert_eq!(repository_of(&refr.join("sub"), &caps), None, "the folder is that repository");

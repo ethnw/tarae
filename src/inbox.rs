@@ -117,18 +117,24 @@ fn ms(since: Instant, now: Instant) -> u64 {
     now.saturating_duration_since(since).as_millis().min(u64::MAX as u128) as u64
 }
 
-/// A session's runs of Claude's that have printed nothing for `waits::SILENT` or more: (id as the state
-/// names it, the slot it's in, its label, when it last printed, `no output for 27:04`).
+/// A session's runs of Claude's that have printed nothing for `waits::SILENT` or more, and aren't busy at it
+/// (`Waiting::worth_a_look`): (id as the state names it, the slot it's in, its label, when it last printed,
+/// `no output for 27:04`, and `· its output goes through tail` when a filter holds it).
 fn silent_runs(l: &crate::session::Session, now: Instant) -> Vec<(String, Slot, String, Instant, String)> {
     let mut out = Vec::new();
     if let Some(r) = l.task_run.as_ref().filter(|r| r.by_claude && r.state == crate::task::State::Running)
+        && r.wait.worth_a_look(r.started, now)
         && let Some(said) = r.wait.silent(r.last_output, now)
     {
         let label = crate::task::traced(&r.task.cmd);
-        out.push((format!("run#{}", r.trace.id()), Slot::Task, label, r.last_output, said));
+        let held = crate::readonly::filtered_by(&r.task.cmd)
+            .map(|f| format!(" · its output goes through {f}"))
+            .unwrap_or_default();
+        out.push((format!("run#{}", r.trace.id()), Slot::Task, label, r.last_output, said + &held));
     }
     if let Some(r) =
         l.test_run.as_ref().filter(|r| r.by_claude && r.state == crate::testing::RunState::Running)
+        && r.wait.worth_a_look(r.started, now)
         && let Some(said) = r.wait.silent(r.last_output, now)
     {
         let label = format!("tests {}", r.target.label);
@@ -288,6 +294,12 @@ impl Editor {
             Next::None => false,
             Next::Go(e) => {
                 self.inbox_to(&e);
+                // (a card there takes the keys at once, as `enter` in the inbox gives them — frictions29 19: there,
+                // that session's chat kept them, and the `n` meant for the card was typed into it)
+                if e.card().is_some_and(|c| self.offers.first().is_some_and(|o| o.id == c && !o.installing()))
+                {
+                    self.card_keys = true;
+                }
                 true
             }
             Next::Done(id) => {

@@ -4206,8 +4206,18 @@ pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
     if drafts.is_empty() {
         return ed.set_status("no drafts — space n on a line writes one");
     }
-    if ed.session.chat.as_ref().is_some_and(|c| c.busy()) {
-        return ed.set_status("Claude is still answering — send the review once it's done");
+    // (Claude answering: the notes wait for its turn's end, as a message does — frictions29 18: refused, they sat
+    // unsent while a message after them was taken to have gone; drafts until then)
+    if let Some(c) = ed.session.chat.as_mut().filter(|c| c.busy()) {
+        if !c.sends.contains(&crate::chat::Later::Review(lines)) {
+            c.sends.push(crate::chat::Later::Review(lines));
+        }
+        let k = drafts.len();
+        return ed.set_status(format!(
+            "review queued — its {} go{} when Claude's turn ends",
+            crate::nav::count(k, "comment"),
+            if k == 1 { "es" } else { "" }
+        ));
     }
     if ed.session.chat.is_none() {
         crate::chat::open(ed);

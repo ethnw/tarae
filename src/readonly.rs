@@ -62,6 +62,22 @@ pub fn piped(line: &str) -> Option<Vec<Vec<Word>>> {
         .collect()
 }
 
+/// Programs that only filter what's piped into them — what follows one keeps or cuts the output, never runs
+/// more of the work.
+const FILTERS: [&str; 12] =
+    ["head", "tail", "grep", "egrep", "rg", "sort", "uniq", "wc", "cut", "awk", "sed", "tr"];
+
+/// The first filter `line`'s output goes through when it's one command piped into filters only (`cargo test
+/// 2>&1 | grep -E 'result' | head -40`: `grep`) — what the user sees of it and the exit status are that
+/// pipeline's end, not the work's (frictions29 9, 21). None: no pipe, or a stage that isn't a filter.
+pub fn filtered_by(line: &str) -> Option<String> {
+    let stages = piped(line)?;
+    let name = |w: &[Word]| w.first().map(|w| w.text.rsplit('/').next().unwrap_or(&w.text).to_string());
+    let rest = stages.get(1..).filter(|r| !r.is_empty())?;
+    let names: Vec<String> = rest.iter().map(|w| name(w)).collect::<Option<_>>()?;
+    names.iter().all(|n| FILTERS.contains(&n.as_str())).then(|| names[0].clone())
+}
+
 /// The parts of `line` before its first single `|` — what runs, not what only filters its output (`cargo
 /// test x 2>&1 | tail`: `cargo test x`) — a command's leading `NAME=value` words kept. None as `parse`.
 pub fn before_pipe(line: &str) -> Option<Vec<Part>> {

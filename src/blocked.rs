@@ -600,6 +600,11 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun,
             Grant::Host(h, p) => crate::hosts::granted(ed, h, *p, scope),
             _ => crate::allow::grant(ed, &grant, scope),
         }
+        // (a yes on the terminals: asked again this turn, it takes no more of the turn's `also` cards — frictions29
+        // 23, the user's interim decision 2026-10-19)
+        if let Some(c) = ed.session.chat.as_mut().filter(|_| grant == Grant::Terminals) {
+            c.also_yes = true;
+        }
         // (the answer rides along whatever its scope, as the user's own run below: a failed take-back of it hides it
         // from the store's answers until the `A`'s write lands)
         let extra = Extra { grant: Some(grant), outside: false, base: None };

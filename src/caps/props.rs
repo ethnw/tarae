@@ -1699,6 +1699,7 @@ fn a_hosts_answer_kept_again_ends_a_failed_take_back() {
     let kept = || crate::allow::Store::read(Some(&w.allow)).get(&project).hosts.len();
     // (the card's `A`, the network open when it asked)
     let a = |ed: &Editor| crate::hosts::Ask {
+        ended: false,
         session: ed.session.proxy_id(),
         run: 0,
         host: "db.example.com".into(),

@@ -150,8 +150,9 @@ fn the_front_card_says_how_many_wait_behind_it_and_where() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// `C-q` with nothing waiting in front goes to the one that has waited longest, in any session; once it's
-/// the card up, `C-q` gives it the keys. #94's case: a card of tarae's parked in a session behind whose turn
+/// `C-q` with nothing waiting in front goes to the one that has waited longest, in any session, and its card
+/// takes the keys there (frictions29 19: it took a second `C-q`, and from a chat the key meant for the card was
+/// typed into it). #94's case: a card of tarae's parked in a session behind whose turn
 /// ended (`done`, its Claude idle) — `C-q` said "no card waits for you" while it waited there; now it goes to
 /// it. Nothing anywhere: said.
 #[test]
@@ -170,13 +171,12 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     park(&mut ed, 0, claudes(1, 5));
     assert_eq!(ed.session.id, back, "the one that waited longest");
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
-    assert!(!ed.card_keys);
-    assert_eq!(ed.keys_to().route(Key { code: Code::Char('q'), ctrl: true, alt: false }), {
+    assert!(ed.card_keys, "the keys with it");
+    assert_eq!(
+        ed.keys_to().route(Key::plain(Code::Char('n'))),
         crate::uistate::Region::Card(ed.offers[0].id)
-    });
-    // C-q: now the keys; `n` answers it there
-    feed(&mut ed, "<C-q>");
-    assert!(ed.card_keys, "the keys");
+    );
+    // `n` answers it there
     feed(&mut ed, "n");
     assert!(ed.offers.is_empty() && !ed.card_keys);
     // C-q: third's — tarae's own card, its turn over (#94) — before front's newer one
@@ -188,7 +188,6 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     // …then front's
     feed(&mut ed, "<C-q>");
     assert_eq!((ed.session.id, ed.offers.first().map(|o| o.title.as_str())), (0, Some("Claude asks 1")));
-    feed(&mut ed, "<C-q>");
     assert!(ed.card_keys);
     // Nothing anywhere: said
     ed.offers.clear();
@@ -268,6 +267,83 @@ fn the_order_is_by_each_ones_wait_on_its_own_clock() {
     let ids: Vec<String> = ed.inbox().into_iter().map(|e| e.id).collect();
     assert_eq!(ids, [format!("card#{}", ed.offers[0].id), format!("edit#s{back}:e1")]);
     drop(sim);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// frictions29 19: `C-q` from a chat that holds the keys reaches the card — one parked in a session behind (the
+/// chat open and focused), one up in front (the chat minimized while Claude works, its input not on screen) —
+/// and the card it reaches takes the keys: its `n` answers it, nothing typed into the chat.
+#[test]
+fn c_q_from_a_chat_holding_the_keys_reaches_the_card() {
+    let (mut ed, dir, back, _) = three("chat-cq");
+    let chat = |busy: bool| {
+        let mut c = crate::chat::Chat::new();
+        c.focused = true;
+        if busy {
+            (c.state, c.follow.on, c.unfolded) = (crate::chat::State::Thinking, true, false);
+        }
+        c
+    };
+    // The chat open and focused here; the card parked behind
+    ed.session.chat = Some(chat(false));
+    park(&mut ed, back, claudes(1, 20));
+    assert!(ed.ui_state().text().contains("keys → chat"), "{}", ed.ui_state().text());
+    // (that session's own chat holding the keys too)
+    session(&mut ed, back).chat = Some(chat(false));
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, back, "C-q went to the card's session");
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+    // …and the card has the keys: one C-q, not one to get there and another to answer
+    feed(&mut ed, "n");
+    assert!(ed.offers.is_empty(), "its n answered it: {:?}", ed.messages.last());
+    assert!(ed.session.chat.as_ref().unwrap().input.is_empty(), "nothing typed into the chat there");
+    // Minimized while Claude works, holding the keys: a card up here
+    ed.session.chat = Some(chat(true));
+    assert!(ed.session.chat.as_ref().unwrap().compact());
+    up(&mut ed, claudes(2, 5));
+    feed(&mut ed, "<C-q>n");
+    assert!(ed.offers.is_empty(), "its n answered it: {:?}", ed.messages.last());
+    assert!(ed.session.chat.as_ref().unwrap().input.is_empty(), "nothing typed into the chat");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// frictions29 9: a run quiet only because a filter holds its output (`| tail -60` over a long build) is working,
+/// not waiting on anyone — it stays out of the inbox while its processes use the CPU, comes in once they've been
+/// idle for `SILENT` too (or half the time its own `timeout` gives it is gone), and says the filter holds it.
+#[test]
+fn a_quiet_run_still_working_stays_out_of_the_inbox() {
+    use crate::task::{Run, State, Task};
+    let (mut ed, dir, _, _) = three("filtered");
+    let Some(then) = Instant::now().checked_sub(Duration::from_secs(400)) else { return };
+    let run = |cmd: &str| {
+        let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: dir.join("front") });
+        (r.state, r.by_claude, r.last_output, r.started) = (State::Running, true, then, then);
+        r
+    };
+    let said = |ed: &Editor| ed.inbox().into_iter().find(|e| e.kind == "silent-run").map(|e| e.asks);
+    // Working: out
+    let mut r = run("cargo test 2>&1 | grep -E 'result' | tail -60");
+    r.wait.looked(240.0, Instant::now());
+    ed.session.task_run = Some(r);
+    assert_eq!(said(&ed), None, "a run using the CPU behind its filter");
+    // Its own time limit half gone: in, working or not
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.wait.limited(then, Some(Duration::from_secs(600)));
+    assert!(said(&ed).is_some_and(|l| l.contains("its output goes through grep")), "{:?}", said(&ed));
+    // Idle for minutes as well: in, the filter said
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.wait.limited(then, None);
+    r.wait.looked(0.0, then);
+    let l = said(&ed).expect("idle and quiet: in the inbox");
+    assert!(l.contains("no output for") && l.contains("its output goes through grep"), "{l}");
+    // No filter: said as before
+    let mut r = run("cargo test");
+    r.wait.looked(0.0, then);
+    ed.session.task_run = Some(r);
+    assert!(said(&ed).is_some_and(|l| !l.contains("goes through")), "{:?}", said(&ed));
+    // `C-q` takes the user to its panel, as for any quiet run
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));
     std::fs::remove_dir_all(&dir).ok();
 }
 

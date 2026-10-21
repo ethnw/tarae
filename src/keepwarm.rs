@@ -273,7 +273,7 @@ pub fn back(s: &Session) -> Option<Back> {
         (!s.asking.is_empty() || !s.parked.is_empty(), Back::Card),
         (s.rebase.is_some(), Back::Rebase),
         (run, Back::Run),
-        (chat.is_some_and(|c| c.queued.is_some()), Back::Queued),
+        (chat.is_some_and(|c| c.queued.is_some() || !c.sends.is_empty()), Back::Queued),
     ]
     .into_iter()
     .find_map(|(holds, b)| holds.then_some(b))

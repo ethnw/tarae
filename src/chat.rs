@@ -405,6 +405,9 @@ pub struct Chat {
     /// card · how many such cards this turn put up (`tools::ALSO_MAX` at most).
     pub also_refused: Vec<crate::allow::Grant>,
     pub also_asked: usize,
+    /// The user said yes to the terminals on an `also` card this turn: asked again, they take none of its
+    /// `ALSO_MAX` (frictions29 23: each e2e or scenes run asked, and the turn ran out of cards).
+    pub also_yes: bool,
     /// Claude's runs that failed in the turn in flight, or the last one once it ended — and the conversation they
     /// were in (piece D3): one the user runs again from what the sandbox blocked goes on by itself
     /// (`tools::told`). Cleared as a turn starts.
@@ -414,6 +417,16 @@ pub struct Chat {
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
     pub queued: Option<String>,
+    /// How many messages `queued` holds, each a blank line apart (`queue`), and the last one — the queued row
+    /// shows it (frictions29 18: a second message joined the first, the row still showed the first's start).
+    pub queued_n: usize,
+    pub queued_last: String,
+    /// What waits for this turn's end besides the message, in order: the review's notes (`space v s`), a reply on
+    /// a note — they were refused while Claude answered (frictions29 18), and go first, one a turn.
+    pub sends: Vec<Later>,
+    /// Hosts the next run of this conversation's Claude that starts reaches, then spent — `y` on a host card whose
+    /// run had ended (`hosts::next_run`, frictions29 16); the conversation over, gone (`conversation_left`).
+    pub hosts_next: Vec<(String, u16)>,
     /// The screen waiting to go with the next message (`C-s`).
     pub screen: Option<Shot>,
     /// claude's id for this conversation (its `session_id`, from `init`) · the one the next process resumes.
@@ -593,6 +606,55 @@ impl Chat {
 }
 
 impl Chat {
+    /// `q` waits for this turn's end with what's queued — after it, or (`first`: one that failed, sent again)
+    /// before it.
+    pub fn queue(&mut self, q: String, first: bool) {
+        let n = self.queued.as_ref().map_or(0, |_| self.queued_n.max(1));
+        if !first || n == 0 {
+            self.queued_last = q.clone();
+        }
+        self.queued = Some(match (self.queued.take(), first) {
+            (Some(was), true) => format!("{q}\n\n{was}"),
+            (Some(was), false) => format!("{was}\n\n{q}"),
+            (None, _) => q,
+        });
+        self.queued_n = n + 1;
+    }
+
+    /// What was queued went (sent, or taken back to edit).
+    pub fn queued_gone(&mut self) {
+        (self.queued_n, self.queued_last) = (0, String::new());
+    }
+
+    /// What waits for this turn's end, as its row and the state say it — (`2 messages queued` · `review notes
+    /// queued`, the last message's text when there's one): frictions29 18. None: nothing waits.
+    pub fn queued_said(&self) -> Option<(String, String)> {
+        let n = self.queued.as_ref().map_or(0, |_| self.queued_n.max(1));
+        let reviews = self.sends.iter().filter(|l| matches!(l, Later::Review(_))).count();
+        let replies = self.sends.len() - reviews;
+        let mut parts = Vec::new();
+        if reviews > 0 {
+            parts.push("review notes".to_string());
+        }
+        if replies > 0 {
+            parts.push(if replies == 1 { "a reply".into() } else { format!("{replies} replies") });
+        }
+        if n > 0 {
+            parts.push(if n == 1 { "a message".into() } else { format!("{n} messages") });
+        }
+        let said = match parts.as_slice() {
+            [] => return None,
+            [one] => format!("{one} queued"),
+            [rest @ .., last] => format!("{} and {last} queued", rest.join(", ")),
+        };
+        let last = match (&self.queued, self.queued_last.is_empty()) {
+            (Some(q), true) => q.clone(),
+            (Some(_), false) => self.queued_last.clone(),
+            (None, _) => String::new(),
+        };
+        Some((said, last))
+    }
+
     /// Its conversation ends (a new one, another one continued): what its answers let through goes with it —
     /// `a` on a card (`allowed`), on a run's card (`run_again`, a socket's too, and the scripts they run), on the
     /// screen card (`sees`). The caller tells the proxy (`hosts::chat_ended`, first) and makes the `Caps` again.
@@ -601,6 +663,7 @@ impl Chat {
         self.run_again.clear();
         self.run_scripts.clear();
         self.sees = false;
+        self.hosts_next.clear();
     }
 
     pub(crate) fn new() -> Self {
@@ -636,8 +699,13 @@ impl Chat {
             run_again: Vec::new(),
             also_refused: Vec::new(),
             also_asked: 0,
+            also_yes: false,
             run_scripts: Vec::new(),
             queued: None,
+            queued_n: 0,
+            queued_last: String::new(),
+            sends: Vec::new(),
+            hosts_next: Vec::new(),
             screen: None,
             conversation: None,
             resume: None,
@@ -1168,10 +1236,7 @@ pub(crate) fn start_again(ed: &mut Editor, message: Option<String>, said: &str) 
         Some(c.msgs.remove(at).text)
     });
     if let Some(q) = failed {
-        c.queued = Some(match c.queued.take() {
-            Some(later) => format!("{q}\n\n{later}"),
-            None => q,
-        });
+        c.queue(q, true);
     }
     c.note(said);
     ensure_proc(ed);
@@ -1636,10 +1701,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 };
                 if let Some(at) = unanswered {
                     let q = c.msgs.remove(at).text;
-                    c.queued = Some(match c.queued.take() {
-                        Some(later) => format!("{q}\n\n{later}"),
-                        None => q,
-                    });
+                    c.queue(q, true);
                 }
                 c.msgs.push(Msg::new(
                     Role::Note,
@@ -1757,12 +1819,41 @@ pub(crate) fn send_queued(ed: &mut Editor) {
     if crate::reads::pointing_asks(ed) {
         return;
     }
-    let Some(q) = ed.session.chat.as_mut().and_then(|c| c.queued.take()) else { return };
-    if !submit_input(ed, &q)
-        && let Some(c) = ed.session.chat.as_mut()
+    // (what waits besides a message goes first, one a turn — frictions29 18; one that sends nothing now, its
+    // drafts gone meanwhile, lets the next go)
+    while let Some(later) =
+        ed.session.chat.as_mut().filter(|c| !c.sends.is_empty()).map(|c| c.sends.remove(0))
     {
-        c.queued = Some(q);
+        match later {
+            Later::Review(lines) => crate::codereview::send_as(ed, lines),
+            Later::Reply { id, text, fresh, why } => crate::notes::send(ed, id, &text, fresh, why, None),
+        }
+        if ed.session.chat.as_ref().is_some_and(Chat::busy) {
+            return;
+        }
     }
+    let Some(q) = ed.session.chat.as_mut().and_then(|c| c.queued.take()) else { return };
+    match submit_input(ed, &q) {
+        true => {
+            if let Some(c) = ed.session.chat.as_mut() {
+                c.queued_gone();
+            }
+        }
+        false => {
+            if let Some(c) = ed.session.chat.as_mut() {
+                c.queued = Some(q);
+            }
+        }
+    }
+}
+
+/// What waits for a turn's end besides a message (`Chat.sends`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Later {
+    /// The review's notes (`codereview::send_as`'s `lines`).
+    Review(Option<bool>),
+    /// A reply on note `id` (`notes::send`'s).
+    Reply { id: u64, text: String, fresh: bool, why: Option<String> },
 }
 
 /// The turn ended refused for money: the message queued during it stays queued, said — it goes once the
@@ -1781,10 +1872,7 @@ pub fn send(ed: &mut Editor) {
     // one joins it. So it does while the project's settings are read (`claudetrust.rs` — their card doesn't
     // hold it: claude runs held back meanwhile): sent once it starts
     if (c.busy() || c.settings.waiting()) && !question.is_empty() {
-        c.queued = Some(match c.queued.take() {
-            Some(q) => format!("{q}\n\n{question}"),
-            None => question,
-        });
+        c.queue(question, false);
         c.input.clear();
         c.cursor = 0;
         return;
@@ -2709,6 +2797,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         // The queued message back to edit — or drop (#23): it's out of the queue while it's in the input
         (Code::Up, ..) if c.input.is_empty() && c.queued.is_some() => {
             c.input = c.queued.take().unwrap_or_default();
+            c.queued_gone();
             c.cursor = c.input.len();
         }
         (Code::PageUp, ..) | (Code::Up, ..) if c.input.is_empty() || key.code == Code::PageUp => {
@@ -3566,6 +3655,7 @@ mod tests {
             since: std::time::Instant::now(),
             found: Default::default(),
             repository: None,
+            not_whole: None,
             own: None,
             then: None,
         };
@@ -3660,6 +3750,7 @@ mod tests {
                 since: std::time::Instant::now(),
                 found: Default::default(),
                 repository: repository.map(Path::to_path_buf),
+                not_whole: None,
                 own: None,
                 then: None,
             };
@@ -3704,6 +3795,12 @@ mod tests {
         let (folder, q, id) = card(&ed);
         assert_eq!(folder, None, "{q}");
         assert!(!q.contains("everything in"), "{q}");
+        // …and says why it isn't offered whole (frictions29 11: a reference repository came a card per path)
+        let why = format!(
+            "Not offered whole, the repository {}: a file in it looks like it holds a token.",
+            crate::allow::tilde(&tokened)
+        );
+        assert!(q.contains(&why), "{q}");
         crate::reads::answer(&mut ed, id, read(&tokened), None, true, None);
         // Each of these offers the file alone, never the repository (review J 5, 15): one that holds a file named
         // like a key, a read of a file named like a key, a repository too big to look through all of it

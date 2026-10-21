@@ -1719,8 +1719,36 @@ pub(crate) mod tests {
 
     /// Another tarae keeping at the same time waits: while a change is made, the lock beside the store is held — a
     /// second open of it (another process's, as far as the lock goes) is refused — and it's free again after.
+    /// In a process of its own (frictions29 22): a lock lives while any copy of its open file does, and another
+    /// test's child holds copies from its fork to its exec — tier own's keeper births and the refused suite's
+    /// forks wait there longest — so "let go after" failed now and then in tier own's full suite.
     #[test]
     fn keeping_holds_the_lock_beside_the_store() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "allow::tests::keeping_lock_scene",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(LOCK_SCENE, "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "the scene: {said}");
+    }
+
+    /// Marks the scene's own process.
+    const LOCK_SCENE: &str = "TARAE_ALLOW_LOCK_SCENE";
+
+    /// `keeping_holds_the_lock_beside_the_store`'s scene, in a process with no other test's children.
+    #[test]
+    #[ignore = "run by keeping_holds_the_lock_beside_the_store in a process of its own"]
+    fn keeping_lock_scene() {
+        if std::env::var_os(LOCK_SCENE).is_none() {
+            return;
+        }
         let dir = crate::scratch::Scratch::new("allow-lock");
         let path = dir.join("state/sandbox.json");
         let other = || std::fs::OpenOptions::new().write(true).open(dir.join("state/sandbox.lock")).unwrap();

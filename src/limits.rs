@@ -246,12 +246,13 @@ pub fn label(window: &str) -> String {
     }
 }
 
-/// `93 %` · `limit reached` (rejected) · `not said`.
+/// `93 %` · `limit reached` (rejected) · `no figure yet` — said beside a reset time, `not said` read as a
+/// contradiction (frictions29 6: `5-hour not said · resets Sun 15:20`).
 pub fn used(r: &Reading) -> String {
     match (r.status, r.percent) {
         (Some(Status::Rejected), _) => "limit reached".into(),
         (_, Some(p)) => format!("{p} %"),
-        (_, None) => "not said".into(),
+        (_, None) => "no figure yet".into(),
     }
 }
 

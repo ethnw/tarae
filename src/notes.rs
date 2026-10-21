@@ -830,9 +830,8 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
     if text.is_empty() {
         return;
     }
-    if ed.session.chat.as_ref().is_some_and(|c| c.busy()) && !crate::codereview::drafting(ed) {
-        return ed.set_status("Claude is still answering — reply once it's done (C-c in the chat stops it)");
-    }
+    // (Claude answering: the reply is in its thread now and goes at the turn's end — frictions29 18)
+    let busy = ed.session.chat.as_ref().is_some_and(|c| c.busy()) && !crate::codereview::drafting(ed);
     // During a review it's a draft: it goes with the rest (`space v s`), nothing is sent now
     let draft = crate::codereview::drafting(ed);
     let fresh = target.filter(|&id| find(ed, id).is_some()).is_none();
@@ -872,6 +871,10 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
         return ed.note(format!("draft saved — {k} in this review · space v s sends them"));
     }
     let why = stop.map(|(_, _, why)| why.to_string());
+    if busy && let Some(c) = ed.session.chat.as_mut() {
+        c.sends.push(crate::chat::Later::Reply { id, text: text.to_string(), fresh, why });
+        return ed.set_status("reply queued — it goes when Claude's turn ends");
+    }
     send(ed, id, text, fresh, why, None);
 }
 
@@ -917,7 +920,11 @@ pub fn send(ed: &mut Editor, id: u64, text: &str, fresh: bool, why: Option<Strin
     if fresh {
         ed.session.notes.list.retain(|n| n.id != id);
     } else if let Some(n) = find_mut(ed, id) {
-        n.thread.pop();
+        // (this reply — the last of yours with its text, not merely the last: one queued while Claude worked may
+        // have others after it by now)
+        if let Some(at) = n.thread.iter().rposition(|e| e.by == By::You && e.text == text && !e.draft) {
+            n.thread.remove(at);
+        }
         n.waiting = false;
     }
     ed.set_warning("couldn't reach claude — the chat panel says why");
@@ -1038,6 +1045,24 @@ mod tests {
 
     fn editor() -> Editor {
         Editor::new(crate::config::Config::default())
+    }
+
+    /// frictions30's review (5): a reply Claude never saw is taken back by itself — a reply queued while Claude worked
+    /// may have others after it by the time it goes, and the last entry isn't it. (Stand-in: a claude that isn't
+    /// there, so the send fails.)
+    #[test]
+    fn a_reply_that_never_went_takes_back_itself_not_the_last() {
+        let s = crate::scratch::Scratch::new("notes-take-back");
+        let mut ed = editor();
+        ed.session.root = s.to_path_buf();
+        ed.config.llm.command = s.join("no-claude-here").display().to_string();
+        let id = add(&mut ed, &s.join("a.rs"), 0..1, By::You, "first");
+        for t in ["queued reply", "a later one"] {
+            find_mut(&mut ed, id).unwrap().thread.push(Entry { by: By::You, text: t.into(), draft: false });
+        }
+        send(&mut ed, id, "queued reply", false, None, Some(true));
+        let left: Vec<&str> = find(&ed, id).unwrap().thread.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(left, ["first", "a later one"]);
     }
 
     /// Each entry says who wrote it — the chat's `note` the author, the reviewer's `finding` the reviewer

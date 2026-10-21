@@ -7319,6 +7319,106 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// frictions29 18: while Claude works, the review's notes (`space v s`) and a reply on a note wait for the
+    /// turn's end as a message does — not refused, drafts until they go — and the queued row says what waits: how
+    /// many messages (a second joins the first) and the last one's start, the review's notes, the replies. At the
+    /// turn's end they go first, one a turn, the messages after.
+    #[test]
+    fn review_notes_and_replies_wait_for_the_turns_end_and_the_row_counts_them() {
+        let s = crate::scratch::Scratch::new("chat-sends-queued");
+        let log = s.join("sent.log");
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let mut ed = editor("fn main() {}\n");
+        let logged = format!("printf '%s\\n' \"$line\" >> '{}'", log.display());
+        fake_claude_stream(
+            &mut ed,
+            &[json_str(&logged), json_str("sleep 1"), serde_json::json!({"type": "result", "result": "ok"})],
+        );
+        let sent = |log: &Path| std::fs::read_to_string(log).unwrap_or_default();
+        feed(&mut ed, "<space>lfirst<ret>");
+        while sent(&log).lines().count() < 1 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ed.session.chat.as_ref().unwrap().busy());
+        ed.session.chat.as_mut().unwrap().unfolded = true;
+        // Two messages: one queue, the row counts them and shows the last
+        feed(&mut ed, "second<ret>third<ret>");
+        let c = ed.session.chat.as_ref().unwrap();
+        assert_eq!(c.queued.as_deref(), Some("second\n\nthird"));
+        assert!(draw(&mut ed).contains("2 messages queued · third"), "{}", draw(&mut ed));
+        // A reply on a note while Claude works: in its thread now, sent at the turn's end (review 5)
+        let path = s.join("a.rs");
+        let other = crate::notes::add(&mut ed, &path, 2..3, crate::notes::By::You, "and here?");
+        crate::notes::submit(&mut ed, Some(other), "this one too");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(said, "reply queued — it goes when Claude's turn ends");
+        let said = ed.session.chat.as_ref().unwrap().queued_said().map(|q| q.0);
+        assert_eq!(said.as_deref(), Some("a reply and 2 messages queued"));
+        // A draft note sent as a review while Claude works: queued, still a draft
+        let id = crate::notes::add(&mut ed, &path, 0..1, crate::notes::By::You, "why?");
+        let n = ed.session.notes.list.iter_mut().find(|n| n.id == id).unwrap();
+        (n.thread[0].draft, n.waiting) = (true, false);
+        crate::codereview::send_as(&mut ed, None);
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(said, "review queued — its 1 comment goes when Claude's turn ends");
+        assert!(
+            ed.session.notes.list.iter().find(|n| n.id == id).unwrap().thread[0].draft,
+            "a draft until sent"
+        );
+        let c = ed.session.chat.as_ref().unwrap();
+        assert!(matches!(c.sends[..], [crate::chat::Later::Reply { .. }, crate::chat::Later::Review(None)]));
+        let said = ed.session.chat.as_ref().unwrap().queued_said().map(|q| q.0);
+        assert_eq!(said.as_deref(), Some("review notes, a reply and 2 messages queued"));
+        let s = draw(&mut ed);
+        assert!(s.contains("queued · third"), "{s}");
+        // (one that sends nothing by its turn — its drafts gone with the first: the next goes on — review 1)
+        ed.session.chat.as_mut().unwrap().sends.push(crate::chat::Later::Review(Some(true)));
+        // (narrow: how many, and still the last one's start)
+        let narrow = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 80, 24).unwrap();
+            let mut parser = vt100::Parser::new(24, 80, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        assert!(narrow(&mut ed).contains("5 queued · third"), "{}", narrow(&mut ed));
+        assert!(
+            ed.ui_state().text().contains("review notes, a reply and 2 messages queued"),
+            "{}",
+            ed.ui_state().text()
+        );
+        assert_eq!(sent(&log).lines().count(), 1, "nothing goes while Claude works");
+        // The turn ends: the reply goes first; at the next end the review, its draft sent; at the one after, the
+        // second review has nothing to send and the messages go
+        settle_for(&mut ed, |_| sent(&log).lines().count() == 2);
+        assert!(sent(&log).lines().nth(1).unwrap().contains("this one too"), "{}", sent(&log));
+        settle_for(&mut ed, |_| sent(&log).lines().count() == 3);
+        assert!(sent(&log).lines().nth(2).unwrap().contains("<review of="), "{}", sent(&log));
+        assert!(!ed.session.notes.list.iter().find(|n| n.id == id).unwrap().thread[0].draft);
+        settle_for(&mut ed, |_| sent(&log).lines().count() == 4);
+        let last = sent(&log).lines().nth(3).unwrap().to_string();
+        assert!(last.contains("second") && last.contains("third"), "{last}");
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        let c = ed.session.chat.as_ref().unwrap();
+        assert!(c.queued.is_none() && c.sends.is_empty() && c.queued_said().is_none());
+        // Idle, nothing waiting: a failed run of the last turn goes on by itself — not while something waits, which
+        // is the conversation expected back too (review 1)
+        let key = crate::blocked::RunKey { tests: false, generation: 7 };
+        assert_eq!(crate::keepwarm::back(&ed.session), None);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.failed = (c.conversation.clone(), vec![key]);
+        assert!(crate::tools::goes_on(&ed, key));
+        ed.session.chat.as_mut().unwrap().sends.push(crate::chat::Later::Review(None));
+        assert!(!crate::tools::goes_on(&ed, key), "review notes wait to go first");
+        assert_eq!(crate::keepwarm::back(&ed.session), Some(crate::keepwarm::Back::Queued));
+    }
+
     /// The edit review's keys say what each takes (it read "y accept · a all" — one `y` left the rest
     /// waiting, easy to miss): with several left `y accept this one` and `a accept all N`; with one, no `a`.
     #[test]
@@ -13567,6 +13667,28 @@ mod tests {
         settle_until(&mut ed, |ed| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run(_))));
         let s = screen(&mut ed);
         assert!(s.contains("more lines · y once you've seen it all — v"), "{s}");
+        // (the hint row too, where `y`'s meaning was — frictions29 13: the row under the cut one said `y Once`)
+        let hint_color = |ed: &mut Editor| {
+            let p = frame(ed);
+            let s = p.screen().contents();
+            let (row, line) =
+                s.lines().enumerate().find(|(_, l)| l.contains("y read it first")).expect("{s}");
+            let col = line[..line.find("read it first").unwrap()].chars().count();
+            p.screen().cell(row as u16, col as u16).unwrap().fgcolor()
+        };
+        let hint_plain = hint_color(&mut ed);
+        // (narrow, a short form where the long one has no room — it took a row of its own at 80 columns, and the
+        // row said `y Once`)
+        let narrow = |ed: &mut Editor, w: u16| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, w, 18).unwrap();
+            let mut parser = vt100::Parser::new(18, w, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let s = narrow(&mut ed, 80);
+        let said = s.contains("y read it first — v") || s.contains("y after v");
+        assert!(said && !s.contains("y Once"), "80 columns:\n{s}");
         let plain = cut_color(&mut ed);
         let y_at = |ed: &Editor| ed.screen.offer_buttons.iter().find(|b| b.3 == 'y').map(|b| (b.0, b.1));
         let before = y_at(&ed);
@@ -13580,7 +13702,15 @@ mod tests {
         assert!(s.contains("more lines · y waits — v shows all of it"), "{s}");
         let warning = ed.theme.try_get("warning").and_then(|s| s.fg);
         assert_ne!(cut_color(&mut ed), plain, "the warning color, not the faint row's ({warning:?})");
+        assert_ne!(hint_color(&mut ed), hint_plain, "its hint row in the warning color too");
         assert_eq!(y_at(&ed), before, "the card stays where it was (no wider)\n{}", screen(&mut ed));
+        // Read whole: `y` has its meaning back, and the card keeps its width — its `y` where it was (review 7)
+        screen(&mut ed);
+        let waiting_at = y_at(&ed);
+        ed.offer_whole.set(ed.offers.first().map(|o| (o.id, o.rev)));
+        let s = screen(&mut ed);
+        assert!(s.contains("y Run") && !s.contains("read it first"), "{s}");
+        assert_eq!(y_at(&ed), waiting_at, "no narrower once read:\n{s}");
     }
 
     /// A card taller than the screen is still drawn — cut to fit, its buttons in sight, a row saying how much
@@ -13618,7 +13748,12 @@ mod tests {
         let s = screen(&mut ed);
         assert!(s.contains("Trust this project's settings?") && s.contains("line 1 of what it runs"), "{s}");
         assert!(!s.contains("line 80 of what it runs"), "cut to fit");
-        assert!(s.contains("more lines · y once you've seen it all — v") && s.contains("y Trust"), "{s}");
+        // (its hint row says what `y` waits for, in place of `y Trust` — frictions29 13)
+        assert!(
+            s.contains("more lines · y once you've seen it all — v") && s.contains("y read it first — v"),
+            "{s}"
+        );
+        assert!(!s.contains("y Trust"), "{s}");
         assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y'), "y in sight");
         settled(&mut ed);
         // `y` before all of it was seen: not an answer

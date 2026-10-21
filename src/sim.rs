@@ -25,6 +25,8 @@ use crate::editor::Editor;
 use crate::event::Event;
 
 mod board;
+mod brings;
+mod hosts;
 mod reviews;
 mod sessions;
 

@@ -1126,17 +1126,20 @@ fn also_ask(
             "there's no sandbox here to open — run it without also: its card says what it may do".into()
         );
     }
-    if ed.session.chat.as_ref().is_some_and(|c| c.also_asked >= ALSO_MAX) {
+    // (the terminals again after the user's yes on them this turn: a card as ever, but not one of the turn's
+    // `ALSO_MAX` — frictions29 23: every e2e or scenes run asks, and turns ended unable to run a test again)
+    let again = matches!(ask, AlsoAsk::Terminals) && ed.session.chat.as_ref().is_some_and(|c| c.also_yes);
+    if !again && ed.session.chat.as_ref().is_some_and(|c| c.also_asked >= ALSO_MAX) {
         return Err(format!(
             "{ALSO_MAX} cards for also this turn already — tell the user what the command needs instead"
         ));
     }
     // (its place among the turn's cards taken now — calls sent together each count — given back if no card comes)
-    if let Some(c) = ed.session.chat.as_mut() {
+    if let Some(c) = ed.session.chat.as_mut().filter(|_| !again) {
         c.also_asked += 1;
     }
-    let give_back = |ed: &mut Editor| {
-        if let Some(c) = ed.session.chat.as_mut() {
+    let give_back = move |ed: &mut Editor| {
+        if let Some(c) = ed.session.chat.as_mut().filter(|_| !again) {
             c.also_asked = c.also_asked.saturating_sub(1);
         }
     };
@@ -3004,7 +3007,11 @@ const SENT_BY_ITSELF: &str = "(tarae sent this when the run ended — the user t
 /// Claude's last turn, the conversation is the one it ran in, and the chat is idle.
 pub fn goes_on(ed: &Editor, key: crate::blocked::RunKey) -> bool {
     ed.session.chat.as_ref().is_some_and(|c| {
-        !c.busy() && c.queued.is_none() && c.failed.0 == c.conversation && c.failed.1.contains(&key)
+        !c.busy()
+            && c.queued.is_none()
+            && c.sends.is_empty()
+            && c.failed.0 == c.conversation
+            && c.failed.1.contains(&key)
     })
 }
 
@@ -3410,6 +3417,19 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     let root = ride.extra.base.as_ref().map_or_else(|| ed.session.root.clone(), |b| b.tree.clone());
     let basis = crate::caps::Basis { root: root.clone(), ..ed.caps_basis() };
     let grant = ride.extra.grant.clone();
+    // (a host card's `y` after its run ended: the next run of that conversation's Claude carries it — spent once it
+    // goes, below; the user's own runs and one whose turn ended never take it — `hosts::next_run`)
+    let next_hosts = match &who {
+        For::Claude(call) => ed
+            .session
+            .chat
+            .as_ref()
+            .filter(|c| c.generation() == call.generation)
+            .map(|c| c.hosts_next.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let spent = next_hosts.clone();
     let said = ed.tokens_said.clone();
     let here = run_here(ed);
     let (job_run, base, session_root) =
@@ -3423,7 +3443,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         let policy = matches!(found, Availability::Ready | Availability::Partial(_)).then(|| {
             let mut w = with_allowed(&llm, &basis.granted(), grant.as_ref());
             // (the session's `s` hosts: the proxy has them already — here for the caches they open, piece C)
-            for h in &basis.hosts {
+            for h in basis.hosts.iter().chain(&next_hosts) {
                 if !w.hosts.contains(h) {
                     w.hosts.push(h.clone());
                 }
@@ -3465,7 +3485,14 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
                 (Some(_), Availability::Partial(why), For::Claude(call)) if !agreed => {
                     ask_unprotected(ed, call, job, Unsandboxed::Partial(why), ride)
                 }
-                (Some(p), _, who) => go(ed, who, job, Some(Guard::In(Box::new(p))), ride),
+                (Some(p), _, who) => {
+                    if let (For::Claude(call), Some(c)) = (&who, ed.session.chat.as_mut())
+                        && c.generation() == call.generation
+                    {
+                        c.hosts_next.retain(|h| !spent.contains(h));
+                    }
+                    go(ed, who, job, Some(Guard::In(Box::new(p))), ride)
+                }
                 (None, Availability::Missing(why), For::Claude(call)) if never => {
                     fail(ed, For::Claude(call), ride.joined, never_ran(&Unsandboxed::Missing(why)))
                 }
@@ -4572,6 +4599,9 @@ const OUTPUT_TAIL: usize = 150;
 /// Characters per output line, at most (a minified bundle on one line).
 const LINE_MAX: usize = 500;
 
+/// A run this long whose output went through a filter has its report say what the filter cost.
+const FILTERED_SAID: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How the command ended as Claude reads it: the verdict, what it waited on (`waited` — in line, then on
 /// another's lock), the places it pointed at (from `root`, the project's), its output.
 fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item], waited: Waited) -> String {
@@ -4593,7 +4623,20 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         .and_then(|t| crate::waits::silent_line(r.last_output, r.started + t))
         .map(|s| format!("{s}\n"))
         .unwrap_or_default();
-    let mut out = format!("{verdict}{took}\n{waited}{silent}$ {}\n", r.task.cmd);
+    // (a long run's answer cut by its own filter, its exit the filter's: said, so the next long run isn't piped —
+    // frictions29 21: `| grep … | head -40` cut the `test result` lines and the suite ran again for them)
+    let filtered = r
+        .took
+        .filter(|t| *t >= FILTERED_SAID)
+        .and_then(|_| crate::readonly::filtered_by(&r.task.cmd))
+        .map(|f| {
+            format!(
+                "Its output went through {f}: what that cut wasn't kept, and the exit status is the pipeline's last \
+                 command's, not the work's. A long command run unfiltered comes back whole (its start and end).\n"
+            )
+        })
+        .unwrap_or_default();
+    let mut out = format!("{verdict}{took}\n{waited}{silent}{filtered}$ {}\n", r.task.cmd);
     // (#219: a run that failed for space says so first — the rest of its errors follow from it)
     if !matches!(r.state, State::Passed) && r.output.iter().any(|(_, l)| disk_full_said(l)) {
         out.push_str(
@@ -6558,6 +6601,103 @@ mod tests {
         );
         pump(&mut ed, &|ed| ed.offers.len() == 3);
         ed.offers.clear();
+        // frictions29 23 (macOS: the terminals are a grant there): past the turn's three, the terminals are refused
+        // too — until the user's yes on them; then asked again they come on a card, taking none of the three
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let terminals = json!({ "terminals": true });
+        assert!(send(&mut ed, 9, terminals.clone()).is_err_and(|e| e.contains("3 cards for also")));
+        let call = super::Call::of(generation, "m10", json!(10));
+        let run = crate::blocked::BlockedRun {
+            claude: Some(call),
+            ..crate::blocked::BlockedRun::of(super::Job::Command("true".into(), dir.clone()))
+        };
+        crate::blocked::grant_answer(
+            &mut ed,
+            0,
+            crate::allow::Grant::Terminals,
+            run,
+            Some(crate::allow::Scope::Once),
+        );
+        assert!(ed.session.chat.as_ref().unwrap().also_yes);
+        send(&mut ed, 11, terminals.clone()).expect("asked again after a yes: not refused");
+        pump(&mut ed, &|ed| !ed.offers.is_empty());
+        assert_eq!(ed.session.chat.as_ref().unwrap().also_asked, 3, "none of the turn's three taken");
+        // A new turn: the yes is gone with it
+        crate::reads::turn_over(&mut ed);
+        assert!(!ed.session.chat.as_ref().unwrap().also_yes);
+        ed.offers.clear();
+    }
+
+    /// frictions29 16 (its review's 10 and 11): the host a `y` on an ended card gave goes with the next run of that
+    /// conversation's Claude that starts — in its rules (the proxy lets it through), and then it's spent; the user's
+    /// own run neither carries it nor uses it up. (Stand-in: `true`; the run's policy is what's looked at.)
+    #[test]
+    fn a_host_given_for_claudes_next_run_goes_with_that_run_alone() {
+        use serde_json::json;
+        const HOST: &str = "registry.example.invalid";
+        let scratch = crate::scratch::Scratch::new("hosts-next");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.state, c.hosts_next) = (crate::chat::State::Thinking, vec![(HOST.to_string(), 443)]);
+        let generation = c.generation();
+        let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(ed) {
+                assert!(std::time::Instant::now() < end, "waited too long");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        // The run started since `before`: whether its rules let the host through
+        let carries = |ed: &crate::editor::Editor, before: u64| {
+            let r = ed.session.task_run.as_ref().filter(|_| ed.task_generation > before)?;
+            match r.guard.as_ref() {
+                Some(super::Guard::In(p)) => Some(p.egress.answered(HOST, 443)),
+                _ => None,
+            }
+        };
+        let next = |ed: &crate::editor::Editor| ed.session.chat.as_ref().unwrap().hosts_next.clone();
+        let ended = |ed: &crate::editor::Editor| {
+            ed.session.task_run.as_ref().is_none_or(|r| r.state != crate::task::State::Running)
+        };
+        let job = || super::Job::Command("true".into(), dir.clone());
+        // The user's own run: not its
+        let before = ed.task_generation;
+        super::guard_and_go(
+            &mut ed,
+            super::For::User("ran again".into()),
+            job(),
+            false,
+            super::Extra::default(),
+        );
+        pump(&mut ed, &|ed| carries(ed, before).is_some());
+        assert_eq!(carries(&ed, before), Some(false), "the user's run doesn't carry it");
+        assert_eq!(next(&ed), [(HOST.to_string(), 443)], "nor use it up");
+        pump(&mut ed, &ended);
+        // Claude's: carried, spent
+        let before = ed.task_generation;
+        let call = super::Call::of(generation, "m1", json!(1));
+        super::guard_and_go(&mut ed, super::For::Claude(call), job(), false, super::Extra::default());
+        pump(&mut ed, &|ed| carries(ed, before).is_some());
+        assert_eq!(carries(&ed, before), Some(true), "Claude's next run reaches it");
+        assert!(next(&ed).is_empty(), "spent");
+        pump(&mut ed, &ended);
+        // Claude's run after it: not again
+        let before = ed.task_generation;
+        let call = super::Call::of(generation, "m2", json!(2));
+        super::guard_and_go(&mut ed, super::For::Claude(call), job(), false, super::Extra::default());
+        pump(&mut ed, &|ed| carries(ed, before).is_some());
+        assert_eq!(carries(&ed, before), Some(false), "once");
+        pump(&mut ed, &ended);
     }
 
     /// Review of piece 4 (2): before the first look at the sandbox has landed (`Availability::Unknown`) a run
@@ -8245,6 +8385,38 @@ mod tests {
         );
         r.output.retain(|(err, _)| !err);
         assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("skipped"));
+    }
+
+    /// frictions29 21: a long run whose output went through a filter (`| grep … | head -40`) has its report say what
+    /// that cost — the cut part not kept, the exit the pipeline's last command's — so the next long run isn't piped
+    /// (that one ran the suite again for the lines head cut). A short one, or one unfiltered, says nothing of it.
+    #[test]
+    fn a_long_runs_report_says_its_filter_cut_its_output() {
+        use crate::task::{Run, State, Task};
+        let cmd = "cargo xtask linux test 2>&1 | grep -E 'test result|FAILED' | head -40";
+        let mut r = Run::for_test(Task { name: "t".into(), cmd: cmd.into(), cwd: "/p".into() });
+        r.state = State::Passed;
+        let said =
+            "Its output went through grep: what that cut wasn't kept, and the exit status is the pipeline's";
+        r.took = Some(std::time::Duration::from_secs(300));
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(text.contains(said) && text.find(said) < text.find("$ cargo"), "before the line: {text}");
+        r.took = Some(std::time::Duration::from_secs(5));
+        assert!(
+            !super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("went through"),
+            "short"
+        );
+        r.took = Some(std::time::Duration::from_secs(300));
+        r.task.cmd = "cargo xtask linux test 2>&1".into();
+        assert!(
+            !super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("went through"),
+            "unfiltered"
+        );
+        r.task.cmd = "cargo test | tee out.txt".into();
+        assert!(
+            !super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("went through"),
+            "tee cuts nothing"
+        );
     }
 
     /// #219: a run that failed for space says so first, in words Claude passes on — not one that passed with

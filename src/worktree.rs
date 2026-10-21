@@ -2211,6 +2211,34 @@ impl Editor {
         self.bringing(which, true)
     }
 
+    /// A bring into `base` landed (session `landed`'s): the other sessions waiting with a card that brings into
+    /// it are graded again against its new tip, at once — their card says the base moved and `y` rebases first,
+    /// where a `y` on the old card would have been refused by the fast-forward (frictions29 24: seven brought in a
+    /// row, four `n`s to keep them in order, a preflight run on a tip already gone).
+    fn bring_regrade(&mut self, landed: crate::event::SessionId, base: &str) {
+        // (a bring card is up wherever it was asked — its checkout says whose it is)
+        let front = !self.background();
+        let waits = |l: &crate::session::Session, offers: &[crate::offer::Offer]| {
+            let up = offers.iter().filter(|_| front);
+            l.parked.iter().chain(up).any(|o| match &o.what {
+                crate::offer::What::Rebased(m) | crate::offer::What::UpTo(m) => {
+                    m.base == base && m.root == l.root
+                }
+                _ => false,
+            })
+        };
+        let names: Vec<String> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter(|l| l.id != landed && l.id != 0 && waits(l, &self.offers))
+            .map(|l| l.name.clone())
+            .collect();
+        for name in names {
+            if let Err(e) = self.session_bring(&name) {
+                crate::log::line("session", "info", &format!("bring {name} graded again: {e}"));
+            }
+        }
+    }
+
     fn bringing(&mut self, which: &str, now: bool) -> Result<(), String> {
         let (id, name) = self.session_named(which)?;
         if id == 0 {
@@ -2251,6 +2279,7 @@ impl Editor {
                     ));
                     // (its review since the base is of nothing now: it ends, said — frictions25 R5)
                     ed.with_session(id, crate::codereview::base_reached);
+                    ed.bring_regrade(id, &b.base);
                 }
                 Bringing::Moved(m) => ed.push_offer(m.card()),
                 // (nothing of its own, behind: moved up instead — #186)
@@ -5031,6 +5060,42 @@ mod tests {
             card(&ed, title).and_then(|o| o.held.clone()).as_deref(),
             Some(crate::codereview::held_said(1).as_str())
         );
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 24: a bring landing grades the other sessions' waiting bring cards again at once — one waiting
+    /// to fast-forward onto the old tip now says the base moved (`y` rebases first) instead of a `y` the
+    /// fast-forward would refuse.
+    #[test]
+    fn a_bring_landing_grades_the_others_waiting_again() {
+        let (repo, dir) = place("bring-regrade");
+        let mut ed = editor(&repo, &dir);
+        let mut made = Vec::new();
+        for name in ["one", "two"] {
+            let wt = new_session(&mut ed, name);
+            std::fs::write(wt.join(format!("{name}.txt")), "x\n").unwrap();
+            git_in(&wt, &["add", "-A"]);
+            git_in(&wt, &["commit", "-qm", name]);
+            made.push(ed.session.id);
+        }
+        let titles = |ed: &Editor| -> Vec<String> {
+            let parked = std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked);
+            ed.offers.iter().chain(parked).map(|o| o.title.clone()).collect()
+        };
+        // Both waiting to be brought; the first asked is in front, the other behind it (`1`)
+        ed.session_bring("two").unwrap();
+        settle_until(&mut ed, |ed| card(ed, "Bring two into main").is_some());
+        assert!(ed.session_switch(made[0]));
+        ed.session_bring("one").unwrap();
+        settle_until(&mut ed, |ed| card(ed, "Bring one into main").is_some());
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n', '1'], "{}", said(&ed));
+        assert_eq!(ed.offers[0].title, "Bring two into main");
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| says(ed, "Brought 1 commit of two into main"));
+        // one's card graded again at once: main moved — `y` rebases first; its old card gone
+        settle_until(&mut ed, |ed| titles(ed).iter().any(|t| t == "Bring one: main moved"));
+        assert!(!titles(&ed).iter().any(|t| t == "Bring one into main"), "{:?}", titles(&ed));
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -2,7 +2,8 @@
 //! the card a rebase leaves pushed (as `rebase_ended` does), `:session-bring`, a frame drawn, `n` or `y` on the
 //! card in front, a switch of sessions, the user taking their time, a new commit in a session — each step's jobs
 //! and their results interleaved by seed. After every step: one bring card a session (frictions28 S1,
-//! `b56cdf41` — the card a rebase left and a later bring's stood side by side).
+//! `b56cdf41` — the card a rebase left and a later bring's stood side by side). A landing that grades the others
+//! again is `sim/brings.rs`'s.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,14 +36,14 @@ fn sessions_and_bring_cards() {
 
 /// A repository on `main` and two sessions' checkouts beside it: `risky` (a commit a person must look at:
 /// its bring card is held) and `plain`.
-struct World {
-    dir: crate::scratch::Scratch,
-    repo: PathBuf,
-    sessions: Vec<(String, PathBuf)>,
+pub(super) struct World {
+    pub(super) dir: crate::scratch::Scratch,
+    pub(super) repo: PathBuf,
+    pub(super) sessions: Vec<(String, PathBuf)>,
 }
 
 impl World {
-    fn new() -> World {
+    pub(super) fn new() -> World {
         let dir = crate::scratch::Scratch::new("sim-sessions");
         let repo = dir.join("proj");
         std::fs::create_dir_all(&repo).unwrap();
@@ -221,7 +222,7 @@ fn cards(ed: &Editor) -> impl Iterator<Item = &Offer> {
 }
 
 /// frictions28 S1: at most one bring card for a session's checkout, up or parked, in any session.
-fn one_bring_card(ed: &Editor) -> Result<(), String> {
+pub(super) fn one_bring_card(ed: &Editor) -> Result<(), String> {
     let mut by_root: BTreeMap<&Path, Vec<String>> = BTreeMap::new();
     for o in cards(ed) {
         if let Some(root) = o.bring_root() {
@@ -235,7 +236,7 @@ fn one_bring_card(ed: &Editor) -> Result<(), String> {
 }
 
 /// What a trace line ends with: the session in front, the cards up and parked, the last thing said.
-fn print(ed: &Editor, dir: &str) -> String {
+pub(super) fn print(ed: &Editor, dir: &str) -> String {
     let said = |os: &[Offer]| {
         let held = |o: &Offer| if o.held.is_some() { " (held)" } else { "" };
         os.iter().map(|o| format!("#{} {}{}", o.id, o.title, held(o))).collect::<Vec<_>>().join(", ")

@@ -7329,6 +7329,9 @@ struct OfferCard {
     buttons: Vec<(usize, usize, usize, char)>,
     /// The buttons: (key, label) — the first bright, the rest dim.
     labels: Vec<(char, &'static str)>,
+    /// The answer whose label says it waits to be read whole (`READ_FIRST`), and whether a key came early for
+    /// it (then in the warning colour).
+    waits: Option<(usize, bool)>,
     pad: usize,
     failed: bool,
     /// When stacked, the "1/3" at the right of the title row (else empty).
@@ -7423,6 +7426,15 @@ fn button_rows(labels: &[(char, &str)], room: usize) -> Vec<std::ops::Range<usiz
     }
     rows
 }
+
+/// The chat's queued row keeps at least this much of the last message's start, narrow (`Chat::queued_said`).
+const QUEUED_LAST_MIN: usize = 12;
+
+/// A cut card's yes, while it waits to be read whole — in place of its meaning on the hint row.
+const READ_FIRST: &str = "read it first — v";
+
+/// `READ_FIRST` where the answers' row has no room for it.
+const READ_FIRST_SHORT: &str = "after v";
 
 /// The width of a row of answers: "y Install   n Not now".
 fn buttons_width(labels: &[(char, &str)]) -> usize {
@@ -7597,7 +7609,7 @@ impl OfferCard {
         for (i, l) in lines.iter_mut().enumerate() {
             l.0 = fit_ellipsis(&l.0, max_inner.saturating_sub(if i == 0 { badge_w } else { 0 }));
         }
-        let labels = labels.unwrap_or_default();
+        let mut labels = labels.unwrap_or_default();
         // Its text being read in its buffer: a bar over the status line — the title, how far the reading
         // is, the answers at the right (clickable as ever)
         if let Some(y) = lay.offer_bar.map(usize::from) {
@@ -7643,6 +7655,7 @@ impl OfferCard {
                 button_rows: Vec::new(),
                 buttons,
                 labels,
+                waits: None,
                 pad: 0,
                 failed: matches!(o.state, OfferState::Failed(_)),
                 badge,
@@ -7655,7 +7668,7 @@ impl OfferCard {
         let has_buttons = !labels.is_empty();
         // The answers in rows as wide as the card can be (#201: `:restart`'s four didn't fit 50 columns on
         // one, so the card wasn't drawn and couldn't be answered) — a blank row above them
-        let button_rows = button_rows(&labels, widest);
+        let mut button_rows = button_rows(&labels, widest);
         let buttons_h = if has_buttons { 1 + button_rows.len() } else { 0 };
         // A key it refused: why, over its answers in the warning colour — never cut away with its body (no
         // silent refusal; the status line's flash was missed)
@@ -7703,6 +7716,31 @@ impl OfferCard {
                 warn.push(lines.len() - 1);
             }
         }
+        // Its yes waiting for `v`: the hint row says so where `y`'s meaning was, in the warning colour once a `y`
+        // came early (frictions29 13: the cut row's turn to the warning colour was missed four times in a day,
+        // the row under it still saying `y Once`). Only where the answers keep their rows.
+        // The card keeps the width of the wider form once it's seen whole too — it doesn't narrow under the pointer as
+        // `y` gets its meaning back (review 7; `cut_floor` as for the cut row).
+        let mut waits = None;
+        let mut btn_floor = 0;
+        // (narrow: the short form — at 80 columns the long one took a row of its own, and the row said `y Once`)
+        let waiting = labels.iter().position(|(k, _)| *k == 'y' && o.weighty_answer(*k)).filter(|_| cut > 0);
+        if let Some(i) = waiting {
+            for form in [READ_FIRST, READ_FIRST_SHORT] {
+                let mut said = labels.clone();
+                said[i].1 = form;
+                let rows = self::button_rows(&said, widest);
+                if rows.len() != button_rows.len() {
+                    continue;
+                }
+                btn_floor = rows.iter().map(|r| buttons_width(&said[r.clone()])).max().unwrap_or(0);
+                if !editor.offer_seen_whole() && !editor.offer_viewing() {
+                    let early = editor.offer_early.get() == Some((o.id, o.rev));
+                    (labels, button_rows, waits) = (said, rows, Some((i, early)));
+                }
+                break;
+            }
+        }
         // (the body's rows only: not the cut row, nor what's said under it)
         let body = lines.len() - usize::from(cut > 0);
         diff.retain(|&(i, _)| i < body);
@@ -7725,7 +7763,8 @@ impl OfferCard {
             .unwrap_or(0)
             .max(if has_buttons { btn_w } else { 0 })
             .max(ask.min(max_inner))
-            .max(cut_floor);
+            .max(cut_floor)
+            .max(if has_buttons { btn_floor } else { 0 });
         let width = inner + 5;
         // Too narrow for it: not drawn (and an install's `y` isn't taken — `offer_key`)
         if width + 1 > lay.edit_w {
@@ -7788,6 +7827,7 @@ impl OfferCard {
             button_rows,
             buttons,
             labels,
+            waits,
             pad,
             failed,
             badge,
@@ -7983,7 +8023,14 @@ impl OfferCard {
                     }
                     apply(out, key)?;
                     queue!(out, Print(k))?;
-                    apply(out, if i == 0 { body } else { dim })?;
+                    apply(
+                        out,
+                        match self.waits {
+                            Some((w, true)) if w == i => warning,
+                            _ if i == 0 => body,
+                            _ => dim,
+                        },
+                    )?;
                     queue!(out, Print(" "), Print(l))?;
                     used += 2 + l.width();
                 }
@@ -10611,17 +10658,33 @@ fn draw_chat(
     let mut used = 0;
     // A message waiting for this turn's end (#23): its start, faint, over the input
     let switched = editor.switch_parts();
-    if let Some(q) = &c.queued
+    // (more than one, or the review's notes: how many and what, then the last message's start — frictions29 18)
+    if let Some((said, last)) = c.queued_said()
         && w > 14
     {
-        let first = q.lines().next().unwrap_or_default();
-        let shown = fit_ellipsis(first, w - 10);
+        let lead = match (said.as_str(), last.is_empty()) {
+            ("a message queued", _) => "queued ".to_string(),
+            (_, true) => format!("{said} "),
+            // (narrow: how many, so the last one's start still shows — at 80 columns the words took the row)
+            (_, false)
+                if said.width()
+                    + 3
+                    + last.lines().next().unwrap_or_default().width().min(QUEUED_LAST_MIN)
+                    > w.saturating_sub(4) =>
+            {
+                format!("{} queued · ", c.queued_n.max(1) + c.sends.len())
+            }
+            (_, false) => format!("{said} · "),
+        };
+        let lead = fit_ellipsis(&lead, w - 4);
+        let first = last.lines().next().unwrap_or_default();
+        let shown = fit_ellipsis(first, w.saturating_sub(lead.width() + 3));
         apply(out, accent)?;
-        queue!(out, Print("queued "))?;
+        queue!(out, Print(&lead))?;
         apply(out, faint)?;
         queue!(out, Print(&shown))?;
         queue!(out, Print(" "))?;
-        used = 8 + shown.width();
+        used = lead.width() + shown.width() + 1;
     } else if let Some((what, changed, back)) = switched.filter(|_| w > 16) {
         // A switch of billing, model or effort since the last message: what the next one costs, until it goes
         // (`switchcost.rs`) — the cost in the warning colour, the rest faint. Narrow: what changed folds first (it

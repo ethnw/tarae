@@ -121,8 +121,9 @@ always asks), change sets, and tarae's own cards (trust, a rebase, a download). 
 count) lists them: each row names its session, what it asks, its kind and how long it has waited. `enter` goes
 to it. Its session comes to the front and its card comes up with the keys, and you answer it there, on the card.
 The list never answers anything itself. `C-q` takes what waits in the session in front first, then follows
-the list's order: it goes to the one that has waited longest, whichever session it's in, and once that's the
-card up here, `C-q` gives it the keys. While anything waits, `C-q` never says nothing does.
+the list's order: it goes to the one that has waited longest, whichever session it's in, and that card comes up
+with the keys, as with `enter` (a chat there that had them keeps what you typed). While anything waits, `C-q`
+never says nothing does.
 
 Two kinds of news are in the list too, after everything that asks for an answer: a run of Claude's that has
 printed nothing for minutes (it may only be slow, and a card surely waits), and a reviewer that ended in a

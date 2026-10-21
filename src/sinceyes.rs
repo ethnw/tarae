@@ -52,8 +52,13 @@ pub enum Kept {
     /// The project's tree at the yes (a git tree's id).
     Tree(String),
     /// The scripts it runs as they were: real path, text (None: not text, or not there) — and, when one of
-    /// them runs the project's code (`runs_project`), the project's tree (Err: why it couldn't be taken).
-    Scripts { scripts: Vec<(PathBuf, Option<String>)>, project: Option<Result<String, String>> },
+    /// them runs the project's code (`runs_project`), the project's tree (Err: why it couldn't be taken); and
+    /// the project's files the line or a script names (`inputs`), as they were.
+    Scripts {
+        scripts: Vec<(PathBuf, Option<String>)>,
+        project: Option<Result<String, String>>,
+        inputs: Vec<(PathBuf, Option<String>)>,
+    },
     /// Not kept, and why (not a git checkout, git failed) — the next card says it can't tell.
     Not(String),
     /// Nothing: it only reads (`readonly::read_only`) — what it reads is on its card.
@@ -164,11 +169,119 @@ pub fn take_with(root: &Path, cwd: &Path, cmd: &str, tree: impl FnOnce() -> Resu
         };
         let scripts: Vec<(PathBuf, Option<String>)> = scripts.iter().map(read).collect();
         let project = runs_project(root, &scripts).then(tree);
-        return Kept::Scripts { scripts, project };
+        let inputs = inputs(root, cwd, cmd, &scripts);
+        return Kept::Scripts { scripts, project, inputs };
     }
     match tree() {
         Ok(id) => Kept::Tree(id),
         Err(e) => Kept::Not(e),
+    }
+}
+
+/// A script's named files kept at most — the rest aren't compared.
+const INPUTS_MAX: usize = 20;
+
+/// A named file bigger than this isn't kept (a data file, not what a script reads to decide what it runs).
+const INPUT_BYTES: u64 = 256 << 10;
+
+/// What a named file's text is kept as when it's named like a key or holds a token: this, then its hash — a change
+/// to it is said, its lines never shown (review 9).
+const HIDDEN: &str = "\u{0}tarae: not kept, its hash: ";
+
+/// The words of a script's `text` it writes to — after `>` or `>>` (`2>`, `&>` too), and `tee`'s — which a run
+/// changes itself: not what it reads (review 8: `echo ok > out.log` made every later card "changed").
+fn written(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut rest = line;
+        while let Some(at) = rest.find('>') {
+            let after = rest[at + 1..].trim_start_matches(['>', '|', '&']).trim_start();
+            let word: String =
+                after.chars().take_while(|c| !c.is_whitespace() && !";|&)".contains(*c)).collect();
+            out.push(word.trim_matches(['"', '\'']).to_string());
+            rest = &rest[at + 1..];
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for (i, _) in words.iter().enumerate().filter(|(_, w)| **w == "tee") {
+            let args = words[i + 1..].iter().take_while(|w| !w.starts_with('|') && !w.ends_with(';'));
+            out.extend(args.filter(|w| !w.starts_with('-')).map(|w| w.trim_matches(['"', '\'']).to_string()));
+        }
+    }
+    out
+}
+
+/// The project's files a script run names besides the scripts: an argument (`bash vm.sh run.sh`) or a word of a
+/// script's text (`cat linmeta-price-in.sh`, `< urls.txt`) that is a file in the project — from where it runs or
+/// beside the script, ignored ones too (`target/sb/…`) — as they are now: real path, text. frictions29 14: three
+/// "script unchanged" cards in a day while what the script read had changed (the hosts it curls, the script it
+/// hands on). What it reads without naming it (a variable, a glob) isn't here.
+fn inputs(
+    root: &Path,
+    cwd: &Path,
+    cmd: &str,
+    scripts: &[(PathBuf, Option<String>)],
+) -> Vec<(PathBuf, Option<String>)> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut named: Vec<(String, PathBuf)> = Vec::new();
+    // (the line's words, from where it runs)
+    for p in crate::readonly::flat(cmd).unwrap_or_default() {
+        if let crate::readonly::Part::Cmd(w) = p {
+            named.extend(w.iter().skip(1).map(|w| (w.text.clone(), cwd.to_path_buf())));
+        }
+    }
+    // (a script's words, from beside it and from where it runs — but what it writes to)
+    for (path, text) in scripts {
+        let (Some(text), Some(dir)) = (text, path.parent()) else { continue };
+        let writes = written(text);
+        let words = text.split(|c: char| !(c.is_alphanumeric() || "._/-+@~".contains(c)));
+        for w in words.filter(|w| (w.contains('.') || w.contains('/')) && !writes.iter().any(|x| x == w)) {
+            named.push((w.to_string(), dir.to_path_buf()));
+            named.push((w.to_string(), cwd.to_path_buf()));
+        }
+    }
+    let mut out: Vec<(PathBuf, Option<String>)> = Vec::new();
+    for (word, from) in named {
+        if out.len() >= INPUTS_MAX {
+            break;
+        }
+        if word.is_empty() || word.starts_with('-') || word.starts_with('~') || word.contains("..") {
+            continue;
+        }
+        let Ok(real) = std::fs::canonicalize(from.join(&word)) else { continue };
+        let small = std::fs::metadata(&real).is_ok_and(|m| m.is_file() && m.len() <= INPUT_BYTES);
+        let git = real.strip_prefix(&root).is_ok_and(|r| r.starts_with(".git"));
+        let known = scripts.iter().any(|(p, _)| *p == real) || out.iter().any(|(p, _)| *p == real);
+        if !small || git || known || !real.starts_with(&root) {
+            continue;
+        }
+        // (named like a key, or holding a token: its hash, never its lines — review 9)
+        let secret = crate::sandbox::key_named(&root, &real)
+            || crate::secretnames::named_secret(&real)
+            || !crate::tokens::found_in(&real).files.is_empty();
+        let bytes = std::fs::read(&real).ok();
+        let text = match secret {
+            true => bytes.map(|b| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                b.hash(&mut h);
+                format!("{HIDDEN}{:016x}", h.finish())
+            }),
+            false => bytes.and_then(|b| String::from_utf8(b).ok()),
+        };
+        out.push((real, text));
+    }
+    out
+}
+
+/// Two parts of what changed as one: a script's own and its named files'.
+fn joined(a: Changed, b: Changed) -> Changed {
+    match (a, b) {
+        (Changed::Unknown(why), _) | (_, Changed::Unknown(why)) => Changed::Unknown(why),
+        (Changed::Nothing, x) | (x, Changed::Nothing) => x,
+        (Changed::Lines { of, mut lines }, Changed::Lines { of: more, lines: rest }) => {
+            lines.extend(rest);
+            Changed::Lines { of: format!("{of}, {more}"), lines: capped(lines) }
+        }
     }
 }
 
@@ -220,21 +333,42 @@ impl Answered {
                     }
                 }
             },
-            (Kept::Scripts { scripts: then, project: kept }, Kept::Scripts { scripts: now, project }) => {
-                let own = scripts_changed(root, then, &now);
-                script_changed = matches!(own, Changed::Lines { .. });
+            (
+                Kept::Scripts { scripts: then, project: kept, inputs: was },
+                Kept::Scripts { scripts: now, project, inputs },
+            ) => {
+                let own = scripts_changed(root, then, &now, true);
                 let names: Vec<String> = now.iter().map(|(p, _)| crate::chat::shown(root, p)).collect();
                 said.push(match &own {
                     Changed::Lines { .. } => format!("script changed: {}", listed(&names)),
                     _ => format!("script unchanged ({})", listed(&names)),
                 });
+                // (the files it names: what it reads, compared too — frictions29 14)
+                let read = scripts_changed(root, was, &inputs, false);
+                if !inputs.is_empty() || !was.is_empty() {
+                    let mut names: Vec<String> = Vec::new();
+                    for (p, _) in inputs.iter().chain(was) {
+                        let name = crate::chat::shown(root, p);
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                    said.push(match &read {
+                        Changed::Lines { .. } => format!("files it names changed: {}", listed(&names)),
+                        _ => format!("files it names unchanged ({})", listed(&names)),
+                    });
+                }
+                let own = joined(own, read);
+                script_changed = matches!(own, Changed::Lines { .. });
+                // (the files it names are said apart, as the scripts are)
+                let apart = [&now[..], &inputs[..]].concat();
                 // (the project, when the script runs its code — its trees then and now)
                 let trees = match (kept, &project) {
                     (Some(Ok(a)), Some(Ok(b))) => Some((a.clone(), b.clone())),
                     _ => None,
                 };
                 let files =
-                    trees.as_ref().map(|(a, b)| files_changed(root, a, b, &entry, &left_out(root, &now)));
+                    trees.as_ref().map(|(a, b)| files_changed(root, a, b, &entry, &left_out(root, &apart)));
                 match &files {
                     Some(Ok(f)) => {
                         f.said(&entry, &mut said);
@@ -522,21 +656,39 @@ fn with_project(
     }
 }
 
-/// The scripts' changes — inside the project as a diff, outside it named only.
+/// The scripts' changes — inside the project as a diff, outside it named only. `runs`: they're what it runs (one
+/// it didn't run then: it can't tell); else files it names (`inputs`): one there then and gone now is said; one
+/// named now and not then isn't compared — made since (by the run itself, most often: review 8), or named by a
+/// script whose own diff shows it. One kept by its hash (`HIDDEN`: named like a key, or holding a token) is said
+/// changed, never shown.
 fn scripts_changed(
     root: &Path,
     then: &[(PathBuf, Option<String>)],
     now: &[(PathBuf, Option<String>)],
+    runs: bool,
 ) -> Changed {
     let mut lines = Vec::new();
     let mut names = Vec::new();
+    for (path, _) in then.iter().filter(|(p, _)| !runs && !now.iter().any(|(n, _)| n == p) && !p.exists()) {
+        let name = crate::chat::shown(root, path);
+        lines.push(format!("{name} — gone since"));
+        names.push(name);
+    }
     for (path, text) in now {
         let name = crate::chat::shown(root, path);
-        names.push(name.clone());
         let Some((_, before)) = then.iter().find(|(p, _)| p == path) else {
+            if !runs {
+                continue;
+            }
             return Changed::Unknown(format!("it runs {name} now, not what it ran then"));
         };
+        names.push(name.clone());
         if before == text {
+            continue;
+        }
+        let hidden = |t: &Option<String>| t.as_deref().is_some_and(|t| t.starts_with(HIDDEN));
+        if hidden(before) || hidden(text) {
+            lines.push(format!("{name} — changed; named like a key, or it holds a token: not shown"));
             continue;
         }
         if !path.starts_with(root) {

@@ -907,6 +907,7 @@ fn snapshot_host_card_closed() {
             open: false,
             hosts: Default::default(),
             also: vec!["crates.io".into(), "*.crates.io".into()],
+            ended: false,
         };
         s.ed.push_offer(crate::hosts::card(a));
         s.check(name);
@@ -1001,6 +1002,7 @@ fn frames_of_the_answer_words() {
             open: true,
             hosts: Default::default(),
             also: Vec::new(),
+            ended: false,
         };
         s.ed.push_offer(crate::hosts::card(a));
     });
@@ -1057,6 +1059,107 @@ fn frames_of_the_answer_words() {
     });
 }
 
+/// frictions30's screens, for their screenshots (only with `TARAE_FRAMES_DIR` set: both themes there, at 80×24 and
+/// 160×45; `cargo xtask shot` draws them with `TARAE_SHOT_REPLAY`): a cut run card's hint row before and after an
+/// early `y` (13), the chat's queued row with review notes and two messages (18), a host card whose run ended (16),
+/// the read card saying why a repository isn't offered whole (11).
+#[test]
+fn frames_of_frictions30() {
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    for (w, h) in [(80, 24), (160, 45)] {
+        let shot = || {
+            let mut s = Shot::new(w, h);
+            s.ed.offer_popups = true;
+            s.file("src/demo.rs", DEMO_RS);
+            s
+        };
+        // 13: a run card taller than the room, then a `y` before it was seen whole
+        let mut s = shot();
+        s.ed.config.llm.sandbox = false;
+        let mut c = crate::chat::Chat::new();
+        (c.state, c.focused) = (crate::chat::State::Thinking, false);
+        c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "run the steps", ""));
+        let generation = c.generation();
+        s.ed.session.chat = Some(c);
+        // (a script the card shows whole: taller than the screen at either size)
+        let root = s.in_project();
+        let script: String = (1..=60).map(|i| format!("echo step {i}\n")).collect();
+        std::fs::write(root.join("steps.sh"), script).unwrap();
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": "sh steps.sh"}}});
+        let r = crate::tools::mcp(&mut s.ed, generation, "c1", &msg);
+        assert!(r.is_none(), "it waits for the user: {r:?}");
+        s.until("the run card", |ed| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run(_))));
+        s.frame();
+        s.frames_both(&format!("f30_cut_card-{w}"));
+        let o = s.ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        s.ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+        s.keys("y");
+        assert_eq!(s.ed.offers.len(), 1, "y waits");
+        s.frames_both(&format!("f30_cut_card_early_y-{w}"));
+        // 18: Claude answering; two messages and the review's notes wait for its turn's end
+        let mut s = shot();
+        let mut c = crate::chat::Chat::new();
+        (c.focused, c.unfolded, c.state) = (true, true, crate::chat::State::Thinking);
+        c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "why does insert clone the name?", ""));
+        c.queue("and keep the first one".into(), false);
+        c.queue("then add a test for it".into(), false);
+        c.sends.push(crate::chat::Later::Review(None));
+        s.ed.session.chat = Some(c);
+        s.frame();
+        s.frames_both(&format!("f30_queued-{w}"));
+        // 16: a host card whose run ended before it was answered (the network closed)
+        let mut s = shot();
+        let a = crate::hosts::Ask {
+            session: s.ed.session.proxy_id(),
+            run: 1,
+            host: "registry.npmjs.org".into(),
+            port: 443,
+            process: "npm".into(),
+            label: "npm install".into(),
+            users: false,
+            left: false,
+            open: false,
+            hosts: Default::default(),
+            also: Vec::new(),
+            ended: true,
+        };
+        s.ed.push_offer(crate::hosts::card(a));
+        s.frames_both(&format!("f30_host_ended-{w}"));
+        // 11: a read in a repository outside the project that isn't offered whole, and why
+        let mut s = shot();
+        let (root, repo) =
+            (PathBuf::from("/Users/me/src/tarae"), PathBuf::from("/Users/me/src/sandbox-runtime"));
+        s.ed.session.chat = Some(crate::chat::Chat::new());
+        let input = json!({ "file_path": repo.join("README.md") });
+        let mut look = crate::reads::look("Read", &input, &root);
+        look.at = Some(repo.join("README.md"));
+        let p = crate::reads::Pending {
+            request_id: "r".into(),
+            generation: 0,
+            input,
+            look,
+            class: crate::cards::Class::Elsewhere,
+            since: Instant::now(),
+            found: Default::default(),
+            repository: None,
+            not_whole: Some((repo.clone(), "it's in or holds a place commands never read".into())),
+            own: None,
+            then: None,
+        };
+        s.ed.session.chat.as_mut().unwrap().reads.push_back(p);
+        crate::reads::next(&mut s.ed);
+        assert!(
+            s.ed.offers.first().is_some_and(|o| o.question.contains("Not offered whole")),
+            "{:?}",
+            s.ed.offers
+        );
+        s.frames_both(&format!("f30_read_not_whole-{w}"));
+    }
+}
+
 /// Piece J: the read card offering the repository a read outside the project is in — `a`/`A` all of it, what `A`
 /// keeps it for said last — for its screenshots, wide and narrow; only with `TARAE_FRAMES_DIR` set (both themes
 /// there; `cargo xtask shot` draws them with `TARAE_SHOT_REPLAY`).
@@ -1092,10 +1195,11 @@ fn frames_of_the_read_card_with_its_repository() {
             since: Instant::now(),
             found: Default::default(),
             repository: Some(repo.clone()),
+            not_whole: None,
             own: None,
             then: None,
         };
-        let (q, warning) = crate::reads::card_text(&p, true, Some((&repo, &Default::default())));
+        let (q, warning) = crate::reads::card_text(&p, true, Some((&repo, &Default::default())), None);
         let what = crate::offer::What::Read { pending: Box::new(p), keep: true, folder: Some(repo.clone()) };
         let mut o = crate::offer::Offer::new(crate::reads::TITLE.into(), &q, "", String::new(), what);
         o.warning = warning;

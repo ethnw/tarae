@@ -401,6 +401,21 @@ fn a_status_never_carries_into_another_period() {
     }
 }
 
+/// A window with a reset and no figure says what's known, not "not said" beside a time (frictions29 6).
+#[test]
+fn a_window_with_no_figure_says_so_beside_its_reset() {
+    let r = Reading {
+        window: "five_hour".into(),
+        percent: None,
+        resets_at_ms: Some(RESETS_MS),
+        status: None,
+        seen_at_ms: BEFORE,
+        from: Source::Event,
+    };
+    assert_eq!(said(&r), format!("5-hour no figure yet · resets {}", resets(RESETS_MS)));
+    assert_eq!(used(&Reading { percent: Some(4), ..r }), "4 %");
+}
+
 /// Opening `:usage` asks the running chat's claude `get_usage` when nothing is fresh — a control request, which
 /// claude answers alongside a turn under way (as it does `interrupt`) — not again while it's fresh, never twice
 /// while that claude hasn't answered (in flight, however long), and again once it answered and nothing is fresh.

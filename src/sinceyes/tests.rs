@@ -107,7 +107,7 @@ fn a_scripts_own_diff_and_one_outside_the_project_named_only() {
     let cmd = "sh check.sh && sh ../outside.sh";
     let y = yes(&root, cmd);
     assert!(
-        matches!(&y.kept, Kept::Scripts { scripts, project: None } if scripts.len() == 2),
+        matches!(&y.kept, Kept::Scripts { scripts, project: None, .. } if scripts.len() == 2),
         "{:?}",
         y.kept
     );
@@ -160,6 +160,98 @@ fn the_same_run_is_what_runs_not_the_filter_after_it() {
     // Unreadable: the whole line
     assert!(same("cargo test $X | tail", "cargo test $X | tail"));
     assert!(!same("cargo test $X | tail", "cargo test $X | head"));
+}
+
+/// frictions29 14: what a script reads by name is compared with it — a file its text names (`fetch.sh` curls
+/// what `urls.txt` lists), one handed to it (`vm.sh run.sh`), ignored ones under `target/sb` too. Unchanged:
+/// said so, by name; changed: its hunks shown with the script's, the card no longer "unchanged" and warned of as
+/// a changed script is. A word that's no file, or a file outside the project, isn't kept.
+#[test]
+fn the_files_a_script_names_are_compared_with_it() {
+    let (dir, root) = repo("inputs");
+    std::fs::create_dir_all(root.join("target/sb")).unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let sb = root.join("target/sb");
+    std::fs::write(
+        sb.join("fetch.sh"),
+        "while read u; do curl -s \"$u\"; done < urls.txt\ncat ../../../other.txt\n",
+    )
+    .unwrap();
+    std::fs::write(sb.join("urls.txt"), "https://a.example.invalid\n").unwrap();
+    std::fs::write(sb.join("vm.sh"), "scp \"$1\" vm: && ssh vm sh \"$1\"\n").unwrap();
+    std::fs::write(sb.join("run.sh"), "echo one\n").unwrap();
+    for (cmd, file, name) in [
+        ("sh target/sb/fetch.sh", "urls.txt", "target/sb/urls.txt"),
+        ("bash target/sb/vm.sh target/sb/run.sh --quick", "run.sh", "target/sb/run.sh"),
+    ] {
+        let y = yes(&root, cmd);
+        let Kept::Scripts { inputs, .. } = &y.kept else { panic!("{:?}", y.kept) };
+        let kept: Vec<String> = inputs.iter().map(|(p, _)| crate::chat::shown(&root, p)).collect();
+        assert_eq!(kept, [name], "{cmd}: no word that's no file, nothing outside the project");
+        let s = y.since(&root, &root, cmd, false);
+        assert!(s.unchanged && s.changed == Changed::Nothing, "{s:?}");
+        assert!(s.head().contains(&format!("\n  files it names unchanged ({name})")), "{}", s.head());
+        let was = std::fs::read_to_string(sb.join(file)).unwrap();
+        std::fs::write(sb.join(file), format!("{was}more-marker\n")).unwrap();
+        let s = y.since(&root, &root, cmd, false);
+        assert!(!s.unchanged && s.script_changed, "{s:?}");
+        assert!(s.head().contains(&format!("\n  files it names changed: {name}")), "{}", s.head());
+        let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
+        assert!(lines.iter().any(|l| l == "+more-marker"), "{lines:#?}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// frictions30's review (6, 8, 9): of what a script names, what it writes (`> out.log`, `tee`) isn't compared — a
+/// run changes it itself; a file made since the yes isn't either (the run's own, or named by a script whose own diff
+/// shows it); one gone since is said; one named like a key or holding a token is compared by its hash, its change
+/// said and never shown.
+#[test]
+fn what_a_script_writes_made_or_keeps_secret_is_said_so() {
+    let (dir, root) = repo("inputs-kinds");
+    let sb = root.join("target/sb");
+    std::fs::create_dir_all(&sb).unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let script =
+        "cat hosts.txt later.txt\nset -a; . ./run.env; set +a\necho ok > out.log\necho 2 | tee -a log.txt\n";
+    std::fs::write(sb.join("go.sh"), script).unwrap();
+    for (f, text) in [
+        ("hosts.txt", "a\n"),
+        ("out.log", "old\n"),
+        ("log.txt", "1\n"),
+        ("run.env", "API_TOKEN=abc123secret\n"),
+    ] {
+        std::fs::write(sb.join(f), text).unwrap();
+    }
+    let cmd = "sh target/sb/go.sh";
+    let y = yes(&root, cmd);
+    let Kept::Scripts { inputs, .. } = &y.kept else { panic!("{:?}", y.kept) };
+    let kept: Vec<String> = inputs.iter().map(|(p, _)| crate::chat::shown(&root, p)).collect();
+    assert_eq!(kept, ["target/sb/hosts.txt", "target/sb/run.env"], "what it writes isn't what it reads");
+    let env = inputs.iter().find(|(p, _)| p.ends_with("run.env")).unwrap();
+    assert!(env.1.as_deref().is_some_and(|t| !t.contains("secret")), "its hash, not its lines");
+    // The run writes its own files, and makes one it names: nothing changed
+    std::fs::write(sb.join("out.log"), "ok\n").unwrap();
+    std::fs::write(sb.join("log.txt"), "1\n2\n").unwrap();
+    std::fs::write(sb.join("later.txt"), "made since\n").unwrap();
+    let s = y.since(&root, &root, cmd, false);
+    assert!(s.unchanged && !s.script_changed, "{s:?}");
+    // The settings file changed: said, never shown
+    std::fs::write(sb.join("run.env"), "API_TOKEN=xyz789secret\n").unwrap();
+    let s = y.since(&root, &root, cmd, false);
+    let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.ends_with("run.env — changed; named like a key, or it holds a token: not shown"))
+    );
+    assert!(!lines.iter().any(|l| l.contains("secret")), "{lines:#?}");
+    // A file it read is gone
+    std::fs::remove_file(sb.join("hosts.txt")).unwrap();
+    let s = y.since(&root, &root, cmd, false);
+    let Changed::Lines { lines, .. } = &s.changed else { panic!("{s:?}") };
+    assert!(lines.iter().any(|l| l == "target/sb/hosts.txt — gone since"), "{lines:#?}");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A script that runs the project's code isn't all that runs: since the yes, the project's changes come

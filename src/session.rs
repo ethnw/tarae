@@ -1383,8 +1383,7 @@ mod tests {
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, back_id, "then the one that waited longest");
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
-        // C-q again: the keys
-        feed(&mut ed, "<C-q>");
+        // …with the keys (frictions29 19: they took a second C-q)
         assert!(ed.card_keys && ed.session.id == back_id);
         // Nothing waits anywhere: said
         ed.offers.clear();
@@ -1703,10 +1702,9 @@ mod tests {
         claude_calls(&mut ed, &front_log, &[("symbols", json!({ "path": "main.rs" }))]);
         feed(&mut ed, "<space>lgo<ret><esc>");
         pump(&mut ed, &|ed| !ed.session.tool_waits.is_empty(), "front's Claude asked its server");
-        // C-q: to back, its card up · C-q: the keys · C-q: back · C-q: the keys again
+        // C-q: to back, its card up with the keys (frictions29 19) · C-q: back · C-q: the keys again
         feed(&mut ed, "<C-q>");
         assert!(ed.session.id == id && runs(&ed.offers), "C-q goes to the card");
-        feed(&mut ed, "<C-q>");
         assert!(ed.card_keys, "the card has the keys");
         assert_eq!(ed.keys_at().label(), Some("CARD"));
         feed(&mut ed, "<C-q>");

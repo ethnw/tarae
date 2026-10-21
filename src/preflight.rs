@@ -789,7 +789,20 @@ impl Editor {
         if passed {
             self.set_success(said);
         } else {
-            self.set_error(said);
+            // (what of tarae's environment its steps got that changes their tools: a test that fails on one
+            // here passes in CI — frictions29 26)
+            let names: Vec<String> = match &self.claude_env {
+                Some(env) => env.keys().cloned().collect(),
+                None => std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect(),
+            };
+            let set = tools_vars(names, &crate::sandboxpack::get().pass);
+            self.set_error(match set.is_empty() {
+                true => said,
+                false => format!(
+                    "{said} · your environment sets {} — a step reading one can fail here and pass in CI",
+                    listed(&set)
+                ),
+            });
         }
         self.rebase_preflight_done(passed, title);
         true
@@ -800,6 +813,34 @@ impl Editor {
         self.project_trust.as_ref().is_some_and(|p| {
             p.state != crate::trust::State::Trusted && p.items.iter().any(|(k, _)| k.starts_with(prefix))
         })
+    }
+}
+
+/// The names in `names` that the packs say their tools read (`[sandbox] pass`: `PYTHON*`, `RUST*`, `CARGO_*` …,
+/// a `*` at the end matching any rest), sorted — the variables of tarae's environment a preflight's steps get
+/// that change what the project's tools do (frictions29 26: `PYTHONDONTWRITEBYTECODE=1` since a reboot failed
+/// a test, and the failure looked like the session's). Names only, never values.
+fn tools_vars(names: impl IntoIterator<Item = String>, pass: &[String]) -> Vec<String> {
+    let read = |n: &str| {
+        pass.iter().any(|p| match p.strip_suffix('*') {
+            Some(prefix) => n.starts_with(prefix),
+            None => n == p,
+        })
+    };
+    let mut out: Vec<String> = names.into_iter().filter(|n| read(n)).collect();
+    crate::sorting::sort(&mut out);
+    out.dedup();
+    out
+}
+
+/// At most this many names said — the rest counted.
+const NAMES_SAID: usize = 4;
+
+/// `a, b, c and 2 more`.
+fn listed(names: &[String]) -> String {
+    match names.len() > NAMES_SAID {
+        true => format!("{} and {} more", names[..NAMES_SAID].join(", "), names.len() - NAMES_SAID),
+        false => names.join(", "),
     }
 }
 
@@ -1307,6 +1348,39 @@ mod tests {
             at += found + 1;
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 26: a failed preflight names the variables of tarae's environment its steps got that change the
+    /// project's tools (the packs' `pass`: `PYTHON*`, `RUST*` …) — names, never values; none set, or a preflight
+    /// that passed: nothing said. The environment is a stand-in (`Editor.claude_env`), never this process's.
+    #[test]
+    fn a_failed_preflight_names_the_tools_variables_it_ran_with() {
+        let s = crate::scratch::Scratch::new("preflight-env");
+        let run = |env: &[(&str, &str)], cmd: &str| {
+            let mut ed = Editor::new(crate::config::Config::default());
+            ed.session.root = s.to_path_buf();
+            ed.claude_env = Some(env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
+            ed.preflight_run(vec![step("test", cmd)], Set::Quick).unwrap();
+            let end = Instant::now() + Duration::from_secs(10);
+            while ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
+                assert!(Instant::now() < end, "it ended");
+                if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
+                    ed.handle_event(ev);
+                }
+            }
+            ed.messages.last().map(|m| m.2.clone()).unwrap_or_default()
+        };
+        let env = [("PYTHONDONTWRITEBYTECODE", "1"), ("RUSTFLAGS", "secret-value-marker"), ("HOME", "/h")];
+        let said = run(&env, "exit 1");
+        assert!(said.contains("your environment sets PYTHONDONTWRITEBYTECODE, RUSTFLAGS — "), "{said}");
+        assert!(
+            !said.contains("HOME") && !said.contains("secret-value-marker"),
+            "names of tools' only: {said}"
+        );
+        assert!(!run(&env, "true").contains("your environment"), "passed: nothing said");
+        assert!(!run(&[("HOME", "/h")], "exit 1").contains("your environment"), "none set");
+        let many: Vec<String> = (0..6).map(|i| format!("PYTHON{i}")).collect();
+        assert_eq!(listed(&many), "PYTHON0, PYTHON1, PYTHON2, PYTHON3 and 2 more");
     }
 
     /// #126: a failed step's output one key away — `o` in the task panel opens it whole in a buffer (only

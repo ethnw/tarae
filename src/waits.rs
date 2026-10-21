@@ -157,6 +157,24 @@ impl Waiting {
         (self.now.is_none() && d >= SILENT).then_some(d)
     }
 
+    /// Whether a quiet run is for the user to look at (the inbox): its processes idle as well for `SILENT`, or
+    /// not looked at yet; one still working — a build under `| tail -60`, its output held by the filter — only
+    /// once half the time its own command gives it (`limited`) is gone (frictions29 9: three long Linux runs an
+    /// hour landed there at 3 minutes).
+    pub fn worth_a_look(&self, started: Instant, now: Instant) -> bool {
+        let idle = match (self.cpu, self.idle) {
+            (None, _) => true,
+            (Some(_), Some(since)) => now.saturating_duration_since(since) >= SILENT,
+            (Some(_), None) => false,
+        };
+        let half = self
+            .limit_at
+            .and_then(|at| at.checked_duration_since(started))
+            .and_then(|d| started.checked_add(d / 2))
+            .is_some_and(|at| now >= at);
+        idle || half
+    }
+
     /// How long until a running run that printed last at `last` goes silent — None: it is, or it waits.
     pub fn silent_in(&self, last: Instant, now: Instant) -> Option<Duration> {
         let d = (last + SILENT).checked_duration_since(now)?;
