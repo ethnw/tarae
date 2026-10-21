@@ -349,6 +349,16 @@ git tab, search, a short Kubernetes one.
   instead of appearing at once, maybe in the chat too. A plan first.
 - **글타래** (*geul-tarae*, "a skein of writing"): a visual pass. Design details that suit ink (meok) and hanji
   paper, and a way of showing and generating text that suits tarae. A plan first.
+- **Quoting** (인용, user 2026-10-17; `quote` in the docs and commands, as pointing is `point`): select part of
+  any text tarae shows and ask about it at once. Code has its selection, and test and preflight output open in a
+  buffer (`space x o`, the task panel's `o`); pointing gives a whole element's id, `C-s` the whole screen. Missing:
+  the chat's transcript (a line of an answer, a code block), the terminal panel (its screen and scrollback — what
+  the screen holds, never keys typed) and the run panels as drawn (task, test, preflight; a plain task's output
+  has no buffer). How is the plan's: Helix's selection keys in a read-only view of that surface, a mouse drag, or
+  both; the quote is a chip over the input like pointing's and a screen's, Backspace takes it off. What goes: the
+  text with where it came from (`<quoted from="terminal" …>`), cut to a limit and said so; Claude's level rules
+  hold (nothing unsent, other sessions never). The terminal's rows follow `llm.screen-terminal` (off → not
+  quotable); a quote is the user's act, never a card. A plan first; each new screen element after its shots.
 
 ## Later
 
