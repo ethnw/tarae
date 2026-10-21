@@ -598,9 +598,15 @@ git tab, search, a short Kubernetes one.
   (`9ad62527` + `45a51568`): meok and hanji take ayu's hues fitted to ink and paper (keywords orange, types blue,
   strings green, constants magenta; the accent stays the seal's coral/vermilion; ink a step darker, `#0c0e12`;
   comments upright and readable, doc comments on the ground with the bar only; every text/ground pair at its floor,
-  pinned by `builtin_themes_clear_their_contrast_floors`). Next: the 붓 mock (수묵화's 농담 — values to the ends,
-  one heavy stroke `▌` or a thin `│` on the surface with the keys, 여백), then D2 edges + D3 frames with names, D4,
-  D5; motion (honest only, the note's table) after.
+  pinned by `builtin_themes_clear_their_contrast_floors`). The 붓 mock (수묵화's 농담: values to the ends, one stroke on the
+  surface with the keys) chose the thin line — "pane을 나누는 느낌, zellij처럼" — over the heavy `▌`, and kept the
+  range (the ground near-ink, the panels on it). D2 + D3 done (2026-10-21, `89f4ba6f`): `ui.edge` = `lines` (default) ·
+  `ground` — one thin line where docked surfaces meet, lit for the surface with the keys; what takes the keys
+  floats in a frame named in its top line (`╭─ space ─╮`), a card's answer keys in its bottom line, two cards never
+  touching; `pane_names` — a group's members in one header with `·`, the one in sight lit (`files · outline · git`,
+  `terminal · check · procs`); comments a warm wash apart from the virtual text's cool dim (ΔE ≥ 12, tested).
+  Next: D4 the contrast test (in), D5 the docs pictures, and motion (honest only, the note's table) as its own
+  small piece after panes P2b.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
