@@ -360,7 +360,8 @@ fn claudes_landlock_rules_in(f: &Fixture) {
         // it gives a hostile claude nothing: in `~/.claude` it writes every name directly anyway, and across grants
         // the kernel wants the move's rights on both sides and no rights gained — nothing comes out of a kept place
         // (no rule there) nor lands on a protected name (a hole)
-        let cfg = r.added.iter().filter(|(path, _)| *path == f.cfg()).fold(0, |all, (_, access)| all | access);
+        let cfg =
+            r.added.iter().filter(|(path, _)| *path == f.cfg()).fold(0, |all, (_, access)| all | access);
         assert_ne!(cfg, 0, "claude's folder");
         assert_eq!(cfg & crate::landlock::REFER, crate::landlock::REFER);
         let written = |path: &Path| {
