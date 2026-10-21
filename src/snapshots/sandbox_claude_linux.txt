@@ -3,6 +3,7 @@ $BASE/tmp all
 $HOME read
     hole $HOME/.aws
     hole $HOME/.cache/go-build
+    hole $HOME/.cache/uv
     hole $HOME/.cargo/credentials
     hole $HOME/.cargo/credentials.toml
     hole $HOME/.claude
@@ -45,6 +46,7 @@ $BASE/tmp all
 $HOME read
     hole $HOME/.aws
     hole $HOME/.cache/go-build
+    hole $HOME/.cache/uv
     hole $HOME/.cargo/credentials
     hole $HOME/.cargo/credentials.toml
     hole $HOME/.claude

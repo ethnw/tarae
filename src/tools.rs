@@ -539,7 +539,7 @@ pub fn tests_done(ed: &mut Editor) {
     let failed = ed.session.test_run.as_ref().is_some_and(|r| matches!(r.state, RunState::Failed(_)));
     let known = rules_known(ed, failed);
     let Some(r) = ed.session.test_run.as_mut() else { return };
-    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known));
+    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known, !failed));
     let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
     if let Some(head) = r.tell.take() {
         let text = report(&ed.session.root, r, Waited::No) + &guard;
@@ -3486,7 +3486,7 @@ pub fn run_done(ed: &mut Editor) {
         ed.session.task_run.as_ref().is_some_and(|r| matches!(r.state, State::Failed(_) | State::Stopped(_)));
     let known = rules_known(ed, failed);
     let Some(r) = ed.session.task_run.as_mut() else { return };
-    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known));
+    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known, !failed));
     let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
     // (what blocked a failed run that `also` could open — not a walk up from the project or the run's folder)
     let run_dir = match r.guard.as_ref() {

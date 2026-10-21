@@ -24,6 +24,7 @@ keys
     $ROOT/.env · always
 never read
     $HOME/.aws
+    $HOME/.cache/uv
     $HOME/.cargo/credentials
     $HOME/.cargo/credentials.toml
     $HOME/.claude
@@ -55,8 +56,10 @@ never written: shared caches
     $HOME/.cargo/registry
     $HOME/go/pkg/mod
 never written: toolchains' homes
+    $HOME/.cache/uv
     $HOME/.cargo
     $HOME/.gradle
+    $HOME/.local/share/uv/python
     $HOME/.npm
     $HOME/.rustup
     $HOME/Library/Java/JavaVirtualMachines
@@ -89,6 +92,7 @@ keys
 never read
     $HOME/.aws
     $HOME/.cache/go-build
+    $HOME/.cache/uv
     $HOME/.cargo/credentials
     $HOME/.cargo/credentials.toml
     $HOME/.claude
@@ -119,8 +123,10 @@ never written: shared caches
     $HOME/.cargo/registry
     $HOME/go/pkg/mod
 never written: toolchains' homes
+    $HOME/.cache/uv
     $HOME/.cargo
     $HOME/.gradle
+    $HOME/.local/share/uv/python
     $HOME/.npm
     $HOME/.rustup
     $HOME/Library/Java/JavaVirtualMachines

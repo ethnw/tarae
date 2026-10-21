@@ -161,13 +161,25 @@ quiet = ["tests/", "test_*.py", "*_test.py", "conftest.py"]
 [sandbox]
 # Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
 not-settings = ["py"]
-reads = ["~/.pip/pip.conf", "~/.config/pip/pip.conf", "~/Library/Application Support/pip/pip.conf"]
+# uv's own Pythons too (`uv python install`, and what `uv sync` fetches when the project asks for a Python not
+# on the system): a venv's `python` links there, so every run of it reads it (compat B3: refused, Python died at
+# its start). A toolchain's home (below): read, never written — the user's venvs run what's there
+reads = [
+    "~/.pip/pip.conf", "~/.config/pip/pip.conf", "~/Library/Application Support/pip/pip.conf", "{uv-python}",
+]
 # What of the user's environment a run gets for Python (measured: `PYTHON*`, ~50 names), its environments
 # (venv, conda, pyenv) and installers (pip, uv) — an index URL with a password left out as a token
 pass = ["PYTHON*", "VIRTUAL_ENV", "CONDA_*", "PYENV*", "PIP_*", "UV_*"]
 # Where pip and uv fetch from by default (the index, the files) — words on the card that asks for a host, never
 # a grant
 registries = ["pypi.org", "files.pythonhosted.org"]
+# uv's cache: the user's next `uv sync` installs what's unpacked there, so nothing of a run's may reach it —
+# never read nor written, wherever `UV_CACHE_DIR` puts it (runs have their own, below)
+kept = ["{uv}"]
+
+[sandbox.homes]
+uv = { env = "UV_CACHE_DIR", else = "~/.cache/uv" }
+uv-python = { env = "UV_PYTHON_INSTALL_DIR", else = "~/.local/share/uv/python" }
 
 # pip's can hold a token (an `index-url` with `user:pass@`): a copy without it, the files merged as pip reads
 # them — `PIP_CONFIG_FILE` when that file is there (pip then reads no user file), else `~/.pip/pip.conf`, then
@@ -179,6 +191,26 @@ var-if-there = true
 files = ["~/.pip/pip.conf", { first = ["{user-config}/pip", "{xdg-config}/pip"], file = "pip.conf" }]
 form = "ini"
 copy = "pip.conf"
+
+# Python's bytecode, of the runs' own: Python writes a module's `.pyc` beside its source when it can — the
+# interpreter's own folders too (Homebrew's are the user's), refused there and compiled again every run, each
+# refusal in the report (compat B1). With a prefix every `.pyc` goes here: kept across a Python project's runs,
+# never read by the user's own Python; elsewhere the run's own (any run may start Python)
+[sandbox.run-home.pycache]
+env = "PYTHONPYCACHEPREFIX"
+keep = true
+when = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
+
+# uv's cache, of the runs' own (compat B3: the user's closed, every uv command failed on it — `uv run` too):
+# kept across a Python project's runs, as Go's build cache is. It starts empty: what a venv already holds runs
+# offline; what isn't there yet is fetched through tarae's proxy with the network open, then kept
+[sandbox.run-home.uv]
+env = "UV_CACHE_DIR"
+keep = true
+when = ["uv.lock", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
+said = """{home}: the user's uv cache stays as it is — their next `uv sync` installs what's there. Your commands \
+have a uv cache of their own, kept for this project. A package not in it yet can't be fetched while the network \
+is closed — tell the user; llm.sandbox-network lets your commands fetch it, into their own."""
 
 [claude]
 builders = ["pytest", "tox", "nox"]

@@ -266,7 +266,7 @@ impl Guard {
     /// runs say it through `report_with`.)
     #[cfg(test)]
     pub fn report(&self, output: &[(bool, String)]) -> String {
-        self.report_with(output, Told::default()).text
+        self.report_with(output, Told::default(), false).text
     }
 
     /// `report`, the rules left out of a quiet one when `known` has their digest — Claude was told them in
@@ -275,9 +275,10 @@ impl Guard {
     /// refusal shows only in the output) always says them. The guarantees (what's kept from other sessions'
     /// commands and what's shared, `Guarantees::told`) come after the rules once a conversation and again when
     /// they change (9b, decision 11; N2: their notes too — 124 to 168 tokens, measured, in every report that says
-    /// the rules again), whatever else the report says.
-    pub fn report_with(&self, output: &[(bool, String)], known: Told) -> Report {
-        self.report_as(output, known, self.guarantees())
+    /// the rules again), whatever else the report says. `passed`: the run ended well — what's refused by design
+    /// and was all it was refused is said calmly then (`opens_apps`), never as blocked.
+    pub fn report_with(&self, output: &[(bool, String)], known: Told, passed: bool) -> Report {
+        self.report_as(output, known, self.guarantees(), passed)
     }
 
     /// `report_with`, its run's guarantees given (tests: each tier's on any machine).
@@ -286,6 +287,7 @@ impl Guard {
         output: &[(bool, String)],
         known: Told,
         guarantees: Option<guarantees::Guarantees>,
+        passed: bool,
     ) -> Report {
         let digest = |s: &String| {
             use std::hash::{Hash, Hasher};
@@ -299,7 +301,7 @@ impl Guard {
         let told = guarantees.map(|g| g.told());
         let guarantees = told.as_ref().map(digest);
         let apart = told.filter(|_| known.guarantees != guarantees).unwrap_or_default();
-        let (text, blocked, open) = self.report_text(output, rules, quiet_rules, &apart);
+        let (text, blocked, open) = self.report_text(output, rules, quiet_rules, &apart, passed);
         Report { text, blocked, open, rules: rules_digest, guarantees }
     }
 
@@ -317,6 +319,7 @@ impl Guard {
         rules: String,
         quiet_rules: String,
         apart: &str,
+        passed: bool,
     ) -> (String, bool, Vec<Denial>) {
         let Guard::In(p) = self else { return (rules, false, Vec::new()) };
         // (the guarantees: a paragraph of their own after the rules' — or where they'd be, left out)
@@ -348,11 +351,20 @@ impl Guard {
                 b.quiet.push(q);
             }
         }
+        // (compat B4: a run that passed, refused nothing but a look-up of LaunchServices — node's, at its start —
+        // isn't told as blocked: refused by design, nothing opens it, and the run did without it. Only all of
+        // what was refused, counted whole; a failed run lists it as ever: it may be why)
+        let apps = passed
+            && b.failed.is_none()
+            && o.total == 0
+            && !b.seen.is_empty()
+            && b.distinct == b.seen.len()
+            && b.seen.iter().all(Denial::opens_apps);
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
             // (nothing watched: a refusal shows only in the output — the rules are how Claude reads it)
             return (with_apart(format!("{ps}{rules}{unwatched}")), false, Vec::new());
         }
-        if b.total > 0 || o.total > 0 {
+        if (b.total > 0 || o.total > 0) && !apps {
             let mut s = match (&b.failed, b.total) {
                 (Some(why), 0) => format!("tarae couldn't watch what the sandbox blocked ({why}). "),
                 (Some(why), _) => {
@@ -420,6 +432,7 @@ impl Guard {
         }
         let quiet = quiet_said(&b).unwrap_or_default();
         let text = match b.failed {
+            None if apps => with_apart(format!("{}{quiet}{ps}{quiet_rules}", apps_said(&b.seen))),
             None => with_apart(format!("The sandbox blocked nothing. {quiet}{ps}{quiet_rules}")),
             Some(why) => {
                 let mut s =
@@ -486,6 +499,15 @@ impl Guard {
                 _ if p.caches.iter().any(|c| path.starts_with(c)) => {
                     let of = p.caches_said.iter().position(|s| s.dirs.iter().any(|c| path.starts_with(c)));
                     caches.extend(of.filter(|i| !caches.contains(i)));
+                }
+                // (a tool's home kept whole — uv's cache: its run home says why, not the list of keys and state)
+                _ if d.op.starts_with("file-write")
+                    && p.run_homes
+                        .iter()
+                        .any(|h| path.starts_with(&h.user) && p.reads.kept_holds(&p.root, &h.user)) =>
+                {
+                    let of = p.run_homes.iter().position(|h| path.starts_with(&h.user));
+                    homes.extend(of.filter(|i| !homes.contains(i)));
                 }
                 _ if p.reads.kept_holds(&p.root, path) => secret.push(crate::allow::tilde(path)),
                 _ if p.reads.copies.instead_of(path).is_some() => {
@@ -1564,6 +1586,14 @@ impl Denial {
         open && is_terminal(Path::new(&self.target))
     }
 
+    /// A look-up of LaunchServices (`NO_WAY_OUT`'s): how a program opens an app, a file or a URL in one —
+    /// refused in every run by design. Node's start looks it up and goes on without it (compat B4).
+    pub fn opens_apps(&self) -> bool {
+        let t = self.target.as_str();
+        self.op == "mach-lookup"
+            && (t.starts_with("com.apple.lsd") || t == "com.apple.coreservices.launchservicesd")
+    }
+
     /// In plain words: `writing ~/x`, `connecting to port 9`, `opening apps` — Seatbelt's own (`shown`) for
     /// what has none. Its network denials name no address, only the port (`remote:*:9` — measured).
     pub fn plain(&self) -> String {
@@ -1715,11 +1745,7 @@ impl Denial {
                 format!("netlink ({t}) — a command's netlink only reads the network, never changes it")
             }
             "appleevent-send" if !t.is_empty() => format!("Apple Event to {t}"),
-            "mach-lookup"
-                if t.starts_with("com.apple.lsd") || t == "com.apple.coreservices.launchservicesd" =>
-            {
-                "opening apps".into()
-            }
+            "mach-lookup" if self.opens_apps() => "opening apps".into(),
             "mach-lookup" if t.starts_with("com.apple.pasteboard.") => "the clipboard".into(),
             "mach-lookup" if KEYCHAIN.contains(&t.as_str()) => "the keychain".into(),
             _ => self.shown(),
@@ -1819,6 +1845,21 @@ fn quiet_said(b: &Blocked) -> Option<String> {
             shell.join(", ")
         )
     })
+}
+
+/// The report's line for a run that passed and was refused only a look-up of LaunchServices (`opens_apps`):
+/// whose, and that nothing opens it.
+fn apps_said(seen: &[Denial]) -> String {
+    let mut who: Vec<&str> = seen.iter().map(|d| d.process.as_str()).filter(|p| !p.is_empty()).collect();
+    who.dedup();
+    let who = match who.is_empty() {
+        true => "a process".to_string(),
+        false => who.join(", "),
+    };
+    format!(
+        "The sandbox blocked only {who}'s look-up of LaunchServices (opening apps) — refused in every run by \
+         design, nothing opens it — and the run passed without it. "
+    )
 }
 
 /// macOS's `ps`: setuid (it runs as root to read every process), and Seatbelt starts no setuid program — no
@@ -6027,6 +6068,63 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// The tools' caches a run would write in home get the project's own, kept across its runs, as Go's build
+    /// cache does (compat B1, B2): golangci-lint's (`GOLANGCI_LINT_CACHE`) in a Go project, Python's bytecode
+    /// (`PYTHONPYCACHEPREFIX` — never beside the interpreter's own modules) in a Python one; elsewhere the
+    /// run's own. Another project gets another; the user's own value isn't what a run gets.
+    #[test]
+    fn lint_and_bytecode_caches_are_the_projects_own() {
+        // (never in the shared temp folder: on Linux that's `/tmp`, which every run writes)
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "runcaches");
+        let base = std::fs::canonicalize(&scratch).unwrap();
+        let home = base.join("home");
+        for d in ["work/go", "work/other", "work/plain", "Library/Caches/golangci-lint"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        for p in ["go", "other"] {
+            std::fs::write(home.join("work").join(p).join("go.mod"), "module p\n").unwrap();
+            std::fs::write(home.join("work").join(p).join("pyproject.toml"), "[project]\n").unwrap();
+        }
+        let theirs = home.join("pyc");
+        let env = HashMap::from([
+            ("HOME".to_string(), home.clone().into()),
+            ("PYTHONPYCACHEPREFIX".to_string(), theirs.clone().into()),
+            ("GOLANGCI_LINT_CACHE".to_string(), theirs.clone().into()),
+        ]);
+        let here = Here { env, ..Here::default() };
+        let llm = crate::llm::LlmConfig::default();
+        let policy = |p: &str| {
+            let root = home.join("work").join(p);
+            toolchain_found_in(&root, ToolDirs::default(), &here);
+            run_policy_in(&root, &llm, &[], &here).expect("a run's policy")
+        };
+        let var = |p: &Policy, k: &str| p.env.iter().find(|(n, _)| n == k).map(|(_, v)| PathBuf::from(v));
+        let kept = |name: &str, p: &str| {
+            home.join(".cache/tarae/run-homes").join(name).join(project_key(&home.join("work").join(p)))
+        };
+        let (go, other, plain) = (policy("go"), policy("other"), policy("plain"));
+        for (name, var_name) in [("golangci-lint", "GOLANGCI_LINT_CACHE"), ("pycache", "PYTHONPYCACHEPREFIX")]
+        {
+            let ours = kept(name, "go");
+            assert_eq!(var(&go, var_name), Some(ours.clone()), "{var_name}");
+            assert!(go.writes_allow(&ours.join("ab/x")) && go.reads_allow(&ours.join("ab/x")), "{name}");
+            assert!(!other.writes_allow(&ours.join("ab/x")), "{name}: another project's");
+            assert_eq!(var(&other, var_name), Some(kept(name, "other")), "{var_name}");
+        }
+        // (neither go.mod nor pyproject.toml: the run's own, nothing kept)
+        let run = plain.run.as_ref().unwrap().path();
+        assert_eq!(var(&plain, "GOLANGCI_LINT_CACHE"), Some(run.join("golangci-lint")));
+        assert_eq!(var(&plain, "PYTHONPYCACHEPREFIX"), Some(run.join("pycache")));
+        let kept_root = home.join(".cache/tarae/run-homes");
+        assert!(!plain.write.iter().any(|w| w.starts_with(&kept_root)), "{:?}", plain.write);
+        // (the user's own caches: not written)
+        for user in [home.join("Library/Caches/golangci-lint/x"), theirs.join("x")] {
+            assert!(!go.writes_allow(&user), "{}", user.display());
+        }
+    }
+
     /// Paths are parameters, never text in the profile — a path can't change what it says.
     #[test]
     fn the_profile_names_paths_only_through_parameters() {
@@ -6211,10 +6309,10 @@ mod tests {
         let p = Policy::for_project(&env(Path::new("/Users/u/p")));
         let quiet = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("rules-once.")), ..p.clone() }));
         let rules = quiet.rules();
-        let first = quiet.report_with(&[], Told::default());
+        let first = quiet.report_with(&[], Told::default(), false);
         assert!(first.text.contains(&rules) && !first.blocked, "{}", first.text);
         let known = |r: &Report| Told { rules: Some(r.rules), guarantees: None };
-        let again = quiet.report_with(&[], known(&first));
+        let again = quiet.report_with(&[], known(&first), false);
         assert!(!again.text.contains(&rules), "{}", again.text);
         assert!(again.text.starts_with("The sandbox blocked nothing."), "{}", again.text);
         let w = Watch::quiet("rules-once-blocked.");
@@ -6223,15 +6321,19 @@ mod tests {
             op: "file-write-create".into(),
             target: "/Users/u/elsewhere/x".into(),
         });
-        let blocked =
-            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(&[], known(&first));
+        let blocked = Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report_with(
+            &[],
+            known(&first),
+            false,
+        );
         assert!(blocked.blocked && blocked.text.contains(&rules), "{}", blocked.text);
         // Nothing watched: a refusal would show only in the output — the rules always come with it
         let unwatched = Guard::In(Box::new(Policy { watch: None, ..p.clone() }));
-        let told = unwatched.report_with(&[], known(&unwatched.report_with(&[], Told::default())));
+        let told =
+            unwatched.report_with(&[], known(&unwatched.report_with(&[], Told::default(), false)), false);
         assert!(!told.blocked && told.text.contains(&unwatched.rules()), "{}", told.text);
         let open = Guard::In(Box::new(Policy { localhost: !p.localhost, ..p }));
-        assert_ne!(open.report_with(&[], Told::default()).rules, first.rules);
+        assert_ne!(open.report_with(&[], Told::default(), false).rules, first.rules);
     }
 
     /// 9b: the guarantees' paragraph comes after the rules on every path a report takes — quiet, blocked, nothing
@@ -6256,7 +6358,7 @@ mod tests {
         for (path, watch, output) in paths {
             let guard = Guard::In(Box::new(Policy { watch, ..p.clone() }));
             let rules = guard.rules();
-            let first = guard.report_as(output, Told::default(), Some(g.clone()));
+            let first = guard.report_as(output, Told::default(), Some(g.clone()), false);
             let (at_rules, at_told) = (first.text.find(&rules), first.text.find(&told));
             assert!(at_rules.is_some() && at_told > at_rules, "{path}: {}", first.text);
             if path == "couldn't watch" {
@@ -6264,7 +6366,7 @@ mod tests {
                 assert!(lines > at_rules && at_told > lines, "{path}: {}", first.text);
             }
             let known = Told { rules: None, guarantees: first.guarantees };
-            let again = guard.report_as(output, known, Some(g.clone()));
+            let again = guard.report_as(output, known, Some(g.clone()), false);
             assert!(again.text.contains(&rules) && !again.text.contains(&told), "{path}: {}", again.text);
         }
     }
@@ -7641,7 +7743,7 @@ mod tests {
             let out = [(true, line.clone())];
             let said: Vec<String> = p.said_in_output(&out, &[]).into_iter().map(|d| d.target).collect();
             assert_eq!(said, [target], "{line}");
-            assert!(g.report_with(&out, Told::default()).blocked, "{line}");
+            assert!(g.report_with(&out, Told::default(), false).blocked, "{line}");
         }
         let allowed = [(true, format!("touch: cannot touch 'src/a.rs': {why}"))];
         assert!(p.said_in_output(&allowed, &[]).is_empty(), "the rules let it write there");
@@ -7725,6 +7827,61 @@ mod tests {
             unsandboxed.get_envs().all(|(k, _)| k != "npm_config_logs_dir"),
             "the user's own runs as they are"
         );
+    }
+
+    /// compat B4: node's look-up of LaunchServices at its start, refused by design, in a run that passed and was
+    /// refused nothing else, is said calmly, not as blocked: no "if the command needs one", nothing to open. A run
+    /// that failed lists it as ever (it may be why); beside anything else refused, in the watch or the output,
+    /// it's listed with the rest; the panel and the record still have it.
+    #[test]
+    fn a_lone_launchservices_look_up_is_calm_only_when_the_run_passed() {
+        let p = Policy { tag: Some("t.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let lookup = Denial {
+            process: "node".into(),
+            op: "mach-lookup".into(),
+            target: "com.apple.coreservices.launchservicesd".into(),
+        };
+        let w = Watch::quiet("t.");
+        w.record(lookup.clone());
+        w.record(lookup.clone());
+        let g = Guard::In(Box::new(Policy { watch: Some(w.clone()), ..p.clone() }));
+        let r = g.report_with(&[], Told::default(), true);
+        assert!(!r.blocked && r.open.is_empty(), "{}", r.text);
+        assert!(
+            r.text.starts_with(
+                "The sandbox blocked only node's look-up of LaunchServices (opening apps) — refused in every \
+                 run by design, nothing opens it — and the run passed without it. In tarae's sandbox"
+            ) && !r.text.contains("If the command needs one"),
+            "{}",
+            r.text
+        );
+        let failed = g.report_with(&[], Told::default(), false);
+        assert!(failed.blocked, "{}", failed.text);
+        assert!(
+            failed.text.starts_with("The sandbox blocked one thing — 2 times:\n  opening apps"),
+            "{}",
+            failed.text
+        );
+        // (the user's panel and the record: as ever)
+        let panel = panel_line(Some(&g), false, std::time::Instant::now());
+        assert!(panel.is_some_and(|(l, _)| l == "sandbox blocked opening apps"));
+        assert!(crate::cards::denied_line("npm test", &w.blocked()).is_some());
+        // Beside another refusal: both named, counted whole
+        w.record(denial("file-write-create", "/Users/u/marker"));
+        let r = g.report_with(&[], Told::default(), true);
+        assert!(
+            r.blocked && r.text.starts_with("The sandbox blocked 2 things — 3 times:\n  opening apps"),
+            "{}",
+            r.text
+        );
+        // An lsd look-up is one too; a refusal the output says isn't calm
+        let lsd = Watch::quiet("t.");
+        lsd.record(Denial { target: "com.apple.lsd.mapdb".into(), ..lookup });
+        let g = Guard::In(Box::new(Policy { watch: Some(lsd), ..p.clone() }));
+        assert!(!g.report_with(&[], Told::default(), true).blocked);
+        let why = if cfg!(target_os = "linux") { "Permission denied" } else { "Operation not permitted" };
+        let out = [(true, format!("touch: cannot touch 'Makefile': {why}"))];
+        assert!(g.report_with(&out, Told::default(), true).blocked);
     }
 
     /// A quiet write is quiet only at its place for the home on this system — macOS's `~/Library/Application
@@ -10020,6 +10177,149 @@ mod tests {
             w.blocked().seen.iter().filter(|d| d.op.starts_with("file-read")).map(Denial::shown).collect();
         assert!(reads.is_empty(), "denied: {reads:?}");
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// uv's cache for runs is the project's own, kept across its runs in tarae's cache folder (compat B3): pointed
+    /// at by `UV_CACHE_DIR`, another project gets another, a project with no Python file the run's own. The
+    /// user's — `~/.cache/uv`, or where their `UV_CACHE_DIR` puts it — is neither read nor written, though the
+    /// user let Claude read `~/.cache`: their next `uv sync` installs what's there. A write refused there is said
+    /// with why.
+    #[test]
+    fn uvs_cache_is_the_projects_own() {
+        // (never in the shared temp folder: on Linux that's `/tmp`, which every run writes)
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "uvcache");
+        let base = std::fs::canonicalize(&scratch).unwrap();
+        let home = base.join("home");
+        for d in ["work/a", "work/b", "work/plain", ".cache/uv", ".cache/x", "uvc"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        for p in ["a", "b"] {
+            std::fs::write(home.join("work").join(p).join("uv.lock"), "version = 1\n").unwrap();
+        }
+        let llm = crate::llm::LlmConfig::default();
+        let policy = |p: &str, theirs: Option<&Path>| {
+            let mut env = HashMap::from([("HOME".to_string(), home.clone().into())]);
+            env.extend(theirs.map(|t| ("UV_CACHE_DIR".to_string(), t.into())));
+            let here = Here { env, ..Here::default() };
+            let root = home.join("work").join(p);
+            toolchain_found_in(&root, ToolDirs::default(), &here);
+            run_policy_in(&root, &llm, &[home.join(".cache")], &here).expect("a run's policy")
+        };
+        let var = |p: &Policy| p.env.iter().find(|(n, _)| n == "UV_CACHE_DIR").map(|(_, v)| PathBuf::from(v));
+        let kept = home.join(".cache/tarae/run-homes/uv");
+        let (a, b, plain) = (policy("a", None), policy("b", None), policy("plain", None));
+        let ours = kept.join(project_key(&home.join("work/a")));
+        assert_eq!(var(&a), Some(ours.clone()));
+        assert!(a.writes_allow(&ours.join("wheels-v5/x")) && a.reads_allow(&ours.join("wheels-v5/x")));
+        assert_eq!(var(&b), Some(kept.join(project_key(&home.join("work/b")))));
+        assert!(!b.writes_allow(&ours.join("x")), "another project's");
+        let run = plain.run.as_ref().unwrap().path().join("uv");
+        assert_eq!(var(&plain), Some(run), "no Python file: the run's own");
+        assert!(!plain.write.iter().any(|w| w.starts_with(&kept)));
+        // (the user's own, at its default and where their variable puts it: closed, though ~/.cache is read)
+        let moved = policy("a", Some(&home.join("uvc")));
+        assert_eq!(var(&moved), Some(ours), "their variable isn't what a run gets");
+        for (p, user) in
+            [(&a, home.join(".cache/uv/sdists-v10/.git")), (&moved, home.join("uvc/wheels-v5/x"))]
+        {
+            assert!(!p.reads_allow(&user) && !p.writes_allow(&user), "{}", user.display());
+        }
+        assert!(a.reads_allow(&home.join(".cache/x/y")), "the rest of ~/.cache, as the user let it");
+        // A write refused there: said with why, not as something to open
+        let w = Watch::quiet("t.");
+        w.record(denial("file-write-create", &home.join(".cache/uv/sdists-v10/.git").display().to_string()));
+        let g = Guard::In(Box::new(Policy { tag: Some("t.".into()), watch: Some(w), ..a }));
+        let r = g.report(&[]);
+        assert!(r.contains("the user's uv cache stays as it is"), "{r}");
+    }
+
+    /// uv's own Pythons (`~/.local/share/uv/python`, or where `UV_PYTHON_INSTALL_DIR` puts them) are read by
+    /// runs — a venv's `python` links there (compat B3) — and never written, nor opened for writing: the user's
+    /// venvs run what's there.
+    #[test]
+    fn uvs_pythons_are_read_never_written() {
+        // (never in the shared temp folder: on Linux that's `/tmp`, which every run writes)
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "uvpython");
+        let home = std::fs::canonicalize(&scratch).unwrap().join("home");
+        let cpython = "cpython-3.12.15-macos-aarch64-none/bin";
+        for d in ["work/a".to_string(), format!(".local/share/uv/python/{cpython}"), format!("pys/{cpython}")]
+        {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("work/a/uv.lock"), "version = 1\n").unwrap();
+        let llm = crate::llm::LlmConfig::default();
+        for (theirs, at) in [(None, ".local/share/uv/python"), (Some(home.join("pys")), "pys")] {
+            let mut env = HashMap::from([("HOME".to_string(), home.clone().into())]);
+            env.extend(theirs.map(|t| ("UV_PYTHON_INSTALL_DIR".to_string(), t.into())));
+            let here = Here { env, ..Here::default() };
+            let root = home.join("work/a");
+            toolchain_found_in(&root, ToolDirs::default(), &here);
+            let p = run_policy_in(&root, &llm, &[], &here).expect("a run's policy");
+            let python = home.join(at).join(cpython).join("python3.12");
+            assert!(p.reads_allow(&python) && !p.writes_allow(&python), "{}", python.display());
+            let later = RunsLater::new(&home, &vars_in(&home, &here), &[]);
+            assert!(later.refuses(&home.join(at)).is_some(), "never opened for writing: {at}");
+        }
+    }
+
+    /// Python compiles a module it imports from a folder runs only read (the interpreter's own, Homebrew's
+    /// Cellar — a stand-in here, outside the project) into the project's kept bytecode home: nothing is refused
+    /// and nothing lands beside the module (compat B1). A stand-in home in the test's own folder (the kept home
+    /// is made there); python3 on PATH, skipped without one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pythons_bytecode_goes_to_the_projects_own_home() {
+        if skipped_inside("sandbox::tests::pythons_bytecode_goes_to_the_projects_own_home")
+            || !Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success())
+        {
+            return;
+        }
+        // (not in the temp folders: runs write there)
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        let t = crate::scratch::Scratch::in_dir(&profile_path(&target), "sb-pyc");
+        let (home, lib) = (t.join("home"), t.join("lib"));
+        let root = home.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::write(lib.join("tarae_b1.py"), "X = 1\n").unwrap();
+        let mut here = Here::now();
+        here.env.insert("HOME".into(), home.clone().into());
+        here.env.remove("XDG_CACHE_HOME");
+        toolchain_found_in(&root, ToolDirs::default(), &here);
+        let llm = crate::llm::LlmConfig::default();
+        let p = run_policy_in(&root, &llm, &[], &here).expect("a run's policy");
+        let tag = format!("tarae-test-{}-pyc.", std::process::id());
+        let w = Watch::start(&tag);
+        std::thread::sleep(WATCH_READY);
+        let p = Policy { tag: Some(tag), watch: Some(w.clone()), ..p };
+        let script = "python3 -c 'import tarae_b1; print(tarae_b1.X)'";
+        let out = command(Some(&p), "/bin/sh", &["-c".into(), script.into()])
+            .current_dir(&root)
+            .env("PYTHONPATH", &lib)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let said =
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && said == "1\n", "{said}");
+        std::thread::sleep(WATCH_LAST * 2);
+        w.finish();
+        let denied: Vec<String> = w.blocked().seen.iter().map(Denial::shown).collect();
+        assert!(denied.is_empty(), "denied: {denied:?}");
+        assert!(!lib.join("__pycache__").exists(), "nothing beside the module");
+        let kept = home.join(".cache/tarae/run-homes/pycache").join(project_key(&root));
+        let at = kept.join(lib.strip_prefix("/").unwrap());
+        let pyc = std::fs::read_dir(&at).into_iter().flatten().flatten();
+        assert!(
+            pyc.map(|e| e.file_name()).any(|n| n.to_string_lossy().starts_with("tarae_b1.")),
+            "no .pyc in {}",
+            at.display()
+        );
     }
 
     /// Not a check: a measuring aid (card model P2's confirm pass, `target/sb/p2-confirm.sh`) — prints the

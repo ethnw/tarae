@@ -461,8 +461,9 @@ fn the_report_is_pinned() {
     ];
     for (label, found) in tiers {
         let g = found.map(Guarantees::landlock).or_else(|| calm.guarantees());
-        let said = |known: Told| calm.report_as(&[], known, g.clone()).text.replace(&rules, "[the rules]");
-        let first = calm.report_as(&[], Told::default(), g.clone());
+        let said =
+            |known: Told| calm.report_as(&[], known, g.clone(), false).text.replace(&rules, "[the rules]");
+        let first = calm.report_as(&[], Told::default(), g.clone(), false);
         let later = Told { rules: Some(first.rules), guarantees: first.guarantees };
         out.push_str(&format!("\n══ {label}: the conversation's first run\n{}", said(Told::default())));
         out.push_str(&format!("\n── a later run\n{}", said(later)));
@@ -533,7 +534,7 @@ fn the_report_says_the_tier_once() {
     let mut known = Told::default();
     let mut run = |g: &Guarantees, failed: bool| {
         let asked = Told { rules: known.rules.filter(|_| !failed), ..known };
-        let r = calm.report_as(&[], asked, Some(g.clone()));
+        let r = calm.report_as(&[], asked, Some(g.clone()), false);
         known = Told { rules: Some(r.rules), guarantees: r.guarantees };
         r.text.contains(&g.told())
     };

@@ -300,6 +300,9 @@ pub enum Check {
     Sandbox,
     /// Not over within its time.
     Timeout,
+    /// It failed where a pass was expected, and fails unsandboxed too: the tool's own, not the sandbox's (§5
+    /// `not-ours`).
+    Outside,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,14 +322,15 @@ impl Failure {
             Check::Made => "protected-name",
             Check::Sandbox => "not-sandboxed",
             Check::Writes => "writes",
+            Check::Outside => "not-ours",
             Check::Exit | Check::Report => "unexplained",
         }
     }
 }
 
 /// The classes by rank: a cell names its entry's first. A failure with no cause said ranks first (§5).
-const CLASSES: [&str; 7] =
-    ["report", "hang", "card", "protected-name", "not-sandboxed", "writes", "unexplained"];
+const CLASSES: [&str; 8] =
+    ["report", "hang", "card", "protected-name", "not-sandboxed", "writes", "not-ours", "unexplained"];
 
 const NO_CAUSE: &str = "it failed, and the report names no cause";
 
@@ -554,6 +558,16 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
             format!("{how} {} — outside the project, and not in its writes", path.display()),
         );
     }
+    // (§5 `not-ours`: a pass expected that failed, and fails unsandboxed too in the copy made before it — the
+    // tool's own: its exit, and the report's silence on it, aren't the sandbox's; what the sandbox blocked still is)
+    if let Some(c) = &copy
+        && entry.expect == Expect::Pass
+        && v.ended.as_ref().is_some_and(|s| *s != crate::task::State::Passed)
+        && let Some(how) = fails_outside(&entry.run, &c.join(entry.cwd.as_deref().unwrap_or("")))
+    {
+        v.failed.retain(|f| f.check != Check::Exit && !(f.check == Check::Report && f.what == NO_CAUSE));
+        v.fail(Check::Outside, format!("it fails unsandboxed too — {how}"));
+    }
     if let Some(c) = &copy
         && v.ended == Some(crate::task::State::Passed)
     {
@@ -630,7 +644,8 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
     if !mark.starts_with("sandbox") {
         v.fail(Check::Sandbox, words);
     }
-    let report = g.report_with(&r.output, crate::sandbox::Told::default());
+    let passed = r.state == crate::task::State::Passed;
+    let report = g.report_with(&r.output, crate::sandbox::Told::default(), passed);
     let seen = g.watch().map(|w| w.blocked().seen).unwrap_or_default();
     let said = match g {
         crate::sandbox::Guard::In(p) => p.said_in_output(&r.output, &seen),
@@ -645,7 +660,6 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
             false => format!("{} — {}", d.reported(), d.shown()),
         })
         .collect();
-    let passed = r.state == crate::task::State::Passed;
     match &entry.expect {
         Expect::Pass => {
             if !passed {
@@ -694,6 +708,21 @@ fn baseline(cmd: &str, dir: &Path) -> Option<Duration> {
     };
     once()?;
     once()
+}
+
+/// The same command unsandboxed, once, in the copy made before the run, from `dir` — how it failed (`exit 3:
+/// its last lines`); None when it passed or couldn't start.
+fn fails_outside(cmd: &str, dir: &Path) -> Option<String> {
+    let mut c = crate::nofile::command("sh", Some(dir));
+    c.args(["-c", cmd]).stdin(std::process::Stdio::null());
+    let out = c.output().ok()?;
+    if out.status.success() {
+        return None;
+    }
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let lines: Vec<(bool, String)> = text.lines().map(|l| (false, l.to_string())).collect();
+    let code = out.status.code().map_or("a signal".to_string(), |n| format!("exit {n}"));
+    Some(format!("{code}: {}", tail(&lines)))
 }
 
 /// The last lines of a run's output, on one line.
@@ -1407,14 +1436,15 @@ timeout = 60
         assert!(failed(&v, Check::Made)[0].contains("isn't a git checkout"), "{v}");
     }
 
-    /// A failure the report names no cause of is the worst outcome (Claude would work around it): said so.
+    /// A failure the report names no cause of is the worst outcome (Claude would work around it): said so. (It
+    /// fails only in the sandbox: one its unsandboxed baseline shares is the tool's own — `not-ours`.)
     #[test]
     fn a_failure_with_no_cause_in_the_report_is_said() {
         if !sandboxed_here("compat::tests::a_failure_with_no_cause_in_the_report_is_said") {
             return;
         }
         let s = Scratch::new("nocause");
-        let v = run(&entry(&e_text("exit 3")), &s.place);
+        let v = run(&entry(&e_text("case $PWD in */baseline-*) ;; *) exit 3;; esac")), &s.place);
         assert_eq!(v.ended, Some(crate::task::State::Failed(Some(3))), "{v}");
         assert_eq!(failed(&v, Check::Report), vec!["it failed, and the report names no cause"], "{v}");
         assert_eq!(v.cell(), "✗ report", "{v}");
@@ -1446,6 +1476,33 @@ timeout = 60
         v.fail(Check::Report, NO_CAUSE);
         assert_eq!(v.cell(), "✗ report");
         assert_eq!(line("s", "e\tx", "✗ a\nb"), "COMPAT\ts\te x\t✗ a b");
+        // (failing unsandboxed too: not the sandbox's — before what it was denied, after what it did outside)
+        v.failed.clear();
+        v.fail(Check::Report, "the sandbox blocked: opening apps");
+        v.fail(Check::Outside, "it fails unsandboxed too — exit 3: x");
+        assert_eq!(v.cell(), "✗ not-ours");
+        v.fail(Check::Writes, "made x");
+        assert_eq!(v.cell(), "✗ writes");
+    }
+
+    /// A pass expected that fails in the sandbox and unsandboxed alike is the tool's own (§5 `not-ours`): its exit
+    /// and the report's silence aren't failed, the baseline's words are said; one that fails only in the sandbox
+    /// stays a failure that names no cause.
+    #[test]
+    fn a_failure_the_baseline_shares_is_not_ours() {
+        if !sandboxed_here("compat::tests::a_failure_the_baseline_shares_is_not_ours") {
+            return;
+        }
+        let s = Scratch::new("notours");
+        let at = &s.place;
+        let v = run(&entry(&e_text("echo broken >&2; exit 3")), at);
+        assert_eq!(v.cell(), "✗ not-ours", "{v}");
+        assert_eq!(failed(&v, Check::Outside), ["it fails unsandboxed too — exit 3: broken"], "{v}");
+        assert!(failed(&v, Check::Exit).is_empty() && failed(&v, Check::Report).is_empty(), "{v}");
+        let sandbox_only = "case $PWD in */baseline-*) ;; *) exit 3;; esac";
+        let v = run(&entry(&e_text(sandbox_only)), at);
+        assert_eq!(v.cell(), "✗ report", "{v}");
+        assert!(failed(&v, Check::Outside).is_empty(), "{v}");
     }
 
     /// The driver `cargo xtask compat` runs (ignored: it needs the stacks' toolchains, and runs their `prewarm`

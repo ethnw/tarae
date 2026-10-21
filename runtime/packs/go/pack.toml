@@ -198,6 +198,13 @@ env = "GOCACHE"
 keep = true
 when = ["go.mod", "go.work"]
 
+# golangci-lint's cache, of the runs' own as Go's build cache is: it won't start without one, and the user's
+# (`os.UserCacheDir`'s `golangci-lint`) is in home, closed — kept across the project's runs, never the user's
+[sandbox.run-home.golangci-lint]
+env = "GOLANGCI_LINT_CACHE"
+keep = true
+when = ["go.mod", "go.work"]
+
 # Go's env file can hold a token (`go env -w GOPROXY=https://user:…@`): denied, Go loses its settings without a
 # word (`target/sb/tokens-checkpoint.md`) — a copy without it, at `GOENV` (`off`: none)
 [[sandbox.settings]]
