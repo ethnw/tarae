@@ -1211,15 +1211,10 @@ fn snapshot_chat_explore() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l");
-    let msg = |role, text: &str, chip: &str, look: Option<Look>| Msg {
-        role,
-        text: text.into(),
-        chip: chip.into(),
-        look,
-        call: String::new(),
-        attached: None,
-        ran: None,
-        cache: Default::default(),
+    let msg = |role, text: &str, chip: &str, look: Option<Look>| {
+        let mut m = Msg::new(role, text, chip);
+        m.look = look;
+        m
     };
     let look = |verb, what: &str, pattern, range: &str, link: Option<Link>| {
         Some(Look { verb, what: what.into(), pattern, range: range.into(), link })
@@ -1264,16 +1259,7 @@ fn snapshot_chat_table() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l");
-    let msg = |role, text: &str| Msg {
-        role,
-        text: text.into(),
-        chip: String::new(),
-        look: None,
-        call: String::new(),
-        attached: None,
-        ran: None,
-        cache: Default::default(),
-    };
+    let msg = |role, text: &str| Msg::new(role, text, "");
     let answer = "Two ways to draw a cell that doesn't fit:\n\n\
                   | 방식 | 장점 | 단점 |\n|---|---|---|\n\
                   | 셀 안에서 줄바꿈 | 내용이 전부 보이고 열 정렬이 유지된다 | 행 높이가 들쭉날쭉해진다 |\n\
@@ -2248,16 +2234,7 @@ fn floating_cards_never_overlap() {
         }
         s.ed.goto_line(39);
         let c = s.ed.session.chat.as_mut().unwrap();
-        c.msgs.push(Msg {
-            role: Role::Thought,
-            text: "Thinking hard about it for a while.\n".repeat(6),
-            chip: String::new(),
-            look: None,
-            call: String::new(),
-            attached: None,
-            ran: None,
-            cache: Default::default(),
-        });
+        c.msgs.push(Msg::new(Role::Thought, "Thinking hard about it for a while.\n".repeat(6), ""));
         let look = Look {
             verb: "read",
             what: "src/demo.rs".into(),
@@ -2265,16 +2242,7 @@ fn floating_cards_never_overlap() {
             range: "L40–60".into(),
             link: None,
         };
-        c.msgs.push(Msg {
-            role: Role::Tool,
-            text: String::new(),
-            chip: String::new(),
-            look: Some(look.clone()),
-            call: String::new(),
-            attached: None,
-            ran: None,
-            cache: Default::default(),
-        });
+        c.msgs.push(Msg::tool(look.clone(), ""));
         c.follow.gaze = Some(crate::follow::Gaze::new(look, Some(path.clone()), Some(39..60)));
         s.ed.set_status("Saved src/demo.rs · 80 lines");
         let bytes = s.frame();

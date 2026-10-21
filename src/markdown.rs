@@ -63,6 +63,20 @@ fn spans_width(spans: &[Span]) -> usize {
 
 /// `default_lang` = language for code blocks without one (usually the current document's language).
 pub fn render(src: &str, theme: &Theme, default_lang: Option<&str>) -> Vec<Line> {
+    render_reading(src, theme, default_lang, &mut Read::default())
+}
+
+/// What a `render` went by beyond its text and theme — what laid-out rows kept for later depend on (the chat's).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Read {
+    /// A code block without a language took `default_lang`.
+    pub default_lang: bool,
+    /// Languages a code block was in whose grammar wasn't loaded yet: painted plain.
+    pub unloaded: Vec<String>,
+}
+
+/// `render`, saying what it went by in `read`.
+pub fn render_reading(src: &str, theme: &Theme, default_lang: Option<&str>, read: &mut Read) -> Vec<Line> {
     let heading =
         theme.try_get("markup.heading").unwrap_or_default().patch(Style { bold: true, ..Style::default() });
     let quote = theme.try_get("markup.quote").unwrap_or(Style { italic: true, ..Style::default() });
@@ -98,7 +112,15 @@ pub fn render(src: &str, theme: &Theme, default_lang: Option<&str>) -> Vec<Line>
             if !matches!(out.last(), None | Some(Line::Blank)) {
                 out.push(Line::Blank);
             }
-            out.extend(code_lines(&code, if lang.is_empty() { default_lang } else { Some(lang) }, theme));
+            read.default_lang |= lang.is_empty();
+            let lang = if lang.is_empty() { default_lang } else { Some(lang) };
+            if let Some(s) = lang.and_then(syntax::resolve)
+                && Loader::global().loaded(&s.name).is_none()
+                && !read.unloaded.contains(&s.name)
+            {
+                read.unloaded.push(s.name.clone());
+            }
+            out.extend(code_lines(&code, lang, theme));
             out.push(Line::Blank);
             continue;
         }

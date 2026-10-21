@@ -243,8 +243,48 @@ pub struct Msg {
     pub attached: Option<Link>,
     /// A command's row (`run`): where it ran, and what it warned of — from the run's own record, at its end.
     pub ran: Option<Ran>,
-    /// Wrapped lines (text length, width, lines) — only changed messages are rewrapped, even while streaming.
-    pub cache: RefCell<Rendered>,
+    /// Goes up with every change to what it shows (`changed`) — a word replaced, a row's verdict — so its rows
+    /// are laid out again, even when the text's length stays.
+    version: u64,
+    /// Its rows as the chat lays them out, kept while their key holds — a frame lays out only the messages
+    /// that changed (the one being written), never the whole conversation (`term::draw_chat`).
+    pub cache: RefCell<Option<Laid>>,
+}
+
+/// A message's rows as laid out, and what they were laid out for.
+pub struct Laid {
+    pub key: LaidKey,
+    /// The front file's language, hashed, when a code block without one took it — none read: another file in
+    /// front doesn't lay it out again.
+    pub lang: Option<u64>,
+    /// Languages a code block was in that weren't loaded: laid out again once one is.
+    pub unloaded: Vec<String>,
+    /// (`Arc`, not `Rc`: a `Msg` stays `Send` — `chats`' restore measurement builds them on workers)
+    pub rows: std::sync::Arc<[ChatRow]>,
+}
+
+/// What every message's rows depend on: its version (and its text's length — an append the version didn't
+/// see), the width, the look (the theme, the styles — `term::draw_chat` hashes it once a frame) and its own
+/// state there (being written, live, a turn's end). What only some read is `Laid`'s own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaidKey {
+    pub version: u64,
+    pub len: usize,
+    pub width: usize,
+    pub look: u64,
+    pub state: u64,
+}
+
+/// One row of a message in the chat: its spans, and what a click on it does.
+#[derive(Clone, Debug, Default)]
+pub struct ChatRow {
+    pub spans: Vec<Span>,
+    /// The row is a link as a whole (a tool call's place, the screen that went with a message).
+    pub link: Option<Link>,
+    /// A tool call's row: its call (a click goes to its replay stop).
+    pub call: Option<String>,
+    /// A command's row: the columns of where it ran (a click there says why).
+    pub ran: Option<(usize, usize)>,
 }
 
 /// The screen as the user saw it, waiting to go with their next message (`C-s` · `:chat-screen`).
@@ -254,9 +294,6 @@ pub struct Shot {
     pub cols: u16,
     pub rows: u16,
 }
-
-/// (text length, width, wrapped lines).
-pub type Rendered = Option<(usize, usize, Vec<Vec<Span>>)>;
 
 impl Msg {
     pub(crate) fn new(role: Role, text: impl Into<String>, chip: impl Into<String>) -> Self {
@@ -268,8 +305,18 @@ impl Msg {
             call: String::new(),
             attached: None,
             ran: None,
+            version: 0,
             cache: RefCell::new(None),
         }
+    }
+
+    /// What it shows changed: its rows are laid out again at the next frame.
+    pub fn changed(&mut self) {
+        self.version += 1;
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub(crate) fn tool(look: Look, call: &str) -> Self {
@@ -480,7 +527,7 @@ pub fn mark_ran(ed: &mut Editor, cmd: &str, ran: Ran) {
     let calls: Vec<String> = c.calls.iter().filter(|k| k.runs(cmd.trim())).map(|k| k.id.clone()).collect();
     if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.ran.is_none() && calls.contains(&m.call)) {
         m.ran = Some(ran);
-        m.cache.replace(None);
+        m.changed();
     }
 }
 
@@ -925,6 +972,7 @@ pub fn restore(ed: &mut Editor, r: Restored) {
             c.msgs.retain(|m| !(m.role == Role::Note && m.text == RESTARTED));
             if let Some(m) = c.msgs.last_mut().filter(|m| m.role == Role::Note) {
                 m.text = RESTARTED.into();
+                m.changed();
             }
         }
     });
@@ -1208,7 +1256,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             c.state = State::Thinking;
             match c.msgs.last_mut() {
-                Some(m) if m.role == Role::Thought => m.text.push_str(&t),
+                Some(m) if m.role == Role::Thought => {
+                    m.text.push_str(&t);
+                    m.changed();
+                }
                 _ => c.msgs.push(Msg::new(Role::Thought, t, "")),
             }
             crate::follow::on_words(ed, false);
@@ -1238,7 +1289,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             match planned {
                 Some(m) if look.verb == "plan" => {
                     m.look = Some(look.clone());
-                    m.cache.replace(None);
+                    m.changed();
                 }
                 _ => c.msgs.push(Msg::tool(look.clone(), &id)),
             }
@@ -1330,7 +1381,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             let said = r.said();
             let retry = |m: &&mut Msg| m.role == Role::Note && m.text.starts_with(crate::limits::RETRY_SAID);
             match c.msgs.last_mut().filter(retry) {
-                Some(m) => m.text = said,
+                Some(m) => {
+                    m.text = said;
+                    m.changed();
+                }
                 None => c.msgs.push(Msg::new(Role::Note, said, "")),
             }
         }
@@ -1355,7 +1409,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 } else {
                     crate::tools::run_verdict(&text)
                 };
-                m.cache.replace(None);
+                m.changed();
             }
             // A lookup's row ends with what it found (`12 references in 3 files`) — Grep's count is follow's
             // (`follow::found`, from its hits)
@@ -1375,7 +1429,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 && let Some(v) = crate::nav::verdict(&text)
             {
                 l.range = v;
-                m.cache.replace(None);
+                m.changed();
             }
             if c.state != State::Idle {
                 crate::follow::on_result(ed, &id, &text, error);
@@ -1400,7 +1454,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             // (an id cited marks its element as it's written — the whole answer is read again at its end)
             let ids = t.contains(['#', ':']);
             match c.msgs.last_mut() {
-                Some(m) if m.role == Role::Assistant => m.text.push_str(&t),
+                Some(m) if m.role == Role::Assistant => {
+                    m.text.push_str(&t);
+                    m.changed();
+                }
                 _ => c.msgs.push(Msg::new(Role::Assistant, t, "")),
             }
             if ids {

@@ -678,7 +678,7 @@ fn found(ed: &mut Editor, id: &str, text: &str) {
         if let Some((p, line)) = first.as_ref().filter(|_| l.link.is_none()) {
             l.link = Some(crate::chat::Link { path: p.clone(), line: *line });
         }
-        m.cache.replace(None);
+        m.changed();
     }
     let Some(f) = follow(ed) else { return };
     if let Some(stop) = f.replay.by_call(id) {
@@ -781,7 +781,7 @@ fn landed(
         if let Some(link) = l.link.as_mut() {
             link.line = lines.start;
         }
-        m.cache.replace(None);
+        m.changed();
     }
     let background = ed.background();
     let Some(f) = follow(ed) else { return };

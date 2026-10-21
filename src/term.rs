@@ -9810,25 +9810,42 @@ fn draw_chat(
     // ── Message rows (filled from the bottom)
     // (tabs + title·divider + plan + divider·hint + usage)
     let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h + usage_h);
-    let mut lines: Vec<Vec<Span>> = Vec::new();
-    // Rows that are links as a whole (tool calls), parallel to `lines` — and the call each tool row is (a
-    // click goes to its replay stop)
-    let mut row_links: Vec<Option<crate::chat::Link>> = Vec::new();
-    let mut row_calls: Vec<(usize, &str)> = Vec::new();
-    // (a command's row: the columns of where it ran — a click there says why — and its call)
-    let mut row_ran: Vec<(usize, (usize, usize), &str)> = Vec::new();
+    use crate::chat::{ChatRow, Laid, LaidKey};
     let sp = |text: String, style: Style| Span { text, style };
+    let plain = |spans: Vec<Span>| ChatRow { spans, ..ChatRow::default() };
     let n = c.msgs.len();
     let string = card.patch(t.try_get("string").unwrap_or(dim));
     // The newest tool call is marked while Claude is still at it
     let exploring = c.busy() && c.msgs.last().is_some_and(|m| m.role == Role::Tool);
-    for (i, m) in c.msgs.iter().enumerate() {
-        row_links.resize(lines.len(), None);
+    let styles = TrailStyles { faint, dim, string, accent, warn: warn_fg };
+    // What every message is drawn in — the theme as read, the chat's styles: one of them changed, every message
+    // is laid out again. The language a code block with none is coloured as only those that have one
+    // (`Laid.lang`)
+    let look = hash_of((t.id, [card, dim, faint, accent, strong, string, warn_fg], ui.base.bg));
+    let lang_hash = hash_of(&lang);
+    // (the last turn's end: no question after it and Claude done — its time row offers the replay)
+    let last_user = c.msgs.iter().rposition(|m| m.role == Role::User);
+    let turn_end = |i: usize| !c.busy() && last_user.is_none_or(|u| u < i);
+    let stops = c.follow.replay.latest();
+    // What a message's rows depend on beyond its text and the look: being written, live, a turn's end
+    let state = |i: usize, m: &crate::chat::Msg| -> u64 {
+        let last = i + 1 == n;
+        match m.role {
+            Role::User => 0,
+            Role::Assistant => u64::from(last && c.state == State::Writing),
+            Role::Thought => u64::from(last && c.busy()),
+            Role::Tool => u64::from(last && exploring),
+            // (the replay's stops, and its keys — which the chat's focus changes)
+            Role::Note if turn_end(i) => 1 | (u64::from(c.focused) << 1) | ((stops as u64) << 2),
+            Role::Note => 0,
+        }
+    };
+    // One message's rows — laid out only when its key changed (`Msg.cache`); what depends on where it is (the
+    // air before it) or on the clock (a live command's wait) is the frame's own, below
+    let laid_out = |i: usize, m: &crate::chat::Msg, read: &mut md::Read| -> Vec<ChatRow> {
+        let mut lines: Vec<ChatRow> = Vec::new();
         match m.role {
             Role::User => {
-                if !lines.is_empty() {
-                    lines.push(Vec::new());
-                }
                 if !m.chip.is_empty() {
                     // The screen that went with it is a link (it opens its copy): underlined like the
                     // places in an answer, a step brighter than the rest of the chip
@@ -9839,10 +9856,8 @@ fn draw_chat(
                         None if m.attached.is_some() => vec![sp(chip, link)],
                         None => vec![sp(chip, faint)],
                     };
-                    lines.push(row);
                     // (a screen went with it: the row opens the copy)
-                    row_links.resize(lines.len(), None);
-                    *row_links.last_mut().expect("just pushed") = m.attached.clone();
+                    lines.push(ChatRow { spans: row, link: m.attached.clone(), ..ChatRow::default() });
                 }
                 // Each line of it rows of its own, blank ones kept, as written (#18: one span with its line
                 // breaks in it reached the terminal as raw LFs — rows overlapped, paragraphs lost their starts)
@@ -9851,43 +9866,34 @@ fn draw_chat(
                     let rows =
                         if part.trim().is_empty() { Vec::new() } else { md::wrap(&para, w - 2, faint) };
                     if rows.is_empty() {
-                        lines.push(vec![sp("▎".into(), accent)]);
+                        lines.push(plain(vec![sp("▎".into(), accent)]));
                     }
                     for l in rows {
                         let mut row = vec![sp("▎ ".into(), accent)];
                         row.extend(l);
-                        lines.push(row);
+                        lines.push(plain(row));
                     }
                 }
             }
             Role::Assistant => {
-                lines.push(Vec::new());
-                let mut cache = m.cache.borrow_mut();
-                if !matches!(&*cache, Some((len, cw, _)) if *len == m.text.len() && *cw == w) {
-                    let rendered = md::render(&crate::chat::displayed(&m.text), t, lang.as_deref());
-                    *cache = Some((m.text.len(), w, chat_markdown(&rendered, w, (faint, dim), ui.base.bg)));
-                }
-                let body = &cache.as_ref().unwrap().2;
-                lines.extend(body.iter().cloned());
-                if i + 1 == n && c.state == State::Writing {
-                    match lines.last_mut() {
-                        Some(l) => l.push(sp("▍".into(), accent)),
-                        None => lines.push(vec![sp("▍".into(), accent)]),
-                    }
+                lines.push(ChatRow::default());
+                let rendered = md::render_reading(&crate::chat::displayed(&m.text), t, lang.as_deref(), read);
+                lines.extend(chat_markdown(&rendered, w, (faint, dim), ui.base.bg).into_iter().map(plain));
+                if i + 1 == n
+                    && c.state == State::Writing
+                    && let Some(l) = lines.last_mut()
+                {
+                    l.spans.push(sp("▍".into(), accent));
                 }
             }
             // Thinking: an aside — faint bar, italic; finished ones fold to two rows
             Role::Thought => {
-                lines.push(Vec::new());
-                let mut cache = m.cache.borrow_mut();
-                if !matches!(&*cache, Some((len, cw, _)) if *len == m.text.len() && *cw == w) {
-                    *cache = Some((m.text.len(), w, thought_rows(&m.text, w - 2, dim, faint, editor)));
-                }
+                lines.push(ChatRow::default());
+                let all = thought_rows(&m.text, w - 2, dim, faint, editor);
                 let live = i + 1 == n && c.busy();
                 let keep = if live { 8 } else { 2 };
                 // Folded: the first two rows with words (a bold step title and the start of its text)
-                let body: Vec<&Vec<Span>> =
-                    cache.as_ref().unwrap().2.iter().filter(|r| live || !blank(r)).collect();
+                let body: Vec<&Vec<Span>> = all.iter().filter(|r| live || !blank(r)).collect();
                 let shown = if live {
                     &body[body.len().saturating_sub(keep)..]
                 } else {
@@ -9902,95 +9908,43 @@ fn draw_chat(
                     if !live && k + 1 == shown.len() && body.len() > keep {
                         r.push(sp("…".into(), faint));
                     }
-                    lines.push(r);
+                    lines.push(plain(r));
                 }
             }
             // `◦ read  src/lib.rs  L10–49` — one quiet row per call; a run of them stays together
             Role::Tool => {
-                let Some(look) = &m.look else { continue };
-                if i == 0 || c.msgs[i - 1].role != Role::Tool {
-                    lines.push(Vec::new());
-                }
-                let styles = TrailStyles { faint, dim, string, accent, warn: warn_fg };
+                let Some(look) = &m.look else { return lines };
                 let live = exploring && i + 1 == n;
-                let (row, mark) = trail_row_at(look, m.ran.as_ref(), live, w, false, &styles);
-                lines.push(row);
-                if let Some(at) = mark {
-                    row_ran.push((lines.len() - 1, at, m.call.as_str()));
-                }
-                row_links.resize(lines.len(), None);
-                *row_links.last_mut().expect("just pushed") = look.link.clone();
-                row_calls.push((lines.len() - 1, m.call.as_str()));
-                // (its command or tests waiting on what isn't their own — another cargo's lock — said under
-                // it, not left looking stuck: #10, `waits.rs`; or printing nothing for minutes — #157)
-                let now = std::time::Instant::now();
-                // (waiting in line: behind what, first — a run a stopped turn left there says so, frictions26)
-                let queued = matches!(look.verb, "run" | "test")
-                    .then(|| crate::queued::chat_said(&editor.session, now))
-                    .flatten();
-                let wait = match look.verb {
-                    _ if queued.is_some() => queued.as_ref().map(|q| q.said.clone()),
-                    // (this turn's — a stopped turn's still going isn't this row's: frictions26)
-                    "run" => editor
-                        .session
-                        .task_run
-                        .as_ref()
-                        .filter(|r| r.chat.is_some() && r.state == crate::task::State::Running)
-                        .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
-                    "test" => editor
-                        .session
-                        .test_run
-                        .as_ref()
-                        .filter(|r| r.chat.is_some() && r.state == crate::testing::RunState::Running)
-                        .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
-                    _ => None,
-                };
-                if live && let Some(wait) = wait {
-                    lines.push(vec![sp(format!("  {}", fit_ellipsis(&wait, w - 2)), faint)]);
-                    // (the run it waits behind, a stopped turn's: what, how long, the key that stops it — the
-                    // name cut, the time and the key whole)
-                    if let Some((label, ran, key)) = queued.and_then(|q| q.left) {
-                        let ran = format!(" · {ran}");
-                        let hint = hint_spans(&[(key, "stop it")], dim, faint);
-                        let hint_w: usize = hint.iter().map(|s| s.text.width()).sum();
-                        let room = w.saturating_sub(2 + ran.width() + 2 + hint_w);
-                        let mut row =
-                            vec![sp(format!("  {}", fit_ellipsis(&label, room)), dim), sp(ran, faint)];
-                        row.push(sp("  ".into(), faint));
-                        row.extend(hint);
-                        lines.push(row);
-                    }
-                }
+                let (spans, ran) = trail_row_at(look, m.ran.as_ref(), live, w, false, &styles);
+                lines.push(ChatRow { spans, link: look.link.clone(), call: Some(m.call.clone()), ran });
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
             Role::Note => {
                 let timing = m.text.ends_with('s') && m.text[..m.text.len() - 1].parse::<f32>().is_ok();
                 // The last turn's end: how to replay its stops (in the code — or `C-]` from here), left
                 // of its time
-                let stops = c.follow.replay.latest();
-                let last_end = !c.busy() && c.msgs[i + 1..].iter().all(|m| m.role != Role::User);
-                if timing && last_end && stops > 0 {
+                if timing && turn_end(i) && stops > 0 {
                     let keys = if c.focused { "C-]" } else { "[r ]r" };
                     let said = format!(" replay its {stops} stop{}", if stops == 1 { "" } else { "s" });
                     let gap = w.saturating_sub(keys.width() + said.width() + m.text.width());
                     if gap >= 2 {
-                        lines.push(vec![
+                        lines.push(plain(vec![
                             sp(keys.into(), Style { bold: true, ..dim }),
                             sp(said, faint),
                             sp(format!("{}{}", " ".repeat(gap), m.text), faint),
-                        ]);
+                        ]));
                     } else {
-                        lines.push(vec![sp(format!("{:>w$}", m.text), faint)]);
+                        lines.push(plain(vec![sp(format!("{:>w$}", m.text), faint)]));
                     }
                 } else if timing {
-                    lines.push(vec![sp(format!("{:>w$}", m.text), faint)]);
+                    lines.push(plain(vec![sp(format!("{:>w$}", m.text), faint)]));
                 } else {
                     // As many rows as it takes (how to install claude is a few lines — #163), each line of it
                     // wrapped, hanging under its text. A compaction is a beat of its own mid-answer, not the
                     // end of what came before: air above it, and the `≈` the session list marks it with
                     let compacted = crate::compaction::is_note(&m.text);
                     if compacted {
-                        lines.push(Vec::new());
+                        lines.push(ChatRow::default());
                     }
                     let mark = if compacted { "≈ " } else { "· " };
                     let mut first = true;
@@ -9999,14 +9953,96 @@ fn draw_chat(
                         for l in md::wrap(&para, w.saturating_sub(2).max(1), faint) {
                             let mut row = vec![sp(if first { mark } else { "  " }.into(), dim)];
                             row.extend(l);
-                            lines.push(row);
+                            lines.push(plain(row));
                             first = false;
                         }
                     }
                 }
             }
         }
+        lines
+    };
+    // The conversation as pieces: each message's kept rows, and the frame's own between and after them
+    enum Piece {
+        Kept(std::sync::Arc<[ChatRow]>),
+        Own(ChatRow),
     }
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut total = 0;
+    for (i, m) in c.msgs.iter().enumerate() {
+        // (air before a question, and before a run of tool rows — where it is, not what it is)
+        let air = match m.role {
+            Role::User => total > 0,
+            Role::Tool => m.look.is_some() && (i == 0 || c.msgs[i - 1].role != Role::Tool),
+            _ => false,
+        };
+        if air {
+            pieces.push(Piece::Own(ChatRow::default()));
+            total += 1;
+        }
+        let key = LaidKey { version: m.version(), len: m.text.len(), width: w, look, state: state(i, m) };
+        let loaded = |name: &str| crate::syntax::Loader::global().loaded(name).is_some();
+        let kept = m
+            .cache
+            .borrow()
+            .as_ref()
+            .filter(|l| still_laid(l, &key, lang_hash, loaded))
+            .map(|l| l.rows.clone());
+        let rows = kept.unwrap_or_else(|| {
+            let mut read = md::Read::default();
+            let rows: std::sync::Arc<[ChatRow]> = laid_out(i, m, &mut read).into();
+            let lang = read.default_lang.then_some(lang_hash);
+            *m.cache.borrow_mut() = Some(Laid { key, lang, unloaded: read.unloaded, rows: rows.clone() });
+            rows
+        });
+        total += rows.len();
+        pieces.push(Piece::Kept(rows));
+        // (the live command or tests waiting on what isn't their own — another cargo's lock — said under it, not
+        // left looking stuck: #10, `waits.rs`; or printing nothing for minutes — #157. The clock's: never kept)
+        let Some(look) = m.look.as_ref().filter(|_| m.role == Role::Tool && exploring && i + 1 == n) else {
+            continue;
+        };
+        let now = std::time::Instant::now();
+        // (waiting in line: behind what, first — a run a stopped turn left there says so, frictions26)
+        let queued = matches!(look.verb, "run" | "test")
+            .then(|| crate::queued::chat_said(&editor.session, now))
+            .flatten();
+        let wait = match look.verb {
+            _ if queued.is_some() => queued.as_ref().map(|q| q.said.clone()),
+            // (this turn's — a stopped turn's still going isn't this row's: frictions26)
+            "run" => editor
+                .session
+                .task_run
+                .as_ref()
+                .filter(|r| r.chat.is_some() && r.state == crate::task::State::Running)
+                .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
+            "test" => editor
+                .session
+                .test_run
+                .as_ref()
+                .filter(|r| r.chat.is_some() && r.state == crate::testing::RunState::Running)
+                .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
+            _ => None,
+        };
+        if let Some(wait) = wait {
+            pieces.push(Piece::Own(plain(vec![sp(format!("  {}", fit_ellipsis(&wait, w - 2)), faint)])));
+            total += 1;
+            // (the run it waits behind, a stopped turn's: what, how long, the key that stops it — the name cut,
+            // the time and the key whole)
+            if let Some((label, ran, key)) = queued.and_then(|q| q.left) {
+                let ran = format!(" · {ran}");
+                let hint = hint_spans(&[(key, "stop it")], dim, faint);
+                let hint_w: usize = hint.iter().map(|s| s.text.width()).sum();
+                let room = w.saturating_sub(2 + ran.width() + 2 + hint_w);
+                let mut row = vec![sp(format!("  {}", fit_ellipsis(&label, room)), dim), sp(ran, faint)];
+                row.push(sp("  ".into(), faint));
+                row.extend(hint);
+                pieces.push(Piece::Own(plain(row)));
+                total += 1;
+            }
+        }
+    }
+    let mut lines: Vec<Vec<Span>> = Vec::new();
     let thought_live = c.msgs.last().is_some_and(|m| m.role == Role::Thought);
     // (compacting can take a minute — said for what it is, whatever was going on before it)
     if crate::compaction::under_way(&editor.session) {
@@ -10063,11 +10099,25 @@ fn draw_chat(
         let pad = area.saturating_sub(intro.len()) / 2;
         lines = std::iter::repeat_n(Vec::new(), pad).chain(intro).collect();
     }
-    row_links.resize(lines.len(), None);
-    let max_scroll = lines.len().saturating_sub(area);
+    total += lines.len();
+    pieces.extend(lines.into_iter().map(|l| Piece::Own(plain(l))));
+    let max_scroll = total.saturating_sub(area);
     let scroll = c.scroll.min(max_scroll);
-    let from = lines.len().saturating_sub(area + scroll);
-    let shown = &lines[from..lines.len() - scroll];
+    let (from, to) = (total.saturating_sub(area + scroll), total - scroll);
+    // (only the rows on screen are looked at again — the rest stays where it's kept)
+    let mut shown: Vec<&ChatRow> = Vec::with_capacity(to - from);
+    let mut at = 0;
+    for p in &pieces {
+        let rows: &[ChatRow] = match p {
+            Piece::Kept(rows) => rows,
+            Piece::Own(row) => std::slice::from_ref(row),
+        };
+        let (a, b) = (from.max(at), to.min(at + rows.len()));
+        if a < b {
+            shown.extend(&rows[a - at..b - at]);
+        }
+        at += rows.len();
+    }
     let mut chat_links = editor.screen.chat_links.borrow_mut();
     let mut chat_calls = editor.screen.chat_calls.borrow_mut();
     let mut chat_ran = editor.screen.chat_ran.borrow_mut();
@@ -10207,22 +10257,21 @@ fn draw_chat(
     }
     for i in 0..area {
         chat_row_start(out, x0, y, edge(y), card)?;
-        if let Some((_, (a, b), call)) = row_ran.iter().find(|r| r.0 == from + i).filter(|_| i < shown.len())
-        {
-            chat_ran.push((y, text_x + a, text_x + b, call.to_string()));
+        if let Some((a, b)) = shown.get(i).and_then(|r| r.ran) {
+            chat_ran.push((y, text_x + a, text_x + b, shown[i].call.clone().unwrap_or_default()));
         }
         let used = match shown.get(i) {
-            Some(l) => match &row_links[from + i] {
+            Some(r) => match &r.link {
                 Some(link) => {
                     chat_links.push((y, text_x, text_x + w, link.clone()));
-                    if let Some((_, call)) = row_calls.iter().find(|r| r.0 == from + i) {
-                        chat_calls.push((y, call.to_string()));
+                    if let Some(call) = &r.call {
+                        chat_calls.push((y, call.clone()));
                     }
-                    chat_spans(out, l, card, w)?
+                    chat_spans(out, &r.spans, card, w)?
                 }
                 // `path:line` and an element's id in an answer: underlined, clickable
                 None => {
-                    let (l, found, ids) = underline_refs(editor, l, faint);
+                    let (l, found, ids) = underline_refs(editor, &r.spans, faint);
                     for (a, b, link) in found {
                         chat_links.push((y, text_x + a, text_x + b, link));
                     }
@@ -10908,6 +10957,24 @@ fn chat_row_start(
 fn chat_row_end(out: &mut impl Write, card: Style, chat_w: usize, used: usize) -> io::Result<()> {
     apply(out, card)?;
     queue!(out, Spaces(chat_w.saturating_sub(3 + used)))
+}
+
+fn hash_of(x: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::hash::DefaultHasher::new();
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// Whether a message's kept rows hold for this frame: the same key; the front file's language the same, if a
+/// code block without one took it; no grammar a block was painted plain for loaded since.
+fn still_laid(
+    l: &crate::chat::Laid,
+    key: &crate::chat::LaidKey,
+    lang: u64,
+    loaded: impl Fn(&str) -> bool,
+) -> bool {
+    l.key == *key && l.lang.is_none_or(|h| h == lang) && !l.unloaded.iter().any(|n| loaded(n))
 }
 
 fn chat_spans(
@@ -13855,6 +13922,301 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         measured("with_many_notes", worst, budget);
         assert!(worst < budget, "worst event→frame {worst:?} with 1000 notes (budget {budget:?})");
+    }
+
+    /// A conversation 200 messages long (50 turns: a question, a tool row, an answer with code, its time) and
+    /// an answer being written: what one streamed delta costs the frame.
+    fn long_chat(msgs: usize) -> Editor {
+        use crate::chat::{Look, Msg, Role};
+        let mut ed = Editor::new(Config::default());
+        let mut c = crate::chat::Chat::new();
+        let answer = "Here's how `parse` works — it reads src/lib.rs:12 and keeps **every** line it can.\n\n\
+                      ```rust\nfn parse(s: &str) -> u32 {\n    s.lines().count() as u32\n}\n```\n\n\
+                      - the caller hands it the whole text\n- nothing is copied twice\n\n\
+                      ```\nlet n = parse(text);\n```\n\nThat's all there is to it, as far as the tests go.";
+        // (every other answer's code all tagged: the file in front doesn't change it)
+        let tagged = answer.replace("```\nlet", "```rust\nlet");
+        for i in 0..msgs {
+            c.msgs.push(match i % 4 {
+                0 => Msg::new(Role::User, format!("Question {i}: how does parse handle a long input?"), ""),
+                1 => Msg::tool(
+                    Look {
+                        verb: "read",
+                        what: "src/lib.rs".into(),
+                        pattern: false,
+                        range: "L10–49".into(),
+                        link: None,
+                    },
+                    &format!("call{i}"),
+                ),
+                2 if i % 8 == 2 => Msg::new(Role::Assistant, answer, ""),
+                2 => Msg::new(Role::Assistant, tagged.as_str(), ""),
+                _ => Msg::new(Role::Note, "4.6s", ""),
+            });
+        }
+        c.msgs.push(Msg::new(Role::Assistant, "Starting", ""));
+        c.state = crate::chat::State::Writing;
+        // (the panel, not the minimized card following would make of it)
+        c.unfolded = true;
+        ed.session.chat = Some(c);
+        ed
+    }
+
+    /// A frame while Claude writes, 200 messages into the conversation: only the answer being written is laid
+    /// out again — what came before is kept (`Msg.cache`), so a stream's frame doesn't grow with the
+    /// conversation. Each delta's frame the best of `ROUNDS`, the worst delta.
+    #[test]
+    fn perf_budget_chat_frame_long_conversation() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_chat_frame_long_conversation") {
+            return;
+        }
+        let budget = frame_budget();
+        let deltas: Vec<String> = (0..24).map(|i| format!(" word{i}")).collect();
+        let keys: Vec<&str> = deltas.iter().map(String::as_str).collect();
+        let (worst, delta) = worst_of_best(&keys, || {
+            let mut ed = long_chat(200);
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 160, 45).unwrap();
+            assert!(String::from_utf8_lossy(&buf).contains("Starting"), "the chat's panel is drawn");
+            keys.iter()
+                .map(|d| {
+                    let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
+                    m.text.push_str(d);
+                    m.changed();
+                    buf.clear();
+                    let t = Instant::now();
+                    render(&mut ed, &mut buf, 160, 45).unwrap();
+                    t.elapsed()
+                })
+                .collect()
+        });
+        // (its own noise: the default, a quarter of a millisecond, is more than the frame is — laying the whole
+        // conversation out again, as before P2, is 0.2 ms here: a jump the history says)
+        let ms = worst.as_secs_f64() * 1000.0;
+        let line = format!(
+            "PERF chat_frame_long_conversation {ms:.3} budget={:.0} noise=0.05\n",
+            budget.as_secs_f64() * 1000.0
+        );
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        assert!(worst < budget, "delta {delta:?} took {worst:?} (budget {budget:?})");
+    }
+
+    /// Each message's kept rows, held (so a block laid out again can't land where a freed one was).
+    type Kept = Vec<Option<std::sync::Arc<[crate::chat::ChatRow]>>>;
+
+    fn kept_rows(ed: &Editor) -> Kept {
+        let c = ed.session.chat.as_ref().unwrap();
+        c.msgs.iter().map(|m| m.cache.borrow().as_ref().map(|l| l.rows.clone())).collect()
+    }
+
+    /// The messages laid out again between `a` and `b`.
+    fn laid_again(a: &Kept, b: &Kept) -> Vec<usize> {
+        let same = |x: &Option<_>, y: &Option<_>| match (x, y) {
+            (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
+            _ => false,
+        };
+        (0..a.len()).filter(|&i| !same(&a[i], &b[i])).collect()
+    }
+
+    fn chat_frame(ed: &mut Editor, w: u16) -> Vec<u8> {
+        let mut buf = Vec::new();
+        render(ed, &mut buf, w, 45).unwrap();
+        buf
+    }
+
+    /// A frame lays out only the messages that changed: none when nothing did; an old answer with a word
+    /// replaced in place (its length the same) and a tool row given its verdict, those two; the one being
+    /// written, only it. A width change lays out every one, once; another language in front, only the answers
+    /// with a code block that has none.
+    #[test]
+    fn the_chat_lays_out_only_the_messages_that_changed() {
+        // (Rust's grammar there from the start: its blocks painted once — one loaded later lays them out again)
+        let rust = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap());
+        let mut ed = long_chat(40);
+        chat_frame(&mut ed, 160);
+        let before = kept_rows(&ed);
+        assert!(before.iter().all(Option::is_some), "every message laid out once");
+        chat_frame(&mut ed, 160);
+        assert_eq!(laid_again(&before, &kept_rows(&ed)), [0usize; 0], "nothing changed, nothing laid out");
+        let c = ed.session.chat.as_mut().unwrap();
+        let m = &mut c.msgs[2];
+        m.text = m.text.replacen("every", "EVERY", 1);
+        m.changed();
+        let m = &mut c.msgs[5];
+        m.look.as_mut().unwrap().range = "L10–49 · ok".into();
+        m.changed();
+        chat_frame(&mut ed, 160);
+        let now = kept_rows(&ed);
+        assert_eq!(laid_again(&before, &now), [2, 5], "the old answer and the tool row, nothing else");
+        let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
+        m.text.push_str(" more");
+        m.changed();
+        chat_frame(&mut ed, 160);
+        let streamed = kept_rows(&ed);
+        assert_eq!(laid_again(&now, &streamed), [40], "only the answer being written");
+        chat_frame(&mut ed, 140);
+        let narrower = kept_rows(&ed);
+        assert_eq!(laid_again(&streamed, &narrower).len(), 41, "another width: every message");
+        chat_frame(&mut ed, 140);
+        assert_eq!(laid_again(&narrower, &kept_rows(&ed)), [0usize; 0], "the same width again: none");
+        let Ok(rust) = rust else { return };
+        ed.docs[0].syntax = Some(crate::syntax::Syntax::parsed(rust, &ed.docs[0].text));
+        chat_frame(&mut ed, 140);
+        let untagged = laid_again(&narrower, &kept_rows(&ed));
+        assert_eq!(untagged, [2, 10, 18, 26, 34], "a Rust file in front: the answers with untagged code");
+    }
+
+    /// An answer whose code block was painted plain, its grammar not loaded yet, is laid out again once it
+    /// is (a picker's preview, a test run loaded it) — and only then; the front file's language matters only
+    /// to one that took it.
+    #[test]
+    fn a_kept_answer_waits_for_the_grammar_it_was_painted_plain_for() {
+        use crate::chat::{Laid, LaidKey};
+        let key = LaidKey { version: 1, len: 10, width: 60, look: 7, state: 0 };
+        let laid = |lang, unloaded: &[&str]| Laid {
+            key,
+            lang,
+            unloaded: unloaded.iter().map(|s| s.to_string()).collect(),
+            rows: Vec::new().into(),
+        };
+        let none = |_: &str| false;
+        assert!(still_laid(&laid(None, &["python"]), &key, 1, none), "not loaded yet: kept");
+        assert!(!still_laid(&laid(None, &["python"]), &key, 1, |n| n == "python"), "loaded: laid again");
+        assert!(still_laid(&laid(None, &[]), &key, 2, none), "no untagged block: any file in front");
+        assert!(
+            still_laid(&laid(Some(1), &[]), &key, 1, none),
+            "an untagged block, the same file's language"
+        );
+        assert!(!still_laid(&laid(Some(1), &[]), &key, 2, none), "an untagged block, another language");
+        // (what a render notes: the block without a language, and one in a grammar not loaded — one of these
+        // that no test here loaded, if any)
+        let loader = crate::syntax::Loader::global();
+        let Some(lang) = ["haskell", "zig", "elixir", "ocaml", "python"]
+            .into_iter()
+            .find(|l| crate::syntax::resolve(l).is_some_and(|s| loader.loaded(&s.name).is_none()))
+        else {
+            return;
+        };
+        let mut read = crate::markdown::Read::default();
+        let src = format!("```{lang}\nx\n```\n\n```\ny\n```\n");
+        crate::markdown::render_reading(&src, &crate::theme::Theme::default(), None, &mut read);
+        let name = crate::syntax::resolve(lang).unwrap().name.clone();
+        assert_eq!(read, crate::markdown::Read { default_lang: true, unloaded: vec![name] });
+    }
+
+    /// A turn's steps redraw what they end without the messages changing: a thought no longer last folds to
+    /// its two rows, a tool row no longer live goes from `●` to `◦`, the answer done loses its `▍` — each kept
+    /// row as a conversation drawn first at that step has it.
+    #[test]
+    fn a_turns_steps_redraw_what_they_end() {
+        use crate::chat::{Look, Msg, Role, State};
+        let look = Look {
+            verb: "read",
+            what: "src/lib.rs".into(),
+            pattern: false,
+            range: "L1–9".into(),
+            link: None,
+        };
+        let thought = format!("**Reading**\n\n{}", "One line of thought about it.\n\n".repeat(10));
+        let states = [State::Thinking, State::Thinking, State::Writing, State::Idle];
+        // (the conversation at step `k`, made at once)
+        let at = |k: usize| {
+            let mut ed = Editor::new(Config::default());
+            let mut c = crate::chat::Chat::new();
+            c.unfolded = true;
+            c.msgs.push(Msg::new(Role::User, "why?", ""));
+            c.msgs.push(Msg::new(Role::Thought, thought.as_str(), ""));
+            if k >= 1 {
+                c.msgs.push(Msg::tool(look.clone(), "t1"));
+            }
+            if k >= 2 {
+                c.msgs.push(Msg::new(Role::Assistant, "Done.", ""));
+            }
+            if k >= 3 {
+                c.msgs.push(Msg::new(Role::Note, "4.6s", ""));
+            }
+            c.state = states[k];
+            ed.session.chat = Some(c);
+            ed
+        };
+        let styled = |ed: &Editor| format!("{:?}", kept_rows(ed));
+        let rows = |ed: &Editor, i: usize| kept_rows(ed)[i].clone().unwrap();
+        let mut ed = at(0);
+        chat_frame(&mut ed, 160);
+        assert!(rows(&ed, 1).len() > 3, "the live thought, unfolded");
+        for (k, &state) in states.iter().enumerate().skip(1) {
+            let c = ed.session.chat.as_mut().unwrap();
+            match k {
+                1 => c.msgs.push(Msg::tool(look.clone(), "t1")),
+                2 => c.msgs.push(Msg::new(Role::Assistant, "Done.", "")),
+                _ => c.msgs.push(Msg::new(Role::Note, "4.6s", "")),
+            }
+            c.state = state;
+            chat_frame(&mut ed, 160);
+            let mut fresh = at(k);
+            chat_frame(&mut fresh, 160);
+            assert_eq!(styled(&ed), styled(&fresh), "step {k}: as drawn first there");
+        }
+        assert_eq!(rows(&ed, 1).len(), 3, "the thought folded: its air and two rows");
+        assert_eq!(rows(&ed, 2)[0].spans[0].text, "◦", "the tool row no longer live");
+        assert!(!rows(&ed, 3).iter().flat_map(|r| &r.spans).any(|s| s.text == "▍"), "the answer done: no ▍");
+    }
+
+    /// A theme changed while a conversation is up recolours what was already said: the frame is the one a
+    /// conversation drawn first in that theme gets — and a theme read again (its file changed, its name
+    /// not) lays every message out again.
+    #[test]
+    fn old_answers_take_a_new_theme() {
+        let idle = |n| {
+            let mut ed = long_chat(n);
+            ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+            ed
+        };
+        // (a conversation that fits whole: the answer's inline code, in the theme's colours, on screen)
+        let mut ed = idle(4);
+        let other = if ed.theme.name == "hanji" { "meok" } else { "hanji" };
+        let first = chat_frame(&mut ed, 160);
+        ed.theme = crate::theme::load(other).unwrap();
+        let after = chat_frame(&mut ed, 160);
+        let mut fresh = idle(4);
+        fresh.theme = crate::theme::load(other).unwrap();
+        chat_frame(&mut fresh, 160);
+        // (the rows' styles, compared whole — the frame's bytes are the terminal's colours, which may fold two
+        // themes' yellows into one)
+        let styled = |ed: &Editor| format!("{:?}", kept_rows(ed));
+        assert_ne!(after, first, "another theme, other colours");
+        assert_eq!(styled(&ed), styled(&fresh), "the old answers in the new theme's colours");
+        let laid = kept_rows(&ed);
+        ed.theme = crate::theme::load(other).unwrap();
+        chat_frame(&mut ed, 160);
+        assert_eq!(laid_again(&laid, &kept_rows(&ed)).len(), 5, "a theme read again: every message laid out");
+    }
+
+    /// A code block with no language is coloured as the file in front: another file's language in front
+    /// recolours the answers already there, as a conversation drawn first beside that file has them.
+    #[test]
+    fn an_answers_untagged_code_follows_the_file_in_front() {
+        let Ok(rust) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) else {
+            return;
+        };
+        let in_rust = |ed: &mut Editor| {
+            ed.docs[0].syntax = Some(crate::syntax::Syntax::parsed(rust.clone(), &ed.docs[0].text));
+        };
+        let idle = |n| {
+            let mut ed = long_chat(n);
+            ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+            ed
+        };
+        let mut ed = idle(12);
+        let plain = chat_frame(&mut ed, 160);
+        in_rust(&mut ed);
+        let after = chat_frame(&mut ed, 160);
+        let mut fresh = idle(12);
+        in_rust(&mut fresh);
+        chat_frame(&mut fresh, 160);
+        let styled = |ed: &Editor| format!("{:?}", kept_rows(ed));
+        assert_ne!(after, plain, "`let n = parse(text);` coloured as Rust");
+        assert_eq!(styled(&ed), styled(&fresh), "the old answers' untagged code as Rust");
     }
 
     /// Same budget on an 8 MB file while a plugin runs away (the demo plugin's endless loop, then a command

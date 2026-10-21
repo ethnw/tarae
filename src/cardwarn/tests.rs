@@ -490,11 +490,7 @@ fn ask(ed: &mut crate::editor::Editor, generation: u64, n: u64, cmd: &str) -> Op
     });
     let look =
         crate::chat::Look { verb: "run", what: cmd.into(), pattern: true, range: String::new(), link: None };
-    c.msgs.push(crate::chat::Msg {
-        look: Some(look),
-        call: id,
-        ..crate::chat::Msg::new(crate::chat::Role::Tool, "", "")
-    });
+    c.msgs.push(crate::chat::Msg::tool(look, &id));
     let msg = serde_json::json!({"jsonrpc": "2.0", "id": n, "method": "tools/call",
         "params": {"name": "run", "arguments": input}});
     assert!(crate::tools::mcp(ed, generation, &format!("r{n}"), &msg).is_none(), "it waits");

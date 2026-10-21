@@ -1,6 +1,7 @@
 //! `cargo xtask scenes [--out DIR] [scene …]` — tarae's main surfaces as shots, each in both themes (meok and
 //! hanji) at 80×24 and 160×45: `<DIR>/<scene>-<dark|light>-<80|160>.png` (default `target/scenes`); every scene
-//! when none is named, `--list` names them. For a change to the screen: the same scenes before and after.
+//! when none is named, `--list` names them. For a change to the screen: the same scenes before and after, and
+//! `--compare BEFORE AFTER` says which shots differ, pixel for pixel, and where.
 //!
 //! Each shot gets a demo crate of its own — a git repository in a fresh temp folder: one commit, one file changed
 //! since, one new — so what one shot saves never shows in the next. Its config is empty but for `editor.lsp =
@@ -19,7 +20,7 @@ use serde_json::{Value, json};
 use crate::shot::{self, Setup};
 use crate::{Result, root};
 
-const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [scene …] | scenes --list";
+const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [scene …] | scenes --list | scenes --compare A B";
 
 /// One surface: the stand-in claude's script, the files tarae opens, the keys sent (as `cargo xtask shot`
 /// takes them: `@1` waits a second, `@?text` until `text` is on screen, `@20?text` at most 20 s).
@@ -116,6 +117,54 @@ const SCENES: &[Scene] = &[
     },
 ];
 
+/// `scenes --compare A B`: each shot in `A` against `B`'s of its name, pixel for pixel — `same`, or the box the
+/// differing pixels lie in, to look at there (a turn's time or a temp path moves from run to run).
+fn compare(a: &Path, b: &Path) -> Result<()> {
+    let read = |p: &Path| -> Result<(u32, u32, Vec<u8>)> {
+        let file = std::fs::File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let mut r = png::Decoder::new(io::BufReader::new(file))
+            .read_info()
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        let mut buf = vec![0; r.output_buffer_size().ok_or("too big a shot")?];
+        let info = r.next_frame(&mut buf).map_err(|e| format!("{}: {e}", p.display()))?;
+        buf.truncate(info.buffer_size());
+        Ok((info.width, info.height, buf))
+    };
+    let mut names: Vec<String> = std::fs::read_dir(a)
+        .map_err(|e| format!("{}: {e}", a.display()))?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".png"))
+        .collect();
+    names.sort();
+    let mut differ = 0;
+    for n in &names {
+        let (x, y) = (read(&a.join(n))?, read(&b.join(n))?);
+        if (x.0, x.1) != (y.0, y.1) {
+            differ += 1;
+            println!("{n}: {}×{} against {}×{}", x.0, x.1, y.0, y.1);
+            continue;
+        }
+        let (w, px) = (x.0 as usize, x.2.len() / (x.0 * x.1) as usize);
+        let mut boxed: Option<(usize, usize, usize, usize)> = None;
+        for (i, (p, q)) in x.2.chunks(px).zip(y.2.chunks(px)).enumerate() {
+            if p != q {
+                let (cx, cy) = (i % w, i / w);
+                let (x0, y0, x1, y1) = boxed.unwrap_or((cx, cy, cx, cy));
+                boxed = Some((x0.min(cx), y0.min(cy), x1.max(cx), y1.max(cy)));
+            }
+        }
+        match boxed {
+            None => println!("{n}: same"),
+            Some((x0, y0, x1, y1)) => {
+                differ += 1;
+                println!("{n}: differs in x {x0}..={x1}, y {y0}..={y1} (of {}×{})", x.0, x.1);
+            }
+        }
+    }
+    println!("{} of {} the same", names.len() - differ, names.len());
+    Ok(())
+}
+
 const SIZES: [(u16, u16); 2] = [(80, 24), (160, 45)];
 const BACKGROUNDS: [&str; 2] = ["dark", "light"];
 
@@ -126,6 +175,10 @@ pub fn run(args: &[String]) -> Result<()> {
         let pause = Duration::from_millis(40);
         return claude(script, stdin.lock(), &mut io::stdout().lock(), pause)
             .map_err(|e| format!("the stand-in claude: {e}"));
+    }
+    if args.first().is_some_and(|a| a == "--compare") {
+        let [_, a, b] = args else { return Err(USAGE.into()) };
+        return compare(Path::new(a), Path::new(b));
     }
     let (mut out, mut names) = (root().join("target/scenes"), Vec::new());
     let mut it = args.iter();

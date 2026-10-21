@@ -14,12 +14,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crossterm::style::Color;
 use toml::Value;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Style {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -71,6 +71,9 @@ impl Style {
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub name: String,
+    /// This theme as read, apart from every other read (a copy keeps it): what was drawn in it is kept by it
+    /// (the chat's laid-out messages) — a theme file read again under the same name is another.
+    pub id: u64,
     styles: HashMap<String, Style>,
     /// Problems hit while reading (bad color names·unknown attributes) — shown as config warnings.
     pub warnings: Vec<String>,
@@ -258,7 +261,9 @@ fn from_table(name: &str, table: &toml::Table) -> Theme {
             styles.insert(k.clone(), st);
         }
     }
-    Theme { name: name.to_string(), styles, warnings, captures: CaptureStyles::default() }
+    static READ: AtomicU64 = AtomicU64::new(1);
+    let id = READ.fetch_add(1, Ordering::Relaxed);
+    Theme { name: name.to_string(), id, styles, warnings, captures: CaptureStyles::default() }
 }
 
 /// Palette — values may be other palette names (`accent = "coral"`, any depth, warns on cycles).
