@@ -175,9 +175,14 @@ The aim is to state what the sandbox guarantees and show that it holds.
    (2026-10-20, `43688c80`): extended attributes and ACLs are served as a mode is in tiers own and host, so
    `install -m`, `cp --preserve=all` and `rsync -AX` work in the project; `security.` and `trusted.` are refused by
    name, as root too. Tier offline stays a full tier with mode and times open, said (user decision 2026-10-18).
-   **Next, D2 A** (user decision 2026-10-20), built outside — it needs tier own: there, the key files in the key
-   places masked per command, by a fresh breadth-first walk each run capped at about 20,000 entries, the folders
-   it didn't walk named in the report. Left: nested user namespaces in tier own are a piece of their own.
+   **D2 A** (user decision 2026-10-20): in tier own the key files in the key places outside the project are hidden
+   per command, found by a fresh breadth-first walk each run capped at 20,000 entries — what no run writes first,
+   by descriptors beneath each place (no link followed, no other filesystem entered, places on NFS/FUSE skipped
+   by type), the folders not reached named in the report; a hidden key a run can't remove is named too. Built
+   outside, imported into the `sandboxa` session, six reviewer rounds; committed on its branch (`332df00a`,
+   2026-10-21) and held for the outside session's tier-own pass (the user run reaches its cases, both break-onces
+   fail as meant; the whole filters last). Left: the child's skipped keys reported back before `exec` (a protocol
+   change — the report says "if still there"); nested user namespaces in tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
 
@@ -376,7 +381,12 @@ main that has what it waits for, and the user says go:
   said so; `C-s` follows `llm.screen-terminal`. Phases: P1 view mode for the chat and the terminal, P2 quoting, P3
   the run panels, P4 the mouse. Under way: P1a done (2026-10-20, `2696b066`), the chat's view mode — `esc` from its
   input or `space >` from anywhere, `q`/`esc` leave, `y` copies; held still while Claude writes, `G` catches up; one
-  cursor on screen, where the keys go (`keys_to()`). P1b, the terminal, next.
+  cursor on screen, where the keys go (`keys_to()`). P1b, the terminal, built in the `view1` session (2026-10-21):
+  `C-\` goes round (code → program → view → code), the scrollback and screen read as text with the code's keys,
+  the program's output held by withholding the reader's acks while you read (its write blocks, as under a real
+  terminal's flow control), the wheel into it, `[keys.terminal]` merged over the defaults with `to_program` to
+  give a key back — four reviewer rounds so far, the fifth's fixes under way; then P2 quoting in a fresh
+  conversation.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
   `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the
@@ -514,10 +524,16 @@ git tab, search, a short Kubernetes one.
   rule): the same act has the same key, the same words and the same look on every surface. The UX audit (the
   `uxaudit` session's `target/sb/uxaudit-plan.md`) laid every surface side by side, held against Helix and zellij
   first. Decided: `q` closes every list or output panel (the review rail's `q` ends the review), `esc code` where a
-  surface stays and `esc close` where it goes, line numbers absolute by default. Piece 1, those words and keys, is
-  built and in review; the next pieces in the plan's order: hints where none are, scrolling alike, the first hour
-  (the tutor, which-key and the palette as a first-timer meets them — what was the first-use check), Helix's
-  picker keys, keys inside zellij, a card never taking keys mid-typing, and the rest.
+  surface stays and `esc close` where it goes, line numbers absolute by default. Landed: piece 1, those words and
+  keys (`c885086e`, 2026-10-21); piece 2, a card never taking the keys mid-typing (one quiet second after the last
+  key, said as `▲1 waiting · C-q` and in the state; test and shot drivers run with it off) and hints where none
+  were — pickers, prompts, the rail's rows, the bottom panels' way in (`62491cdf`). Built, in review: pieces 4 and
+  6 — scrolling alike (one `list_move` table for every list and output panel, `C-e`/`C-y`, `S-PageUp` over the
+  terminal's history) and Helix's picker keys (`C-v`/`C-s` split, `C-t` preview, `A-ret`). Then 5, the first hour
+  (the tutor, which-key and the palette as a first-timer meets them — what was the first-use check), and 7, keys
+  inside zellij. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
+  grants, viewed marks lost on a review's re-open, moved-brace re-flags, the reviewer re-reading whole, ten keys
+  to commit — and tier-own tests only runnable outside) for the next frictions batch.
 - **A memory card and panel**: what Claude remembers for the project, in Claude Code's own format.
 - **The run-flow panel**: one run's processes, writes, connections and refusals, from sources that need no
   privileges, on macOS too.
