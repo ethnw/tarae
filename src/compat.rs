@@ -1129,6 +1129,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn with_root: turns_dir",
         "checkpoints kept in memory only: the snapshot still runs",
     ),
+    (
+        "src/editor.rs",
+        "in fn with_root: wet_ink",
+        "drawing only: the head of an answer being written drawn wet or dry — nothing a run does or reads",
+    ),
     ("src/sandbox.rs", "fn asked: a test build's twin", ASKED),
     ("src/sandbox.rs", "in fn now: asked", ASKED),
     ("src/sandbox.rs", "in fn now: env", "drops the proxy variables: `as_shipped`'s `Here` takes them all"),
