@@ -472,7 +472,7 @@ impl Offer {
             warning: None,
             warnings: Vec::new(),
             diff: None,
-            since: Instant::now(),
+            since: crate::clock::now(),
             drawn: Default::default(),
             asked: None,
             held: None,
@@ -1211,7 +1211,7 @@ impl crate::editor::Editor {
         }
         self.offer_seq += 1;
         o.id = self.offer_seq;
-        o.since = Instant::now();
+        o.since = crate::clock::now();
         // (the user's own: the input that asked is the last one given — a card that comes after more typing,
         // or from work nobody's input started, waits its turn: #205)
         o.came = self.input_seq;
@@ -1481,7 +1481,7 @@ impl crate::editor::Editor {
         }
         let mut o = self.offers.remove(0);
         self.offer_said(&o, key);
-        o.state = OfferState::Installing(Instant::now());
+        o.state = OfferState::Installing(crate::clock::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
         self.card_answered(id);
@@ -1590,7 +1590,7 @@ impl crate::editor::Editor {
         }
         let mut o = self.offers.remove(0);
         self.offer_answered(&o, 'a');
-        o.state = OfferState::Installing(Instant::now());
+        o.state = OfferState::Installing(crate::clock::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
         if let What::Limit(a) = what {
@@ -1726,7 +1726,7 @@ impl crate::editor::Editor {
         }
         let mut o = self.offers.remove(0);
         self.offer_said(&o, if both { 'D' } else { 'R' });
-        o.state = OfferState::Installing(Instant::now());
+        o.state = OfferState::Installing(crate::clock::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
         if let What::SessionEnd(e) = what {
@@ -2186,7 +2186,7 @@ impl crate::editor::Editor {
             || self
                 .offer_seen
                 .get()
-                .is_some_and(|(id, rev, at)| (id, rev) == (o.id, o.rev) && at.elapsed() >= SETTLE)
+                .is_some_and(|(id, rev, at)| (id, rev) == (o.id, o.rev) && crate::clock::since(at) >= SETTLE)
     }
 
     /// Brings the `i`-th stacked card to the front (when a back card is clicked).

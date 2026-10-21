@@ -22,6 +22,7 @@ mod chrome;
 mod claudetrust;
 mod claudeupdate;
 mod clipboard;
+mod clock;
 mod cmdline;
 mod codereview;
 mod codeview;
@@ -145,6 +146,8 @@ mod share;
 mod shell;
 mod sidebar;
 mod signature;
+#[cfg(test)]
+mod sim;
 mod sinceyes;
 mod sizes;
 mod snapshot;

@@ -1,0 +1,133 @@
+//! The time logic decides by — a card settling, a toast's life, how long a run waited — read in one place, so a
+//! simulated run (`sim.rs`, test builds only) can hold it still and move it by seed. Logging and measurements
+//! read the real clock as they always did; what reads it here is what behaves differently as time passes.
+//! Outside a simulation these are `Instant::now()` and `SystemTime::now()`.
+
+use std::time::{Duration, Instant, SystemTime};
+
+/// Now, as logic reads it.
+#[inline]
+pub fn now() -> Instant {
+    #[cfg(test)]
+    if let Some(t) = crate::sim::now() {
+        return t;
+    }
+    Instant::now()
+}
+
+/// The wall clock, as logic reads it.
+#[inline]
+pub fn system() -> SystemTime {
+    #[cfg(test)]
+    if let Some(t) = crate::sim::system() {
+        return t;
+    }
+    SystemTime::now()
+}
+
+/// How long since `t` (one of `now`'s) — `t.elapsed()` on this clock; none for a `t` still to come.
+#[inline]
+pub fn since(t: Instant) -> Duration {
+    now().saturating_duration_since(t)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every clock read in tarae's code that isn't on this list goes through `clock` — and the list only
+    /// shrinks: a file's count is what's left of its raw reads (`CLOCK_READS`) in what a non-test build
+    /// compiles, logging and measurements among them. A read added fails here; one converted fails too until
+    /// its count goes down (the message prints the table as it is now).
+    #[test]
+    fn every_clock_read_in_logic_goes_through_clock() {
+        let now = crate::sim::lint::counts(CLOCK_READS, &["clock.rs"]);
+        crate::sim::lint::only_shrinks("clock reads", &now, RAW_CLOCK_READS);
+    }
+
+    /// What a raw clock read looks like — called, or passed as a value (`.map(|_| Instant::now)`,
+    /// `.map(Instant::elapsed)`).
+    const CLOCK_READS: &[&str] = &["Instant::now", "SystemTime::now", ".elapsed()", "::elapsed"];
+
+    /// Second review 3: a clock read passed as a function value is one too.
+    #[test]
+    fn a_clock_read_passed_as_a_value_counts() {
+        let f = "fn f(v: Option<u8>) {\n    let a = v.map(|_| Instant::now);\n    let b = w.map(Instant::elapsed);\n    let c = SystemTime::now();\n}\n";
+        let files = [("main.rs".to_string(), "mod a;\n".to_string()), ("a.rs".to_string(), f.to_string())];
+        let n = crate::sim::lint::count_tree(&files, CLOCK_READS, &[]);
+        assert_eq!(n.get("a.rs"), Some(&3), "{n:?}");
+    }
+
+    /// Raw clock reads left, per file (paths under `src/`).
+    const RAW_CLOCK_READS: &[(&str, usize)] = &[
+        ("allow.rs", 1),
+        ("attach.rs", 4),
+        ("builds.rs", 3),
+        ("calls.rs", 1),
+        ("cards.rs", 3),
+        ("chat.rs", 5),
+        ("chats.rs", 2),
+        ("claudeupdate.rs", 1),
+        ("codereview.rs", 1),
+        ("compaction.rs", 1),
+        ("containers.rs", 1),
+        ("dap.rs", 4),
+        ("disk.rs", 3),
+        ("dsyms.rs", 1),
+        ("editor.rs", 13),
+        ("edits.rs", 1),
+        ("features.rs", 3),
+        ("follow.rs", 10),
+        ("fswatch.rs", 8),
+        ("gitmenu.rs", 1),
+        ("gitpanel.rs", 2),
+        ("gitrepo.rs", 1),
+        ("grammar.rs", 4),
+        ("inbox.rs", 4),
+        ("llm.rs", 6),
+        ("log.rs", 1),
+        ("lsp.rs", 3),
+        ("lsp_editor.rs", 15),
+        ("main.rs", 2),
+        ("nav.rs", 6),
+        ("picker.rs", 3),
+        ("plugin/abi.rs", 1),
+        ("plugin/cli.rs", 2),
+        ("plugin/io.rs", 7),
+        ("plugin/perm.rs", 1),
+        ("preflight.rs", 5),
+        ("procs.rs", 13),
+        ("queued.rs", 6),
+        ("reads.rs", 7),
+        ("reaper.rs", 3),
+        ("rebase.rs", 3),
+        ("recovery.rs", 6),
+        ("refactor.rs", 2),
+        ("restart.rs", 6),
+        ("reviewer.rs", 5),
+        ("runhomes.rs", 1),
+        ("sandbox.rs", 9),
+        ("sandbox/keeper.rs", 13),
+        ("sandbox/linux.rs", 3),
+        ("sandbox/proxy.rs", 3),
+        ("sandbox/proxy/egress.rs", 4),
+        ("sandbox/proxy/relay.rs", 2),
+        ("sandbox/supervisor.rs", 2),
+        ("share.rs", 8),
+        ("snapshot.rs", 1),
+        ("spawn.rs", 2),
+        ("stuck.rs", 1),
+        ("syntax.rs", 4),
+        ("task.rs", 6),
+        ("term.rs", 15),
+        ("testcode.rs", 1),
+        ("testing.rs", 7),
+        ("tools.rs", 5),
+        ("trace.rs", 3),
+        ("uisocket.rs", 1),
+        ("uistate.rs", 6),
+        ("uistate/claude.rs", 3),
+        ("uistate/panels.rs", 1),
+        ("uistate/watch.rs", 1),
+        ("usage.rs", 1),
+        ("worktree.rs", 10),
+    ];
+}

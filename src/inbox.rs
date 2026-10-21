@@ -17,7 +17,7 @@
 //! quiet are listed after everything that asks for an answer (#171), and so is a reviewer that ended in a
 //! session behind (#195) — news to read there, gone once that session is in front.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -101,14 +101,15 @@ fn waited(ms: u64) -> String {
 
 /// The inbox's order — the one place it's decided: the card the user's own command just made while it's in
 /// front (`yours`, #205 — user decision 2026-10-13: `C-q` and `enter` go to it, Claude's stays stacked), then
-/// what asks for an answer before what doesn't, oldest first, then the order they came in (an entry, when it
-/// came, its card's id).
-fn in_line(a: &(Entry, Instant, u64), b: &(Entry, Instant, u64), yours: Option<u64>) -> std::cmp::Ordering {
+/// what asks for an answer before what doesn't, oldest first, then the order they came in (an entry, how long
+/// it has waited — each on its own clock, a card's on logic's and the rest's on the real one, so the two never
+/// meet as instants — its card's id).
+fn in_line(a: &(Entry, Duration, u64), b: &(Entry, Duration, u64), yours: Option<u64>) -> std::cmp::Ordering {
     let first = |e: &Entry| yours.is_none() || e.card() != yours;
     let quiet = |e: &Entry| !e.asks_answer();
     (first(&a.0).cmp(&first(&b.0)))
         .then(quiet(&a.0).cmp(&quiet(&b.0)))
-        .then(a.1.cmp(&b.1))
+        .then(b.1.cmp(&a.1))
         .then(a.2.cmp(&b.2))
 }
 
@@ -150,9 +151,11 @@ impl Editor {
     /// its own moment: two cards come within one swapped between `keys_to`'s read and `handle_key`'s — the
     /// routing test, now and then); things that came at the same instant keep the order they came in.
     pub(crate) fn inbox_from(&self, cards: &[CardState]) -> Vec<Entry> {
-        let now = Instant::now();
+        // (a card's time is on logic's clock, `clock`; the rest's are still the real one's — a review's, a run's
+        // last output, a reviewer's, a rebase's, Claude's edits and reads — each read against its own)
+        let (now, real) = (crate::clock::now(), Instant::now());
         // (`seq`: a card's id counts up as cards come — the tie-break)
-        let mut v: Vec<(Entry, Instant, u64)> = cards
+        let mut v: Vec<(Entry, Duration, u64)> = cards
             .iter()
             .filter(|c| c.state != "installing")
             .map(|c| {
@@ -165,13 +168,17 @@ impl Editor {
                     up: c.up,
                 };
                 let seq = e.card().unwrap_or(0);
-                (e, c.since, seq)
+                (e, now.saturating_duration_since(c.since), seq)
             })
             .collect();
         for l in std::iter::once(&self.session).chain(&self.sessions) {
             let s = session_id(l.id);
             let entry = |id: String, kind, asks: String, since, up| {
-                (Entry { id, session: s.clone(), kind, asks, waited_ms: ms(since, now), up }, since, u64::MAX)
+                (
+                    Entry { id, session: s.clone(), kind, asks, waited_ms: ms(since, real), up },
+                    real.saturating_duration_since(since),
+                    u64::MAX,
+                )
             };
             if let Some(r) = l.review.as_ref().filter(|r| r.ready) {
                 let file = self.docs.iter().find(|d| d.id == r.doc_id).map(|d| d.display_name(&l.root));
@@ -184,7 +191,7 @@ impl Editor {
             }
             // Claude's run printing nothing for minutes: something to look at — its turn waits on it, and
             // only the user can stop it (#157). Waited since it went quiet.
-            for (id, _, label, last, said) in silent_runs(l, now) {
+            for (id, _, label, last, said) in silent_runs(l, real) {
                 v.push(entry(id, "silent-run", format!("{label} · {said}"), last, "running"));
             }
             // Its reviewer ended while it was behind (#195): news, not a question — what it found, where to

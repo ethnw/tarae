@@ -369,7 +369,7 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     editor.toasts_drawn(card);
     // (what came before this is drawn, input too — `Editor::frame_due`; after `toasts_drawn`, which restarts
     // the time of an error shown at last)
-    (editor.frame_at, editor.frame_input) = (Some(std::time::Instant::now()), editor.input_seq);
+    (editor.frame_at, editor.frame_input) = (Some(crate::clock::now()), editor.input_seq);
     // (a go-to's answer on screen: its timing to the log — N1)
     editor.trace_drawn();
     // (a run's wave and wait counter want frames only while their slot is drawn — this frame's say)
@@ -391,13 +391,13 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     // The front card in sight since when (a new one, or new text, starts it over)
     let front = offer.as_ref().and(editor.offers.first()).map(|o| (o.id, o.rev));
     if front != editor.offer_seen.get().map(|(id, rev, _)| (id, rev)) {
-        editor.offer_seen.set(front.map(|(id, rev)| (id, rev, std::time::Instant::now())));
+        editor.offer_seen.set(front.map(|(id, rev)| (id, rev, crate::clock::now())));
     }
     // (first drawn: its `card` line counts the answer's time from here — `cards.rs`)
     if let Some(o) = editor.offers.first().filter(|_| front.is_some())
         && o.drawn.get().is_none()
     {
-        o.drawn.set(Some(std::time::Instant::now()));
+        o.drawn.set(Some(crate::clock::now()));
     }
     // Drawn whole: all of it has been in sight (a cut one is only once `v` showed it — its bar is no card in
     // sight)

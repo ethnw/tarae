@@ -243,6 +243,34 @@ fn the_order_is_when_each_came_however_it_is_read() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Review (detsim P1, note 8): a card's wait is on logic's clock — a simulation's here, moved on ten minutes —
+/// and an edit's on the real one, a minute: the two are ordered by how long each has waited on its own clock,
+/// never as instants of two clocks. The card first.
+#[test]
+fn the_order_is_by_each_ones_wait_on_its_own_clock() {
+    let mut sim =
+        crate::sim::Sim::new("inbox_clocks", crate::sim::Choices::seeded(1), Duration::from_secs(30));
+    let (mut ed, dir, back, _) = three("clocks");
+    let mut card = claudes(1, 0);
+    card.since = crate::clock::now();
+    up(&mut ed, card);
+    let mut chat = crate::chat::Chat::new();
+    chat.edits.queue.push_back(crate::edits::Pending {
+        request_id: "e1".into(),
+        tool: "Edit".into(),
+        input: serde_json::json!({ "file_path": "src/a.rs" }),
+        reason: String::new(),
+        since: Instant::now() - Duration::from_secs(60),
+        protected: Some(false),
+    });
+    session(&mut ed, back).chat = Some(chat);
+    sim.wait(Duration::from_secs(600));
+    let ids: Vec<String> = ed.inbox().into_iter().map(|e| e.id).collect();
+    assert_eq!(ids, [format!("card#{}", ed.offers[0].id), format!("edit#s{back}:e1")]);
+    drop(sim);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// #171: a run of Claude's quiet for minutes (a slow `apt-get` in docker) is in the inbox, but after a card
 /// that waits for an answer — even one that came long after it went quiet, in another session. `C-q` goes to
 /// the card first; the quiet run stays reachable after it.

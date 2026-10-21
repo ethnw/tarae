@@ -234,7 +234,7 @@ impl Toast {
             ToastKind::Error => 60_000,
         };
         let life = std::time::Duration::from_millis(ms);
-        Toast { text, kind, at: std::time::Instant::now(), life, step: None, shown: false, id: 0, of: None }
+        Toast { text, kind, at: crate::clock::now(), life, step: None, shown: false, id: 0, of: None }
     }
 
     pub fn alive(&self) -> bool {
@@ -248,7 +248,7 @@ impl Toast {
 
     /// How long it has been up — none while it waits for a card (its time starts when one shows it).
     pub fn age(&self) -> std::time::Duration {
-        if self.waiting() { std::time::Duration::ZERO } else { self.at.elapsed() }
+        if self.waiting() { std::time::Duration::ZERO } else { crate::clock::since(self.at) }
     }
 }
 
@@ -1527,6 +1527,7 @@ impl Editor {
 
     /// A step that is one job: said (`set_step`) while `work` runs on `jobs`' worker, and over (`step_done`)
     /// before `then` gets its result — so the step never lingers under what came of it.
+    #[track_caller]
     pub fn step<W, R, T>(
         &mut self,
         jobs: crate::event::Jobs,
@@ -1618,7 +1619,7 @@ impl Editor {
         if !card {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let mut started = false;
         for t in self.toasts.iter_mut().filter(|t| !t.shown) {
             if t.waiting() {
@@ -2502,16 +2503,16 @@ impl Editor {
 
     /// A wake-up for the next frame `tick_wanted` asks for, unless one due by then is set already.
     fn tick_ask(&mut self) {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         let Some(delay) = self.tick_wanted() else { return };
-        let at = Instant::now() + delay;
+        let at = crate::clock::now() + delay;
         // One already due by then serves (a later one doesn't: a new toast must start fading in now)
         if self.ticking.is_some_and(|t| t <= at + Duration::from_millis(5)) || cfg!(test) {
             return;
         }
         self.ticking = Some(at);
         self.events.jobs().spawn(move || {
-            std::thread::sleep(delay);
+            crate::event::sleep(delay);
             move |ed: &mut Editor| {
                 if ed.ticking == Some(at) {
                     ed.ticking = None;

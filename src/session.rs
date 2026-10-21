@@ -503,8 +503,8 @@ impl Editor {
         let front = l.id == self.session.id && !self.behind;
         if l.waits() || (front && self.offers.iter().any(crate::offer::Offer::claudes)) {
             Doing::Waiting
-        } else if let Some(w) = l.stuck(Instant::now()) {
-            Doing::Stuck { tool: w.tool, secs: w.since.elapsed().as_secs() }
+        } else if let Some(w) = l.stuck(crate::clock::now()) {
+            Doing::Stuck { tool: w.tool, secs: crate::clock::since(w.since).as_secs() }
         } else if let Some(pos) = crate::queued::position(l) {
             Doing::Queued { pos }
         } else if l.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
@@ -530,7 +530,7 @@ impl Editor {
             generation,
             id: id.clone(),
             tool,
-            since: Instant::now(),
+            since: crate::clock::now(),
             after,
         });
         self.stuck_watch(generation, id, after);
@@ -540,9 +540,9 @@ impl Editor {
     /// is) — and again while it waits; nothing once it's answered.
     fn stuck_watch(&self, generation: u64, id: serde_json::Value, wake: Duration) {
         self.events.shared_jobs().spawn(move || {
-            std::thread::sleep(wake);
+            crate::event::sleep(wake);
             move |ed: &mut Editor| {
-                let now = Instant::now();
+                let now = crate::clock::now();
                 let next = std::iter::once(&ed.session)
                     .chain(&ed.sessions)
                     .flat_map(|l| &l.tool_waits)
@@ -673,10 +673,10 @@ impl Editor {
             self.unchanged = true;
             return;
         };
-        let o = l.parked.iter().find(|o| o.id == card && o.since.elapsed() >= NUDGE_AFTER);
+        let o = l.parked.iter().find(|o| o.id == card && crate::clock::since(o.since) >= NUDGE_AFTER);
         let Some((mins, title)) = o
             .filter(|_| !l.nudged.contains(&card))
-            .map(|o| (o.since.elapsed().as_secs() / 60, o.title.clone()))
+            .map(|o| (crate::clock::since(o.since).as_secs() / 60, o.title.clone()))
         else {
             self.unchanged = true;
             return;

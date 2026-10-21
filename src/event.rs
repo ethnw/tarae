@@ -5,8 +5,10 @@
 //! while waiting on the channel.
 //! Zero dependencies — std threads + mpsc. (An async runtime only if LSP/LLM streaming proves it necessary.)
 
+use std::panic::Location;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Duration;
 
 use crate::editor::Editor;
 use crate::key::Key;
@@ -58,25 +60,44 @@ pub struct Queue {
     /// The user's input (its `input_seq`) whose handling is under way — or a job's result it started, through
     /// jobs it started in turn (`Jobs` carries it): what a card it makes was asked by (#205).
     asked: std::cell::Cell<Option<u64>>,
+    /// The simulation it was made in (`sim.rs`): what its senders send goes there.
+    #[cfg(test)]
+    sim: Option<crate::sim::Handle>,
 }
 
 impl Default for Queue {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, session: Default::default(), asked: Default::default() }
+        Self {
+            tx,
+            rx,
+            session: Default::default(),
+            asked: Default::default(),
+            #[cfg(test)]
+            sim: crate::sim::current(),
+        }
     }
 }
 
 impl Queue {
     /// A sender whose results are applied in the session in front now, wherever the user is when they land.
     pub fn sender(&self) -> Tx {
-        Tx { tx: self.tx.clone(), session: Some(self.session.get()) }
+        self.tx_for(Some(self.session.get()))
+    }
+
+    fn tx_for(&self, session: Option<SessionId>) -> Tx {
+        Tx {
+            tx: self.tx.clone(),
+            session,
+            #[cfg(test)]
+            sim: self.sim.clone(),
+        }
     }
 
     /// A sender whose results are applied as they come, in whatever session is in front then — for what every
     /// session shares (language servers, the saver, input, the config watch, plugins, the debugger).
     pub fn shared_sender(&self) -> Tx {
-        Tx { tx: self.tx.clone(), session: None }
+        self.tx_for(None)
     }
 
     pub fn jobs(&self) -> Jobs {
@@ -134,14 +155,27 @@ impl Queue {
 pub struct Tx {
     tx: Sender<Event>,
     session: Option<SessionId>,
+    #[cfg(test)]
+    sim: Option<crate::sim::Handle>,
 }
 
 impl Tx {
+    #[track_caller]
     pub fn send(&self, ev: Event) -> Result<(), mpsc::SendError<Event>> {
-        self.tx.send(match (ev, self.session) {
+        let ev = match (ev, self.session) {
             (Event::Job(apply), Some(session)) => Event::For(session, apply),
             (ev, _) => ev,
-        })
+        };
+        // (in a simulation: its inbox, landed when the seed says — and a sender made outside it, used in it, is
+        // refused: what it sends would never land)
+        #[cfg(test)]
+        if let Some(sim) = &self.sim {
+            crate::sim::send(sim, ev);
+            return Ok(());
+        }
+        #[cfg(test)]
+        crate::sim::stray();
+        self.tx.send(ev)
     }
 }
 
@@ -155,39 +189,55 @@ pub struct Jobs {
 
 impl Jobs {
     /// Runs `work` on a thread and sends its result (a closure to apply to the editor) to the main loop.
+    #[track_caller]
     pub fn spawn<W, A>(&self, work: W)
     where
         W: FnOnce() -> A + Send + 'static,
         A: FnOnce(&mut Editor) + Send + 'static,
     {
         let (tx, asked) = (self.tx.clone(), self.asked);
-        run(Box::new(move || {
-            let apply = work();
-            let apply = move |ed: &mut Editor| match asked {
-                None => apply(ed),
-                Some(_) => {
-                    let was = ed.events.set_asked(asked);
-                    apply(ed);
-                    ed.events.set_asked(was);
-                }
-            };
-            let _ = tx.send(Event::Job(Box::new(apply)));
-        }));
+        run(
+            Location::caller(),
+            Box::new(move || {
+                let apply = work();
+                let apply = move |ed: &mut Editor| match asked {
+                    None => apply(ed),
+                    Some(_) => {
+                        let was = ed.events.set_asked(asked);
+                        apply(ed);
+                        ed.events.set_asked(was);
+                    }
+                };
+                let _ = tx.send(Event::Job(Box::new(apply)));
+            }),
+        );
     }
 
     /// Runs `work` on a thread with nothing to bring back (a state file saved, history written): no result, so
     /// the main loop isn't woken for it — a result, even one that does nothing, is an event and a frame.
+    #[track_caller]
     pub fn background(&self, work: impl FnOnce() + Send + 'static) {
-        run(Box::new(work));
+        run(Location::caller(), Box::new(work));
     }
+}
+
+/// `thread::sleep` for a job's work — a timer, a debounce, a poll. In a simulation (test builds) the job
+/// yields until the simulated clock reaches its wake, and other threads run meanwhile.
+pub fn sleep(d: Duration) {
+    #[cfg(test)]
+    if crate::sim::sleep(d) {
+        return;
+    }
+    thread::sleep(d);
 }
 
 /// Lets `x` go on a worker — a big file's parse trees take milliseconds to free (`editor.rs`'s, perf
 /// profile: 4.6 ms the main tree, 1.1 ms its layers — and those go at every parse). No result comes back.
+#[track_caller]
 pub fn drop_later<T: Send + 'static>(x: T) {
     #[cfg(test)]
     DROPPED_LATER.with(|n| n.set(n.get() + 1));
-    run(Box::new(move || drop(x)));
+    run(Location::caller(), Box::new(move || drop(x)));
 }
 
 #[cfg(test)]
@@ -209,11 +259,23 @@ pub fn check_thread_name(name: &str) {
 
 /// A thread of tarae's, by name — `tarae-<what>`, at most `THREAD_NAME_MAX` bytes — so `top -H`, a profiler
 /// or `tarae-trace` tells tarae's threads apart (unnamed, every one is called `tarae`).
+/// In a simulation it's the step's own while it lives (`sim::helper`): refused once it outlives that step.
+#[track_caller]
 pub fn thread<T: Send + 'static>(
     name: &str,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> thread::JoinHandle<T> {
     check_thread_name(name);
+    #[cfg(test)]
+    let f = {
+        let helper = crate::sim::helper(Location::caller());
+        move || {
+            if let Some(h) = &helper {
+                h.enter();
+            }
+            f()
+        }
+    };
     thread::Builder::new().name(name.into()).spawn(f).expect("failed to spawn thread")
 }
 
@@ -229,14 +291,18 @@ pub fn scoped<'scope, T: Send + 'scope>(
     thread::Builder::new().name(name.into()).spawn_scoped(s, f).expect("failed to spawn thread")
 }
 
-/// One copy of the thread-spawn machinery for every job, not one per job type.
-fn run(job: Box<dyn FnOnce() + Send>) {
+/// One copy of the thread-spawn machinery for every job, not one per job type. `site`: where it was spawned —
+/// what a simulation's schedule names it by.
+fn run(site: &'static Location<'static>, job: Box<dyn FnOnce() + Send>) {
     #[cfg(not(test))]
-    thread("tarae-job", job);
+    {
+        let _ = site;
+        thread("tarae-job", job);
+    }
     // Tests: the worker carries the test's name (libtest names its threads after them), so a failure on
     // it says which test it ran for
     #[cfg(test)]
-    {
+    if let Some(job) = crate::sim::spawn_job(site, job) {
         let name = thread::current().name().map(str::to_string);
         let worker = name.map_or_else(thread::Builder::new, |n| thread::Builder::new().name(n));
         worker.spawn(job).expect("failed to spawn thread");
@@ -319,4 +385,49 @@ mod tests {
         );
         assert!(long.is_empty(), "names Linux cuts at {THREAD_NAME_MAX} bytes:\n{long:#?}");
     }
+
+    /// A job's work waits through `event::sleep` — in a simulation the clock moves instead of the thread
+    /// sleeping (`sim.rs`). What still calls `thread::sleep` is on this list, which only shrinks.
+    #[test]
+    fn every_sleep_in_the_code_goes_through_event_sleep() {
+        // (called, or passed as a value)
+        let now = crate::sim::lint::counts(&["thread::sleep"], &["event.rs"]);
+        crate::sim::lint::only_shrinks("thread::sleep", &now, RAW_SLEEPS);
+    }
+
+    /// `thread::sleep` calls left, per file (paths under `src/`).
+    const RAW_SLEEPS: &[(&str, usize)] = &[
+        ("attach.rs", 3),
+        ("builds.rs", 1),
+        ("cards.rs", 1),
+        ("dap.rs", 4),
+        ("disk.rs", 2),
+        ("editor.rs", 1),
+        ("follow.rs", 2),
+        ("fswatch.rs", 1),
+        ("git.rs", 1),
+        ("gitmenu.rs", 1),
+        ("llm.rs", 1),
+        ("lsp_editor.rs", 13),
+        ("nav.rs", 5),
+        ("plugin/cli.rs", 1),
+        ("plugin/events.rs", 2),
+        ("plugin/io.rs", 1),
+        ("procs.rs", 1),
+        ("reaper.rs", 1),
+        ("rebase.rs", 1),
+        ("refactor.rs", 1),
+        ("restart.rs", 2),
+        ("sandbox.rs", 4),
+        ("sandbox/keeper.rs", 1),
+        ("sandbox/proxy.rs", 1),
+        ("saver.rs", 1),
+        ("session.rs", 1),
+        ("share.rs", 5),
+        ("stuck.rs", 1),
+        ("task.rs", 1),
+        ("testing.rs", 1),
+        ("tools.rs", 1),
+        ("usage.rs", 1),
+    ];
 }

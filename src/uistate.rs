@@ -1220,13 +1220,13 @@ impl Editor {
                 settled: is_front && self.offer_settled(),
                 rev: o.rev,
                 up,
-                waited_ms: ms(o.since.elapsed()),
+                waited_ms: ms(crate::clock::since(o.since)),
                 since: o.since,
                 in_sight_ms: self
                     .offer_seen
                     .get()
                     .filter(|&(id, rev, _)| (id, rev) == (o.id, o.rev))
-                    .map(|(.., at)| ms(at.elapsed())),
+                    .map(|(.., at)| ms(crate::clock::since(at))),
                 seen_whole: is_front && self.offer_seen_whole(),
                 cut: self.screen.offer_cut.filter(|_| is_front),
                 viewing: is_front && self.offer_viewing(),

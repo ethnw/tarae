@@ -501,9 +501,10 @@ pub fn said(
 ) -> Value {
     let own = Asked::new(Why::Own, Request::Own);
     let asked = o.asked.as_ref().unwrap_or(&own);
-    let now = Instant::now();
+    // (the card's times are on logic's clock: `Offer.since`, `drawn`)
+    let now = crate::clock::now();
     logged(session, "card", &line(o, asked, answer, now, caps));
-    record(o, asked, answer, (now, SystemTime::now()), session.name(), caps)
+    record(o, asked, answer, (now, crate::clock::system()), session.name(), caps)
 }
 
 // ── The record ─────────────────────────────────────────────────────────────────────────────
