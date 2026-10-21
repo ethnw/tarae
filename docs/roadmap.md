@@ -621,9 +621,11 @@ git tab, search, a short Kubernetes one.
   the user has seen them); motion (honest only, the note's table) as its own small piece after panes P2b.
 - **Follow leads the cursor to what Claude writes** (the user, 2026-10-21: "커서가 안 따라가고 가만히 있으니까
   어색한데" — follow moves the cursor for a read but only keeps an edit's head in sight; while the keys are in the
-  chat the code pane shows no cursor): the cursor goes to an edit's first changed line and the writing head (at
-  follow's pace), the first key pauses as today, a Claude mark on the head's line while the keys are in the chat,
-  `● follow` said — under way in the `follow2` session (2026-10-21).
+  chat the code pane shows no cursor) — landed (`a571c4e5`, 2026-10-22): the cursor goes to the line an edit
+  rewrites and stays there when it lands; Claude's caret, an accent bar after the last character written, rides
+  the writing every frame (the person's cursor stays a block); `● follow` / `● chat · follow`; a key of yours that
+  moves, edits or enters INSERT/SELECT pauses it, a key sequence under way only holds it; the saver's writes are
+  jobs the process's end waits for.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
