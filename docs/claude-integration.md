@@ -98,7 +98,10 @@ To send the screen yourself, use `C-s` (below).
 A card that asks something (this one, a command to run, a read outside the project) takes its answer keys in
 the editor. While you're in the chat — typing, or its input empty as Claude asks mid-turn — or in a review, it
 leaves your keys alone and says `C-q to answer it` (the chat's hints say `C-q answer card`): the first letter of
-a message typed next is the message's, never an answer. `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
+a message typed next is the message's, never an answer. The code is the same while keys are coming in: a card that
+comes within a second of your last key (a paste and its Enter, a chord, a script typing over `tarae keys`) waits
+for them to go quiet — the status line says `▲1 waiting · C-q` — and takes them once they've been quiet a second;
+a card your own last key asked for takes them at once. `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
 Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what waits behind it — `1/3`: cards
 under it, Claude's calls queued, cards in other sessions — and says it in words: `2 more wait — 1 here, 1 in
 fix-login · space I lists them`.

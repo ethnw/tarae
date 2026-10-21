@@ -27,6 +27,7 @@ use crate::event::Event;
 mod applies;
 mod board;
 mod brings;
+mod cardwait;
 mod hosts;
 mod instructions;
 #[cfg(not(target_os = "linux"))]

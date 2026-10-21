@@ -102,6 +102,46 @@ fn older_card_behind(ed: &mut Editor) {
     light_card(ed);
 }
 
+/// A key, then a light card right after it: it waits for the keys to go quiet (friction 60).
+fn card_as_keys_came(ed: &mut Editor) {
+    ed.keys_hold = true;
+    feed(ed, &["j"]);
+    light_card(ed);
+}
+
+/// The state says a card waits for the keys to go quiet — the keys line names it, the card says what it waits
+/// for, both forms — and stops saying it once they've been quiet, when the keys are its; given them by `C-q`, it
+/// has them and waits for nothing.
+#[test]
+fn the_state_says_a_card_waits_for_the_keys_to_go_quiet() {
+    let mut ed = editor();
+    card_as_keys_came(&mut ed);
+    frame(&mut ed);
+    // (keys just came: the frame drawn never eats into the window, however slow the machine)
+    ed.last_input = Some(crate::clock::now());
+    let s = ed.ui_state();
+    let id = format!("card#{}", ed.offers[0].id);
+    assert_eq!(s.json()["keys"]["region"], "code", "the keys are the code's meanwhile");
+    assert_eq!(s.json()["keys"]["waiting"], id.as_str());
+    assert_eq!(s.json()["cards"][0]["waits"], "keys quiet");
+    let text = s.text();
+    assert!(text.contains(&format!("· {id} takes them once the keys are quiet")), "{text}");
+    assert!(text.contains(" · waits for the keys quiet, C-q answers it"), "{text}");
+    // Given the keys: its own, waiting for nothing
+    feed(&mut ed, &["<C-q>"]);
+    let s = ed.ui_state();
+    assert_eq!(s.json()["keys"]["to"], id.as_str());
+    assert!(s.json()["keys"]["waiting"].is_null() && s.json()["cards"][0]["waits"].is_null());
+    // Let go, then quiet: the keys are its, nothing waits
+    feed(&mut ed, &["<esc>"]);
+    assert_eq!(ed.ui_state().json()["keys"]["waiting"], id.as_str(), "let go as keys came: waits again");
+    ed.last_input = ed.last_input.map(|t| t - crate::offer::KEYS_QUIET);
+    let s = ed.ui_state();
+    assert_eq!(s.json()["keys"]["to"], id.as_str(), "quiet: the card's");
+    assert!(s.json()["keys"]["waiting"].is_null() && s.json()["cards"][0]["waits"].is_null());
+    assert!(!s.text().contains("quiet"), "{}", s.text());
+}
+
 /// A weighty card whose answers do nothing here: a change set of a chat process that isn't there.
 fn weighty_card(ed: &mut Editor) {
     let q = "Claude renames `a` to `b` in 3 files.\n\nOne review for the set.";
@@ -284,6 +324,12 @@ const SCENES: &[Scene] = &[
     ("a card stepped aside, given the keys (C-q)", |ed| {
         light_card(ed);
         ed.offers[0].aside = true;
+        feed(ed, &["<C-q>"]);
+    }),
+    // (it came right after a key: it waits for the keys to go quiet — friction 60)
+    ("a card that came as keys came in", card_as_keys_came),
+    ("a card that came as keys came in, given the keys (C-q)", |ed| {
+        card_as_keys_came(ed);
         feed(ed, &["<C-q>"]);
     }),
     ("a card in insert mode", |ed| {

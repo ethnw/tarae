@@ -278,6 +278,8 @@ impl Sandbox {
                 ("XDG_CACHE_HOME".into(), home.join(".cache").into()),
                 ("TERM".into(), "xterm-256color".into()),
                 ("TARAE_BACKGROUND".into(), "dark".into()),
+                // (as below: a driver's keys never hold a card back)
+                ("TARAE_KEYS_QUIET_MS".into(), "0".into()),
                 ("GIT_CONFIG_GLOBAL".into(), self.git_config().into()),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ]);
@@ -298,6 +300,11 @@ impl Sandbox {
             ("TERM", "xterm-256color".into()),
             // The harness doesn't answer the OSC 11 background query — skip it (and its 200 ms timeout)
             ("TARAE_BACKGROUND", "dark".into()),
+            // A test is a driver: its keys come as fast as it sends them, so a card that comes would wait for them to go
+            // quiet (`offer::keys_quiet`) and a `y` sent to it land in the code, as the machine's load decides —
+            // `undo_history_comes_along_on_restart` timed out so under two builds. 0: no wait. The test of the wait
+            // sets its own (`with_env`, after this: it wins)
+            ("TARAE_KEYS_QUIET_MS", "0".into()),
         ]
         .into_iter()
         .map(|(k, v): (&str, OsString)| (k.into(), v))

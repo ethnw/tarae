@@ -1294,7 +1294,7 @@ fn a_driver_reads_where_the_keys_go() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
     let s = t.state_json(0);
-    assert_eq!(s["v"], 8, "the schema's version (`uistate::V`)");
+    assert_eq!(s["v"], 9, "the schema's version (`uistate::V`)");
     assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
     assert_eq!(s["tarae"]["pid"], t.pid());
     let input = s["input"].as_u64().unwrap();
@@ -1409,6 +1409,53 @@ fn a_watcher_hears_what_changes() {
     assert!(keys["frame"].as_u64() <= s["frame"].as_u64() && keys["input"].as_u64() <= s["input"].as_u64());
     // The gone ring remembers it
     assert!(s["gone"].as_array().unwrap().iter().any(|g| g["id"] == id.as_str() && g["how"] == "answered n"));
+}
+
+/// A card that comes while keys are coming in waits for them to go quiet (friction 60), and a driver reads it
+/// before it sends: `keys.waiting` names it and the card `waits: keys quiet`; a `y` sent meanwhile is the code's
+/// (a yank), the card stays up; quiet a second, the next state has the keys the card's. The card is the project's
+/// trust, asked as a `.tarae.toml` written mid-session is read — no key asked for it.
+#[test]
+fn a_card_that_comes_as_keys_come_waits_and_the_state_says_so() {
+    // (the window widened to 4 s: the state round trips and screen reads between the keys stay inside it however
+    // loaded the machine — a `y` after it would answer the trust card)
+    let sb = Sandbox::new("keysquiet").with_env("TARAE_KEYS_QUIET_MS", "4000");
+    sb.write("a.txt", "one\ntwo\nthree\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("one");
+    sb.write(".tarae.toml", "[editor]\nrestart-build = \"true\"\n");
+    // (a key every 150 ms until the card is up: it comes as they come in)
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let (s, id) = loop {
+        let input = t.state_json(0)["input"].as_u64().unwrap();
+        t.send("j");
+        let s = t.state_json(input + 1);
+        let card = s["cards"].as_array().into_iter().flatten().find(|c| c["kind"] == "project-trust");
+        if let Some(id) = card.and_then(|c| c["id"].as_str()).map(str::to_string) {
+            break (s, id);
+        }
+        assert!(std::time::Instant::now() < end, "no trust card came");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    };
+    assert_eq!(
+        (s["keys"]["region"].as_str(), s["keys"]["waiting"].as_str()),
+        (Some("code"), Some(id.as_str()))
+    );
+    assert_eq!(s["cards"][0]["waits"], "keys quiet");
+    // A `y` while it waits: the code's
+    let input = s["input"].as_u64().unwrap();
+    t.send("y");
+    let s = t.state_json(input + 1);
+    assert!(s["cards"].as_array().is_some_and(|c| c.iter().any(|c| c["id"] == id.as_str())), "still up");
+    assert_eq!(s["keys"]["waiting"], id.as_str(), "still waiting: keys came");
+    t.wait_for("the status line says it waits", |s| s.status().contains("▲1 waiting · C-q"));
+    // Quiet: the screen changes by itself — the wake's own frame, read off the screen with nothing asked (a state
+    // request draws a frame of its own) — and the state says the keys are the card's, no key sent
+    t.wait_for("the card takes the keys, drawn", |s| !s.status().contains("waiting"));
+    let s = t.state_json(0);
+    assert_eq!(s["keys"]["to"], id.as_str(), "{s}");
+    assert!(s["keys"]["waiting"].is_null() && s["cards"][0]["waits"].is_null(), "{s}");
+    assert_eq!(s["input"].as_u64(), Some(input + 1), "no key since the y");
 }
 
 /// A chat turn as a watcher hears it: `turn started` as the message goes, `turn ended` with its time when

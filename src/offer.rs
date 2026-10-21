@@ -74,6 +74,9 @@ pub struct Offer {
     pub like: Vec<u64>,
     /// The person's input count (`Editor.person_seq` — not a shuttle's keys) when it came (`push_offer`).
     pub came: u64,
+    /// It came while keys were coming in (within `KEYS_QUIET` of the last — a paste, a chord, a driver's
+    /// steps): it waits for them to go quiet before it takes them (`Editor::offer_waits_keys`, friction 60).
+    pub typing: bool,
     /// The user's own (`Offer::rank`, #205): a kind a command of theirs asks for, made by the input the user
     /// gave last (`Queue.asked` — the key, or a job it started; nothing typed since).
     pub yours: bool,
@@ -115,6 +118,25 @@ pub const CARD_VIEW: &str = "card · ";
 /// How long a card that runs something must have been in sight, as it is, before `y` answers it — a key
 /// pressed as it appears, or as its text changes, isn't an answer.
 pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long the keys must have been quiet before a card that came while they were coming in takes them
+/// (friction 60: a card came between a paste and its Enter, and a script's `space W` went to one). Above the
+/// gaps inside one act — a chord's keys (~0.1–0.3 s), a paste then its Enter (~0.3–0.7 s), a driver's steps
+/// (milliseconds) — and below a pause to read what came up. `card held`/`card free` log lines say each wait.
+pub const KEYS_QUIET: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// `KEYS_QUIET`, or `TARAE_KEYS_QUIET_MS` milliseconds instead — for e2e tests that read the state between keys
+/// and must stay inside the window however loaded the machine (as `TARAE_TREES_UNSEEN`); the constant in unit tests.
+pub fn keys_quiet() -> std::time::Duration {
+    static QUIET: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    if cfg!(test) {
+        return KEYS_QUIET;
+    }
+    *QUIET.get_or_init(|| {
+        let ms = std::env::var("TARAE_KEYS_QUIET_MS").ok().and_then(|v| v.parse::<u64>().ok());
+        ms.map_or(KEYS_QUIET, std::time::Duration::from_millis)
+    })
+}
 
 #[derive(Clone, Debug)]
 pub enum What {
@@ -569,6 +591,7 @@ impl Offer {
             aside: false,
             like: Vec::new(),
             came: 0,
+            typing: false,
             yours: false,
             output: None,
         }
@@ -1481,6 +1504,9 @@ impl crate::editor::Editor {
         // or from work nobody's input started, waits its turn: #205)
         o.came = self.person_seq;
         o.yours = o.yours_kind() && self.events.asked() == Some(self.input_seq);
+        // (keys coming in: it waits for them to go quiet — but not one the last key itself asked for, which is
+        // what the hand waits on, nor one parked in a session behind: it comes up when you switch there)
+        o.typing = self.keys_hold && !o.yours && !self.background() && self.keys_coming();
         // One bring card a session: a new one takes the place of the one waiting for that checkout, wherever it
         // waits — its going said (the gone ring: one card replaced); one whose bring is under way stays
         if let Some(root) = o.bring_root().map(std::path::Path::to_path_buf) {
@@ -1545,8 +1571,73 @@ impl crate::editor::Editor {
         // a card that took them from an empty input took the `a` of a message typed next as a grant)
         // (asked: counted once it's stacked — one asked again while it's up only refreshed the one there, above)
         self.count(crate::features::Area::Card, o.kind());
+        if o.typing {
+            let after = self.last_input.map_or(0, |t| crate::clock::since(t).as_millis());
+            crate::log::line("tarae", "card", &format!("card held: came {after} ms after a key"));
+            self.keys_quiet_later();
+        }
         let at = self.offer_place(&o);
         self.offers.insert(at, o);
+    }
+
+    /// Whether keys are coming in: the last came within `KEYS_QUIET`.
+    pub fn keys_coming(&self) -> bool {
+        self.last_input.is_some_and(|t| crate::clock::since(t) < keys_quiet())
+    }
+
+    /// Whether the front card waits for the keys to go quiet before it takes them: it came while they were
+    /// coming in (`Offer.typing`) and they still are — drawn, `C-q` answering it, the status line saying it.
+    pub fn offer_waits_keys(&self) -> bool {
+        self.offers.first().is_some_and(|o| o.typing) && self.keys_coming()
+    }
+
+    /// Whether a card anywhere — up, or parked when its session went behind — waits for the keys to go quiet: its
+    /// wake stays armed while one does (the review of friction 60: a card parked as it waited came back to the
+    /// front with nothing to wake it).
+    pub fn cards_typing(&self) -> bool {
+        let parked = std::iter::once(&self.session).chain(&self.sessions).flat_map(|l| &l.parked);
+        self.offers.iter().chain(parked).any(|o| o.typing)
+    }
+
+    /// The keys quiet for `KEYS_QUIET`: the cards that came while they were coming in may take them, in every
+    /// session. True if one did.
+    pub fn keys_quiet_sync(&mut self) -> bool {
+        if self.keys_coming() {
+            return false;
+        }
+        let parked = std::iter::once(&mut self.session).chain(&mut self.sessions).flat_map(|l| &mut l.parked);
+        let mut freed = 0;
+        for o in self.offers.iter_mut().chain(parked).filter(|o| o.typing) {
+            o.typing = false;
+            freed += 1;
+        }
+        if freed > 0 {
+            let quiet = self.last_input.map_or(0, |t| crate::clock::since(t).as_millis());
+            crate::log::line("tarae", "card", &format!("card free: the keys quiet {quiet} ms"));
+        }
+        freed > 0
+    }
+
+    /// One wake for when the keys will have been quiet for `KEYS_QUIET`, while a card waits on them: its frame
+    /// gives it the keys (and the status line stops saying it waits). Keys meanwhile: it sleeps on.
+    fn keys_quiet_later(&mut self) {
+        let Some(t) = self.last_input.filter(|_| !self.keys_waking) else { return };
+        self.keys_waking = true;
+        let wait = keys_quiet().saturating_sub(crate::clock::since(t));
+        // (every session's: a job of the session in front now would land as that one's, a frame owed for the card
+        // it frees in front marked unchanged once another session is in front — friction 60's review)
+        self.events.shared_jobs().spawn(move || {
+            crate::event::sleep(wait);
+            |ed: &mut crate::editor::Editor| {
+                ed.keys_waking = false;
+                if !ed.keys_quiet_sync() {
+                    ed.unchanged = true;
+                    if ed.cards_typing() {
+                        ed.keys_quiet_later();
+                    }
+                }
+            }
+        });
     }
 
     /// Where a new card goes among those up: behind every one that ranks with it or before it

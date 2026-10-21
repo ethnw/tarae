@@ -24,11 +24,11 @@
 21                              ▌
 22                              ▌                   No board has read them: space v C has one read them first.
 23                              ▌
-24                              ▌                   Drafts stay. Opened again, its marks are kept: a file
-25   ]g hunk  ]F file           ▌                   changed since asks only for its lines since.
-26   space e files  ]u unviewed ▌
-27   space n comment            ▌                   h Go to them   n Keep reviewing
-28   space v m viewed · q end   ▌                ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+24   ]g hunk  ]F file           ▌                   Drafts stay. Opened again, its marks are kept: a file
+25   space e files  ]u unviewed ▌                   changed since asks only for its lines since.
+26   space n comment            ▌
+27   space v m viewed           ▌                   h Go to them   n Keep reviewing
+28   space v q end              ▌                ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 29  ● normal   +1                                                                           rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
@@ -86,11 +86,11 @@
 21
 22                                                  dd ddddd ddd dddd ddddd ddddd d d ddd ddd dddd dddd dddddd
 23
-24                                                  dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd
-25   DD ffff  DD ffff                               ddddddd ddddd dddd dddd ddd ddd ddddd dddddd
-26   DDDDD D fffff  DD ffffffff
-27   DDDDD D fffffff                                A              A dddd ddddddddd
-28   DDDDD D f ffffff f f fff
+24   DD ffff  DD ffff                               dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd
+25   DDDDD D fffff  DD ffffffff                     ddddddd ddddd dddd dddd ddd ddd ddddd dddddd
+26   DDDDD D fffffff
+27   DDDDD D D ffffff                               A              A dddd ddddddddd
+28   DDDDD D D fff
 29  a TTTTTT   gg                                                                           dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other

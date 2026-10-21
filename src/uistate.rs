@@ -29,7 +29,9 @@ use crate::sizes::Slot;
 /// and `owner_flags`.
 /// 8: the front session's `view` (a surface's view mode — `view.rs`); `keys.region` `view:chat`, a handler
 /// `chat-view`.
-pub const V: u64 = 8;
+/// 9: `keys.waiting` (the card that takes the keys once they've been quiet — friction 60) and a card's `waits`
+/// (`keys quiet`).
+pub const V: u64 = 9;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -276,6 +278,9 @@ pub struct KeysTo {
     pub to: String,
     /// A program typing over the UI socket (`shuttle.rs`): its name, and whether your key paused it.
     pub shuttle: Option<(String, bool)>,
+    /// The card that takes the keys once they've been quiet `offer::KEYS_QUIET` — it came while they were coming in
+    /// (friction 60); until then they go where `region` says (`Editor::card_waits_quiet`).
+    pub waiting: Option<String>,
 }
 
 impl KeysTo {
@@ -299,6 +304,7 @@ pub fn keys_json(k: &KeysTo) -> Value {
         "drawn": k.drawn,
         "under": k.under.map(Region::name),
         "shuttle": k.shuttle.as_ref().map(|(name, paused)| json!({ "name": name, "paused": paused })),
+        "waiting": k.waiting,
     })
 }
 
@@ -578,6 +584,11 @@ impl Editor {
             to: self.element_id(region),
             chain,
             shuttle: crate::shuttle::keys_said(self),
+            waiting: self
+                .offers
+                .first()
+                .filter(|_| self.card_waits_quiet())
+                .map(|o| format!("card#{}", o.id)),
         }
     }
 
@@ -1203,6 +1214,9 @@ pub struct CardState {
     pub withheld: Vec<char>,
     /// It stepped aside for what its `h` went to (`Offer.aside`): its letters are the code's, `C-q` answers it.
     pub aside: bool,
+    /// What it waits for before it takes the keys: `keys quiet` — it came while they were coming in (friction 60;
+    /// the keys' `waiting` names it); its letters are the code's meanwhile, `C-q` answers it.
+    pub waits: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1383,6 +1397,7 @@ impl Editor {
                 held: o.held.clone(),
                 withheld,
                 aside: o.aside,
+                waits: (is_front && self.card_waits_quiet()).then_some("keys quiet"),
             }
         };
         let mut cards: Vec<CardState> = self
@@ -1513,6 +1528,7 @@ impl UiState {
                     "held": c.held,
                     "withheld": c.withheld.iter().map(char::to_string).collect::<Vec<_>>(),
                     "aside": c.aside,
+                    "waits": c.waits,
                 });
                 // (none at Claude's level: its `asks` is cut, and the text would be it whole)
                 if !c.text.is_empty() {
@@ -1653,6 +1669,9 @@ impl UiState {
         if let Some((name, paused)) = &k.shuttle {
             keys += &format!(" · shuttle {name}{}", if *paused { " (paused)" } else { "" });
         }
+        if let Some(card) = &k.waiting {
+            keys += &format!(" · {card} takes them once the keys are quiet");
+        }
         Some(keys)
     }
 
@@ -1689,6 +1708,9 @@ impl UiState {
             }
             if c.aside {
                 line += " · aside, C-q answers it";
+            }
+            if let Some(w) = c.waits {
+                line += &format!(" · waits for the {w}, C-q answers it");
             }
             if c.state != "asking" {
                 line += &format!(" · {}", c.state);

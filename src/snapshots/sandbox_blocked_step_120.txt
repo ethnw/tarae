@@ -29,7 +29,7 @@
 26
 27
 28
-29  ● picker                                                                                        rust   utf-8 LF   1:1
+29  ● picker   enter choose  type narrow  esc close                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -91,7 +91,7 @@
 26
 27
 28
-29  a TTTTTT                                                                                        dddd   ddddd dd   TTT
+29  a TTTTTT   DDDDD ffffff  DDDD ffffff  DDD fffff                                                 dddd   ddddd dd   TTT
 ## legend
 bg: p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning

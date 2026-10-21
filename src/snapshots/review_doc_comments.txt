@@ -18,11 +18,11 @@
 15                              ▌ 13
 16                              ▌ 14 fn main() {
 17                              ▌ 15     let text = "to be or not to be";
-18                              ▌ 16     println!("{} words, the longest {:?}", count(text),
-19   ]g hunk  ]F file           ▌        longest(text));
-20   space e files  ]u unviewed ▌ 17 }
-21   space n comment            ▌
-22   space v m viewed · q end   ▌
+18   ]g hunk  ]F file           ▌ 16     println!("{} words, the longest {:?}", count(text),
+19   space e files  ]u unviewed ▌        longest(text));
+20   space n comment            ▌ 17 }
+21   space v m viewed           ▌
+22   space v q end              ▌
 23  ● normal   +2  −1                                                          rust   utf-8 LF   14:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
@@ -68,11 +68,11 @@
 15                                ff
 16                                AA
 17                                ff                ggg gg gg ggg gg ggg
-18                                ff              ggg gggggg ggg ggggggg ggggg
-19   DD ffff  DD ffff
-20   DDDDD D fffff  DD ffffffff   ff
-21   DDDDD D fffffff
-22   DDDDD D f ffffff f f fff
+18   DD ffff  DD ffff             ff              ggg gggggg ggg ggggggg ggggg
+19   DDDDD D fffff  DD ffffffff
+20   DDDDD D fffffff              ff
+21   DDDDD D D ffffff
+22   DDDDD D D fff
 23  a TTTTTT   gg  ee                                                          dddd   ddddd dd   TTTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other

@@ -24,11 +24,11 @@
 21                              ▌   −    println!("{} distinct words", counts.len()); // 타래
 22                              ▌ 18 }
 23                              ▌
-24                              ▌
-25   ]g hunk  ]F file           ▌
-26   space e files  ]u unviewed ▌
-27   space n comment            ▌
-28   space v s send 1 · q end   ▌
+24   ]g hunk  ]F file           ▌
+25   space e files  ]u unviewed ▌
+26   space n comment            ▌
+27   space v s send 1           ▌
+28   space v q end              ▌
 29  ● normal   +3  −3                                                                       rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
@@ -86,11 +86,11 @@
 21                                  E             ggg gggggggg gggggg
 22                                ff
 23
-24
-25   DD ffff  DD ffff
-26   DDDDD D fffff  DD ffffffff
-27   DDDDD D fffffff
-28   DDDDD D D aaaa a f f fff
+24   DD ffff  DD ffff
+25   DDDDD D fffff  DD ffffffff
+26   DDDDD D fffffff
+27   DDDDD D D aaaa a
+28   DDDDD D D fff
 29  a TTTTTT   gg  ee                                                                       dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other

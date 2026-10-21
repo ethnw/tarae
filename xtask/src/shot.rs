@@ -477,6 +477,10 @@ fn as_a_terminal<'c>(cmd: &'c mut Command, config: &std::ffi::OsStr, state: &Pat
         .env("COLORTERM", "truecolor")
         .env("TARAE_UNDERCURL", "0")
         .env("TARAE_SHOT_NO_DISK", "1")
+        // (a shot is a driver: its keys come as fast as it sends them, so a card that comes would wait for them to go
+        // quiet — `offer::keys_quiet` — and the `y` sent to it land in the code, as the machine's load decides; 0: no
+        // wait. Shots, scenes and the docs' pictures all start here)
+        .env("TARAE_KEYS_QUIET_MS", "0")
         .env("XDG_CONFIG_HOME", config)
         .env("XDG_STATE_HOME", state)
         // (tarae's cache — runs' folders, the reviewer's reading copies — the shot's own, never yours)

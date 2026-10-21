@@ -29,7 +29,7 @@
 26
 27   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 28
-29  ● picker                                                                             rust   utf-8 LF   14:1
+29  ● picker   type narrow  esc close                                                    rust   utf-8 LF   14:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -91,7 +91,7 @@
 26
 27
 28
-29  a TTTTTT                                                                             dddd   ddddd dd   TTTT
+29  a TTTTTT   DDDD ffffff  DDD fffff                                                    dddd   ddddd dd   TTTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

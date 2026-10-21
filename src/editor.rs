@@ -520,6 +520,13 @@ pub struct Editor {
     /// The person's own keys, clicks and pastes — the terminal's input, not a shuttle's steps (`shuttle.rs`): what
     /// only a person's look may do goes by it (follow's pause, a card's place among yours).
     pub person_seq: u64,
+    /// When the last key, click or paste came, anyone's — a card that comes within `offer::KEYS_QUIET` of it
+    /// waits for the keys to go quiet (`Offer.typing`).
+    pub last_input: Option<std::time::Instant>,
+    /// That wait is on: off in tests (their keys come within milliseconds of any card) but where they test it.
+    pub keys_hold: bool,
+    /// A wake for the keys gone quiet is under way (`Editor::keys_quiet_later`) — one at a time.
+    pub keys_waking: bool,
     /// A program typing over the UI socket, its grants, the step under way (`shuttle.rs`).
     pub shuttles: crate::shuttle::Shuttles,
     /// Debug run · breakpoints (kept without a debug run) · debug run generation (drops late messages).
@@ -854,6 +861,9 @@ impl Editor {
             goto_after_load: None,
             input_seq: 0,
             person_seq: 0,
+            last_input: None,
+            keys_hold: !cfg!(test),
+            keys_waking: false,
             shuttles: Default::default(),
             dap: None,
             breakpoints: Default::default(),
@@ -1461,12 +1471,18 @@ impl Editor {
             }
             return;
         }
-        let panes: Vec<_> = self.screen.panes.iter().map(|(v, r, _, _)| (*v, *r)).collect();
-        if let Some(v) = crate::split::neighbor(&panes, self.session.focus, dx, dy) {
-            self.focus_view(v);
-        } else if dy > 0 {
-            self.bottom_take_keys();
+        match self.pane_toward(dx, dy) {
+            Some(v) => self.focus_view(v),
+            None if dy > 0 => self.bottom_take_keys(),
+            None => {}
         }
+    }
+
+    /// The pane that way from the one in hand, as last drawn — none below: `C-w j` goes to the bottom slot (its
+    /// header's `C-w j scroll` says so only then).
+    pub fn pane_toward(&self, dx: i32, dy: i32) -> Option<crate::split::ViewId> {
+        let panes: Vec<_> = self.screen.panes.iter().map(|(v, r, _, _)| (*v, *r)).collect();
+        crate::split::neighbor(&panes, self.session.focus, dx, dy)
     }
 
     /// `C-w e`: to the side panel from wherever the keys are — or back to the code from it. A closed panel
@@ -3333,22 +3349,30 @@ impl Editor {
     /// Whether the front card takes the keys: given it with `C-q`, or in normal mode with nothing else
     /// holding them (no prefix key, prompt, picker, review, the chat's input or the terminal) — and it hasn't
     /// stepped aside for what its `h` went to (`Offer.aside`), nor is its text the buffer in sight: there
-    /// only `C-q` gives them (frictions15 review: Esc then `y`, a yank out of habit, answered the card).
+    /// only `C-q` gives them (frictions15 review: Esc then `y`, a yank out of habit, answered the card) — nor did
+    /// it come while keys were coming in that haven't gone quiet yet (`offer_waits_keys`, friction 60: a card came
+    /// between a paste and its Enter).
     pub fn card_has_keys(&self) -> bool {
-        self.card_keys
-            || (self.mode == Mode::Normal
-                && !self.offer_reading()
-                && !self.offers.first().is_some_and(|o| o.aside)
-                && self.pending.is_empty()
-                && self.prompt.is_none()
-                && self.picker.is_none()
-                && self.session.review.is_none()
-                && !self.session.chat.as_ref().is_some_and(|c| c.focused)
-                && !self
-                    .session
-                    .terminal
-                    .as_ref()
-                    .is_some_and(|t| t.focus && t.visible && t.exited.is_none()))
+        self.card_keys || (self.card_keys_free() && !self.offer_waits_keys())
+    }
+
+    /// The front card would have the keys but for keys coming in: it takes them once they've been quiet
+    /// `offer::KEYS_QUIET` — the status line's `▲1 waiting · C-q`, the state's `keys.waiting` and its `waits`.
+    pub fn card_waits_quiet(&self) -> bool {
+        !self.card_keys && self.card_keys_free() && self.offer_waits_keys()
+    }
+
+    /// Nothing else holds the keys from the front card (`card_has_keys` but the wait for the keys to go quiet).
+    fn card_keys_free(&self) -> bool {
+        self.mode == Mode::Normal
+            && !self.offer_reading()
+            && !self.offers.first().is_some_and(|o| o.aside)
+            && self.pending.is_empty()
+            && self.prompt.is_none()
+            && self.picker.is_none()
+            && self.session.review.is_none()
+            && !self.session.chat.as_ref().is_some_and(|c| c.focused)
+            && !self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none())
     }
 
     /// `C-q` while a card is up — this session's first, then the one that has waited longest (`inbox.rs`) —
@@ -3566,6 +3590,12 @@ impl Editor {
     /// shuttle typing pauses (`shuttle::person_typed`).
     fn input_came(&mut self) {
         self.input_seq += 1;
+        // (after a quiet the cards that came while keys were coming in take them — before this key counts; a
+        // shuttle's step did so before its check, and nothing frees one between the check and its key)
+        if self.shuttles.stepping.is_none() {
+            self.keys_quiet_sync();
+        }
+        self.last_input = Some(crate::clock::now());
         if self.shuttles.stepping.is_none() {
             self.person_seq += 1;
             self.review_input();
@@ -14578,6 +14608,156 @@ mod tests {
         feed(&mut ed, "y");
         assert!(ed.offers.is_empty());
         assert_eq!(text(&ed), "text\n");
+    }
+
+    /// A card that comes while keys are coming in (a paste, a chord, a driver's steps) waits for them to go quiet
+    /// before it takes them (friction 60): what's typed meanwhile is the code's, the status line says it waits,
+    /// `C-q` reaches it at once; the keys quiet for `KEYS_QUIET`, it takes them — and one nobody's keys were near
+    /// takes them as it comes.
+    #[test]
+    fn a_card_waits_for_the_keys_to_go_quiet() {
+        use crate::offer::{KEYS_QUIET, Offer, What};
+        let mut ed = editor("one two\n");
+        ed.keys_hold = true;
+        let status = |ed: &mut Editor| {
+            crate::term::render(ed, &mut Vec::new(), 100, 20).unwrap();
+            let text = crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 100, 20).unwrap();
+            text.lines().last().unwrap_or_default().to_string()
+        };
+        let settle = |ed: &mut Editor| {
+            crate::term::render(ed, &mut Vec::new(), 100, 20).unwrap();
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        };
+        let quiet = |ed: &mut Editor| ed.last_input = ed.last_input.map(|t| t - KEYS_QUIET);
+        // (keys just came: the frames drawn between the steps never eat into the window, however slow the machine)
+        let coming = |ed: &mut Editor| ed.last_input = Some(crate::clock::now());
+        let card = |title: &str| {
+            Offer::new(title.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: [0; 32] })
+        };
+        // A key, and a card right after it: drawn, waiting — the next keys are the code's
+        feed(&mut ed, "w");
+        ed.push_offer(card("Trust this project's settings?"));
+        settle(&mut ed);
+        coming(&mut ed);
+        assert!(!ed.card_has_keys(), "it came as keys came in: it waits");
+        assert!(status(&mut ed).contains("▲1 waiting · C-q"), "said: {}", status(&mut ed));
+        coming(&mut ed);
+        feed(&mut ed, "bey");
+        assert_eq!(ed.offers.len(), 1, "y was the code's: the card is still up");
+        assert_eq!(ed.doc().selection().primary().head, 3, "b and e moved: on the end of `one`");
+        // `C-q` reaches it at once; Esc gives the keys back, and it waits again while they keep coming
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_has_keys(), "C-q gave it the keys");
+        feed(&mut ed, "<esc>");
+        assert!(!ed.card_has_keys(), "keys still coming in");
+        // Quiet for `KEYS_QUIET`: it takes them, and its `y` answers it
+        quiet(&mut ed);
+        assert!(ed.card_has_keys(), "the keys went quiet");
+        assert!(!status(&mut ed).contains("waiting"), "in sight, it says so itself");
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty(), "y answered it");
+        // A card that comes when the keys have been quiet takes them as it comes
+        quiet(&mut ed);
+        ed.push_offer(card("Again"));
+        settle(&mut ed);
+        assert!(ed.card_has_keys(), "nothing coming in: it has the keys");
+        // A card the last key itself asked for (the user's own) takes them as it comes, keys coming in or not
+        feed(&mut ed, "n");
+        ed.offers.clear();
+        let review_end = What::ReviewEnd { session: 0, started: std::time::Instant::now() };
+        let was = ed.events.set_asked(Some(ed.input_seq));
+        ed.push_offer(Offer::new(
+            "End the review?".into(),
+            "2 files not viewed.",
+            "",
+            String::new(),
+            review_end,
+        ));
+        ed.events.set_asked(was);
+        assert!(ed.offers[0].yours && ed.card_has_keys(), "the user's own: its keys at once");
+        assert_eq!(text(&ed), "one two\n");
+    }
+
+    /// The wake for the keys gone quiet is every session's (friction 60's review): a card that waits, still up after
+    /// a switch to another session, is freed by it and a frame is owed for it — the result is never taken for the
+    /// session in front when the card came (that one's, behind, is applied as "nothing in sight changed").
+    #[test]
+    fn a_waiting_card_is_freed_and_drawn_after_a_session_switch() {
+        use crate::offer::{KEYS_QUIET, Offer, What};
+        use std::time::Duration;
+        let dir = crate::scratch::Scratch::new("cardwait-switch");
+        let mut ed = editor("one\n");
+        ed.keys_hold = true;
+        let main = ed.session.id;
+        let other = ed.session_open(dir.path()).unwrap();
+        assert!(ed.session_switch(main));
+        // (the keys came in moments before: the wake comes in about 100 ms)
+        ed.last_input = Some(crate::clock::now() - (KEYS_QUIET - Duration::from_millis(100)));
+        let trust = What::ProjectTrust { hash: [0; 32] };
+        ed.push_offer(Offer::new("Trust this project?".into(), "x = 1", "", String::new(), trust));
+        assert!(ed.cards_typing() && ed.keys_waking, "it waits, its wake armed");
+        // To the other session: the trust card isn't one that parks with its session — still up, still waiting
+        assert!(ed.session_switch(other));
+        assert!(ed.card_waits_quiet(), "up in front of the other session, waiting");
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(std::time::Instant::now() < end, "no wake landed");
+            let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) else { continue };
+            let unchanged = crate::term::handle_noting(&mut ed, ev);
+            if !ed.cards_typing() {
+                assert!(!unchanged, "freed in front: a frame owed for it");
+                break;
+            }
+        }
+        assert!(ed.card_has_keys() && !ed.card_waits_quiet());
+    }
+
+    /// Hints where there were none (uxaudit D6): a prompt says what enter does with its line (the command line's
+    /// names complete with tab), a picker what enter does and that typing narrows it, both how they close; a
+    /// bottom panel without the keys says how they come, before its commands.
+    #[test]
+    fn prompts_pickers_and_a_panel_say_their_keys() {
+        let mut ed = editor("one two\n");
+        let shown = |ed: &mut Editor| {
+            crate::term::render(ed, &mut Vec::new(), 120, 24).unwrap();
+            crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 120, 24).unwrap()
+        };
+        let status = |ed: &mut Editor| shown(ed).lines().last().unwrap_or_default().to_string();
+        feed(&mut ed, ":");
+        assert!(status(&mut ed).contains("enter run  tab complete  esc close"), "{}", status(&mut ed));
+        feed(&mut ed, "<esc>/");
+        assert!(status(&mut ed).contains("enter search  esc close"), "{}", status(&mut ed));
+        feed(&mut ed, "<esc><space>?");
+        assert!(status(&mut ed).contains("enter run  type narrow  esc close"), "{}", status(&mut ed));
+        feed(&mut ed, "<esc>");
+        assert!(!status(&mut ed).contains("esc close"), "closed: no hints");
+        let task =
+            crate::task::Task { name: "build".into(), cmd: "true".into(), cwd: ed.session.root.clone() };
+        ed.session.task_run = Some(crate::task::Run::for_test(task));
+        let header = |ed: &mut Editor| shown(ed).lines().find(|l| l.contains("space m")).map(str::to_string);
+        let h = header(&mut ed).expect("the task panel's header");
+        assert!(h.contains("C-w j scroll  space m"), "the way in, first: {h}");
+        // Split, the top pane in hand: `C-w j` goes to the pane below — not said; from the lower one, said
+        feed(&mut ed, "<C-w>s");
+        shown(&mut ed);
+        feed(&mut ed, "<C-w>k");
+        shown(&mut ed);
+        assert!(ed.pane_toward(0, 1).is_some(), "a pane below the one in hand");
+        let h = header(&mut ed).expect("the task panel's header");
+        assert!(!h.contains("C-w j"), "a pane below: {h}");
+        feed(&mut ed, "<C-w>j");
+        shown(&mut ed);
+        let h = header(&mut ed).expect("the task panel's header");
+        assert!(h.contains("C-w j scroll"), "the lowest pane: {h}");
+        // In insert mode `C-w` deletes a word: not said there
+        feed(&mut ed, "i");
+        let h = header(&mut ed).expect("the task panel's header");
+        assert!(!h.contains("C-w j"), "insert mode: {h}");
+        feed(&mut ed, "<esc>");
+        ed.bottom_take_keys();
+        let h = shown(&mut ed).lines().find(|l| l.contains("esc code")).map(str::to_string);
+        assert!(h.is_some_and(|h| !h.contains("C-w j")), "with the keys: its own");
     }
 
     /// Multiple offers stack in arrival order and only the front one gets keys — clicking a back card

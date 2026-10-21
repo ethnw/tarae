@@ -134,6 +134,11 @@ side git · 4 rows · in hand git:src/term.rs
     taken as a character (`f`, `r`, a `gw` label).
   - `drawn`: the region is on screen this frame.
   - `under`: what has the keys once a `C-q` card lets go.
+  - `waiting` (V 9, friction 60): the card that takes the keys once they've been quiet a second — it came while
+    keys were coming in; until then they go where `region` says (text form: `card#3 takes them once the keys are
+    quiet`). A driver about to answer it waits for the next state with `waiting` gone, or sends `C-q` first. A
+  shuttle's step frees a card whose quiet has come before it checks anything, and never between its check and its
+  key: a step checked as the code's lands in the code.
 
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
@@ -200,7 +205,9 @@ side git · 4 rows · in hand git:src/term.rs
     nothing changed since; `null` otherwise.
   - `held` (frictions25 R8): why its yes isn't among its answers (`Offer.held` — high-risk changes no one has
     looked at), `null` when it isn't held; the text form says it on the card's line, `y held: …`. `aside`: it
-    stepped aside for what its `h` went to (`Offer.aside`) — `aside, C-q answers it` on the line.
+    stepped aside for what its `h` went to (`Offer.aside`) — `aside, C-q answers it` on the line. `waits` (V 9):
+    `keys quiet` while it waits for the keys to go quiet (`keys.waiting` names it), else `null` — `waits for the keys
+    quiet, C-q answers it` on the line.
   - `text` (cardburden 5, full level only): the card's text whole, `[{ line, role }]` — `role` as the card draws
     the line: `warning` (what yes risks, the warning colour: `Offer.warning` and the data's `warnings`) over
     `diff` (what changed since a `y`, `sinceyes`) over `decided` (`decided_lines`, full strength) — the rest

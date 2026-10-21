@@ -24,11 +24,11 @@
 21                              ▌ 20▎let added_15 = 15;                                                           ▐
 22                              ▌ 21▎let added_16 = 16;                                                           ▐
 23                              ▌ 22▎let added_17 = 17;                                                           ▐
-24                              ▌ 23▎let added_18 = 18;                                                           ▐
-25   ]g hunk  ]F file           ▌ 24▎let added_19 = 19;                                                           ▐
-26   space e files  ]u unviewed ▌ 25▎let added_20 = 20;                                                           ▐
-27   space n comment            ▌ 26▎let added_21 = 21;                                                           ▐
-28   space v m viewed · q end   ▌ 27▎let added_22 = 22;                                                           ▐
+24   ]g hunk  ]F file           ▌ 23▎let added_18 = 18;                                                           ▐
+25   space e files  ]u unviewed ▌ 24▎let added_19 = 19;                                                           ▐
+26   space n comment            ▌ 25▎let added_20 = 20;                                                           ▐
+27   space v m viewed           ▌ 26▎let added_21 = 21;                                                           ▐
+28   space v q end              ▌ 27▎let added_22 = 22;                                                           ▐
 29  ● normal   +30                                                                          rust   utf-8 LF   4:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
@@ -86,11 +86,11 @@
 21                                ffg                                                                             g
 22                                ffg                                                                             g
 23                                ffg                                                                             g
-24                                ffg                                                                             g
-25   DD ffff  DD ffff             ffg                                                                             g
-26   DDDDD D fffff  DD ffffffff   ffg                                                                             g
-27   DDDDD D fffffff              ffg                                                                             g
-28   DDDDD D f ffffff f f fff     ffg                                                                             g
+24   DD ffff  DD ffff             ffg                                                                             g
+25   DDDDD D fffff  DD ffffffff   ffg                                                                             g
+26   DDDDD D fffffff              ffg                                                                             g
+27   DDDDD D D ffffff             ffg                                                                             g
+28   DDDDD D D fff                ffg                                                                             g
 29  a TTTTTT   ggg                                                                          dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other

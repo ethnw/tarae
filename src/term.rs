@@ -1047,10 +1047,18 @@ fn draw_debug_panel(
     Ok(())
 }
 
-/// A test's or task's panel with the keys: what they do there, first in its header's hints.
+/// A test's or task's panel: what its keys do there when it has them, else how they come (`C-w j` — how you get
+/// in, uxaudit D6) — first in its header's hints, before the commands that work from anywhere.
 fn slot_hints(editor: &Editor) -> Vec<(&'static str, &'static str)> {
     if !editor.bottom_focus {
-        return Vec::new();
+        // (only where `C-w` is the window prefix — the code in normal mode, nothing under way: in insert mode or a
+        // draft it deletes a word, in the terminal it's the program's — and from a pane with none below it: from
+        // one with a pane below, `C-w j` goes to that one)
+        let prefix = editor.mode == crate::editor::Mode::Normal
+            && editor.pending.is_empty()
+            && editor.keys_to().region == crate::uistate::Region::Code;
+        let way_in = prefix && editor.pane_toward(0, 1).is_none();
+        return way_in.then_some(("C-w j", "scroll")).into_iter().collect();
     }
     let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
     let mut v = vec![("j k", "scroll"), ("C-w z", zoom)];
@@ -6497,7 +6505,10 @@ fn draw_statusline(
     let inbox = editor.inbox();
     let waiting = inbox.iter().filter(|e| e.asks_answer()).count();
     // (a card only when this frame draws it — on a screen too small for it, the count says what it needs: #201)
+    // (nor while it waits for the keys to go quiet — it came as they were coming in: friction 60)
+    let held = editor.card_waits_quiet();
     let only_in_sight = waiting == 1
+        && !held
         && match editor.next_up() {
             crate::inbox::Next::Card(_) => editor.screen.offer_card.is_some(),
             crate::inbox::Next::Review => true,
@@ -6513,6 +6524,8 @@ fn draw_statusline(
         // (what it needs folds first — that one waits is what's left when the room runs out)
         if let Some(short) = card_short(editor, lay) {
             left.push(Seg { text: format!(" · {short}"), style: ui.status.patch(warn), keep: INBOX - 1 });
+        } else if held {
+            left.push(Seg { text: " · C-q".into(), style: ui.status.patch(warn), keep: INBOX - 1 });
         }
         gap = " ";
     }
@@ -9169,11 +9182,13 @@ fn put_gutter(out: &mut impl Write, (glyph, style): (&str, Style)) -> io::Result
 ///   ◦ src/edits.rs  +214   new
 ///
 ///   ]g hunk  ]F file
+///   space e files  ]u unviewed
 ///   space n comment
-///   space v s send 2 · q end
+///   space v s send 2
+///   space v q end
 /// ```
-/// The review rail's key hints under its files: a blank and four rows.
-const RAIL_HINTS: usize = 5;
+/// The review rail's key hints under its files: a blank and five rows (whole pairs — uxaudit D6).
+const RAIL_HINTS: usize = 6;
 
 /// The review rail's width bounds, and the columns the code keeps beside it.
 const REVIEW_RAIL_MIN: usize = 24;
@@ -9352,19 +9367,24 @@ fn review_rail_hints(
             walk(),
             hint(&[("space n", "comment"), ("]u", "unviewed")]),
             hint(&[("space u", "undo the whole turn")]),
-            vec![sp("space v", key), sp(" u undo · q keep", faint)],
+            hint(&[("space v u", "undo")]),
+            hint(&[("space v q", "keep")]),
         ]
     } else {
-        // `space v` once, its keys after it (`s send 2 · q end`) — the pairs wouldn't fit the rail
-        let send = if drafts > 0 {
-            vec![sp("space v s", key), sp(&format!(" send {drafts}"), accent), sp(" · q end", faint)]
+        // (whole pairs, a row each where two wouldn't fit the rail — uxaudit D6)
+        let mut v =
+            vec![walk(), hint(&[("space e", "files"), ("]u", "unviewed")]), hint(&[("space n", "comment")])];
+        if drafts > 0 {
+            v.push(vec![sp("space v s", key), sp(&format!(" send {drafts}"), accent)]);
+            v.push(hint(&[("space v q", "end")]));
         } else if high {
-            // (no `q end`: a high-risk change not looked at holds the end — and the rail's width)
-            vec![sp("space v h", key), sp(" looked at", accent)]
+            // (no `q end`: a high-risk change not looked at holds the end)
+            v.push(vec![sp("space v h", key), sp(" looked at", accent)]);
         } else {
-            vec![sp("space v", key), sp(" m viewed · q end", faint)]
-        };
-        vec![walk(), hint(&[("space e", "files"), ("]u", "unviewed")]), hint(&[("space n", "comment")]), send]
+            v.push(hint(&[("space v m", "viewed")]));
+            v.push(hint(&[("space v q", "end")]));
+        }
+        v
     }
 }
 
@@ -9994,10 +10014,7 @@ fn draw_review_rail(
         scrolls.push((rows.len(), room as isize));
     }
     rows.push(more(below, "↓"));
-    // Keys at the bottom
-    let fill = lay.body_h.saturating_sub(rows.len() + RAIL_HINTS);
-    rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
-    rows.push((Vec::new(), card, None));
+    // Keys at the bottom (as many rows as they take now — at most `RAIL_HINTS`, a blank above)
     // (the cursor on a high-risk change no one has looked at yet)
     let high_here = r.current(editor).is_some_and(|i| {
         let line = editor.cursor_line();
@@ -10007,7 +10024,11 @@ fn draw_review_rail(
                 && !g.looked_at(&editor.session.looked)
         })
     });
-    for row in review_rail_hints(r.focus, turn, drafts, high_here, key, faint, accent) {
+    let hints = review_rail_hints(r.focus, turn, drafts, high_here, key, faint, accent);
+    let fill = lay.body_h.saturating_sub(rows.len() + 1 + hints.len());
+    rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
+    rows.push((Vec::new(), card, None));
+    for row in hints {
         rows.push((row, card, None));
     }
     let mut links = editor.screen.review_rail.borrow_mut();
@@ -13261,10 +13282,65 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         hints(&[("enter", "go to it"), ("type", "narrow"), ("esc", "close")])
     } else if editor.picker.as_ref().is_some_and(replace_list) {
         hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "close")])
+    } else if let Some(p) = editor.picker.as_ref() {
+        // Every other list (uxaudit D6): what enter does there, where it's one thing — typing narrows it, esc closes
+        match picker_enter(p.kind) {
+            Some(enter) => hints(&[("enter", enter), ("type", "narrow"), ("esc", "close")]),
+            None => hints(&[("type", "narrow"), ("esc", "close")]),
+        }
+    } else if let Some(p) = editor.prompt.as_ref() {
+        // A prompt: what enter does with the line; the command line's names complete with tab
+        let enter = prompt_enter(p.kind);
+        match p.kind {
+            crate::editor::PromptKind::Command => {
+                hints(&[("enter", enter), ("tab", "complete"), ("esc", "close")])
+            }
+            _ => hints(&[("enter", enter), ("esc", "close")]),
+        }
     } else if editor.popup.is_some() {
         hints(&[("C-d", "scroll down"), ("C-u", "scroll up"), ("esc", "close")])
     } else {
         None
+    }
+}
+
+/// What `enter` does in a picker of kind `kind` (`features::PICKERS`) — None where it's more than one thing or
+/// its own hints say it (`key_hints`).
+fn picker_enter(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "files" | "changed-files" => "open",
+        "commands" | "tasks" => "run",
+        "symbols"
+        | "workspace-symbols"
+        | "diagnostics"
+        | "workspace-diagnostics"
+        | "places"
+        | "jumps"
+        | "text-matches" => "go to it",
+        "themes" | "model" | "effort" | "session-base" | "rebase-session" | "blocked" | "plugin" => "choose",
+        "code-actions" => "apply",
+        "attach" => "attach",
+        "watches" => "remove",
+        _ => return None,
+    })
+}
+
+/// What `enter` does with a prompt's line.
+fn prompt_enter(kind: crate::editor::PromptKind) -> &'static str {
+    use crate::editor::PromptKind as K;
+    match kind {
+        K::Command | K::Shell(_) => "run",
+        K::Search { .. } => "search",
+        K::SelectRegex => "select",
+        K::Split => "split",
+        K::Keep { remove: false } => "keep",
+        K::Keep { remove: true } => "remove",
+        K::Rename => "rename",
+        K::BreakCondition | K::LogMessage | K::Watch => "set",
+        K::Replace => "replace",
+        K::Note(_) => "send",
+        K::Plugin(_) => "done",
+        K::Session => "make it",
     }
 }
 
@@ -14288,6 +14364,7 @@ mod tests {
                 aside: false,
                 like: Vec::new(),
                 came: 0,
+                typing: false,
                 yours: false,
                 output: None,
             });

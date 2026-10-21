@@ -121,6 +121,38 @@ fn a_step_lands_where_a_persons_key_would() {
     );
 }
 
+/// A card that waits for the keys to go quiet (friction 60) is freed before a step's check, never between the
+/// check and its key: with the quiet passing right there (`AFTER_CHECK`), the shuttle's `y` checked as the code's
+/// lands in the code — it never reaches a card it may not answer (a project's trust) unchecked. A step after the
+/// keys went quiet meets the card, and its `y` is refused.
+#[test]
+fn a_card_freed_as_a_step_lands_never_takes_its_key_unchecked() {
+    let mut ed = editor();
+    ed.keys_hold = true;
+    let id = connect_for_test(&mut ed, "t", Level::Light);
+    // (keys coming in — the shuttle's last step, say — then the card from elsewhere)
+    ed.last_input = Some(crate::clock::now());
+    let trust = What::ProjectTrust { hash: [0; 32] };
+    ed.push_offer(Offer::new("Trust this project?".into(), "x = 1", "", String::new(), trust));
+    frame(&mut ed);
+    settle(&mut ed);
+    // (keys just came: the frame drawn never eats into the window, however slow the machine)
+    ed.last_input = Some(crate::clock::now());
+    assert!(ed.card_waits_quiet(), "it waits for the keys");
+    let pane = to(&ed);
+    AFTER_CHECK.set(Some(crate::offer::KEYS_QUIET * 2));
+    let (said, landed) = here(&mut ed, id, "y");
+    assert!(landed && said["landed"] == pane.as_str() && said["took"] == "code", "{said}");
+    assert_eq!(ed.offers.len(), 1, "the card unanswered");
+    // Quiet before the step: the card has the keys, and the shuttle's `y` on it is refused
+    ed.last_input = ed.last_input.map(|t| t - crate::offer::KEYS_QUIET * 2);
+    let card = to(&ed);
+    assert!(card.starts_with("card#"), "the card's: {card}");
+    let (said, landed) = here(&mut ed, id, "y");
+    assert!(!landed && said["refused"] == "never", "{said}");
+    assert_eq!(ed.offers.len(), 1);
+}
+
 /// Every step says where it goes — an empty `expect`, or none for the keys, is refused; so is one whose place
 /// isn't where the keys go: nothing is typed.
 #[test]
