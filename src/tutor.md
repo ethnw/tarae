@@ -7,7 +7,7 @@ Forget a key? Press `space` any time — a card shows the keys you can press nex
 
 ## 1. Modes — a key types a letter, or runs a command
 
-You're in **NORMAL** mode (the pill at the bottom left). Here keys are commands.
+You're in **NORMAL** mode (the word at the bottom left says so). Here keys are commands.
 Press `i` for **INSERT** mode — from then on, what you type is text. `Esc` brings you back.
 
   → Put the cursor after "here" at the end of the line below, press `i`, type anything, `Esc`.

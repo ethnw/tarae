@@ -50,7 +50,8 @@ type. Enter → diff takes about 3.4 s with the default model.
 
 ![Chat panel — ask with the selection as context; code in answers sits in a well in its language's colors](screenshots/m4-chat.png)
 
-`space l` (or `:chat [question]`) opens a panel on the right; `space L` closes it and `:chat-new` starts over. One
+`space l` (or `:chat [question]`) opens a panel on the right ([in hanji](screenshots/m4-chat-hanji.png)); `space L`
+closes it and `:chat-new` starts over. One
 process lives for the whole conversation, so Claude remembers what came before.
 
 **The model** is named in the chat's title while it's idle (`Opus 5.5 · high`). `C-t` in the chat (or `:model`,
@@ -397,8 +398,7 @@ Moving the cursor, switching
 files, or scrolling in the editor takes over: following pauses (`claude › paused`) until `C-f` or your next
 question. `C-o` jumps back to where you were before the turn.
 
-An empty conversation shows a short guide and example questions you can pick with `tab`
-([hanji theme](screenshots/m4-chat-hanji.png)).
+An empty conversation shows a short guide and example questions you can pick with `tab`.
 
 ### The plan
 
@@ -654,7 +654,7 @@ its chat row marked `▲` from then, and a line in Claude's report. `Cargo.toml`
 so in the sandbox those tools are refused that write, and the line says so. The words come from the language
 packs (`warn` entries with `start = true`), so a project's `[[cards.warn]]` can add its own.
 
-![Claude wants to run git commit: a card at the bottom right shows the whole command with y Run and n No, the minimized chat moved to the top right, its row on the command](screenshots/chat-run.png)
+![Claude wants to run cargo test outside the sandbox: a card at the bottom right shows the command, Claude's reason and, in the warning color, that outside the sandbox it runs with all your permissions this once, with y Run and n No; the follow card at the top right says Claude is waiting for your answer](screenshots/chat-run.png)
 
 ### The sandbox
 

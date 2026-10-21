@@ -495,6 +495,17 @@ impl Compared {
 
 /// Shot `n` in `a` against its twin in `b`, pixel for pixel.
 fn compared(a: &Path, b: &Path, n: &str) -> Compared {
+    compared_but(a, b, n, &|_, _, _, _| false)
+}
+
+/// `compared`, passing over the pixels `left_out(x, y, w, h)` names in a `w`×`h` shot (a docs row's cells that may
+/// differ between takes — `docshots.rs`'s `varies`).
+fn compared_but(
+    a: &Path,
+    b: &Path,
+    n: &str,
+    left_out: &dyn Fn(usize, usize, usize, usize) -> bool,
+) -> Compared {
     let read = |p: &Path| -> Result<(u32, u32, Vec<u8>)> {
         let file = std::fs::File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
         let mut r = png::Decoder::new(io::BufReader::new(file))
@@ -515,11 +526,11 @@ fn compared(a: &Path, b: &Path, n: &str) -> Compared {
     if (x.0, x.1) != (y.0, y.1) {
         return Compared::Differs(format!("in size: {}×{} against {}×{}", x.0, x.1, y.0, y.1));
     }
-    let (w, px) = (x.0 as usize, x.2.len() / (x.0 * x.1).max(1) as usize);
+    let (w, h, px) = (x.0 as usize, x.1 as usize, x.2.len() / (x.0 * x.1).max(1) as usize);
     let mut boxed: Option<(usize, usize, usize, usize)> = None;
     for (i, (p, q)) in x.2.chunks(px.max(1)).zip(y.2.chunks(px.max(1))).enumerate() {
-        if p != q {
-            let (cx, cy) = (i % w, i / w);
+        let (cx, cy) = (i % w, i / w);
+        if p != q && !left_out(cx, cy, w, h) {
             let (x0, y0, x1, y1) = boxed.unwrap_or((cx, cy, cx, cy));
             boxed = Some((x0.min(cx), y0.min(cy), x1.max(cx), y1.max(cy)));
         }
@@ -677,10 +688,10 @@ fn config_toml(me: &Path, script: &str) -> String {
 
 /// A folder made new for one shot (0700; the next number when the name is taken — never one that was there),
 /// by its real path; removed on drop, and only it.
-struct Fresh(PathBuf);
+pub(crate) struct Fresh(pub(crate) PathBuf);
 
 impl Fresh {
-    fn new(name: &str) -> Result<Fresh> {
+    pub(crate) fn new(name: &str) -> Result<Fresh> {
         let base = std::env::temp_dir();
         for n in 0..1000 {
             let p = base.join(format!("{name}-{}-{n}", std::process::id()));
@@ -813,6 +824,10 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
     let mut lines = input.lines();
     while let Some(line) = lines.next() {
         let line = line?;
+        // (the docs' own scripts first)
+        if docshots::answered(script, &line, out, pause)? {
+            continue;
+        }
         // (a ping's fork sends its message once `initialize`'s answer names the credential: answered for it)
         if script == "warmfork" && line.contains("\"tarae-init\"") {
             let account = json!({"models": [], "account": {"apiKeySource": "none"}});

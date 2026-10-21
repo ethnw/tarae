@@ -7,7 +7,8 @@
 //! Keys are sent in order, 0.35 s apart (`\r` = Enter, `\t` = Tab, `\x1b` = Esc, `\xHH` = any byte; everything
 //! else, Korean too, goes out as UTF-8); `@3` waits 3 s taking screen updates; `@?ready` waits until `ready` is
 //! on screen (a language server indexing …) — at most 120 s, or `@30?ready` 30; `@!ready` (`@30!ready`) until it's
-//! gone from it.
+//! gone from it. A wait that times out fails the shot (the picture is still saved, of the screen as it was then):
+//! a shot of the wrong frame never passes as one that worked.
 //!
 //! Environment:
 //! - `TARAE_SHOT_XDG` — config home (`tarae/config.toml` under it; default `/tmp/tarae-shot/xdg`). Point it at
@@ -40,7 +41,8 @@ use std::time::{Duration, Instant};
 use crate::{Result, root};
 
 const SIZE: f32 = 15.0;
-const PAD: usize = 14;
+/// The margin around the cells, in 1× pixels (`docshots.rs` finds a picture's cells by it).
+pub(crate) const PAD: usize = 14;
 const BG: Rgb = [30, 31, 40];
 const FG: Rgb = [248, 248, 242];
 /// tarae wraps each frame in a synchronized update (`CSI ?2026h … ?2026l`) — only whole frames are fed, so a
@@ -68,11 +70,12 @@ pub fn run(args: &[String]) -> Result<()> {
         let state = given
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join(format!("tarae-shot-state-{}", std::process::id())));
-        let res = Setup::from_env().and_then(|setup| drive(&mut vt, &setup, keys, &state, None, cols, rows));
+        let res = Setup::from_env().and_then(|setup| drive(&mut vt, &setup, keys, &state, &[], cols, rows));
         if given.is_none() {
             let _ = std::fs::remove_dir_all(&state);
         }
-        res?;
+        let missed = res?;
+        return picture_of(&vt, scale, Path::new(out), &missed);
     }
     picture(&vt, scale, Path::new(out))
 }
@@ -115,25 +118,40 @@ impl Setup {
 pub fn take(setup: &Setup, keys: &[String], size: (u16, u16), state: &Path, out: &Path) -> Result<()> {
     let (cols, rows) = size;
     let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
-    drive(&mut vt, setup, keys, state, None, cols, rows)?;
-    picture(&vt, 1, out)
+    let missed = drive(&mut vt, setup, keys, state, &[], cols, rows)?;
+    picture_of(&vt, 1, out, &missed)
 }
 
-/// `take` for a picture the docs show (`scenes --docs`): at `scale`, and with tarae's data home (grammars, packs,
-/// sessions' checkouts) at `data` rather than yours — nothing downloaded on this machine shows in it.
+/// `take` for a picture the docs show (`scenes --docs`): at `scale`, and with tarae's homes in `homes` rather than
+/// yours (`XDG_DATA_HOME` — grammars, packs, sessions' checkouts —, `XDG_CACHE_HOME`, `HOME` …): nothing
+/// downloaded, cached or kept on this machine shows in it. What it returns: the screen it drew, each cell's text
+/// row by row (a wide character's second cell empty) — a docs row checks its `varies` there.
 pub fn take_at(
     setup: &Setup,
     keys: &[String],
     size: (u16, u16),
     scale: usize,
     state: &Path,
-    data: &Path,
+    homes: &[(&str, std::ffi::OsString)],
     out: &Path,
-) -> Result<()> {
+) -> Result<Vec<Vec<String>>> {
     let (cols, rows) = size;
     let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
-    drive(&mut vt, setup, keys, state, Some(data), cols, rows)?;
-    picture(&vt, scale, out)
+    let missed = drive(&mut vt, setup, keys, state, homes, cols, rows)?;
+    picture_of(&vt, scale, out, &missed)?;
+    let screen = vt.parser.screen();
+    let text = |r, c| screen.cell(r, c).map(|c| c.contents().to_string()).unwrap_or_default();
+    Ok((0..rows).map(|r| (0..cols).map(|c| text(r, c)).collect()).collect())
+}
+
+/// The picture of a driven screen, saved either way — and an error when a wait in its keys timed out (`missed`):
+/// it's of the frame as it was then, likely not the one meant, and must not pass as a shot that worked.
+fn picture_of(vt: &Vt, scale: usize, out: &Path, missed: &[String]) -> Result<()> {
+    picture(vt, scale, out)?;
+    match missed {
+        [] => Ok(()),
+        _ => Err(format!("{} — the shot is of the screen as it was then", missed.join("; "))),
+    }
 }
 
 /// The screen as a PNG at `out`.
@@ -272,16 +290,17 @@ fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc == -1 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
-/// `data`: tarae's `XDG_DATA_HOME` (None: the shot's own environment's).
+/// `homes`: folders set for tarae last, over the rest (`take_at`; none: the shot's own environment's). What it
+/// returns: each wait in `keys` that timed out, said (the keys after it are still sent).
 fn drive(
     vt: &mut Vt,
     setup: &Setup,
     keys: &[String],
     state: &Path,
-    data: Option<&Path>,
+    homes: &[(&str, std::ffi::OsString)],
     cols: u16,
     rows: u16,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     if !setup.bin.is_file() {
         return Err(format!("{} not found", setup.bin.display()));
     }
@@ -303,8 +322,8 @@ fn drive(
         .stdin(stdio()?)
         .stdout(stdio()?)
         .stderr(stdio()?);
-    if let Some(data) = data {
-        cmd.env("XDG_DATA_HOME", data);
+    for (k, v) in homes {
+        cmd.env(k, v);
     }
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
@@ -363,13 +382,15 @@ fn drive(
         }
     };
     pump(vt, 1.2);
+    let mut missed = Vec::new();
     for k in keys {
         if let Some((max, text)) = wait_key(k) {
             let t = Instant::now();
             if pump_until(vt, text, max, false) {
                 eprintln!("shot: {text:?} on screen after {:.1}s", t.elapsed().as_secs_f64());
             } else {
-                eprintln!("shot: {text:?} not on screen after {max}s — taking the shot as it is");
+                eprintln!("shot: {text:?} not on screen after {max}s — going on, the shot will fail");
+                missed.push(format!("waited {max} s for {text:?}: never on screen"));
             }
             continue;
         }
@@ -378,7 +399,8 @@ fn drive(
             if pump_until(vt, text, max, true) {
                 eprintln!("shot: {text:?} gone from the screen after {:.1}s", t.elapsed().as_secs_f64());
             } else {
-                eprintln!("shot: {text:?} still on screen after {max}s — taking the shot as it is");
+                eprintln!("shot: {text:?} still on screen after {max}s — going on, the shot will fail");
+                missed.push(format!("waited {max} s for {text:?} to go: still on screen"));
             }
             continue;
         }
@@ -391,7 +413,7 @@ fn drive(
     }
     pump(vt, 0.6);
     quit(&mut master, &mut child, &rx);
-    Ok(())
+    Ok(missed)
 }
 
 /// The longest `@?text` waits unless it says (`@30?text`).
@@ -503,6 +525,8 @@ struct Fonts {
     bold_italic: fontdue::Font,
     /// Hangul and anything else past U+2E80 (CJK)
     wide: Option<fontdue::Font>,
+    /// The wide font's bold, for a bold cell's: a bold cell looks bold whatever its script (none found: `wide`)
+    wide_bold: Option<fontdue::Font>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -512,23 +536,38 @@ enum Face {
     Italic,
     BoldItalic,
     Wide,
+    WideBold,
 }
+
+/// The wide fonts looked for, in order: each with its bold — (file, collection index), the bold's file and index.
+/// (Apple SD Gothic Neo's collection: Regular 0, Medium 2, Bold 6 — by the ink each puts down, measured
+/// 2026-10-20: Bold 148 % of Regular's.)
+const WIDE_FONTS: [(&str, u32, &str, u32); 3] = [
+    ("AppleSDGothicNeo.ttc", 0, "AppleSDGothicNeo.ttc", 6),
+    ("NotoSansCJK-Regular.ttc", 0, "NotoSansCJK-Bold.ttc", 0),
+    ("NanumGothic.ttf", 0, "NanumGothicBold.ttf", 0),
+];
 
 impl Fonts {
     /// The fonts, tuned for `SIZE` at `scale`.
     fn load(scale: usize) -> Result<Fonts> {
         let size = SIZE * scale as f32;
-        let open = |name: &str| -> Option<fontdue::Font> {
+        let open_at = |name: &str, index: u32| -> Option<fontdue::Font> {
             let bytes = std::fs::read(find_font(name)?).ok()?;
-            fontdue::Font::from_bytes(bytes, fontdue::FontSettings { scale: size, ..Default::default() }).ok()
+            let settings =
+                fontdue::FontSettings { scale: size, collection_index: index, ..Default::default() };
+            fontdue::Font::from_bytes(bytes, settings).ok()
         };
+        let open = |name: &str| open_at(name, 0);
         let regular = open("JetBrainsMono-Regular.ttf").ok_or("JetBrainsMono-Regular.ttf not found")?;
         let or_regular = |name| open(name).unwrap_or_else(|| regular.clone());
         let (bold, italic) = (or_regular("JetBrainsMono-Bold.ttf"), or_regular("JetBrainsMono-Italic.ttf"));
         let bold_italic = open("JetBrainsMono-BoldItalic.ttf").unwrap_or_else(|| bold.clone());
-        let wide =
-            ["AppleSDGothicNeo.ttc", "NotoSansCJK-Regular.ttc", "NanumGothic.ttf"].into_iter().find_map(open);
-        Ok(Fonts { regular, bold, italic, bold_italic, wide })
+        let (wide, wide_bold) = WIDE_FONTS
+            .iter()
+            .find_map(|&(f, i, b, j)| Some((open_at(f, i)?, open_at(b, j))))
+            .map_or((None, None), |(w, b)| (Some(w), b));
+        Ok(Fonts { regular, bold, italic, bold_italic, wide, wide_bold })
     }
 
     fn face(&self, f: Face) -> &fontdue::Font {
@@ -538,6 +577,7 @@ impl Fonts {
             Face::Italic => &self.italic,
             Face::BoldItalic => &self.bold_italic,
             Face::Wide => self.wide.as_ref().unwrap_or(&self.regular),
+            Face::WideBold => self.wide_bold.as_ref().unwrap_or(self.face(Face::Wide)),
         }
     }
 }
@@ -689,7 +729,7 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
         }
     }
     // 2) Glyphs
-    let mut glyphs: HashMap<(Face, char, bool), (fontdue::Metrics, Vec<u8>)> = HashMap::new();
+    let mut glyphs: HashMap<(Face, char), (fontdue::Metrics, Vec<u8>)> = HashMap::new();
     for y in 0..rows {
         for x in 0..cols {
             let Some(c) = cell(y, x) else { continue };
@@ -718,12 +758,14 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
                 continue;
             }
             let mut pen = px as f32;
-            // (a wide character alone in its cell: drawn to fill both cells and centred across them — at the font's
-            // own size, from the first cell's edge, `실타래` read `실 타 래`, frictions29 8; centring alone only moved
-            // the gap, the glyph's ink 12 px of the cells' 18)
+            // (a wide character alone in its cell: at the font's own size, centred across its two cells. Drawn from
+            // the first cell's edge `실타래` read `실 타 래` (frictions29 8); drawn bigger, to fill both cells, the
+            // Hangul stood too big next to the English (the user's look, 2026-10-20) — so the size is the font's, and
+            // the centring is what stays. A bold cell's in the wide font's Bold: bold whatever its script)
             let centred = c.is_wide() && text.chars().count() == 1;
             for chr in text.chars() {
                 let face = match (c.bold(), c.italic()) {
+                    (true, _) if chr as u32 > 0x2e80 && fonts.wide_bold.is_some() => Face::WideBold,
                     _ if chr as u32 > 0x2e80 && fonts.wide.is_some() => Face::Wide,
                     (true, true) => Face::BoldItalic,
                     (true, false) => Face::Bold,
@@ -731,31 +773,20 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
                     _ => Face::Regular,
                 };
                 // A glyph the mono font lacks: try the wide font
-                let face = if face != Face::Wide
+                let face = if !matches!(face, Face::Wide | Face::WideBold)
                     && fonts.face(face).lookup_glyph_index(chr) == 0
                     && fonts.wide.is_some()
                 {
-                    Face::Wide
+                    // (a bold cell's in the wide font's bold, whatever its script)
+                    if c.bold() && fonts.wide_bold.is_some() { Face::WideBold } else { Face::Wide }
                 } else {
                     face
                 };
                 let font = fonts.face(face);
-                let (m, bitmap) = glyphs.entry((face, chr, centred)).or_insert_with(|| match centred {
-                    true => font.rasterize(chr, size * wide_scale(font.metrics(chr, size).advance_width, cw)),
-                    false => font.rasterize(chr, size),
-                });
+                let (m, bitmap) = glyphs.entry((face, chr)).or_insert_with(|| font.rasterize(chr, size));
                 // (the 1× baseline's, times the scale)
                 let baseline = (py + baseline1 * s) as i64;
-                let top = match centred {
-                    // (drawn bigger: its middle where the font's own size has it, not grown up from the baseline —
-                    // it sat high beside the Latin letters)
-                    true => {
-                        let m0 = font.metrics(chr, size);
-                        let middle = baseline - m0.ymin as i64 - m0.height as i64 / 2;
-                        middle - m.height as i64 / 2
-                    }
-                    false => baseline - m.ymin as i64 - m.height as i64,
-                };
+                let top = baseline - m.ymin as i64 - m.height as i64;
                 let left = match centred {
                     true => (px + (2 * cw).saturating_sub(m.width) / 2) as i64,
                     false => pen.round() as i64 + m.xmin as i64,
@@ -785,21 +816,6 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
 /// The 1× baseline, in pixels from the top of a cell `ch1` tall: `font`'s line (ascent, descent, line gap)
 /// centred in the cell, as a terminal places it (Ghostty, kitty) — one for every face of a row, a fallback's
 /// glyphs on it too. (frictions28: `3 + ascent` put it about 3 px low in a 21 px cell.)
-/// How much bigger than the font's size a wide character is drawn so its advance fills its two cells (`cw` a
-/// cell, in pixels) as a terminal's does — never smaller, at most `WIDE_SCALE_MAX` (a line's height holds it).
-fn wide_scale(advance: f32, cw: usize) -> f32 {
-    match advance > 0.0 {
-        true => (WIDE_FILL * (2 * cw) as f32 / advance).clamp(1.0, WIDE_SCALE_MAX),
-        false => 1.0,
-    }
-}
-
-/// The share of its two cells a wide character's advance fills, drawn.
-const WIDE_FILL: f32 = 0.98;
-
-/// A wide character is drawn at most this much bigger than the font's size.
-const WIDE_SCALE_MAX: f32 = 1.3;
-
 fn baseline(font: &fontdue::Font, ch1: usize) -> usize {
     let at = font.horizontal_line_metrics(SIZE).map_or(SIZE, |l| {
         let line = l.ascent - l.descent + l.line_gap;
@@ -845,6 +861,95 @@ mod tests {
         assert_eq!(vt.parser.screen().contents(), "ab");
         vt.feed(b"\x1b[?2026l");
         assert_eq!(vt.parser.screen().contents(), "abcd");
+    }
+
+    /// A wait that times out is said and fails the shot — the picture still saved, of the screen as it was —
+    /// and one that's met isn't; the keys after a missed one are still sent. (A stand-in on the pty draws one whole
+    /// frame, then echoes nothing.)
+    #[test]
+    fn a_wait_that_times_out_fails_the_shot() {
+        // (the picture is drawn either way: without JetBrains Mono there's none to draw)
+        if Fonts::load(1).is_err() {
+            return;
+        }
+        let dir = crate::scenes::Fresh::new("tarae-shot-missed").unwrap();
+        let setup = Setup {
+            bin: "/bin/sh".into(),
+            files: vec!["-c".into(), r"printf '\033[?2026hready\033[?2026l'; exec cat >/dev/null".into()],
+            cwd: dir.0.clone(),
+            config: dir.0.clone(),
+            background: None,
+            env: Vec::new(),
+        };
+        let keys = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let out = dir.0.join("met.png");
+        assert_eq!(take(&setup, &keys(&["@3?ready", "@0.3!nothere"]), (20, 3), &dir.0, &out), Ok(()));
+        let out = dir.0.join("missed.png");
+        let e = take(&setup, &keys(&["@0.3?nothere", "@0.3!ready", "@3?ready"]), (20, 3), &dir.0, &out)
+            .unwrap_err();
+        assert!(e.contains(r#"waited 0.3 s for "nothere": never on screen"#), "{e}");
+        assert!(e.contains(r#"waited 0.3 s for "ready" to go: still on screen"#), "{e}");
+        assert!(out.is_file(), "the picture is saved to look at");
+    }
+
+    /// A shot's homes (`take_at`'s, a docs shot's own) are what its program sees, over the environment it's
+    /// taken in, its setup's own variables and the terminal's (`as_a_terminal`'s `XDG_STATE_HOME`): `drive` sets
+    /// them last, and that order is what makes them win. (A stand-in on the pty draws `ok` only when `HOME`,
+    /// `XDG_CACHE_HOME` and `XDG_STATE_HOME` are the homes given.)
+    #[test]
+    fn a_shots_homes_win_over_what_else_sets_them() {
+        if Fonts::load(1).is_err() {
+            return;
+        }
+        let dir = crate::scenes::Fresh::new("tarae-shot-homes").unwrap();
+        let check = r#"v="$HOME|$XDG_CACHE_HOME|$XDG_STATE_HOME"; [ "$v" = "/t/home|/t/cache|/t/state" ] && m=ok || m="no:$v"
+            printf '\033[?2026h%s\033[?2026l' "$m"; exec cat >/dev/null"#;
+        let setup = Setup {
+            bin: "/bin/sh".into(),
+            files: vec!["-c".into(), check.into()],
+            cwd: dir.0.clone(),
+            config: dir.0.clone(),
+            background: None,
+            // (the setup's own, set before the homes)
+            env: vec![("HOME", Some("/yours")), ("XDG_CACHE_HOME", Some("/yours/.cache"))],
+        };
+        let homes = [
+            ("HOME", "/t/home".into()),
+            ("XDG_CACHE_HOME", "/t/cache".into()),
+            ("XDG_STATE_HOME", "/t/state".into()),
+        ];
+        let out = dir.0.join("homes.png");
+        let keys = ["@3?ok".to_string()];
+        assert!(take_at(&setup, &keys, (80, 2), 1, &dir.0, &homes, &out).is_ok(), "the homes given");
+    }
+
+    /// A bold cell's character the mono font lacks, below the wide range, is drawn in the wide font's bold too —
+    /// "bold whatever its script". (Skipped where no such character is found, or no bold wide face.)
+    #[test]
+    fn a_bold_cells_fallback_glyph_is_the_wide_fonts_bold() {
+        let Ok(f) = Fonts::load(1) else { return };
+        let (Some(wide), Some(bold)) = (f.wide.as_ref(), f.wide_bold.as_ref()) else { return };
+        let ink =
+            |font: &fontdue::Font, c| font.rasterize(c, SIZE).1.iter().map(|a| u64::from(*a)).sum::<u64>();
+        // (one the mono font lacks whose bold the wide font draws heavier — some punctuation is one shape in both)
+        let lacked = (0x2000..0x2e80u32).filter_map(char::from_u32).find(|&c| {
+            f.regular.lookup_glyph_index(c) == 0
+                && wide.lookup_glyph_index(c) != 0
+                && ink(bold, c) > ink(wide, c) + 50
+        });
+        let Some(c) = lacked else { return };
+        let drawn = |text: &str| {
+            let mut vt = vt100::Parser::new(1, 8, 0);
+            vt.process(format!("\x1b[?25l{text}").as_bytes());
+            let (_, _, px) = render(vt.screen(), &f, 1);
+            px.chunks(3).flat_map(|p| p.iter().zip(BG).map(|(a, b)| u64::from(a.abs_diff(b)))).sum::<u64>()
+        };
+        let (regular, bold) = (drawn(&c.to_string()), drawn(&format!("\x1b[1m{c}")));
+        assert!(
+            bold > regular,
+            "{c:?} (U+{:04X}) in a bold cell: ink {bold} against Regular's {regular}",
+            c as u32
+        );
     }
 
     /// A shot taken where `NO_COLOR=1` is set (a task panel) is still in color: tarae doesn't see it. (A
@@ -967,28 +1072,42 @@ mod tests {
         }
     }
 
-    /// A wide character's glyph sits in the middle of its two cells, as wide as a terminal draws it — `실타래`
-    /// reads as one word, not `실 타 래` (frictions29 8: each glyph was drawn from its first cell's left edge).
-    /// (Skipped without JetBrains Mono or a CJK face.)
+    /// A wide character is drawn at the font's own size — scale 1.0, as the user chose on 2026-10-20 (filling its
+    /// two cells, it stood too big next to the English) — in the middle of its two cells (frictions29 8: drawn from
+    /// the first cell's edge, `실타래` read `실 타 래`); a bold cell's in the wide font's Bold. (Skipped without
+    /// JetBrains Mono or a CJK face; the bold part without a bold CJK face.)
     #[test]
-    fn a_wide_characters_glyph_is_centred_across_its_two_cells() {
+    fn a_wide_character_is_at_the_fonts_own_size_centred_and_bold_in_a_bold_cell() {
         let Ok(f) = Fonts::load(1) else { return };
-        if f.wide.is_none() {
-            return;
-        }
-        let mut vt = vt100::Parser::new(1, 8, 0);
-        vt.process("\x1b[?25l실타래".as_bytes());
-        let (w, h, px) = render(vt.screen(), &f, 1);
+        let Some(wide) = f.wide.as_ref() else { return };
         let cw = f.regular.metrics('M', SIZE).advance_width as usize;
-        let inked = |x: usize| (0..h).any(|y| px[(y * w + x) * 3..(y * w + x) * 3 + 3] != BG);
+        let drawn = |text: &str| {
+            let mut vt = vt100::Parser::new(1, 8, 0);
+            vt.process(format!("\x1b[?25l{text}").as_bytes());
+            render(vt.screen(), &f, 1)
+        };
+        let (w, h, px) = drawn("실타래");
+        let lit = |x: usize, y: usize| px[(y * w + x) * 3..(y * w + x) * 3 + 3] != BG;
         for (i, c) in ['실', '타', '래'].into_iter().enumerate() {
             let (x0, x1) = (PAD + 2 * i * cw, PAD + 2 * (i + 1) * cw);
-            let ink: Vec<usize> = (x0..x1).filter(|&x| inked(x)).collect();
-            let (Some(&a), Some(&b)) = (ink.first(), ink.last()) else { panic!("{c}: no ink") };
+            let cols: Vec<usize> = (x0..x1).filter(|&x| (0..h).any(|y| lit(x, y))).collect();
+            let rows = (0..h).filter(|&y| (x0..x1).any(|x| lit(x, y))).count();
+            let (Some(&a), Some(&b)) = (cols.first(), cols.last()) else { panic!("{c}: no ink") };
+            // (scale 1.0: its ink the font's own glyph's at the shot's size — a pixel's give for antialiasing)
+            let m = wide.metrics(c, SIZE);
+            assert!((b - a + 1).abs_diff(m.width) <= 1, "{c}: {} px wide, the font's {}", b - a + 1, m.width);
+            assert!(rows.abs_diff(m.height) <= 1, "{c}: {rows} px tall, the font's {}", m.height);
             let (left, right) = (a - x0, x1 - 1 - b);
             assert!(left.abs_diff(right) <= 1, "{c}: {left} px of air on its left, {right} on its right");
-            // (and as wide as a terminal draws it: the gap to the next one no wider than a stroke)
-            assert!(left + right <= 3, "{c}: {left} + {right} px of air in its {} px", x1 - x0);
+        }
+        // (a bold cell's: the wide font's Bold — Apple SD Gothic Neo's puts down about half again Regular's ink)
+        if f.wide_bold.is_some() {
+            // (the ink's strength, how far each pixel is from the ground: antialiasing lights about as many either way)
+            let ink = |(_, _, px): (usize, usize, Vec<u8>)| -> u64 {
+                px.chunks(3).flat_map(|p| p.iter().zip(BG).map(|(a, b)| u64::from(a.abs_diff(b)))).sum()
+            };
+            let (regular, bold) = (ink(drawn("한")), ink(drawn("\x1b[1m한")));
+            assert!(bold * 100 > regular * 125, "a bold cell's 한: ink {bold} against Regular's {regular}");
         }
     }
 
