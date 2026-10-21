@@ -329,12 +329,41 @@ fn your_keys_remap_view_mode_and_its_hints() {
     assert_eq!(region(&ed), "chat");
 }
 
+/// `C-w q` in the chat's view mode closes nothing — as from its input, it's said (`space L` closes the chat); the
+/// code's panes stay.
+#[test]
+fn ctrl_w_q_in_the_chats_view_is_said_and_closes_no_pane() {
+    let mut ed = editor();
+    ed.session.chat.as_mut().unwrap().focused = false;
+    feed(&mut ed, "<C-w>v");
+    let panes = ed.session.views.len();
+    assert!(panes >= 2, "two panes");
+    ed.session.chat.as_mut().unwrap().focused = true;
+    feed(&mut ed, "<esc><C-w>q");
+    assert_eq!(ed.session.views.len(), panes, "no pane closed");
+    assert_eq!(
+        ed.status.as_ref().map(|s| s.0.as_str()),
+        Some("C-w q closes panels — space L closes the chat")
+    );
+    assert_eq!(region(&ed), "view:chat");
+}
+
 /// The chat's chords stay its in view mode — `C-y` the last code block (none here: said) — and `C-w` is the
 /// windows' (`C-w z` fills the screen with the chat, its view mode kept).
 #[test]
 fn the_chats_chords_work_in_view_mode() {
     let mut ed = editor();
-    feed(&mut ed, "<esc><C-y>");
+    feed(&mut ed, "<esc>");
+    // (and the state says so: the chord's layer is the chat's — the routing matrix probes no chord)
+    let chord: Key = "C-y".parse().unwrap();
+    let said = ed.keys_to().route(chord).handler();
+    crate::uistate::TOOK.set(None);
+    ed.handle_key(chord);
+    assert_eq!(
+        (crate::uistate::TOOK.get(), said),
+        (Some(crate::uistate::Handler::Chat), crate::uistate::Handler::Chat)
+    );
+    frame(&mut ed);
     assert_eq!(ed.status.as_ref().map(|s| s.0.as_str()), Some("no code block in the last answer"));
     assert_eq!(region(&ed), "view:chat");
     feed(&mut ed, "<C-w>z");

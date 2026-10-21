@@ -431,9 +431,9 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 ## View mode
 
-A cursor on what a surface shows — the chat's conversation (`esc` from its input). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done. Its own keys go over them.
+A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done. Its own keys go over them, and each surface's over those.
 
-### Its own keys (`[keys.view]`, `[keys.view.chat]`)
+### Its own keys (`[keys.view]`)
 
 | Key | Command | Description |
 |---|---|---|
@@ -449,11 +449,26 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `right` | `page_down` | Move page down |
 | `up` | `scroll_up` | Scroll up a line |
 
+### The terminal's (`[keys.view.terminal]`)
+
+| Key | Command | Description |
+|---|---|---|
+| `q` | `wclose` | Close this window or panel |
+| `backtab` | `slot_prev` | Previous bottom panel tab |
+| `C-\` | `view_code` | To the code, at once |
+| `tab` | `slot_next` | Next tab of the bottom panel |
+
 ### The chat's input (`[keys.chat]`)
 
 | Key | Command | Description |
 |---|---|---|
 | `esc` | `chat_view` | View the chat |
+
+### Taken from the terminal's program (`[keys.terminal]` — every other key is the program's; `to_program` gives one of these back)
+
+| Key | Command | Description |
+|---|---|---|
+| `C-\` | `terminal_view` | View the terminal |
 
 ## Cards, reviews and panels
 

@@ -136,6 +136,16 @@ e = "file_picker"                                # tables are sub-menus (space e
   `left`, `pageup`, `home`, `F5`
 - Sub-menus merge key by key — adding `space e` keeps the rest of `space`
 - Like Helix, `[keys.normal]` doesn't spill into select mode; bind a key in `[keys.select]` too if you want it there
+- View mode (the chat's and the terminal's) is normal mode on what they show: `[keys.normal]` spills in (kept to
+  what reads), `[keys.view]` goes over it, `[keys.view.chat]` and `[keys.view.terminal]` over that; `[keys.chat]`
+  is the chat's input (`esc` → its view mode)
+- `[keys.terminal]`: the keys taken from the terminal's program, merged over the default (`"C-\\" =
+  "terminal_view"`); every key it doesn't name goes to the program, and `to_program` gives one back:
+  ```toml
+  [keys.terminal]
+  "C-]" = "terminal_view"   # C-] to its view mode too
+  "C-\\" = "to_program"     # and C-\ is the program's again
+  ```
 - `space ?` lists every command with a description, so you can find a name to bind
 
 ## Language servers

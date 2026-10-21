@@ -15,7 +15,8 @@
 //!
 //! `C-w z` fills the screen with what has the keys — the code (its pane alone), the bottom slot, the chat, the
 //! side panel — and back (`Zoom`); it ends when the keys go elsewhere. The bottom slot takes the keys with
-//! `C-w j` or a click (`bottom_key`: they scroll it; `q` closes it; Esc or `C-w k` back to the code).
+//! `C-w j` or a click (`bottom_key`: they scroll it; `q` closes it; Esc or `C-w k` back to the code; the
+//! terminal's: its view mode, `view.rs`).
 
 use crate::key::{Code, Key};
 
@@ -271,20 +272,22 @@ impl crate::editor::Editor {
             Region::Rail => crate::codereview::close_asked(self),
             Region::Slot(Slot::Plugin) => self.set_status("a plugin's panel closes by its own keys"),
             Region::Slot(s) => self.slot_close(s),
-            Region::Chat | Region::Unfold => self.set_status("C-w q closes panels — space L closes the chat"),
+            Region::View(crate::view::Surface::Terminal) => self.slot_close(Slot::Terminal),
+            Region::Chat | Region::Unfold | Region::View(crate::view::Surface::Chat) => {
+                self.set_status("C-w q closes panels — space L closes the chat")
+            }
             _ => return false,
         }
         true
     }
 }
 
-/// Keys while the bottom slot has them (test and task output, the terminal's scrollback): the list panels' moves
-/// (`key::list_move`: `j`/`k` a line, `C-d`/`C-u` half the panel, `C-f`/`C-b` all of it, `g`/`G` the start/end),
-/// `tab`/`S-tab` its other tabs, `q` closes it
-/// (`slot_close`); on the terminal `i` (Enter) types in it, on a task or test panel Enter runs the user's run
-/// waiting there now, on the task panel `o` a preflight step's output and `K` where Claude's command ran; Esc
-/// back to the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the
-/// code may not be in sight). False = not the slot's.
+/// Keys while the bottom slot has them (test and task output — the terminal's are its view mode's, `view.rs`):
+/// the list panels' moves (`key::list_move`: `j`/`k` a line, `C-d`/`C-u` half the panel, `C-f`/`C-b` all of it,
+/// `g`/`G` the start/end), `tab`/`S-tab` its other tabs, `q` closes it (`slot_close`); Enter runs the user's run
+/// waiting there now, on the task panel `o` a preflight step's output and `K` where Claude's command ran; Esc back
+/// to the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
+/// may not be in sight). False = not the slot's.
 pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
     if !ed.bottom_focus
         || ed.mode != crate::editor::Mode::Normal
@@ -297,6 +300,9 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         ed.bottom_focus = false;
         return false;
     };
+    if slot == Slot::Terminal {
+        return false;
+    }
     let rows = ed.slot_rows(slot);
     let by = match (key.code, key.ctrl) {
         (Code::Char(' ' | ':' | '[' | ']'), false) | (Code::Char('w'), true) => return false,
@@ -315,13 +321,6 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         }
         (Code::Char('q'), false) => {
             ed.slot_close(slot);
-            return true;
-        }
-        (Code::Char('i' | 'a') | Code::Enter, false) if slot == Slot::Terminal => {
-            if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.exited.is_none()) {
-                t.focus = true;
-                ed.bottom_focus = false;
-            }
             return true;
         }
         // A preflight's step output, whole, in a buffer (#126)
@@ -358,12 +357,8 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
             crate::key::ListMove::Last => isize::MAX / 2,
         },
         _ => {
-            let (place, out) = match slot {
-                Slot::Terminal => ("the terminal's panel", "i type in it, esc code"),
-                Slot::Test => ("the test panel", "esc code"),
-                _ => ("the task panel", "esc code"),
-            };
-            ed.key_unused(key, place, out);
+            let place = if slot == Slot::Test { "the test panel" } else { "the task panel" };
+            ed.key_unused(key, place, "esc code");
             return true;
         }
     };
@@ -373,13 +368,11 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
                 r.scroll_by(by, rows);
             }
         }
-        Slot::Task => {
+        _ => {
             if let Some(r) = ed.session.task_run.as_mut() {
                 r.scroll_by(by, rows);
             }
         }
-        // (back is up)
-        _ => ed.terminal_scroll_by(-by),
     }
     true
 }
@@ -642,6 +635,8 @@ impl crate::editor::Editor {
                     t.focus = false;
                 }
                 self.bottom_focus = true;
+                // (the terminal's: its view mode, at once — what has the keys is said before the next key)
+                crate::view::sync(self);
             }
         }
     }
@@ -695,7 +690,6 @@ impl crate::editor::Editor {
     /// `C-w z` ends once what it filled the screen with doesn't have them.
     pub fn focus_sync(&mut self) {
         self.slot_sync();
-        crate::view::sync(self);
         if self.bottom_focus {
             let program = self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible);
             let other = self.session.chat.as_ref().is_some_and(|c| c.focused)
@@ -718,6 +712,8 @@ impl crate::editor::Editor {
         {
             self.procs_unfocus();
         }
+        // (a view whose surface lost the keys ends; the terminal given tarae's keys is in its view mode)
+        crate::view::sync(self);
         if self.zoom.is_some() && self.zoomed().is_none() {
             self.zoom = None;
         }

@@ -664,16 +664,17 @@ fn terminal_panel_runs_the_shell_and_gives_the_keys_back() {
     t.send("echo sum-$((40+2))\r");
     t.wait_text("sum-42");
     assert!(!t.screen().contains("the bufferecho"), "the buffer never saw the keys");
-    t.send("\x1c");
+    // (`C-\` its view mode, `C-\` again the code)
+    t.send("\x1c\x1c");
     t.send("i");
     t.wait_for("INSERT mode in the code", |s| s.status().contains("● insert"));
     t.normal_mode();
     t.send(" T");
     t.send("echo again-$((1+1))\r");
     t.wait_text("again-2");
+    // (its view mode: `q` hides it, the shell running on)
     t.send("\x1c");
-    t.send("\x17j");
-    t.send(" T");
+    t.send("q");
     t.wait_for("the terminal hidden", |s| !s.contains("● terminal") && !s.contains("sum-42"));
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
@@ -694,7 +695,8 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
     t.wait_text("flood-line");
     std::thread::sleep(std::time::Duration::from_secs(1)); // a second of it piling up
     let asked = std::time::Instant::now();
-    t.send("\x1c");
+    // (its view mode, then the code: what came meanwhile taken in as it's left)
+    t.send("\x1c\x1c");
     t.send("i");
     // (an editor the flood takes never handles them — the bound only has to outlast a slow runner)
     let inserting = t.poll_for(std::time::Duration::from_secs(5), |s| s.status().contains("● insert"));
@@ -750,7 +752,7 @@ fn gone(what: &str, shell: i32, job: i32) {
 fn a_quit_tarae_leaves_no_shell_behind() {
     let sb = Sandbox::new("quit-shell").with_env("HISTFILE", "/dev/null");
     let (mut t, shell, job) = a_shell_with_a_job(&sb);
-    t.send("\x1c");
+    t.send("\x1c\x1c");
     t.command("q!");
     assert_eq!(t.wait_exit().code(), Some(0));
     gone(":q!", shell, job);
@@ -1212,7 +1214,7 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     // (sh's prompt: `$`, or `#` as root — a container)
     t.wait_for("the terminal", |s| s.contains("● terminal") && (s.contains("$ ") || s.contains("# ")));
     idle(&mut t, "the terminal");
-    t.send("\x1c");
+    t.send("\x1c\x1c");
     t.wait_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.send(" l");
     t.wait_text("Ask about");
@@ -1284,8 +1286,8 @@ fn connected(sock: &std::path::Path) -> Option<std::process::Child> {
 }
 
 /// A driver reads where the keys go before sending — the four slips of 2026-10-04 through the real binary
-/// and its socket (`tarae state`): the code's keys; the terminal's program having every key, then tarae's
-/// keys on its panel (the status line says `i type in it`); a card the chat's draft keeps from its `y`;
+/// and its socket (`tarae state`): the code's keys; the terminal's program having every key, then its view
+/// mode (the status line says `● view · terminal  i type`); a card the chat's draft keeps from its `y`;
 /// `--after-input` answering about the keys just sent. The terminal's shell finds this tarae (`TARAE_UI`).
 #[test]
 fn a_driver_reads_where_the_keys_go() {
@@ -1310,16 +1312,16 @@ fn a_driver_reads_where_the_keys_go() {
     );
     t.send("echo ui=${TARAE_UI##*/}\r");
     t.wait_text(&format!("ui={}.sock", t.pid()));
-    // tarae's keys on its panel: `C-\` back to the code, `C-w j` down to it
+    // `C-\` from the program: its view mode — tarae's keys on its panel
     let input = t.state_json(0)["input"].as_u64().unwrap();
-    t.send("\x1c\x17j");
-    let s = t.state_json(input + 3);
+    t.send("\x1c");
+    let s = t.state_json(input + 1);
     assert_eq!(
         (s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()),
-        (Some("slot:terminal"), Some("commands"))
+        (Some("view:terminal"), Some("commands"))
     );
     t.wait_for("the status line says so", |s| {
-        s.status().contains("● terminal") && s.status().contains("i type in it")
+        s.status().contains("● view · terminal") && s.status().contains("i type")
     });
     assert!(t.state(&[]).lines().nth(1).unwrap().starts_with("keys → terminal (commands)"));
     drop(t);
@@ -1362,8 +1364,8 @@ fn what_a_run_left_running_is_taraes_and_ends_when_it_quits() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let adopted = parent(pid);
-    // Quit: `C-\` gives the keys back to tarae
-    t.send("\x1c:q!\r");
+    // Quit: `C-\` gives the keys back to tarae (its view mode), `C-\` again to the code
+    t.send("\x1c\x1c:q!\r");
     t.wait_exit();
     let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::path::Path::new(&format!("/proc/{pid}")).exists() && std::time::Instant::now() < end {

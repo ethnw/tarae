@@ -62,8 +62,6 @@ pub struct EditorConfig {
     pub git_blame: bool,
     /// Auto-save: "off" | "focus" (when the terminal loses focus) | "idle" (+ after 2 s without input).
     pub auto_save: String,
-    /// The key that hands the keys back from the built-in terminal to the code (`editor.terminal-escape`).
-    pub terminal_escape: String,
     /// On save, record the undo history; restore it on reopen (`undofile.rs`).
     pub persistent_undo: bool,
     /// Keep a copy of every buffer with unsaved edits, offered back after a crash (`recovery.rs`) · files
@@ -145,7 +143,6 @@ impl Default for EditorConfig {
             format_on_save: true,
             git_blame: true,
             auto_save: "focus".into(),
-            terminal_escape: "C-\\".into(),
             persistent_undo: true,
             recovery: true,
             recovery_skip: Vec::new(),

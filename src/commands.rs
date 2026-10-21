@@ -143,6 +143,8 @@ commands! {
         git_panel => "Git: stage, commit, push",
         terminal => "Terminal: show / hide",
         terminal_focus => "Terminal: give it the keys",
+        terminal_view => "View the terminal",
+        to_program => "Leave the key to the program",
         git_log => "Git log (each commit's diff)",
         git_branches => "Switch branch",
         conflict_ours => "Conflict: keep ours",
@@ -188,6 +190,7 @@ commands! {
         chat_point => "Point Claude at something",
         chat_view => "View the chat",
         view_leave => "Leave view mode",
+        view_code => "To the code, at once",
         view_input => "Back to typing",
         view_latest => "To the latest, caught up",
         view_copy => "Copy, to paste anywhere",
@@ -267,6 +270,7 @@ commands! {
         sizes_auto => "Sizes back to automatic",
         zoom_toggle => "Full screen: on / off",
         slot_next => "Next tab of the bottom panel",
+        slot_prev => "Previous bottom panel tab",
         workspace_symbol_picker => "Symbols in the workspace",
         chat_close => "Close chat",
         code_action => "Code actions",
@@ -2248,6 +2252,10 @@ fn slot_next(cx: &mut Context) {
     cx.editor.slot_step(1);
 }
 
+fn slot_prev(cx: &mut Context) {
+    cx.editor.slot_step(-1);
+}
+
 fn wonly(cx: &mut Context) {
     cx.editor.only_view();
 }
@@ -2346,8 +2354,23 @@ fn chat_point(cx: &mut Context) {
 fn chat_view(cx: &mut Context) {
     crate::view::chat_view(cx.editor);
 }
+/// The terminal's `C-\` from its program: its view mode, at the row in sight.
+fn terminal_view(cx: &mut Context) {
+    crate::view::terminal_view(cx.editor);
+}
+/// In `[keys.terminal]`: the key isn't taken from the program — it goes there as an unlisted one does
+/// (`Keymaps::terminal_takes`; this never runs there). Bound anywhere else, it's said.
+fn to_program(cx: &mut Context) {
+    cx.editor
+        .set_status("to_program gives a key back to the terminal's program — bind it in [keys.terminal]");
+}
 fn view_leave(cx: &mut Context) {
     crate::view::leave_key(cx.editor);
+}
+/// The terminal's `C-\` in its view mode: to the code whatever is selected — the round's next stop, one key
+/// (`esc` collapses a selection first, the reader's two steps).
+fn view_code(cx: &mut Context) {
+    crate::view::ask(cx.editor, crate::view::After::Leave);
 }
 fn view_input(cx: &mut Context) {
     crate::view::ask(cx.editor, crate::view::After::Input);

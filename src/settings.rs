@@ -193,13 +193,6 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.auto_save = v.as_str().unwrap_or("focus").to_string(),
     },
     Setting {
-        path: "editor.terminal-escape",
-        kind: Kind::Str,
-        doc: "The key that gives the keys back to the code from the terminal (space T)",
-        get: |c| Value::from(c.terminal_escape.as_str()),
-        set: |c, v| c.terminal_escape = v.as_str().unwrap_or("C-\\").to_string(),
-    },
-    Setting {
         path: "editor.persistent-undo",
         kind: Kind::Bool,
         doc: "Keep undo history across restarts (saved next to your state, dropped if the file changed elsewhere)",
@@ -876,8 +869,17 @@ pub fn show(cfg: &EditorConfig) -> String {
         }
         out.push_str(&format!("# {} ({})\n{key} = {}\n", s.doc, s.kind.describe(), (s.get)(cfg)));
     }
+    out.push_str(KEY_TABLES);
     out
 }
+
+/// `:config-show`'s last word: the key tables, each merged over the default keymap.
+const KEY_TABLES: &str = "\n# Keys — tables of your own, each merged over the default keymap (:config-open; the reference: \
+docs/reference/keymap.md)\n\
+# [keys.normal] [keys.select] [keys.insert] — the code's modes\n\
+# [keys.view] [keys.view.chat] [keys.view.terminal] — view mode; [keys.chat] — the chat's input\n\
+# [keys.terminal] — keys taken from the terminal's program (C-\\ = terminal_view); one bound to to_program goes \
+back to it, e.g. \"C-\\\\\" = \"to_program\"\n";
 
 /// Generated docs (`docs/reference/*.md`) are compared with a fresh render; `TARAE_BLESS=1` rewrites
 /// the file instead. Shared by the settings and keymap reference tests.
@@ -955,6 +957,10 @@ mod tests {
              | Table | What it holds |\n|---|---|\n\
              | `[keys.normal]` · `[keys.select]` · `[keys.insert]` | Key bindings on top of the \
              [default keymap](keymap.md) |\n\
+             | `[keys.view]` · `[keys.view.chat]` · `[keys.view.terminal]` · `[keys.chat]` | View mode's keys and the \
+             chat input's, on top of the defaults |\n\
+             | `[keys.terminal]` | Keys taken from the terminal's program, on top of the defaults (`C-\\` → its \
+             view mode); a key bound to `to_program` goes back to the program |\n\
              | `[lsp.<name>]` | A language server: `command`, `args`, `except` (features it's not asked for) |\n\
              | `[lang.<language>]` | Per language: `lsp = [\"name\", …]` — which server to try, in order; `also = […]` — \
              servers that run beside it |\n\

@@ -37,6 +37,7 @@ mod reviews;
 mod sessions;
 mod shuttle;
 mod stuckstop;
+mod termview;
 mod watchers;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

@@ -381,12 +381,9 @@ main that has what it waits for, and the user says go:
   said so; `C-s` follows `llm.screen-terminal`. Phases: P1 view mode for the chat and the terminal, P2 quoting, P3
   the run panels, P4 the mouse. Under way: P1a done (2026-10-20, `2696b066`), the chat's view mode — `esc` from its
   input or `space >` from anywhere, `q`/`esc` leave, `y` copies; held still while Claude writes, `G` catches up; one
-  cursor on screen, where the keys go (`keys_to()`). P1b, the terminal, built in the `view1` session (2026-10-21):
-  `C-\` goes round (code → program → view → code), the scrollback and screen read as text with the code's keys,
-  the program's output held by withholding the reader's acks while you read (its write blocks, as under a real
-  terminal's flow control), the wheel into it, `[keys.terminal]` merged over the defaults with `to_program` to
-  give a key back — four reviewer rounds so far, the fifth's fixes under way; then P2 quoting in a fresh
-  conversation.
+  cursor on screen, where the keys go (`keys_to()`). P1b done (2026-10-21): the terminal's — `C-\` goes round
+  (code → program → view → code), its scrollback and screen read as text, the program's output held until you
+  catch up, the wheel into it; `[keys.terminal]` replaced `editor.terminal-escape`. P2, quoting, next.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
   `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the

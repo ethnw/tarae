@@ -23,7 +23,6 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `editor.header` | bool | `true` | Top bar: path › definition under the cursor, and open buffers |
 | `editor.inlay-hints` | bool | `true` | Show language server inlay hints (types, parameter names) as dim virtual text |
 | `editor.auto-save` | `"off"` · `"focus"` · `"idle"` | `"focus"` | Save modified files automatically: when the terminal loses focus, or also after 2 s idle |
-| `editor.terminal-escape` | string | `'C-\'` | The key that gives the keys back to the code from the terminal (space T) |
 | `editor.persistent-undo` | bool | `true` | Keep undo history across restarts (saved next to your state, dropped if the file changed elsewhere) |
 | `editor.recovery` | bool | `true` | Keep a copy of each buffer with unsaved edits (after a pause in typing, in your state folder) — after a crash or a kill, the next start offers them back |
 | `editor.recovery-skip` | list of strings | `[]` | Files whose unsaved edits are never copied — a name matches anywhere, in any case ("*.secret"), a path is from the project root ("private/") or ~/; keys and tokens never are (~/.ssh, .env, *.pem…) |
@@ -128,6 +127,8 @@ These are read alongside the settings above; see the [configuration guide](../co
 | Table | What it holds |
 |---|---|
 | `[keys.normal]` · `[keys.select]` · `[keys.insert]` | Key bindings on top of the [default keymap](keymap.md) |
+| `[keys.view]` · `[keys.view.chat]` · `[keys.view.terminal]` · `[keys.chat]` | View mode's keys and the chat input's, on top of the defaults |
+| `[keys.terminal]` | Keys taken from the terminal's program, on top of the defaults (`C-\` → its view mode); a key bound to `to_program` goes back to the program |
 | `[lsp.<name>]` | A language server: `command`, `args`, `except` (features it's not asked for) |
 | `[lang.<language>]` | Per language: `lsp = ["name", …]` — which server to try, in order; `also = […]` — servers that run beside it |
 | `[[attach]]` | A named debugger attach target: `name`, `lang`, `host`, `port` or `pid`, `before`, `remote-root`, `program` |

@@ -510,6 +510,8 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         && let Some(t) = editor.session.terminal.as_mut()
     {
         t.resize((lay.debug_h - crate::chrome::HEAD) as u16, terminal_cols(&lay) as u16);
+        // (its view mode read again at the new size)
+        crate::view::terminal_resized(editor);
     }
     if lay.rail_w > 0
         && !editor.review_rail_up()
@@ -1088,7 +1090,7 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
 /// (`Screen.slot_tabs`) or stepped with `C-w t`. Returns the first row of the panel's body.
 ///
 /// ```text
-///   terminal   check ▲   tests ●  │  sh                                      C-\ type in it  space T hide
+///   terminal   check ▲   tests ●  │  sh                                                C-\ type  space T hide
 ///   ──────────────────────────────────────────────────────────────────────────────────────────────────
 /// ```
 #[allow(clippy::too_many_arguments)]
@@ -1377,25 +1379,43 @@ fn draw_terminal_panel(
             if code == 0 { dim } else { Style { fg: ui.error.fg, ..card } },
         ));
     }
-    if screen.scrollback() > 0 {
+    // Its view mode: `● view` — held still; once its program wrote more, said: its output waits, and so does the
+    // program (`G` catches up)
+    let view = crate::view::terminal_view_of(editor);
+    if view.is_some() {
+        let accent = Style { fg: ui.accent.fg, ..card };
+        head.push(("  ● view".into(), accent));
+        if t.came() {
+            head.push((" · output waits".into(), dim));
+        }
+    } else if screen.scrollback() > 0 {
         head.push((format!("  {} lines back", screen.scrollback()), faint));
     }
-    let esc = editor.config.terminal_escape.as_str();
-    let zoomed = editor.zoomed().is_some();
-    let zoom = if zoomed { "back" } else { "full screen" };
-    let mut hints: Vec<(&str, &str)> = match (t.exited, t.focus, editor.bottom_focus) {
-        (Some(_), _, true) => vec![("j k", "scroll"), ("C-w z", zoom), ("q", "close"), ("esc", "code")],
-        (Some(_), _, false) => vec![("space T", "close")],
-        // (filling the screen, its escape leaves the keys on it: `C-w z` from there)
-        (None, true, _) if zoomed => vec![(esc, "stop typing")],
-        (None, true, _) => vec![(esc, "code")],
-        (None, false, true) => {
-            vec![("i", "type in it"), ("j k", "scroll"), ("C-w z", zoom), ("q", "hide"), ("esc", "code")]
-        }
-        (None, false, false) => vec![(esc, "type in it")],
+    let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
+    // (each key as bound — a remap moves the hint)
+    let bound =
+        |name: &str, like: &str| crate::view::bound(editor, crate::view::Surface::Terminal, name, like);
+    let to_view = editor.keymaps.terminal.keys_for("terminal_view").into_iter().next();
+    let to_program = editor.keymaps.normal.keys_for("terminal_focus").into_iter().next();
+    let viewing: Vec<(Option<String>, &str)> = vec![
+        (bound("view_input", "i").filter(|_| t.exited.is_none()), "type"),
+        (bound("view_copy", "y"), "copy"),
+        (bound("search", "/"), "search"),
+        (bound("view_latest", "G"), "latest"),
+        (bound("view_leave", "esc"), "code"),
+        (bound("wclose", "q"), if t.exited.is_some() { "close" } else { "hide" }),
+        (Some("C-w z".into()), zoom),
+    ];
+    let mut hints: Vec<(&str, &str)> = match (t.exited, t.focus) {
+        _ if view.is_some() => viewing.iter().filter_map(|(k, d)| Some((k.as_deref()?, *d))).collect(),
+        (Some(_), _) => vec![("space T", "close")],
+        // (the round's key: where it goes next — counted in `esc_says_one_word_per_act_in_every_hint`)
+        (None, true) => to_view.as_deref().map(|round| vec![(round, "view")]).unwrap_or_default(),
+        (None, false) => to_program.as_deref().map(|round| vec![(round, "type")]).unwrap_or_default(),
     };
     // The program has the mouse: how to select in it anyway
-    if t.exited.is_none() && screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
+    if view.is_none() && t.exited.is_none() && screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+    {
         hints.insert(0, ("alt+drag", "select"));
     }
     let body = slot_header(out, editor, ui, lay, card, &head, &hints)?;
@@ -1406,6 +1426,9 @@ fn draw_terminal_panel(
     let selection_bg = ["ui.selection.primary", "ui.selection"]
         .iter()
         .find_map(|k| editor.theme.try_get(k).and_then(|s| s.bg));
+    // (its view mode's selections and cursors, painted over the cells of the lines they're on — its cursors only
+    // while it has the keys: a card given them, a picker over it, its selections alone)
+    let view_cursor = editor.cursor_in() == Some(crate::chrome::CursorIn::View);
     for r in 0..rows {
         let y = (body + r) as u16;
         queue!(out, MoveTo(x0 as u16, y))?;
@@ -1413,6 +1436,10 @@ fn draw_terminal_panel(
         queue!(out, Spaces(PAD))?;
         let mut current = Some(card);
         let mut x = 0;
+        // (the document's line this row is, its marks, and the bytes of it the cells so far are)
+        let (marks, cursors_at) =
+            view.map_or_else(Default::default, |v| terminal_row_marks(v, r, ui, view_cursor));
+        let mut at = 0;
         while x < cols {
             let Some(cell) = screen.cell(r as u16, x as u16) else { break };
             if cell.is_wide_continuation() {
@@ -1428,7 +1455,7 @@ fn draw_terminal_panel(
             if sel.is_some_and(|(a, b)| (a..=b).contains(&(r as u16, x as u16))) {
                 bg = selection_bg.or(bg);
             }
-            let st = Style {
+            let mut st = Style {
                 fg,
                 bg,
                 bold: cell.bold(),
@@ -1437,6 +1464,14 @@ fn draw_terminal_panel(
                 dim: cell.dim(),
                 ..Style::default()
             };
+            if let Some(m) = &marks {
+                st = marks_at(m, at, st);
+            }
+            // (where a cursor is on screen: recorded, as the code's are)
+            if cursors_at.contains(&at) {
+                editor.screen.cursors.borrow_mut().push((x0 + PAD + x, y as usize));
+            }
+            at += crate::view::cell_len(cell.contents());
             // Escapes only where the style changes (a screenful of plain text is one)
             if current != Some(st) {
                 apply(out, st)?;
@@ -6414,7 +6449,7 @@ fn draw_statusline(
         Mode::Select => "SELECT",
     });
     // (a view mode's own `v`: said after its surface)
-    let view = crate::view::chat_view_of(editor).filter(|_| matches!(keys, Keys::View(_)));
+    let view = editor.session.view.as_ref().filter(|_| matches!(keys, Keys::View(_)));
     let mode = match view.map(|v| v.mode()) {
         Some(Mode::Select) => format!("{mode} · SELECT"),
         _ => mode.to_string(),
@@ -6443,7 +6478,9 @@ fn draw_statusline(
     // A view mode's way back to typing and out — each key as bound; the first to fold when narrow
     if let Keys::View(s) = keys {
         let bound = |name: &str, like: &str| crate::view::bound(editor, s, name, like);
-        let pairs = [(bound("view_input", "i"), "type"), (bound("view_leave", "esc"), "code")];
+        // (an ended program takes no typing)
+        let typed = bound("view_input", "i").filter(|_| crate::view::typeable(editor));
+        let pairs = [(typed, "type"), (bound("view_leave", "esc"), "code")];
         for (k, what) in pairs.iter().filter_map(|(k, d)| Some((k.as_ref()?, *d))) {
             left.push(Seg { text: format!("  {k}"), style: Style { bold: true, ..dim }, keep: VIEW_HINTS });
             left.push(Seg {
@@ -11328,8 +11365,6 @@ fn chat_markdown(
     chat_markdown_drawn(lines, (w, w), styles, well).0
 }
 
-/// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what wet ink
-/// leaves alone. Text wraps at `measure` (≤ `w`), code rows take `w`.
 /// A row of a view's document (`view.rs`) with its selections and cursors painted over its spans: a selection's
 /// background over the spans' own colours, a cursor in the code's style (the primary's apart, as the code's).
 /// What's on the line's end — a cursor on the line break, a selection over it — is the cell after its text.
@@ -11342,38 +11377,10 @@ fn view_paint(
     cursor: bool,
 ) -> Option<Vec<crate::markdown::Span>> {
     use crate::markdown::Span;
+    let marks = view_marks(v, line, ui, cursor)?;
     let d = v.doc();
-    let text = &d.text;
-    if line > mv::last_line(text) {
-        return None;
-    }
-    let (ls, le) = (mv::line_start(text, line), mv::line_end(text, line));
-    let sel = d.selection();
-    let primary = sel.primary_index();
-    // (byte ranges of the line, each with what it patches — selections first, the cursors over them)
-    let mut marks: Vec<(usize, usize, Style)> = Vec::new();
-    let mut cursors: Vec<(usize, usize, Style)> = Vec::new();
-    for (i, r) in sel.ranges().iter().enumerate() {
-        let first = i == primary;
-        let bg = if first { ui.selection_primary.bg } else { ui.selection.bg };
-        let wash = Style { bg, ..Style::default() };
-        let (a, b) = (r.from().max(ls), r.to().min(le + 1));
-        if a < b {
-            marks.push((a - ls, b - ls, wash));
-        }
-        let c = r.cursor(text);
-        if cursor && (ls..=le).contains(&c) {
-            let end = crate::graphemes::next_boundary(text, c).min(le).max(c + 1);
-            cursors.push((c - ls, end - ls, if first { ui.cursor_primary } else { ui.cursor }));
-        }
-    }
-    if marks.is_empty() && cursors.is_empty() {
-        return None;
-    }
-    marks.extend(cursors);
-    let style_at = |at: usize, base: Style| {
-        marks.iter().filter(|m| (m.0..m.1).contains(&at)).fold(base, |s, m| s.patch(m.2))
-    };
+    let (ls, le) = (mv::line_start(&d.text, line), mv::line_end(&d.text, line));
+    let style_at = |at: usize, base: Style| marks_at(&marks, at, base);
     let mut out: Vec<Span> = Vec::new();
     let mut at = 0;
     let push = |text: &str, style: Style, out: &mut Vec<Span>| match out.last_mut() {
@@ -11397,6 +11404,64 @@ fn view_paint(
     Some(out)
 }
 
+/// A view's marks on its document's `line`: byte ranges of the line, each with the style it patches — its
+/// selections, then its cursors over them (`cursor`: drawn — it has the keys). A cursor's or a selection's
+/// place on the line break is the line's length. None: nothing of the view's on the line.
+fn view_marks(v: &crate::view::View, line: usize, ui: &Ui, cursor: bool) -> Option<Marks> {
+    let d = v.doc();
+    let text = &d.text;
+    if line > mv::last_line(text) {
+        return None;
+    }
+    let (ls, le) = (mv::line_start(text, line), mv::line_end(text, line));
+    let sel = d.selection();
+    let primary = sel.primary_index();
+    let mut marks: Vec<(usize, usize, Style)> = Vec::new();
+    let mut cursors: Vec<(usize, usize, Style)> = Vec::new();
+    for (i, r) in sel.ranges().iter().enumerate() {
+        let first = i == primary;
+        let bg = if first { ui.selection_primary.bg } else { ui.selection.bg };
+        let wash = Style { bg, ..Style::default() };
+        let (a, b) = (r.from().max(ls), r.to().min(le + 1));
+        if a < b {
+            marks.push((a - ls, b - ls, wash));
+        }
+        let c = r.cursor(text);
+        if cursor && (ls..=le).contains(&c) {
+            let end = crate::graphemes::next_boundary(text, c).min(le).max(c + 1);
+            cursors.push((c - ls, end - ls, if first { ui.cursor_primary } else { ui.cursor }));
+        }
+    }
+    if marks.is_empty() && cursors.is_empty() {
+        return None;
+    }
+    marks.extend(cursors);
+    Some(marks)
+}
+
+/// The terminal's row `r` in its view mode: the marks on the document's line it shows (`view_marks`) and the
+/// bytes of it its cursors are at (`cursor`: drawn) — the drawer counts a row's bytes cell by cell
+/// (`view::cell_len`).
+fn terminal_row_marks(v: &crate::view::View, r: usize, ui: &Ui, cursor: bool) -> (Option<Marks>, Vec<usize>) {
+    let d = v.doc();
+    let line = d.top + r;
+    let Some(marks) = view_marks(v, line, ui, cursor) else { return (None, Vec::new()) };
+    let ls = mv::line_start(&d.text, line);
+    let cursors = d.selection().ranges().iter().map(|s| s.cursor(&d.text));
+    let at = cursors.filter(|&c| cursor && mv::line_of(&d.text, c) == line).map(|c| c - ls).collect();
+    (Some(marks), at)
+}
+
+/// A view's marks on a line: byte ranges, each with the style it patches.
+type Marks = Vec<(usize, usize, Style)>;
+
+/// `base` with every mark over byte `at` patched on, in order.
+fn marks_at(marks: &[(usize, usize, Style)], at: usize, base: Style) -> Style {
+    marks.iter().filter(|m| (m.0..m.1).contains(&at)).fold(base, |s, m| s.patch(m.2))
+}
+
+/// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what wet ink
+/// leaves alone. Text wraps at `measure` (≤ `w`), code rows take `w`.
 fn chat_markdown_drawn(
     lines: &[crate::markdown::Line],
     (w, measure): (usize, usize),
@@ -15334,8 +15399,25 @@ mod tests {
         assert!(worst < budget, "worst event→frame {worst:?} with 1000 notes (budget {budget:?})");
     }
 
-    /// A conversation 200 messages long (50 turns: a question, a tool row, an answer with code, its time) and
-    /// an answer being written: what one streamed delta costs the frame.
+    /// The terminal's view: a row's marks are its document line's — the selected row (`x`) on the selection's
+    /// ground, its cursor on the line's end (the line break's cell, where `x` leaves it); the row above it nothing;
+    /// the cursors only while it has the keys.
+    #[test]
+    fn a_terminal_rows_marks_are_its_lines() {
+        let ed = crate::view::terminal_tests::viewing("<C-\\>kx");
+        let ui = Ui::new(&ed);
+        let v = crate::view::terminal_view_of(&ed).unwrap();
+        let t = ed.session.terminal.as_ref().unwrap();
+        let row = t.parser.screen().contents().lines().position(|l| l == "line 3").unwrap();
+        let (marks, cursors) = terminal_row_marks(v, row, &ui, true);
+        let marks = marks.expect("the selected row is painted");
+        assert_eq!(marks_at(&marks, 2, Style::default()).bg, ui.selection_primary.bg);
+        // (`x` puts the cursor on the line's end: its line break's cell)
+        assert_eq!(cursors, vec!["line 3".len()]);
+        assert_eq!(terminal_row_marks(v, row - 1, &ui, true), (None, Vec::new()), "nothing on the row above");
+        assert!(terminal_row_marks(v, row, &ui, false).1.is_empty(), "no cursor without the keys");
+    }
+
     /// A view's selection and cursor painted over a chat row's spans (`view_paint`): the selection's ground over
     /// the spans' own colours, the cursor in the code's style on the line break's cell after the text; a row the
     /// view has nothing on comes back as it was.
@@ -15488,6 +15570,8 @@ mod tests {
         }
     }
 
+    /// A conversation `msgs` messages long (a question, a tool row, an answer with code, its time, turn after turn)
+    /// and an answer being written — for what one streamed delta costs the frame.
     fn long_chat(msgs: usize) -> Editor {
         use crate::chat::{Look, Msg, Role};
         let mut ed = Editor::new(Config::default());
@@ -17496,9 +17580,11 @@ mod tests {
 
     /// `esc` says one thing per act in every hint tarae has (uxaudit D1): `code` where the surface stays and the
     /// keys go back to the code, `close` where it goes — in every file a build compiles, in each form a hint
-    /// takes: a pair (`("esc", "code")`), the terminal's escape key's pair (`(esc, "code")`, `C-\` by default) and
-    /// a line that says what to do instead (`key_unused`'s `"enter open, esc code"`). The few that say something
-    /// else are each counted, with why — a new one fails until it's said here.
+    /// takes: a pair (`("esc", "code")`) and a line that says what to do instead (`key_unused`'s `"enter open, esc
+    /// code"`). The few that say something else are each counted, with why — a new one fails until it's said here.
+    /// And the terminal's round key's pairs (a key held in `round`, as bound — `C-\` by default): it says where
+    /// it goes next on the round (code → program → view mode → code), from the program `view`, from the code `type`;
+    /// in its view mode the way out is `esc code`, a pair as everywhere.
     #[test]
     fn esc_says_one_word_per_act_in_every_hint() {
         const KEPT: &[(&str, usize)] = &[
@@ -17518,9 +17604,8 @@ mod tests {
             // a note being written: what's typed goes
             ("cancel", 2),
         ];
-        // The terminal's escape key: from the program back to the code, or — filling the screen — off the
-        // program with the keys kept on it; and the same key into the program from the code
-        const TERMINAL: &[(&str, usize)] = &[("code", 1), ("stop typing", 1), ("type in it", 1)];
+        // The terminal's round: from the code into the program (`type`), from the program into its view mode (`view`)
+        const TERMINAL: &[(&str, usize)] = &[("type", 1), ("view", 1)];
         type Words = std::collections::BTreeMap<String, usize>;
         let (mut seen, mut terminal) = (Words::new(), Words::new());
         let word = |rest: &str, ends: &[char]| rest.split(ends).next().unwrap_or_default().to_string();
@@ -17530,7 +17615,7 @@ mod tests {
             for part in src.split("(\"esc\", \"").skip(1) {
                 *seen.entry(word(part, &['"'])).or_default() += 1;
             }
-            for part in src.split("(esc, \"").skip(1) {
+            for part in src.split("(round, \"").skip(1) {
                 *terminal.entry(word(part, &['"'])).or_default() += 1;
             }
             for pat in ["\"esc ", ", esc "] {
@@ -17548,7 +17633,7 @@ mod tests {
         kept.sort();
         assert_eq!(other, kept, "an esc hint's word: `code` (it stays) or `close` (it goes)");
         let terminal: Vec<(&str, usize)> = terminal.iter().map(|(w, n)| (w.as_str(), *n)).collect();
-        assert_eq!(terminal, TERMINAL, "the terminal's escape key's words");
+        assert_eq!(terminal, TERMINAL, "the terminal's round key's words");
         assert!(
             seen.get("code").is_some_and(|&n| n >= 10) && seen.get("close").is_some_and(|&n| n >= 10),
             "{seen:?}"

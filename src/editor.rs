@@ -2571,7 +2571,9 @@ impl Editor {
         });
         // A run of Claude's going silent, in any session: one frame then — the inbox counts it (#157); a shuttle's
         // step lit on its chip: one frame when it goes faint (`shuttle::LIT`)
-        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self)].into_iter().flatten().min()
+        // The terminal's view at a new panel size: one frame once it has held (`view::terminal_resized`)
+        let settle = crate::view::terminal_settling(self).then_some(crate::view::SETTLE);
+        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle].into_iter().flatten().min()
     }
 
     /// Whether the main loop draws after a batch of events (`unchanged`: every one of them said it changed

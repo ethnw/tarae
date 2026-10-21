@@ -177,6 +177,11 @@ impl Node {
     }
 }
 
+/// A binding that gives its key back to the terminal's program (`to_program`, alone).
+fn is_to_program(cmds: &[MappableCommand]) -> bool {
+    matches!(cmds, [MappableCommand::Static(c)] if c.name == "to_program")
+}
+
 pub enum Lookup<'a> {
     Matched(&'a [MappableCommand]),
     Pending,
@@ -197,6 +202,9 @@ pub struct Keymaps {
     views: Vec<(&'static str, Node, Node)>,
     /// The chat's input (`[chat]`): what its keys run before it types them — `esc` → its view mode.
     pub chat: Node,
+    /// The keys taken from the terminal's program (`[terminal]`) — `C-\` → its view mode; every other key is the
+    /// program's. A user's `[keys.terminal]` merges over it as every table does; `to_program` gives one back.
+    pub terminal: Node,
 }
 
 const DEFAULT_KEYS: &str = include_str!("default_keys.toml");
@@ -248,6 +256,7 @@ impl Keymaps {
             view_on,
             views: Vec::new(),
             chat: part("chat", warnings),
+            terminal: part("terminal", warnings),
         };
         km.build_views();
         km
@@ -297,18 +306,31 @@ impl Keymaps {
 
     /// Merges the user's `[keys]` table. As in helix, `keys.normal` does not spill into select. View mode is
     /// normal mode on another document: `keys.normal` spills into it (kept to `view::COMMANDS`), `keys.view`
-    /// and `keys.view.<surface>` over it (decided 2026-10-20).
+    /// and `keys.view.<surface>` over it (decided 2026-10-20). `keys.terminal` merges over the keys taken from the
+    /// program like the rest; a key bound to `to_program` there goes back to it.
     pub fn merge_user(&mut self, keys: &toml::Table, warnings: &mut Vec<String>) {
         for (mode, node) in [
             ("normal", &mut self.normal),
             ("select", &mut self.select),
             ("insert", &mut self.insert),
             ("chat", &mut self.chat),
+            ("terminal", &mut self.terminal),
         ] {
             if let Some(toml::Value::Table(t)) = keys.get(mode) {
                 node.merge(Node::from_toml(t, &format!("keys.{mode}"), warnings));
             }
         }
+        // (a key taken from the program is one key: a sequence's first key would go to the program and the rest
+        // never fire — said, left out)
+        self.terminal.map.retain(|k, t| {
+            let one = matches!(t, KeyTrie::Leaf(_));
+            if !one {
+                warnings.push(format!(
+                    "keys.terminal.{k}: a key taken from the program is one key, not a sequence — left out"
+                ));
+            }
+            one
+        });
         let (view, on) = Self::view_tables(keys, "keys", warnings);
         self.view.merge(view);
         for (name, node) in on {
@@ -325,6 +347,15 @@ impl Keymaps {
         let (_, normal, select) =
             self.views.iter().find(|(n, ..)| *n == surface.name()).expect("every surface has its table");
         if mode == Mode::Select { select } else { normal }
+    }
+
+    /// The commands the terminal's program gives up `key` for (`[terminal]`) — None: it's the program's (not
+    /// bound there, or bound to `to_program`).
+    pub fn terminal_takes(&self, key: Key) -> Option<&[MappableCommand]> {
+        match self.terminal.search(&[key]) {
+            Some(KeyTrie::Leaf(cmds)) if !is_to_program(cmds) => Some(cmds),
+            _ => None,
+        }
     }
 
     /// `lookup` in a view mode's table.
@@ -626,17 +657,24 @@ mod tests {
         node_tables(&mut out, &km.insert, &mut Vec::new(), "## Insert mode");
 
         out.push_str(
-            "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input). Normal \
-             mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the \
-             rest is said, not done. Its own keys go over them.\n",
+            "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input), the \
+             terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel). Normal mode's moves, \
+             selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not \
+             done. Its own keys go over them, and each surface's over those.\n",
         );
+        node_tables(&mut out, &km.view, &mut Vec::new(), "### Its own keys (`[keys.view]`)");
+        for (name, node) in &km.view_on {
+            let title = format!("### The {name}'s (`[keys.view.{name}]`)");
+            node_tables(&mut out, node, &mut Vec::new(), &title);
+        }
+        node_tables(&mut out, &km.chat, &mut Vec::new(), "### The chat's input (`[keys.chat]`)");
         node_tables(
             &mut out,
-            &km.view,
+            &km.terminal,
             &mut Vec::new(),
-            "### Its own keys (`[keys.view]`, `[keys.view.chat]`)",
+            "### Taken from the terminal's program (`[keys.terminal]` — every other key is the program's; \
+             `to_program` gives one of these back)",
         );
-        node_tables(&mut out, &km.chat, &mut Vec::new(), "### The chat's input (`[keys.chat]`)");
 
         out.push_str(
             "\n## Cards, reviews and panels\n\nKeys of what's up on the screen — not rebindable, so not in \

@@ -626,11 +626,12 @@ mod tests {
         let mut n = 0;
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
-            // The module the tests are in: `a/b.rs` → `a::b::tests`, `a/tests.rs` → `a::tests`
+            // The module the tests are in: `a/b.rs` → `a::b::tests`, `a/tests.rs` → `a::tests`, a file of tests of
+            // its own `a/b_tests.rs` → `a::b_tests`
             let rel = file.strip_prefix(&src).unwrap().with_extension("");
             let module: Vec<String> = rel.iter().map(|s| s.to_string_lossy().to_string()).collect();
             let module = match module.last().map(String::as_str) {
-                Some("tests") => module.join("::"),
+                Some(m) if m == "tests" || m.ends_with("_tests") => module.join("::"),
                 _ => format!("{}::tests", module.join("::")),
             };
             let lines: Vec<&str> = text.lines().collect();

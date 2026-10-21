@@ -1,8 +1,10 @@
 //! View mode — a cursor on what a surface shows (`target/sb/quote-plan.md` §3): the surface's rows as a read-only
 //! document, Helix's moves, selections, search and counts on it (`COMMANDS`, the keymap's `[view]` tables), drawn
 //! by the surface's own drawer with the selections painted over its rows (`term::view_paint`). The chat's: `esc`
-//! from its input, `i` back; `esc` again to the code. It holds still while it lasts — the chat draws the rows it
-//! was made of, `G` catches up.
+//! from its input, `i` back; `esc` again to the code. The terminal's: `C-\` from its program, `i` back; `esc` or
+//! `C-\` to the code (tarae's keys on its panel are its view mode). It holds still while it lasts — the chat
+//! draws the rows it was made of, the terminal keeps its program's output back (`Terminal::hold`) — `G`
+//! catches up.
 //!
 //! The document is in no pane and never the front buffer: each key's command runs with it swapped in as
 //! `current` (`swap`) and put back before the key's handler returns — frames, jobs, servers and `context()` see
@@ -18,21 +20,55 @@ use crate::keymap::Lookup;
 use crate::movement as mv;
 use crate::selection::{Range, Selection};
 
-/// What has a view mode (P1a: the chat's conversation; the terminal next).
+/// What has a view mode: the chat's conversation, the terminal's scrollback and screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Surface {
     Chat,
+    Terminal,
 }
 
-pub const SURFACES: &[Surface] = &[Surface::Chat];
+pub const SURFACES: &[Surface] = &[Surface::Chat, Surface::Terminal];
 
 impl Surface {
     /// Its name in the keymap (`[view.chat]`), the state and the status line.
     pub fn name(self) -> &'static str {
         match self {
             Surface::Chat => "chat",
+            Surface::Terminal => "terminal",
         }
     }
+}
+
+/// Where the keys were when the wheel brought a view mode — back there when the wheel takes it back down,
+/// nothing selected (§9 Q9): the code, the chat's input, the terminal's program, or another surface's view mode
+/// (made again: the chat's where you were, the terminal's at the rows in sight).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Was {
+    Code,
+    Chat,
+    Program,
+    View(Surface),
+}
+
+/// The terminal's view, as it was made: its program's run, its size, its rows of scrollback above the screen,
+/// its document's lines.
+#[derive(Clone, Copy, Debug)]
+struct Made {
+    generation: u64,
+    size: (u16, u16),
+    back: usize,
+    lines: usize,
+}
+
+/// Where the terminal's view puts its cursor.
+#[derive(Clone, Copy, Debug)]
+enum Land {
+    /// The program's cursor row when nothing is scrolled back (its prompt), else the last row in sight.
+    InSight,
+    /// The row `n` of what's in sight (under the wheel's pointer).
+    Row(usize),
+    /// The latest: the last row with text, never above the program's cursor.
+    Latest,
 }
 
 /// Normal mode's commands view mode runs (the rest of a key there is said, not done): moves, selections,
@@ -106,6 +142,7 @@ pub const COMMANDS: &[&str] = &[
     // (its own rows, `[view]`)
     "view_copy",
     "view_leave",
+    "view_code",
     "view_input",
     "view_latest",
 ];
@@ -146,10 +183,13 @@ pub struct View {
     search_origin: Option<usize>,
     /// A prompt its `/`, `?` or `s` opened is up: its keys apply here.
     pub prompt: bool,
-    /// Entered by the wheel (where the keys were: back there when the wheel takes it back down, nothing
-    /// selected — §9 Q9).
-    pub by_wheel: Option<bool>,
+    /// Entered by the wheel: where the keys were.
+    pub by_wheel: Option<Was>,
     after: Option<After>,
+    /// The terminal's: what it was made of.
+    made: Option<Made>,
+    /// The terminal's: a new panel size seen, not settled yet (`terminal_resized`).
+    settling: Option<(u16, u16)>,
 }
 
 impl View {
@@ -203,7 +243,10 @@ impl View {
 
     /// Rows it was made of.
     pub fn rows(&self) -> usize {
-        self.laid.iter().map(|(_, r)| r.len()).sum()
+        match self.made {
+            Some(m) => m.lines,
+            None => self.laid.iter().map(|(_, r)| r.len()).sum(),
+        }
     }
 
     /// Something came since it was made (`● view · new text after`).
@@ -297,6 +340,66 @@ pub fn has_keys(ed: &Editor) -> Option<Surface> {
         Surface::Chat => {
             ed.session.chat.as_ref().filter(|c| c.focused && !c.compact()).map(|_| Surface::Chat)
         }
+        Surface::Terminal => terminal_holds(ed, v).then_some(Surface::Terminal),
+    }
+}
+
+/// The terminal's view still has its surface: tarae's keys on its panel, in front, the same run.
+fn terminal_holds(ed: &Editor, v: &View) -> bool {
+    let run = v.made.map(|m| m.generation);
+    ed.bottom_focus
+        && ed.slot() == Some(crate::sizes::Slot::Terminal)
+        && ed.session.terminal.as_ref().is_some_and(|t| t.visible && Some(t.generation()) == run)
+}
+
+/// The terminal is in its view mode.
+pub fn terminal_viewed(ed: &Editor) -> bool {
+    ed.session.view.as_ref().is_some_and(|v| v.surface == Surface::Terminal)
+}
+
+/// The terminal in its view mode (drawn with the painter on its cells).
+pub fn terminal_view_of(ed: &Editor) -> Option<&View> {
+    ed.session.view.as_ref().filter(|v| v.surface == Surface::Terminal)
+}
+
+/// Where the keys are now, as the wheel would give them back.
+fn was(ed: &Editor) -> Was {
+    if let Some(s) = has_keys(ed) {
+        Was::View(s)
+    } else if ed.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none()) {
+        Was::Program
+    } else if ed.session.chat.as_ref().is_some_and(|c| c.focused) {
+        Was::Chat
+    } else {
+        Was::Code
+    }
+}
+
+/// The keys back where the wheel found them.
+fn give_back(ed: &mut Editor, was: Was) {
+    ed.bottom_focus = false;
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.focused = matches!(was, Was::Chat | Was::View(Surface::Chat));
+    }
+    if let Some(t) = ed.session.terminal.as_mut() {
+        t.focus = was == Was::Program && t.visible && t.exited.is_none();
+        if t.focus {
+            t.parser.screen_mut().set_scrollback(0);
+        }
+    }
+    match was {
+        Was::View(Surface::Chat) => chat_view(ed),
+        Was::View(Surface::Terminal) if ed.session.terminal.as_ref().is_some_and(|t| t.visible) => {
+            terminal_enter(ed, Land::InSight, None)
+        }
+        _ => {}
+    }
+}
+
+/// Another surface's view ends as this one's comes (one view at a time).
+fn take_over(ed: &mut Editor, surface: Surface) {
+    if ed.session.view.as_ref().is_some_and(|v| v.surface != surface) {
+        leave(ed);
     }
 }
 
@@ -390,7 +493,7 @@ pub fn chat_wheel(ed: &mut Editor, line: Option<usize>, up: bool) {
             }
             return;
         }
-        let was = ed.session.chat.as_ref().is_some_and(|c| c.focused);
+        let was = was(ed);
         let laid = ed.screen.chat_laid.borrow().clone();
         enter(ed, laid, line, Some(was));
     }
@@ -408,23 +511,21 @@ pub fn chat_wheel(ed: &mut Editor, line: Option<usize>, up: bool) {
         && let Some(was) = v.by_wheel
     {
         leave(ed);
-        if let Some(c) = ed.session.chat.as_mut() {
-            c.focused = was;
-        }
+        give_back(ed, was);
     }
 }
 
-/// A view of the chat made from `laid`, the cursor on `line` (else the last), what's on screen as it was.
-fn enter(ed: &mut Editor, laid: Laid, line: Option<usize>, by_wheel: Option<bool>) {
-    let mut doc = chat_doc(ed, &laid);
-    let last = mv::last_line(&doc.text);
-    let line = line.unwrap_or(last).min(last);
-    doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
-    // (the rows in sight stay where they are: the window the chat showed)
-    doc.set_top(ed.screen.chat_view.get().map_or(0, |a| a.3).min(last));
-    let seen = ed.session.chat.as_ref().map_or(0, seen);
-    ed.session.view = Some(View {
-        surface: Surface::Chat,
+/// A view mode's state, its keys under way none yet.
+fn made(
+    surface: Surface,
+    doc: Document,
+    laid: Laid,
+    seen: u64,
+    by_wheel: Option<Was>,
+    made: Option<Made>,
+) -> View {
+    View {
+        surface,
         doc: Some(doc),
         laid,
         seen,
@@ -438,16 +539,257 @@ fn enter(ed: &mut Editor, laid: Laid, line: Option<usize>, by_wheel: Option<bool
         prompt: false,
         by_wheel,
         after: None,
-    });
+        made,
+        settling: None,
+    }
+}
+
+/// A view of the chat made from `laid`, the cursor on `line` (else the last), what's on screen as it was.
+fn enter(ed: &mut Editor, laid: Laid, line: Option<usize>, by_wheel: Option<Was>) {
+    take_over(ed, Surface::Chat);
+    let mut doc = chat_doc(ed, &laid);
+    let last = mv::last_line(&doc.text);
+    let line = line.unwrap_or(last).min(last);
+    doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
+    // (the rows in sight stay where they are: the window the chat showed)
+    doc.set_top(ed.screen.chat_view.get().map_or(0, |a| a.3).min(last));
+    let seen = ed.session.chat.as_ref().map_or(0, seen);
+    ed.session.view = Some(made(Surface::Chat, doc, laid, seen, by_wheel, None));
     if let Some(c) = ed.session.chat.as_mut() {
         c.focused = true;
+    }
+    // (the keys are the chat's now — not the program's, nor tarae's on the slot)
+    ed.bottom_focus = false;
+    if let Some(t) = ed.session.terminal.as_mut() {
+        t.focus = false;
     }
     in_sight(ed);
 }
 
-/// The rows it shows (rows, width) — as the last frame drew them.
+/// The rows it shows (rows, width) — as the last frame drew the chat's; the terminal's screen.
 fn viewport(ed: &Editor) -> (usize, usize) {
+    if let Some(m) = ed.session.view.as_ref().and_then(|v| v.made) {
+        return (usize::from(m.size.0).max(1), usize::from(m.size.1).max(1));
+    }
     ed.screen.chat_view.get().map_or((20, 60), |a| (a.2.max(1), a.1.max(1)))
+}
+
+// ── The terminal ────────────────────────────────────────────────────────────────────────────────
+
+/// The bytes a cell of the terminal's is in its document's line: a blank one a space, a wide one its character
+/// once (its second cell none), the program's control characters a space each — as `vt100::Screen::rows` gives a
+/// row, which the document is read from; the painter counts the same way.
+pub fn cell_len(contents: &str) -> usize {
+    match contents {
+        "" => 1,
+        s => s.chars().map(|c| if c.is_control() { 1 } else { c.len_utf8() }).sum(),
+    }
+}
+
+/// The terminal's rows — its scrollback, then its screen — as a document, a line each (`cell_len`, blanks at its
+/// end off), and how many rows of scrollback are above the screen. vt100 reaches its rows only through the
+/// scrollback offset: read a page at a time by moving it, put back as it was.
+fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize)> {
+    let t = ed.session.terminal.as_mut()?;
+    let screen = t.parser.screen_mut();
+    let (rows, cols) = screen.size();
+    let was = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let back = screen.scrollback();
+    let total = back + usize::from(rows);
+    let mut text = String::new();
+    let mut line = 0;
+    while line < total {
+        // (the page whose first row is `line` — the screen's own, once past the scrollback)
+        let off = back.saturating_sub(line);
+        screen.set_scrollback(off);
+        let first = back - off;
+        let before = line;
+        for row in screen.rows(0, cols).skip(line - first) {
+            if line == total {
+                break;
+            }
+            let from = text.len();
+            text.extend(row.chars().map(|c| if c.is_control() { ' ' } else { c }));
+            let kept = text[from..].trim_end().len();
+            text.truncate(from + kept);
+            // (each row its line break: a blank last row is a line too — joined, it would be the ghost line
+            // after a final newline, and the view one row short of the screen's bottom)
+            text.push('\n');
+            line += 1;
+        }
+        if line == before {
+            break;
+        }
+    }
+    screen.set_scrollback(was);
+    let mut doc = Document::from_str(ed.alloc_id(), &text);
+    doc.wrap = Some(false);
+    doc.throwaway = true;
+    Some((doc, back))
+}
+
+/// The terminal's view mode: held still from now (its program's output kept back), its rows read, the cursor
+/// where `land` says, the rows in sight as they were — tarae's keys on its panel.
+fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
+    take_over(ed, Surface::Terminal);
+    let Some(t) = ed.session.terminal.as_mut() else { return };
+    t.hold();
+    t.focus = false;
+    t.visible = true;
+    let screen = t.parser.screen();
+    let (size, off, cursor) = (screen.size(), screen.scrollback(), usize::from(screen.cursor_position().0));
+    let generation = t.generation();
+    let Some((mut doc, back)) = terminal_doc(ed) else { return };
+    let last = mv::last_line(&doc.text);
+    let top = back.saturating_sub(off);
+    let rows = usize::from(size.0).max(1);
+    let latest = || {
+        let blank = |l: usize| doc.text.line(l).chars().all(char::is_whitespace);
+        (back + cursor..=last).rev().find(|&l| !blank(l)).unwrap_or(back + cursor)
+    };
+    let line = match land {
+        Land::InSight if off == 0 => back + cursor,
+        Land::InSight => top + rows - 1,
+        // (inside the scrolloff margin: the view stays as the wheel found it)
+        Land::Row(r) => {
+            let so = ed.config.scrolloff.min((rows - 1) / 2);
+            top + r.clamp(so, rows - 1 - so)
+        }
+        Land::Latest => latest(),
+    }
+    .min(last);
+    doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
+    doc.set_top(top.min(last));
+    let made_of = Made { generation, size, back, lines: last + 1 };
+    ed.session.view = Some(made(Surface::Terminal, doc, Vec::new(), generation, by_wheel, Some(made_of)));
+    ed.bottom_focus = true;
+    ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.focused = false;
+    }
+    in_sight(ed);
+}
+
+/// The terminal's `C-\` from its program (`[terminal]`): its view mode, at the row in sight. No terminal: one
+/// started, the keys its program's (`C-\` from the code).
+pub fn terminal_view(ed: &mut Editor) {
+    match ed.session.terminal.is_some() {
+        true => terminal_enter(ed, Land::InSight, None),
+        false => ed.terminal_focus(),
+    }
+}
+
+/// The wheel over the terminal (its program didn't ask for the mouse, not full-screen — or in its view mode):
+/// up, its view mode at that point, the cursor on the row under the pointer, the keys its; it scrolls the view;
+/// back down to the bottom, by the wheel, nothing selected, the keys go back where they were.
+pub fn terminal_wheel(ed: &mut Editor, row: Option<usize>, up: bool) {
+    if !terminal_viewed(ed) {
+        if !up {
+            // (left scrolled back: forward, as the wheel always did)
+            if let Some(t) = ed.session.terminal.as_mut() {
+                let s = t.parser.screen_mut();
+                let n = s.scrollback();
+                s.set_scrollback(n.saturating_sub(3));
+            }
+            return;
+        }
+        let was = was(ed);
+        terminal_enter(ed, row.map_or(Land::InSight, Land::Row), Some(was));
+    }
+    swap(ed, |ed| ed.scroll_view(if up { -3 } else { 3 }, false));
+    let Some(v) = ed.session.view.as_ref() else { return };
+    let at_end = v.made.is_some_and(|m| v.doc().top >= m.back);
+    if !up
+        && at_end
+        && !v.selects()
+        && !v.prompt
+        && let Some(was) = v.by_wheel
+    {
+        leave(ed);
+        give_back(ed, was);
+    }
+}
+
+/// A press on its screen's cell (row, column) while viewed: the view's cursor on that cell's character, as a click
+/// in the code puts it (a wide character's second cell: the character; past a row's text: its end) — nothing goes to
+/// the program.
+pub fn terminal_click(ed: &mut Editor, cell: Option<(u16, u16)>) {
+    let Some((r, c)) = cell else { return };
+    // (the bytes of the row's line before the cell's character, counted as the document was read — `cell_len`)
+    let Some(t) = ed.session.terminal.as_ref() else { return };
+    let s = t.parser.screen();
+    let (mut at, mut here) = (0, 0);
+    for x in 0..=c {
+        let Some(cell) = s.cell(r, x) else { break };
+        if cell.is_wide_continuation() {
+            continue;
+        }
+        here = at;
+        at += cell_len(cell.contents());
+    }
+    let Some(v) = ed.session.view.as_mut().filter(|v| v.doc.is_some()) else { return };
+    let d = v.doc_mut();
+    let line = (d.top + usize::from(r)).min(mv::last_line(&d.text));
+    let (ls, le) = (mv::line_start(&d.text, line), mv::line_end(&d.text, line));
+    d.set_selection(Selection::point((ls + here).min(le)));
+    in_sight(ed);
+}
+
+/// A new panel size waits to settle (`terminal_resized`): a frame is wanted `SETTLE` on.
+pub fn terminal_settling(ed: &Editor) -> bool {
+    terminal_view_of(ed).is_some_and(|v| v.settling.is_some())
+}
+
+/// How long a new panel size has to hold before the view is read again at it (`terminal_resized`): a frame's
+/// wake-up after the last change of a border drag.
+pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// After each frame's resize (`term::render_frame`): the panel took another size — its view read again at it, the
+/// cursor on the line it was on, once the size has settled: the same at two frames in a row (`settling` the one
+/// seen first; `Editor::tick_wanted` asks for the second, `SETTLE` on). A border drag's frames don't each pay a
+/// reading (3.7 ms at 5,000 rows); meanwhile the view draws as it was made — rows added at the screen's bottom
+/// have no line yet, the scrollback's are unchanged.
+pub fn terminal_resized(ed: &mut Editor) {
+    let now = ed.session.terminal.as_ref().map(|t| t.parser.screen().size());
+    let Some(v) = ed.session.view.as_mut().filter(|v| v.doc.is_some() && v.surface == Surface::Terminal)
+    else {
+        return;
+    };
+    let Some(m) = v.made else { return };
+    let Some(now) = now else { return };
+    // (back at the size it was made at counts as a change too: vt100 drops a shrunk screen's bottom rows and
+    // brings them back blank — what it shows isn't what the view was made of)
+    if v.settling.is_none() && now == m.size {
+        return;
+    }
+    if v.settling != Some(now) {
+        v.settling = Some(now);
+        return;
+    }
+    // (read again into the view as it is — its mode, keys under way, count, selections and top kept: a row keeps its
+    // line, a resize leaving vt100's scrollback as it was; a place past its line's new end at the end)
+    let Some((mut doc, back)) = terminal_doc(ed) else { return };
+    let Some(v) = ed.session.view.as_mut() else { return };
+    let old = v.doc();
+    let place = |pos: usize| {
+        let l = mv::line_of(&old.text, pos);
+        (l, pos - mv::line_start(&old.text, l))
+    };
+    let last = mv::last_line(&doc.text);
+    let put = |(l, at): (usize, usize)| {
+        let l = l.min(last);
+        let p = (mv::line_start(&doc.text, l) + at).min(mv::line_end(&doc.text, l));
+        crate::graphemes::snap(&doc.text, p)
+    };
+    let sel = old.selection().transform(|r| Range { anchor: put(place(r.anchor)), head: put(place(r.head)) });
+    let top = old.top.min(last);
+    doc.set_selection(sel);
+    doc.set_top(top);
+    v.doc = Some(doc);
+    v.made = Some(Made { size: now, back, lines: last + 1, ..m });
+    v.settling = None;
+    in_sight(ed);
 }
 
 /// The cursor's line in sight, the scrolloff margin kept (one line a row: nothing wraps).
@@ -467,6 +809,12 @@ fn in_sight(ed: &mut Editor) {
     // (no further down than the last line at the bottom)
     top = top.min((last + 1).saturating_sub(rows));
     d.set_top(top);
+    // (the terminal shows what's in sight by its scrollback offset)
+    if let Some(m) = v.made
+        && let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation() == m.generation)
+    {
+        t.parser.screen_mut().set_scrollback(m.back.saturating_sub(top));
+    }
 }
 
 /// Runs `f` with the view's document as `current`, its mode, keys under way and size as the editor's — all
@@ -540,12 +888,20 @@ pub fn leave_key(ed: &mut Editor) {
     ask(ed, After::Leave);
 }
 
-/// Ends the view: where it was kept for next time (the chat's `view_at`), the chat no longer held — the rows
+/// Ends the view: where it was kept for next time (the chat's `view_at`), the surface no longer held — the rows
 /// you were reading still in sight, what came while it held below them — the document freed. The keys stay
 /// where they are — the caller says where they go.
 pub fn leave(ed: &mut Editor) {
-    let Some(v) = ed.session.view.take() else { return };
     let (rows, _) = viewport(ed);
+    let Some(v) = ed.session.view.take() else { return };
+    if let Some(m) = v.made {
+        // (the terminal: what its program wrote meanwhile onto its screen — scrolled back, it stays on the rows
+        // you read)
+        if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation() == m.generation) {
+            t.release();
+        }
+        return close_prompt(ed, &v);
+    }
     let d = v.doc();
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
     // (the chat's scroll counts from the live bottom: what the last frame laid out, rows that came included —
@@ -569,15 +925,34 @@ fn close_prompt(ed: &mut Editor, v: &View) {
 /// Ends the view and keeps nothing of it: the conversation it was made of is gone (`C-l` a new one, `C-p` an
 /// earlier one) — its rows and its place are another conversation's.
 pub fn forget(ed: &mut Editor) {
-    if let Some(v) = ed.session.view.take().filter(|v| v.surface == Surface::Chat) {
+    // (only the chat's: a terminal's view isn't the conversation's — taken here, its held output would never go out)
+    if ed.session.view.as_ref().is_some_and(|v| v.surface == Surface::Chat)
+        && let Some(v) = ed.session.view.take()
+    {
         close_prompt(ed, &v);
     }
 }
 
-/// The view caught up: made again from what the last frame laid out, the cursor on the latest line.
+/// The view caught up: made again from what the last frame laid out (the terminal's: from its screen, what
+/// came taken in), the cursor on the latest line.
 fn catch_up(ed: &mut Editor) {
+    let Some((by_wheel, surface)) = ed.session.view.as_ref().map(|v| (v.by_wheel, v.surface)) else { return };
+    if surface == Surface::Terminal {
+        // (the view's own mode and keys under way come along: a `v`, a count before `G`)
+        let Some(old) = ed.session.view.take() else { return };
+        if let Some(t) = ed.session.terminal.as_mut() {
+            t.release();
+        }
+        terminal_enter(ed, Land::Latest, by_wheel);
+        if let Some(v) = ed.session.view.as_mut() {
+            (v.mode, v.pending, v.count, v.on_next_char, v.char_for) =
+                (old.mode, old.pending, old.count, old.on_next_char, old.char_for);
+            let last = v.rows();
+            v.doc_mut().set_top(last);
+        }
+        return in_sight(ed);
+    }
     let laid = ed.screen.chat_laid.borrow().clone();
-    let Some(by_wheel) = ed.session.view.as_ref().map(|v| v.by_wheel) else { return };
     enter(ed, laid, None, by_wheel);
     // (the last line at the bottom of the view)
     if let Some(v) = ed.session.view.as_mut() {
@@ -589,16 +964,33 @@ fn catch_up(ed: &mut Editor) {
 
 /// What a command asked for, once its key is done.
 fn after(ed: &mut Editor) {
-    let Some(a) = ed.session.view.as_mut().and_then(|v| v.after.take()) else { return };
-    match a {
-        After::Leave => {
+    let Some(v) = ed.session.view.as_mut() else { return };
+    let Some(a) = v.after.take() else { return };
+    let surface = v.surface;
+    match (a, surface) {
+        (After::Leave, Surface::Chat) => {
             leave(ed);
             if let Some(c) = ed.session.chat.as_mut() {
                 c.focused = false;
             }
         }
-        After::Input => leave(ed),
-        After::Latest => catch_up(ed),
+        (After::Leave, Surface::Terminal) => {
+            leave(ed);
+            ed.bottom_focus = false;
+        }
+        (After::Input, Surface::Chat) => leave(ed),
+        (After::Input, Surface::Terminal) => {
+            if ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_some()) {
+                return ed.set_status("its program has ended — q close, esc code");
+            }
+            leave(ed);
+            ed.bottom_focus = false;
+            if let Some(t) = ed.session.terminal.as_mut() {
+                t.focus = true;
+                t.parser.screen_mut().set_scrollback(0);
+            }
+        }
+        (After::Latest, _) => catch_up(ed),
     }
 }
 
@@ -654,7 +1046,10 @@ pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
     }
     swap(ed, |ed| key_in(ed, surface, key));
     after(ed);
-    Some(Handler::ChatView)
+    Some(match surface {
+        Surface::Chat => Handler::ChatView,
+        Surface::Terminal => Handler::TerminalView,
+    })
 }
 
 /// `key` with the view's document swapped in: the awaited character (`f`), a count, the table's command.
@@ -708,10 +1103,16 @@ pub fn bound(ed: &Editor, surface: Surface, name: &str, like: &str) -> Option<St
 /// A key view mode has no use for: said where the user looks, with the way to type (§3.1).
 fn said(ed: &mut Editor, surface: Surface, keys: &[Key]) {
     let seq: Vec<String> = keys.iter().map(Key::to_string).collect();
-    // (the two ways on, as the status line says them — to type, to the code: its menus, `:`, its keys)
-    let ways: Vec<String> = [("view_input", "i", "types"), ("view_leave", "esc", "to the code")]
+    // (the two ways on, as the status line says them — to type, to the code: its menus, `:`, its keys; an ended
+    // program takes no typing)
+    let types = match surface {
+        Surface::Chat => Some("types"),
+        Surface::Terminal if typeable(ed) => Some("types in the program"),
+        Surface::Terminal => None,
+    };
+    let ways: Vec<String> = [("view_input", "i", types), ("view_leave", "esc", Some("to the code"))]
         .iter()
-        .filter_map(|(cmd, like, what)| Some(format!("{} {what}", bound(ed, surface, cmd, like)?)))
+        .filter_map(|(cmd, like, what)| Some(format!("{} {}", bound(ed, surface, cmd, like)?, (*what)?)))
         .collect();
     let out = match ways.is_empty() {
         true => "its keys are its moves and selections".to_string(),
@@ -720,18 +1121,42 @@ fn said(ed: &mut Editor, surface: Surface, keys: &[Key]) {
     ed.set_status(format!("{} isn't in view mode — {out}", seq.join(" ")));
 }
 
-/// Every key and event: a view whose surface lost the keys (a click elsewhere, the chat closed or minimized)
-/// ends, kept for next time.
-pub fn sync(ed: &mut Editor) {
-    let Some(v) = ed.session.view.as_ref() else { return };
-    let gone = match v.surface {
-        Surface::Chat => !ed.session.chat.as_ref().is_some_and(|c| c.focused && !c.compact()),
-    };
-    if gone {
-        leave(ed);
+/// Whether `i` has somewhere to type: the chat's input always, the terminal's program while it runs.
+pub fn typeable(ed: &Editor) -> bool {
+    match ed.session.view.as_ref().map(|v| v.surface) {
+        Some(Surface::Terminal) => ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
+        _ => true,
     }
 }
 
+/// Every key and event: a view whose surface lost the keys (a click elsewhere, the chat closed or minimized,
+/// the terminal hidden, behind another tab or replaced) ends, kept for next time; tarae's keys on the terminal's
+/// panel are its view mode (`C-w j`, a tab stepped to, its program ended while it fills the screen). Never
+/// inside a key's command (its document swapped in): after it.
+pub fn sync(ed: &mut Editor) {
+    if ed.session.view.as_ref().is_some_and(|v| v.doc.is_none()) {
+        return;
+    }
+    if let Some(v) = ed.session.view.as_ref() {
+        let gone = match v.surface {
+            Surface::Chat => !ed.session.chat.as_ref().is_some_and(|c| c.focused && !c.compact()),
+            Surface::Terminal => !terminal_holds(ed, v),
+        };
+        if gone {
+            leave(ed);
+        }
+    }
+    if ed.session.view.is_none()
+        && ed.bottom_focus
+        && ed.slot() == Some(crate::sizes::Slot::Terminal)
+        && ed.session.terminal.as_ref().is_some_and(|t| t.visible)
+    {
+        terminal_enter(ed, Land::InSight, None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod terminal_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -741,8 +1166,9 @@ pub fn state(ed: &Editor) -> Option<serde_json::Value> {
     let v = ed.session.view.as_ref()?;
     let d = v.doc();
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
-    let now = match v.surface {
-        Surface::Chat => ed.session.chat.as_ref().map_or(v.seen, seen),
+    let held = match v.surface {
+        Surface::Chat => v.came(ed.session.chat.as_ref().map_or(v.seen, seen)),
+        Surface::Terminal => ed.session.terminal.as_ref().is_some_and(|t| t.came()),
     };
     Some(serde_json::json!({
         "surface": v.surface.name(),
@@ -751,6 +1177,6 @@ pub fn state(ed: &Editor) -> Option<serde_json::Value> {
         "selections": d.selection().ranges().len(),
         "selects": v.selects(),
         "mode": if v.mode == Mode::Select { "select" } else { "normal" },
-        "held": v.came(now),
+        "held": held,
     }))
 }

@@ -111,7 +111,7 @@ pub enum Keys {
     Review,
     /// Claude's change in review in the buffer (its `y`/`n`) — a word of its own, so `review` means one thing.
     Change,
-    /// The bottom slot with tarae's keys — on the terminal they scroll it, `i` types in it.
+    /// The bottom slot with tarae's keys (the terminal's are its view mode's).
     Slot(Slot),
     /// The terminal's program: every key goes to it.
     Program,
@@ -147,6 +147,7 @@ impl Keys {
             Keys::Card => "CARD",
             Keys::Point => "POINT",
             Keys::View(crate::view::Surface::Chat) => "VIEW · CHAT",
+            Keys::View(crate::view::Surface::Terminal) => "VIEW · TERMINAL",
         })
     }
 
@@ -160,11 +161,10 @@ impl Keys {
         matches!(self, Keys::Code | Keys::Review | Keys::Change)
     }
 
-    /// The key hint the status line puts after the label (key, what it does): on the terminal with tarae's
-    /// keys, that typing isn't the program's yet — the label alone was the program's too.
+    /// The key hint the status line puts after the label (key, what it does). A view mode's — the terminal's
+    /// with tarae's keys — are the status line's own, each key as bound.
     pub fn hint(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Keys::Slot(Slot::Terminal) => Some(("i", "type in it")),
             Keys::Point => Some(("esc", "stop pointing")),
             _ => None,
         }

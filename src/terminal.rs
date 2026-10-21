@@ -1,7 +1,8 @@
 //! The built-in terminal — your shell in the bottom panel. `space T` shows it with the keys, and hides it (it keeps running); `C-\`
-//! moves the keys between the code and it (`editor.terminal-escape` inside it, a keymap command outside).
-//! The wheel over it scrolls back; a click in it gives it the keys, a click outside takes them back; a drag
-//! selects text and copies it. A program that asks for the mouse (`htop`, `vim`, `lazygit`) gets it instead,
+//! goes round: the code → the program → its view mode (`view.rs`: its scrollback and screen as a document,
+//! held still — the program's output kept back until you catch up) → the code. The keys taken from the
+//! program are the keymap's `[terminal]` rows. The wheel over it scrolls back in its view mode; a click in it
+//! gives the program the keys, a click outside takes them back; a drag selects text and copies it. A program that asks for the mouse (`htop`, `vim`, `lazygit`) gets it instead,
 //! and a full-screen one without it gets the wheel as arrow keys. A paste goes to it marked as one when it
 //! asked for that (bracketed paste).
 //!
@@ -33,6 +34,17 @@ pub struct Terminal {
     /// whether the drag is still going.
     pub selection: Option<((u16, u16), (u16, u16))>,
     pub selecting: bool,
+    /// While its view mode lasts: the program's output, kept back — the screen holds still as you read it (the
+    /// answers to what the program asks are sent at once all the same). Into the screen once caught up
+    /// (`release`). At most one batch: its go-ahead is kept (`waiting`).
+    held: Option<Vec<u8>>,
+    /// The reader's go-aheads kept back while held (`output_acked`): it reads no more, the pty's buffer fills and
+    /// the program waits on its write — a real terminal's flow control — until it's caught up (`release`).
+    waiting: Vec<std::sync::mpsc::SyncSender<()>>,
+    /// Odd while held, one more at each hold and release (and as it goes): the wait thread's drain counts only
+    /// while nothing is held and none began or ended meanwhile — so the program's end comes after what the
+    /// reader holds (`spawn`).
+    holds: std::sync::Arc<std::sync::atomic::AtomicU64>,
     master: OwnedFd,
     writer: Sender<Vec<u8>>,
     generation: u64,
@@ -66,12 +78,56 @@ impl Terminal {
         let _ = self.writer.send(bytes);
     }
 
-    /// The program's output onto the screen — and the answers to what it asks the terminal.
+    /// The program's output onto the screen (kept back while held). What it asks of the terminal was answered as
+    /// it was read (`answer`, the reader's).
     fn take(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes);
-        for reply in answers(bytes) {
-            self.send(reply.to_vec());
+        match self.held.as_mut() {
+            Some(h) => h.extend_from_slice(bytes),
+            None => self.parser.process(bytes),
         }
+    }
+
+    /// Its run (a replacement is another).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Held still from now: the program's output is kept back (`take`).
+    pub fn hold(&mut self) {
+        if self.held.is_none() {
+            self.held = Some(Vec::new());
+            self.holds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// What came while held goes onto the screen, and it's no longer held — scrolled back, it stays on the rows
+    /// it showed (vt100 keeps a scrolled-back view where it is as rows come).
+    pub fn release(&mut self) {
+        if let Some(h) = self.held.take() {
+            self.parser.process(&h);
+            self.holds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // (the reader goes on: the program writes again)
+        for go in self.waiting.drain(..) {
+            let _ = go.send(());
+        }
+    }
+
+    /// Output came while held (`● view · output waits`).
+    pub fn came(&self) -> bool {
+        self.held.as_ref().is_some_and(|h| !h.is_empty())
+    }
+
+    /// Held still now (its view mode) — the simulation checks it's held exactly while viewed.
+    #[cfg(test)]
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Bytes kept back now (the tests and the simulation: one batch at most).
+    #[cfg(test)]
+    pub fn held_len(&self) -> usize {
+        self.held.as_ref().map_or(0, Vec::len)
     }
 
     /// The selection, first cell to last, in reading order (on the screen as it is now — it may have
@@ -259,11 +315,26 @@ fn spawn(
     let fd = reader.as_raw_fd();
     let (eof, read_all) = std::sync::mpsc::channel::<()>();
     let reading = events.clone();
+    // Keys → the program (a full pty buffer blocks this thread, never the editor) — and the reader's answers
+    let (writer, keys) = std::sync::mpsc::channel::<Vec<u8>>();
+    let answering = writer.clone();
+    let holds = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let held_meanwhile = holds.clone();
     // The shell waited for as it ends — a program it left behind holding the terminal (one that ignored
-    // the hangup) mustn't keep it a zombie (#131); then what's left to read, `DRAIN_AFTER_EXIT` at most
+    // the hangup) mustn't keep it a zombie (#131); then what's left to read, `DRAIN_AFTER_EXIT` at most — counted
+    // only while nothing is held: while the view holds, the reader waits for a go-ahead and reaches no end, so
+    // the end waits too, and comes after the batches it holds (a whole drain once the view lets go)
     crate::event::thread("tarae-term-wait", move || {
+        use std::sync::atomic::Ordering::SeqCst;
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-        let _ = read_all.recv_timeout(crate::spawn::DRAIN_AFTER_EXIT);
+        loop {
+            let seen = held_meanwhile.load(SeqCst);
+            match read_all.recv_timeout(crate::spawn::DRAIN_AFTER_EXIT) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    if seen % 2 == 1 || held_meanwhile.load(SeqCst) != seen => {}
+                _ => break,
+            }
+        }
         let done = move |ed: &mut Editor| ended(ed, generation, code);
         let _ = events.send(crate::event::Event::Job(Box::new(done)));
     });
@@ -286,27 +357,25 @@ fn spawn(
                             _ => break,
                         }
                     }
+                    // Its questions answered now, as it's read — before it waits for the last batch's go-ahead,
+                    // kept while the view holds: a question never waits with the output (fish waits 10 s)
+                    answer(&answering, &bytes);
                     // (an error: the batch was dropped unshown — the editor is going)
                     if let Some(rx) = shown.take() {
                         let _ = rx.recv();
                     }
                     let (done, rx) = std::sync::mpsc::sync_channel(1);
                     shown = Some(rx);
-                    let apply = move |ed: &mut Editor| {
-                        output(ed, generation, &bytes);
-                        let _ = done.send(());
-                    };
+                    let apply = move |ed: &mut Editor| output_acked(ed, generation, &bytes, done);
                     if events.send(crate::event::Event::Job(Box::new(apply))).is_err() {
                         return;
                     }
                 }
             }
         }
-        // (its batches are queued before its end is told)
+        // (its batches are queued before its end is told — held too: the wait thread waits while it's held)
         let _ = eof.send(());
     });
-    // Keys → the program (a full pty buffer blocks this thread, never the editor)
-    let (writer, keys) = std::sync::mpsc::channel::<Vec<u8>>();
     let mut out = std::fs::File::from(master.try_clone().map_err(|e| e.to_string())?);
     crate::event::thread("tarae-term-keys", move || {
         for bytes in keys {
@@ -324,6 +393,9 @@ fn spawn(
         exited: None,
         selection: None,
         selecting: false,
+        held: None,
+        waiting: Vec::new(),
+        holds,
         master,
         writer,
         generation,
@@ -342,17 +414,52 @@ fn answers(bytes: &[u8]) -> Vec<&'static [u8]> {
     std::iter::repeat_n(DA1, asks(b"\x1b[c") + asks(b"\x1b[0c")).collect()
 }
 
+/// The reader's answers to what a batch it read asks of the terminal, sent to the program at once.
+fn answer(writer: &Sender<Vec<u8>>, bytes: &[u8]) {
+    for reply in answers(bytes) {
+        let _ = writer.send(reply.to_vec());
+    }
+}
+
+/// For the tests and the simulation, whose stand-in has no reader thread: what the reader does as it reads a
+/// batch — its questions answered at once, before the batch is handed on (`output_acked`) or waits on a go-ahead.
+#[cfg(test)]
+pub(crate) fn reader_reads(ed: &Editor, bytes: &[u8]) {
+    if let Some(t) = ed.session.terminal.as_ref() {
+        answer(&t.writer, bytes);
+    }
+}
+
 /// Output of run `generation` — kept until the terminal is in place if it comes first (the reader starts
 /// before the worker that started the program hands it over).
-fn output(ed: &mut Editor, generation: u64, bytes: &[u8]) {
+pub(crate) fn output(ed: &mut Editor, generation: u64, bytes: &[u8]) {
     if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation == generation) {
         t.take(bytes);
-        // What was selected has likely moved (not while it's being dragged)
-        if !t.selecting {
+        // What was selected has likely moved (not while it's being dragged, nor while held still)
+        if !t.selecting && t.held.is_none() {
             t.selection = None;
         }
     } else if ed.session.terminal_run == generation {
         ed.session.terminal_early.0.extend_from_slice(bytes);
+    }
+}
+
+/// A reader's batch (`spawn`'s job): onto the screen or held (`output`) — its go-ahead (`done`: the reader waits
+/// for it before it sends the next) at once, or, while held, kept until it's caught up (`release`): the reader
+/// reads no more, the pty's buffer fills and the program's write waits — nothing piles up in tarae, at most one
+/// batch is held, and taking it in costs no more than a batch ever does.
+pub(crate) fn output_acked(
+    ed: &mut Editor,
+    generation: u64,
+    bytes: &[u8],
+    done: std::sync::mpsc::SyncSender<()>,
+) {
+    output(ed, generation, bytes);
+    match ed.session.terminal.as_mut().filter(|t| t.generation == generation && t.held.is_some()) {
+        Some(t) => t.waiting.push(done),
+        None => {
+            let _ = done.send(());
+        }
     }
 }
 
@@ -397,7 +504,12 @@ impl Drop for Terminal {
     /// on, its terminal gone. Killed, tarae can't: the master's last copy closes with it and the kernel
     /// hangs the shell up (`pty::open` — no other program has one).
     fn drop(&mut self) {
-        if self.exited.is_some() {
+        // (held no more: its wait thread's drain counts again — its end, another run's now, is let go)
+        if self.held.take().is_some() {
+            self.holds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // (no process of its own — a test's stand-in: `-0` and `-1` would be this process group and everyone)
+        if self.exited.is_some() || self.pid <= 1 {
             return;
         }
         // SAFETY: tcgetpgrp/getsid only read; the signals go to the process group we started (`setsid`) and
@@ -494,21 +606,19 @@ impl Editor {
         true
     }
 
-    /// Keys while the terminal has them: the escape key (`editor.terminal-escape`, `C-\`) gives them back to
-    /// the code; `S-pageup`/`S-pagedown` scroll its past a page, as every terminal emulator's do (uxaudit Z2 —
-    /// the next key the program gets brings it back down); the rest go to the program.
+    /// Keys while the terminal has them: the keymap's `[terminal]` rows run their commands (`C-\` → its view
+    /// mode); `S-pageup`/`S-pagedown` scroll its past a page, as every terminal emulator's do (uxaudit Z2 — the
+    /// next key the program gets brings it back down); the rest go to the program.
     pub fn terminal_key(&mut self, key: Key) -> bool {
-        let escape: Option<Key> = self.config.terminal_escape.parse().ok();
-        let Some(t) = self.session.terminal.as_mut().filter(|t| t.focus && t.visible && t.exited.is_none())
-        else {
+        if !self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none()) {
             return false;
-        };
-        if Some(key) == escape {
-            t.focus = false;
-            // Filling the screen (`C-w z`): tarae's keys stay on it — the code isn't in sight
-            self.bottom_focus = self.zoom == Some(crate::sizes::Zoom::Bottom);
+        }
+        if let Some(cmds) = self.keymaps.terminal_takes(key) {
+            let cmds = cmds.to_vec();
+            self.run(&cmds, None);
             return true;
         }
+        let Some(t) = self.session.terminal.as_mut() else { return false };
         // (a full-screen program's alternate screen keeps no past: the key is the program's, as a terminal sends it)
         if key.shift
             && !key.ctrl
@@ -528,6 +638,14 @@ impl Editor {
             t.send(bytes);
         }
         true
+    }
+
+    /// `back` lines further back (forward when negative) — as far as it keeps (vt100 clamps).
+    pub fn terminal_scroll_by(&mut self, back: isize) {
+        if let Some(t) = self.session.terminal.as_mut() {
+            let now = t.parser.screen().scrollback();
+            t.parser.screen_mut().set_scrollback(now.saturating_add_signed(back));
+        }
     }
 
     /// Pasted text while the terminal has the keys — marked as a paste when the program asked for that
@@ -558,6 +676,22 @@ impl Editor {
     /// Alt with the press: tarae's own selection even over a program that has the mouse (most terminals
     /// keep shift-drag for their own selection, across the whole screen).
     pub fn terminal_mouse(&mut self, kind: MouseKind, cell: Option<(u16, u16)>, alt: bool) {
+        // In its view mode the mouse is the view's, whoever asked for it: the program's screen is held still, maybe
+        // scrolled back — a click there isn't on what the program drew now. The wheel scrolls the view, a press puts
+        // its cursor on that cell, as a click in the code; a drag waits for P4 (as its selection)
+        if crate::view::terminal_viewed(self) {
+            let row = cell.map(|c| c.0 as usize);
+            return match kind {
+                MouseKind::ScrollUp | MouseKind::ScrollDown => {
+                    crate::view::terminal_wheel(self, row, kind == MouseKind::ScrollUp)
+                }
+                MouseKind::Down => crate::view::terminal_click(self, cell),
+                // (no silent drag: what selects there now, said)
+                MouseKind::Drag => self
+                    .set_status("a drag doesn't select in view mode yet — x or v selects, y copies, i types"),
+                MouseKind::Up => {}
+            };
+        }
         let Some(t) = self.session.terminal.as_mut() else { return };
         let screen = t.parser.screen();
         let (rows, cols) = screen.size();
@@ -583,8 +717,9 @@ impl Editor {
                     let key = Key::plain(if up { Code::Up } else { Code::Down });
                     t.send(encode(key, app_cursor).unwrap_or_default().repeat(3));
                 } else {
+                    // (up: its view mode at the row under the pointer — tmux's copy mode by the wheel, §3.8)
                     t.selection = None;
-                    self.terminal_scroll(up);
+                    crate::view::terminal_wheel(self, cell.map(|c| c.0 as usize), up);
                 }
             }
             MouseKind::Down => {
@@ -616,19 +751,40 @@ impl Editor {
             }
         }
     }
+}
 
-    /// The wheel over the terminal: scroll back (up) / forward (down) three lines.
-    pub fn terminal_scroll(&mut self, up: bool) {
-        self.terminal_scroll_by(if up { 3 } else { -3 });
-    }
-
-    /// `back` lines further back (forward when negative) — as far as it keeps (vt100 clamps).
-    pub fn terminal_scroll_by(&mut self, back: isize) {
-        if let Some(t) = self.session.terminal.as_mut() {
-            let now = t.parser.screen().scrollback();
-            t.parser.screen_mut().set_scrollback(now.saturating_add_signed(back));
-        }
-    }
+/// A terminal with no program: what `output` gives it is its screen, what it sends goes to the receiver — for
+/// tests and the simulation, which need no pty (its `Drop` signals nothing: no process of its own).
+#[cfg(test)]
+pub(crate) fn stand_in(
+    ed: &mut Editor,
+    rows: u16,
+    cols: u16,
+    scrollback: usize,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (writer, sent) = std::sync::mpsc::channel();
+    let master = std::fs::File::open("/dev/null").expect("/dev/null").into();
+    ed.terminal_generation += 1;
+    ed.session.terminal_run = ed.terminal_generation;
+    ed.session.terminal = Some(Terminal {
+        parser: vt100::Parser::new(rows, cols, scrollback),
+        focus: true,
+        visible: true,
+        title: "sh".into(),
+        exited: None,
+        selection: None,
+        selecting: false,
+        held: None,
+        waiting: Vec::new(),
+        holds: Default::default(),
+        master,
+        writer,
+        generation: ed.terminal_generation,
+        size: (rows, cols),
+        pid: 0,
+    });
+    ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
+    sent
 }
 
 #[cfg(test)]
@@ -714,8 +870,8 @@ mod tests {
     }
 
     /// #144: `space T` with the terminal shown but without the keys gives it the keys — in front of the
-    /// slot or behind another tab alike; it hides only from inside (tarae's keys on its panel). (The
-    /// program is the test's own `sleep`.)
+    /// slot or behind another tab alike. From inside (tarae's keys on its panel: its view mode) `space` is
+    /// said, and `q` hides it. (The program is the test's own `sleep`.)
     #[test]
     fn space_t_gives_a_shown_terminal_the_keys_and_hides_it_only_from_inside() {
         if no_pty_here("space_t_gives_a_shown_terminal_the_keys_and_hides_it_only_from_inside") {
@@ -740,9 +896,13 @@ mod tests {
         assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));
         space_t(&mut ed);
         assert_eq!(state(&ed), (true, true), "shown without the keys: given them, not hidden");
-        // From inside — tarae's keys on its panel: hidden, running on
+        // From inside — its view mode: `space` said, `q` hides it, running on
         ed.bottom_take_keys();
         space_t(&mut ed);
+        assert_eq!(state(&ed), (true, false), "space in view mode: said");
+        // (its `T` waits for a character, as in the code: esc lets it go)
+        ed.handle_key(crate::key::Key::plain(crate::key::Code::Esc));
+        ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('q')));
         assert_eq!(state(&ed), (false, false), "hidden from inside");
         assert!(ed.session.terminal.as_ref().unwrap().exited.is_none(), "running on");
         // Hidden: shown with the keys
@@ -928,7 +1088,11 @@ mod tests {
     }
 
     fn wait(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        wait_up_to(ed, 5, done)
+    }
+
+    fn wait_up_to(ed: &mut Editor, secs: u64, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         while !done(ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
                 ed.handle_event(ev);
@@ -1089,7 +1253,8 @@ mod tests {
         assert_eq!(ed.doc().text.to_string(), "", "not the buffer's");
     }
 
-    /// Keys go to the program while it has them (the buffer is untouched); `C-\\` gives them back.
+    /// Keys go to the program while it has them (the buffer is untouched); `C-\\` goes round: its view mode, the
+    /// code, the program again.
     #[test]
     fn keys_go_to_the_program_until_ctrl_backslash() {
         if no_pty_here("keys_go_to_the_program_until_ctrl_backslash") {
@@ -1126,37 +1291,31 @@ mod tests {
             }
         }
         assert!(seen(&ed), "{:?}", ed.session.terminal.as_ref().map(|t| t.parser.screen().contents()));
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        let ctrl_backslash = Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false };
+        ed.handle_key(ctrl_backslash);
         assert!(!ed.session.terminal.as_ref().unwrap().focus);
+        assert!(crate::view::terminal_viewed(&ed), "its view mode");
+        ed.handle_key(ctrl_backslash);
+        assert!(!crate::view::terminal_viewed(&ed) && !ed.bottom_focus);
         ed.handle_key(key('i'));
         assert_eq!(ed.mode, crate::editor::Mode::Insert, "the code has the keys again");
         ed.handle_key(Key::plain(Code::Esc));
-        // C-\\ from the code gives the keys back to it; from inside (tarae's keys on its panel) space T
-        // hides it, again shows it (#144)
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        // C-\\ from the code gives the keys back to it; `q` in its view mode hides it, the shell running on — as
+        // every list or output panel's `q` closes it (uxaudit D2); `space T` shows it with the keys (#144)
+        ed.handle_key(ctrl_backslash);
         assert!(ed.session.terminal.as_ref().unwrap().focus);
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
-        ed.bottom_take_keys();
-        for k in [' ', 'T'] {
-            ed.handle_key(key(k));
-        }
-        assert!(!ed.session.terminal.as_ref().unwrap().visible, "hidden");
+        ed.handle_key(ctrl_backslash);
+        ed.handle_key(key('q'));
+        let t = ed.session.terminal.as_ref().unwrap();
+        assert!(!t.visible && t.exited.is_none(), "hidden, running");
+        assert!(!ed.bottom_focus);
         for k in [' ', 'T'] {
             ed.handle_key(key(k));
         }
         let t = ed.session.terminal.as_ref().unwrap();
         assert!(t.visible && t.focus, "shown with the keys, the same shell");
-        // `q` on its panel with tarae's keys hides it as `space T` does, the shell running on — as every list or
-        // output panel's `q` closes it (uxaudit D2); `C-w q` there too (D3)
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
-        ed.bottom_take_keys();
-        ed.handle_key(key('q'));
-        let t = ed.session.terminal.as_ref().unwrap();
-        assert!(!t.visible && t.exited.is_none(), "hidden, running");
-        assert!(!ed.bottom_focus);
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
-        ed.bottom_take_keys();
+        // `C-w q` in its view mode too (D3)
+        ed.handle_key(ctrl_backslash);
         ed.handle_key(Key { code: Code::Char('w'), ctrl: true, alt: false, shift: false });
         ed.handle_key(key('q'));
         assert!(!ed.session.terminal.as_ref().unwrap().visible, "C-w q: hidden too");
@@ -1232,6 +1391,178 @@ mod tests {
         assert_eq!(back(&ed), 0, "nothing scrolled");
     }
 
+    /// fish's case, for real: while viewed, a question in the batch the reader reads as it waits for the last
+    /// one's go-ahead is answered at once — the program (bash, its terminal raw) gets the answer within its 3 s and
+    /// says ANSWERED, seen once caught up. Answered only as the batch is handed on, it would say TIMEOUT.
+    #[test]
+    fn a_question_read_while_the_view_holds_is_answered_at_once() {
+        if no_pty_here("a_question_read_while_the_view_holds_is_answered_at_once") {
+            return;
+        }
+        let scratch = crate::scratch::Scratch::new("terminal-question-held");
+        let fifo = fifo_in(&scratch);
+        let script = format!(
+            "exec bash -c 'read -r _ < \"{}\"; stty -icanon -echo; echo first-batch; sleep 0.5; printf \"\\033[c\"; \
+             if IFS= read -r -d c -t 3 _; then echo ANSWERED; else echo TIMEOUT; fi; sleep 30'",
+            fifo.display()
+        );
+        let mut ed = run_until(&script, |ed| ed.session.terminal.is_some());
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        assert!(crate::view::terminal_viewed(&ed));
+        let_go(&fifo);
+        // (viewed past bash's 3 s: the first batch held, the question in the reader's next)
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(3600);
+        while std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(ed.session.terminal.as_ref().unwrap().came(), "output held while viewed");
+        ed.handle_key(Key::plain(Code::Esc));
+        wait(&mut ed, |ed| shows(ed, "ANSWERED") || shows(ed, "TIMEOUT"));
+        let contents = ed.session.terminal.as_ref().map(|t| t.parser.screen().contents());
+        assert!(shows(&ed, "ANSWERED"), "answered while held: {contents:?}");
+    }
+
+    /// A program ending while viewed with output still in the reader (it read the next batch and waits for the
+    /// held one's go-ahead, so it reaches no end): its end waits too — past the drain's 2 s, still not told — and
+    /// once the view lets go comes after that output, every line on the screen as it's told. It leaves a child
+    /// holding the pty: where the pty outlives its session's leader (Linux) there's no end of file, and the end
+    /// comes a drain's time after the view let go; macOS revokes it as the leader exits.
+    #[test]
+    fn a_program_ending_while_viewed_ends_after_its_output() {
+        if no_pty_here("a_program_ending_while_viewed_ends_after_its_output") {
+            return;
+        }
+        let scratch = crate::scratch::Scratch::new("terminal-end-held");
+        let fifo = fifo_in(&scratch);
+        let script = format!(
+            "read -r _ < '{}'; (trap '' HUP; sleep 8) & echo first-words; sleep 0.3; echo last-words; exit 3",
+            fifo.display()
+        );
+        let mut ed = run_until(&script, |ed| ed.session.terminal.is_some());
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        let_go(&fifo);
+        // (the drain's 2 s, and some: the program long gone)
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let t = ed.session.terminal.as_ref().unwrap();
+        assert_eq!(t.exited, None, "its end waits with its output");
+        assert!(t.came() && !shows(&ed, "first-words"), "its output still held");
+        ed.handle_key(Key::plain(Code::Esc));
+        wait(&mut ed, |ed| ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_some()));
+        assert_eq!(ed.session.terminal.as_ref().unwrap().exited, Some(3), "told once the view let go");
+        let contents = ed.session.terminal.as_ref().map(|t| t.parser.screen().contents());
+        assert!(
+            shows(&ed, "first-words") && shows(&ed, "last-words"),
+            "its output before its end: {contents:?}"
+        );
+    }
+
+    /// A terminal replaced while viewed (dropped — a session ending — and another started): the old one's output
+    /// held and its reader waiting go with it; its program (one that ignores the hangup) ends later, once the new
+    /// one runs — that end is another run's and touches nothing of the new one, which runs on and shows its own.
+    #[test]
+    fn a_terminal_replaced_while_viewed_leaves_the_new_one_alone() {
+        if no_pty_here("a_terminal_replaced_while_viewed_leaves_the_new_one_alone") {
+            return;
+        }
+        let scratch = crate::scratch::Scratch::new("terminal-replaced-held");
+        let fifo = fifo_in(&scratch);
+        let script = format!(
+            "trap '' HUP; read -r _ < '{}'; (trap '' HUP; sleep 14) & echo old-a; sleep 0.3; echo old-b; sleep 1.5; exit 5",
+            fifo.display()
+        );
+        let mut ed = run_until(&script, |ed| ed.session.terminal.is_some());
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        let_go(&fifo);
+        wait(&mut ed, |ed| ed.session.terminal.as_ref().is_some_and(|t| t.came()));
+        assert!(ed.session.terminal.as_ref().unwrap().came(), "its output held, the next in its reader");
+        // (the old run's wait thread holds the other count: it's gone once that thread has sent its end)
+        let old = ed.session.terminal.as_ref().unwrap().holds.clone();
+        // (replaced: dropped, another started)
+        ed.session.terminal = None;
+        ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "echo fresh-one; sleep 30".into()], Vec::new());
+        wait(&mut ed, |ed| shows(ed, "fresh-one"));
+        assert!(!crate::view::terminal_viewed(&ed), "the old one's view gone with it");
+        // (the old program ends now, the new one running: its end told — to nobody. Its exit 1.8 s after
+        // `let_go`, then `DRAIN_AFTER_EXIT` — a drop that left `holds` odd keeps that thread waiting as long as
+        // the orphan holds the terminal, 14 s, where it stays open: Linux; macOS revokes it as the shell exits)
+        wait_up_to(&mut ed, 10, |_| std::sync::Arc::strong_count(&old) == 1);
+        assert_eq!(std::sync::Arc::strong_count(&old), 1, "the old run's end was sent: its view let it go");
+        while let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+        let t = ed.session.terminal.as_ref().unwrap();
+        assert_eq!(t.exited, None, "the new one runs on");
+        assert!(shows(&ed, "fresh-one") && !shows(&ed, "old-b"), "its own screen");
+    }
+
+    /// A flooding program (`yes`) while viewed: the reader's go-ahead is kept, so it reads no more — what tarae
+    /// holds stays one batch, the pty's buffer fills and the program's write waits there (unread output on the
+    /// master, nothing more taken in). `G` sends the go-ahead: the program writes again and the next batch comes
+    /// (held again, still viewed); leaving lets it run.
+    #[test]
+    fn a_flood_waits_on_its_write_while_viewed() {
+        if no_pty_here("a_flood_waits_on_its_write_while_viewed") {
+            return;
+        }
+        let mut ed = run_until("yes flood-line", |ed| shows(ed, "flood-line"));
+        assert!(shows(&ed, "flood-line"));
+        // (the main loop's events — the reader's batches: `n` of them, or `ms` gone)
+        let batches = |ed: &mut Editor, n: usize, ms: u64| {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            let mut taken = 0;
+            while taken < n && std::time::Instant::now() < end {
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
+                    ed.handle_event(ev);
+                    taken += 1;
+                }
+            }
+        };
+        let held_and_full = |ed: &Editor| {
+            ed.session
+                .terminal
+                .as_ref()
+                .is_some_and(|t| t.came() && !t.waiting.is_empty() && ready(t.master.as_raw_fd()))
+        };
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        assert!(crate::view::terminal_viewed(&ed));
+        wait(&mut ed, held_and_full);
+        let t = ed.session.terminal.as_ref().unwrap();
+        let held = t.held_len();
+        assert!(t.came() && !t.waiting.is_empty(), "a batch held, its go-ahead kept");
+        assert!(held <= BATCH + 64 * 1024, "one batch at most: {held} bytes");
+        assert!(ready(t.master.as_raw_fd()), "the program's next output waits unread in the pty");
+        // (what doesn't happen is seen only over a while — the one window here; a slow machine can't make it fail)
+        batches(&mut ed, 3, 300);
+        assert_eq!(
+            ed.session.terminal.as_ref().unwrap().held_len(),
+            held,
+            "nothing more taken in: the program waits"
+        );
+        ed.handle_key(Key::plain(Code::Char('G')));
+        let t = ed.session.terminal.as_ref().unwrap();
+        assert!(!t.came() && t.waiting.is_empty(), "caught up: the go-ahead sent");
+        wait(&mut ed, |ed| ed.session.terminal.as_ref().is_some_and(|t| t.came()));
+        assert!(
+            ed.session.terminal.as_ref().unwrap().came(),
+            "the program wrote again: the next batch, held"
+        );
+        ed.handle_key(Key::plain(Code::Esc));
+        let left = |ed: &Editor| {
+            let t = ed.session.terminal.as_ref().unwrap();
+            !crate::view::terminal_viewed(ed) && !t.came() && t.waiting.is_empty()
+        };
+        assert!(left(&ed), "left: it runs");
+        batches(&mut ed, 3, 5000);
+        assert!(left(&ed), "its batches go ahead as they come");
+    }
+
     /// #58: a `:preflight` started while the terminal holds the bottom slot shows at once — its tab in the
     /// slot's row, with the running badge — the terminal staying in front.
     #[test]
@@ -1279,9 +1610,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `C-w j` puts tarae's keys on the terminal (not the program's — `C-w z` can be typed there), `C-w z`
-    /// fills the screen with it, `i` types in it; its escape key then leaves the keys on it while it fills
-    /// the screen, and Esc goes back to the code — which ends it.
+    /// `C-w j` puts tarae's keys on the terminal (its view mode, not the program's — `C-w z` can be typed there),
+    /// `C-w z` fills the screen with it, `i` types in it; `C-\\` then leaves the keys on it (its view mode), and Esc
+    /// goes back to the code — which ends it.
     #[test]
     fn the_terminal_fills_the_screen_and_its_escape_stays_on_it() {
         if no_pty_here("the_terminal_fills_the_screen_and_its_escape_stays_on_it") {
@@ -1308,13 +1639,15 @@ mod tests {
         let focus = |ed: &Editor| ed.session.terminal.as_ref().unwrap().focus;
         draw(&mut ed);
         let small = ed.screen.bottom_h;
-        // Its escape, not filling the screen: back to the code
+        // `C-\\` and Esc: back to the code
         ed.handle_key(ctrl('\\'));
+        ed.handle_key(Key::plain(Code::Esc));
         assert!(!focus(&ed) && !ed.bottom_focus);
         for k in [ctrl('w'), key('j'), ctrl('w'), key('z')] {
             ed.handle_key(k);
         }
         assert!(ed.bottom_focus && !focus(&ed), "tarae's keys on it");
+        assert!(crate::view::terminal_viewed(&ed), "its view mode");
         draw(&mut ed);
         assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
         assert_eq!(ed.screen.bottom_h, ed.screen.body_h, "all the rows");
@@ -1327,7 +1660,7 @@ mod tests {
         assert_eq!(ed.doc().text.to_string(), "", "the buffer never saw them");
         assert_eq!(ed.zoomed(), Some(Zoom::Bottom), "typing in it, it still fills the screen");
         ed.handle_key(ctrl('\\'));
-        assert!(!focus(&ed) && ed.bottom_focus, "its escape: the keys stay on it");
+        assert!(!focus(&ed) && ed.bottom_focus, "C-\\: the keys stay on it, its view mode");
         assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
         ed.handle_key(Key::plain(Code::Esc));
         assert!(!ed.bottom_focus);

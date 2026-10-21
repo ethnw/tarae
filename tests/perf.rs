@@ -338,8 +338,9 @@ fn perf_e2e_procs_sampling() {
         t.wait_text("one");
         t.send(" T");
         t.wait_for("the terminal", |s| s.contains("● terminal") && (s.contains("$ ") || s.contains("# ")));
-        t.send("\x1c");
-        t.wait_for("the code has the keys", |s| s.contains("C-\\ type in it"));
+        // (`C-\` its view mode, `esc` the code)
+        t.send("\x1c\x1b");
+        t.wait_for("the code has the keys", |s| s.contains("C-\\ type"));
         if open {
             t.send(":procs\r");
             t.wait_text("SELF-CHECKS");

@@ -377,7 +377,8 @@ you left it in this conversation; the first time, on the last answer's first row
 opens it too, at the row under the pointer; rolled back down to the end with nothing selected, it closes and the
 keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …) work in it as in the input; `C-d`
 `C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it (kept to what reads), and `[keys.view]`,
-`[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound.
+`[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound. The terminal has the same
+view mode, `C-\` from its program ([features](features.md)): one set of keys to read either.
 
 ### Follow mode
 

@@ -369,9 +369,23 @@ esc = "view_leave"
 # (as tmux's copy mode and less: `q` out too)
 q = "view_leave"
 
+# The terminal: its view mode's own on top of [view] — `C-\` (the round: code → program → view → code, a selection
+# or not), the
+# slot's other tabs, `q` hides the panel (the shell runs on) as every output panel's `q` closes it
+[view.terminal]
+"C-\\" = "view_code"
+tab = "slot_next"
+S-tab = "slot_prev"
+q = "wclose"
+
 # The chat's input: what its keys run before they're typed
 [chat]
 esc = "chat_view"
+
+# The keys taken from the terminal's program — everything else is its (vim needs `esc`). Yours merge over these;
+# bind one to `to_program` to give it back to the program.
+[terminal]
+"C-\\" = "terminal_view"
 
 [insert]
 esc = "normal_mode"

@@ -53,7 +53,7 @@ pub enum Region {
     Rail,
     /// An edit's review in the buffer (`llm::review_key`).
     EditReview,
-    /// The bottom slot with tarae's keys: its panel's own (the terminal's: `i` types in it).
+    /// The bottom slot with tarae's keys: its panel's own (the terminal's are its view mode's).
     Slot(Slot),
     /// The terminal's program: every key goes to it.
     Program,
@@ -111,7 +111,8 @@ impl Region {
             Region::NextCard => Handler::NextCard,
             Region::Popup => Handler::Popup,
             Region::Point => Handler::Point,
-            Region::View(_) => Handler::ChatView,
+            Region::View(crate::view::Surface::Chat) => Handler::ChatView,
+            Region::View(crate::view::Surface::Terminal) => Handler::TerminalView,
         }
     }
 }
@@ -151,6 +152,7 @@ pub enum Handler {
     EditReview,
     Picker,
     ChatView,
+    TerminalView,
     Unfold,
     Chat,
     Rail,
@@ -174,6 +176,7 @@ impl Handler {
             Handler::EditReview => "edit-review",
             Handler::Picker => "picker",
             Handler::ChatView => "chat-view",
+            Handler::TerminalView => "terminal-view",
             Handler::Unfold => "chat-minimized",
             Handler::Chat => "chat",
             Handler::Rail => "review",
@@ -405,9 +408,11 @@ impl Editor {
                 }
             } else if view.pending().is_empty() && !view.waits() {
                 v.push(layer(Region::View(s), Filter::Except(crate::view::passes(self))));
-                let chords = crate::view::passes(self).into_iter().filter(|k| k.code != Code::Char('w'));
-                let chords: Vec<Key> = chords.collect();
-                v.push(layer(Region::Chat, Filter::Only(chords)));
+                if s == crate::view::Surface::Chat {
+                    let chords = crate::view::passes(self).into_iter().filter(|k| k.code != Code::Char('w'));
+                    let chords: Vec<Key> = chords.collect();
+                    v.push(layer(Region::Chat, Filter::Only(chords)));
+                }
             } else {
                 v.push(layer(Region::View(s), Filter::All));
             }
@@ -460,9 +465,8 @@ impl Editor {
             if !self.session.sidebar.as_ref().is_some_and(|s| s.focus) && self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
-            if let Some(s) = self
-                .slot()
-                .filter(|s| self.bottom_focus && matches!(s, Slot::Terminal | Slot::Test | Slot::Task))
+            // (the terminal's are its view mode's, above)
+            if let Some(s) = self.slot().filter(|s| self.bottom_focus && matches!(s, Slot::Test | Slot::Task))
             {
                 v.push(layer(Region::Slot(s), editors(&[ch('['), ch(']'), ctrl('w')])));
             }
@@ -619,6 +623,7 @@ impl Editor {
             Region::Popup => s.popup.get().is_some(),
             Region::Point => self.pointing.is_some(),
             Region::View(crate::view::Surface::Chat) => s.chat_view.get().is_some(),
+            Region::View(crate::view::Surface::Terminal) => s.terminal_rows.is_some(),
         }
     }
 
@@ -629,7 +634,9 @@ impl Editor {
             Region::Code => format!("pane#{}", self.session.focus),
             Region::Side(crate::sidebar::Mode::Git) => "git".into(),
             Region::Side(_) => "side".into(),
-            Region::Slot(Slot::Terminal) | Region::Program => "terminal".into(),
+            Region::Slot(Slot::Terminal) | Region::Program | Region::View(crate::view::Surface::Terminal) => {
+                "terminal".into()
+            }
             Region::Slot(s) => slot_name(s).into(),
             Region::Rail => "review".into(),
             Region::Unfold | Region::View(crate::view::Surface::Chat) => "chat".into(),

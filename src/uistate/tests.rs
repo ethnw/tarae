@@ -411,9 +411,13 @@ const SCENES: &[Scene] = &[
         ed.bottom_take_keys();
     }),
     ("the terminal's program", terminal),
-    ("the terminal with tarae's keys", |ed| {
+    ("the terminal in view mode, by C-w j", |ed| {
         terminal(ed);
         ed.bottom_take_keys();
+    }),
+    ("the terminal in view mode, a row selected", |ed| {
+        terminal(ed);
+        feed(ed, &["<C-\\>", "x"]);
     }),
     ("the terminal's program, a prompt over it", |ed| {
         terminal(ed);
@@ -842,7 +846,7 @@ fn slip_1_a_y_meant_for_a_card_goes_to_the_chat_input() {
 }
 
 /// Slip 2: a message meant for tarae typed into the terminal's shell. The state tells the program having
-/// the keys from tarae's keys on its panel — and so does the status line (`i type in it`).
+/// the keys from its view mode — and so does the status line (`● view · terminal  i type  esc code`).
 #[test]
 fn slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel() {
     if no_pty_here("slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel") {
@@ -856,14 +860,12 @@ fn slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel() {
     assert_eq!(ed.keys_at(), crate::chrome::Keys::Program);
     assert_eq!(ed.keys_at().hint(), None);
     feed(&mut ed, &["<C-\\>"]);
-    ed.bottom_take_keys();
     frame(&mut ed);
     let k = ed.keys_to();
-    assert_eq!((k.region.name(), k.takes), ("slot:terminal".to_string(), Takes::Commands));
-    assert_eq!(ed.keys_at().hint(), Some(("i", "type in it")));
+    assert_eq!((k.region.name(), k.takes), ("view:terminal".to_string(), Takes::Commands));
     let shown = crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 120, 40).unwrap();
-    let status = shown.lines().find(|l| l.contains("● terminal ")).unwrap_or_default();
-    assert!(status.contains("● terminal   i type in it"), "{shown}");
+    let status = shown.lines().find(|l| l.contains("● view · terminal ")).unwrap_or_default();
+    assert!(status.contains("● view · terminal   i type  esc code"), "{shown}");
 }
 
 /// Slip 3: ` W` typed into a chat input that wasn't on screen — minimized while Claude worked. Now the

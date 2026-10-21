@@ -207,15 +207,28 @@ configs carry over as they are.
   `[[places]]`: rustc's long one, tsc's, Python tracebacks) goes into the list as it comes, so `]q` walks the errors.
   Modified files are saved first
 - **Terminal** `space T` — your shell in a panel below the code, with the keys: everything you type goes to it
-  (colors, full-screen programs, the lot). `C-\` moves the keys between the code and it, both ways (inside it the key
-  is `editor.terminal-escape`); `space T` shows it with the keys — from wherever it is, behind another tab or
-  shown without them — and hides it (it keeps running) only from inside: tarae's keys on its panel (`C-w j`, a
-  click on its header), where `q` hides it too. The wheel over it scrolls
-  back, and so do `Shift+PageUp`/`Shift+PageDown` while it has the keys (a page; the next key it gets brings it
-  back down; a full-screen program, which keeps no past, gets them as from any terminal) — if your terminal leaves them to the program; a click in it gives it the keys, a click outside takes them back; a drag selects text and copies it. A
-  program that asks for the mouse (htop, vim, lazygit) gets clicks and the wheel instead (alt+drag still selects —
-  the panel's title says so), a full-screen one that
-  doesn't gets the wheel as arrow keys, and a paste arrives marked as one (a shell doesn't run it line by line)
+  (colors, full-screen programs, the lot — `esc` too). `C-\` goes round: from the code to the program, from the
+  program to its **view mode**, from there to the code. `space T` shows it with the keys — from wherever it is,
+  behind another tab or shown without them.
+  - **View mode** (`C-\` from the program, `C-w j` to its panel, or the wheel up over it): a cursor on its
+    scrollback and screen as text, the code's normal mode on them — `j` `k` `w` `x` `v` `/` `n` `*` `gg`, counts,
+    the `z` views; `↑` `↓` a line, `←` `→` a page, `y` copies, `G` the latest. The panel's head says `● view`, the
+    status line `● view · terminal`. It holds still: the program's output waits, and so does the program —
+    once its next write fills the pty, it's held there as a real terminal's flow control holds it (`● view ·
+    output waits`); nothing piles up in tarae. Its questions to the terminal are still answered. `G` catches up,
+    leaving does too (the rows you read stay in sight), and the program goes on. `i` (`a`, `enter`) types in the
+    program again, `esc` (a selection collapses first) or `C-\` goes to the code, `q` hides the panel (the shell
+    runs on), `tab` the slot's other tabs. The wheel back down to the bottom, nothing selected, gives the keys
+    back where they were. `[keys.terminal]` adds keys taken from the program (`C-\` by default; every other key
+    is the program's), and `to_program` gives one back; `[keys.view.terminal]` remaps its view mode.
+  - Outside view mode `Shift+PageUp`/`Shift+PageDown` scroll its past a page while the program has the keys (the
+    next key it gets brings it back down; a full-screen program, which keeps no past, gets them as from any
+    terminal) — if your terminal leaves them to the program. A click in it gives the program the keys, a click
+    outside takes them back; a drag selects text and copies it. A program that asks for the mouse (htop, vim, lazygit) gets clicks and the wheel instead
+    (alt+drag still selects — the panel's title says so), a full-screen one that doesn't gets the wheel as arrow
+    keys, and a paste arrives marked as one (a shell doesn't run it line by line). In view mode the mouse is the
+    view's, whoever asked for it: the wheel scrolls it, a click puts its cursor on that cell, nothing goes to the
+    program; a drag doesn't select there yet (said — `x`, `v` and `y` do)
 - **One tree for every list of files** — the file picker while you type, `space /` results, changed files, the
   replace preview, references, `space D`, and the code review's rail all show files under their folders, with faint
   guides. While typing, the best match comes first and its folders come with it (a folder holding just one folder
