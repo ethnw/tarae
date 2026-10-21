@@ -2185,6 +2185,7 @@ mod tests {
             claude: None,
             billing: Default::default(),
             build: None,
+            queue: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

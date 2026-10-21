@@ -4071,16 +4071,38 @@ mod tests {
                     s.recv(&mut [0u8; 64]).is_ok()
                 };
                 let mut said = Vec::new();
-                // (each tried, read from and let go before the next: the port free again)
+                // (each tried, read from and let go before the next: the port free again — but a socket the
+                // supervisor bound lives on a moment after the run closes it, where a process another thread of
+                // tarae's forked meanwhile holds tarae's copy (`pidfd_getfd`'s, close-on-exec) until its exec:
+                // the next bind there waits for it, a bind that had been made only — frictions33: `any` and
+                // `picked`, then `sent`, `EADDRINUSE` in the control now and then in a full suite. A run that
+                // never bound there, another session's, is answered at once.)
+                let mut made = false;
+                let after_made = |made: bool, bind: &mut dyn FnMut() -> io::Result<std::os::fd::OwnedFd>| {
+                    let by = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        match bind() {
+                            Err(e)
+                                if made
+                                    && e.raw_os_error() == Some(libc::EADDRINUSE)
+                                    && Instant::now() < by =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5))
+                            }
+                            r => return r,
+                        }
+                    }
+                };
                 for (what, at, range) in [
                     ("named", format!("127.0.0.1:{port}"), None),
                     ("any", format!("0.0.0.0:{port}"), None),
                     ("picked", "127.0.0.1:0".to_string(), Some(port)),
                 ] {
-                    match bound_only(false, &at, false, range) {
+                    match after_made(made, &mut || bound_only(false, &at, false, range)) {
                         Ok(fd) => {
                             let s = std::net::UdpSocket::from(fd);
                             let on = s.local_addr().is_ok_and(|a| a.port() == port);
+                            made |= on;
                             said.push(format!("{what}=ok"));
                             if on && took(&s) {
                                 said.push(format!("{what}-got=yes"));
@@ -4090,14 +4112,27 @@ mod tests {
                     }
                 }
                 // SAFETY: plain calls; the descriptor is this process's own from here.
-                let s = unsafe {
+                let narrowed = || unsafe {
                     let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
                     let range = u32::from(port) | (u32::from(port) << 16);
                     let size = std::mem::size_of::<u32>() as libc::socklen_t;
                     libc::setsockopt(fd, libc::SOL_IP, 51, (&raw const range).cast(), size);
                     std::net::UdpSocket::from_raw_fd(fd)
                 };
-                let sent = s.send_to(b"x", "127.0.0.1:9");
+                // (its bind the kernel's, on the send: waits as a bind does, after one made there)
+                let mut s = narrowed();
+                let by = Instant::now() + Duration::from_secs(2);
+                let sent = loop {
+                    match s.send_to(b"x", "127.0.0.1:9") {
+                        Err(e)
+                            if made && e.raw_os_error() == Some(libc::EADDRINUSE) && Instant::now() < by =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                            s = narrowed();
+                        }
+                        r => break r,
+                    }
+                };
                 let at = s.local_addr().map(|a| a.port()).unwrap_or(0);
                 said.push(format!("sent={}", tried(sent)));
                 if at == port && took(&s) {

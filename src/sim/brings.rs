@@ -2,13 +2,19 @@
 //! commits of their own — and at random a bring asked (`:session-bring`, its card graded on a worker), one brought
 //! as its card's `y` does (`session_bring_now`, fast-forward only), a new commit in a session, a frame, the user
 //! taking their time. A landing grades the other sessions' waiting bring cards again (`bring_regrade`) — its jobs
-//! among the rest, a bring asked meanwhile, another landing. After every step: one bring card a session.
+//! among the rest, a bring asked meanwhile, another landing. And the bring queue (24 a, `bringqueue.rs`): both
+//! marked, `B`, its card's `y` — the rebase and the quick preflight it starts as tasks stood in for by the
+//! scenario (no task is modelled): it rebases the checkout itself (`git rebase main`, aborted at a conflict —
+//! the two sessions' `a.rs` clash) and says a preflight passed or failed. After every step: one bring card a
+//! session, and the queue holds each session once, one under way at most.
 
 use std::time::Duration;
 
 use super::sessions::{World, git, one_bring_card, print};
 use super::{Choices, Sim};
+use crate::bringqueue::Stage;
 use crate::editor::Editor;
+use crate::key::{Code, Key};
 
 /// The seeds every `cargo test` runs, each twice — git's processes are most of a step (~40 steps a second).
 const SEEDS: &[u64] = &[0];
@@ -38,8 +44,11 @@ fn run(choices: Choices) -> Vec<String> {
         names.push((name.clone(), wt.clone()));
     }
     ed.session_switch(0);
+    ed.bring_queue.stand_in = true;
     let dir = world.dir.display().to_string();
-    sim.walk(&mut ed, INPUTS, |sim, ed| input(sim, ed, &names), one_bring_card, |ed| print(ed, &dir));
+    let check = |ed: &Editor| one_bring_card(ed).and_then(|()| queue_held(ed));
+    let said = |ed: &Editor| format!("{} · {}", print(ed, &dir), queue_said(ed));
+    sim.walk(&mut ed, INPUTS, |sim, ed| input(sim, ed, &names), check, said);
     let trace = sim.trace().to_vec();
     drop(sim);
     drop(ed);
@@ -49,8 +58,9 @@ fn run(choices: Choices) -> Vec<String> {
 fn input(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)]) -> String {
     let c = &mut sim.choices;
     let (name, root) = c.pick(names).clone();
-    // (by arm: a bring asked 4, one brought 2, a commit 2, a frame 1, time passing 1)
-    match c.weighted(&[4, 2, 2, 1, 1]) {
+    // (by arm: a bring asked 4, one brought 2, a commit 2, a frame 1, time passing 1, the queue asked 1, the
+    // queue's task stood in for 3)
+    match c.weighted(&[4, 2, 2, 1, 1, 1, 3]) {
         0 => match ed.session_bring(&name) {
             Ok(()) => format!(":session-bring {name}"),
             Err(e) => format!(":session-bring {name}: {e}"),
@@ -70,10 +80,107 @@ fn input(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)])
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
             "a frame".into()
         }
-        _ => {
+        4 => {
             let ms = *c.pick(&[50, 600]);
             sim.wait(Duration::from_millis(ms));
             format!("{ms} ms pass")
         }
+        5 => queue_asked(sim, ed, names),
+        _ => {
+            let passes = *c.pick(&[true, false]);
+            stand_in(ed, names, passes)
+        }
     }
+}
+
+/// `space W`'s `m` on each session, `B`, and the card's `y` once it's drawn and settled.
+fn queue_asked(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)]) -> String {
+    if ed.bring_queue.run.is_some() {
+        return "(a queue is under way)".into();
+    }
+    ed.bring_queue.marks.clear();
+    for (name, _) in names {
+        if let Ok((id, _)) = ed.session_named(name) {
+            ed.bring_mark(id);
+        }
+    }
+    if let Err(e) = ed.bring_queue_ask() {
+        return format!("B: {e}");
+    }
+    let front = |ed: &Editor| ed.offers.first().is_some_and(|o| o.kind() == "bring-queue");
+    if !front(ed) {
+        return "B: its card behind another".into();
+    }
+    crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
+    sim.wait(crate::offer::SETTLE + Duration::from_millis(50));
+    ed.handle_key(Key::plain(Code::Char('y')));
+    "B, and y on its card".into()
+}
+
+/// What the queue's one under way waits on, ended by the scenario: its rebase — run here, aborted at a conflict —
+/// or its preflight (`passes`).
+fn stand_in(ed: &mut Editor, names: &[(String, std::path::PathBuf)], passes: bool) -> String {
+    let Some((id, stage)) = ed.bring_queue.run.as_ref().and_then(|r| r.now) else {
+        return "(nothing of the queue's under way)".into();
+    };
+    let Some((name, root)) = names.iter().find(|(n, _)| ed.session_named(n).is_ok_and(|(i, _)| i == id))
+    else {
+        return "(the queue's one isn't the scenario's)".into();
+    };
+    match stage {
+        Stage::Rebasing => {
+            let rebased = rebase(root);
+            let done = if rebased { Ok(()) } else { Err("its rebase stopped at a conflict".into()) };
+            ed.with_session(id, |ed| {
+                ed.bring_queue_rebased(done);
+            });
+            format!("{name}'s rebase {}", if rebased { "done" } else { "stopped: aborted" })
+        }
+        Stage::Preflight => {
+            ed.with_session(id, |ed| ed.rebase_preflight_done(passes, "quick preflight"));
+            format!("{name}'s preflight {}", if passes { "passed" } else { "failed" })
+        }
+        s => format!("({name}: {s:?}, nothing to stand in for)"),
+    }
+}
+
+/// `git rebase main` in `root` as the scenario's own git runs — aborted at a conflict: whether it went through.
+fn rebase(root: &std::path::Path) -> bool {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "-C"])
+            .arg(root)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("XDG_CONFIG_HOME", "/dev/null")
+            .env("GIT_AUTHOR_DATE", "2026-10-18T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-10-18T00:00:00Z")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    run(&["rebase", "-q", "main"]) || !run(&["rebase", "--abort"])
+}
+
+/// The queue holds each session once, and one under way at most.
+fn queue_held(ed: &Editor) -> Result<(), String> {
+    let Some(run) = ed.bring_queue.run.as_ref() else { return Ok(()) };
+    let mut all: Vec<u64> = run.left.iter().copied().chain(run.now.map(|(id, _)| id)).collect();
+    let n = all.len();
+    all.sort_unstable();
+    all.dedup();
+    match all.len() == n {
+        true => Ok(()),
+        false => Err(format!("a session twice in the queue: {:?} · {:?}", run.left, run.now)),
+    }
+}
+
+/// The queue as it is: the one under way and its stage, those left, brought and out.
+fn queue_said(ed: &Editor) -> String {
+    let Some(run) = ed.bring_queue.run.as_ref() else { return "no queue".into() };
+    let brought: Vec<&str> = run.brought.iter().map(|(n, _)| n.as_str()).collect();
+    let out: Vec<String> = run.out.iter().map(|(n, why)| format!("{n}: {why}")).collect();
+    format!("queue now {:?} left {:?} brought {brought:?} out {out:?}", run.now, run.left)
 }

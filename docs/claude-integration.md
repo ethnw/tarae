@@ -1917,6 +1917,17 @@ is a card — `y` takes the main checkout's changes where they don't touch the s
 card says how many), `v` shows them, `n` keeps it; either way only later changes are asked. A buffer of it
 with unsaved changes is left alone. `.claude/settings*.json` aren't followed: they're trusted on their own card.
 
+Several sessions ready at once are brought **in turn**: in the session list, `m` marks the row in hand (again:
+unmarks; the row says `bring 1st`, `bring 2nd` … — the order marked is the order brought), and `B` asks once
+(`Bring 3 into main … fix-login, docs, then parser`). After `y` each goes as a single bring would, one at a
+time on its base's tip: rebased onto it if it moved, its quick preflight run there, then brought — the next
+starts once it lands, so no preflight runs on a tip already gone. One that meets a conflict (its Claude is asked
+as above), changes in no commit (its card stays), a preflight that fails or doesn't run, or nothing to bring is
+left out, said, and the rest go on; a fast-forward refused because the base moved under it is looked at once
+more. Meanwhile its row says where it is (`bring queue 2/3 · preflight`, `bring queue · next`), a bring of one
+in the queue asked another way waits for its turn, and the end says who was brought and who wasn't, and why.
+One marked alone is a single bring.
+
 A session with no commits of its own, behind its base (it was made, nothing was committed, and the base moved
 on), has nothing to bring. `:session-bring` then offers to move it up to its base's tip instead: the card says
 it's a fast-forward in its checkout (`behind has no commits past main — nothing to bring. It's 2 commits

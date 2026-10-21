@@ -448,6 +448,8 @@ pub struct Editor {
     pub(crate) git_bases_read: u64,
     /// Rebase lines read on a worker that came back (`rebase::rebase_git`) — what tests wait on.
     pub(crate) rebase_lines_read: u64,
+    /// Sessions marked in `space W` and the bring queue going (`bringqueue.rs`) — the editor's, not a session's.
+    pub bring_queue: crate::bringqueue::Queue,
     /// `gw` labels on screen (labels.rs) — the next two keys pick one.
     pub jump_labels: Option<crate::labels::Labels>,
     /// Length of the key sequence behind the last command — to drop `Q` itself when recording stops.
@@ -1004,6 +1006,7 @@ impl Editor {
             git_told: Default::default(),
             git_bases_read: 0,
             rebase_lines_read: 0,
+            bring_queue: Default::default(),
             replace_targets: None,
             replace_plan: Vec::new(),
             next_id: 0,
@@ -1848,6 +1851,7 @@ impl Editor {
         self.offer_group_sync();
         crate::notes::stale_sync(self);
         crate::stuck::sync(self);
+        self.bring_queue_sync();
         self.plugin_front();
         self.schedule_tick();
         #[cfg(test)]

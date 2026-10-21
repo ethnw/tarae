@@ -12667,10 +12667,18 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         }
     } else if let Some(p) = editor.picker.as_ref().filter(|p| p.keys) {
         // The sessions: the checkout tarae started in can't be ended or brought in
+        // (`B` once some are marked — the bring queue, `bringqueue.rs`: first after `enter`, it's what's next)
+        let marked = editor.bring_queue.marks.len();
+        let bring = format!("bring the {marked} in turn");
+        let marks: &[(&'static str, &str)] = if marked > 0 { &[("B", bring.as_str())] } else { &[] };
+        let with = |rest: &[(&'static str, &str)]| {
+            let (enter, rest) = rest.split_at(1);
+            hints(&[enter, marks, rest].concat())
+        };
         match p.current().map(|i| &i.action) {
-            None => hints(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
+            None => with(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
             // (`$`: who pays for its Claude — every session, the one tarae started in too)
-            Some(Action::Session(0)) => hints(&[
+            Some(Action::Session(0)) => with(&[
                 ("enter", "switch"),
                 ("n", "new"),
                 ("w", "keep warm"),
@@ -12681,22 +12689,24 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             Some(Action::Session(id))
                 if *id != editor.session.id && editor.session_store.build_dirs.contains_key(id) =>
             {
-                hints(&[
+                with(&[
                     ("enter", "switch"),
                     ("n", "new"),
                     ("d", "end"),
                     ("b", "bring into its base"),
+                    ("m", "mark to bring"),
                     ("x", "drop its build"),
                     ("w", "keep warm"),
                     ("$", "billing"),
                     ("esc", "close"),
                 ])
             }
-            Some(_) => hints(&[
+            Some(_) => with(&[
                 ("enter", "switch"),
                 ("n", "new"),
                 ("d", "end"),
                 ("b", "bring into its base"),
+                ("m", "mark to bring"),
                 ("w", "keep warm"),
                 ("$", "billing"),
                 ("esc", "close"),

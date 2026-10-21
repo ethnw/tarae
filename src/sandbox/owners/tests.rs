@@ -95,9 +95,19 @@ fn the_kernel_lists_a_ports_sockets_with_their_v6only() {
         assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut st) }, 0);
         st.st_ino as u64
     };
-    let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = v4.local_addr().unwrap().port();
-    let v6 = v6only_listener(port);
+    // (the port the kernel gave the IPv4 one is free at 127.0.0.1 only: another test's IPv6 socket may hold it at
+    // `[::1]` — frictions33, `EADDRINUSE` now and then in a full suite. A pair that fits is found again.)
+    let (v4, port, v6) = (0..50)
+        .find_map(|_| {
+            let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = v4.local_addr().unwrap().port();
+            match v6only_listener(port) {
+                Ok(v6) => Some((v4, port, v6)),
+                Err(e) if e.raw_os_error() == Some(libc::EADDRINUSE) => None,
+                Err(e) => panic!("a v6-only listener: {e}"),
+            }
+        })
+        .expect("a port free in both families within 50 tries");
     let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let udp = std::net::UdpSocket::bind("[::]:0").unwrap();
     let uport = udp.local_addr().unwrap().port();
@@ -145,7 +155,7 @@ fn the_kernel_lists_a_ports_sockets_with_their_v6only() {
 
 /// A TCP listener at `[::]:port`, `IPV6_V6ONLY` (beside an IPv4 one on that port).
 #[cfg(target_os = "linux")]
-fn v6only_listener(port: u16) -> std::os::fd::OwnedFd {
+fn v6only_listener(port: u16) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd};
     // SAFETY: plain calls on a socket of ours, an address and an int of the sizes given.
     unsafe {
@@ -164,14 +174,11 @@ fn v6only_listener(port: u16) -> std::os::fd::OwnedFd {
         a.sin6_family = libc::AF_INET6 as libc::sa_family_t;
         a.sin6_port = port.to_be();
         let len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
-        assert_eq!(
-            libc::bind(fd.as_raw_fd(), (&raw const a).cast(), len),
-            0,
-            "{}",
-            std::io::Error::last_os_error()
-        );
+        if libc::bind(fd.as_raw_fd(), (&raw const a).cast(), len) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         assert_eq!(libc::listen(fd.as_raw_fd(), 1), 0);
-        fd
+        Ok(fd)
     }
 }
 

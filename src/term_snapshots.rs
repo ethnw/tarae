@@ -1859,6 +1859,41 @@ fn sessions_reviewing(w: u16) -> Shot {
     s
 }
 
+/// frictions29 24 (a): `space W` with three sessions — as it opens (`m` among the keys), two marked in turn (each
+/// row says its place, `B` first after `enter`), then `B`'s card. With `TARAE_FRAMES_DIR`, each in both themes
+/// (`target/sb/frictions33-shots.sh` draws them).
+#[test]
+fn snapshot_sessions_marked_to_bring() {
+    let mut s = Shot::new(112, 30);
+    let root = s.in_project();
+    (s.ed.session.name, s.ed.session.git_branch) = ("main".into(), Some("main".into()));
+    for name in ["fix-login", "docs", "parser"] {
+        let dir = root.with_file_name(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = s.ed.session_add(dir);
+        let l = s.ed.sessions.iter_mut().find(|l| l.id == id).unwrap();
+        (l.name, l.base) = (name.into(), Some("main".into()));
+    }
+    s.ed.session_list();
+    s.frame();
+    s.check("sessions_bring_list");
+    s.frames_both("f33_list");
+    s.keys("jmjjm");
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    let row = |name: &str| rows.iter().find(|r| r.contains(name)).cloned().unwrap_or_default();
+    assert!(row("fix-login").contains("bring 1st") && row("parser").contains("bring 2nd"), "{rows:#?}");
+    assert!(!row("docs").contains("bring"), "{rows:#?}");
+    s.check("sessions_bring_marked");
+    s.frames_both("f33_list_marked");
+    s.ed.offer_popups = true;
+    s.keys("B");
+    assert!(s.ed.offers.first().is_some_and(|o| o.kind() == "bring-queue"), "{:?}", s.ed.offers);
+    s.check("bring_queue_card");
+    s.frames_both("f33_bring_queue_card");
+}
+
 /// frictions26 S1: a session's end card when what `session.keep` names is kept — the kept line decided, its own
 /// CLAUDE.md copied beside it — and when nothing can be (over the size): said in the warning colour, with what
 /// goes with the checkout.

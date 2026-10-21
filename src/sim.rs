@@ -34,6 +34,7 @@ mod ptybroker;
 mod rebasemsg;
 mod reviews;
 mod sessions;
+mod stuckstop;
 mod watchers;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

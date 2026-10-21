@@ -455,6 +455,12 @@ impl Run {
             ended: Default::default(),
         }
     }
+
+    /// Running as process `pid` (a test's own stand-in).
+    pub fn running_as(mut self, pid: u32) -> Run {
+        (self.pid, self.state) = (Some(pid), State::Running);
+        self
+    }
 }
 
 impl Drop for Run {

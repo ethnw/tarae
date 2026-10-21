@@ -161,8 +161,8 @@ fn tarae_state_ends_quietly_when_its_reader_is_gone() {
     use std::os::unix::net::UnixListener;
     use std::os::unix::process::CommandExt;
     let sb = Sandbox::new("epipe");
-    // (short: a socket's path fits `sun_path`)
-    let sock = sb.home().join("u.sock");
+    // (a path that fits `sun_path`, wherever the temp folder is)
+    let sock = sb.socket("u.sock");
     let listener = UnixListener::bind(&sock).unwrap();
     std::thread::spawn(move || {
         for mut s in listener.incoming().map_while(Result::ok) {

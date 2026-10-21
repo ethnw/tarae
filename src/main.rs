@@ -12,6 +12,7 @@ mod beneath;
 mod billing;
 mod blocked;
 mod board;
+mod bringqueue;
 mod builds;
 mod calls;
 mod caps;

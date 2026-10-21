@@ -1,0 +1,97 @@
+# bring_queue_card · 112x30 · theme meok · cursor 2:4
+## text
+00  tarae  ›  [scratch]
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+02   1
+03
+04
+05
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17                                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+18                                                    ▎ Bring 2 into main
+19                                                      Bring 2 sessions into main, one after another?
+20                                                      fix-login, then parser.
+21
+22                                                      Each in turn: rebased onto main's tip if it moved, its
+23                                                      quick preflight run there, then brought — the next
+24                                                      starts once it lands. A conflict or a failed preflight
+25                                                      stops only that one; the rest go on.
+26
+27                                                      y Bring them in turn   n Not now
+28                                                   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+29  ● normal   main   ▎ parser marked to bring 2nd — B brings the 2 in turn                        utf-8 LF   1:1
+## bg · surface per cell, blank = ui.background
+00
+01
+02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03
+04
+05
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27                                                   ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+28
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  TTTTTTTTT
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   A
+03
+04
+05
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18                                                    a BBBBB B BBBB BBBB
+19
+20
+21
+22                                                      dddd dd ddddd ddddddd dddd dddddd ddd dd dd dddddd ddd
+23                                                      ddddd ddddddddd ddd dddddd dddd ddddddd d ddd dddd
+24                                                      dddddd dddd dd dddddd d dddddddd dd d dddddd ddddddddd
+25                                                      ddddd dddd dddd dddd ddd dddd dd ddd
+26
+27                                                      A                      A ddd ddd
+28
+29  a TTTTTT   aaaa   a                                                                            ddddd dd   TTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

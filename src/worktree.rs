@@ -913,7 +913,7 @@ pub struct Brought {
 }
 
 /// What the checks before a bring found (on a worker).
-enum Bringing {
+pub(crate) enum Bringing {
     Brought(Brought),
     /// The base moved since: the rebase card.
     Moved(crate::rebase::Moved),
@@ -1099,6 +1099,9 @@ pub struct Shown {
     pub billing: crate::billing::Billing,
     /// What its own build folder outside its checkout takes (`build_dirs`) — None: none, or not measured yet.
     pub build: Option<(u64, bool)>,
+    /// Marked to bring (`bring 2nd`), or where it is in the bring queue going (`bring queue · preflight`) —
+    /// `bringqueue.rs`.
+    pub queue: Option<String>,
 }
 
 impl Shown {
@@ -1171,6 +1174,11 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
             let doing = match (&l.rebasing, doing.is_empty()) {
                 (Some(r), true) => r.clone(),
                 (Some(r), false) => format!("{r} · {doing}"),
+                (None, _) => doing,
+            };
+            let doing = match (&l.queue, doing.is_empty()) {
+                (Some(q), true) => q.clone(),
+                (Some(q), false) => format!("{q} · {doing}"),
                 (None, _) => doing,
             };
             let usage = l
@@ -2125,6 +2133,7 @@ impl Editor {
                 ),
                 billing: l.billing,
                 build: self.session_store.build_dirs.get(&l.id).map(|(_, size)| *size),
+                queue: self.bring_said(l.id),
             })
             .collect();
         items(&shown)
@@ -2144,8 +2153,9 @@ impl Editor {
     }
 
     /// A letter in the list: `j`/`k` move, a digit brings that row's session to the front, `n` makes a new
-    /// one, `d` ends the one in hand, `b` brings it into its base, `x` drops its build folder, `w` marks its
-    /// conversation to be kept warm (or not), `$` switches who pays for its Claude.
+    /// one, `d` ends the one in hand, `b` brings it into its base, `m` marks it for the bring queue (`B` brings
+    /// the marked ones in turn — `bringqueue.rs`), `x` drops its build folder, `w` marks its conversation to be
+    /// kept warm (or not), `$` switches who pays for its Claude.
     pub(crate) fn session_list_key(&mut self, c: char) {
         use crate::picker::Action;
         let Some(p) = self.picker.as_mut() else { return };
@@ -2173,6 +2183,21 @@ impl Editor {
                 let which = id.to_string();
                 let done = if c == 'd' { self.session_end(&which) } else { self.session_bring(&which) };
                 if let Err(e) = done {
+                    self.set_error(e);
+                }
+            }
+            // Marked to bring in turn — again: unmarked (the row says `bring 2nd`)
+            'm' => {
+                let Some(id) = here else { return };
+                self.bring_mark(id);
+            }
+            // The marked ones, brought one after another — asked on one card (`bringqueue.rs`)
+            'B' => {
+                if self.bring_queue.marks.is_empty() {
+                    return self.set_status("nothing marked — m marks the sessions to bring in turn, then B");
+                }
+                self.picker = None;
+                if let Err(e) = self.bring_queue_ask() {
                     self.set_error(e);
                 }
             }
@@ -2204,13 +2229,19 @@ impl Editor {
     /// quick preflight, then brings: #155, it brought at once). The base moved since: a card offers to rebase
     /// it first (`rebase.rs`). Not while a rebase is under way there.
     pub fn session_bring(&mut self, which: &str) -> Result<(), String> {
-        self.bringing(which, false)
+        self.bringing(which, How::Card)
     }
 
     /// The bring card's `y` (or its preflight passed): its base moved up to its branch, fast-forward only (a
     /// worker).
     pub(crate) fn session_bring_now(&mut self, which: &str) -> Result<(), String> {
-        self.bringing(which, true)
+        self.bringing(which, How::Now)
+    }
+
+    /// The bring queue's one under way, looked at as `:session-bring` does — what's found goes to the queue
+    /// (`bring_queue_looked`), never a card.
+    pub(crate) fn bringing_queued(&mut self, id: SessionId) -> Result<(), String> {
+        self.bringing(&id.to_string(), How::Queue)
     }
 
     /// A bring into `base` landed (session `landed`'s): the other sessions waiting with a card that brings into
@@ -2241,16 +2272,32 @@ impl Editor {
         }
     }
 
-    fn bringing(&mut self, which: &str, now: bool) -> Result<(), String> {
+    fn bringing(&mut self, which: &str, how: How) -> Result<(), String> {
         let (id, name) = self.session_named(which)?;
         if id == 0 {
             return Err(format!("{name} is the checkout tarae started in — bring a session into it instead"));
         }
+        // (the bring queue's own steps go on; a bring of one in it otherwise waits for its turn)
+        let its_turn = match how {
+            How::Queue => true,
+            How::Now => self.bring_queue_at(id) == Some(crate::bringqueue::Stage::Bringing),
+            How::Card => false,
+        };
+        if !its_turn && self.bring_queued(id) {
+            return Err(format!("{name} is in the bring queue — it comes in its turn (space W says where)"));
+        }
+        let now = how == How::Now;
+        // (the queue's one under way: what keeps it from going on is an Err its caller takes it out with)
+        let queued = its_turn && self.bring_queue_at(id).is_some();
         let session =
             std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).expect("named");
         // (a rebase stopped there: its card, to go on or abort — #175)
         if session.rebase.is_some() {
-            return self.rebase_offer(id).map_err(|e| format!("bring {name}: {e}"));
+            let offered = self.rebase_offer(id).map_err(|e| format!("bring {name}: {e}"));
+            return match queued {
+                true => Err(offered.err().unwrap_or_else(|| "a rebase is under way there — its card".into())),
+                false => offered,
+            };
         }
         let (root, base, start) = (session.root.clone(), session.base.clone(), self.start_root());
         let (looked, rules) = (session.looked.clone(), crate::risk::Rules::of(&self.config));
@@ -2270,8 +2317,21 @@ impl Editor {
             },
         };
         self.step(self.events.shared_jobs(), "session", said, work, move |ed, result| {
+            // (the queue's: what it looked at goes to it — and so does a bring of its one under way that didn't land,
+            // its base moved during the preflight among them: else it waited on it for good)
+            let landed = matches!(result, Bringing::Brought(_));
+            if how == How::Queue || (queued && !landed) {
+                match how {
+                    How::Queue => ed.bring_queue_looked(id, result),
+                    _ => ed.bring_queue_not_brought(id, result),
+                }
+                ed.git_refresh();
+                ed.git_reload_bases();
+                return;
+            }
             match result {
                 Bringing::Brought(b) => {
+                    let what = format!("{} of {}, now at {}", commits(b.count), b.branch, b.tip);
                     ed.set_success(format!(
                         "Brought {} of {} into {} — now at {}",
                         commits(b.count),
@@ -2282,6 +2342,7 @@ impl Editor {
                     // (its review since the base is of nothing now: it ends, said — frictions25 R5)
                     ed.with_session(id, crate::codereview::base_reached);
                     ed.bring_regrade(id, &b.base);
+                    ed.bring_queue_landed(id, what);
                 }
                 Bringing::Moved(m) => ed.push_offer(m.card()),
                 // (nothing of its own, behind: moved up instead — #186)
@@ -2310,6 +2371,15 @@ impl Editor {
         });
         Ok(())
     }
+}
+
+/// Who asked for a bring: `:session-bring` and `b` (a card first), the card's `y` or a preflight passed (now),
+/// the bring queue (`bringqueue.rs`: what's found goes to it).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum How {
+    Card,
+    Now,
+    Queue,
 }
 
 #[cfg(test)]
@@ -4945,6 +5015,7 @@ mod tests {
             claude: None,
             billing: Default::default(),
             build: None,
+            queue: None,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[
@@ -5316,6 +5387,250 @@ mod tests {
         // one's card graded again at once: main moved — `y` rebases first; its old card gone
         settle_until(&mut ed, |ed| titles(ed).iter().any(|t| t == "Bring one: main moved"));
         assert!(!titles(&ed).iter().any(|t| t == "Bring one into main"), "{:?}", titles(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 24 (a): sessions ready at once, brought in turn — `space W`, `m` on each (the rows say their
+    /// place), `B`, one `y`: `one` brought after its quick preflight; `clash`, rebased onto main's new tip, meets
+    /// a conflict — out alone, its Claude asked as for a single bring; `two` rebased onto the tip, preflighted
+    /// there and brought. The end says who was brought and who wasn't, and why.
+    #[test]
+    fn marked_sessions_are_brought_in_turn() {
+        let (repo, dir) = place("bring-queue");
+        let mut ed = editor(&repo, &dir);
+        let ran = dir.join("preflights");
+        ed.config.preflight = vec![crate::preflight::Step {
+            name: "check".into(),
+            cmd: format!("pwd >> '{}'", ran.display()),
+            note: None,
+            from: ".tarae.toml".into(),
+            full: false,
+        }];
+        let mut wts = Vec::new();
+        for (name, file, body) in [
+            ("one", "a.txt", "one\nfrom one\n"),
+            ("clash", "a.txt", "one\nclash\n"),
+            ("two", "two.txt", "two\n"),
+        ] {
+            let wt = new_session(&mut ed, name);
+            std::fs::write(wt.join(file), body).unwrap();
+            git_in(&wt, &["add", "-A"]);
+            git_in(&wt, &["commit", "-qm", name]);
+            wts.push(wt);
+        }
+        ed.session_switch(0);
+        // The list: `m` on each, in turn — each row says its place
+        feed(&mut ed, "<space>W");
+        assert_eq!(ed.picker.as_ref().map(|p| p.kind), Some("sessions"));
+        feed(&mut ed, "jmjmjm");
+        let hints: Vec<String> = ed.picker.as_ref().unwrap().items().iter().map(|i| i.hint.clone()).collect();
+        for (row, place) in [(1, "bring 1st"), (2, "bring 2nd"), (3, "bring 3rd")] {
+            assert!(hints[row].contains(place), "row {row}: {hints:?}");
+        }
+        assert!(says(&ed, "two marked to bring 3rd — B brings the 3 in turn"), "{}", said(&ed));
+        feed(&mut ed, "B");
+        assert!(ed.picker.is_none());
+        let q = card(&ed, "Bring 3 into main")
+            .map(|o| o.question.clone())
+            .unwrap_or_else(|| panic!("{}", said(&ed)));
+        assert!(q.starts_with("Bring 3 sessions into main, one after another? one, clash, then two."), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'n']);
+        feed(&mut ed, "y");
+        assert!(ed.bring_queue.run.is_some() && ed.bring_queue.marks.is_empty());
+        let end = Instant::now() + Duration::from_secs(60);
+        while ed.bring_queue.run.is_some() {
+            let left = end.saturating_duration_since(Instant::now());
+            let ev = ed
+                .events
+                .recv_timeout(left)
+                .unwrap_or_else(|| panic!("the queue never ended: {}", said(&ed)));
+            ed.handle_event(ev);
+        }
+        assert!(
+            says(&ed, "Bring queue done — brought one, two · not brought: clash (its rebase stopped at "),
+            "{}",
+            said(&ed)
+        );
+        // main: one, then two on top of it; clash's commit not in it, its rebase stopped in its checkout
+        assert_eq!(git_in(&repo, &["log", "--format=%s", "main"]), "two\none\nbase");
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), git_in(&wts[2], &["rev-parse", "HEAD"]));
+        assert!(crate::rebase::under_way(&wts[1]).is_some(), "clash's rebase waits on its conflict");
+        // (each preflight in its own checkout, on the tip it was brought from)
+        let ran = std::fs::read_to_string(&ran).unwrap();
+        let ran: Vec<&str> = ran.lines().collect();
+        assert_eq!(ran, [wts[0].to_str().unwrap(), wts[2].to_str().unwrap()]);
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A queue of `names`' sessions (ids), started as its card's `y` does.
+    fn queue_of(ed: &mut Editor, ids: &[SessionId], names: &[&str]) {
+        let names = names.iter().map(|n| n.to_string()).collect();
+        ed.bring_queue_start(crate::bringqueue::Ask { ids: ids.to_vec(), names, bases: vec!["main".into()] });
+    }
+
+    /// The queue's end, said.
+    fn queue_over(ed: &mut Editor) {
+        let end = Instant::now() + Duration::from_secs(60);
+        while ed.bring_queue.run.is_some() {
+            let left = end.saturating_duration_since(Instant::now());
+            let ev =
+                ed.events.recv_timeout(left).unwrap_or_else(|| panic!("the queue never ended: {}", said(ed)));
+            ed.handle_event(ev);
+        }
+    }
+
+    /// The bring queue's ways out, each taking only its own session out (real rebases and preflights): `behind`
+    /// has nothing to bring; `held`'s rebase is held by a change in no commit (its card stays); `gone` closed
+    /// before its turn; `one`, rebased onto main's tip and preflighted, is brought.
+    #[test]
+    fn the_bring_queue_leaves_out_what_cant_be_brought() {
+        let (repo, dir) = place("bring-queue-out");
+        let mut ed = editor(&repo, &dir);
+        ed.config.preflight = vec![crate::preflight::Step {
+            name: "check".into(),
+            cmd: "true".into(),
+            note: None,
+            from: ".tarae.toml".into(),
+            full: false,
+        }];
+        let mut ids = Vec::new();
+        let mut wts = Vec::new();
+        for name in ["behind", "held", "gone", "one"] {
+            let wt = new_session(&mut ed, name);
+            if name != "behind" {
+                std::fs::write(wt.join(format!("{name}.txt")), "x\n").unwrap();
+                git_in(&wt, &["add", "-A"]);
+                git_in(&wt, &["commit", "-qm", name]);
+            }
+            ids.push(ed.session.id);
+            wts.push(wt);
+        }
+        std::fs::write(wts[1].join("a.txt"), "not in a commit\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "main moves"]);
+        ed.session_switch(0);
+        queue_of(&mut ed, &ids, &["behind", "held", "gone", "one"]);
+        ed.session_close(&wts[2]);
+        queue_over(&mut ed);
+        let out = ed.messages.iter().rev().find(|m| m.2.starts_with("Bring queue done")).map(|m| m.2.clone());
+        let out = out.unwrap_or_else(|| panic!("{}", said(&ed)));
+        assert!(out.starts_with("Bring queue done — brought one · not brought: "), "{out}");
+        assert!(out.contains("behind (nothing to bring — no commits past main)"), "{out}");
+        assert!(out.contains("held (changes not in a commit in its checkout — its card asks)"), "{out}");
+        assert!(out.contains("gone ("), "{out}");
+        // (up or parked with its session, wherever it was asked)
+        let parked = std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked);
+        let titles: Vec<&str> = ed.offers.iter().chain(parked).map(|o| o.title.as_str()).collect();
+        assert!(titles.iter().any(|t| t.contains("held")), "held's card stays: {titles:?}");
+        assert_eq!(git_in(&repo, &["log", "-1", "--format=%s", "main"]), "one");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Fix 2 of frictions33's review: the queue's one under way whose bring can't start — a rebase is there by the
+    /// time its preflight passes (one begun by hand, here a resolved one) — is out, said, its rebase card up, and the
+    /// next goes on: it doesn't wait at its bring for good. Its rebase and preflight stood in for (`Queue.stand_in`).
+    #[test]
+    fn a_queued_bring_that_cant_start_is_left_out() {
+        use crate::bringqueue::Stage;
+        let (repo, dir) = place("bring-queue-cant");
+        let mut ed = editor(&repo, &dir);
+        ed.bring_queue.stand_in = true;
+        let mut ids = Vec::new();
+        for name in ["a", "b"] {
+            let wt = new_session(&mut ed, name);
+            std::fs::write(wt.join(format!("{name}.txt")), "x\n").unwrap();
+            git_in(&wt, &["add", "-A"]);
+            git_in(&wt, &["commit", "-qm", name]);
+            ids.push(ed.session.id);
+        }
+        ed.session_switch(0);
+        queue_of(&mut ed, &ids, &["a", "b"]);
+        settle_until(&mut ed, |ed| ed.bring_queue_at(ids[0]) == Some(Stage::Preflight));
+        ed.with_session(ids[0], |ed| {
+            crate::rebase::resolved_for_test(ed, "a", None);
+            ed.rebase_preflight_done(true, "quick preflight");
+        });
+        assert_eq!(ed.bring_queue_at(ids[0]), None, "a still waits at its bring: {}", said(&ed));
+        assert!(
+            says(
+                &ed,
+                "Bring queue: a not brought — a rebase is under way there — its card — the next goes on"
+            ),
+            "{}",
+            said(&ed)
+        );
+        assert!(ed.bring_queue_at(ids[1]).is_some(), "b's turn: {}", said(&ed));
+        let parked = std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked);
+        let rebase_card =
+            |o: &crate::offer::Offer| matches!(o.what, crate::offer::What::RebaseResolved { .. });
+        assert!(ed.offers.iter().chain(parked).any(rebase_card), "a's rebase card up");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The bring queue's steps that come back on their own, its rebase and preflight stood in for
+    /// (`Queue.stand_in`): `a`'s base moves during its preflight — its bring finds it moved, and it's looked at once
+    /// more (rebased, preflighted again) and brought; `b`'s preflight is dropped on the way (its flag cleared, no
+    /// end said) — out; `c`'s session ends while it's under way — out. Each is said, and the queue ends.
+    #[test]
+    fn the_bring_queue_goes_on_past_what_happens_under_it() {
+        use crate::bringqueue::Stage;
+        let (repo, dir) = place("bring-queue-under");
+        let mut ed = editor(&repo, &dir);
+        ed.bring_queue.stand_in = true;
+        let (mut ids, mut wts) = (Vec::new(), Vec::new());
+        for name in ["a", "b", "c"] {
+            let wt = new_session(&mut ed, name);
+            std::fs::write(wt.join(format!("{name}.txt")), "x\n").unwrap();
+            git_in(&wt, &["add", "-A"]);
+            git_in(&wt, &["commit", "-qm", name]);
+            ids.push(ed.session.id);
+            wts.push(wt);
+        }
+        ed.session_switch(0);
+        let at = |ed: &Editor, i: usize| ed.bring_queue_at(ids[i]);
+        queue_of(&mut ed, &ids, &["a", "b", "c"]);
+        settle_until(&mut ed, |ed| at(ed, 0) == Some(Stage::Preflight));
+        // a: main moves during its preflight — the bring finds it moved: looked at again, rebased
+        std::fs::write(repo.join("m.txt"), "m\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "main moves"]);
+        ed.with_session(ids[0], |ed| ed.rebase_preflight_done(true, "quick preflight"));
+        settle_until(&mut ed, |ed| at(ed, 0) == Some(Stage::Rebasing) || at(ed, 0).is_none());
+        assert_eq!(at(&ed, 0), Some(Stage::Rebasing), "{}", said(&ed));
+        git_in(&wts[0], &["rebase", "-q", "main"]);
+        ed.with_session(ids[0], |ed| {
+            ed.bring_queue_rebased(Ok(()));
+        });
+        settle_until(&mut ed, |ed| at(ed, 0) == Some(Stage::Preflight));
+        ed.with_session(ids[0], |ed| ed.rebase_preflight_done(true, "quick preflight"));
+        // b: its preflight dropped on the way — out
+        settle_until(&mut ed, |ed| at(ed, 1) == Some(Stage::Rebasing));
+        assert_eq!(git_in(&repo, &["log", "-1", "--format=%s", "main"]), "a");
+        git_in(&wts[1], &["rebase", "-q", "main"]);
+        ed.with_session(ids[1], |ed| {
+            ed.bring_queue_rebased(Ok(()));
+        });
+        settle_until(&mut ed, |ed| at(ed, 1) == Some(Stage::Preflight));
+        ed.with_session(ids[1], |ed| ed.session.bring_after_preflight = false);
+        ed.bring_queue_sync();
+        // c: its session ends under way — out, and the queue's over
+        settle_until(&mut ed, |ed| at(ed, 2).is_some_and(|s| s != Stage::Looking));
+        ed.session_close(&wts[2]);
+        ed.bring_queue_sync();
+        assert!(ed.bring_queue.run.is_none(), "{}", said(&ed));
+        assert!(
+            says(
+                &ed,
+                "Bring queue done — brought a · not brought: b (its preflight didn't run); c (its session ended)"
+            ),
+            "{}",
+            said(&ed)
+        );
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

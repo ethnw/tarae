@@ -30,8 +30,8 @@ use crate::sizes::Slot;
 
 /// The processes of a run's tree read at most.
 const PROCS_MAX: usize = 24;
-/// A stopped run still there this long after its TERM gets a KILL.
-const KILL_AFTER: Duration = Duration::from_secs(3);
+/// A stopped run still there this long after its TERM gets a KILL (tests: shorter — the stand-ins end at the TERM).
+const KILL_AFTER: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 3000 });
 /// A process's command line is cut past this many characters (a long classpath).
 const COMMAND_MAX: usize = 100;
 
@@ -446,8 +446,9 @@ pub fn show(ed: &mut Editor, s: &Stuck) {
     ed.set_status("what its threads wait in, in its output — y on the card stops it, n keeps waiting");
 }
 
-/// `y` on the card: the run stopped (TERM to its group, KILL if it's still there `KILL_AFTER` later) — its
-/// panel and output stay, and Claude's report has them.
+/// `y` on the card: the run stopped with every process under it (`procs::stop_tree`: TERM, KILL to what's still
+/// there `KILL_AFTER` later — what left its group with `setsid` too, frictions29 35) — its panel and output stay,
+/// and Claude's report has them. What outlived the stop is said once it's known (`stopped`).
 pub fn stop(ed: &mut Editor, s: &Stuck) {
     let line = format!("── stopped from tarae's card: {} ──", said(s));
     let (pid, containers) = match s.slot {
@@ -463,23 +464,68 @@ pub fn stop(ed: &mut Editor, s: &Stuck) {
     .unwrap_or((None, None));
     let Some(pid) = pid else { return ed.set_status("that run ended already") };
     ed.session.log().line("stuck", "stop", &format!("pid {pid}: {}", said(s)));
-    let started = crate::procs::read(pid).map(|o| o.started);
-    crate::dap::term_group(pid);
     // (what it started in a container engine — a quiet `docker run`'s work goes on there — with it, by name:
     // `containers.rs`)
     if let Some(c) = containers {
         c.stopped();
     }
-    // (the same process still — a pid isn't given out again that soon, and its start says it's the one)
-    // (a timer, nothing written: a quit doesn't wait for it)
-    ed.events.jobs().detached(move || {
-        std::thread::sleep(KILL_AFTER);
-        if crate::procs::read(pid).is_some_and(|o| !o.zombie && Some(o.started) == started) {
-            // SAFETY: a KILL to the process group of Claude's run, started with setsid, still the same.
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        }
+    // (its tree read before the first signal, on a worker — the stop's timer with it; a quit doesn't wait)
+    let (slot, run) = (s.slot, s.run);
+    ed.events.jobs().spawn(move || {
+        let done = crate::procs::stop_tree(pid, KILL_AFTER);
+        move |ed: &mut Editor| stopped(ed, slot, run, pid, done)
     });
     ed.set_status("stopping it — its output stays in the panel, and Claude hears how it ended");
+}
+
+/// How many of run `run`'s processes a stop shows at most, of those that outlived it.
+const OUTLIVED_SHOWN: usize = 3;
+
+/// The stop of run `run` (its root `pid`) is over (`done`): what left its group and was stopped with it goes in
+/// its output; what outlived it is said — there, as a warning, and in the log — with `:procs` to see it.
+fn stopped(ed: &mut Editor, slot: Slot, run: u64, pid: u32, done: crate::procs::Stopped) {
+    let n = done.outlived.len();
+    let apart = match done.apart {
+        0 => None,
+        1 => Some("── stopped with it: 1 process it started in a session of its own ──".to_string()),
+        k => Some(format!("── stopped with it: {k} processes it started in sessions of their own ──")),
+    };
+    let named: Vec<String> = done
+        .outlived
+        .iter()
+        .take(OUTLIVED_SHOWN)
+        .map(|(p, cmd)| format!("pid {p} {}", crate::cut::fit_ellipsis(cmd, COMMAND_MAX)))
+        .collect();
+    let more = if n > named.len() { format!(" and {} more", n - named.len()) } else { String::new() };
+    let outlived = (n > 0).then(|| {
+        let them = if n == 1 { "1 process".to_string() } else { format!("{n} processes") };
+        format!(
+            "{them} outlived the stop: {}{more} — :procs shows {}",
+            named.join(", "),
+            if n == 1 { "it" } else { "them" }
+        )
+    });
+    let lines: Vec<String> = apart.into_iter().chain(outlived.iter().map(|o| format!("── {o} ──"))).collect();
+    match slot {
+        Slot::Task => {
+            if let Some(r) = ed.session.task_run.as_mut().filter(|r| r.trace.id() == run) {
+                lines.into_iter().for_each(|l| r.push_line(false, l, false));
+            }
+        }
+        _ => {
+            if let Some(r) = ed.session.test_run.as_mut().filter(|r| r.trace.id() == run) {
+                r.output.extend(lines.into_iter().map(|l| (false, l)));
+            }
+        }
+    }
+    let log = format!("pid {pid}: {} apart, {n} outlived {:?}", done.apart, done.outlived);
+    ed.session.log().line("stuck", "stopped", &log);
+    match outlived {
+        Some(o) => ed.set_warning(format!("Stopped Claude's run — but {o}")),
+        // (nothing apart, nothing left: nothing new on screen)
+        None if done.apart == 0 => ed.unchanged = true,
+        None => {}
+    }
 }
 
 /// `n` on the card: asked again only after as long again with nothing.

@@ -813,9 +813,14 @@ impl Editor {
                     if let Err(e) = ed.rebase_offer(id) {
                         ed.set_error(format!("rebase {}: {e}", m.branch));
                     }
+                    ed.bring_queue_rebased(Err("a rebase was under way there — its card".into()));
                 }
                 Err(changed) if !unsaved.is_empty() || (!stash && !changed.is_empty()) => {
                     ed.push_offer(Held { moved: m, changed, unsaved }.card());
+                    // (the queue never stashes for you: its card asks, a single bring after)
+                    ed.bring_queue_rebased(Err(
+                        "changes not in a commit in its checkout — its card asks".into()
+                    ));
                 }
                 Err(changed) => ed.rebase_go(m, if stash { changed } else { Vec::new() }),
             }
@@ -860,7 +865,9 @@ impl Editor {
             false,
             Box::new(move |ed, e| {
                 ed.session.rebase = None;
-                ed.set_error(format!("rebase {branch}: {e}"));
+                if !ed.bring_queue_rebased(Err(format!("the rebase didn't start: {e}"))) {
+                    ed.set_error(format!("rebase {branch}: {e}"));
+                }
             }),
         );
     }
@@ -924,6 +931,10 @@ impl Editor {
                         "the rebase stopped at {at} — the task panel says why; :rebase-continue or :rebase-abort"
                     )),
                 }
+                // (a conflict stops only this one: its Claude resolves it as for a single bring)
+                self.bring_queue_rebased(Err(format!(
+                    "its rebase stopped at {at} — bring it once it's resolved"
+                )));
             }
             Ended::Done { ahead, tip, back } => {
                 let (stashed, kept) =
@@ -949,8 +960,9 @@ impl Editor {
                 }
                 // (its instruction files: the main checkout's changes since its copy — #27)
                 crate::instructions::follow(self);
-                // (a session's: bring it now? The checkout tarae started in has no base to go into)
-                if self.session.id != 0 {
+                // (a session's: bring it now? The checkout tarae started in has no base to go into — the bring
+                // queue's one under way goes on to its preflight instead)
+                if self.session.id != 0 && !self.bring_queue_rebased(Ok(())) {
                     let (root, quick, sid) =
                         (self.session.root.clone(), self.preflight_quick(), self.session.id);
                     let mut card =
@@ -974,6 +986,7 @@ impl Editor {
                 self.session.rebase = None;
                 self.rebase_cards_gone();
                 self.set_status(format!("Rebase aborted — {branch} is back where it was"));
+                self.bring_queue_rebased(Err("its rebase was aborted".into()));
             }
             // (git's own words, its `error:`/`fatal:` lines — #188: "the task panel says why" sent you looking)
             Ended::Failed => {
@@ -995,6 +1008,7 @@ impl Editor {
                     false => format!("git said: {}", why.join(" ")),
                 };
                 self.set_error(format!("rebase {branch}: git stopped before it began — {why}"));
+                self.bring_queue_rebased(Err("its rebase failed before it began".into()));
             }
         }
     }
@@ -1602,11 +1616,21 @@ impl Editor {
             return;
         }
         let (id, name) = (self.session.id, self.session.label().to_string());
-        if !passed {
+        // (the bring queue's one under way: said there, the next going on if it failed)
+        if self.bring_queue_at(id) == Some(crate::bringqueue::Stage::Preflight) {
+            self.bring_queue_preflight(passed, title);
+            if !passed {
+                return;
+            }
+        } else if !passed {
             return self.set_warning(format!("{name} not brought — the {title} didn't pass"));
         }
         if let Err(e) = self.session_bring_now(&id.to_string()) {
-            self.set_error(e);
+            // (the queue's one under way: out, the next going on — else it waited at its bring for good)
+            match self.bring_queue_at(id) {
+                Some(_) => self.bring_queue_out(id, e),
+                None => self.set_error(e),
+            }
         }
     }
 }

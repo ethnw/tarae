@@ -369,6 +369,57 @@ fn a_stuck_run_is_captured_then_asked_about() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions29 35: `y` on the card stops what the run started in a session of its own too — a test's helper that
+/// called `setsid` to take a pty was left running, blocked in a read. The run is the test's own `sh` starting
+/// the stand-in (`procs::tests::setsid_helper`, in the test's `Scratch`): after `y` it's gone, and the run's output
+/// says it was stopped with it.
+#[test]
+fn a_stop_from_the_card_ends_what_left_the_runs_group() {
+    let dir = crate::scratch::Scratch::new("stuck-apart");
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.session.root = dir.path().to_path_buf();
+    let exe = std::env::current_exe().unwrap();
+    let cmd = format!(
+        "{}='{}' '{}' --exact procs::tests::setsid_helper --ignored --test-threads=1 >/dev/null 2>&1 & wait",
+        crate::procs::tests::SETSID_HELPER,
+        dir.path().display(),
+        exe.display()
+    );
+    let task = crate::task::Task { name: "apart".into(), cmd, cwd: dir.path().to_path_buf() };
+    let user = crate::tools::For::User("apart".into());
+    assert!(ed.task_start_for(task, user, None, Default::default()).is_ok());
+    let file = dir.join("pid");
+    let by = Instant::now() + Duration::from_secs(20);
+    while !file.exists() {
+        assert!(Instant::now() < by, "the stand-in never said its pid");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let helper: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+    let started = crate::procs::read(helper).expect("the stand-in runs").started;
+    let _end = crate::procs::tests::EndStandIn(helper, started);
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.by_claude = true;
+    let pid = r.pid().unwrap();
+    let ago = |m: u32| Instant::now().checked_sub(MIN * m).unwrap();
+    r.last_output = ago(11);
+    r.wait.idle = Some(ago(11));
+    ed.procs_sampled(sample(pid, 0.0));
+    settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
+    crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
+    let o = (ed.offers[0].id, ed.offers[0].rev);
+    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+    ed.handle_key(Key::plain(Code::Char('y')));
+    assert!(ed.offers.iter().all(|o| o.stuck().is_none()));
+    let said = "── stopped with it: 1 process it started in a session of its own ──";
+    let out = |ed: &Editor| ed.session.task_run.as_ref().map(|r| r.output.clone()).unwrap_or_default();
+    settle_until(&mut ed, |ed| out(ed).iter().any(|l| l.1 == said || l.1.contains("outlived the stop")));
+    let gone = !crate::procs::read(helper).is_some_and(|o| !o.zombie && o.started == started);
+    assert!(gone, "the stand-in in a session of its own outlived the stop: {:?}", out(&ed));
+    assert!(out(&ed).iter().any(|l| l.1 == said), "{:?}", out(&ed));
+    assert!(!out(&ed).iter().any(|l| l.1.contains("outlived")), "{:?}", out(&ed));
+    ed.session.task_run = None;
+}
+
 /// frictions15 #3 (a): a quiet run of Claude's that was granted a daemon's socket may be working there — a
 /// build on a remote container engine printed nothing for minutes at 0% CPU here and was called stuck. Its
 /// card is `Quiet:` and says what it can reach; one let reach nothing is still `Stuck?` (#181 — cargo hung

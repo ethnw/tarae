@@ -63,7 +63,19 @@ pub struct Sandbox {
     soft_nofile: Option<u64>,
     /// The tarae it runs (`with_bin`) — else `TARAE_BIN`, else this build's.
     bin: Option<PathBuf>,
+    /// Sockets `socket` gave outside its folder (relative paths), removed with it.
+    sockets: Mutex<Vec<PathBuf>>,
 }
+
+/// `sun_path`'s room, its closing NUL included: a socket's path must be shorter.
+#[cfg(target_os = "macos")]
+const SUN_PATH: usize = 104;
+#[cfg(not(target_os = "macos"))]
+const SUN_PATH: usize = 108;
+
+/// Where `socket` puts one whose path in the sandbox's folder would pass `sun_path`: relative to the test's
+/// working folder — cargo runs a test in its package's root, inside the project.
+const SOCKETS: &str = "target/e2e-sockets";
 
 impl Sandbox {
     pub fn new(name: &str) -> Self {
@@ -77,8 +89,15 @@ impl Sandbox {
         fs::create_dir_all(&dir).unwrap();
         // Real path (macOS: /var → /private/var) — tarae canonicalizes the paths it opens.
         let root = fs::canonicalize(&dir).unwrap();
-        let sb =
-            Sandbox { root, live: false, tools: Vec::new(), vars: Vec::new(), soft_nofile: None, bin: None };
+        let sb = Sandbox {
+            root,
+            live: false,
+            tools: Vec::new(),
+            vars: Vec::new(),
+            soft_nofile: None,
+            bin: None,
+            sockets: Mutex::new(Vec::new()),
+        };
         for d in
             ["home/.config/tarae", "home/.local/state", "home/.local/share", "home/.cache", "claude", "work"]
         {
@@ -195,6 +214,25 @@ impl Sandbox {
         self.root.join("home")
     }
 
+    /// A path for a unix socket of the test's own (its listener, a stand-in's): in the sandbox's folder when it
+    /// fits `sun_path` — else a short one relative to the test's working folder (`SOCKETS`), removed with the
+    /// sandbox. The folder is in `$TMPDIR`, and a sandboxed run's `TMPDIR` is its own folder deep in tarae's
+    /// cache: there a socket's path passed 104 bytes (terminals A's measure) — and a sandboxed run binds one
+    /// only in the project or that folder, so `/tmp` is no way out. A process given it (`TARAE_UI`) keeps the
+    /// test's working folder.
+    pub fn socket(&self, name: &str) -> PathBuf {
+        let at = self.root.join(name);
+        if at.as_os_str().len() < SUN_PATH {
+            return at;
+        }
+        static N: AtomicUsize = AtomicUsize::new(0);
+        fs::create_dir_all(SOCKETS).unwrap();
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let rel = Path::new(SOCKETS).join(format!("{}-{n}-{name}", std::process::id()));
+        self.sockets.lock().unwrap().push(rel.clone());
+        rel
+    }
+
     /// tarae's state folder (`$XDG_STATE_HOME/tarae`).
     pub fn state(&self) -> PathBuf {
         self.home().join(".local/state/tarae")
@@ -298,6 +336,9 @@ impl Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+        for s in self.sockets.lock().unwrap().drain(..) {
+            let _ = fs::remove_file(s);
+        }
     }
 }
 

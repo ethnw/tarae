@@ -255,6 +255,76 @@ pub fn tree(root: u32) -> Vec<Os> {
     out
 }
 
+/// What a stop (`stop_tree`) did: how many of the run's processes were in a group of their own — a `setsid`,
+/// which its group's signals don't reach — and those still there after the KILL, pid and command line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stopped {
+    pub apart: usize,
+    pub outlived: Vec<(u32, String)>,
+}
+
+/// How long a stop waits, after the KILL, for the kernel to take what it killed.
+const STOP_SETTLE: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 1000 });
+
+/// Stops the run at `pid` (started with `setsid`: pgid = pid) and every process under it — also those that left
+/// its group (frictions29 35: a test's helper called `setsid` to take a pty and was left running, blocked in a
+/// read): TERM, then KILL to what's still there `kill_after` later, then what outlived it. Its tree is read
+/// first, while the links to it hold (once a parent dies its children go to launchd, or to tarae's reaper). A
+/// process is signalled only while it's still the one read (pid and start) — a pid isn't given out again that
+/// soon. Blocks: on a worker.
+pub fn stop_tree(pid: u32, kill_after: Duration) -> Stopped {
+    let tree = tree(pid);
+    let read: Vec<(u32, u64)> = tree.iter().filter(|o| !o.zombie).map(|o| (o.pid, o.started)).collect();
+    let same = |p: u32, started: u64| read_live(p).is_some_and(|o| o.started == started);
+    // (`getpgid` says -1 for one gone: not apart)
+    let group = |p: u32| {
+        // SAFETY: a plain call: the process's group.
+        unsafe { libc::getpgid(p as i32) }
+    };
+    let apart: Vec<(u32, u64)> =
+        read.iter().copied().filter(|&(p, _)| p != pid && ![-1, pid as i32].contains(&group(p))).collect();
+    let signal = |sig: i32| {
+        for &(p, started) in &apart {
+            if same(p, started) {
+                // SAFETY: a signal to a process of the run's tree, still the one read.
+                unsafe { libc::kill(p as i32, sig) };
+            }
+        }
+    };
+    let root = read.iter().find(|(p, _)| *p == pid).map(|&(_, s)| s);
+    if root.is_some() {
+        crate::dap::term_group(pid);
+    }
+    signal(libc::SIGTERM);
+    // (the waits whole, whatever goes meanwhile: a stop takes as many steps however fast its processes end —
+    // a simulation's steps are the same each time)
+    if read.is_empty() {
+        return Stopped::default();
+    }
+    crate::event::sleep(kill_after);
+    // (the group's KILL while any process read in it is still there — the root may have ended on the TERM and
+    // left one that ignores it: the group's id stays taken while it has a member, never given out again)
+    let in_group = read.iter().filter(|r| !apart.contains(r));
+    if in_group.into_iter().any(|&(p, s)| same(p, s)) {
+        // SAFETY: a KILL to the process group of the run, started with setsid, a member read in it still there.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    }
+    signal(libc::SIGKILL);
+    crate::event::sleep(STOP_SETTLE);
+    let name = |p: u32| tree.iter().find(|o| o.pid == p).map(|o| o.name.clone()).unwrap_or_default();
+    let outlived = read
+        .iter()
+        .filter(|&&(p, s)| same(p, s))
+        .map(|&(p, _)| (p, command(p).unwrap_or_else(|| name(p))))
+        .collect();
+    Stopped { apart: apart.len(), outlived }
+}
+
+/// Process `pid` now, unless it's gone or a zombie (ended, waiting to be reaped).
+fn read_live(pid: u32) -> Option<Os> {
+    read(pid).filter(|o| !o.zombie)
+}
+
 /// Process `pid`'s command line, its words joined by spaces (`KERN_PROCARGS2`: argc, the executable's path,
 /// NULs, then the words) — None if it's gone or not ours to read.
 #[cfg(target_os = "macos")]
@@ -2332,10 +2402,114 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const MB: u64 = 1 << 20;
+
+    /// Marks the stand-in's own process: the folder it writes its pid in.
+    pub const SETSID_HELPER: &str = "TARAE_SETSID_HELPER";
+
+    /// A process that leaves its group as frictions29 35's did (a test's helper taking a pty): `setsid`, its pid
+    /// written in `$TARAE_SETSID_HELPER/pid`, then a sleep — 60 s at most, so even a stop that misses it leaves
+    /// nothing for long.
+    #[test]
+    #[ignore = "a stand-in run by a_stop_ends_a_descendant_in_a_session_of_its_own"]
+    fn setsid_helper() {
+        let Some(dir) = std::env::var_os(SETSID_HELPER).map(PathBuf::from) else { return };
+        // SAFETY: plain calls.
+        let pid = unsafe {
+            libc::setsid();
+            libc::getpid()
+        };
+        std::fs::write(dir.join("pid.tmp"), pid.to_string()).unwrap();
+        std::fs::rename(dir.join("pid.tmp"), dir.join("pid")).unwrap();
+        let by = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The stand-in started the way a run's descendant is: an `sh` of the test's own in a session of its own
+    /// (`spawn::setsid`, as a run), running the test binary on `setsid_helper` — the `sh`'s pid, and the
+    /// helper's once it has left the group (with its start, to tell it from a later process with its pid).
+    pub fn setsid_stand_in(dir: &Path) -> (u32, u32, u64) {
+        let exe = std::env::current_exe().unwrap();
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args([
+            "-c",
+            "\"$0\" --exact procs::tests::setsid_helper --ignored --test-threads=1 >/dev/null 2>&1 & wait",
+        ])
+        .arg(&exe)
+        .env(SETSID_HELPER, dir);
+        let sh = crate::spawn::setsid(&c).unwrap().pid;
+        let file = dir.join("pid");
+        let by = Instant::now() + Duration::from_secs(20);
+        while !file.exists() {
+            assert!(Instant::now() < by, "the stand-in never said its pid");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+        let started = read(pid).expect("the stand-in runs").started;
+        (sh, pid, started)
+    }
+
+    /// The stand-in ended by the test itself whatever the test found — only while it's still the one it read.
+    pub struct EndStandIn(pub u32, pub u64);
+
+    impl Drop for EndStandIn {
+        fn drop(&mut self) {
+            if read_live(self.0).is_some_and(|o| o.started == self.1) {
+                // SAFETY: a KILL to the test's own stand-in, still the one it started.
+                unsafe { libc::kill(self.0 as i32, libc::SIGKILL) };
+            }
+        }
+    }
+
+    /// A stop's KILL reaches its group whatever ended first: the root ends on the TERM, a process in its group that
+    /// ignores TERM (the test's own `sleep`, in its `Scratch`) is killed all the same — nothing outlives it.
+    #[test]
+    fn a_stop_kills_the_group_its_root_left_behind() {
+        let dir = crate::scratch::Scratch::new("stop-group");
+        let file = dir.join("pid");
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", "(trap '' TERM; exec sleep 60) & echo $! > \"$0\"; wait"]).arg(&file);
+        let sh = crate::spawn::setsid(&c).unwrap().pid;
+        let by = Instant::now() + Duration::from_secs(20);
+        while std::fs::read_to_string(&file).map_or(true, |s| !s.ends_with('\n')) {
+            assert!(Instant::now() < by, "the stand-in never said its pid");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let sleeper: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+        // (its exec done: what ignores TERM is the `sleep`, still in the root's group)
+        while read(sleeper).is_none_or(|o| o.name != "sleep") {
+            assert!(Instant::now() < by, "the stand-in never became sleep");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = read(sleeper).unwrap().started;
+        let _end = EndStandIn(sleeper, started);
+        let done = stop_tree(sh, Duration::from_millis(300));
+        assert_eq!(done, Stopped { apart: 0, outlived: Vec::new() }, "the group's TERM-proof member");
+    }
+
+    /// frictions29 35: a stop ends what left the run's group too — the stand-in (`setsid_helper`, the test's own,
+    /// in its `Scratch`) is gone after `stop_tree` on the `sh` that started it, said as apart, nothing outlived.
+    #[test]
+    fn a_stop_ends_a_descendant_in_a_session_of_its_own() {
+        let dir = crate::scratch::Scratch::new("stop-tree");
+        let (sh, helper, started) = setsid_stand_in(&dir);
+        let _end = EndStandIn(helper, started);
+        // SAFETY: plain calls: the groups.
+        let (g_sh, g_helper) = unsafe { (libc::getpgid(sh as i32), libc::getpgid(helper as i32)) };
+        assert_eq!((g_sh, g_helper), (sh as i32, helper as i32), "each in a group of its own");
+        let done = stop_tree(sh, Duration::from_millis(300));
+        assert!(read_live(sh).is_none(), "the run's root ended");
+        assert!(
+            !read_live(helper).is_some_and(|o| o.started == started),
+            "the stand-in in a session of its own outlived the stop: {done:?}"
+        );
+        assert_eq!(done, Stopped { apart: 1, outlived: Vec::new() });
+    }
 
     /// 9e: a keeper's row says its session's sandbox in the words the panel's state line has (`Guarantees::line`),
     /// its own `said` only before the session's first run.

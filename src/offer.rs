@@ -218,6 +218,9 @@ pub enum What {
     /// A session with nothing to bring, behind its base (`rebase.rs`, #186): `y` moves it up to its base's tip
     /// (a fast-forward in its checkout), `n` leaves it.
     UpTo(Box<crate::rebase::Moved>),
+    /// Sessions marked in `space W`, brought one after another (`bringqueue.rs`, frictions29 24 a): `y` starts the
+    /// queue, `n` leaves them marked.
+    BringQueue(Box<crate::bringqueue::Ask>),
     /// A git-tab action would run hooks from inside the checkout that its base doesn't have as they are
     /// (`hooks.rs`): `y` runs it as usual, `n` runs it with no hooks this time.
     Hooks(Box<crate::hooks::Ask>),
@@ -304,6 +307,7 @@ pub const KINDS: &[&str] = &[
     "rebase-resolved",
     "instructions",
     "up-to",
+    "bring-queue",
     "hooks",
     "restart",
     "restart-same",
@@ -370,6 +374,8 @@ impl What {
             | What::ReviewEnd { .. }
             | What::SessionNew(_)
             | What::RebaseResolved { .. }
+            // (the queue is the editor's: its marks go with it — marked again after)
+            | What::BringQueue(_)
             // (about the checkout as it was then — `:session-bring` looks at it afresh and raises it again)
             | What::RebaseHeld(_)
             // (Claude's: a run's job can't be run again blind — its call ends with the turn)
@@ -538,6 +544,7 @@ impl Offer {
                     | What::RebaseHeld(_)
                     | What::Rebased(_)
                     | What::UpTo(_)
+                    | What::BringQueue(_)
                     | What::Hooks(_)
                     | What::Restart(_)
                     | What::RestartSame { .. }
@@ -617,6 +624,7 @@ impl Offer {
                 | What::Rebased(_)
                 | What::RebaseResolved { .. }
                 | What::UpTo(_)
+                | What::BringQueue(_)
                 | What::Hooks(_)
                 | What::Restart(_)
                 | What::RestartSame { .. }
@@ -1065,6 +1073,7 @@ impl Offer {
                 vec![('y', "Take the main checkout's"), ('v', "See them"), ('n', "Keep this one")]
             }
             W::UpTo(_) => vec![('y', "Move it up"), ('n', "Leave it")],
+            W::BringQueue(_) => vec![('y', "Bring them in turn"), ('n', "Not now")],
             W::Hooks(a) if a.runnable() => {
                 vec![('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }), ('n', "Skip hooks")]
             }
@@ -1160,6 +1169,7 @@ impl Offer {
             W::RebaseResolved { .. } => "rebase-resolved",
             W::Instructions(_) => "instructions",
             W::UpTo(_) => "up-to",
+            W::BringQueue(_) => "bring-queue",
             W::Hooks(_) => "hooks",
             W::Restart(_) => "restart",
             W::RestartSame { .. } => "restart-same",
@@ -1618,6 +1628,10 @@ impl crate::editor::Editor {
                 self.rebase_answer(&root, true);
             }
             What::UpTo(m) => self.rebase_move_up(id, *m),
+            What::BringQueue(ask) => {
+                self.offer_finished(id, Ok(()));
+                self.bring_queue_start(*ask);
+            }
             What::Hooks(ask) => self.hooks_answer(id, *ask, true),
             What::Restart(c) => crate::restart::chosen(self, id, *c, Some(0)),
             What::RestartSame { id: r } => crate::restart::same_answer(self, id, r, true),
@@ -2226,6 +2240,7 @@ impl crate::editor::Editor {
                 self.set_status("the rebase waits — its card is in the inbox (space I), or :rebase-continue")
             }
             What::UpTo(m) => self.set_status(format!("Left {} where it is, behind {}", m.name, m.base)),
+            What::BringQueue(_) => self.set_status("Not brought — they stay marked: B in space W asks again"),
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
             What::Restart(c) => crate::restart::chosen(self, o.id, *c, None),
             What::RestartSame { id } => crate::restart::same_answer(self, o.id, id, false),

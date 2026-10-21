@@ -335,6 +335,7 @@ impl Policy {
     /// Whether its run gets a pty broker (macOS, `ptybroker`): it has a folder of its own, and no socket of the
     /// user's is granted it — one could hand it a descriptor of the user's terminal, and its profile then has no
     /// ioctl on terminals (`TTY_IOCTLS`): such a run asks the terminals card as before.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // (macOS's — its test runs everywhere)
     pub fn brokers_ptys(&self) -> bool {
         self.run.is_some() && self.sockets.is_empty()
     }

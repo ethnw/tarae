@@ -564,7 +564,6 @@ mod tests {
         ("saver.rs", 1),
         ("session.rs", 1),
         ("share.rs", 5),
-        ("stuck.rs", 1),
         ("task.rs", 1),
         ("testing.rs", 1),
         ("tools.rs", 1),

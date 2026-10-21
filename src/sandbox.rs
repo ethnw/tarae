@@ -10976,7 +10976,8 @@ mod tests {
     /// lines at most (each said once, cut at 300 characters), and a last one saying the rest was left out.
     #[test]
     fn a_runs_skips_file_is_read_bounded() {
-        let dir = scratch("skips-bounded");
+        // (a `Scratch`: `scratch` is macOS's only — this test runs on Linux too)
+        let dir = crate::scratch::Scratch::new("skips-bounded");
         let f = dir.join("skips");
         let skip = |rest: &str| crate::test_results::skip_line(rest);
         let long = "x".repeat(1000);
@@ -11006,7 +11007,6 @@ mod tests {
         let end = after_run(Some(&p))();
         assert_eq!(end.skipped.len(), SKIPS_KEPT + 1, "{:?}", end.skipped);
         assert_eq!(end.skipped[0], "a — why");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A quiet write is quiet only at its place for the home on this system — macOS's `~/Library/Application
