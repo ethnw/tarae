@@ -314,6 +314,11 @@ Done so far, under way, and the order after it (2026-10-17, brought up to 2026-1
   `refused`, `waits` and a session's answer line (V 10); the usage asked where the stream's rate-limit event carries
   no percent; the reviewer's delta round measured (no saving, left as it was); the outside run card for
   `userns-run.sh` designed only.
+  Batch 37 (2026-10-21, `0a83af3a` + `b1b4d0e4`): a bring card after a failed preflight says so up front (`y bring anyway`); `]u` lands
+  on a file changed on disk since its mark; the watch reads another program's write once it settles (one reload, one
+  toast); a session's end counts only what it removed; the broker test's missing skip; `tab` between the slot's
+  panels from `:procs`; the first start's trust card beside the title page; and the stuck test's real cause (the
+  card drawn cut under a long `$TMPDIR` — not load).
   The load-flake hunt (2026-10-21, `29c39437`, friction 80): seven tests that fell only while three sessions built —
   five fixed at their cause, two of them real bugs (a disk-watch round an earlier reload overtook was dropped by a
   git action's batch; the first snapshot's index copy lost the checkout's mtime on Linux, so git trusted a
