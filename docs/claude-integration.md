@@ -379,13 +379,16 @@ opens it too, at the row under the pointer; rolled back down to the end with not
 keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …) work in it as in the input; `C-d`
 `C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it (kept to what reads), and `[keys.view]`,
 `[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound. The terminal has the same
-view mode, `C-\` from its program ([features](features.md)): one set of keys to read either.
+view mode, `C-\` from its program, and so do the run panels — a task's output, a preflight's, the tests' failure —
+with the keys on them ([features](features.md)): one set of keys to read any of them. `space` there is view mode's
+own menu: `space >` quotes, `space l` the chat, `space I` the inbox, `space ?` the palette.
 
 ### Quoting what you read
 
 Select part of what you're reading and ask about it: `enter` on a selection in a view mode — the conversation's,
-the terminal's — or `space >` on a selection in the code (`:quote` too) puts it over the chat's input as a chip,
-and the input takes the keys: `terminal 12 lines goes with it`, `Claude's answer 3 lines`, `src/a.rs L12–18`.
+the terminal's, a run panel's — or `space >` on a selection in the code (`:quote` too) puts it over the chat's
+input as a chip, and the input takes the keys: `terminal 12 lines goes with it`, `Claude's answer 3 lines`,
+`task output 4 lines`, `failure 2 lines`, `src/a.rs L12–18`.
 Several selections make several chips; Backspace in the empty input takes the last thing added off (a quote, the
 screen, an element pointed at — one stack). With nothing selected `space >` opens the conversation's view mode, and
 `enter` does what it did: the input, the terminal's program.

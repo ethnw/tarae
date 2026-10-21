@@ -900,12 +900,10 @@ mod tests {
         assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));
         space_t(&mut ed);
         assert_eq!(state(&ed), (true, true), "shown without the keys: given them, not hidden");
-        // From inside — its view mode: `space` said, `q` hides it, running on
+        // From inside — its view mode: `space T` said (view mode's `space` has no `T`), `q` hides it, running on
         ed.bottom_take_keys();
         space_t(&mut ed);
-        assert_eq!(state(&ed), (true, false), "space in view mode: said");
-        // (its `T` waits for a character, as in the code: esc lets it go)
-        ed.handle_key(crate::key::Key::plain(crate::key::Code::Esc));
+        assert_eq!(state(&ed), (true, false), "space T in view mode: said");
         ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('q')));
         assert_eq!(state(&ed), (false, false), "hidden from inside");
         assert!(ed.session.terminal.as_ref().unwrap().exited.is_none(), "running on");

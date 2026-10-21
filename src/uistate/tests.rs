@@ -492,9 +492,52 @@ const SCENES: &[Scene] = &[
         task_panel(ed);
         ed.session.slot_front = Some(Slot::Task);
     }),
-    ("the task panel with tarae's keys", |ed| {
+    ("the task panel in view mode, by C-w j", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();
+    }),
+    ("the task panel in view mode, a row selected", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        feed(ed, &["x"]);
+    }),
+    ("the task panel in view mode, its search prompt", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        feed(ed, &["/"]);
+    }),
+    ("the task panel in view mode, space under way", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        feed(ed, &[" "]);
+    }),
+    // (`]` gone on to the editor: `]x`/`]q` are its, the rest the view says)
+    ("the task panel in view mode, ] under way", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        feed(ed, &["]"]);
+    }),
+    ("a preflight in view mode", |ed| {
+        task_panel(ed);
+        let steps = [crate::preflight::Step {
+            name: "fmt".into(),
+            cmd: String::new(),
+            note: None,
+            from: String::new(),
+            full: false,
+        }];
+        let p = crate::preflight::Preflight::new(0, &steps, crate::preflight::Set::Full, "k".into());
+        ed.session.preflight = Some(p);
+        ed.bottom_take_keys();
+    }),
+    ("the test panel in view mode", |ed| {
+        ed.session.test_run = Some(crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]));
+        ed.bottom_take_keys();
+    }),
+    ("a card over the task panel's view mode", |ed| {
+        task_panel(ed);
+        ed.bottom_take_keys();
+        light_card(ed);
     }),
     ("the terminal's program", terminal),
     ("the terminal in view mode, by C-w j", |ed| {

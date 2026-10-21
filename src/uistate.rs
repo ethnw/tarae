@@ -106,7 +106,8 @@ impl Region {
             Region::EditReview => Handler::EditReview,
             Region::Slot(Slot::Procs) => Handler::Procs,
             Region::Slot(Slot::Plugin) => Handler::PluginPanel,
-            Region::Slot(_) => Handler::Bottom,
+            // (the test, task and terminal panels' keys are their view modes')
+            Region::Slot(_) => Handler::Code,
             Region::Program => Handler::Program,
             Region::Card(_) => Handler::Card,
             Region::NextCard => Handler::NextCard,
@@ -114,6 +115,7 @@ impl Region {
             Region::Point => Handler::Point,
             Region::View(crate::view::Surface::Chat) => Handler::ChatView,
             Region::View(crate::view::Surface::Terminal) => Handler::TerminalView,
+            Region::View(_) => Handler::RunView,
         }
     }
 }
@@ -154,13 +156,13 @@ pub enum Handler {
     Picker,
     ChatView,
     TerminalView,
+    RunView,
     Unfold,
     Chat,
     Rail,
     Side,
     Procs,
     PluginPanel,
-    Bottom,
     Prompt,
     Code,
 }
@@ -178,13 +180,13 @@ impl Handler {
             Handler::Picker => "picker",
             Handler::ChatView => "chat-view",
             Handler::TerminalView => "terminal-view",
+            Handler::RunView => "run-view",
             Handler::Unfold => "chat-minimized",
             Handler::Chat => "chat",
             Handler::Rail => "review",
             Handler::Side => "side",
             Handler::Procs => "procs",
             Handler::PluginPanel => "plugin",
-            Handler::Bottom => "slot",
             Handler::Prompt => "prompt",
             Handler::Code => "code",
         }
@@ -397,6 +399,11 @@ impl Editor {
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
         }
+        // `view::key`: a run panel's `[`/`]` gone on to the editor — the key after it is the editor's where it
+        // completes the panel's own (`]x`, `]q`), else the view says it
+        if let Some((s, goes)) = crate::view::run_bracket(self).filter(|_| !modal) {
+            v.push(layer(Region::View(s), Filter::Except(goes)));
+        }
         // `view::key`: a surface's view mode — a prompt it opened (`/`) takes them all; with nothing under way
         // `C-w` and the chat's chords go on (to `chat::key`'s, which takes only those then)
         let viewing = crate::view::has_keys(self).filter(|_| !pending);
@@ -467,10 +474,7 @@ impl Editor {
             if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
-            // (the terminal's are its view mode's, above)
-            if let Some(s) = self.slot().filter(|s| at(At::Slot) && matches!(s, Slot::Test | Slot::Task)) {
-                v.push(layer(Region::Slot(s), editors(&[ch('['), ch(']'), ctrl('w')])));
-            }
+            // (the terminal's, the test and task panels' are their view modes', above)
         }
         if self.prompt.is_some() {
             v.push(layer(Region::Prompt, Filter::All));
@@ -625,6 +629,8 @@ impl Editor {
             Region::Point => self.pointing.is_some(),
             Region::View(crate::view::Surface::Chat) => s.chat_view.get().is_some(),
             Region::View(crate::view::Surface::Terminal) => s.terminal_rows.is_some(),
+            Region::View(crate::view::Surface::Tests) => s.test_panel.get().is_some(),
+            Region::View(_) => s.task_panel.get().is_some(),
         }
     }
 
@@ -641,6 +647,7 @@ impl Editor {
             Region::Slot(s) => slot_name(s).into(),
             Region::Rail => "review".into(),
             Region::Unfold | Region::View(crate::view::Surface::Chat) => "chat".into(),
+            Region::View(s) if let Some(slot) = s.slot() => slot_name(slot).into(),
             other => other.name(),
         }
     }

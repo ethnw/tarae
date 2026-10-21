@@ -217,7 +217,21 @@ configs carry over as they are.
 - **Build tasks** — `space m m` runs the task again (the first time, `space m p` picks one), `space m c` stops it and
   closes its panel, `:task <name>` (`:make`) runs one by name. With the keys on its panel (`C-w j`, a click), `q`
   closes it once the run has ended — one under way is left running and says `space m c` stops it (the test panel's
-  `q` the same, with `space x c`); Esc gives the keys to the code (its header says `esc code`). Tasks come from the project — `cargo check`/`clippy`/
+  `q` the same, with `space x c`); Esc gives the keys to the code (its header says `esc code`).
+  - **View mode** — the keys on a run panel (the task's, a preflight's, the tests') are its view mode, as the
+    terminal's are: `C-w j`, a click (its cursor on that row) or the wheel up over it. A cursor on its output as
+    text — the tests' panel: the failure picked, its message, else the output — the code's normal mode on it: `j`
+    `k` `w` `x` `v` `/` `n` `*` `gg`, counts; `↑` `↓` (`C-e` `C-y`) a line, `←` `→` a page, `y` copies, `G` the
+    latest. The panel's head says `● view`, the status line `● view · task` (`· preflight`, `· tests`). It holds
+    still: what the run prints meanwhile waits below (`● view · output after`), `G` catches up. `enter` on a
+    selection quotes it to Claude (`<quoted from="task"` … `"preflight"`, `"test"` with the test's name); with nothing
+    selected, your run waiting behind Claude's runs now (the status line says `enter run now`), else the chat's
+    input. `tab` / `S-tab` the slot's other panels, `K` where Claude's command ran, `o` a preflight step's whole
+    output, `]x` / `[x` the next failure (the view follows it), `]q` / `[q` the list's next (the rest of `]`'s, on the code
+    out of sight, are said), `esc` (a selection collapses first) to the code,
+    `q` closes the panel once its run has ended. `space` is view mode's own menu — `space >` quotes, `space l` the
+    chat, `space I` the inbox, `space ?` the palette (in every view mode). `[keys.view.run]` remaps it.
+  Tasks come from the project — `cargo check`/`clippy`/
   `build`, `go build`/`vet`, `tsc`, every `npm run` script, `ruff`/`mypy`, `make`, as the language packs say — and from `[task.<name>] cmd =
   "…"` (optional `cwd`) in the config. It runs in the background with its output below the code; every
   `file:line:col: message` it prints (rustc, gcc/clang, go, eslint, ruff, mypy — and the forms the packs add with

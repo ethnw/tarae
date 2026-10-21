@@ -195,6 +195,8 @@ commands! {
         view_latest => "To the latest, caught up",
         view_copy => "Copy, to paste anywhere",
         view_take => "Quote it to the chat, or type",
+        run_where => "Where Claude's command ran",
+        preflight_output => "A preflight step's output",
         // (whole in which-key at 80 columns: 18 characters)
         quote => "Quote or view chat",
         command_palette => "Find a command",
@@ -2389,11 +2391,32 @@ fn view_input(cx: &mut Context) {
 /// selected, the surface's own — the chat's input, the terminal's program (`view_input`).
 fn view_take(cx: &mut Context) {
     let take = crate::view::wide(cx.editor.doc());
-    crate::view::ask(cx.editor, if take { crate::view::After::Take } else { crate::view::After::Input });
+    crate::view::ask(cx.editor, if take { crate::view::After::Take } else { crate::view::After::Enter });
+}
+/// A run panel's `K` (`[view.run]`): where Claude's command in it ran, and why.
+fn run_where(cx: &mut Context) {
+    match crate::view::swapped(cx.editor) {
+        true => crate::view::ask(cx.editor, crate::view::After::Where),
+        false => cx.editor.set_status("K says where Claude's command ran — on the task panel, C-w j"),
+    }
+}
+/// A run panel's `o` (`[view.run]`): a preflight step's whole output in a buffer (`:preflight-output`).
+fn preflight_output(cx: &mut Context) {
+    if crate::view::swapped(cx.editor) {
+        return crate::view::ask(cx.editor, crate::view::After::Output);
+    }
+    if let Err(e) = cx.editor.preflight_output("") {
+        cx.editor.set_status(e);
+    }
 }
 /// `space >` · `:quote`: the code's selection to the chat as quotes, the input with the keys; nothing selected,
-/// the chat's view mode.
+/// the chat's view mode. In a view mode (its `space >`): its selection, as `enter` quotes it; none, the chat's view.
 fn quote(cx: &mut Context) {
+    if crate::view::swapped(cx.editor) {
+        let take = crate::view::wide(cx.editor.doc());
+        let after = if take { crate::view::After::Take } else { crate::view::After::ChatView };
+        return crate::view::ask(cx.editor, after);
+    }
     crate::quote::code(cx.editor);
 }
 /// View mode's `y`: what's selected to the clipboard (to paste outside tarae) and to `"` (`p` in the code) at

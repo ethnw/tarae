@@ -276,6 +276,8 @@ pub struct Run {
     pub output: Vec<(bool, String)>,
     /// Every line's bytes it printed, a newline each — what was cut from `output` too.
     pub output_bytes: usize,
+    /// How many times `keep` took lines out of `output` — a line's index before one isn't its index after.
+    trimmed: u64,
     pub started: Instant,
     pub took: Option<Duration>,
     pid: Option<u32>,
@@ -342,6 +344,11 @@ impl Run {
         self.generation
     }
 
+    /// How many times lines were taken out of its output (`keep`): a view made of it before reads other indices.
+    pub fn trimmed(&self) -> u64 {
+        self.trimmed
+    }
+
     /// Its process, while it runs (`:procs`).
     pub fn pid(&self) -> Option<u32> {
         self.pid
@@ -392,6 +399,7 @@ impl Run {
             };
             let from = marker + 1;
             self.output.drain(from..from + excess);
+            self.trimmed += 1;
             self.cut = Some((marker, before + excess));
             self.output[marker].1 = format!("… {} lines not kept …", before + excess);
             self.scroll = self.scroll.map(|t| if t >= from + excess { t - excess } else { t.min(from) });
@@ -400,6 +408,7 @@ impl Run {
         if n > OUTPUT_KEPT {
             let k = n - OUTPUT_KEPT;
             self.output.drain(..k);
+            self.trimmed += 1;
             self.section = self.section.saturating_sub(k);
             self.cut = self.cut.and_then(|(m, d)| (m >= k).then_some((m - k, d)));
             self.scroll = self.scroll.map(|t| t.saturating_sub(k));
@@ -429,6 +438,7 @@ impl Run {
             task,
             state: State::Passed,
             output: Vec::new(),
+            trimmed: 0,
             output_bytes: 0,
             started: Instant::now(),
             took: None,
@@ -465,6 +475,12 @@ impl Run {
     /// Running as process `pid` (a test's own stand-in).
     pub fn running_as(mut self, pid: u32) -> Run {
         (self.pid, self.state) = (Some(pid), State::Running);
+        self
+    }
+
+    /// As the `n`th run spawned (a run that replaces another — `sim/runview.rs`).
+    pub fn of_generation(mut self, n: u64) -> Run {
+        self.generation = n;
         self
     }
 }
@@ -1012,6 +1028,7 @@ impl Editor {
             task,
             state: State::Running,
             output: Vec::new(),
+            trimmed: 0,
             output_bytes: 0,
             started: Instant::now(),
             took: None,

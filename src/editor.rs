@@ -298,6 +298,9 @@ pub struct Screen {
     /// terminal's own cursor, one place on screen (`Editor::cursor_in`; the test that counts them).
     pub cursors: std::cell::RefCell<Vec<(usize, usize)>>,
     pub chat_view: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// Where the run panel in front drew its output (the tests' detail): (its panel, first screen row, the text's
+    /// first column, rows) — the mouse finds a row of its view there.
+    pub run_rows: std::cell::Cell<Option<(crate::sizes::Slot, usize, usize, usize)>>,
     /// First row and row count of the picker list.
     pub picker_list: Option<(usize, usize)>,
     /// Grammar download offer buttons: (row, start col, end col, key to feed when clicked).
@@ -2317,18 +2320,33 @@ impl Editor {
             }
             return;
         }
-        // The test panel: the wheel scrolls its detail (the failure's message, or the output); a click gives it
-        // the keys (`sizes::bottom_key`)
+        // The test panel: the wheel up over it enters its view mode at the row under the pointer, and scrolls it
+        // (the failure's message, or the output); a press gives it the keys — on its detail, the view's cursor there
         let slot = self.slot();
-        if let Some((y0, y1, rows)) = s.test_panel.get()
+        // (the row of the output under the pointer, and its column — as the panel drew them, `Screen.run_rows`)
+        let run_row = |slot: crate::sizes::Slot| {
+            s.run_rows
+                .get()
+                .filter(|r| r.0 == slot && (r.1..r.1 + r.3).contains(&y) && x >= r.2)
+                .map(|r| (y - r.1, x - r.2))
+        };
+        if let Some((y0, y1, _)) = s.test_panel.get()
             && slot == Some(crate::sizes::Slot::Test)
             && (y0..=y1).contains(&y)
             && in_slot
         {
-            match (m.kind, self.session.test_run.as_mut()) {
-                (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
-                (K::ScrollUp, Some(r)) => r.scroll_by(-3, rows),
-                (K::Down, _) => self.bottom_take_keys(),
+            let at = run_row(crate::sizes::Slot::Test);
+            match m.kind {
+                K::ScrollDown | K::ScrollUp => crate::view::run_wheel(
+                    self,
+                    crate::sizes::Slot::Test,
+                    at.map(|a| a.0),
+                    m.kind == K::ScrollUp,
+                ),
+                K::Down => match at {
+                    Some((r, c)) => crate::view::run_click(self, crate::sizes::Slot::Test, r, c),
+                    None => self.bottom_take_keys(),
+                },
                 _ => {}
             }
             return;
@@ -2345,17 +2363,28 @@ impl Editor {
             let heading = chip
                 .and_then(|k| self.session.preflight.as_ref()?.steps.get(k))
                 .map(|step| format!("── {} ──", step.name));
-            match (m.kind, self.session.task_run.as_mut()) {
-                (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
-                (K::ScrollUp, Some(r)) => r.scroll_by(-3, rows),
-                (K::Down, Some(r)) if heading.is_some() => {
+            let at = run_row(crate::sizes::Slot::Task);
+            match m.kind {
+                K::ScrollDown | K::ScrollUp => crate::view::run_wheel(
+                    self,
+                    crate::sizes::Slot::Task,
+                    at.map(|a| a.0),
+                    m.kind == K::ScrollUp,
+                ),
+                K::Down if heading.is_some() && self.session.task_run.is_some() => {
+                    // (its view made again from there: its heading at the top)
+                    crate::view::leave(self);
+                    let r = self.session.task_run.as_mut().expect("a run, above");
                     match r.output.iter().position(|l| Some(&l.1) == heading.as_ref()) {
                         Some(at) => r.scroll_to(at, rows),
                         None => self.set_status("that step hasn't printed anything yet"),
                     }
                     self.bottom_take_keys();
                 }
-                (K::Down, _) => self.bottom_take_keys(),
+                K::Down => match at {
+                    Some((r, c)) => crate::view::run_click(self, crate::sizes::Slot::Task, r, c),
+                    None => self.bottom_take_keys(),
+                },
                 _ => {}
             }
             return;
@@ -3831,9 +3860,6 @@ impl Editor {
         }
         if crate::plugin::plugin_panel_key(self, key) {
             return took(Handler::PluginPanel);
-        }
-        if crate::sizes::bottom_key(self, key) {
-            return took(Handler::Bottom);
         }
         // Start screen: `r` = the files last open here
         if self.welcome()
@@ -12710,23 +12736,28 @@ mod tests {
         assert_eq!(top(&ed), end, "its end in sight");
         feed(&mut ed, "<C-w>j");
         assert!(ed.session.is_at(crate::session::At::Slot));
-        feed(&mut ed, "kkk");
+        assert_eq!(
+            ed.keys_to().region,
+            crate::uistate::Region::View(crate::view::Surface::Task),
+            "its view mode"
+        );
+        feed(&mut ed, "<up><up><up>");
         assert_eq!(top(&ed), end - 3, "scrolled back");
         feed(&mut ed, "xdi");
         assert_eq!(text(&ed), "a\nb\nc\n", "the code never saw them");
         assert_eq!(ed.mode, Mode::Normal);
         assert_eq!(ed.cursor_line(), 0);
-        feed(&mut ed, "g");
+        feed(&mut ed, "gg");
         assert_eq!(top(&ed), 0);
         feed(&mut ed, "G");
         assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, None, "at the end: follows it again");
-        // Its header says what the keys do there, and the status line that they're its
+        // Its header says what the keys do there, and the status line that they're its view mode's
         draw(&mut ed);
         let (frame, w, h) = ed.last_frame.clone().unwrap();
         let screen = crate::screen::text(&frame, w, h).unwrap();
-        let head = screen.lines().find(|l| l.contains("j k scroll")).unwrap();
-        assert!(head.contains(" ok "), "{head}");
-        assert!(screen.lines().any(|l| l.starts_with(" ● task ")), "{screen}");
+        let head = screen.lines().find(|l| l.contains("y copy")).unwrap();
+        assert!(head.contains(" ok ") && head.contains("● view"), "{head}");
+        assert!(screen.lines().any(|l| l.starts_with(" ● view · task ")), "{screen}");
         feed(&mut ed, "<esc>j");
         assert!(!ed.session.is_at(crate::session::At::Slot));
         assert_eq!(ed.cursor_line(), 1, "the code's again");
@@ -12793,7 +12824,7 @@ mod tests {
         feed(&mut ed, "<C-w>j<C-w>z");
         draw(&mut ed);
         assert_eq!((ed.screen.bottom_h, ed.screen.chat_w, ed.screen.side_w), (ed.screen.body_h, 0, 0));
-        feed(&mut ed, "k");
+        feed(&mut ed, "<up>");
         assert_eq!(
             ed.session.task_run.as_ref().unwrap().scroll,
             Some(40 - ed.screen.task_panel.get().unwrap().2 - 1)
@@ -13207,7 +13238,7 @@ mod tests {
             crate::term::render(ed, &mut bytes, 140, 40).unwrap();
             let (frame, w, h) = ed.last_frame.clone().unwrap();
             let screen = crate::screen::text(&frame, w, h).unwrap();
-            screen.lines().find(|l| l.contains("j k scroll")).unwrap_or_default().to_string()
+            screen.lines().find(|l| l.contains("y copy")).unwrap_or_default().to_string()
         };
         task_of_40_lines(&mut ed);
         ed.session.task_run.as_mut().unwrap().state = crate::task::State::Running;

@@ -120,8 +120,9 @@ side git · 4 rows · in hand git:src/term.rs
   - `to`: the element id that takes the next key.
   - `region`: `code` · `prompt` · `picker` · `chat` · `view:chat` (the chat's view mode — `view.rs`, its
     handler `chat-view`, V 8) · `view:terminal` (the terminal's — tarae's keys on its panel, its handler
-    `terminal-view`; there's no `slot:terminal`) · `side:<tab>` · `review` · `edit-review` · `slot:<panel>` (tests,
-    task, `:procs`, a plugin's) · `terminal-program` · `card`. In a view mode `pending` and `char_next` are its own
+    `terminal-view`; there's no `slot:terminal`) · `view:task` · `view:preflight` · `view:tests` (the run panels' —
+    tarae's keys on them, their handler `run-view`; no `slot:task` or `slot:tests`, and the `slot` handler went) ·
+    `side:<tab>` · `review` · `edit-review` · `slot:<panel>` (`:procs`, a plugin's) · `terminal-program` · `card`. In a view mode `pending` and `char_next` are its own
     (its count, `g`, `f`).
   - `takes`:
     - `commands`: normal mode, panels.
@@ -144,7 +145,8 @@ side git · 4 rows · in hand git:src/term.rs
 
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
-- **`sessions[].view`** (V 8, the front session's only) — a surface's view mode: `surface` (`chat` · `terminal`),
+- **`sessions[].view`** (V 8, the front session's only) — a surface's view mode: `surface` (`chat` · `terminal` ·
+  `task` · `preflight` · `tests`),
   the cursor's `line` of `lines`, `selections`, `selects` (wider than a character), `mode` (`normal` · `select`),
   `held` (something came since it was made — the terminal's: its program's output waiting). Shapes, never text; Claude's level never has it.
 - **`sessions[].with`** (the front session's only; absent when empty) — what goes with the chat input's next

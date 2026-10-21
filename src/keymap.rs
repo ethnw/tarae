@@ -311,9 +311,9 @@ impl Keymaps {
         };
         let mut rows = t.clone();
         let mut on = Vec::new();
-        for s in crate::view::SURFACES {
-            if let Some(toml::Value::Table(sub)) = rows.remove(s.name()) {
-                on.push((s.name(), Node::from_toml(&sub, &format!("{path}.view.{}", s.name()), warnings)));
+        for &name in crate::view::TABLES {
+            if let Some(toml::Value::Table(sub)) = rows.remove(name) {
+                on.push((name, Node::from_toml(&sub, &format!("{path}.view.{name}"), warnings)));
             }
         }
         (Node::from_toml(&rows, &format!("{path}.view"), warnings), on)
@@ -322,14 +322,15 @@ impl Keymaps {
     /// View mode's tables from `normal`/`select` and the view rows — again after the user's keys merge in.
     fn build_views(&mut self) {
         let keep = |name: &str| crate::view::COMMANDS.contains(&name);
-        self.views = crate::view::SURFACES
+        self.views = crate::view::TABLES
             .iter()
-            .map(|s| {
+            .map(|&table| {
                 let mut on = self.view.clone();
-                if let Some((_, n)) = self.view_on.iter().find(|(name, _)| *name == s.name()) {
+                if let Some((_, n)) = self.view_on.iter().find(|(name, _)| *name == table) {
                     on.merge(n.clone());
                 }
-                // (the space menu is the editor's — in view mode its `space` is said, not a prefix)
+                // (the space menu is the editor's — in view mode `space` is view mode's own, `[view.space]`: what
+                // it has of the editor's there)
                 let space = Key::plain(crate::key::Code::Char(' '));
                 let mut normal = self.normal.filtered(&keep);
                 normal.map.remove(&space);
@@ -337,7 +338,7 @@ impl Keymaps {
                 let mut select = self.select.filtered(&keep);
                 select.map.remove(&space);
                 select.merge(on);
-                (s.name(), normal, select)
+                (table, normal, select)
             })
             .collect();
     }
@@ -383,7 +384,7 @@ impl Keymaps {
     /// A view mode's table: the surface's, in normal or select (`v`).
     pub fn view(&self, surface: crate::view::Surface, mode: Mode) -> &Node {
         let (_, normal, select) =
-            self.views.iter().find(|(n, ..)| *n == surface.name()).expect("every surface has its table");
+            self.views.iter().find(|(n, ..)| *n == surface.table()).expect("every surface has its table");
         if mode == Mode::Select { select } else { normal }
     }
 
@@ -772,14 +773,18 @@ mod tests {
 
         out.push_str(
             "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input), the \
-             terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel). Normal mode's moves, \
-             selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not \
-             done; `enter` quotes what's selected to the chat. Its own keys go over them, and each surface's over \
-              those.\n",
+             terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel), the run panels' output \
+             — a task's, a preflight's, the tests' failure or output (`C-w j` to the panel, a click, the wheel). \
+             Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), \
+             the rest is said, not done; `enter` quotes what's selected to the chat; `space` is its own menu, what \
+             it has of the editor's. Its own keys go over them, and each surface's over those.\n",
         );
         node_tables(&mut out, &km.view, &mut Vec::new(), "### Its own keys (`[keys.view]`)");
         for (name, node) in &km.view_on {
-            let title = format!("### The {name}'s (`[keys.view.{name}]`)");
+            let title = match *name {
+                "run" => "### The run panels' — task, preflight, tests (`[keys.view.run]`)".to_string(),
+                name => format!("### The {name}'s (`[keys.view.{name}]`)"),
+            };
             node_tables(&mut out, node, &mut Vec::new(), &title);
         }
         node_tables(&mut out, &km.chat, &mut Vec::new(), "### The chat's input (`[keys.chat]`)");

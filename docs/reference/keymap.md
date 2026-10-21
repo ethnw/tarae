@@ -431,7 +431,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 ## View mode
 
-A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done; `enter` quotes what's selected to the chat. Its own keys go over them, and each surface's over those.
+A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel), the run panels' output — a task's, a preflight's, the tests' failure or output (`C-w j` to the panel, a click, the wheel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done; `enter` quotes what's selected to the chat; `space` is its own menu, what it has of the editor's. Its own keys go over them, and each surface's over those.
 
 ### Its own keys (`[keys.view]`)
 
@@ -447,7 +447,17 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `left` | `page_up` | Move page up |
 | `ret` | `view_take` | Quote it to the chat, or type |
 | `right` | `page_down` | Move page down |
+| `space` | … | More keys — see `space` below |
 | `up` | `scroll_up` | Scroll up a line |
+
+### `space`
+
+| Key | Command | Description |
+|---|---|---|
+| `space >` | `quote` | Quote or view chat |
+| `space ?` | `command_palette` | Find a command |
+| `space I` | `inbox` | What waits for your answer |
+| `space l` | `chat_open` | Chat with Claude |
 
 ### The terminal's (`[keys.view.terminal]`)
 
@@ -456,6 +466,18 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `q` | `wclose` | Close this window or panel |
 | `backtab` | `slot_prev` | Previous bottom panel tab |
 | `C-\` | `view_code` | To the code, at once |
+| `tab` | `slot_next` | Next tab of the bottom panel |
+
+### The run panels' — task, preflight, tests (`[keys.view.run]`)
+
+| Key | Command | Description |
+|---|---|---|
+| `K` | `run_where` | Where Claude's command ran |
+| `o` | `preflight_output` | A preflight step's output |
+| `q` | `wclose` | Close this window or panel |
+| `backtab` | `slot_prev` | Previous bottom panel tab |
+| `C-e` | `scroll_down` | Scroll down a line |
+| `C-y` | `scroll_up` | Scroll up a line |
 | `tab` | `slot_next` | Next tab of the bottom panel |
 
 ### The chat's input (`[keys.chat]`)

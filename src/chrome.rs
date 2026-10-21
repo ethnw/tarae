@@ -148,6 +148,9 @@ impl Keys {
             Keys::Point => "POINT",
             Keys::View(crate::view::Surface::Chat) => "VIEW · CHAT",
             Keys::View(crate::view::Surface::Terminal) => "VIEW · TERMINAL",
+            Keys::View(crate::view::Surface::Task) => "VIEW · TASK",
+            Keys::View(crate::view::Surface::Preflight) => "VIEW · PREFLIGHT",
+            Keys::View(crate::view::Surface::Tests) => "VIEW · TESTS",
         })
     }
 

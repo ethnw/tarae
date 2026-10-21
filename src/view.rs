@@ -21,24 +21,62 @@ use crate::movement as mv;
 use crate::selection::{Range, Selection};
 use crate::session::At;
 
-/// What has a view mode: the chat's conversation, the terminal's scrollback and screen.
+/// What has a view mode: the chat's conversation, the terminal's scrollback and screen, and the bottom slot's run
+/// panels — a task's output, a preflight's, the tests' detail (the failure picked, else the output).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Surface {
     Chat,
     Terminal,
+    Task,
+    Preflight,
+    Tests,
 }
 
-pub const SURFACES: &[Surface] = &[Surface::Chat, Surface::Terminal];
+/// The keymap's view tables over `[view]`: `[view.chat]`, `[view.terminal]`, and `[view.run]` the three run panels
+/// share.
+pub const TABLES: &[&str] = &["chat", "terminal", "run"];
 
 impl Surface {
-    /// Its name in the keymap (`[view.chat]`), the state and the status line.
+    /// Its name in the state (`view:tests`) and the status line (`● view · tests`).
     pub fn name(self) -> &'static str {
         match self {
             Surface::Chat => "chat",
             Surface::Terminal => "terminal",
+            Surface::Task => "task",
+            Surface::Preflight => "preflight",
+            Surface::Tests => "tests",
         }
     }
+
+    /// Its table in the keymap (`[view.chat]`; the run panels' `[view.run]`).
+    pub fn table(self) -> &'static str {
+        match self {
+            Surface::Chat => "chat",
+            Surface::Terminal => "terminal",
+            Surface::Task | Surface::Preflight | Surface::Tests => "run",
+        }
+    }
+
+    /// The bottom slot's panel it is.
+    pub fn slot(self) -> Option<crate::sizes::Slot> {
+        use crate::sizes::Slot;
+        match self {
+            Surface::Chat => None,
+            Surface::Terminal => Some(Slot::Terminal),
+            Surface::Task | Surface::Preflight => Some(Slot::Task),
+            Surface::Tests => Some(Slot::Test),
+        }
+    }
+
+    /// A run panel's: the task's, a preflight's, the tests'.
+    pub fn run(self) -> bool {
+        matches!(self, Surface::Task | Surface::Preflight | Surface::Tests)
+    }
 }
+
+/// Commands of the editor's that view mode's `space` has (`[view.space]`): run once the key's command is done and
+/// the view's document put back — they open a picker or go to the chat, never on the view's buffer.
+pub const EDITORS: &[&str] = &["chat_open", "inbox", "command_palette"];
 
 /// Where the keys were when the wheel brought a view mode — back there when the wheel takes it back down,
 /// nothing selected (§9 Q9): the code, the chat's input, the terminal's program, or another surface's view mode
@@ -59,6 +97,29 @@ struct Made {
     size: (u16, u16),
     back: usize,
     lines: usize,
+}
+
+/// A run panel's view, as it was made: its run, the tests' failure it shows (None: the output), and how many times
+/// its run's output had been trimmed (`task::Run::trimmed` — once more, its lines aren't the view's lines).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RunMade {
+    generation: u64,
+    picked: Option<usize>,
+    trimmed: u64,
+}
+
+/// How many times a run panel's output was trimmed (the tests' never is).
+fn run_trimmed(ed: &Editor, s: Surface) -> u64 {
+    match s {
+        Surface::Task | Surface::Preflight => ed.session.task_run.as_ref().map_or(0, |r| r.trimmed()),
+        _ => 0,
+    }
+}
+
+/// The run's lines are still the view's, line for line: the same run showing the same thing, nothing trimmed out
+/// of it since — only then is the view's top an index into its output (its `scroll`). Printed on, they still are.
+fn same_lines(ed: &Editor, s: Surface, m: RunMade) -> bool {
+    run_is(ed, s) == Some((m.generation, m.picked)) && run_trimmed(ed, s) == m.trimmed
 }
 
 /// Where the terminal's view puts its cursor.
@@ -166,6 +227,17 @@ pub enum After {
     Latest,
     /// `enter` on a selection: quoted to the chat (`quote.rs`).
     Take,
+    /// `enter` with nothing selected: the surface's own — the chat's input, the terminal's program, a run panel's
+    /// run waiting behind (else the chat's input).
+    Enter,
+    /// `space >` with nothing selected, off the chat: the chat's view mode.
+    ChatView,
+    /// A run panel's `K`: where Claude's command ran.
+    Where,
+    /// A run panel's `o`: a preflight step's output in a buffer.
+    Output,
+    /// A command of `EDITORS` (`space l`, `space I`, `space ?`): run on the editor.
+    Editor,
 }
 
 /// A surface's view mode: its document, the keys' state while they're its, and what it was made of.
@@ -201,6 +273,13 @@ pub struct View {
     wraps: Vec<Option<usize>>,
     /// The terminal's: a new panel size seen, not settled yet (`terminal_resized`).
     settling: Option<(u16, u16)>,
+    /// A run panel's: what it was made of, and each line's stderr flag (its colour as the panel draws it) —
+    /// `waiting`: nothing printed yet, its one line the command, as the panel shows it (faint).
+    run: Option<RunMade>,
+    errs: Vec<bool>,
+    waiting: bool,
+    /// `EDITORS`' commands its key asked for (`After::Editor`).
+    deferred: Vec<crate::keymap::MappableCommand>,
 }
 
 impl View {
@@ -254,10 +333,26 @@ impl View {
 
     /// Rows it was made of.
     pub fn rows(&self) -> usize {
-        match self.made {
-            Some(m) => m.lines,
-            None => self.laid.iter().map(|(_, r)| r.len()).sum(),
+        match (self.made, self.run) {
+            (Some(m), _) => m.lines,
+            (None, Some(_)) => self.errs.len(),
+            (None, None) => self.laid.iter().map(|(_, r)| r.len()).sum(),
         }
+    }
+
+    /// A run panel's line `l` came on stderr (drawn faint, as the panel's output is).
+    pub fn err(&self, l: usize) -> bool {
+        self.errs.get(l).copied().unwrap_or(false)
+    }
+
+    /// The tests' view shows a failure's message (None: the output).
+    pub fn failure(&self) -> bool {
+        self.run.is_some_and(|m| m.picked.is_some())
+    }
+
+    /// A run panel's view made before its run printed anything: its one line is the command (drawn faint).
+    pub fn waiting(&self) -> bool {
+        self.waiting
     }
 
     /// Something came since it was made (`● view · new text after`).
@@ -395,7 +490,49 @@ pub fn has_keys(ed: &Editor) -> Option<Surface> {
             .filter(|c| ed.session.is_at(At::Chat) && !c.compact())
             .map(|_| Surface::Chat),
         Surface::Terminal => terminal_holds(ed, v).then_some(Surface::Terminal),
+        s => run_holds(ed, v).then_some(s),
     }
+}
+
+/// A run panel's view still has its surface: tarae's keys on its panel, in front, the same run showing the same
+/// thing (the tests' failure picked — `]x` picks another: the view is made again).
+fn run_holds(ed: &Editor, v: &View) -> bool {
+    let Some(slot) = v.surface.slot() else { return false };
+    ed.session.is_at(At::Slot)
+        && ed.slot() == Some(slot)
+        && run_surface(ed, slot) == Some(v.surface)
+        && v.run.is_some_and(|m| run_is(ed, v.surface) == Some((m.generation, m.picked)))
+}
+
+/// The run panel `slot` is, as a view's surface: the task panel a preflight's while its run is one.
+pub fn run_surface(ed: &Editor, slot: crate::sizes::Slot) -> Option<Surface> {
+    use crate::sizes::Slot;
+    match slot {
+        Slot::Task => ed.session.task_run.as_ref().map(|r| {
+            match ed.session.preflight.as_ref().is_some_and(|p| p.generation == r.generation()) {
+                true => Surface::Preflight,
+                false => Surface::Task,
+            }
+        }),
+        Slot::Test => ed.session.test_run.as_ref().map(|_| Surface::Tests),
+        _ => None,
+    }
+}
+
+/// What a run panel shows now: its run, and the tests' failure picked.
+fn run_is(ed: &Editor, s: Surface) -> Option<(u64, Option<usize>)> {
+    match s {
+        Surface::Task | Surface::Preflight => ed.session.task_run.as_ref().map(|r| (r.generation(), None)),
+        Surface::Tests => {
+            ed.session.test_run.as_ref().map(|r| (r.generation(), r.picked().map(|_| r.selected)))
+        }
+        Surface::Chat | Surface::Terminal => None,
+    }
+}
+
+/// A run panel in its view mode (drawn from its document, the painter on it).
+pub fn run_view_of(ed: &Editor, slot: crate::sizes::Slot) -> Option<&View> {
+    ed.session.view.as_ref().filter(|v| v.surface.run() && v.surface.slot() == Some(slot) && v.doc.is_some())
 }
 
 /// The terminal's view still has its surface: tarae's keys on its panel, in front, the same run.
@@ -446,6 +583,9 @@ fn give_back(ed: &mut Editor, was: Was) {
         Was::View(Surface::Chat) => chat_view(ed),
         Was::View(Surface::Terminal) if ed.session.terminal.as_ref().is_some_and(|t| t.visible) => {
             terminal_enter(ed, Land::InSight, None)
+        }
+        Was::View(s) if s.slot().is_some_and(|slot| run_surface(ed, slot) == Some(s)) => {
+            run_enter(ed, s, Land::InSight, None)
         }
         _ => {}
     }
@@ -598,6 +738,10 @@ fn made(
         made,
         wraps: Vec::new(),
         settling: None,
+        run: None,
+        errs: Vec::new(),
+        waiting: false,
+        deferred: Vec::new(),
     }
 }
 
@@ -619,12 +763,188 @@ fn enter(ed: &mut Editor, laid: Laid, line: Option<usize>, by_wheel: Option<Was>
     in_sight(ed);
 }
 
-/// The rows it shows (rows, width) — as the last frame drew the chat's; the terminal's screen.
+/// The rows it shows (rows, width) — as the last frame drew the chat's, a run panel's; the terminal's screen.
 fn viewport(ed: &Editor) -> (usize, usize) {
-    if let Some(m) = ed.session.view.as_ref().and_then(|v| v.made) {
+    let Some(v) = ed.session.view.as_ref() else { return (20, 60) };
+    if let Some(m) = v.made {
         return (usize::from(m.size.0).max(1), usize::from(m.size.1).max(1));
     }
+    if v.surface.run() {
+        let s = &ed.screen;
+        let w = s.width.map_or(80, |w| w.saturating_sub(s.slot_x + s.chat_w + 2 * crate::chrome::PAD));
+        return (run_rows(ed, v.surface), w.max(1));
+    }
     ed.screen.chat_view.get().map_or((20, 60), |a| (a.2.max(1), a.1.max(1)))
+}
+
+// ── The run panels ──────────────────────────────────────────────────────────────────────────────
+
+/// The rows a run panel shows its output (the tests' detail) in, as the last frame drew it (not drawn yet: ten, till
+/// the frame that draws it — `run_resized`).
+pub(crate) fn run_rows(ed: &Editor, s: Surface) -> usize {
+    let p = match s {
+        Surface::Tests => ed.screen.test_panel.get(),
+        _ => ed.screen.task_panel.get(),
+    };
+    p.map_or(10, |p| p.2).max(1)
+}
+
+/// A run panel's rows as a document — the task's output; the tests' detail: the failure picked's message, else
+/// the output — a line each (a tab two spaces, as the panel draws it), each line's stderr flag, the line its panel
+/// shows first in `rows`, and what the run had printed (`seen`). Nothing printed yet: the command, its one line, as
+/// the panel shows it.
+fn run_doc(ed: &mut Editor, s: Surface, rows: usize) -> Option<(Document, Vec<bool>, usize, u64)> {
+    let mut text = String::new();
+    let mut errs = Vec::new();
+    let mut push = |err: bool, l: &str| {
+        text.push_str(&l.replace('\t', "  "));
+        text.push('\n');
+        errs.push(err);
+    };
+    let (top, seen) = match s {
+        Surface::Tests => {
+            let r = ed.session.test_run.as_ref()?;
+            match r.picked() {
+                // (as its panel says it)
+                Some(c) if c.message.is_empty() => push(false, "failed (no message)"),
+                Some(c) => c.message.iter().for_each(|m| push(false, m)),
+                None if r.output.is_empty() => push(false, &r.target.argv().join(" ")),
+                None => r.output.iter().for_each(|(e, l)| push(*e, l)),
+            }
+            (r.detail_top(rows), (r.output.len() + r.cases.len()) as u64)
+        }
+        _ => {
+            let r = ed.session.task_run.as_ref()?;
+            if r.output.is_empty() {
+                // (a command of several lines: its first, as the panel shows it)
+                let mut lines = r.task.cmd.lines();
+                let first = lines.next().unwrap_or_default();
+                push(false, &if lines.next().is_some() { format!("{first} …") } else { first.to_string() });
+            }
+            r.output.iter().for_each(|(e, l)| push(*e, l));
+            (r.top(rows), r.output_bytes as u64)
+        }
+    };
+    let mut doc = Document::from_str(ed.alloc_id(), &text);
+    doc.wrap = Some(false);
+    doc.throwaway = true;
+    Some((doc, errs, top, seen))
+}
+
+/// What a run panel's run has printed (its view's `seen` — another now: something came after).
+fn run_seen(ed: &Editor, s: Surface) -> Option<u64> {
+    match s {
+        Surface::Tests => ed.session.test_run.as_ref().map(|r| (r.output.len() + r.cases.len()) as u64),
+        _ => ed.session.task_run.as_ref().map(|r| r.output_bytes as u64),
+    }
+}
+
+/// A run panel's view mode — held still from now (it draws its document while more comes), the cursor where `land`
+/// says (in sight: a failure's first line, else the output's last row in sight), the rows in sight as they were —
+/// tarae's keys on its panel.
+fn run_enter(ed: &mut Editor, s: Surface, land: Land, by_wheel: Option<Was>) {
+    let Some(slot) = s.slot() else { return };
+    take_over(ed, s);
+    let Some(is) = run_is(ed, s) else { return };
+    let rows = run_rows(ed, s);
+    let waiting = match s {
+        Surface::Tests => {
+            ed.session.test_run.as_ref().is_some_and(|r| r.picked().is_none() && r.output.is_empty())
+        }
+        _ => ed.session.task_run.as_ref().is_some_and(|r| r.output.is_empty()),
+    };
+    let Some((mut doc, errs, top, seen)) = run_doc(ed, s, rows) else { return };
+    let last = mv::last_line(&doc.text);
+    let so = ed.config.scrolloff.min((rows - 1) / 2);
+    let line = match land {
+        Land::InSight if is.1.is_some() => top,
+        // (its last row in sight — inside the scrolloff margin, the view as it was, but at the output's end)
+        Land::InSight if top + rows > last => last,
+        Land::InSight => (top + rows - 1 - so).max(top),
+        // (inside the scrolloff margin: the view stays as the wheel found it)
+        Land::Row(r) => top + r.clamp(so, rows - 1 - so),
+        Land::Latest => last,
+    }
+    .min(last);
+    doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
+    doc.set_top(top.min(last));
+    let mut view = made(s, doc, Vec::new(), seen, by_wheel, None);
+    view.run = Some(RunMade { generation: is.0, picked: is.1, trimmed: run_trimmed(ed, s) });
+    view.errs = errs;
+    view.waiting = waiting;
+    ed.session.view = Some(view);
+    ed.session.at = At::Slot;
+    ed.session.slot_front = Some(slot);
+    in_sight(ed);
+}
+
+/// After a frame (`term::render`): a run panel's view laid out for another number of rows than its panel just drew
+/// (`C-w z`, the panel growing with its output) kept in sight at it — true when that moved it (drawn again).
+pub fn run_resized(ed: &mut Editor) -> bool {
+    let Some(top) =
+        ed.session.view.as_ref().filter(|v| v.surface.run() && v.doc.is_some()).map(|v| v.doc().top)
+    else {
+        return false;
+    };
+    in_sight(ed);
+    ed.session.view.as_ref().is_some_and(|v| v.doc().top != top)
+}
+
+/// The wheel over a run panel's rows (`row`: the one under the pointer): up, its view mode at that point, the keys
+/// its; it scrolls the view; back down to the end, by the wheel, nothing selected, the keys go back where they were.
+/// Down outside view mode, the panel scrolls on as it always did.
+pub fn run_wheel(ed: &mut Editor, slot: crate::sizes::Slot, row: Option<usize>, up: bool) {
+    let Some(s) = run_surface(ed, slot) else { return };
+    if run_view_of(ed, slot).is_none() {
+        if !up {
+            let rows = run_rows(ed, s);
+            match s {
+                Surface::Tests => ed.session.test_run.as_mut().map(|r| r.scroll_by(3, rows)),
+                _ => ed.session.task_run.as_mut().map(|r| r.scroll_by(3, rows)),
+            };
+            return;
+        }
+        let was = was(ed);
+        run_enter(ed, s, row.map_or(Land::InSight, Land::Row), Some(was));
+    }
+    swap(ed, |ed| ed.scroll_view(if up { -3 } else { 3 }, false));
+    let rows = run_rows(ed, s);
+    let Some(v) = ed.session.view.as_ref() else { return };
+    let at_end = v.doc().top + rows >= v.rows();
+    if !up
+        && at_end
+        && !v.selects()
+        && !v.prompt
+        && let Some(was) = v.by_wheel
+    {
+        leave(ed);
+        give_back(ed, was);
+    }
+}
+
+/// A press on a run panel's row `row` (of its output — the tests' detail) at column `col` of its text: the keys its
+/// view mode's, the cursor on that character, as a click in the code puts it.
+pub fn run_click(ed: &mut Editor, slot: crate::sizes::Slot, row: usize, col: usize) {
+    ed.bottom_take_keys();
+    let Some(v) = ed.session.view.as_mut().filter(|v| v.surface.slot() == Some(slot) && v.doc.is_some())
+    else {
+        return;
+    };
+    let d = v.doc_mut();
+    let line = (d.top + row).min(mv::last_line(&d.text));
+    let (ls, le) = (mv::line_start(&d.text, line), mv::line_end(&d.text, line));
+    let text = d.text.byte_slice(ls..le).to_string();
+    // (the character whose cells hold the column — display width, a wide one's second cell its own)
+    let (mut w, mut at) = (0, 0);
+    for g in unicode_segmentation::UnicodeSegmentation::graphemes(text.as_str(), true) {
+        let gw = unicode_width::UnicodeWidthStr::width(g);
+        if w + gw > col {
+            break;
+        }
+        (w, at) = (w + gw, at + g.len());
+    }
+    // (in sight already: a press inside the scrolloff margin doesn't move the rows under the pointer)
+    d.set_selection(Selection::point(crate::graphemes::snap(&d.text, (ls + at).min(le))));
 }
 
 // ── The terminal ────────────────────────────────────────────────────────────────────────────────
@@ -873,6 +1193,17 @@ fn in_sight(ed: &mut Editor) {
     {
         t.parser.screen_mut().set_scrollback(m.back.saturating_sub(top));
     }
+    // (a run panel's scroll is the view's, while it shows what the view was made of — what `o` reads as the step in
+    // view, where it's left)
+    let (s, run) = (v.surface, v.run);
+    if let Some(m) = run
+        && same_lines(ed, s, m)
+    {
+        match s {
+            Surface::Tests => ed.session.test_run.as_mut().map(|r| r.scroll_to(top, rows)),
+            _ => ed.session.task_run.as_mut().map(|r| r.scroll_to(top, rows)),
+        };
+    }
 }
 
 /// Runs `f` with the view's document as `current`, its mode, keys under way and size as the editor's — all
@@ -954,6 +1285,19 @@ pub fn leave_key(ed: &mut Editor) {
 pub fn leave(ed: &mut Editor) {
     let (rows, _) = viewport(ed);
     let Some(v) = ed.session.view.take() else { return };
+    if let Some(m) = v.run {
+        // (a run panel: scrolled to the rows you read — its end, it follows its output again — while it still shows
+        // what the view was made of)
+        let top = v.doc().top;
+        if same_lines(ed, v.surface, m) {
+            let rows = run_rows(ed, v.surface);
+            match v.surface {
+                Surface::Tests => ed.session.test_run.as_mut().map(|r| r.scroll_to(top, rows)),
+                _ => ed.session.task_run.as_mut().map(|r| r.scroll_to(top, rows)),
+            };
+        }
+        return close_prompt(ed, &v);
+    }
     if let Some(m) = v.made {
         // (the terminal: what its program wrote meanwhile onto its screen — scrolled back, it stays on the rows
         // you read)
@@ -997,13 +1341,18 @@ pub fn forget(ed: &mut Editor) {
 /// came taken in), the cursor on the latest line.
 fn catch_up(ed: &mut Editor) {
     let Some((by_wheel, surface)) = ed.session.view.as_ref().map(|v| (v.by_wheel, v.surface)) else { return };
-    if surface == Surface::Terminal {
+    if surface != Surface::Chat {
         // (the view's own mode and keys under way come along: a `v`, a count before `G`)
         let Some(old) = ed.session.view.take() else { return };
-        if let Some(t) = ed.session.terminal.as_mut() {
-            t.release();
+        match surface {
+            Surface::Terminal => {
+                if let Some(t) = ed.session.terminal.as_mut() {
+                    t.release();
+                }
+                terminal_enter(ed, Land::Latest, by_wheel);
+            }
+            s => run_enter(ed, s, Land::Latest, by_wheel),
         }
-        terminal_enter(ed, Land::Latest, by_wheel);
         if let Some(v) = ed.session.view.as_mut() {
             (v.mode, v.pending, v.count, v.on_next_char, v.char_for) =
                 (old.mode, old.pending, old.count, old.on_next_char, old.char_for);
@@ -1027,17 +1376,35 @@ fn after(ed: &mut Editor) {
     let Some(v) = ed.session.view.as_mut() else { return };
     let Some(a) = v.after.take() else { return };
     let surface = v.surface;
+    let deferred = std::mem::take(&mut v.deferred);
     match (a, surface) {
         (After::Leave, Surface::Chat) => {
             leave(ed);
             ed.session.leave(At::Chat);
         }
-        (After::Leave, Surface::Terminal) => {
+        (After::Leave, _) => {
             leave(ed);
             ed.session.leave(At::Slot);
         }
-        (After::Input, Surface::Chat) => leave(ed),
-        (After::Input, Surface::Terminal) => {
+        (After::Input | After::Enter, Surface::Chat) => leave(ed),
+        (After::Input, s) if s.run() => {
+            // (the way out as `said` names it, as bound)
+            let out =
+                bound(ed, s, "view_leave", "esc").map(|k| format!(" — {k} to the code")).unwrap_or_default();
+            ed.set_status(format!("the {} panel takes no typing{out}", s.name()));
+        }
+        // (a run panel's: the user's own run waiting behind Claude's, now — Claude's stopping, `queued.rs`; none
+        // waits: the chat's input, to ask about what's read)
+        (After::Enter, s) if s.run() => {
+            let which =
+                if s == Surface::Tests { crate::queued::Slot::Tests } else { crate::queued::Slot::Task };
+            if !crate::queued::run_now(ed, which) {
+                leave(ed);
+                ed.session.leave(At::Slot);
+                crate::chat::open(ed);
+            }
+        }
+        (After::Input | After::Enter, _) => {
             if ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_some()) {
                 return ed.set_status("its program has ended — q close, esc code");
             }
@@ -1050,7 +1417,44 @@ fn after(ed: &mut Editor) {
         }
         (After::Latest, _) => catch_up(ed),
         (After::Take, surface) => take(ed, surface),
+        (After::ChatView, Surface::Chat) => {
+            ed.set_status("this is the chat's view — select something, then enter or space > quotes it")
+        }
+        (After::ChatView, _) => chat_view(ed),
+        (After::Where, s) => run_where(ed, s),
+        (After::Output, s) => {
+            let out = match s {
+                Surface::Preflight => ed.preflight_output(""),
+                _ => Err("o shows a preflight step's output — this run isn't one".into()),
+            };
+            if let Err(e) = out {
+                ed.set_status(e);
+            }
+        }
+        (After::Editor, _) => ed.run(&deferred, None),
     }
+}
+
+/// A run panel's `K`: where Claude's command in it ran, and why — from its run's record (cardburden 4b).
+fn run_where(ed: &mut Editor, s: Surface) {
+    let ran = match s {
+        Surface::Task | Surface::Preflight => ed
+            .session
+            .task_run
+            .as_ref()
+            .and_then(|r| Some((crate::task::traced(&r.task.cmd), r.ran.clone()?))),
+        _ => None,
+    };
+    match ran {
+        Some((cmd, ran)) => crate::chat::say_ran(ed, &cmd, &ran),
+        None => ed.set_status("K says where a command of Claude's ran — this run isn't one"),
+    }
+}
+
+/// A command a view mode's key runs on the editor, its document put back (`After`): asked for from inside the
+/// key's command — a view's document swapped in — else run now.
+pub fn swapped(ed: &Editor) -> bool {
+    ed.session.view.as_ref().is_some_and(|v| v.doc.is_none())
 }
 
 /// `enter` on a selection: each range a quote over the chat's input (`quote.rs`), the view left, the input with
@@ -1079,6 +1483,8 @@ fn taken(ed: &Editor, v: &View) -> Vec<crate::quote::Taken> {
     let how = |l: usize| match v.surface {
         Surface::Chat => rows.get(l).map_or((0, None), |r| (r.skip, r.join.map(usize::from))),
         Surface::Terminal => (0, v.wraps.get(l.wrapping_sub(1)).copied().flatten()),
+        // (an output's lines are its own: none wrapped)
+        _ => (0, None),
     };
     let rest = |l: usize| rows.get(l).and_then(|r| r.rest.clone());
     let quote = |r: &Range| {
@@ -1090,6 +1496,32 @@ fn taken(ed: &Editor, v: &View) -> Vec<crate::quote::Taken> {
         }
         let n = lines(text.lines().count());
         Some(match v.surface {
+            s @ (Surface::Task | Surface::Preflight | Surface::Tests) => {
+                // (what ran: the task's name, the tests' target — and the failure the detail is of)
+                let (from, title, case) = match s {
+                    Surface::Tests => {
+                        let r = ed.session.test_run.as_ref();
+                        let case = r.and_then(|r| r.picked().map(|c| c.name.clone()));
+                        ("test", r.map_or_else(String::new, |r| r.target.label.clone()), case)
+                    }
+                    _ => {
+                        let name =
+                            ed.session.task_run.as_ref().map_or_else(String::new, |r| r.task.name.clone());
+                        (if s == Surface::Preflight { "preflight" } else { "task" }, name, None)
+                    }
+                };
+                let at = format!("{}-{} of {}", l0 + 1, l1 + 1, v.rows());
+                let mut attrs = vec![("from", from.to_string()), ("title", title)];
+                attrs.extend(case.clone().map(|c| ("test", c)));
+                attrs.push(("lines", at));
+                let what = match (s, &case) {
+                    (Surface::Tests, Some(_)) => "failure",
+                    (Surface::Tests, None) => "test output",
+                    (Surface::Preflight, _) => "preflight",
+                    _ => "task output",
+                };
+                Taken { attrs, label: format!("{what} {n}"), text, redact: true, code: None }
+            }
             Surface::Terminal => {
                 // (the program's file name — `terminal::spawn`'s `argv[0]`, never a title the program sets)
                 let title = ed.session.terminal.as_ref().map_or_else(String::new, |t| t.title.clone());
@@ -1154,6 +1586,7 @@ pub fn passes(ed: &Editor) -> Vec<Key> {
     let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false, shift: false };
     let mut v = vec![ctrl('w'), Key { alt: true, ..ctrl('w') }];
     v.extend(CHAT_CHORDS.iter().map(|&c| ctrl(c)).filter(|&k| chat_chord(ed, k)));
+    v.extend(['[', ']'].map(|c| Key::plain(Code::Char(c))).into_iter().filter(|&k| run_pass(ed, k)));
     v
 }
 
@@ -1162,6 +1595,16 @@ pub fn passes(ed: &Editor) -> Vec<Key> {
 /// under way go on. Returns the handler that took it.
 pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
     use crate::uistate::Handler;
+    // (a run panel's `[`/`]` went on: the key after it is the editor's only where it completes the panel's own)
+    if let Some((s, goes)) = run_bracket(ed) {
+        if goes.contains(&key) {
+            return None;
+        }
+        let mut keys = std::mem::take(&mut ed.pending);
+        keys.push(key);
+        said(ed, s, &keys);
+        return Some(Handler::RunView);
+    }
     let surface = has_keys(ed)?;
     if !ed.pending.is_empty() {
         return None;
@@ -1177,7 +1620,7 @@ pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
     if v.pending.is_empty()
         && v.on_next_char.is_none()
         && v.count.is_none()
-        && (windows(key) || chat_chord(ed, key))
+        && (windows(key) || chat_chord(ed, key) || run_pass(ed, key))
     {
         return None;
     }
@@ -1186,7 +1629,40 @@ pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
     Some(match surface {
         Surface::Chat => Handler::ChatView,
         Surface::Terminal => Handler::TerminalView,
+        Surface::Task | Surface::Preflight | Surface::Tests => Handler::RunView,
     })
+}
+
+/// The editor's commands a run panel's view reaches through `[`/`]`, as the panel did: the failures' (the tests'
+/// view is made again of the one picked) and the list's. The rest act on the code out of sight: said.
+const BRACKETS: &[&str] =
+    &["goto_next_test_failure", "goto_prev_test_failure", "goto_next_quickfix", "goto_prev_quickfix"];
+
+/// A run panel's view whose `[`/`]` went on to the editor (`run_pass`): its surface, and the keys after it that are
+/// the editor's too — those completing one of `BRACKETS` as bound, and `esc` (it lets the sequence go).
+pub fn run_bracket(ed: &Editor) -> Option<(Surface, Vec<Key>)> {
+    use crate::keymap::MappableCommand;
+    let s = has_keys(ed).filter(|s| s.run())?;
+    let [b] = ed.pending.as_slice() else { return None };
+    if !matches!(b.code, Code::Char('[' | ']')) || b.ctrl || b.alt {
+        return None;
+    }
+    let panels = |cmds: &[MappableCommand]| {
+        cmds.iter().all(|c| matches!(c, MappableCommand::Static(st) if BRACKETS.contains(&st.name)))
+    };
+    let mut goes: Vec<Key> = (ed.keymaps.children(Mode::Normal, &[*b]).into_iter().map(|(k, ..)| k))
+        .filter(|&k| matches!(ed.keymaps.lookup(Mode::Normal, &[*b, k]), Lookup::Matched(c) if panels(c)))
+        .collect();
+    goes.push(Key::plain(Code::Esc));
+    Some((s, goes))
+}
+
+/// `[` and `]` on a run panel's view: on to the editor, as they were on the panel — for the keys of `BRACKETS`
+/// after them (`run_bracket`) — where its table doesn't bind them.
+fn run_pass(ed: &Editor, key: Key) -> bool {
+    let Some(v) = ed.session.view.as_ref().filter(|v| v.surface.run()) else { return false };
+    let bracket = matches!(key.code, Code::Char('[' | ']')) && !key.ctrl && !key.alt;
+    bracket && ed.keymaps.view(v.surface, v.mode).search(&[key]).is_none()
 }
 
 /// `key` with the view's document swapped in: the awaited character (`f`), a count, the table's command.
@@ -1219,7 +1695,15 @@ fn key_in(ed: &mut Editor, surface: Surface, key: Key) {
     };
     let keys = std::mem::take(&mut ed.pending);
     let count = ed.count.take();
+    let editors = |c: &crate::keymap::MappableCommand| matches!(c, crate::keymap::MappableCommand::Static(s) if EDITORS.contains(&s.name));
     match cmds {
+        // (the editor's own, once the view's document is put back — `space ?`, `space I`, `space l`)
+        Some(cmds) if cmds.iter().any(editors) => {
+            if let Some(v) = ed.session.view.as_mut() {
+                v.deferred = cmds;
+            }
+            ask(ed, After::Editor);
+        }
         Some(cmds) => {
             ed.run(&cmds, count);
             if ed.on_next_char.is_some() {
@@ -1247,7 +1731,7 @@ fn said(ed: &mut Editor, surface: Surface, keys: &[Key]) {
     let types = match surface {
         Surface::Chat => Some("types"),
         Surface::Terminal if typeable(ed) => Some("types in the program"),
-        Surface::Terminal => None,
+        _ => None,
     };
     let ways: Vec<String> = [("view_input", "i", types), ("view_leave", "esc", Some("to the code"))]
         .iter()
@@ -1273,7 +1757,8 @@ pub fn quotes(ed: &Editor) -> bool {
 pub fn typeable(ed: &Editor) -> bool {
     match ed.session.view.as_ref().map(|v| v.surface) {
         Some(Surface::Terminal) => ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
-        _ => true,
+        Some(s) => !s.run(),
+        None => true,
     }
 }
 
@@ -1291,24 +1776,53 @@ pub fn sync(ed: &mut Editor) {
                 !(ed.session.is_at(At::Chat) && ed.session.chat.as_ref().is_some_and(|c| !c.compact()))
             }
             Surface::Terminal => !terminal_holds(ed, v),
+            _ => !run_holds(ed, v),
         };
         if gone {
             leave(ed);
+        } else if v.surface.run() {
+            // (its panel another size since — `C-w z`, a border dragged: the cursor kept in sight, the top within it)
+            in_sight(ed);
         }
     }
-    if ed.session.view.is_none()
-        && ed.session.is_at(At::Slot)
-        && ed.slot() == Some(crate::sizes::Slot::Terminal)
-        && ed.session.terminal.as_ref().is_some_and(|t| t.visible)
-    {
-        terminal_enter(ed, Land::InSight, None);
+    if ed.session.view.is_some() || !ed.session.is_at(At::Slot) {
+        return;
+    }
+    match ed.slot() {
+        Some(crate::sizes::Slot::Terminal) if ed.session.terminal.as_ref().is_some_and(|t| t.visible) => {
+            terminal_enter(ed, Land::InSight, None)
+        }
+        // (a run panel's: another run, another failure picked — made again, landed as at first)
+        Some(slot) if let Some(s) = run_surface(ed, slot) => run_enter(ed, s, Land::InSight, None),
+        _ => {}
     }
 }
 
 #[cfg(test)]
+mod run_tests;
+#[cfg(test)]
 pub(crate) mod terminal_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// A run panel's view mode with the user's own run waiting behind there: `enter`, nothing selected, runs it now.
+pub fn run_waits(ed: &Editor) -> bool {
+    let Some(v) = ed.session.view.as_ref().filter(|v| v.surface.run()) else { return false };
+    let which =
+        if v.surface == Surface::Tests { crate::queued::Slot::Tests } else { crate::queued::Slot::Task };
+    crate::queued::mine_waits(ed, which)
+}
+
+/// The surface whose view mode opened the prompt that's up (`/`, `?`, `s`): its word on the status line under it.
+pub fn prompt_from(ed: &Editor) -> Option<Surface> {
+    let s = has_keys(ed)?;
+    (ed.prompt.is_some() && ed.session.view.as_ref().is_some_and(|v| v.prompt)).then_some(s)
+}
+
+/// A run panel's view: its run printed more since it was made (`● view · output after`).
+pub fn run_came(ed: &Editor, v: &View, s: Surface) -> bool {
+    run_seen(ed, s).is_some_and(|n| v.came(n))
+}
 
 /// The state's `view`: its surface, the cursor's line, selections and whether something came since — shapes,
 /// never text.
@@ -1319,6 +1833,7 @@ pub fn state(ed: &Editor) -> Option<serde_json::Value> {
     let held = match v.surface {
         Surface::Chat => v.came(ed.session.chat.as_ref().map_or(v.seen, seen)),
         Surface::Terminal => ed.session.terminal.as_ref().is_some_and(|t| t.came()),
+        s => run_came(ed, v, s),
     };
     Some(serde_json::json!({
         "surface": v.surface.name(),

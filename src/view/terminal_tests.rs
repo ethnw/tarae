@@ -366,9 +366,13 @@ fn tab_steps_to_the_slots_other_tab_and_back() {
     print(&mut ed, "\r\nwhile-on-the-task\r\n$ ");
     feed(&mut ed, "<tab>");
     assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));
-    assert_eq!(region(&ed), "slot:task");
+    assert_eq!(region(&ed), "view:task", "the task panel's view mode");
     let t = ed.session.terminal.as_ref().unwrap();
-    assert!(ed.session.view.is_none() && !t.holding(), "the view gone, nothing held");
+    let task = ed.session.view.as_ref().map(|v| v.surface);
+    assert!(
+        task == Some(crate::view::Surface::Task) && !t.holding(),
+        "the terminal's view gone, nothing held"
+    );
     assert!(t.parser.screen().contents().contains("while-on-the-task"), "what came taken in");
     feed(&mut ed, "<S-tab>");
     assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));
@@ -387,20 +391,26 @@ fn tab_steps_to_the_slots_other_tab_and_back() {
     assert_eq!(ed.slot(), Some(tabs[(at + 2) % 3]), "the one before: {tabs:?}");
 }
 
-/// `space` in its view mode does what it does in the chat's — one code path (`view::key` → `key_in` → `said`):
-/// said, with the way to type and the way out; the next key is the view's own (`T` waits for its character, as `T`
-/// in the code), never the space menu's — `q` hides the panel.
+/// `space` in its view mode does what it does in the chat's — one code path (`view::key` → `key_in`): view mode's
+/// own menu (`[view.space]`, its which-key), never the code's — a key the code's menu has and it doesn't (`space T`)
+/// said, with the way to type and the way out, nothing hidden (friction 87).
 #[test]
 fn space_in_view_mode_is_said_as_in_the_chats() {
     let (mut ed, _sent) = term(Config::default(), 3);
     feed(&mut ed, "<C-\\><space>");
+    assert_eq!(ed.session.view.as_ref().unwrap().pending().len(), 1, "a prefix under way");
+    assert!(frame(&mut ed).contains("Quote or view chat"), "its which-key: view mode's rows");
+    feed(&mut ed, "T");
     let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-    assert_eq!(said, "space isn't in view mode — i types in the program, esc to the code");
+    assert_eq!(said, "space T isn't in view mode — i types in the program, esc to the code");
     assert_eq!(region(&ed), "view:terminal");
     assert!(ed.session.terminal.as_ref().unwrap().visible, "nothing hidden");
-    let chat = crate::view::tests::viewing("<esc><space>");
+    let chat = crate::view::tests::viewing("<esc><space>T");
     let said = chat.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-    assert_eq!(said, "space isn't in view mode — i types, esc to the code", "the chat's, the same sentence");
+    assert_eq!(
+        said, "space T isn't in view mode — i types, esc to the code",
+        "the chat's, the same sentence"
+    );
 }
 
 /// A blank row at the screen's bottom is a line of its own: the view's last rows are the screen's, `G` shows it

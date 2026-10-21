@@ -15,10 +15,9 @@
 //!
 //! `C-w z` fills the screen with what has the keys — the code (its pane alone), the bottom slot, the chat, the
 //! side panel — and back (`Zoom`); it ends when the keys go elsewhere. The bottom slot takes the keys with
-//! `C-w j` or a click (`bottom_key`: they scroll it; `q` closes it; Esc or `C-w k` back to the code; the
-//! terminal's: its view mode, `view.rs`).
+//! `C-w j` or a click: they're its panel's view mode (`view.rs` — `q` closes it, Esc or `C-w k` back to the
+//! code).
 
-use crate::key::{Code, Key};
 use crate::session::At;
 
 use std::path::{Path, PathBuf};
@@ -274,7 +273,7 @@ impl crate::editor::Editor {
             Region::Rail => crate::codereview::close_asked(self),
             Region::Slot(Slot::Plugin) => self.set_status("a plugin's panel closes by its own keys"),
             Region::Slot(s) => self.slot_close(s),
-            Region::View(crate::view::Surface::Terminal) => self.slot_close(Slot::Terminal),
+            Region::View(s) if let Some(slot) = s.slot() => self.slot_close(slot),
             Region::Chat | Region::Unfold | Region::View(crate::view::Surface::Chat) => {
                 self.set_status("C-w q closes panels — space L closes the chat")
             }
@@ -282,101 +281,6 @@ impl crate::editor::Editor {
         }
         true
     }
-}
-
-/// Keys while the bottom slot has them (test and task output — the terminal's are its view mode's, `view.rs`):
-/// the list panels' moves (`key::list_move`: `j`/`k` a line, `C-d`/`C-u` half the panel, `C-f`/`C-b` all of it,
-/// `g`/`G` the start/end), `tab`/`S-tab` its other tabs, `q` closes it (`slot_close`); Enter runs the user's run
-/// waiting there now, on the task panel `o` a preflight step's output and `K` where Claude's command ran; Esc back
-/// to the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
-/// may not be in sight). False = not the slot's.
-pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
-    if !ed.session.is_at(At::Slot)
-        || ed.mode != crate::editor::Mode::Normal
-        || !ed.pending.is_empty()
-        || ed.prompt.is_some()
-    {
-        return false;
-    }
-    let Some(slot) = ed.slot().filter(|s| matches!(s, Slot::Terminal | Slot::Test | Slot::Task)) else {
-        ed.session.leave(At::Slot);
-        return false;
-    };
-    if slot == Slot::Terminal {
-        return false;
-    }
-    let rows = ed.slot_rows(slot);
-    let by = match (key.code, key.ctrl) {
-        (Code::Char(' ' | ':' | '[' | ']'), false) | (Code::Char('w'), true) => return false,
-        // The slot's other tabs
-        (Code::Tab, false) => {
-            ed.slot_step(1);
-            return true;
-        }
-        (Code::BackTab, _) => {
-            ed.slot_step(-1);
-            return true;
-        }
-        (Code::Esc, _) => {
-            ed.session.leave(At::Slot);
-            return true;
-        }
-        (Code::Char('q'), false) => {
-            ed.slot_close(slot);
-            return true;
-        }
-        // A preflight's step output, whole, in a buffer (#126)
-        (Code::Char('o'), false) if slot == Slot::Task => {
-            if let Err(e) = ed.preflight_output("") {
-                ed.set_status(e);
-            }
-            return true;
-        }
-        // Where Claude's command in it ran, and why — from its run's record (cardburden 4b)
-        (Code::Char('K'), false) if slot == Slot::Task => {
-            let ran = ed
-                .session
-                .task_run
-                .as_ref()
-                .and_then(|r| Some((crate::task::traced(&r.task.cmd), r.ran.clone()?)));
-            match ran {
-                Some((cmd, ran)) => crate::chat::say_ran(ed, &cmd, &ran),
-                None => ed.set_status("K says where a command of Claude's ran — this run isn't one"),
-            }
-            return true;
-        }
-        // The user's own run waiting behind Claude's: now, Claude's stopping (`queued.rs`)
-        (Code::Enter, false) => {
-            let which =
-                if slot == Slot::Test { crate::queued::Slot::Tests } else { crate::queued::Slot::Task };
-            crate::queued::run_now(ed, which);
-            return true;
-        }
-        _ if let Some(m) = crate::key::list_move(key, rows) => match m {
-            // (an output has no selection: its view is what moves)
-            crate::key::ListMove::By(by) | crate::key::ListMove::Scroll(by) => by,
-            crate::key::ListMove::First => isize::MIN / 2,
-            crate::key::ListMove::Last => isize::MAX / 2,
-        },
-        _ => {
-            let place = if slot == Slot::Test { "the test panel" } else { "the task panel" };
-            ed.key_unused(key, place, "esc code");
-            return true;
-        }
-    };
-    match slot {
-        Slot::Test => {
-            if let Some(r) = ed.session.test_run.as_mut() {
-                r.scroll_by(by, rows);
-            }
-        }
-        _ => {
-            if let Some(r) = ed.session.task_run.as_mut() {
-                r.scroll_by(by, rows);
-            }
-        }
-    }
-    true
 }
 
 impl crate::editor::Editor {
@@ -590,18 +494,6 @@ impl crate::editor::Editor {
         }
     }
 
-    /// The rows of output the slot's panel showed last frame (before one: 10).
-    pub(crate) fn slot_rows(&self, slot: Slot) -> usize {
-        let s = &self.screen;
-        match slot {
-            Slot::Test => s.test_panel.get().map(|p| p.2),
-            Slot::Task => s.task_panel.get().map(|p| p.2),
-            _ => s.terminal_size.get().map(|(r, _)| r as usize),
-        }
-        .unwrap_or(10)
-        .max(1)
-    }
-
     /// Whether the bottom slot has the keys — tarae's (`At::Slot`), or the terminal's program, or a
     /// plugin panel's.
     pub fn bottom_has_keys(&self) -> bool {
@@ -732,6 +624,7 @@ mod tests {
         let dir = crate::scratch::Scratch::new("keys-gone");
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.path().to_path_buf();
+        use crate::key::{Code, Key};
         let key = |ed: &mut crate::editor::Editor| ed.handle_key(Key::plain(Code::Char('l')));
         ed.session.chat = Some(crate::chat::Chat::new());
         ed.session.at = At::Chat;
@@ -758,25 +651,24 @@ mod tests {
         assert_eq!(ed.session.at, At::Code, "nothing in the slot takes them");
     }
 
-    /// cardburden 4b: `K` in the task panel says where Claude's command in it ran and why — its run's record,
-    /// as a click on its chat row's mark does; its hint on the panel's header. A run that isn't Claude's says
-    /// so. (The run is the test's own `sleep`, stopped at the end.)
+    /// cardburden 4b: `K` in the task panel's view mode says where Claude's command in it ran and why — its
+    /// run's record, as a click on its chat row's mark does; its hint on the panel's header. A run that isn't
+    /// Claude's says so. (The run is the test's own `sleep`, stopped at the end.)
     #[test]
     fn k_in_the_task_panel_says_where_claudes_command_ran() {
-        let dir = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-k-ran-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("k-ran");
+        let dir = std::fs::canonicalize(scratch.path()).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
         let task = crate::task::Task { name: "t".into(), cmd: "sleep 30".into(), cwd: dir.clone() };
         assert!(
             ed.task_start_for(task, crate::tools::For::User("t".into()), None, Default::default()).is_ok()
         );
-        ed.session.at = crate::session::At::Slot;
-        let k: Key = "K".parse().unwrap();
+        ed.bottom_take_keys();
+        let k: crate::key::Key = "K".parse().unwrap();
         let said = |ed: &crate::editor::Editor| ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
-        assert!(bottom_key(&mut ed, k));
+        ed.handle_key(k);
+        assert_eq!(crate::uistate::TOOK.get(), Some(crate::uistate::Handler::RunView));
         assert!(said(&ed).contains("this run isn't one"), "{}", said(&ed));
         let r = ed.session.task_run.as_mut().unwrap();
         r.by_claude = true;
@@ -786,13 +678,12 @@ mod tests {
         let mut parser = vt100::Parser::new(30, 140, 0);
         parser.process(&bytes);
         assert!(parser.screen().contents().contains("K where it ran"), "its hint");
-        assert!(bottom_key(&mut ed, k));
+        ed.handle_key(k);
         assert_eq!(
             said(&ed),
             "sleep 30 — ran outside\nOutside the sandbox, with all your permissions — said yes to. From card#7."
         );
         ed.session.task_run = None;
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Automatic: the chat 2/5 up to 96 (U3); at 140 with the side panel, the chat narrows so the code keeps

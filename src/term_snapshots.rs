@@ -5962,7 +5962,7 @@ fn the_panels_follow_one_set_of_rules() {
     s.keys("<esc><C-w>e");
     assert_eq!(keys(&mut s), (vec![true, false, false, false], "● files".into()), "the side panel");
     s.keys("<esc><C-w>j");
-    assert_eq!(keys(&mut s), (vec![false, false, false, true], "● task".into()), "the bottom slot");
+    assert_eq!(keys(&mut s), (vec![false, false, false, true], "● view · task".into()), "the bottom slot");
     // …and what hasn't them, faded: the chat's title, the code's file name (the slot has the keys)
     let ui = Ui::new(&s.ed);
     let p = cells(&s.frame(), w, h);

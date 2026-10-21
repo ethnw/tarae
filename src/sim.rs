@@ -38,6 +38,7 @@ mod quota;
 mod quotes;
 mod rebasemsg;
 mod reviews;
+mod runview;
 mod sessions;
 mod shuttle;
 mod stuckstop;

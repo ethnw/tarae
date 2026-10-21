@@ -296,7 +296,7 @@ fn push_at(ed: &mut Editor, mut what: What, front: bool, trace: Option<crate::tr
     let next = Next { id: trace.id(), what, queued, trace };
     let line = &mut ed.session.runs_next;
     if users {
-        line.retain(|n| !(n.what.slot() == slot && matches!(n.what, What::Task(_) | What::Tests(_))));
+        line.retain(|n| !mine(n, slot));
     }
     let at = match (users, front) {
         (true, _) => line.iter().position(|n| !n.what.users()).unwrap_or(line.len()),
@@ -365,15 +365,20 @@ pub fn started(ed: &mut Editor, slot: Slot, name: &str) {
     }
 }
 
+/// The user's own run waiting in `slot`'s line — not Claude's (what `enter` on its panel's view runs now).
+fn mine(n: &Next, slot: Slot) -> bool {
+    n.what.slot() == slot && matches!(n.what, What::Task(_) | What::Tests(_))
+}
+
+/// The user's own run waits in `slot`'s line (`enter run now` on its panel's view).
+pub fn mine_waits(ed: &Editor, slot: Slot) -> bool {
+    ed.session.runs_next.iter().any(|n| mine(n, slot))
+}
+
 /// `enter` in the panel: the user's own run waiting in `slot` starts now — Claude's under way stops. False:
 /// none of theirs waits there.
 pub fn run_now(ed: &mut Editor, slot: Slot) -> bool {
-    let Some(i) = ed
-        .session
-        .runs_next
-        .iter()
-        .position(|n| n.what.slot() == slot && matches!(n.what, What::Task(_) | What::Tests(_)))
-    else {
+    let Some(i) = ed.session.runs_next.iter().position(|n| mine(n, slot)) else {
         return false;
     };
     match ed.session.runs_next.remove(i).map(|n| (n.what, n.trace)) {

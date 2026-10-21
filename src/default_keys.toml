@@ -371,6 +371,13 @@ esc = "view_leave"
 # (as tmux's copy mode and less: `q` out too)
 q = "view_leave"
 
+# `space` in view mode: what it has of the editor's menu there — the rest acts on the code, out of sight
+[view.space]
+">" = "quote"
+l = "chat_open"
+I = "inbox"
+"?" = "command_palette"
+
 # The terminal: its view mode's own on top of [view] — `C-\` (the round: code → program → view → code, a selection
 # or not), the
 # slot's other tabs, `q` hides the panel (the shell runs on) as every output panel's `q` closes it
@@ -378,6 +385,19 @@ q = "view_leave"
 "C-\\" = "view_code"
 tab = "slot_next"
 S-tab = "slot_prev"
+q = "wclose"
+
+# The run panels — the task's output, a preflight's, the tests' detail: their view mode's own on top of [view] —
+# the slot's other tabs, where Claude's command ran, a preflight step's whole output, `q` closes the panel once its
+# run has ended (`enter` with nothing selected runs your run waiting behind, else goes to the chat's input)
+[view.run]
+tab = "slot_next"
+S-tab = "slot_prev"
+# (a row, as on every output panel — the chat's view keeps its `C-y`, its last code block)
+C-e = "scroll_down"
+C-y = "scroll_up"
+K = "run_where"
+o = "preflight_output"
 q = "wclose"
 
 # The chat's input: what its keys run before they're typed

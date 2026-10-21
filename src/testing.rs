@@ -394,6 +394,14 @@ impl TestRun {
         }
     }
 
+    /// Scrolled to the detail's line `at` at the top — a failure's message stays where it's put; at the output's
+    /// end it follows the output again (a view mode left there — `view::leave`).
+    pub fn scroll_to(&mut self, at: usize, rows: usize) {
+        let max = self.detail_len().saturating_sub(rows);
+        let at = at.min(max);
+        self.scroll = (self.picked().is_some() || at < max).then_some(at);
+    }
+
     /// The wheel over the pane: `by` lines down (up when negative). Back at the output's end, it follows
     /// the output again.
     pub fn scroll_by(&mut self, by: isize, rows: usize) {

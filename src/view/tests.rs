@@ -291,13 +291,14 @@ fn moves_and_selections_run_on_the_transcript_never_the_code() {
     assert_eq!(ed.doc().text.to_string(), "fn main() {}\nlet code = 1;\n");
 }
 
-/// What view mode has no use for — an edit, the space menu, `:` — is said, the transcript as it was.
+/// What view mode has no use for — an edit, the space menu's acts on the code (`space x` — view mode's own
+/// `space` has only what it has of them), `:` — is said, the transcript as it was.
 #[test]
 fn an_edit_or_a_menu_is_said_not_done() {
     let mut ed = editor();
     feed(&mut ed, "<esc>");
     let text = view(&ed).doc().text.to_string();
-    for k in ["d", " ", ":", "p", "u", "o"] {
+    for k in ["d", "<space>x", ":", "p", "u", "o"] {
         ed.status = None;
         feed(&mut ed, k);
         let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
