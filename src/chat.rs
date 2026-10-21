@@ -362,9 +362,6 @@ pub struct Chat {
     pub unfolded: bool,
     /// Claude's edits waiting for (or in) their review.
     pub edits: crate::edits::Edits,
-    /// No sandbox on this system, and the user agreed (`a` on its card) to run Claude's commands without
-    /// one for this conversation (`sandbox.rs`).
-    pub unprotected: bool,
     /// What the user allowed for this conversation (`a` on a card — `allow.rs`) · Claude's reads waiting
     /// for their card (`reads.rs`).
     pub allowed: crate::allow::Allowed,
@@ -599,7 +596,6 @@ impl Chat {
             started_new: false,
             unfolded: false,
             edits: Default::default(),
-            unprotected: false,
             allowed: Default::default(),
             reads: Default::default(),
             read_once: Vec::new(),
@@ -1052,7 +1048,6 @@ pub fn reset(ed: &mut Editor) {
     }
     c.msgs.clear();
     c.plan = None;
-    c.unprotected = false;
     c.allowed = Default::default();
     c.state = State::Idle;
     c.scroll = 0;
@@ -1103,6 +1098,30 @@ pub(crate) fn settings_restart(ed: &mut Editor, why: &str, stop: bool) {
     }
 }
 
+/// Its claude started again as things hold now (the key card's `y` — `envkey.rs`), said in the chat — the
+/// conversation resumed when there is one — and `message`, the one that failed, sent again (its row goes: it's
+/// sent anew, before a message queued since).
+pub(crate) fn start_again(ed: &mut Editor, message: Option<String>, said: &str) {
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    c.kill();
+    if let Some(id) = c.conversation.clone() {
+        c.resume = Some(id);
+    }
+    let failed = message.filter(|_| !c.busy()).and_then(|q| {
+        let at = c.msgs.iter().rposition(|m| m.role == Role::User && m.text == q)?;
+        Some(c.msgs.remove(at).text)
+    });
+    if let Some(q) = failed {
+        c.queued = Some(match c.queued.take() {
+            Some(later) => format!("{q}\n\n{later}"),
+            None => q,
+        });
+    }
+    c.note(said);
+    ensure_proc(ed);
+    send_queued(ed);
+}
+
 /// The turn is over — its end, or the exit of a claude stopped mid-turn: the restart that waited for it
 /// (`Gate.again`), the conversation resumed. Whether one started.
 fn settings_again(ed: &mut Editor) -> bool {
@@ -1117,7 +1136,8 @@ fn settings_again(ed: &mut Editor) -> bool {
 }
 
 fn ensure_proc(ed: &mut Editor) {
-    let cfg = ed.config.llm.clone();
+    // (a key passed on until the session ends — the key card's `y`, `envkey.rs`)
+    let cfg = llm::LlmConfig { keep_env_key: llm::keeps_key(ed), ..ed.config.llm.clone() };
     let tx = ed.events.sender();
     let Some(c) = &mut ed.session.chat else { return };
     if c.proc.is_some() {
@@ -1373,7 +1393,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         _ => None,
     };
     // (the credential claude says it runs on, against who pays for it — `billing.rs`)
-    let keep_key = ed.config.llm.keep_env_key;
+    let keep_key = llm::keeps_key(ed);
     let wrong = |c: &Chat, said: Option<&str>| {
         c.billing.and_then(|b| crate::billing::checked(b, keep_key, crate::billing::Role::Chat, said))
     };
@@ -1657,6 +1677,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                     }
                 }
             }
+            // (a key held back: the card asks whether Claude takes it)
+            if login_hint.is_some() {
+                crate::envkey::ask(ed);
+            }
             crate::follow::on_done(ed);
             crate::edits::turn_over(ed);
             crate::tools::turn_over(ed);
@@ -1767,6 +1791,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             // (a turn cut off: what its requests reported, no cost)
             ed.session.usage.cut_off(crate::usage::now_ms());
             crate::usage::watch(ed);
+            if login_hint.is_some() {
+                crate::envkey::ask(ed);
+            }
             // A review (or a command's card) claude was waiting on has no one to answer now
             crate::edits::turn_over(ed);
             crate::tools::turn_over(ed);

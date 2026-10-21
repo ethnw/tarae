@@ -453,7 +453,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.environment-key",
         kind: Kind::Enum(&["drop", "keep"]),
-        doc: "Claude: an ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in tarae's environment — \"drop\": Claude runs on your Claude Code login; \"keep\": passed on, for a login by key alone or a gateway (ANTHROPIC_BASE_URL with its token). Inside a Claude Code session always dropped (the host's). Only your own config sets it",
+        doc: "Claude: an ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in tarae's environment — \"drop\": Claude runs on your Claude Code login; \"keep\": passed on, for a login by key alone or a gateway (ANTHROPIC_BASE_URL with its token). When Claude isn't logged in and a key was dropped, a card offers it for the session, or A writes \"keep\" here. Inside a Claude Code session always dropped (the host's). Only your own config sets it",
         get: |c| Value::from(if c.llm.keep_env_key { "keep" } else { "drop" }),
         set: |c, v| c.llm.keep_env_key = s(v) == "keep",
     },

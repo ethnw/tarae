@@ -355,7 +355,11 @@ mod tests {
     /// The keys of cards, reviews and panels (`offer.rs`, `llm::review_key`, `codereview.rs`, the task
     /// panel) — where, which, what.
     const ON_SCREEN: &[(&str, &str, &str)] = &[
-        ("A card", "`y` `n`", "Yes · no (some take `a` this chat, `A` always); Esc never answers one"),
+        (
+            "A card",
+            "`y` `n`",
+            "Yes · no (some take `a` this chat, `s` this session, `A` always); Esc never answers one",
+        ),
         (
             "A card",
             "`C-q`",

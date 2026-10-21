@@ -49,6 +49,7 @@ mod editor;
 mod edits;
 mod edittool;
 mod ended;
+mod envkey;
 mod event;
 mod features;
 mod fetch;

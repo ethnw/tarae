@@ -1487,6 +1487,20 @@ pub(crate) fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Strin
     if outside.is_none() && sandboxed_here(ed) {
         return in_sandbox(ed, call, cmd.to_string(), cwd);
     }
+    // (none, or a partial one: the session's card at its first run — asked at its turn in line, so one at a
+    // time — and none runs after its `n`)
+    if outside.is_none()
+        && let Some(kind) = unsandboxed_kind(ed)
+    {
+        match ed.session.no_sandbox {
+            None => {
+                guarded(ed, call, Job::Command(cmd.to_string(), cwd), false);
+                return Ok(());
+            }
+            Some(NoSandbox::Never) => return Err(never_ran(&kind)),
+            Some(_) => {}
+        }
+    }
     // This exact command, allowed for the chat on its card (`a` — #193): its filters may differ, Docker's
     // socket rides with it when that was its card's. Where it reads, and whether a script it runs is as it
     // was allowed, are looked at as for any read — anything off and it's the card.
@@ -2923,7 +2937,7 @@ fn sandbox_look(ed: &mut Editor) {
 
 /// Runs Claude's `job` the way `sandbox.rs` says: in the sandbox (the policy made on a worker — the
 /// toolchain's folders are asked there), or, where there's none, once the user agrees: on its own card, for
-/// this conversation (`Chat.unprotected`), or already (`asked`: the command's card said so).
+/// this session (`Session.no_sandbox`), or already (`asked`: the command's card said so).
 fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
     guard_and_go(ed, For::Claude(call), job, asked, Extra::default());
 }
@@ -3023,16 +3037,23 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             {
                 return crate::queued::run_next(ed);
             }
-            let agreed = ride.unprotected || ed.session.chat.as_ref().is_some_and(|c| c.unprotected);
+            let agreed = ride.unprotected || ed.session.no_sandbox == Some(NoSandbox::Unasked);
+            let never = !ride.unprotected && ed.session.no_sandbox == Some(NoSandbox::Never);
             let policy = match policy {
                 Some(Err(why)) => return not_started(ed, who, ride.joined, why),
                 p => p.and_then(Result::ok),
             };
             match (policy, found, who) {
+                (Some(_), Availability::Partial(why), For::Claude(call)) if never => {
+                    fail(ed, For::Claude(call), ride.joined, never_ran(&Unsandboxed::Partial(why)))
+                }
                 (Some(_), Availability::Partial(why), For::Claude(call)) if !agreed => {
                     ask_unprotected(ed, call, job, Unsandboxed::Partial(why), ride)
                 }
                 (Some(p), _, who) => go(ed, who, job, Some(Guard::In(Box::new(p))), ride),
+                (None, Availability::Missing(why), For::Claude(call)) if never => {
+                    fail(ed, For::Claude(call), ride.joined, never_ran(&Unsandboxed::Missing(why)))
+                }
                 (None, Availability::Missing(why), For::Claude(call)) if !agreed => {
                     ask_unprotected(ed, call, job, Unsandboxed::Missing(why), ride)
                 }
@@ -3166,83 +3187,147 @@ pub enum Unsandboxed {
     Partial(String),
 }
 
-/// Claude's command waits for the user (`kind` says why) — `y` this once, `a` for this conversation, `n` no.
+/// What you said on the session's no-sandbox card (Q6) — held until the session ends, never kept past a
+/// restart (`Session.no_sandbox`): `y` ask before each run · `s` checks and reads run unasked (what would ask
+/// anyway still does — its run card) · `n` none runs, Claude told once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoSandbox {
+    Ask,
+    Unasked,
+    Never,
+}
+
+/// No sandbox for Claude's commands here, or a partial one (why) — with `llm.sandbox` on: off is yours.
+fn unsandboxed_kind(ed: &Editor) -> Option<Unsandboxed> {
+    match &ed.sandbox {
+        _ if !ed.config.llm.sandbox => None,
+        Availability::Missing(why) => Some(Unsandboxed::Missing(why.clone())),
+        Availability::Partial(why) => Some(Unsandboxed::Partial(why.clone())),
+        _ => None,
+    }
+}
+
+/// What Claude hears of a run after the session's `n` — the first refusal said why (`unprotected_answer`).
+fn never_ran(kind: &Unsandboxed) -> String {
+    match kind {
+        Unsandboxed::Missing(_) => {
+            "Not run: there's no sandbox here, and the user chose to run none of your commands without one \
+             this session"
+        }
+        Unsandboxed::Partial(_) => {
+            "Not run: the sandbox here goes only so far, and the user chose to run none of your commands in \
+             it this session"
+        }
+    }
+    .into()
+}
+
+/// Claude's command waits for the user (`kind` says why). The session's first such card (`first`) asks how
+/// its runs go until it ends — `y` ask each time, `s` unasked, `n` none; a later one (after `y`) asks for
+/// this run — `y` it runs, `s` the rest unasked too, `n` not this one.
 fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, kind: Unsandboxed, ride: Ride) {
     use crate::cards::{Past, Request, Why};
     let label = job.label();
-    let (title, question, why, request) = match &kind {
+    // (one asking for the session at a time: a test run's card beside a command's asks for its run)
+    let first = ed.session.no_sandbox.is_none()
+        && !ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::NoSandbox { first: true, .. }));
+    let (title, there) = match &kind {
         Unsandboxed::Missing(why) => (
             NO_SANDBOX_TITLE,
             format!(
-                "{label}\n\nThere's none here ({why}) — it would run with all your permissions: your files, your \
-                 network."
+                "There's no sandbox here ({why}) — it runs with all your permissions: your files, your network."
             ),
-            Why::NoSandbox,
-            Request::Run { past: Past::No, sandboxed: false, reads: Vec::new(), outward: false },
         ),
         Unsandboxed::Partial(why) => (
             PARTIAL_SANDBOX_TITLE,
-            format!("{label}\n\nThe sandbox here goes only so far: {why}. It runs in it as far as it goes."),
-            Why::NoSandbox,
-            Request::Run { past: Past::No, sandboxed: false, reads: Vec::new(), outward: false },
+            format!("The sandbox here goes only so far ({why}) — it runs in it as far as it goes."),
         ),
+    };
+    let question = match first {
+        true => format!(
+            "{label}\n\n{there}\n\nAsked once until this session ends, in every chat: y runs this one and asks before \
+             each next · s runs checks and reads unasked (the rest still ask) · n runs none."
+        ),
+        false => format!("{label}\n\n{there}"),
     };
     call.step("no-sandbox card up");
     let (cmd, cwd) = match &job {
         Job::Command(cmd, cwd) => (cmd.clone(), cwd.clone()),
         _ => (label.clone(), ed.session.root.clone()),
     };
-    let asked = crate::cards::Asked::new(why, request).ran(call.run_id(), &cmd, &cwd, &ed.session.root);
-    let what = crate::offer::What::NoSandbox { job, call, ride: Box::new(ride), kind };
+    let request = Request::Run { past: Past::No, sandboxed: false, reads: Vec::new(), outward: false };
+    let asked =
+        crate::cards::Asked::new(Why::NoSandbox, request).ran(call.run_id(), &cmd, &cwd, &ed.session.root);
+    let what = crate::offer::What::NoSandbox { job, call, ride: Box::new(ride), kind, first };
     let o = crate::offer::Offer::new(title.into(), &question, "", String::new(), what);
     ed.push_offer(o.asked(asked));
 }
 
-/// The answer on that card: `y` runs it — without a sandbox, or in the partial one — `a` too, and the rest
-/// of this conversation's, `n` tells Claude no (and the calls that joined it).
+/// The answer on that card: `y` runs it — without a sandbox, or in the partial one — `s` too, and the rest
+/// of the session's checks and reads unasked, `n` tells Claude no (and the calls that joined it). On the
+/// session's first card it's how its runs go until it ends (`Session.no_sandbox`).
 pub fn unprotected_answer(
     ed: &mut Editor,
     id: u64,
-    (job, call, ride, kind): (Job, Call, Ride, Unsandboxed),
+    (job, call, ride, kind, first): (Job, Call, Ride, Unsandboxed, bool),
     answer_is: Unprotected,
 ) {
     ed.offer_finished(id, Ok(()));
+    match (first, answer_is) {
+        (_, Unprotected::ThisSession) => ed.session.no_sandbox = Some(NoSandbox::Unasked),
+        (true, Unprotected::Once) => ed.session.no_sandbox = Some(NoSandbox::Ask),
+        (true, Unprotected::No) => ed.session.no_sandbox = Some(NoSandbox::Never),
+        (false, _) => {}
+    }
     if answer_is != Unprotected::No {
         call.step("answered yes");
     }
     if answer_is == Unprotected::No {
-        let e = match &kind {
-            Unsandboxed::Missing(why) => format!(
+        // (told once why none runs; each later one hears `never_ran`)
+        let e = match (&kind, first) {
+            (Unsandboxed::Missing(why), true) => format!(
+                "There's no sandbox on this system ({why}), and the user chose to run none of your commands \
+                 without one until this session ends — don't try others; ask them how to go on"
+            ),
+            (Unsandboxed::Partial(why), true) => format!(
+                "The sandbox here goes only so far ({why}), and the user chose to run none of your commands in \
+                 it until this session ends — don't try others; ask them how to go on"
+            ),
+            (Unsandboxed::Missing(why), false) => format!(
                 "There's no sandbox on this system ({why}), and the user chose not to run `{}` without one — \
                  ask them how to go on",
                 job.label()
             ),
-            Unsandboxed::Partial(why) => format!(
+            (Unsandboxed::Partial(why), false) => format!(
                 "The sandbox here goes only so far ({why}), and the user chose not to run `{}` in it — ask them \
                  how to go on",
                 job.label()
             ),
         };
+        if first {
+            ed.set_status("Claude's commands don't run until this session ends");
+        }
         for c in std::iter::once(call).chain(ride.joined.into_iter().map(|j| j.call)) {
             answer(ed, c, Err(e.clone()));
         }
         return crate::queued::run_next(ed);
     }
-    let chat = answer_is == Unprotected::ThisChat;
-    if chat && let Some(c) = ed.session.chat.as_mut() {
-        c.unprotected = true;
-    }
+    let session = answer_is == Unprotected::ThisSession;
     match kind {
         Unsandboxed::Missing(why) => {
-            if chat {
-                ed.set_warning("Claude's commands run without a sandbox in this conversation");
+            if session {
+                ed.set_warning(
+                    "Claude's checks and reads run without a sandbox, unasked, until this session ends",
+                );
             }
             go(ed, For::Claude(call), job, Some(Guard::Without(why)), ride)
         }
         // (in the sandbox: made again for it, now agreed)
         Unsandboxed::Partial(_) => {
-            if chat {
-                ed.set_warning("Claude's commands run in the partial sandbox unasked in this conversation");
+            if session {
+                ed.set_warning(
+                    "Claude's checks and reads run in the partial sandbox unasked until this session ends",
+                );
             }
             guard_then_go(ed, For::Claude(call), job, Ride { unprotected: true, ..ride })
         }
@@ -3467,15 +3552,15 @@ pub fn made_view(ed: &mut Editor) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unprotected {
     Once,
-    ThisChat,
+    ThisSession,
     No,
 }
 
 /// Whether Claude's commands run without a sandbox now — the chat's title says so (a partial one agreed
-/// for the conversation is still a sandbox).
+/// for the session is still a sandbox).
 pub fn unsandboxed(ed: &Editor) -> bool {
     let partial = matches!(ed.sandbox, Availability::Partial(_));
-    !ed.config.llm.sandbox || ed.session.chat.as_ref().is_some_and(|c| c.unprotected && !partial)
+    !ed.config.llm.sandbox || (ed.session.no_sandbox == Some(NoSandbox::Unasked) && !partial)
 }
 
 /// The command Claude ran ended — how, and its output, go back; the editor shows the first error. One the
@@ -5445,7 +5530,7 @@ mod tests {
         crate::chat::open(&mut ed);
         let c = ed.session.chat.as_mut().unwrap();
         c.state = crate::chat::State::Thinking;
-        c.unprotected = true;
+        ed.session.no_sandbox = Some(super::NoSandbox::Unasked);
         ed.sandbox = crate::sandbox::Availability::Unknown;
         let q = decided(&mut ed, json!({ "command": format!("touch {}", dir.join("made").display()) }));
         assert!(q.is_some(), "today's gate: its card");

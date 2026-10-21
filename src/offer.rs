@@ -126,13 +126,16 @@ pub enum What {
     /// `unprotected` = the card said there's no sandbox (`sandbox.rs`).
     /// `reads` = places outside the project a read-only command reads — `a`/`A` allow them for longer too.
     Run(Box<crate::tools::RunCard>),
-    /// No sandbox on this system (`tools.rs`): `y` runs Claude's command anyway, `a` does for the rest of
-    /// the conversation, `n` tells Claude no. `ride`: what goes along to the run (`queued.rs`).
+    /// No sandbox on this system, or a partial one (`tools.rs`): `y` runs Claude's command anyway, `s` its
+    /// checks and reads unasked until the session ends, `n` tells Claude no. `first`: the session's card —
+    /// its answer holds for the session's runs (`y` ask each time, `n` none — `Session.no_sandbox`).
+    /// `ride`: what goes along to the run (`queued.rs`).
     NoSandbox {
         job: crate::tools::Job,
         call: crate::tools::Call,
         ride: Box<crate::queued::Ride>,
         kind: crate::tools::Unsandboxed,
+        first: bool,
     },
     /// Claude's last run made protected names where none was (`made` — what Landlock can't refuse,
     /// `tools::ask_made`), before what runs next there (`then`: Claude's run, your task or preflight): `y`
@@ -244,6 +247,10 @@ pub enum What {
     Limit(Box<crate::billing::LimitAsk>),
     /// `:features-reset` (`features.rs`): `y` empties the feature counts · `n` keeps them.
     FeaturesReset,
+    /// The chat's claude has no login and tarae held a key of its environment back (`envkey.rs`): `y` Claude
+    /// takes it until session `session` ends — `message`, the one that failed, goes again · `A` always (your
+    /// config) · `n` not asked again this session.
+    EnvKey { session: crate::event::SessionId, message: Option<String> },
 }
 
 /// Every card's kind (`Offer::kind`) — what `:features` lists, so a card never asked shows as 0
@@ -291,6 +298,7 @@ pub const KINDS: &[&str] = &[
     "lookup",
     "containers",
     "billing-switch",
+    "environment-key",
     "limit",
     "features-reset",
 ];
@@ -361,6 +369,8 @@ impl What {
             | What::Lookup(_)
             // (about a conversation's cache as it was — `$` asks again, a refusal comes again)
             | What::BillingSwitch { .. }
+            // (the chat after a restart fails again, and asks again: the answer isn't kept)
+            | What::EnvKey { .. }
             | What::Limit(_) => Lost,
         }
     }
@@ -591,6 +601,7 @@ impl Offer {
                 | What::NotesStale { .. }
                 // (its yes spends your credits)
                 | What::BillingSwitch { .. }
+                | What::EnvKey { .. }
                 | What::Limit(_)
         )
     }
@@ -617,7 +628,9 @@ impl Offer {
     /// Whether `s` answers it — for this session: a host's card, or a card that grants what may be kept that
     /// long (`top`).
     pub fn for_session(&self) -> bool {
-        self.host().is_some() || self.top() >= Some(crate::allow::Scope::Session)
+        self.host().is_some()
+            || self.top() >= Some(crate::allow::Scope::Session)
+            || matches!(self.what, What::NoSandbox { .. })
     }
 
     /// For a card that grants (what the sandbox blocked, a read outside the project, a run reading there): the
@@ -746,7 +759,7 @@ impl Offer {
             // (a host lasts for the session, `s` — never the conversation's)
             What::Grant { grant: crate::allow::Grant::Host(..), .. } => false,
             What::Grant { .. } => self.top() >= Some(crate::allow::Scope::ThisChat),
-            What::NoSandbox { .. } | What::Read { keep: true, .. } | What::Screen { .. } => true,
+            What::Read { keep: true, .. } | What::Screen { .. } => true,
             // (what it reads outside, this command again, or its socket for the rest of the chat)
             What::Run(r) => {
                 r.keep || r.again.is_some() || r.socket.as_deref().is_some_and(|s| !as_outside(s))
@@ -762,7 +775,7 @@ impl Offer {
             What::Run(r) => r.keep,
             // (a socket is this conversation's at most — #119)
             What::Grant { grant, .. } => grant.keepable(),
-            What::Host(_) => true,
+            What::Host(_) | What::EnvKey { .. } => true,
             _ => self.lasts() && matches!(self.what, What::Read { .. }),
         }
     }
@@ -868,7 +881,10 @@ impl Offer {
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
             W::ClaudeSettings { .. } => vec![('y', "Trust"), ('v', "Details"), ('n', "Hold back")],
             W::GitTrust(_) => vec![('y', "Let them run"), ('n', "Keep off")],
-            W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
+            W::NoSandbox { first: true, .. } => {
+                vec![('y', "Ask each time"), ('s', "This session"), ('n', "Don't run them")]
+            }
+            W::NoSandbox { .. } => vec![('y', "Run"), ('s', "This session"), ('n', "No")],
             W::ProtectedMade { .. } => {
                 vec![('y', "Keep, run"), ('r', "Remove, run"), ('v', "See them"), ('n', "No")]
             }
@@ -975,6 +991,7 @@ impl Offer {
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
             W::BillingSwitch { money: true, .. } => vec![('y', "This session"), ('n', "Stay")],
             W::BillingSwitch { .. } => vec![('y', "Switch"), ('n', "Keep it")],
+            W::EnvKey { .. } => vec![('y', "This session"), ('A', "Always"), ('n', "No")],
             W::Limit(_) if self.limit_all() => {
                 vec![('y', "This session"), ('a', "New sessions too"), ('n', "Wait")]
             }
@@ -1029,6 +1046,7 @@ impl Offer {
             W::Lookup(_) => "lookup",
             W::Containers(_) => "containers",
             W::BillingSwitch { .. } => "billing-switch",
+            W::EnvKey { .. } => "environment-key",
             W::Limit(_) => "limit",
             W::FeaturesReset => "features-reset",
         }
@@ -1271,6 +1289,12 @@ impl crate::editor::Editor {
                 self.offer_held(c)
             }
             Code::Char('s') if o.for_session() => self.offer_for_session(),
+            Code::Char('a' | 'A') if matches!(o.what, What::NoSandbox { .. }) => {
+                self.set_status("this card asks y, s or n")
+            }
+            Code::Char('a') if matches!(o.what, What::EnvKey { .. }) => {
+                self.set_status("this card asks y, A or n")
+            }
             Code::Char('a') if o.for_session() => self.set_status("this card asks y, s, A or n"),
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
@@ -1379,10 +1403,10 @@ impl crate::editor::Editor {
                 self.plugin_ask_answer(plugin, asks, true);
             }
             What::Run(card) => crate::tools::run_answer(self, id, *card, Some(crate::allow::Scope::Once)),
-            What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
+            What::NoSandbox { job, call, ride, kind, first } => crate::tools::unprotected_answer(
                 self,
                 id,
-                (job, call, *ride, kind),
+                (job, call, *ride, kind, first),
                 crate::tools::Unprotected::Once,
             ),
             What::ProtectedMade { then, made } => {
@@ -1450,6 +1474,9 @@ impl crate::editor::Editor {
             }
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
             What::BillingSwitch { session, to, .. } => self.switch_answer(id, session, to),
+            What::EnvKey { session, message } => {
+                crate::envkey::answer(self, id, (session, message), crate::envkey::Answer::Session)
+            }
             What::Limit(a) => self.limit_answer(id, *a, false),
             What::FeaturesReset => self.features_reset_answer(id, true),
         }
@@ -1501,6 +1528,12 @@ impl crate::editor::Editor {
                 crate::reads::answer(self, o.id, *pending, session, keep, folder)
             }
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, session),
+            What::NoSandbox { job, call, ride, kind, first } => crate::tools::unprotected_answer(
+                self,
+                o.id,
+                (job, call, *ride, kind, first),
+                crate::tools::Unprotected::ThisSession,
+            ),
             _ => {}
         }
     }
@@ -1893,12 +1926,6 @@ impl crate::editor::Editor {
         self.offer_said(&o, if scope == crate::allow::Scope::Always { 'A' } else { 'a' });
         self.card_answered(o.id);
         match o.what {
-            What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
-                self,
-                o.id,
-                (job, call, *ride, kind),
-                crate::tools::Unprotected::ThisChat,
-            ),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, o.id, *pending, Some(scope), keep, folder)
             }
@@ -1907,6 +1934,9 @@ impl crate::editor::Editor {
             What::Screen { call } => crate::seeing::answer(self, o.id, call, Some(scope)),
             What::Host(a) if scope == crate::allow::Scope::Always => {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Project)
+            }
+            What::EnvKey { session, message } if scope == crate::allow::Scope::Always => {
+                crate::envkey::answer(self, o.id, (session, message), crate::envkey::Answer::Always)
             }
             _ => {}
         }
@@ -1962,10 +1992,10 @@ impl crate::editor::Editor {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, None),
-            What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
+            What::NoSandbox { job, call, ride, kind, first } => crate::tools::unprotected_answer(
                 self,
                 o.id,
-                (job, call, *ride, kind),
+                (job, call, *ride, kind, first),
                 crate::tools::Unprotected::No,
             ),
             What::ProtectedMade { then, made } => {
@@ -2026,6 +2056,9 @@ impl crate::editor::Editor {
                     crate::billing::Billing::Subscription => "on your API key",
                 };
                 self.set_status(format!("{name} stays {stays}"));
+            }
+            What::EnvKey { session, message } => {
+                crate::envkey::answer(self, o.id, (session, message), crate::envkey::Answer::No)
             }
             What::Limit(a) => self.limit_wait(&a),
             What::FeaturesReset => self.features_reset_answer(o.id, false),

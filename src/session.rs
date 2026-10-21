@@ -156,6 +156,12 @@ pub struct Session {
     /// A commit's tree being written for a run of its Claude's (`basetree.rs`) — another such run waits for
     /// that one's answer: they'd write the same tree.
     pub base_writing: bool,
+    /// No sandbox here, or a partial one: what you said on its card for Claude's commands — asked at the
+    /// session's first run, held until it ends, never kept past a restart (`tools::NoSandbox`, Q6).
+    pub no_sandbox: Option<crate::tools::NoSandbox>,
+    /// The key card's answer (`envkey.rs`): `true` — its chat's claude takes a key from tarae's environment
+    /// until the session ends · `false` — not asked again. None: not asked. Never kept past a restart.
+    pub env_key: Option<bool>,
     /// The run cards of its Claude's answered until you quit — each the last for its run in its folder
     /// (`sinceyes::Answered`): the same run asked again says `Same as card#41 — y at 18:02` and what changed
     /// since in what it runs (cardburden 3).
@@ -320,6 +326,8 @@ impl Session {
             made_protected: Vec::new(),
             made_kept: Vec::new(),
             base_writing: false,
+            no_sandbox: None,
+            env_key: None,
             answered: Vec::new(),
             asking: Vec::new(),
             spawned: Vec::new(),

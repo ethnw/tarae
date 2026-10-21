@@ -430,7 +430,7 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 
 | Where | Key | What it does |
 |---|---|---|
-| A card | `y` `n` | Yes · no (some take `a` this chat, `A` always); Esc never answers one |
+| A card | `y` `n` | Yes · no (some take `a` this chat, `s` this session, `A` always); Esc never answers one |
 | A card | `C-q` | Give it the keys from wherever they are (the status line says CARD); Esc goes back, unanswered |
 | No card here | `C-q` | To the session whose Claude waits for you — its card comes up there; nothing waiting, to a session whose turn ended (`done`) |
 | A card cut to fit | `v` | All of it in a buffer — `y` waits until its end was on screen |

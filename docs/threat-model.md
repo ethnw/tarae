@@ -444,7 +444,7 @@ Not kept:
 | `llm.sandbox-network` | the internet through the proxy; every host unless `llm.sandbox-hosts` lists them |
 | `y` on a host card | that host for the run, session, or always |
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
-| `y`/`a` on a no-sandbox card | commands as you, unconfined |
+| `y`/`s` on a no-sandbox card | commands as you, unconfined — `s` its checks and reads unasked until the session ends, in every chat of it, never kept past a restart |
 | `llm.sandbox = false` | every command of Claude's as you, unconfined, **unasked** — only the chat's title says `› no sandbox` |
 | `llm.claude-sandbox = false` | the claude program itself as you, unconfined — on macOS the chat says so; on Linux it's the default (§2, G25); only your own config sets it |
 
@@ -456,9 +456,12 @@ test: `trust::tests::every_sandbox_setting_waits_for_trust`
 
 ### 1.12 When there's no sandbox
 
-No Seatbelt (inside another sandbox), Landlock missing or ABI 1: every command of Claude's asks first, saying why;
-`y` this one, `a` this conversation.
-test: `editor::tests::without_a_sandbox_claudes_commands_ask` · `sandbox::tests::a_run_outside_the_sandbox_says_it_had_no_user_namespace_where_refused`
+No Seatbelt (inside another sandbox), Landlock missing or ABI 1: Claude's first command in a session asks first,
+saying why, how the session's commands go until it ends — `y` ask before each, `s` checks and reads unasked in
+every chat of the session (what would ask anyway still asks), `n` none (Claude told once). What `s` gives is what
+`a` gave a conversation, spanning the session's chats; it's never kept: a restart asks again. A partial sandbox
+(Landlock ABI 2, G11) asks the same, in its own words, its commands still in it as far as it goes.
+test: `editor::tests::without_a_sandbox_the_session_asks_once` · `editor::tests::a_partial_sandbox_asks_once_a_session` · `sandbox::tests::a_run_outside_the_sandbox_says_it_had_no_user_namespace_where_refused`
 
 The exception is yours to make: **`llm.sandbox = false` turns the sandbox off without a card** — every command of
 Claude's then runs as you, unconfined, and only the chat's title (`› no sandbox`) and Claude's own report say so.

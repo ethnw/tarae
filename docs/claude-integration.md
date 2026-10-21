@@ -271,8 +271,12 @@ reviewer, `space i` and its spare — inherits tarae's environment with a few na
   `claude setup-token`'s `CLAUDE_CODE_OAUTH_TOKEN`). If you sign in only with a key — an API key alone, or a
   gateway's `ANTHROPIC_BASE_URL` with its `ANTHROPIC_AUTH_TOKEN` — set `llm.environment-key = "keep"` in your own
   config (`~/.config/tarae/config.toml`; a project's `.tarae.toml` or `.tarae.local.toml` is refused it, and
-  says so). When Claude fails for want of a login and a key was left out, the chat says which and names the
-  setting.
+  says so). When Claude fails for want of a login and a key was left out — in a session on your plan, tarae not
+  inside a Claude Code session — a card asks whether Claude takes it (the chat only points at it), saying its requests then bill that key's API account by the token: `y` until this session
+  ends (the chat's claude starts again with it, the conversation resumed, and the message that failed goes
+  again) · `A` always (`llm.environment-key = "keep"` written to your own config, never a project's) · `n`, not
+  asked again this session. Where there's no card (an API session, whose claude never takes a key from the
+  environment, or after `n`), the chat says which key was left out and names the setting.
 - What Claude Code sets in the processes it starts, always: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, its session
   id, entrypoint, effort, pid, `CLAUDE_PROJECT_DIR`, `CLAUDE_AGENT_SDK_VERSION`, `AI_AGENT`, the
   `CLAUDE_CODE_BRIDGE_*` and `CLAUDE_CODE_MESSAGING_*` families. Inherited, they're another session's, and Claude
@@ -989,9 +993,12 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   in `.git` (a write the sandbox would deny and report)
 - **Where there's no sandbox** (a Linux kernel without Landlock, a processor other than x86-64 or ARM64 on
   Linux, or tarae itself running inside another sandbox on macOS), Claude's commands don't
-  quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
-  commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.
-  `llm.sandbox = false` turns the sandbox off; the title says so too
+  quietly run without one. The session's first command brings one card that says there's none and asks how
+  Claude's commands go until the session ends, in every chat of it: `y` runs this one and asks before each
+  next (`y` runs it, `s` turns to the next answer, `n` not this one) · `s` runs checks and reads unasked (a
+  command that would ask anyway still has its own card) · `n` runs none, and Claude is told why once. The
+  answer is never kept: after a restart the first command asks again. While they run without one, the chat's
+  title says `› no sandbox`. `llm.sandbox = false` turns the sandbox off; the title says so too
 
 #### On Linux
 
@@ -1063,9 +1070,9 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 
   | Landlock ABI (Linux) | Claude's commands |
   |---|---|
-  | none (before 5.13, or left out of the boot's `lsm=`) | no sandbox: each command asks first (the card above) |
+  | none (before 5.13, or left out of the boot's `lsm=`) | no sandbox: the session's card first (the card above) |
   | 1 (5.13) | no sandbox, as with none, the card saying why: this version refuses every move or link across folders, which builds do all the time, so tarae doesn't use it |
-  | 2 (5.19) | a partial sandbox: truncating a file isn't controlled. Each command asks first, saying why — `y` this one, `a` this conversation (still in the sandbox), `n` |
+  | 2 (5.19) | a partial sandbox: truncating a file isn't controlled. The same card once a session, saying why — `y` ask each time, `s` unasked until the session ends (still in the sandbox), `n` none |
   | 3–4 (6.2) | the full sandbox, unasked, as on macOS. Device `ioctl`s aren't controlled |
   | 5 (6.10) | + device `ioctl`s controlled |
   | 6 (6.12) | + a command can't send a signal to a process outside its own (below 6, Claude's result says it could) |

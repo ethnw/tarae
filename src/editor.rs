@@ -7684,82 +7684,157 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// No sandbox on this system: a command of Claude's — a check too — doesn't run quietly without one. Its
-    /// card says so: `n` tells Claude, `y` runs it this once, `a` for the rest of the conversation (the
-    /// chat's title says so meanwhile); a command that asks anyway says it on its own card.
+    /// A turn in a fresh chat of `ed`'s session in which Claude runs `command` (`claude_calls`) — handled until
+    /// a card is up or the turn is over; the log of what claude was sent.
+    fn run_turn(ed: &mut Editor, dir: &Path, command: &str) -> std::path::PathBuf {
+        std::fs::remove_file(dir.join("stdin.log")).ok();
+        let log = claude_calls(ed, dir, "run", &serde_json::json!({ "command": command }));
+        crate::chat::close(ed);
+        feed(ed, "<space>ltouch it<ret>");
+        let answered = |ed: &Editor| {
+            ed.session.chat.as_ref().is_some_and(|c| !c.busy())
+                && std::fs::read_to_string(&log).is_ok_and(|s| s.contains("\"c7\""))
+        };
+        settle_for(ed, |ed| !ed.offers.is_empty() || answered(ed));
+        log
+    }
+
+    /// No sandbox on this system: a command of Claude's — a check too — doesn't run quietly without one. The
+    /// session's first run asks how its runs go until it ends, in every chat (Q6): `n` none (Claude told why
+    /// once, then a line each), `y` this one and a card before each next (where `s` turns it), `s` checks and
+    /// reads unasked (the chat's title says so) — a command that asks anyway still has its own card. A restart
+    /// asks again.
     #[test]
-    fn without_a_sandbox_claudes_commands_ask() {
+    fn without_a_sandbox_the_session_asks_once() {
+        use crate::offer::What;
         use crate::sandbox::Availability;
-        use serde_json::json;
-        let dir = std::env::temp_dir().join(format!("tarae-run-bare-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("run-bare");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         let made = dir.join("made");
         let command = format!("touch {}", made.display());
-        let start = |command: &str| {
-            std::fs::remove_file(dir.join("stdin.log")).ok();
+        let start = || {
             let mut ed = editor("");
             ed.sandbox = Availability::Missing("not on this system".into());
             ed.config.llm.run_allow = vec!["touch".into()];
-            let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
-            feed(&mut ed, "<space>ltouch it<ret>");
-            (ed, log)
+            ed
         };
-        // n: nothing ran, Claude hears why
-        let (mut ed, log) = start(&command);
-        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let first = |ed: &Editor| {
+            matches!(ed.offers.first().map(|o| &o.what), Some(What::NoSandbox { first: true, .. }))
+        };
+        // n: nothing runs this session, Claude hears why once — the next chat's run, a line, no card
+        let mut ed = start();
+        let log = run_turn(&mut ed, &dir, &command);
+        assert!(first(&ed) && ed.offers[0].weighty());
         let o = &ed.offers[0];
-        assert!(matches!(o.what, crate::offer::What::NoSandbox { .. }) && o.weighty());
         assert!(o.question.contains(&command) && o.question.contains("not on this system"), "{}", o.question);
+        assert_eq!(
+            o.answers(false),
+            vec![('y', "Ask each time"), ('s', "This session"), ('n', "Don't run them")]
+        );
         ed.offer_dismiss();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
-        assert!(answer.contains("chose not to run") && answer.contains("isError"), "{answer}");
+        assert!(answer.contains("run none of your commands") && answer.contains("isError"), "{answer}");
+        let log = run_turn(&mut ed, &dir, &command);
+        assert!(ed.offers.is_empty(), "one card a session");
+        assert!(tool_answer(&log).contains("Not run: there's no sandbox here"), "{}", tool_answer(&log));
         assert!(!made.exists() && ed.session.task_run.is_none());
-        // y: this once — and it says how it ran
-        let (mut ed, log) = start(&command);
-        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        // y: this one runs, and says how — the next chat's asks for its run (`n` there is that run's), and `s`
+        // on such a card holds for the rest
+        let mut ed = start();
+        let log = run_turn(&mut ed, &dir, &command);
         ed.offer_accept();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
-        assert!(made.exists());
-        let answer = tool_answer(&log);
-        assert!(answer.contains("Ran without a sandbox (not on this system)"), "{answer}");
-        assert!(!crate::tools::unsandboxed(&ed), "only this once");
+        assert!(made.exists() && tool_answer(&log).contains("Ran without a sandbox (not on this system)"));
+        assert!(!crate::tools::unsandboxed(&ed), "asked each time");
         std::fs::remove_file(&made).ok();
-        // a: for this conversation — the next one doesn't ask, and the title says so
-        let (mut ed, _) = start(&command);
-        settle_for(&mut ed, |ed| !ed.offers.is_empty());
-        ed.offer_for_chat();
+        let log = run_turn(&mut ed, &dir, &command);
+        assert!(matches!(ed.offers[0].what, What::NoSandbox { first: false, .. }), "its run's card");
+        assert_eq!(ed.offers[0].answers(false), vec![('y', "Run"), ('s', "This session"), ('n', "No")]);
+        ed.offer_dismiss();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("chose not to run `touch") && !made.exists());
+        run_turn(&mut ed, &dir, &command);
+        assert!(matches!(ed.offers[0].what, What::NoSandbox { first: false, .. }), "still asked");
+        ed.offer_for_session();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(made.exists() && crate::tools::unsandboxed(&ed));
+        std::fs::remove_file(&made).ok();
+        // s: unasked in the next chat too — and the title says so
+        let mut ed = start();
+        run_turn(&mut ed, &dir, &command);
+        assert!(first(&ed));
+        ed.offer_for_session();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(made.exists() && crate::tools::unsandboxed(&ed));
+        std::fs::remove_file(&made).ok();
+        let log = run_turn(&mut ed, &dir, &command);
+        assert!(ed.offers.is_empty() && made.exists(), "a new chat, no card: {}", tool_answer(&log));
         std::fs::remove_file(&made).ok();
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 150, 40).unwrap();
         let mut parser = vt100::Parser::new(40, 150, 0);
         parser.process(&bytes);
         assert!(parser.screen().contents().contains("› no sandbox"), "{}", parser.screen().contents());
-        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "run", "arguments": {"command": command}}});
-        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
-        ed.session.task_run = None;
-        let generation = ed.session.chat.as_ref().unwrap().generation();
-        assert!(crate::tools::mcp(&mut ed, generation, "c1", &msg).is_none());
-        settle_for(&mut ed, |ed| {
-            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
-        });
-        assert!(ed.offers.is_empty() && made.exists(), "agreed for the conversation: no card");
-        std::fs::remove_file(&made).ok();
         // A command that asks anyway: its own card says there's no sandbox, and `y` there is enough
         // (`;` and what isn't a check make it more than a check)
-        let (mut ed, _) = start(&format!("{command}; basename x"));
-        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        run_turn(&mut ed, &dir, &format!("{command}; basename x"));
         let o = &ed.offers[0];
-        assert!(matches!(&o.what, crate::offer::What::Run(r) if r.unprotected));
+        assert!(matches!(&o.what, What::Run(r) if r.unprotected));
         assert!(o.question.contains("No sandbox here (not on this system)"), "{}", o.question);
         ed.offer_accept();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(ed.offers.is_empty() && made.exists(), "one card, not two");
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&made).ok();
+        // Not past a restart: the tarae it restarts into asks again
+        let state = crate::restart::snapshot(&mut ed);
+        let mut back = start();
+        crate::restart::restore(&mut back, &state);
+        assert_eq!(back.session.no_sandbox, None, "never kept");
+        run_turn(&mut back, &dir, &command);
+        assert!(first(&back) && !made.exists(), "asked again");
+    }
+
+    /// A partial sandbox (Linux's Landlock ABI 2 — a stand-in here, any system) asks as none does, once a
+    /// session, in its own words: `n` none runs in it (Claude told once), `s` the rest unasked — still in the
+    /// sandbox as far as it goes, so the title doesn't say "no sandbox".
+    #[test]
+    fn a_partial_sandbox_asks_once_a_session() {
+        use crate::offer::What;
+        let scratch = crate::scratch::Scratch::new("run-partial-once");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let made = dir.join("made");
+        let command = format!("touch {}", made.display());
+        let why = "stand-in: this kernel's Landlock (ABI 2) can't control truncating files";
+        let start = || {
+            let mut ed = editor("");
+            ed.sandbox = crate::sandbox::Availability::Partial(why.into());
+            ed.config.llm.run_allow = vec!["touch".into()];
+            ed
+        };
+        let mut ed = start();
+        let log = run_turn(&mut ed, &dir, &command);
+        let o = &ed.offers[0];
+        assert!(matches!(o.what, What::NoSandbox { first: true, .. }), "{}", o.title);
+        assert_eq!(o.title, crate::tools::PARTIAL_SANDBOX_TITLE);
+        assert!(o.question.contains(why) && o.question.contains("goes only so far"), "{}", o.question);
+        ed.offer_dismiss();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("goes only so far") && tool_answer(&log).contains("run none"));
+        let log = run_turn(&mut ed, &dir, &command);
+        assert!(
+            ed.offers.is_empty() && tool_answer(&log).contains("Not run: the sandbox here goes only so far")
+        );
+        assert!(!made.exists());
+        // s: the next chat's run isn't asked (where it runs — the sandbox in a sandbox — isn't this test's)
+        let mut ed = start();
+        run_turn(&mut ed, &dir, &command);
+        ed.offer_for_session();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert_eq!(ed.session.no_sandbox, Some(crate::tools::NoSandbox::Unasked));
+        run_turn(&mut ed, &dir, &command);
+        assert!(ed.offers.is_empty(), "one card a session");
+        assert!(!crate::tools::unsandboxed(&ed), "agreed, and still sandboxed");
     }
 
     /// `llm.sandbox = false`: Claude's commands run without one, unasked — and the title and Claude's report
@@ -7959,9 +8034,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Landlock ABI 2 (a stand-in: this kernel's rules, the availability ABI 2 has): every run of Claude's
-    /// asks first, saying why — `n` tells Claude, `y` runs it in the sandbox, `a` for the rest of the
-    /// conversation (still sandboxed: the title doesn't say "no sandbox").
+    /// Landlock ABI 2 (a stand-in: this kernel's rules, the availability ABI 2 has): the session's first run
+    /// of Claude's asks first, saying why — `n` tells Claude, `y` runs it in the sandbox, `s` the rest of the
+    /// session's too (still sandboxed: the title doesn't say "no sandbox").
     #[cfg(target_os = "linux")]
     #[test]
     fn a_partial_sandbox_asks_each_run() {
@@ -7999,7 +8074,7 @@ mod tests {
         assert!(made.exists());
         assert!(tool_answer(&log).contains("In tarae's sandbox"), "{}", tool_answer(&log));
         let (mut ed, _) = start();
-        ed.offer_for_chat();
+        ed.offer_for_session();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(made.exists() && !crate::tools::unsandboxed(&ed), "agreed, and still sandboxed");
         std::fs::remove_dir_all(&dir).ok();

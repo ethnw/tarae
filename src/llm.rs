@@ -548,13 +548,13 @@ impl ClaudeEnv {
 
     /// The rules over tarae's environment as it reads it to say what's left out: `given`'s alone (a test's —
     /// what's said never depends on where the tests run), else the process's.
-    fn as_read(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
+    pub(crate) fn as_read(given: Option<&Env>, keep_keys: bool) -> ClaudeEnv {
         let names = given.map_or_else(process_names, |g| g.keys().cloned().collect());
         claude_env(names.iter().map(String::as_str), keep_keys)
     }
 
     /// The keys left out (`CREDENTIALS`).
-    fn keys(&self) -> Vec<&str> {
+    pub(crate) fn keys(&self) -> Vec<&str> {
         self.removed.iter().map(String::as_str).filter(|n| CREDENTIALS.contains(n)).collect()
     }
 
@@ -600,6 +600,12 @@ impl ClaudeEnv {
     }
 }
 
+/// Whether the session in front's chat passes a key from tarae's environment on: `llm.environment-key = "keep"`,
+/// or `y` on the key card until the session ends (`envkey.rs`).
+pub fn keeps_key(ed: &Editor) -> bool {
+    ed.config.llm.keep_env_key || ed.session.env_key == Some(true)
+}
+
 /// What claude's environment leaves out, said once since tarae started: one log line, and the chat's note — None:
 /// nothing left out, or said already.
 pub fn env_told(ed: &mut Editor) -> Option<String> {
@@ -607,14 +613,14 @@ pub fn env_told(ed: &mut Editor) -> Option<String> {
         return None;
     }
     ed.claude_env_told = true;
-    let said = ClaudeEnv::as_read(ed.claude_env.as_ref(), ed.config.llm.keep_env_key).said()?;
+    let said = ClaudeEnv::as_read(ed.claude_env.as_ref(), keeps_key(ed)).said()?;
     crate::log::line("claude", "info", &said);
     Some(said)
 }
 
 /// What a claude that failed with `error` for want of a login is told, when tarae left a key out, or where tarae's
 /// claudes keep a login of their own (Linux with claude confined: `:claude-login`, once) — None: not a login
-/// failure, or neither.
+/// failure, or neither. With the key card up for it (`envkey::offered`), one line pointing there.
 pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
     if !crate::claudehome::NOT_LOGGED_IN.iter().any(|l| error.contains(l)) {
         return None;
@@ -623,10 +629,17 @@ pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
     let confined = ed.config.llm.claude_sandbox;
     let place = crate::claudehome::Place::of(crate::sandbox::Os::HOST, confined, &var).ok().flatten();
     let own = crate::claudehome::login_hint(error, place.as_ref(), &mut ed.claude_login_told);
-    let env = ClaudeEnv::as_read(ed.claude_env.as_ref(), ed.config.llm.keep_env_key);
+    let env = ClaudeEnv::as_read(ed.claude_env.as_ref(), keeps_key(ed));
     let keys = env.keys();
     if keys.is_empty() {
         return own;
+    }
+    // (the key card says the rest — `envkey.rs`: the chat only points at it)
+    if crate::envkey::offered(ed, &env) {
+        return Some(format!(
+            "A card asks whether Claude takes {} from tarae's environment.",
+            keys.join(" and ")
+        ));
     }
     let how = crate::claudehome::how_to_log_in(place.as_ref());
     Some(format!(
@@ -2302,15 +2315,16 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// claude failing for want of a login, with a key tarae left out, is told why and what passes it — in the
-    /// chat, after claude's own words — and nothing of the key's value. A key you keep, or another failure, adds
-    /// nothing.
+    /// claude failing for want of a login, with a key tarae left out and no key card for it (here: answered `n`),
+    /// is told why and what passes it — in the chat, after claude's own words — and nothing of the key's value. A
+    /// key you keep, or another failure, adds nothing.
     #[test]
     fn a_login_failure_with_a_key_left_out_names_the_setting() {
         let scratch = crate::scratch::Scratch::new("llm-login");
         let root = scratch.to_path_buf();
         let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
         ed.claude_env = Some(Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into())]));
+        ed.session.env_key = Some(false);
         // (claude unconfined — Linux's default: your own login, on either system)
         ed.config.llm.claude_sandbox = false;
         // (a stand-in claude with no login: each message answered as Claude Code does under `-p`)
