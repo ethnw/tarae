@@ -419,7 +419,8 @@ protocol — and on shuttle keys.
 ### 7. Plugin API 0.3
 
 One batch with the forge plugin: regions, cards, tools for Claude, a masked prompt, notes, the repository
-([plugins.md](plugins.md)). The database plugin waits for its regions ([queued](#queued-not-scheduled)).
+([plugins.md](plugins.md)). The database plugin waits for its regions; the to-do plugin waits for two calls not in this list yet, a search
+through tarae's engine and a file's comments ([queued](#queued-not-scheduled)).
 
 ### 8. The forge plugin
 
@@ -552,8 +553,6 @@ git tab, search, a short Kubernetes one.
   folders of each checkout's own cut the waits for cargo's lock to seconds (5.8 s in a quick preflight, three
   sessions at work). What's left is CPU contention and showing the wait. It's scheduled then if that shows.
 - **Core audit**: a session's own build folders. (Sandbox rules as pack data are done.)
-- **Image viewing** — undecided: an external viewer, a canvas in the core with a WebAssembly decoder plugin, or a
-  viewer in the core.
 - **A size pass.** The release binary's budget was raised to 12 MB (2026-10-09), then to 13 MB (18 bundled,
   2026-10-15) until stabilization (§9) brings it back; `cargo perf` fails a jump of more than 0.3 MB meanwhile. Four helpers LTO had copied into many callers are kept out of line
   (−66 KB measured). From the size audit (2026-10-09):
@@ -568,6 +567,15 @@ git tab, search, a short Kubernetes one.
   context screen. Notes: the `k8s` session's target/sb/.
 - **Database plugin**: steps 0–2 and 8–9 landed; steps 3–7 and 10 wait for plugin API 0.3; DynamoDB on hold.
   Notes: the `db` session's target/sb/db-plan.md.
+- **To-do plugin** (user, 2026-10-20): both kinds in one plugin — one side tab, two lists. *In the code*: the
+  project's `TODO`, `FIXME`, `NOTE`… — the tags the comment grammar already colours
+  (`runtime/queries/comment/highlights.scm`), found by tarae's own search and kept only where the tree puts them in
+  a comment, never a text guess; grouped by file, filtered by tag, `enter` to the line. *Yours*: what you mean to
+  do in the project, ticked off in place. Open, for its plan: which tags it lists by default (the grammar's
+  include notes, not tasks: `SAFETY`, `INVARIANT`, `DEBUG`); where yours are kept (Markdown checkboxes in a file
+  of the project, readable without tarae, or the plugin's own folder); an item tied to a session; Claude adding or
+  ticking items (API 0.3's tools for Claude, every write said). API 0.2 gives `find` and `read-file`
+  ([plugins.md](plugins.md)); it needs a search through tarae's engine and where a file's comments are.
 - **Viewport-bounded injections**: branch `viewport-injections` (10 commits past main, last 2026-10-02; draft PR
   #1 on ethnw/tarae). Rebase and land, or drop: to decide with the user.
 - **Grammar distribution**: branch `grammar-wasm-proto` (15 commits; grammars as WebAssembly on tarae's own
