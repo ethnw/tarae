@@ -757,6 +757,13 @@ impl Lines {
     pub fn send(&self, line: String) -> std::io::Result<()> {
         self.0.send(line).map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
     }
+
+    /// A stand-in claude's stdin (no process, no thread — a simulation's): what's sent, read from the receiver.
+    #[cfg(test)]
+    pub fn stand_in() -> (Lines, std::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = channel::<String>();
+        (Lines(tx), rx)
+    }
 }
 
 // ── Reading the streamed answer ─────────────────────────────────────────

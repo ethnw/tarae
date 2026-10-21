@@ -116,6 +116,7 @@ mod procs;
 mod pty;
 mod queued;
 mod quickfix;
+mod quote;
 mod readonly;
 mod reads;
 mod readtool;
@@ -382,6 +383,9 @@ fn main() -> Result<()> {
     editor.events.jobs().detached(sandbox::prune_runs);
     // (and the pins of tarae's binary such a tarae left — macOS's shim, `nofile::pin`)
     editor.events.jobs().detached(nofile::prune_pins);
+    // (and the copies of what went with messages such a tarae left in the temp folder — `chat::prune_sent`)
+    let own = editor.sent_dir.clone();
+    editor.events.jobs().detached(move || chat::prune_sent(own));
     // The card record's months past `cards::KEEP_MONTHS` (a worker's)
     if let Some(dir) = editor.cards_dir.clone() {
         editor.events.jobs().detached(move || match cards::prune(&dir, std::time::SystemTime::now()) {

@@ -978,6 +978,42 @@ fn chat_prompt_tokens() {
     assert!(!p.is_empty(), "claude's usage in its stream");
 }
 
+/// A quote's framing (view P2): the same three lines of a file asked about two ways, each in a fresh chat — as the
+/// code's selection the context carries by itself (`<selection lines=…>`), and quoted with `space >` (`<quoted
+/// id=… from="code" path=… lines=…>`, the selection then not sent again). The two first requests' prompts differ
+/// by what a quote's framing costs over the selection's; `chat_prompt_tokens` against `TARAE_BIN` (the build
+/// before) gives the system prompt's line.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_quote_framing_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let first = |quote: bool| {
+        let (sb, out) = teed_chat(if quote { "quote-quoted" } else { "quote-selected" });
+        sb.write("notes.rs", "fn alpha() -> u32 {\n    let beta = 2;\n    beta * 21\n}\n");
+        let mut t = sb.spawn(&["notes.rs"]);
+        t.send("xxx");
+        match quote {
+            true => {
+                t.send(" >");
+                t.wait_for("the quote's chip", |s| s.contains("notes.rs L1–3 goes with it"));
+            }
+            false => {
+                t.send(" l");
+                t.wait_for("the chat, focused", |s| s.contains("enter send"));
+            }
+        }
+        chat_turn(&mut t, "Reply with the single word ok. Use no tools.");
+        prompts(&std::fs::read_to_string(&out).unwrap_or_default()).first().copied()
+    };
+    let (selected, quoted) = (first(false), first(true));
+    eprintln!(
+        "TOKENS first request's prompt — the lines as the selection: {selected:?} · quoted: {quoted:?}"
+    );
+    assert!(selected.is_some() && quoted.is_some(), "claude's usage in both streams");
+}
+
 /// A turn whose context carries the `ui:` line (a toast up): its first request's prompt, beside
 /// `chat_prompt_tokens`' — the difference is the line.
 #[test]

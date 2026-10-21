@@ -147,6 +147,9 @@ side git · 4 rows · in hand git:src/term.rs
 - **`sessions[].view`** (V 8, the front session's only) — a surface's view mode: `surface` (`chat` · `terminal`),
   the cursor's `line` of `lines`, `selections`, `selects` (wider than a character), `mode` (`normal` · `select`),
   `held` (something came since it was made — the terminal's: its program's output waiting). Shapes, never text; Claude's level never has it.
+- **`sessions[].with`** (the front session's only; absent when empty) — what goes with the chat input's next
+  message, in the order added: `{kind: "pointed", id}` · `{kind: "screen", cols, rows}` · `{kind: "quote", from,
+  lines, cut, hidden}` (`chat::Chat::with_state`). Shapes, never text; Claude's level never has it (unsent).
 - **`sessions`** — id, name, branch, `doing` (`Doing`: `idle` · `working` · `waiting` · `done` ·
   `stuck {tool, secs}` — its chat's Claude), `reviewer: "reviewing"` while its reviewer reads, `"waits to review"`
   while it waits its turn in the line (`reviewer.rs`, #195; absent else — a field of its own, not a `doing`: the two work apart and often at once, and a driver

@@ -170,6 +170,7 @@ fn pick(ed: &mut Editor, id: String) {
     c.unfolded = true;
     if !c.pointed.contains(&id) {
         c.pointed.push(id.clone());
+        c.with.push(crate::chat::With::Pointed);
     }
     crate::reads::point(ed, &id);
 }

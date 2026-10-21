@@ -264,6 +264,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::uistate::point::start(editor);
             Ok(())
         }
+        "quote" => {
+            crate::quote::code(editor);
+            Ok(())
+        }
         "sandbox-blocked" => {
             editor.sandbox_blocked(crate::blocked::Which::Either);
             Ok(())

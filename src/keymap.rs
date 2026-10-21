@@ -660,7 +660,8 @@ mod tests {
             "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input), the \
              terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel). Normal mode's moves, \
              selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not \
-             done. Its own keys go over them, and each surface's over those.\n",
+             done; `enter` quotes what's selected to the chat. Its own keys go over them, and each surface's over \
+              those.\n",
         );
         node_tables(&mut out, &km.view, &mut Vec::new(), "### Its own keys (`[keys.view]`)");
         for (name, node) in &km.view_on {

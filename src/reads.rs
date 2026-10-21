@@ -881,10 +881,11 @@ pub fn ask_own(ed: &mut Editor, keys: Vec<PathBuf>, own: Own) {
     ed.push_offer(crate::offer::Offer::new(POINTED_TITLE.into(), &q, "", String::new(), what).asked(asked));
 }
 
-/// A chip taken off the chat's input: its `y` goes, and a card its pointing raised goes with it.
+/// A chip taken off the chat's input: its `y` goes, and a card its pointing raised goes with it — never those of an
+/// element a queued message waits with (`Chat.queued_pointed`).
 pub fn unpointed(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_mut() else { return };
-    let pointed = c.pointed.clone();
+    let pointed: Vec<String> = c.pointed.iter().chain(&c.queued_pointed).cloned().collect();
     c.key_pass.retain(|(id, _)| pointed.contains(id));
     ed.drop_cards_for(
         |w| own_card(w, |o| matches!(o, Own::Chip(id) if !pointed.contains(id))),

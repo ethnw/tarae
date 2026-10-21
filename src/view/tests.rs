@@ -383,8 +383,8 @@ fn space_gt_views_the_conversation_from_the_code() {
     feed(&mut ed, " >");
     assert_eq!(region(&ed), "view:chat");
     assert_eq!(at(&ed).0, "The latest answer starts here.");
-    // (the palette names its key)
-    assert_eq!(ed.keymaps.bindings().get("chat_view").map(String::as_str), Some("space >"));
+    // (the palette names its key — `quote`'s: nothing selected in the code, it views the chat)
+    assert_eq!(ed.keymaps.bindings().get("quote").map(String::as_str), Some("space >"));
     // The chat closed: it opens, nothing in it to view — the input has the keys, said
     let mut ed = editor();
     ed.config.llm.command = "sh".into();
@@ -505,6 +505,82 @@ fn a_session_switch_ends_the_view_and_its_prompt() {
     assert!(ed.session.view.is_none() && ed.sessions.iter().all(|s| s.view.is_none()), "no view anywhere");
     let behind = ed.sessions.iter().find(|s| s.id == 0).unwrap();
     assert!(behind.chat.as_ref().unwrap().view_at.is_some(), "its place kept");
+}
+
+/// `x enter` on the conversation: a chip over the input — Claude's answer, its row — the input with the keys and its
+/// draft as left, the view gone; the hint rows say `enter quote` while something is selected. Two cursors, two
+/// chips. `enter` without a selection still types.
+#[test]
+fn enter_quotes_the_selection_and_the_input_takes_the_keys() {
+    let mut ed = editor();
+    feed(&mut ed, "<esc>x");
+    let shown = frame(&mut ed);
+    // (said while selected: on the status line and the chat's hint row)
+    assert_eq!(shown.lines().filter(|l| l.contains("enter quote")).count(), 2, "{shown}");
+    feed(&mut ed, "<ret>");
+    assert_eq!(region(&ed), "chat");
+    assert!(ed.session.view.is_none());
+    let c = ed.session.chat.as_ref().unwrap();
+    assert_eq!(c.input, "a draft");
+    let q = &c.quotes[..];
+    assert_eq!((q.len(), q[0].text.as_str()), (1, "The latest answer starts here."));
+    assert_eq!(q[0].label, "Claude's answer 1 line");
+    assert_eq!(q[0].attrs, [("from", "chat".to_string()), ("role", "assistant".to_string())]);
+    assert!(frame(&mut ed).contains("Claude's answer 1 line goes with it"));
+    // Plain cursors, nothing wider than a character: `enter` types, `enter quote` isn't said
+    let mut ed = editor();
+    feed(&mut ed, "<esc>C");
+    assert!(view(&ed).selects() && !frame(&mut ed).contains("enter quote"), "two cursors, nothing to quote");
+    feed(&mut ed, "<ret>");
+    assert_eq!(region(&ed), "chat");
+    assert!(ed.session.chat.as_ref().unwrap().quotes.is_empty());
+    // Two selections: two quotes
+    let mut ed = editor();
+    feed(&mut ed, "<esc>%sneedle<ret><ret>");
+    let c = ed.session.chat.as_ref().unwrap();
+    let texts: Vec<&str> = c.quotes.iter().map(|q| q.text.as_str()).collect();
+    assert_eq!(texts, ["needle", "needle"]);
+    // The user's own words from their message, its bar left out
+    let mut ed = editor();
+    feed(&mut ed, "<esc>gg/insert<ret>x<ret>");
+    let c = ed.session.chat.as_ref().unwrap();
+    assert_eq!(c.quotes[0].text, "why does insert clone the name?");
+    assert_eq!(c.quotes[0].label, "your message 1 line");
+    // Two paragraphs of yours: the blank line between them a blank line, its bar left out too
+    let msgs =
+        vec![Msg::new(Role::User, "first part\n\nsecond part", ""), Msg::new(Role::Assistant, "ok", "")];
+    let mut ed = chat_with(Config::default(), msgs);
+    feed(&mut ed, "<esc>/first<ret>xxx<ret>");
+    assert_eq!(ed.session.chat.as_ref().unwrap().quotes[0].text, "first part\n\nsecond part");
+}
+
+/// A paragraph the chat wrapped is quoted as the line it was; a code row cut with `…` as its whole line; the
+/// code well's edge left out.
+#[test]
+fn a_quote_of_the_chat_is_the_text_not_its_rows() {
+    let words = "every word of a paragraph long enough to wrap in the chat's narrow column twice over at least, \
+                 and then some more of them so that whatever the chat's width it wraps more than once";
+    let code = format!("let x = \"{}\";", "a".repeat(150));
+    let answer = format!("{words}\n\n```\n{code}\n```");
+    let mut ed = chat_with(
+        Config::default(),
+        vec![Msg::new(Role::User, "q", ""), Msg::new(Role::Assistant, answer, "")],
+    );
+    feed(&mut ed, "<esc>");
+    assert_eq!(at(&ed).0.split_whitespace().next(), Some("every"), "on the answer's first row");
+    assert!(!at(&ed).0.contains("some more"), "wrapped on screen: {}", at(&ed).0);
+    feed(&mut ed, "mip<ret>");
+    let c = ed.session.chat.as_ref().unwrap();
+    assert_eq!(c.quotes[0].text, words, "rejoined");
+    // The code row, cut on screen: whole
+    let mut ed = chat_with(
+        Config::default(),
+        vec![Msg::new(Role::User, "q", ""), Msg::new(Role::Assistant, format!("```\n{code}\n```"), "")],
+    );
+    let shown = frame(&mut ed);
+    assert!(!shown.contains(&code), "cut on screen");
+    feed(&mut ed, "<esc>/let<ret>x<ret>");
+    assert_eq!(ed.session.chat.as_ref().unwrap().quotes[0].text, code);
 }
 
 /// The state lists the view's shape — never its text — and Claude's level none of it.

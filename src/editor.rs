@@ -630,6 +630,9 @@ pub struct Editor {
     pub git_auto: bool,
     /// Where the chat's conversations are kept (`chats.rs`) — None in tests (they set a temp dir).
     pub chats_dir: Option<std::path::PathBuf>,
+    /// Where the copies of what went with messages are written (`chat::write_sent`): a folder of this tarae's own in
+    /// the temp folder — None in tests (no copy; those that read one set a scratch folder).
+    pub sent_dir: Option<std::path::PathBuf>,
     /// Where Claude's turns are kept (`checkpoint.rs`), every session's — None in tests (they set a temp dir).
     pub turns_dir: Option<std::path::PathBuf>,
     /// The sessions kept per repository, and whether they're back (`worktree.rs`).
@@ -914,6 +917,7 @@ impl Editor {
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
+            sent_dir: if cfg!(test) { None } else { Some(crate::chat::sent_dir()) },
             turns_dir,
             session_store: crate::worktree::SessionStore {
                 dir: if cfg!(test) { None } else { crate::worktree::default_dir() },
@@ -14681,6 +14685,8 @@ mod tests {
         let dir = scratch.to_path_buf();
         let log = dir.join("stdin.log");
         let mut ed = editor("fn main() {}\n");
+        // (the copy of what went: in this test's folder)
+        ed.sent_dir = Some(dir.join("sent"));
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec![
             "-c".into(),

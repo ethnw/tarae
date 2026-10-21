@@ -86,19 +86,26 @@ pub fn after_frame(ed: &mut Editor) {
     }
 }
 
+/// What of the last frame Claude doesn't get — every pane showing a file named like a key it may not read
+/// (`reads::key_panes`), the terminal panel when `llm.screen-terminal` is off — and whether the terminal was left
+/// out: the `screen` tool's and `C-s`'s alike.
+pub(crate) fn hidden(ed: &Editor) -> (Vec<crate::screen::Hidden>, bool) {
+    let cols = ed.last_frame.as_ref().map_or(0, |f| f.1 as usize);
+    let hide = ed.screen.terminal_rows.filter(|_| !ed.config.llm.screen_terminal).map(|rows| {
+        crate::screen::Hidden { rows, cols: (0, ed.screen.chat_x.unwrap_or(cols)), note: LEFT_OUT.into() }
+    });
+    let left_out = hide.is_some();
+    let mut hidden = crate::reads::key_panes(ed);
+    hidden.extend(hide);
+    (hidden, left_out)
+}
+
 /// The last frame as the tool's answer — the terminal panel blanked when it's left out, and every pane showing
 /// a file named like a key Claude may not read (`reads::key_panes`).
 pub(crate) fn text(ed: &Editor) -> Result<String, String> {
     let (frame, cols, rows) = ed.last_frame.as_ref().ok_or("nothing is on screen yet")?;
     let terminal = ed.screen.terminal_rows;
-    let hide = terminal.filter(|_| !ed.config.llm.screen_terminal).map(|rows| crate::screen::Hidden {
-        rows,
-        cols: (0, ed.screen.chat_x.unwrap_or(*cols as usize)),
-        note: LEFT_OUT.into(),
-    });
-    let left_out = hide.is_some();
-    let mut hidden = crate::reads::key_panes(ed);
-    hidden.extend(hide);
+    let (hidden, left_out) = hidden(ed);
     let text = crate::screen::text_hiding(frame, *cols, *rows, &hidden)
         .ok_or("this screen can't be read as text")?;
     let part = match (terminal, left_out) {

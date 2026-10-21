@@ -75,6 +75,68 @@ fn program(ed: &Editor) -> bool {
     ed.session.terminal.as_ref().unwrap().focus
 }
 
+/// `C-s` sends the screen as the `screen` tool sees it: with `llm.screen-terminal` off the terminal's rows are left
+/// out (said in their place) — before P2 they went whatever it said.
+#[test]
+fn ctrl_s_leaves_the_terminal_out_when_its_rows_dont_go() {
+    for on in [true, false] {
+        let (mut ed, _sent) = term(Config::default(), 2);
+        (ed.config.llm.command, ed.config.llm.args) =
+            ("sh".into(), vec!["-c".into(), "cat > /dev/null".into()]);
+        ed.config.llm.screen_terminal = on;
+        print(&mut ed, "a-row-only-the-terminal-has\r\n$ ");
+        crate::chat::attach_screen(&mut ed).unwrap();
+        let text = ed.session.chat.as_ref().unwrap().screen.as_ref().unwrap().text.clone();
+        assert_eq!(text.contains("a-row-only-the-terminal-has"), on, "{on}: {text}");
+    }
+}
+
+/// `enter` on the selected rows: a quote over the chat's input — the program's line that wrapped joined again, the
+/// screen's blank foot left out, its token-like line hidden, where from said — the view left (its output goes on),
+/// the chat's input with the keys. `llm.screen-terminal` off: said, nothing taken, the view stays.
+#[test]
+fn enter_quotes_the_selected_rows_to_the_chat() {
+    let (mut ed, _sent) = term(Config::default(), 2);
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    let long = "w".repeat(300);
+    // (and a line whose wrap falls right after a space: the row before ends on it — a blank the document trims)
+    let cols = usize::from(ed.session.terminal.as_ref().unwrap().parser.screen().size().1);
+    let spaced = format!("{} {}", "a".repeat(cols - 1), "tail");
+    print(&mut ed, &format!("API_TOKEN=tarae-fake-token-0123456789abcdef\r\n{long}\r\n{spaced}\r\n$ "));
+    feed(&mut ed, "<C-\\>%");
+    assert!(!view(&ed).doc().text.to_string().contains(&long), "the line wrapped on screen");
+    // (said while selected: on the status line and the panel's head)
+    let shown = frame(&mut ed);
+    assert!(status(&shown).contains("enter quote"), "{}", status(&shown));
+    assert_eq!(shown.lines().filter(|l| l.contains("enter quote")).count(), 2, "{shown}");
+    feed(&mut ed, "<ret>");
+    assert_eq!(region(&ed), "chat");
+    assert!(ed.session.view.is_none() && !ed.bottom_focus, "the view left");
+    let q = &ed.session.chat.as_ref().unwrap().quotes[0];
+    assert!(q.text.contains(&format!("\n{long}\n{spaced}\n$")), "joined, its space kept: {:?}", q.text);
+    assert!(q.text.starts_with("line 1\nline 2\n") && q.text.ends_with('$'), "{:?}", q.text);
+    assert!(!q.text.contains("tarae-fake-token"), "{:?}", q.text);
+    assert_eq!(q.hidden, 1);
+    assert_eq!(q.attrs[0], ("from", "terminal".to_string()));
+    assert!(q.attrs[2].1.starts_with("1-"), "{:?}", q.attrs);
+    assert_eq!(q.chip(), "terminal 6 lines · 1 line hidden");
+    // Its rows don't go to Claude: said, kept
+    let (mut ed, _sent) = term(Config::default(), 2);
+    ed.config.llm.screen_terminal = false;
+    feed(&mut ed, "<C-\\>x");
+    // (`enter quote` isn't offered where `enter` can't quote)
+    assert!(!frame(&mut ed).contains("enter quote"), "not offered");
+    feed(&mut ed, "<ret>");
+    assert_eq!(region(&ed), "view:terminal");
+    let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    assert!(said.contains("llm.screen-terminal"), "{said}");
+    assert!(ed.session.chat.as_ref().is_none_or(|c| c.quotes.is_empty()));
+    // `enter` with nothing selected (`esc` collapsed it): the program, as before
+    feed(&mut ed, "<esc><ret>");
+    assert_eq!(region(&ed), "terminal-program");
+}
+
 /// `C-\` goes round: the program → its view mode (said on the status line and the panel's head) → the code → the
 /// program; `i` from the view types again; `esc` too goes to the code.
 #[test]

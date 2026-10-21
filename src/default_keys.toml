@@ -254,8 +254,9 @@ l = "chat_open"
 L = "chat_close"
 # Point at something on screen (a card, a row, a run) — it goes with your next chat message (C-o in the chat)
 "@" = "chat_point"
-# The chat's conversation under a cursor: read, search, copy (esc from the chat's input too)
-">" = "chat_view"
+# Quote the selection to the chat (it goes with your next message) — nothing selected: the chat's conversation
+# under a cursor, to read, search, copy and quote (esc from the chat's input too)
+">" = "quote"
 n = "note_here"
 N = "note_picker"
 u = "undo_turn"
@@ -362,7 +363,8 @@ left = "page_up"
 right = "page_down"
 G = "view_latest"
 y = "view_copy"
-ret = "view_input"
+# (a selection: quoted to the chat — nothing selected: back to typing)
+ret = "view_take"
 i = "view_input"
 a = "view_input"
 esc = "view_leave"

@@ -390,7 +390,10 @@ main that has what it waits for, and the user says go:
   input or `space >` from anywhere, `q`/`esc` leave, `y` copies; held still while Claude writes, `G` catches up; one
   cursor on screen, where the keys go (`keys_to()`). P1b done (2026-10-21): the terminal's — `C-\` goes round
   (code → program → view → code), its scrollback and screen read as text, the program's output held until you
-  catch up, the wheel into it; `[keys.terminal]` replaced `editor.terminal-escape`. P2, quoting, next.
+  catch up, the wheel into it; `[keys.terminal]` replaced `editor.terminal-escape`. P2 done (2026-10-21): quoting —
+  `enter` on a view's selection, `space >` (`:quote`) on the code's, a chip over the input; `<quoted>` with its own
+  closing id, the source said, cut past 16 KB and said, the terminal's token-like lines out; `C-s` follows
+  `llm.screen-terminal`. P3, the run panels, next.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
   `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the

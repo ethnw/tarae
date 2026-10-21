@@ -219,8 +219,10 @@ configs carry over as they are.
     status line `● view · terminal`. It holds still: the program's output waits, and so does the program —
     once its next write fills the pty, it's held there as a real terminal's flow control holds it (`● view ·
     output waits`); nothing piles up in tarae. Its questions to the terminal are still answered. `G` catches up,
-    leaving does too (the rows you read stay in sight), and the program goes on. `i` (`a`, `enter`) types in the
-    program again, `esc` (a selection collapses first) or `C-\` goes to the code, `q` hides the panel (the shell
+    leaving does too (the rows you read stay in sight), and the program goes on. `enter` on a selection quotes it
+    to Claude — a chip over the chat's input, the program's wrapped lines joined, token-like lines taken out
+    ([quoting](claude-integration.md#quoting-what-you-read); not while `llm.screen-terminal` is off). `i` (`a`,
+    `enter` with nothing selected) types in the program again, `esc` (a selection collapses first) or `C-\` goes to the code, `q` hides the panel (the shell
     runs on), `tab` the slot's other tabs. The wheel back down to the bottom, nothing selected, gives the keys
     back where they were. `[keys.terminal]` adds keys taken from the program (`C-\` by default; every other key
     is the program's), and `to_program` gives one back; `[keys.view.terminal]` remaps its view mode.

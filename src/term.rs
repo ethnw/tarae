@@ -1397,7 +1397,9 @@ fn draw_terminal_panel(
         |name: &str, like: &str| crate::view::bound(editor, crate::view::Surface::Terminal, name, like);
     let to_view = editor.keymaps.terminal.keys_for("terminal_view").into_iter().next();
     let to_program = editor.keymaps.normal.keys_for("terminal_focus").into_iter().next();
+    let quotes = crate::view::quotes(editor);
     let viewing: Vec<(Option<String>, &str)> = vec![
+        (bound("view_take", "ret").filter(|_| quotes), "quote"),
         (bound("view_input", "i").filter(|_| t.exited.is_none()), "type"),
         (bound("view_copy", "y"), "copy"),
         (bound("search", "/"), "search"),
@@ -6491,7 +6493,8 @@ fn draw_statusline(
         let bound = |name: &str, like: &str| crate::view::bound(editor, s, name, like);
         // (an ended program takes no typing)
         let typed = bound("view_input", "i").filter(|_| crate::view::typeable(editor));
-        let pairs = [(typed, "type"), (bound("view_leave", "esc"), "code")];
+        let quote = bound("view_take", "ret").filter(|_| crate::view::quotes(editor));
+        let pairs = [(quote, "quote"), (typed, "type"), (bound("view_leave", "esc"), "code")];
         for (k, what) in pairs.iter().filter_map(|(k, d)| Some((k.as_ref()?, *d))) {
             left.push(Seg { text: format!("  {k}"), style: Style { bold: true, ..dim }, keep: VIEW_HINTS });
             left.push(Seg {
@@ -10433,7 +10436,9 @@ fn draw_chat(
                     // places in an answer, a step brighter than the rest of the chip
                     let chip = fit_ellipsis(&m.chip, w);
                     let link = Style { underline: true, ..dim };
-                    let row = match chip.rfind("screen ").filter(|_| m.attached.is_some()) {
+                    let at =
+                        Some(m.linked).filter(|&at| at > 0 && chip.is_char_boundary(at) && at < chip.len());
+                    let row = match at.filter(|_| m.attached.is_some()) {
                         Some(at) => vec![sp(chip[..at].to_string(), faint), sp(chip[at..].to_string(), link)],
                         None if m.attached.is_some() => vec![sp(chip, link)],
                         None => vec![sp(chip, faint)],
@@ -10445,15 +10450,24 @@ fn draw_chat(
                 // breaks in it reached the terminal as raw LFs — rows overlapped, paragraphs lost their starts)
                 for part in m.text.split('\n').map(|l| l.trim_end_matches('\r')) {
                     let para = [md::Line::Text { spans: vec![sp(part.to_string(), strong)], indent: 0 }];
-                    let rows =
-                        if part.trim().is_empty() { Vec::new() } else { md::wrap(&para, mw - 2, faint) };
+                    let (rows, drawn) = match part.trim().is_empty() {
+                        true => Default::default(),
+                        false => md::wrap_drawn(&para, mw - 2, faint, faint),
+                    };
                     if rows.is_empty() {
-                        lines.push(plain(vec![sp("▎".into(), accent)]));
+                        // (a blank line: its bar isn't the text's either)
+                        lines.push(ChatRow {
+                            spans: vec![sp("▎".into(), accent)],
+                            skip: 1,
+                            ..ChatRow::default()
+                        });
                     }
-                    for l in rows {
+                    for (l, d) in rows.into_iter().zip(drawn) {
                         let mut row = vec![sp("▎ ".into(), accent)];
                         row.extend(l);
-                        lines.push(plain(row));
+                        // (its bar isn't the text's, nor a wrapped row's hanging indent)
+                        let (skip, join) = (2 + d.join.map_or(0, |j| j.drop), d.join.map(|j| j.space));
+                        lines.push(ChatRow { spans: row, skip, join, ..ChatRow::default() });
                     }
                 }
             }
@@ -10466,7 +10480,14 @@ fn draw_chat(
                 if writing && editor.wet_ink {
                     wet_head("chat", &mut rows, &drawn, ui, card);
                 }
-                lines.extend(rows.into_iter().map(plain));
+                // (a code well's edge isn't the text's, nor a wrapped row's hanging indent — a list's bullet is)
+                lines.extend(rows.into_iter().zip(drawn).map(|(spans, d)| ChatRow {
+                    spans,
+                    skip: if d.code { d.lead } else { 0 } + d.join.map_or(0, |j| j.drop),
+                    join: d.join.map(|j| j.space),
+                    rest: d.rest,
+                    ..ChatRow::default()
+                }));
                 if writing && let Some(l) = lines.last_mut() {
                     l.spans.push(sp("▍".into(), accent));
                 }
@@ -10493,7 +10514,8 @@ fn draw_chat(
                     if !live && k + 1 == shown.len() && body.len() > keep {
                         r.push(sp("…".into(), faint));
                     }
-                    lines.push(plain(r));
+                    // (its bar isn't the text's)
+                    lines.push(ChatRow { spans: r, skip: 2, ..ChatRow::default() });
                 }
             }
             // `◦ read  src/lib.rs  L10–49` — one quiet row per call; a run of them stays together
@@ -10503,7 +10525,13 @@ fn draw_chat(
                 let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
                 let glyph = knot(look, in_hand, &styles);
                 let (spans, ran) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, w, false, &styles);
-                lines.push(ChatRow { spans, link: look.link.clone(), call: Some(m.call.clone()), ran });
+                lines.push(ChatRow {
+                    spans,
+                    link: look.link.clone(),
+                    call: Some(m.call.clone()),
+                    ran,
+                    ..ChatRow::default()
+                });
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
             Role::Note => {
@@ -10537,10 +10565,12 @@ fn draw_chat(
                     let mut first = true;
                     for part in m.text.split('\n') {
                         let para = [md::Line::Text { spans: vec![sp(part.to_string(), dim)], indent: 0 }];
-                        for l in md::wrap(&para, mw.saturating_sub(2).max(1), faint) {
+                        let (rows, drawn) = md::wrap_drawn(&para, mw.saturating_sub(2).max(1), faint, faint);
+                        for (l, d) in rows.into_iter().zip(drawn) {
                             let mut row = vec![sp(if first { mark } else { "  " }.into(), dim)];
                             row.extend(l);
-                            lines.push(plain(row));
+                            let (skip, join) = (2 + d.join.map_or(0, |j| j.drop), d.join.map(|j| j.space));
+                            lines.push(ChatRow { spans: row, skip, join, ..ChatRow::default() });
                             first = false;
                         }
                     }
@@ -10995,14 +11025,18 @@ fn draw_chat(
         queue!(out, Print(&tail))?;
         queue!(out, Print(" "))?;
         used = head.width() + tail.width() + 1;
-    } else if c.screen.is_some() || !c.pointed.is_empty() {
-        // What goes with the message: the elements pointed at (`C-o`), the screen (`C-s`) — or how many
-        let mut what: Vec<String> = c.pointed.clone();
-        what.extend(c.screen.as_ref().map(|s| format!("screen {}×{}", s.cols, s.rows)));
+    } else if c.has_with() {
+        // What goes with the message, in the order added: the elements pointed at (`C-o`), the screen (`C-s`), the
+        // quotes (`enter` on a view's selection, `space >`) — or how many
+        let what: Vec<String> = c.with_chips();
         let said = if what.len() == 1 { " goes with it " } else { " go with it " };
         let whole = what.iter().map(|s| s.width()).sum::<usize>() + 3 * (what.len() - 1);
         let what = match whole + said.width() + 2 <= w {
             true => what,
+            // (one: cut to the room left, its start kept — where it's from; several: how many)
+            false if what.len() == 1 => {
+                vec![fit_ellipsis(&what[0], w.saturating_sub(said.width() + 2).max(1))]
+            }
             false => vec![format!("{} things", what.len())],
         };
         let wide = what.iter().map(|s| s.width()).sum::<usize>() + 3 * (what.len() - 1) + said.width();
@@ -11062,7 +11096,10 @@ fn draw_chat(
     let mut hints: Vec<(&str, &str)> = Vec::new();
     // (each key as bound — a remap moves the hint)
     let bound = |name: &str, like: &str| crate::view::bound(editor, crate::view::Surface::Chat, name, like);
+    // (`enter` quotes what's selected — said while something is)
+    let quotes = crate::view::quotes(editor);
     let viewing = [
+        (bound("view_take", "ret").filter(|_| quotes), "quote"),
         (bound("view_input", "i"), "type"),
         (bound("view_copy", "y"), "copy"),
         (bound("search", "/"), "search"),
@@ -11097,16 +11134,16 @@ fn draw_chat(
         hints.push(("C-f", if c.follow.active() { "unfollow" } else { "follow" }));
     } else {
         let code = c.last_code().is_some();
+        // What waits to go with it: how it comes off — first, the one way back (an empty input sends nothing yet,
+        // and at 80 columns `enter send` before it left it no room)
+        let screen_only = c.pointed.is_empty() && c.quotes.is_empty();
+        if c.has_with() && c.input.is_empty() {
+            hints.push(("backspace", if screen_only { "no screen" } else { "take it off" }));
+        }
         hints.push(("enter", "send"));
         // (one queued and not sent — a restart waited for the turn)
         if c.queued.is_some() && c.input.is_empty() {
             hints.push(("↑", "edit queued"));
-        }
-        // What waits to go with it: how it comes off (early — the one way back)
-        if !c.pointed.is_empty() && c.input.is_empty() {
-            hints.push(("backspace", "take it off"));
-        } else if c.screen.is_some() && c.input.is_empty() {
-            hints.push(("backspace", "no screen"));
         }
         hints.push(esc);
         if crate::checkpoint::can_undo(editor) {
@@ -11494,10 +11531,17 @@ fn chat_markdown_drawn(
                 let inner = w.saturating_sub(2);
                 let mut row = vec![Span { text: " ".into(), style: Style { bg: well, ..Style::default() } }];
                 let mut used = 0;
+                let mut rest = String::new();
                 for s in spans {
-                    let room = inner.saturating_sub(used + usize::from(full > inner));
+                    // (once a span is cut nothing after it is drawn — a narrow one could fit where a wide one
+                    // didn't: the row stays the line's start, `rest` its end, in order)
+                    let room = match rest.is_empty() {
+                        true => inner.saturating_sub(used + usize::from(full > inner)),
+                        false => 0,
+                    };
                     let t = fit(&s.text, room);
                     used += t.width();
+                    rest.push_str(&s.text[t.len()..]);
                     row.push(Span { text: t, style: Style { bg: well, ..s.style } });
                 }
                 if full > inner {
@@ -11516,6 +11560,8 @@ fn chat_markdown_drawn(
                     lead: 1,
                     tail: pad + usize::from(full > inner),
                     code: true,
+                    join: None,
+                    rest: (full > inner).then(|| rest.into()),
                 });
             }
             // (prose at the measure; a rule or a table as wide as the panel)
@@ -12016,7 +12062,7 @@ fn wet(
     use crate::markdown::Span;
     // Each row's characters: (char, its unit's first index — None: not a unit's), from what the text wrote
     let units_of = |r: usize, row: &[Span]| -> Vec<(char, Option<usize>)> {
-        let d = drawn.get(r).copied().unwrap_or_default();
+        let d = drawn.get(r).cloned().unwrap_or_default();
         let chars: Vec<char> = row.iter().flat_map(|s| s.text.chars()).collect();
         let n = chars.len();
         let written = |i: usize| !d.whole && i >= d.lead && i + d.tail < n;
@@ -12071,7 +12117,7 @@ fn wet(
     };
     // What the text wrote from there on is wet, the spaces between too; what the layout drew stays
     for (r, row) in rows.iter_mut().enumerate().skip(r0) {
-        let d = drawn.get(r).copied().unwrap_or_default();
+        let d = drawn.get(r).cloned().unwrap_or_default();
         let n: usize = row.iter().map(|s| s.text.chars().count()).sum();
         let wet_at = |i: usize| !d.whole && i >= d.lead && i + d.tail < n && (r > r0 || i >= i0);
         let mut out: Vec<Span> = Vec::with_capacity(row.len() + 2);
@@ -15757,6 +15803,20 @@ mod tests {
         chat_frame(&mut ed, 140);
         let untagged = laid_again(&narrower, &kept_rows(&ed));
         assert_eq!(untagged, [2, 10, 18, 26, 34], "a Rust file in front: the answers with untagged code");
+    }
+
+    /// A code row cut with `…` draws the line's start and keeps its end (`Drawn.rest`, what a quote puts back) — in
+    /// order: a wide character that didn't fit cuts the row there, a narrow one after it isn't drawn in its place.
+    #[test]
+    fn a_cut_code_row_is_the_lines_start_and_keeps_its_end() {
+        use crate::markdown::{Line, Span};
+        let sp = |t: &str| Span { text: t.into(), style: Style::default() };
+        let lines = [Line::Code(vec![sp("aaaa"), sp("宽"), sp("zz")])];
+        // (8 cells: its edge, 5 of text and the `…`, a pad — the wide one needs 2 where 1 is left)
+        let (rows, drawn) = chat_markdown_drawn(&lines, (8, 8), (Style::default(), Style::default()), None);
+        let row: String = rows[0].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(row.trim_end(), " aaaa…");
+        assert_eq!(drawn[0].rest.as_deref(), Some("宽zz"));
     }
 
     /// 번짐: the last two words of text being written — across spans and rows, a span split where the wet part

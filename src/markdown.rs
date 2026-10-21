@@ -489,13 +489,26 @@ pub fn wrap_with(lines: &[Line], width: usize, rule: Style, label: Style) -> Vec
 
 /// What of a laid-out row the layout drew rather than the text wrote: all of it (a rule, a table's rule), its
 /// first `lead` characters (a list item's bullet or number, a quote's bar — merged into the text's span when
-/// they share its style), its last `tail` (a cut code row's `…` and padding); `code`: a code row.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// they share its style), its last `tail` (a cut code row's `…` and padding); `code`: a code row. `join`: it
+/// goes on from the row before (wrapped); `rest`: what a cut code row's `…` stands for — a quote's text joins
+/// and restores them (`quote::text_of`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Drawn {
     pub whole: bool,
     pub lead: usize,
     pub tail: usize,
     pub code: bool,
+    pub join: Option<Join>,
+    pub rest: Option<std::sync::Arc<str>>,
+}
+
+/// A row that goes on from the one before it, where the layout wrapped a line: its first `drop` characters
+/// (a hanging indent — a bar or mark the drawer puts before every row adds to it) aren't the text's, and `space`:
+/// the break took a space.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Join {
+    pub drop: usize,
+    pub space: bool,
 }
 
 /// `wrap_with`, and what of each row it drew (`Drawn`), row for row.
@@ -505,16 +518,17 @@ pub fn wrap_drawn(lines: &[Line], width: usize, rule: Style, label: Style) -> (V
     for line in lines {
         let from = out.len();
         let mut lead = 0;
+        let mut joins = Vec::new();
         match line {
             Line::Blank => out.push(Vec::new()),
             Line::Rule => out.push(vec![Span { text: "─".repeat(width), style: rule }]),
             // Code wraps too (a card is narrower than code) — continuation rows hang under its indentation
             Line::Code(spans) => {
                 let lead = spans.iter().flat_map(|s| s.text.chars()).take_while(|c| *c == ' ').count();
-                wrap_row(spans, lead, width, &mut out);
+                wrap_row(spans, lead, width, &mut out, &mut joins);
             }
             Line::Text { spans, indent } => {
-                wrap_row(spans, *indent, width, &mut out);
+                wrap_row(spans, *indent, width, &mut out, &mut joins);
                 // (a list item's or a quote's head: the first row's first `indent` cells — `render` makes it
                 // exactly that wide; a paragraph has none)
                 let mut cells = 0;
@@ -543,17 +557,30 @@ pub fn wrap_drawn(lines: &[Line], width: usize, rule: Style, label: Style) -> (V
                 _ => false,
             };
             let code = matches!(line, Line::Code(_));
-            drawn.push(Drawn { whole, lead: if k == 0 { lead } else { 0 }, tail: 0, code });
+            let join = joins.get(k).copied().flatten();
+            drawn.push(Drawn { whole, lead: if k == 0 { lead } else { 0 }, tail: 0, code, join, rest: None });
         }
     }
     (out, drawn)
 }
 
 /// One line's spans into rows of `width`, broken at the last space (else after a word's last `/` — a path
-/// keeps its names whole — else mid-word); rows after the first start with `indent` spaces.
-fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>>) {
+/// keeps its names whole — else mid-word); rows after the first start with `indent` spaces. `joins`: a row each,
+/// how it goes on from the one before (none for the first).
+fn wrap_row(
+    spans: &[Span],
+    indent: usize,
+    width: usize,
+    out: &mut Vec<Vec<Span>>,
+    joins: &mut Vec<Option<Join>>,
+) {
     // Narrow box: a deep indent mustn't leave no room for text
     let indent = indent.min(width / 2);
+    let mut join = None;
+    let mut push = |row: &[(char, Style)], join: Option<Join>| {
+        out.push(group(row));
+        joins.push(join);
+    };
     let cells: Vec<(char, Style)> =
         spans.iter().flat_map(|s| s.text.chars().map(move |c| (c, s.style))).collect();
     let mut row: Vec<(char, Style)> = Vec::new();
@@ -566,7 +593,8 @@ fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>
         if w + cw > width && row.len() > indent {
             // The word before just fits: break at this space
             if c == ' ' {
-                out.push(group(&row));
+                push(&row, join);
+                join = Some(Join { drop: indent, space: true });
                 row = vec![(' ', Style::default()); indent];
                 w = indent;
                 i += 1;
@@ -585,7 +613,8 @@ fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>
                     None => Vec::new(),
                 },
             };
-            out.push(group(&row));
+            push(&row, join);
+            join = Some(Join { drop: indent, space: brk.is_some() });
             row = vec![(' ', Style::default()); indent];
             row.extend(rest);
             w = row.iter().map(|(x, _)| x.width().unwrap_or(0)).sum();
@@ -595,7 +624,7 @@ fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>
         w += cw;
         i += 1;
     }
-    out.push(group(&row));
+    push(&row, join);
 }
 
 fn group(cells: &[(char, Style)]) -> Vec<Span> {
@@ -655,7 +684,7 @@ fn table(
     let wrapped = |row: &[Vec<Span>]| -> Vec<Vec<Vec<Span>>> {
         let wrap = |(cell, &w): (&Vec<Span>, &usize)| {
             let mut lines = Vec::new();
-            wrap_row(cell, 0, w, &mut lines);
+            wrap_row(cell, 0, w, &mut lines, &mut Vec::new());
             lines
         };
         row.iter().zip(&widths).map(wrap).collect()
@@ -745,14 +774,14 @@ fn stacked(
         }
         let title: Vec<Span> =
             row[0].iter().map(|s| Span { text: s.text.clone(), style: s.style.patch(bold) }).collect();
-        wrap_row(&title, 0, width, out);
+        wrap_row(&title, 0, width, out, &mut Vec::new());
         for (h, cell) in header.iter().zip(row).skip(1) {
             if cell.iter().all(|s| s.text.trim().is_empty()) {
                 continue;
             }
             let name = cut(&h.iter().map(|s| s.text.as_str()).collect::<String>(), label_w);
             let mut lines = Vec::new();
-            wrap_row(cell, 0, width.saturating_sub(indent), &mut lines);
+            wrap_row(cell, 0, width.saturating_sub(indent), &mut lines, &mut Vec::new());
             for (j, mut l) in lines.into_iter().enumerate() {
                 let mut line = if j == 0 {
                     let gap = indent - 2 - name.width();

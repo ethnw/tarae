@@ -194,6 +194,9 @@ commands! {
         view_input => "Back to typing",
         view_latest => "To the latest, caught up",
         view_copy => "Copy, to paste anywhere",
+        view_take => "Quote it to the chat, or type",
+        // (whole in which-key at 80 columns: 18 characters)
+        quote => "Quote or view chat",
         command_palette => "Find a command",
         theme_picker => "Choose a theme (live preview)",
         symbol_picker => "Symbols in this file",
@@ -2380,6 +2383,17 @@ fn view_code(cx: &mut Context) {
 }
 fn view_input(cx: &mut Context) {
     crate::view::ask(cx.editor, crate::view::After::Input);
+}
+/// View mode's `enter`: what's selected to the chat as quotes (`quote.rs`), the input with the keys; nothing
+/// selected, the surface's own — the chat's input, the terminal's program (`view_input`).
+fn view_take(cx: &mut Context) {
+    let take = crate::view::wide(cx.editor.doc());
+    crate::view::ask(cx.editor, if take { crate::view::After::Take } else { crate::view::After::Input });
+}
+/// `space >` · `:quote`: the code's selection to the chat as quotes, the input with the keys; nothing selected,
+/// the chat's view mode.
+fn quote(cx: &mut Context) {
+    crate::quote::code(cx.editor);
 }
 /// View mode's `y`: what's selected to the clipboard (to paste outside tarae) and to `"` (`p` in the code) at
 /// once — the copy toast says it, once.

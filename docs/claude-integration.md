@@ -342,7 +342,7 @@ each one while the chat keeps the keys.
 | `C-q` | Give a card that asks mid-turn the keys — the chat keeps them till then |
 | `C-r` | Replace the selection with the answer's code — through the same review |
 | `C-y` | Copy the code |
-| `C-s` | Send the screen with your next message: what you see, as text (`:chat-screen` from anywhere). The line over the input says `screen 140×40 goes with it`; Backspace in the empty input takes it off. The message's row opens a copy of what went |
+| `C-s` | Send the screen with your next message: what you see, as text (`:chat-screen` from anywhere) — the terminal panel's rows only while `llm.screen-terminal` is on, as for Claude's own look. The line over the input says `screen 140×40 goes with it`; Backspace in the empty input takes it off. The message's row opens a copy of what went |
 | `C-o` | Point at something on screen: labels on the cards, rows, tabs and the path bar — a label's two letters (or a click) put its id in the message ([more](#whats-on-screen-by-id)) |
 | `C-]` (`C-g`) | Go to where Claude looked or pointed, or to an element it cites by id (again = one further back) |
 | `C-f` | Follow mode on/off (resumes if you took over) |
@@ -366,8 +366,9 @@ that would (`d`, `p`, the `space` menu, `:`) is said, not done.
 | `↑` `↓` | A line up or down, the cursor carried along at the edge |
 | `←` `→` | A page back (older) or on (newer) |
 | `y` | Copy what's selected, the rows as drawn — to the clipboard, and to `p` in the code |
+| `enter` | Quote what's selected to Claude ([below](#quoting-what-you-read)) — nothing selected, back to the input |
 | `G` | The latest: the conversation caught up, the cursor on its last row (`5G`: row 5) |
-| `i` `a` `enter` | Back to the input, your text as it was |
+| `i` `a` | Back to the input, your text as it was |
 | `esc` `q` | A selection collapses first; with none, back to the code |
 
 It holds still while you read: Claude's answer streaming in doesn't move it, and the title says
@@ -379,6 +380,46 @@ keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …)
 `C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it (kept to what reads), and `[keys.view]`,
 `[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound. The terminal has the same
 view mode, `C-\` from its program ([features](features.md)): one set of keys to read either.
+
+### Quoting what you read
+
+Select part of what you're reading and ask about it: `enter` on a selection in a view mode — the conversation's,
+the terminal's — or `space >` on a selection in the code (`:quote` too) puts it over the chat's input as a chip,
+and the input takes the keys: `terminal 12 lines goes with it`, `Claude's answer 3 lines`, `src/a.rs L12–18`.
+Several selections make several chips; Backspace in the empty input takes the last thing added off (a quote, the
+screen, an element pointed at — one stack). With nothing selected `space >` opens the conversation's view mode, and
+`enter` does what it did: the input, the terminal's program.
+
+A quote is what you selected as you saw it then, not as it is when you send. Claude gets it with your message,
+where it came from said:
+
+```
+<quoted id="q3f9a0" from="terminal" title="zsh" lines="1204-1218 of 1530">
+…the text…
+</quoted id="q3f9a0">
+```
+
+- **The text, not the rows**: a line the chat or the terminal wrapped is one line again; a code row the chat cut
+  with `…` goes whole; the bar before your own words and a code block's edge stay out.
+- **Its own end**: the closing tag carries the quote's random id, so text that prints `</quoted>` (a build log, a
+  page in the terminal) can't end it. Claude reads a quote as data, not instructions.
+- **Cut, said**: past 16 KB a quote keeps its first quarter and its last three quarters (`… 440 lines cut …`
+  between), said on the chip (`· cut`) and in the tag. A message carries 8 quotes and 48 KB at most: a quote that
+  doesn't fit the room left is cut to it (`· cut`); a ninth, or one with almost no room left, is refused on the
+  status line.
+- **Queued, it keeps its own**: `enter` while Claude works queues the message with what's over the input then — its
+  quotes, the screen, what you pointed at (`a message with 2 quotes and the screen queued`); what you add after waits
+  for the next message. A second message joins the queued one; quotes past one message's limits stay over the input
+  for the next, said. `↑` takes the queued one back with all of it — only whole: if its quotes and those over the
+  input wouldn't fit one message, it says so and Backspace makes room.
+- `enter` with nothing typed sends nothing — it says to type your question, what's over the input going with it.
+- **Tokens stay out**: the terminal's lines that look like a token (`env`'s output, an `Authorization` header) are
+  taken out — `· 1 line hidden` on the chip, `hidden=` in the tag. The code's and the conversation's go as they are.
+- **What can't go is said**: the terminal's rows with `llm.screen-terminal` off; a file named like a key Claude
+  may not read (point at its pane, `space @`, to choose). The code's selection still goes with every message by
+  itself — once: quoted, it isn't sent again beside the quote.
+
+The sent message's row lists its quotes; it opens a copy of what went.
 
 ### Follow mode
 

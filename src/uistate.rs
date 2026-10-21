@@ -923,6 +923,9 @@ pub struct SessionState {
     /// A surface's view mode (`view::state`: its surface, the cursor's line of how many, selections, whether
     /// something came since — shapes, never text) — the front session's only; Claude's level never.
     pub view: Option<Value>,
+    /// What goes with the chat input's next message, in the order added (`Chat::with_state`: shapes, never text)
+    /// — the front session's only; Claude's level never (unsent).
+    pub with: Vec<Value>,
 }
 
 /// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
@@ -1333,6 +1336,10 @@ impl Editor {
             billing: l.billing.name(),
             sandbox: l.sandbox.clone(),
             view: if is_front { crate::view::state(self) } else { None },
+            with: match (is_front, self.session.chat.as_ref()) {
+                (true, Some(c)) => c.with_state(),
+                _ => Vec::new(),
+            },
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1557,6 +1564,9 @@ impl UiState {
                 }
                 if let Some(view) = &s.view {
                     v["view"] = view.clone();
+                }
+                if !s.with.is_empty() {
+                    v["with"] = json!(s.with);
                 }
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);

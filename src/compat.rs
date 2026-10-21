@@ -1136,6 +1136,7 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn with_root: shellcheck",
         "turned on (`as_shipped`): home's shellcheck rc files and SHELLCHECK_OPTS as the process has them",
     ),
+    ("src/editor.rs", "in fn with_root: sent_dir", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: sizes", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: sizes_path", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: tokens_said", "stays off: token holders told of again at each run"),

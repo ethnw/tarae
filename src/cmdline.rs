@@ -98,6 +98,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["sandbox-env"], Arg::None, "Your environment's names Claude's commands get, and don't"),
     c(&["chat-screen"], Arg::None, "Send the screen, as text, with your next chat message"),
     c(&["chat-point"], Arg::None, "Point at something on screen — it goes with your next chat message"),
+    c(&["quote"], Arg::None, "Quote the selection to the chat (space >) — none: view the chat"),
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
     c(&["procs"], Arg::None, "What tarae runs and what it costs"),
     c(&["messages"], Arg::None, "The notifications since tarae started, newest first"),

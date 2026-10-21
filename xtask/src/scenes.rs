@@ -38,6 +38,49 @@ struct Scene {
 
 const MAIN: &[&str] = &["src/main.rs"];
 
+/// The finished turn (`chatdone`'s), in its view mode a line selected (`enter quote` said) — then `enter`: the
+/// chip over the input.
+const QUOTE_VIEW: &[&str] = &[
+    "@1",
+    " ",
+    "l",
+    "@1",
+    "why does insert clone the name?",
+    "\r",
+    "@?Change 1 of 1",
+    "@1",
+    "y",
+    "@20?Nothing else",
+    "@1",
+    "\x1b",
+    "@?view",
+    "x",
+    "x",
+    // (no wait on `enter quote`: HEAD's build takes this one too, the before)
+    "@1",
+];
+const QUOTE_CHIP: &[&str] = &[
+    "@1",
+    " ",
+    "l",
+    "@1",
+    "why does insert clone the name?",
+    "\r",
+    "@?Change 1 of 1",
+    "@1",
+    "y",
+    "@20?Nothing else",
+    "@1",
+    "\x1b",
+    "@?view",
+    "x",
+    "x",
+    "@?enter quote",
+    "\r",
+    "@?goes with it",
+    "@1",
+];
+
 /// The finished turn (`chatdone`'s), then the keys to the code: one `esc` (before the chat's view mode), two.
 const CURSOR_TURN_ESC1: &[&str] = &[
     "@1",
@@ -364,7 +407,7 @@ const SCENES: &[Scene] = &[
     // mode, `esc esc` with it (`-1`/`-2`) —, in the chat's view mode, in the terminal's program from the code)
     // (view mode for a first-timer: the space menu's way in, a key it has no use for said with both ways on,
     // `y`'s copy said)
-    Scene { name: "view-space", claude: "idle", files: MAIN, keys: &["@1", " ", "@?View the chat", "@1"] },
+    Scene { name: "view-space", claude: "idle", files: MAIN, keys: &["@1", " ", "@?Close chat", "@1"] },
     // (an empty conversation: nothing to view — its input's hint row says `esc code`)
     Scene { name: "view-empty", claude: "idle", files: MAIN, keys: &["@1", " ", "l", "@?Ask about", "@1"] },
     Scene {
@@ -411,6 +454,72 @@ const SCENES: &[Scene] = &[
             "x",
             "y",
             "@?copied",
+            "@1",
+        ],
+    },
+    // (view P2, quoting: a selection on the conversation and its `enter quote` hint; `enter`'s chip over the input;
+    // `space >` on the code's lines; the message sent with it, its chip a link; the terminal's rows quoted)
+    Scene { name: "quote-view", claude: "full", files: MAIN, keys: QUOTE_VIEW },
+    Scene { name: "quote-chip", claude: "full", files: MAIN, keys: QUOTE_CHIP },
+    Scene {
+        name: "quote-code",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", "j", "j", "x", "x", " ", ">", "@?goes with it", "@1"],
+    },
+    Scene {
+        name: "quote-sent",
+        claude: "idle",
+        files: MAIN,
+        // (`C-f`: not following — the chat stays whole, the message's row in sight)
+        keys: &[
+            "@1",
+            "j",
+            "j",
+            "x",
+            "x",
+            " ",
+            ">",
+            "@?goes with it",
+            "what do these do?",
+            "\r",
+            "@?what do these",
+            "\x06",
+            "@?L3",
+            "@1",
+        ],
+    },
+    // (the terminal's view, rows selected — HEAD's build takes it too — then `enter`'s chip)
+    Scene {
+        name: "quote-termview",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1", " ", "T", "@3", "seq 1 40", "\r", "@?40", "@1", "\x1c", "@?view", "k", "k", "x", "x", "@1",
+        ],
+    },
+    Scene {
+        name: "quote-term",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "T",
+            "@3",
+            "seq 1 40",
+            "\r",
+            "@?40",
+            "@1",
+            "\x1c",
+            "@?view",
+            "k",
+            "k",
+            "x",
+            "x",
+            "@?enter quote",
+            "\r",
+            "@?goes with it",
             "@1",
         ],
     },
@@ -1125,7 +1234,8 @@ fn one(
         background: Some(bg),
         // (the shuttle scenes' terminal: a plain sh of the shot's own — a `$ ` prompt, no rc, no history, no user
         // or host name; never the shell of whoever takes the shots)
-        env: match scene.name.starts_with("shuttle") {
+        // (a plain shell, its prompt `$ ` — nobody's own setup in the picture)
+        env: match scene.name.starts_with("shuttle") || scene.name.starts_with("quote-term") {
             true => {
                 vec![("SHELL", Some("/bin/sh")), ("PS1", Some("$ ")), ("HISTFILE", Some("")), ("ENV", None)]
             }

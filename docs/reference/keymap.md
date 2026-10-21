@@ -258,7 +258,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 |---|---|---|
 | `space '` | `last_picker` | Reopen the last picker |
 | `space /` | `global_search` | Search in project |
-| `space >` | `chat_view` | View the chat |
+| `space >` | `quote` | Quote or view chat |
 | `space ?` | `command_palette` | Find a command |
 | `space @` | `chat_point` | Point Claude at something |
 | `space a` | `code_action` | Code actions |
@@ -431,7 +431,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 ## View mode
 
-A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done. Its own keys go over them, and each surface's over those.
+A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done; `enter` quotes what's selected to the chat. Its own keys go over them, and each surface's over those.
 
 ### Its own keys (`[keys.view]`)
 
@@ -445,7 +445,7 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `down` | `scroll_down` | Scroll down a line |
 | `esc` | `view_leave` | Leave view mode |
 | `left` | `page_up` | Move page up |
-| `ret` | `view_input` | Back to typing |
+| `ret` | `view_take` | Quote it to the chat, or type |
 | `right` | `page_down` | Move page down |
 | `up` | `scroll_up` | Scroll up a line |
 
@@ -551,6 +551,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:sandbox-env` |  | Your environment's names Claude's commands get, and don't |
 | `:chat-screen` |  | Send the screen, as text, with your next chat message |
 | `:chat-point` |  | Point at something on screen — it goes with your next chat message |
+| `:quote` |  | Quote the selection to the chat (space >) — none: view the chat |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:procs` |  | What tarae runs and what it costs |
 | `:messages` |  | The notifications since tarae started, newest first |

@@ -145,6 +145,7 @@ pub const COMMANDS: &[&str] = &[
     "view_code",
     "view_input",
     "view_latest",
+    "view_take",
 ];
 
 /// The chat's rows as a frame laid them out, in order: each message's kept rows (with its index), and the
@@ -162,6 +163,8 @@ pub enum After {
     Input,
     /// `G`: caught up, on the latest line.
     Latest,
+    /// `enter` on a selection: quoted to the chat (`quote.rs`).
+    Take,
 }
 
 /// A surface's view mode: its document, the keys' state while they're its, and what it was made of.
@@ -186,8 +189,10 @@ pub struct View {
     /// Entered by the wheel: where the keys were.
     pub by_wheel: Option<Was>,
     after: Option<After>,
-    /// The terminal's: what it was made of.
+    /// The terminal's: what it was made of, and which of its lines wrapped into the next — with the blanks its line
+    /// lost at its end — a quote joins them again.
     made: Option<Made>,
+    wraps: Vec<Option<usize>>,
     /// The terminal's: a new panel size seen, not settled yet (`terminal_resized`).
     settling: Option<(u16, u16)>,
 }
@@ -254,13 +259,22 @@ impl View {
         now != self.seen
     }
 
-    /// More than one character selected, or several cursors — what `esc` collapses first.
+    /// More than one character selected, or several cursors — what `esc` collapses first, `enter` quotes.
     pub fn selects(&self) -> bool {
-        let d = self.doc();
-        let sel = d.selection();
-        sel.ranges().len() > 1
-            || sel.ranges().iter().any(|r| crate::graphemes::next_boundary(&d.text, r.from()) < r.to())
+        selects(self.doc())
     }
+}
+
+/// A range of `doc`'s selection is wider than a character — what `enter` quotes (several plain cursors aren't).
+pub fn wide(d: &Document) -> bool {
+    d.selection().ranges().iter().any(|r| crate::graphemes::next_boundary(&d.text, r.from()) < r.to())
+}
+
+/// `doc` has more than one character selected, or several cursors.
+pub fn selects(d: &Document) -> bool {
+    let sel = d.selection();
+    sel.ranges().len() > 1
+        || sel.ranges().iter().any(|r| crate::graphemes::next_boundary(&d.text, r.from()) < r.to())
 }
 
 /// What the conversation holds now, as one number: what came changes it.
@@ -540,6 +554,7 @@ fn made(
         by_wheel,
         after: None,
         made,
+        wraps: Vec::new(),
         settling: None,
     }
 }
@@ -587,9 +602,9 @@ pub fn cell_len(contents: &str) -> usize {
 }
 
 /// The terminal's rows — its scrollback, then its screen — as a document, a line each (`cell_len`, blanks at its
-/// end off), and how many rows of scrollback are above the screen. vt100 reaches its rows only through the
-/// scrollback offset: read a page at a time by moving it, put back as it was.
-fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize)> {
+/// end off), how many rows of scrollback are above the screen, and which rows wrapped into the next. vt100 reaches
+/// its rows only through the scrollback offset: read a page at a time by moving it, put back as it was.
+fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize, Vec<Option<usize>>)> {
     let t = ed.session.terminal.as_mut()?;
     let screen = t.parser.screen_mut();
     let (rows, cols) = screen.size();
@@ -598,6 +613,7 @@ fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize)> {
     let back = screen.scrollback();
     let total = back + usize::from(rows);
     let mut text = String::new();
+    let mut wraps = Vec::with_capacity(total);
     let mut line = 0;
     while line < total {
         // (the page whose first row is `line` — the screen's own, once past the scrollback)
@@ -605,13 +621,18 @@ fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize)> {
         screen.set_scrollback(off);
         let first = back - off;
         let before = line;
-        for row in screen.rows(0, cols).skip(line - first) {
+        let skip = line - first;
+        for (k, row) in screen.rows(0, cols).skip(skip).enumerate() {
             if line == total {
                 break;
             }
             let from = text.len();
             text.extend(row.chars().map(|c| if c.is_control() { ' ' } else { c }));
             let kept = text[from..].trim_end().len();
+            // (a wrapped row's blanks at its end are spaces the program printed — vt100 gives a row's cells up to
+            // the last one written: a quote joins it to the next with them)
+            let wrapped = screen.row_wrapped((skip + k) as u16);
+            wraps.push(wrapped.then(|| text[from + kept..].chars().count()));
             text.truncate(from + kept);
             // (each row its line break: a blank last row is a line too — joined, it would be the ghost line
             // after a final newline, and the view one row short of the screen's bottom)
@@ -626,7 +647,7 @@ fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize)> {
     let mut doc = Document::from_str(ed.alloc_id(), &text);
     doc.wrap = Some(false);
     doc.throwaway = true;
-    Some((doc, back))
+    Some((doc, back, wraps))
 }
 
 /// The terminal's view mode: held still from now (its program's output kept back), its rows read, the cursor
@@ -640,7 +661,7 @@ fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
     let screen = t.parser.screen();
     let (size, off, cursor) = (screen.size(), screen.scrollback(), usize::from(screen.cursor_position().0));
     let generation = t.generation();
-    let Some((mut doc, back)) = terminal_doc(ed) else { return };
+    let Some((mut doc, back, wraps)) = terminal_doc(ed) else { return };
     let last = mv::last_line(&doc.text);
     let top = back.saturating_sub(off);
     let rows = usize::from(size.0).max(1);
@@ -662,7 +683,9 @@ fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
     doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
     doc.set_top(top.min(last));
     let made_of = Made { generation, size, back, lines: last + 1 };
-    ed.session.view = Some(made(Surface::Terminal, doc, Vec::new(), generation, by_wheel, Some(made_of)));
+    let mut view = made(Surface::Terminal, doc, Vec::new(), generation, by_wheel, Some(made_of));
+    view.wraps = wraps;
+    ed.session.view = Some(view);
     ed.bottom_focus = true;
     ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
     if let Some(c) = ed.session.chat.as_mut() {
@@ -769,8 +792,9 @@ pub fn terminal_resized(ed: &mut Editor) {
     }
     // (read again into the view as it is — its mode, keys under way, count, selections and top kept: a row keeps its
     // line, a resize leaving vt100's scrollback as it was; a place past its line's new end at the end)
-    let Some((mut doc, back)) = terminal_doc(ed) else { return };
+    let Some((mut doc, back, wraps)) = terminal_doc(ed) else { return };
     let Some(v) = ed.session.view.as_mut() else { return };
+    v.wraps = wraps;
     let old = v.doc();
     let place = |pos: usize| {
         let l = mv::line_of(&old.text, pos);
@@ -991,7 +1015,86 @@ fn after(ed: &mut Editor) {
             }
         }
         (After::Latest, _) => catch_up(ed),
+        (After::Take, surface) => take(ed, surface),
     }
+}
+
+/// `enter` on a selection: each range a quote over the chat's input (`quote.rs`), the view left, the input with
+/// the keys. The terminal's only where its rows go to Claude (`llm.screen-terminal`) — else said, nothing done.
+fn take(ed: &mut Editor, surface: Surface) {
+    if surface == Surface::Terminal && !ed.config.llm.screen_terminal {
+        return ed.set_status("the terminal's rows don't go to Claude (llm.screen-terminal) — y copies them");
+    }
+    let Some(v) = ed.session.view.as_ref() else { return };
+    let taken = taken(ed, v);
+    if taken.is_empty() {
+        return ed.set_status("only blanks are selected — nothing to quote");
+    }
+    // (the keys the chat's input's: `quote::add` focuses it, the terminal's panel lets go)
+    leave(ed);
+    crate::quote::add(ed, taken);
+}
+
+/// The view's selections as quotes, one a range (blank ones left out): the chat's rows joined where the layout
+/// wrapped them, a cut code row whole; the terminal's where the program's line wrapped, its lines of how many.
+fn taken(ed: &Editor, v: &View) -> Vec<crate::quote::Taken> {
+    use crate::chat::Role;
+    use crate::quote::{Taken, lines, text_of};
+    let d = v.doc();
+    let rows: Vec<&ChatRow> = v.laid.iter().flat_map(|(_, r)| r.iter()).collect();
+    let how = |l: usize| match v.surface {
+        Surface::Chat => rows.get(l).map_or((0, None), |r| (r.skip, r.join.map(usize::from))),
+        Surface::Terminal => (0, v.wraps.get(l.wrapping_sub(1)).copied().flatten()),
+    };
+    let rest = |l: usize| rows.get(l).and_then(|r| r.rest.clone());
+    let quote = |r: &Range| {
+        let (text, l0, l1) = text_of(&d.text, (r.from(), r.to()), &how, &rest);
+        // (blank rows around it — a screen's foot, the air between messages — aren't what was meant)
+        let text = text.trim_start_matches('\n').trim_end().to_string();
+        if text.trim().is_empty() {
+            return None;
+        }
+        let n = lines(text.lines().count());
+        Some(match v.surface {
+            Surface::Terminal => {
+                // (the program's file name — `terminal::spawn`'s `argv[0]`, never a title the program sets)
+                let title = ed.session.terminal.as_ref().map_or_else(String::new, |t| t.title.clone());
+                let at = format!("{}-{} of {}", l0 + 1, l1 + 1, v.rows());
+                Taken {
+                    attrs: vec![("from", "terminal".into()), ("title", title), ("lines", at)],
+                    label: format!("terminal {n}"),
+                    text,
+                    redact: true,
+                    code: None,
+                }
+            }
+            Surface::Chat => {
+                // (whose words: one message's role, else the chat's)
+                let msgs = ed.session.chat.as_ref().map(|c| &c.msgs);
+                let role = |l: usize| place_at(&v.laid, l).and_then(|(m, _)| Some(msgs?.get(m)?.role));
+                let (role, label) = match (role(l0), role(l1)) {
+                    (Some(a), Some(b)) if a == b => match a {
+                        Role::User => ("user", "your message"),
+                        Role::Assistant => ("assistant", "Claude's answer"),
+                        Role::Thought => ("thinking", "Claude's thinking"),
+                        Role::Tool => ("tool calls", "Claude's tool calls"),
+                        Role::Note => ("note", "the chat"),
+                    },
+                    _ => ("several", "the chat"),
+                };
+                Taken {
+                    attrs: vec![("from", "chat".into()), ("role", role.into())],
+                    label: format!("{label} {n}"),
+                    text,
+                    redact: false,
+                    code: None,
+                }
+            }
+        })
+    };
+    // (only the ranges wider than a character: a plain cursor beside them quotes nothing)
+    let wide = |r: &&Range| crate::graphemes::next_boundary(&d.text, r.from()) < r.to();
+    d.selection().ranges().iter().filter(wide).filter_map(quote).collect()
 }
 
 /// Whether `key` is `C-w` (or `A-C-w`): the windows' keys, the editor's from a view mode too.
@@ -1097,7 +1200,9 @@ fn key_in(ed: &mut Editor, surface: Surface, key: Key) {
 /// `a` and `ret`), else the shortest — None when nothing is (a remap took it away).
 pub fn bound(ed: &Editor, surface: Surface, name: &str, like: &str) -> Option<String> {
     let keys = ed.keymaps.view(surface, Mode::Normal).keys_for(name);
-    keys.iter().find(|k| k.as_str() == like).or(keys.first()).cloned()
+    let k = keys.iter().find(|k| k.as_str() == like).or(keys.first())?;
+    // (as every hint names it)
+    Some(if k == "ret" { "enter".into() } else { k.clone() })
 }
 
 /// A key view mode has no use for: said where the user looks, with the way to type (§3.1).
@@ -1119,6 +1224,15 @@ fn said(ed: &mut Editor, surface: Surface, keys: &[Key]) {
         false => ways.join(", "),
     };
     ed.set_status(format!("{} isn't in view mode — {out}", seq.join(" ")));
+}
+
+/// Whether `enter` quotes in the view mode now (`enter quote` said): something selected, on a surface whose rows go
+/// to Claude — not the terminal's while `llm.screen-terminal` is off (there `enter` only says why).
+pub fn quotes(ed: &Editor) -> bool {
+    ed.session
+        .view
+        .as_ref()
+        .is_some_and(|v| wide(v.doc()) && (v.surface != Surface::Terminal || ed.config.llm.screen_terminal))
 }
 
 /// Whether `i` has somewhere to type: the chat's input always, the terminal's program while it runs.

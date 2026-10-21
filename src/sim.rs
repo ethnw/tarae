@@ -35,6 +35,7 @@ mod instructions;
 #[cfg(not(target_os = "linux"))]
 mod ptybroker;
 mod quota;
+mod quotes;
 mod rebasemsg;
 mod reviews;
 mod sessions;
