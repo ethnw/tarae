@@ -408,6 +408,11 @@ answer the background-color query). Files to restore, recent files, and undo his
 `@3` among the keys waits 3 s, `@?ready` until `ready` is on screen (a language server indexing). The other knobs
 are listed at the top of [`xtask/src/shot.rs`](xtask/src/shot.rs).
 
+For a change to the screen, `cargo xtask scenes [scene …]` takes tarae's main surfaces — the start screen, code
+with the side panel, a picker, a toast, the git tab, `:granted`, the chat mid-answer and after, Claude's edit
+review, a turn's review, a card — in both themes at 80 and 160 columns, into `target/scenes/` (`--out DIR`), each
+on a demo crate of its own with a stand-in claude: the same pictures before and after (`--list` names them).
+
 The design language:
 
 - **One accent color** (`ui.accent`; if a theme lacks it, the primary cursor background is used)

@@ -10,6 +10,8 @@
 //!   Run only when grammar commits or the bundle list change.
 //! - `shot out.png [keys …]` — the real screen as a PNG, for looking at a change before it's committed
 //!   (see [`shot`]); `shot --live out.png [--pid N]` — a running tarae's last frame as one.
+//! - `scenes [--out DIR] [scene …]` — tarae's main surfaces as shots, both themes at 80 and 160 columns, each on a
+//!   demo crate of its own with a stand-in claude (see [`scenes`]).
 //! - `perf` (`cargo perf`) — the budgets and real-use scenarios in the `perf` profile, their numbers kept in
 //!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
 //! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see
@@ -47,6 +49,7 @@ mod perf;
 // (tarae's own: a pty close-on-exec from the start)
 #[path = "../../src/pty.rs"]
 mod pty;
+mod scenes;
 mod shot;
 mod stream;
 mod trace;
@@ -58,6 +61,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("vendor-grammars") => vendor_grammars(),
         Some("shot") => shot::run(&args[1..]),
+        Some("scenes") => scenes::run(&args[1..]),
         Some("perf") => perf::run(&args[1..]),
         // (`prune`: the target volumes no checkout uses, and landed checkouts' with `--yes`; `--all`: every volume
         // and image of the repository's — linux.rs)
@@ -71,7 +75,7 @@ fn main() {
         Some("compat") => compat::run(&args[1..]),
         Some("glyphs") => glyphs::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
                 .into(),
         ),
     };

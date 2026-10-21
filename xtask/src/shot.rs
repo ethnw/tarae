@@ -67,17 +67,61 @@ pub fn run(args: &[String]) -> Result<()> {
         let state = given
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join(format!("tarae-shot-state-{}", std::process::id())));
-        let res = drive(&mut vt, keys, &state, cols, rows);
+        let res = Setup::from_env().and_then(|setup| drive(&mut vt, &setup, keys, &state, cols, rows));
         if given.is_none() {
             let _ = std::fs::remove_dir_all(&state);
         }
         res?;
     }
+    picture(&vt, scale, Path::new(out))
+}
 
+/// What a shot runs: the tarae, the files it opens and where, its config home, and the theme's background
+/// (`TARAE_BACKGROUND`; None: the shot's own environment's).
+pub struct Setup {
+    pub bin: PathBuf,
+    pub files: Vec<String>,
+    pub cwd: PathBuf,
+    pub config: PathBuf,
+    pub background: Option<&'static str>,
+}
+
+impl Setup {
+    /// `cargo xtask shot`'s: from its variables (the top of this file), the shot profile's tarae built unless
+    /// `TARAE_SHOT_BIN` names one.
+    fn from_env() -> Result<Setup> {
+        let root = root();
+        let bin = match folder("TARAE_SHOT_BIN", std::env::var_os("TARAE_SHOT_BIN"), false)? {
+            Some(bin) => bin,
+            None => build_shot(&root)?,
+        };
+        let files = std::env::var("TARAE_SHOT_FILES")
+            .unwrap_or_else(|_| "src/transaction.rs src/selection.rs".into())
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let cwd = folder("TARAE_SHOT_CWD", std::env::var_os("TARAE_SHOT_CWD"), true)?.unwrap_or(root);
+        let config = folder("TARAE_SHOT_XDG", std::env::var_os("TARAE_SHOT_XDG"), true)?
+            .unwrap_or_else(|| "/tmp/tarae-shot/xdg".into());
+        Ok(Setup { bin, files, cwd, config, background: None })
+    }
+}
+
+/// One shot of `setup`'s tarae on a `cols`×`rows` pty, `keys` sent as `cargo xtask shot` sends them, its state
+/// in `state` (left there), the screen saved to `out`.
+pub fn take(setup: &Setup, keys: &[String], size: (u16, u16), state: &Path, out: &Path) -> Result<()> {
+    let (cols, rows) = size;
+    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    drive(&mut vt, setup, keys, state, cols, rows)?;
+    picture(&vt, 1, out)
+}
+
+/// The screen as a PNG at `out`.
+fn picture(vt: &Vt, scale: usize, out: &Path) -> Result<()> {
     let fonts = Fonts::load(scale)?;
     let (w, h, px) = render(vt.parser.screen(), &fonts, scale);
-    save_png(Path::new(out), w, h, &px)?;
-    println!("saved {out} ({w}, {h})");
+    save_png(out, w, h, &px)?;
+    println!("saved {} ({w}, {h})", out.display());
     Ok(())
 }
 
@@ -208,28 +252,22 @@ fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc == -1 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
-fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Result<()> {
-    let root = root();
-    let bin = match folder("TARAE_SHOT_BIN", std::env::var_os("TARAE_SHOT_BIN"), false)? {
-        Some(bin) => bin,
-        None => build_shot(&root)?,
-    };
-    if !bin.is_file() {
-        return Err(format!("{} not found", bin.display()));
+fn drive(vt: &mut Vt, setup: &Setup, keys: &[String], state: &Path, cols: u16, rows: u16) -> Result<()> {
+    if !setup.bin.is_file() {
+        return Err(format!("{} not found", setup.bin.display()));
     }
-    let files =
-        std::env::var("TARAE_SHOT_FILES").unwrap_or_else(|_| "src/transaction.rs src/selection.rs".into());
-    let cwd =
-        folder("TARAE_SHOT_CWD", std::env::var_os("TARAE_SHOT_CWD"), true)?.unwrap_or_else(|| root.clone());
-    let config = folder("TARAE_SHOT_XDG", std::env::var_os("TARAE_SHOT_XDG"), true)?
-        .map_or_else(|| "/tmp/tarae-shot/xdg".into(), PathBuf::into_os_string);
-
     let (master, slave) = crate::pty::open(rows, cols).map_err(|e| format!("pty: {e}"))?;
     let mut master = File::from(master);
     let stdio = || slave.try_clone().map(Stdio::from).map_err(|e| e.to_string());
-    let mut cmd = Command::new(&bin);
-    cmd.args(files.split_whitespace()).current_dir(cwd);
-    as_a_terminal(&mut cmd, &config, state).stdin(stdio()?).stdout(stdio()?).stderr(stdio()?);
+    let mut cmd = Command::new(&setup.bin);
+    cmd.args(&setup.files).current_dir(&setup.cwd);
+    if let Some(bg) = setup.background {
+        cmd.env("TARAE_BACKGROUND", bg);
+    }
+    as_a_terminal(&mut cmd, setup.config.as_os_str(), state)
+        .stdin(stdio()?)
+        .stdout(stdio()?)
+        .stderr(stdio()?);
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
@@ -239,7 +277,7 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
+    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", setup.bin.display()))?;
     drop(slave);
 
     // Drains the master until EOF — on macOS an exiting process whose tty output nobody reads hangs.
@@ -321,7 +359,7 @@ fn wait_key(key: &str) -> Option<(f64, &str)> {
 
 /// The `shot` profile's tarae, built now (`Cargo.toml`: release's behavior, built incrementally without
 /// LTO — seconds after an edit where `--release` takes over a minute).
-fn build_shot(root: &Path) -> Result<PathBuf> {
+pub fn build_shot(root: &Path) -> Result<PathBuf> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let st = Command::new(cargo)
         .args(["build", "--quiet", "--profile", "shot", "--bin", "tarae"])
