@@ -127,7 +127,7 @@ fn captures() -> &'static Mutex<Captures> {
     C.get_or_init(Mutex::default)
 }
 
-fn capture_id(name: &str) -> u32 {
+pub(crate) fn capture_id(name: &str) -> u32 {
     let mut c = captures().lock().unwrap();
     if let Some(&id) = c.ids.get(name) {
         return id;

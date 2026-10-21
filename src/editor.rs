@@ -597,6 +597,8 @@ pub struct Editor {
     mouse_in_terminal: bool,
     /// Recently opened files (start screen — open with number keys).
     pub recent: Vec<PathBuf>,
+    /// What you ran from the palette, newest first — its order with nothing typed (`palette.rs`).
+    pub palette_ran: Vec<String>,
     /// The restore file (last position per file, open files per folder — `restore.rs`).
     pub restore: crate::restore::State,
     /// Theme before the theme preview (Esc restores it).
@@ -1017,6 +1019,7 @@ impl Editor {
             recovery,
             idle_save_gen: 0,
             recent: Vec::new(),
+            palette_ran: Vec::new(),
             restore: crate::restore::State::default(),
             theme_before: None,
             screen: Screen::default(),
@@ -1104,16 +1107,15 @@ impl Editor {
         id
     }
 
-    /// `:tutor` — hands-on tutorial (a disposable practice buffer, markdown colors).
+    /// `:tutor` — hands-on tutorial (a disposable practice buffer, drawn as text: `tutor.rs`).
     pub fn open_tutor(&mut self) {
         let id = self.alloc_id();
-        let mut doc = Document::from_str(id, include_str!("tutor.md"));
+        let (text, paint) = crate::tutor::text();
+        let mut doc = Document::from_str(id, &text);
         doc.title = Some("tutor".into());
         doc.throwaway = true;
+        doc.paint = paint;
         self.add_doc(doc);
-        if let Some(spec) = crate::syntax::spec("markdown") {
-            self.load_language(id, spec);
-        }
     }
 
     pub fn new_scratch(&mut self) {
@@ -2892,8 +2894,13 @@ impl Editor {
             0 => crate::key::UNDRAWN_ROWS,
             n => n,
         };
+        // (`q` closes a list whose letters are keys — the session list, `:granted` — as every list panel's does;
+        // elsewhere it's typed)
+        let q_closes = key.code == Code::Char('q') && !key.alt && p.keys;
         match (key.code, key.ctrl) {
-            (Code::Esc, _) | (Code::Char('c'), true) => {
+            (Code::Esc, _) | (Code::Char('c'), true) | (Code::Char('q'), false)
+                if key.code != Code::Char('q') || q_closes =>
+            {
                 // A plugin's pick: it hears nothing was chosen
                 if let Some(token) = self.plugin_pick_token() {
                     self.picker = None;
@@ -2990,12 +2997,20 @@ impl Editor {
             }
             (Code::Enter, _) => {
                 let action = p.current().map(|i| i.action.clone());
-                // (a command chosen in the palette: counted as the palette's — a `:` one as typed)
+                // (a command chosen in the palette: counted as the palette's — a `:` one as typed — and first
+                // in it next time)
                 if p.kind == "commands" {
                     match &action {
                         Some(Action::Command(name)) => self.count(crate::features::Area::Palette, name),
                         Some(Action::Typed(line)) => self.count_typed(line),
                         _ => {}
+                    }
+                    if let Some(k) = action.as_ref().and_then(crate::palette::key) {
+                        self.palette_ran = crate::palette::bump(&self.palette_ran, &k);
+                        if !cfg!(test) {
+                            let ran = self.palette_ran.clone();
+                            self.events.jobs().background(move || crate::palette::save(&ran));
+                        }
                     }
                 }
                 self.keep_last_picker();
@@ -11718,8 +11733,25 @@ mod tests {
         crate::term::render(&mut ed, &mut bytes, 120, 20).unwrap();
         let mut parser = vt100::Parser::new(20, 120, 0);
         parser.process(&bytes);
-        assert!(parser.screen().contents().contains("1–3 switch to that row"));
+        // (uxaudit 5: and that its letters are keys — typing to filter it made `n` ask for a new session)
+        let s = parser.screen().contents();
+        assert!(s.contains("letters are keys here, nothing is typed · 1–3 switch"), "{s}");
         assert!(parser.screen().hide_cursor(), "no cursor");
+        // Narrower: the digits fold first, whole — never cut
+        for w in (50..120).step_by(3) {
+            let mut bytes = Vec::new();
+            crate::term::render(&mut ed, &mut bytes, w, 20).unwrap();
+            let mut narrow = vt100::Parser::new(20, w, 0);
+            narrow.process(&bytes);
+            let s = narrow.screen().contents();
+            let row = s.lines().find(|l| l.contains("letters")).unwrap_or_else(|| panic!("at {w}:\n{s}"));
+            assert!(!row.contains('·') || row.contains("1–3 switch"), "at {w}: {row}");
+        }
+        // A letter that isn't one of its keys is said, the list kept
+        feed(&mut ed, "t");
+        let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(said.starts_with("t does nothing in the session list"), "{said}");
+        assert!(ed.picker.as_ref().is_some_and(|p| p.query.is_empty()));
         settle_until(&mut ed, |ed| rows(ed)[1].1.contains("changed"));
         let r = rows(&ed);
         // (the checkout tarae started in by its branch, as the sessions are)
@@ -11727,6 +11759,10 @@ mod tests {
         assert!(r[1].1.starts_with("↑1  1 changed  waits for you"), "{r:?}");
         assert!(r[0].1.starts_with("here"), "{r:?}");
         assert_eq!(ed.picker.as_ref().unwrap().items()[1].glyph, Some(("▲", "warning")));
+        // `q` closes it, as every list's (the tutor teaches it)
+        feed(&mut ed, "q");
+        assert!(ed.picker.is_none(), "q closed it");
+        feed(&mut ed, "<space>W");
         // Letters don't type: `j` moves, Enter switches
         feed(&mut ed, "j");
         assert_eq!(ed.picker.as_ref().unwrap().query, "");
@@ -14024,9 +14060,95 @@ mod tests {
         let mut ed = editor("");
         feed(&mut ed, ":tutor<ret>");
         assert_eq!(ed.doc().display_name(&ed.session.root), "tutor");
-        assert!(ed.doc().text.to_string().starts_with("# tarae tutorial"));
+        assert!(ed.doc().text.to_string().starts_with("tarae tutorial"));
         feed(&mut ed, "ihello<esc>:q<ret>");
         assert!(ed.should_quit, "an edited tutorial doesn't block quitting");
+    }
+
+    /// The tutor is text (uxaudit 5) — its colours are spans kept on the buffer, and they follow what you do
+    /// in it: typed before them they move along, undone they come back, deleted whole they go.
+    #[test]
+    fn the_tutors_colours_follow_its_edits() {
+        let mut ed = editor("");
+        feed(&mut ed, ":tutor<ret>");
+        assert!(ed.doc().syntax.is_none() && !ed.doc().text.to_string().contains('`'));
+        let painted = |ed: &Editor| -> Vec<String> {
+            let (d, t) = (ed.doc(), ed.doc().text.to_string());
+            d.paint.iter().map(|s| t[s.0..s.1].to_string()).collect()
+        };
+        let before = painted(&ed);
+        assert_eq!(before[..2], ["tarae tutorial", "space"]);
+        feed(&mut ed, "ggiHello <esc>");
+        assert_eq!(painted(&ed), before, "typed before them, they move along");
+        feed(&mut ed, "u");
+        assert_eq!(painted(&ed), before, "undone, they're where they were");
+        feed(&mut ed, "gg/space<ret>d");
+        let mut want = before.clone();
+        want.remove(1);
+        assert_eq!(painted(&ed), want, "a key deleted whole takes its colour along");
+        feed(&mut ed, "u");
+        assert_eq!(painted(&ed), before, "undone, the key is back with its colour");
+        feed(&mut ed, "U");
+        assert_eq!(painted(&ed), want, "redone, gone again");
+        // Typed right after a key still painted (`space ?`): the key keeps its span, what's typed stays plain
+        feed(&mut ed, "gg/space \\?<ret>aX<esc>");
+        assert!(ed.doc().text.to_string().contains("space ?X"), "appended after it");
+        assert_eq!(painted(&ed), want, "typed against its end, it's plain");
+    }
+
+    /// `q` closes `:granted` too — the other list whose letters are keys (uxaudit 5, as the session list's); a
+    /// letter it has no use for is still said there.
+    #[test]
+    fn q_closes_the_list_of_grants_too() {
+        let mut ed = editor("");
+        ed.granted_open(Vec::new(), false);
+        assert_eq!(ed.picker.as_ref().map(|p| (p.kind, p.keys)), Some((crate::granted::KIND, true)));
+        feed(&mut ed, "x");
+        let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(ed.picker.is_some() && said.contains("does nothing in the list of grants"), "{said}");
+        feed(&mut ed, "q");
+        assert!(ed.picker.is_none(), "q closed it");
+    }
+
+    /// The palette for a first hour (uxaudit 5): with nothing typed, what you ran from it comes first, then the
+    /// commands a first hour asks for; typed, a word's start ranks above letters inside a word, and those above
+    /// letters here and there.
+    #[test]
+    fn the_palette_lists_what_you_ran_then_the_common_ones_and_ranks_word_starts_first() {
+        let mut ed = editor("");
+        let rows = |ed: &Editor, n: usize| -> Vec<String> {
+            let p = ed.picker.as_ref().unwrap();
+            (0..n).filter_map(|r| p.item_at(r)).map(|i| i.label.clone()).collect()
+        };
+        feed(&mut ed, "<space>?");
+        assert_eq!(rows(&ed, 3), ["Learn the keys (tutorial)", "Open a file", "Search in project"]);
+        // Every one of a first hour's is in the palette, in its order — one renamed or misspelt would fall to the rest
+        let common = crate::palette::COMMON;
+        let p = ed.picker.as_ref().unwrap();
+        let keys: Vec<String> = (0..common.len())
+            .filter_map(|r| p.item_at(r))
+            .filter_map(|i| crate::palette::key(&i.action))
+            .collect();
+        assert_eq!(keys, common);
+        // Run one: the next palette starts with it
+        feed(&mut ed, "line highlight<ret>");
+        assert!(!ed.config.cursorline, "ran");
+        feed(&mut ed, "<space>?");
+        assert_eq!(rows(&ed, 2), ["Toggle current line highlight", "Learn the keys (tutorial)"]);
+        // `side`: at a word's start first, inside a word next, scattered letters last
+        feed(&mut ed, "<esc><space>?side");
+        let p = ed.picker.as_ref().unwrap();
+        assert!(
+            p.words,
+            "ranked by where the words sit (picker.rs's test: where nucleo alone ranks otherwise)"
+        );
+        let all: Vec<String> =
+            (0..p.len()).filter_map(|r| p.item_at(r)).map(|i| i.label.to_lowercase()).collect();
+        let first = |f: &dyn Fn(&str) -> bool| all.iter().position(|l| f(l)).expect("listed");
+        let start = first(&|l| l.starts_with("side") || l.contains(" side"));
+        let inside = first(&|l| l.contains("inside"));
+        let scattered = first(&|l| !l.contains("side"));
+        assert!(start == 0 && start < inside && inside < scattered, "{all:#?}");
     }
 
     #[test]

@@ -247,6 +247,9 @@ pub struct Snapshot {
     text: Rope,
     selection: Selection,
     version: u64,
+    /// Its painted colours as they were (`Document.paint`: the tutor's — none elsewhere): a key deleted whole
+    /// comes back with its colour.
+    paint: Vec<(usize, usize, u32)>,
 }
 
 pub struct Document {
@@ -308,6 +311,9 @@ pub struct Document {
     /// Display name of an unnamed buffer (tutorial etc.) · disposable (quit isn't blocked as "unsaved").
     pub title: Option<String>,
     pub throwaway: bool,
+    /// Colours painted over a document with no language (`tutor.rs`: its headings and keys, the marks that
+    /// said so taken out of the text) — byte spans and global capture ids, following its edits.
+    pub paint: Vec<(usize, usize, u32)>,
     /// Soft wrap for this buffer alone (`z w`, `:soft-wrap`) — None: `editor.soft-wrap` decides (#156).
     pub wrap: Option<bool>,
     /// Address of non-file content (jdtls jdt:// class source) — reopening uses this buffer. Read-only.
@@ -414,6 +420,7 @@ impl Document {
             own: Own::default(),
             title: None,
             throwaway: false,
+            paint: Vec::new(),
             wrap: None,
             virtual_uri: None,
             marks: Vec::new(),
@@ -503,6 +510,7 @@ impl Document {
         for (_, m) in &mut self.marks {
             *m = tx.map_selection(m);
         }
+        self.paint_follow(tx);
         self.own.edited(self.id, tx);
         self.set_selection(sel);
         self.next_version += 1;
@@ -511,6 +519,18 @@ impl Document {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// The painted colours follow an edit: what's typed against a span's either end stays plain, a span deleted
+    /// whole goes.
+    fn paint_follow(&mut self, tx: &Transaction) {
+        if self.paint.is_empty() {
+            return;
+        }
+        for s in &mut self.paint {
+            (s.0, s.1) = (tx.map_pos(s.0, Assoc::After), tx.map_pos(s.1, Assoc::Before));
+        }
+        self.paint.retain(|s| s.0 < s.1);
     }
 
     /// Keep `sel` as a mark (it follows edits) — returns its id.
@@ -579,7 +599,12 @@ impl Document {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot { text: self.text.clone(), selection: self.selection.clone(), version: self.version }
+        Snapshot {
+            text: self.text.clone(),
+            selection: self.selection.clone(),
+            version: self.version,
+            paint: self.paint.clone(),
+        }
     }
 
     /// Close the edit group — if now differs from the group-start snapshot, push onto the undo stack.
@@ -616,7 +641,7 @@ impl Document {
     pub fn install_history(&mut self, (undo, redo): crate::undofile::Stacks) {
         let mut snap = |(text, selection): (Rope, Selection)| {
             self.next_version += 1;
-            Snapshot { text, selection, version: self.next_version }
+            Snapshot { text, selection, version: self.next_version, paint: Vec::new() }
         };
         let undo: Vec<Snapshot> = undo.into_iter().map(&mut snap).collect();
         let redo: Vec<Snapshot> = redo.into_iter().map(&mut snap).collect();
@@ -640,6 +665,7 @@ impl Document {
         self.text = snap.text;
         self.selection = snap.selection;
         self.version = snap.version;
+        self.paint = snap.paint;
         if let (Some(s), Some(e)) = (&mut self.syntax, edit) {
             s.edit(&[e]);
         }

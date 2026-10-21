@@ -153,6 +153,7 @@ pub struct FilterJob {
     candidates: Vec<u32>,
     query: String,
     tree: bool,
+    words: bool,
     config: Config,
 }
 
@@ -161,19 +162,21 @@ pub type Filtered = (u64, String, Vec<u32>, bool);
 
 impl FilterJob {
     pub fn run(self) -> Filtered {
+        let mut matcher = Matcher::new(self.config);
         let (matches, tail) =
-            filter(&self.items, &self.candidates, &self.query, self.tree, &mut Matcher::new(self.config));
+            filter(&self.items, &self.candidates, &self.query, (self.tree, self.words), &mut matcher);
         (self.generation, self.query, matches, tail)
     }
 }
 
 /// `candidates` of `items` scored against `query`, best first — a tree needs only its best TREE_MAX in
-/// order (the flag says so). Any thread; a big list is scored on every core.
+/// order (the flag says so); `words` (`Picker.words`) ranks by where the query sits first (`placement`). Any
+/// thread; a big list is scored on every core.
 fn filter(
     items: &[Item],
     candidates: &[u32],
     query: &str,
-    tree: bool,
+    (tree, words): (bool, bool),
     matcher: &mut Matcher,
 ) -> (Vec<u32>, bool) {
     let pat = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
@@ -181,7 +184,13 @@ fn filter(
         let mut buf = Vec::new();
         part.iter()
             .filter_map(|&i| {
-                pat.score(Utf32Str::new(&items[i as usize].label, &mut buf), matcher).map(|s| (s, i))
+                let label = &items[i as usize].label;
+                let s = pat.score(Utf32Str::new(label, &mut buf), matcher)?;
+                // (the placement above the score: nucleo's stay far below 2²⁴)
+                Some(match words {
+                    true => ((2 - placement(label, query) as u32) << 24 | s.min((1 << 24) - 1), i),
+                    false => (s, i),
+                })
             })
             .collect()
     };
@@ -221,6 +230,22 @@ fn filter(
         scored.sort_unstable_by(order);
     }
     (scored.into_iter().map(|(_, i)| i).collect(), tail)
+}
+
+/// Where a query's words sit in a label, the worst of them: 0 each at a word's start, 1 inside a word, 2 only as
+/// letters here and there (`side`: "Side panel" 0, "Select inside object" 1, "Cursor to mid-screen" 2). A word
+/// of nucleo's pattern syntax (`!`, `'`, `^`, `$`) doesn't rank.
+fn placement(label: &str, query: &str) -> u8 {
+    let label = label.to_lowercase();
+    let of = |w: &str| -> u8 {
+        if w.starts_with(['!', '\'', '^']) || w.ends_with('$') {
+            return 0;
+        }
+        let w = w.to_lowercase();
+        let at_start = |i: usize| label[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        label.match_indices(&w).map(|(i, _)| if at_start(i) { 0 } else { 1 }).min().unwrap_or(2)
+    };
+    query.split_whitespace().map(of).max().unwrap_or(0)
 }
 
 /// Lists of paths shown as a folder tree (filetree.rs), relative to `root`.
@@ -324,6 +349,9 @@ pub struct Picker {
     /// Letters are the list's keys, not a query (the session list: `d` `b` `n`, a digit picks a row) — a
     /// short list nobody needs to filter.
     pub keys: bool,
+    /// What's typed is words, not a path: a match at a word's start ranks first, inside a word next, letters
+    /// here and there last (`placement`; the palette).
+    pub words: bool,
     /// Each row's hint keeps its room and a long label is cut in its middle (`:granted`: a place's start and end,
     /// and where it comes from).
     pub hints_first: bool,
@@ -390,6 +418,7 @@ impl Picker {
             make: None,
             made: None,
             keys: false,
+            words: false,
             hints_first: false,
             stamps: false,
             closing: None,
@@ -747,6 +776,7 @@ impl Picker {
                 candidates,
                 query: self.query.clone(),
                 tree: self.tree.is_some(),
+                words: self.words,
                 config: self.matcher.config.clone(),
             });
             self.filtering = true;
@@ -754,8 +784,13 @@ impl Picker {
         }
         self.cancel_filter();
         self.remember();
-        let (matches, tail) =
-            filter(&self.items, &candidates, &self.query, self.tree.is_some(), &mut self.matcher);
+        let (matches, tail) = filter(
+            &self.items,
+            &candidates,
+            &self.query,
+            (self.tree.is_some(), self.words),
+            &mut self.matcher,
+        );
         (self.matches, self.tail_unsorted) = (matches, tail);
         self.matched = Some(self.query.clone());
         self.selected = self.selected.min(self.matches.len().saturating_sub(1));
@@ -1371,6 +1406,35 @@ fn by_place(mut items: Vec<Item>) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The palette's ranking (uxaudit 5): a query at a word's start first, inside a word next, letters here and
+    /// there last — an acronym's letters each at a word's start score high with nucleo alone.
+    #[test]
+    fn words_rank_a_words_start_above_letters_inside_and_scattered() {
+        let labels = ["Show In Debug Editor", "Select inside object", "Cursor to mid-screen", "Side panel"];
+        let items: Vec<Item> = labels
+            .iter()
+            .map(|l| Item {
+                label: l.to_string(),
+                action: Action::Typed(l.to_string()),
+                hint: String::new(),
+                glyph: None,
+            })
+            .collect();
+        let order = |words: bool| -> Vec<&str> {
+            let all: Vec<u32> = (0..items.len() as u32).collect();
+            let (m, _) = filter(&items, &all, "side", (false, words), &mut Matcher::new(Config::DEFAULT));
+            m.iter().map(|&i| labels[i as usize]).collect()
+        };
+        assert_eq!(
+            order(true),
+            ["Side panel", "Select inside object", "Show In Debug Editor", "Cursor to mid-screen"]
+        );
+        assert_ne!(order(false), order(true), "nucleo alone ranks them otherwise");
+        assert_eq!(placement("Go to the side panel", "side pan"), 0);
+        assert_eq!(placement("Go to the side panel", "side anel"), 1, "the worst of its words");
+        assert_eq!(placement("Go to the side panel", "!foo"), 0, "nucleo's syntax doesn't rank");
+    }
 
     fn items(labels: &[&str]) -> Vec<Item> {
         labels

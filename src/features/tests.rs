@@ -138,7 +138,8 @@ fn a_typed_command_bound_to_a_key_counts_by_name() {
 #[test]
 fn the_palette_counts_apart_from_keys() {
     let mut ed = counting();
-    feed(&mut ed, "<space>?");
+    // (the first row is `:tutor`, a typed one — the palette's first hour)
+    feed(&mut ed, "<space>?<down>");
     assert_eq!(ed.picker.as_ref().map(|p| p.kind), Some("commands"));
     let row = ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.action.clone());
     let Some(crate::picker::Action::Command(name)) = row else { panic!("a command first: {row:?}") };

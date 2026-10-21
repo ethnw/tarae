@@ -259,7 +259,8 @@ src/
   task.rs            build tasks — found in the project, run, their places into the list
   terminal.rs        the built-in terminal (a pty, vt100)
   replace.rs         replace across files
-  tutor.md           the :tutor text
+  tutor.md, tutor.rs the :tutor text, drawn as text (its marks taken out, kept as colours)
+  palette.rs         the palette's order with nothing typed: what you ran, then a first hour's
 
   lsp.rs             LSP client (threads, framing, position encoding)
   lsp_editor.rs      editor ↔ LSP (didChange, requests, responses)

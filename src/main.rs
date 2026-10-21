@@ -105,6 +105,7 @@ mod offer;
 mod outlines;
 mod packs;
 mod pairs;
+mod palette;
 mod patch;
 mod paths;
 mod picker;
@@ -183,6 +184,7 @@ mod tools;
 mod trace;
 mod transaction;
 mod trust;
+mod tutor;
 mod typed;
 mod uisocket;
 mod uistate;
@@ -345,6 +347,7 @@ fn main() -> Result<()> {
     hosts::listen(editor.events.shared_sender());
     // Started without a file: recent files on the start screen (existing ones only; reads one small file)
     editor.recent = recent::load();
+    editor.palette_ran = palette::load();
     editor.restore = restore::State::load();
     for f in &files {
         if let Err(e) = editor.open(f) {

@@ -1907,10 +1907,16 @@ fn command_palette(cx: &mut Context) {
             glyph: None,
         }));
     }
-    // Bound commands first (the frequently used ones), then by name
-    crate::sorting::by(&mut items, |a, b| (a.hint.is_empty(), &a.label).cmp(&(b.hint.is_empty(), &b.label)));
-    cx.editor
-        .open_picker(crate::picker::Picker::of("commands", "commands", items, false).without_preview(), None);
+    // What you ran from it first, then a first hour's commands (`palette.rs`), then bound commands (the
+    // frequently used ones), then by name
+    let ran = &cx.editor.palette_ran;
+    let rank = |i: &Item| crate::palette::key(&i.action).map_or((2, 0), |k| crate::palette::rank(ran, &k));
+    crate::sorting::by(&mut items, |a, b| {
+        (rank(a), a.hint.is_empty(), &a.label).cmp(&(rank(b), b.hint.is_empty(), &b.label))
+    });
+    let mut p = crate::picker::Picker::of("commands", "commands", items, false).without_preview();
+    p.words = true;
+    cx.editor.open_picker(p, None);
 }
 
 /// Theme picker: small window at top center — the code behind previews the highlighted theme live

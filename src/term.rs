@@ -3433,9 +3433,15 @@ fn draw_text(
     }
     // Query the whole visible area once (instead of 50 times per line). If the area is abnormally large
     // (very long lines), split per line — then the loop below queries each line chunk separately.
-    let whole: Option<Vec<(usize, usize, u32)>> = syntax
-        .filter(|_| vis_to - vis_from <= 1 << 20)
-        .map(|syn| syntax::highlights(syn, text, vis_from..vis_to, &mut qcursor));
+    // (a document with no language may be painted by hand: the tutor's headings and keys)
+    let whole: Option<Vec<(usize, usize, u32)>> = match syntax {
+        Some(syn) => (vis_to - vis_from <= 1 << 20)
+            .then(|| syntax::highlights(syn, text, vis_from..vis_to, &mut qcursor)),
+        None if !doc.paint.is_empty() => {
+            Some(doc.paint.iter().filter(|s| s.1 > vis_from && s.0 < vis_to).copied().collect())
+        }
+        None => None,
+    };
     // …painted once for the frame (rows take their slice), not every span looked at for every row
     let paint_all = whole.as_deref().map_or_else(Vec::new, |w| paint_spans(w, vis_from..vis_to));
 
@@ -3893,11 +3899,11 @@ fn draw_text(
         };
         // Per-byte captures for this line chunk — the frame's, else queried for this chunk alone
         let per_line;
-        let paint: &[u32] = match syntax {
-            None => &[],
-            Some(syn) => match paint_all.get(start.wrapping_sub(vis_from)..end.wrapping_sub(vis_from)) {
-                Some(p) if whole.is_some() => p,
-                _ => {
+        let paint: &[u32] = match paint_all.get(start.wrapping_sub(vis_from)..end.wrapping_sub(vis_from)) {
+            Some(p) if whole.is_some() => p,
+            _ => match syntax {
+                None => &[],
+                Some(syn) => {
                     per_line =
                         paint_spans(&syntax::highlights(syn, text, start..end, &mut qcursor), start..end);
                     &per_line
@@ -5665,15 +5671,20 @@ fn draw_picker(
                 queue!(out, Print("─".repeat(left_w)))?;
             }
         } else if row == 1 && p.keys {
-            // Nothing is typed in a list whose letters are keys: no `›` — what a digit does, faint
+            // Nothing is typed in a list whose letters are keys: no `›` — that its letters are keys, and what a
+            // digit does, faint (the digits fold first)
             let n = p.items().len().min(9);
             let right = format!("{}  {count} ", p.title);
+            let room = (lw + 2).saturating_sub(3 + right.width() + 2);
             let say = match p.kind {
                 crate::granted::KIND => crate::granted::SAID.to_string(),
-                _ if n > 1 => format!("1–{n} switch to that row"),
-                _ => String::new(),
+                _ => {
+                    let keys = "letters are keys here, nothing is typed";
+                    let digits = format!("{keys} · 1–{n} switch");
+                    if n > 1 && digits.width() <= room { digits } else { keys.to_string() }
+                }
             };
-            let say = fit_ellipsis(&say, (lw + 2).saturating_sub(3 + right.width() + 2));
+            let say = fit_ellipsis(&say, room);
             apply(out, faint)?;
             queue!(out, Print("   "), Print(&say))?;
             apply(out, card)?;
@@ -13650,6 +13661,35 @@ mod tests {
         let s = p.screen().contents();
         assert!(s.lines().any(|l| l.contains("-    Shorter: the bottom panel")), "drawn:\n{s}");
         assert!(!s.contains("minus") && !s.contains('…'), "drawn:\n{s}");
+    }
+
+    /// The tutor is drawn as text (uxaudit 5): no mark of markdown on screen — its keys and headings stand out by
+    /// their colours alone.
+    #[test]
+    fn the_tutor_is_drawn_as_text_in_its_colours() {
+        // (crossterm drops every color under NO_COLOR, which tarae's test runner sets)
+        crossterm::style::force_color_output(true);
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.open_tutor();
+        let mut bytes = Vec::new();
+        render(&mut ed, &mut bytes, 100, 30).unwrap();
+        let mut p = vt100::Parser::new(30, 100, 0);
+        p.process(&bytes);
+        let s = p.screen().contents();
+        assert!(!s.contains('`') && !s.contains("**") && !s.contains("# "), "drawn:\n{s}");
+        // (row by row: a row drawn to the screen's edge reads as wrapped, joined to the next in `contents`)
+        let at = |needle: &str| -> (u16, u16) {
+            let (y, l) = p.screen().rows(0, 100).enumerate().find(|(_, l)| l.contains(needle)).expect(needle);
+            (y as u16, l[..l.find(needle).unwrap()].width() as u16)
+        };
+        let fg = |(y, x): (u16, u16)| p.screen().cell(y, x).map(|c| (c.fgcolor(), c.bold())).unwrap();
+        let (y, x) = at("Press space");
+        let (press, key) = (fg((y, x)), fg((y, x + 6)));
+        assert_ne!(press.0, key.0, "a key stands out from its sentence:\n{s}");
+        // (past the title's first letter: the cursor is on it)
+        let (y, x) = at("tarae tutorial");
+        let title = fg((y, x + 1));
+        assert!(title.1 && title.0 != press.0, "the title is a heading: {title:?}");
     }
 
     /// Which-key on a narrow screen (#201's check at 50 columns): `space`'s keys in as many columns as the rows

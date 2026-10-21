@@ -1,7 +1,7 @@
 # sessions_reviewing_list · 160x16 · theme meok · cursor hidden
 ## text
 00 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄   claude                                                 ready
-01    1–3 switch to that row                                                         sessions  3/3    ────────────────────────────────────────────────────────────
+01    letters are keys here, nothing is typed · 1–3 switch                           sessions  3/3    ────────────────────────────────────────────────────────────
 02  ──────────────────────────────────────────────────────────────────────────────────────────────    main │ fix-login ● ¶ reviewing │ docs • │ +
 03 ▎   main                                                               here     ¶ reviewing
 04   ● fix-login                                                          working  ¶ reviewing        ▎ Ask Claude
@@ -35,7 +35,7 @@
 15
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                                                                    dddddd                                                 fffff
-01    fff ffffff ff ffff fff                                                         ffffffff  fff    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01    fffffff fff ffff fffff fffffff ff fffff f fff ffffff                           ffffffff  fff    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 02  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff    TTTT f ddddddddd a             f dddd d f d
 03 a   TTTT                                                               dddd     d ddddddddd
 04   a                                                                    ddddddd  d ddddddddd        a TTT TTTTTT

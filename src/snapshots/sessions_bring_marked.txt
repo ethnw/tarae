@@ -2,7 +2,7 @@
 ## text
 00
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02      1–4 switch to that row                                                                     sessions  4/4
+02      letters are keys here, nothing is typed · 1–4 switch                                       sessions  4/4
 03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 04       main                                                                                          here
 05       fix-login                                                                                     bring 1st
@@ -64,7 +64,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00
 01
-02      fff ffffff ff ffff fff                                                                     ffffffff  fff
+02      fffffff fff ffff fffff fffffff ff fffff f fff ffffff                                       ffffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 04                                                                                                     dddd
 05                                                                                                     ddddd ddd

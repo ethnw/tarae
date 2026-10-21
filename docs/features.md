@@ -20,11 +20,14 @@ and so does [Claude](claude-integration.md).
 You don't need to know the keys to start:
 
 - **Command palette** `space ?` — find any command by what it does, with its key on the right. `:` commands such as `:w`
-  and `:chat-new` are in there too ([screenshot](screenshots/ux-palette.png))
+  and `:chat-new` are in there too. With nothing typed, what you ran from it comes first, then a first hour's
+  commands (the tutor, finding files, the panels, Claude, the review, sessions, the inbox); typed, a word's start
+  ranks above letters inside a word, and those above letters here and there ([screenshot](screenshots/ux-palette.png))
 - **which-key** — press `space`, `g`, `m`, `[`, or `]` and a card shows the keys that can come next and what they do
   ([screenshot](screenshots/ux-which-key.png))
-- **`:tutor`** — a 10-minute hands-on tutorial in a practice buffer; editing it never blocks quitting
-  ([screenshot](screenshots/ux-tutor.png))
+- **`:tutor`** — a 10-minute hands-on tutorial in a practice buffer, plain text with its keys in colour; editing it
+  never blocks quitting. Past the editing keys: the panels and where your keys are, the terminal and `C-\`, Claude,
+  cards and `C-q`, the review, sessions and the inbox ([screenshot](screenshots/ux-tutor.png))
 - **Start screen** — launched without a file, tarae shows first steps and your recent files; open one with its number key
   ([screenshot](screenshots/ux-welcome.png))
 - **A folder** — `tarae .` or `tarae ~/src/app` works in that folder (its `.tarae.toml`), starting on the start

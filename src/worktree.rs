@@ -2219,7 +2219,12 @@ impl Editor {
                     self.set_error(e);
                 }
             }
-            _ => {}
+            // (typed as if to filter it: said, not swallowed — uxaudit 5)
+            _ => self.key_unused(
+                crate::key::Key::plain(crate::key::Code::Char(c)),
+                "the session list",
+                "letters are keys here",
+            ),
         }
     }
 
