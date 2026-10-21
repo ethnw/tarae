@@ -390,10 +390,12 @@ main that has what it waits for, and the user says go:
   input or `space >` from anywhere, `q`/`esc` leave, `y` copies; held still while Claude writes, `G` catches up; one
   cursor on screen, where the keys go (`keys_to()`). P1b done (2026-10-21): the terminal's — `C-\` goes round
   (code → program → view → code), its scrollback and screen read as text, the program's output held until you
-  catch up, the wheel into it; `[keys.terminal]` replaced `editor.terminal-escape`. P2 done (2026-10-21): quoting —
+  catch up, the wheel into it; `[keys.terminal]` replaced `editor.terminal-escape`. P2 done (2026-10-21, `8e17fc36`): quoting —
   `enter` on a view's selection, `space >` (`:quote`) on the code's, a chip over the input; `<quoted>` with its own
   closing id, the source said, cut past 16 KB and said, the terminal's token-like lines out; `C-s` follows
-  `llm.screen-terminal`. P3, the run panels, next.
+  `llm.screen-terminal`. P3 next, before panes (decided 2026-10-21): the run panels' view mode — `RunView` in place of
+  `Bottom`, `[view.run]`, quoting from them — only; its hops (`C-w h/j/k/l`, `t` into a view mode, the cursor kept per
+  surface) go into panes, whose navigation they are. P4 after panes.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
   `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the
@@ -540,8 +542,10 @@ git tab, search, a short Kubernetes one.
   `A-ret`). Landed (`129906f1`): 5, the first
   hour — the tutor drawn as text with its keys in colour and sections for the panels, the terminal's round, cards,
   the review, sessions and the inbox; the palette opening on what you ran and a first hour's commands, word starts
-  first; the session list saying its letters are keys (what was the first-use check). Next: 7, keys inside
-  zellij. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
+  first; the session list saying its letters are keys (what was the first-use check); 7 (`8480c8ef`), inside
+  zellij — where a hinted key is one zellij takes first (its defaults, `g q p n s t h o b`; `editor.zellij-keys`, yours
+  only, for a changed config), tarae says its twin in which-key, the palette, the cards, the chat, the tutor,
+  `:config-show` and the keymap reference, only inside zellij; shots drop `ZELLIJ`. The audit's eight pieces are in. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
   grants, viewed marks lost on a review's re-open, moved-brace re-flags, the reviewer re-reading whole, ten keys
   to commit — and tier-own tests only runnable outside); batch 36 took 66–79 and 81, 80 (the load flakes) is its own hunt.
 - **A memory card and panel**: what Claude remembers for the project, in Claude Code's own format.
