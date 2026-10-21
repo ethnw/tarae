@@ -93,8 +93,8 @@ Kept:
   mode and times calls, allowing them only where the run may write — or through a file it holds open for writing,
   which Landlock let it write when it opened it (a protected name it made where none was too: §1.2's card asks about
   that one); a path through `/proc`, `/dev/fd` or a magic link is refused, never resolved for it. A file's owner,
-  extended attributes (ACLs too) and flags never change, the project's neither
-  ([D-h](design/sandbox-keeper.md#decisions)).
+  extended attributes (ACLs too) and flags never change, the project's neither; an owner call that changes nothing
+  (`rsync -a`, `cp -a`) is let in tiers own and host where a mode would be ([D-h](design/sandbox-keeper.md#decisions)).
   test: `sandbox::tests::a_run_changes_no_attribute_of_a_file_outside_its_write_places` (shown, macOS/Linux) ·
   `sandbox::keeper::tests::a_runs_raw_mode_and_times_calls_are_served_or_refused` ·
   `compat::tests::a_protected_name_is_refused_with_its_cause_or_found_made` (a made name's times, Linux) ·

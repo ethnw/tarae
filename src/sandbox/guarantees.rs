@@ -310,8 +310,9 @@ const MAC_SHARED: &str = " Here a command shares POSIX shared memory with other 
 
 /// What a Landlock run may change of a file's attributes where served (own, host — linmeta B, D-h): Landlock has no
 /// right for them, so tarae serves its mode and times calls (`seccomp::serves_attr`), and allows them only where the
-/// run may write, or through a file it holds open for writing (what Landlock let it write); owner, extended
-/// attributes, ACLs and flags are refused in every tier (`seccomp::ATTR_CALLS`).
+/// run may write, or through a file it holds open for writing (what Landlock let it write) — an owner call too, but
+/// only one that changes nothing (sandbox C); a change of owner, extended attributes, ACLs and flags are refused in
+/// every tier (`seccomp::ATTR_CALLS`).
 const ATTRS_SERVED: &str = " A command changes a file's mode and times only where it may write, or through a file it \
      holds open for writing; never a file's owner, extended attributes, ACLs or flags — in the project neither.";
 

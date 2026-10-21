@@ -254,6 +254,11 @@ fn in_stand_in_home() {
     let policy = confined_policy_in(&root, &llm, &here);
     let _policy_cleanup = RunCleanupGuard { policy: policy.clone() };
     let other_policy = confined_policy_in(&other_root, &llm, &here);
+    // (its protected names bound read-only by mounts of the run's own — tier own, a user's: B9 — not closed by
+    // their folders' rules)
+    #[cfg(target_os = "linux")]
+    let sealed =
+        policy.confine.as_ref().and_then(|c| c.as_ref().ok()).is_some_and(|c| !c.covers.seals.is_empty());
     let _other_cleanup = RunCleanupGuard { policy: other_policy.clone() };
     if let Ok(want) = std::env::var("TARAE_EXPECT_TIER") {
         let want = want.trim();
@@ -539,7 +544,14 @@ fn in_stand_in_home() {
     }
     #[cfg(target_os = "linux")]
     {
-        let r5_beside = got["r5_beside"] == "refused";
+        // (beside a protected name: where the run's protected names are sealed — tier own, run as a user: B9 —
+        // every folder takes new files by design, so it's made, and caught as any new one; else its folder is closed
+        // entry by entry and it's refused)
+        let made = |path: &str| since_main.protected.iter().any(|m| m.path == path);
+        let r5_beside = match sealed {
+            true => got["r5_beside"] == "allowed" && made("sub/Cargo.toml"),
+            false => got["r5_beside"] == "refused",
+        };
         let r5_new_caught =
             got["r5_new"] == "allowed" && since_main.protected.iter().any(|m| m.path == "new1/Cargo.toml");
         let r5_case_caught =
@@ -555,7 +567,7 @@ fn in_stand_in_home() {
             verdict: if r5_ok { Verdict::Caught } else { Verdict::Allowed },
             witness: format!(
                 "beside-protected={}, new={}, case={}, symlink={}",
-                word(r5_beside),
+                if sealed { cw(r5_beside) } else { word(r5_beside) },
                 cw(r5_new_caught),
                 cw(r5_case_caught),
                 cw(r5_sym_caught)
@@ -1296,6 +1308,8 @@ fn in_stand_in_home() {
             arch: std::env::consts::ARCH,
             abi: c.abi,
             yama: yama.and_then(|s| s.trim().parse().ok()),
+            // SAFETY: a plain call.
+            user: unsafe { libc::geteuid() } != 0,
         };
         (format!("Linux {tier}"), snapshot_for(&machine))
     };
@@ -1342,12 +1356,16 @@ struct Machine<'a> {
     abi: u32,
     /// Yama's `ptrace_scope`, None without Yama.
     yama: Option<u32>,
+    /// Run as a user, not root: the system refuses some calls before tarae (`caps`, `packet`: `system`), and in
+    /// tier own the protected names are sealed by mounts of the run's own (B9), its folders taking new files.
+    user: bool,
 }
 
 /// The snapshot a Linux table is held against, or why none is: the snapshots are one machine's words, the test
 /// VM's — x86-64 (row 24 tries another ABI's calls only there), Landlock ABI 6 or more (rows 17 and 25: a run's
 /// signals scoped), Yama's `ptrace_scope` 1 (row 25's ptrace and `pidfd_getfd`, against a baseline Yama refuses
-/// or not) — keyed by tier, offline with namespaces apart (it has a network of its own). Elsewhere the rows'
+/// or not) — keyed by tier, offline with namespaces apart (it has a network of its own), a user's apart (the system
+/// refuses some calls first; in own its names are sealed, B9). Elsewhere the rows'
 /// properties still hold, and the table is said, not compared.
 fn snapshot_for(m: &Machine) -> Result<String, String> {
     if m.tier.ends_with("partial") {
@@ -1364,20 +1382,32 @@ fn snapshot_for(m: &Machine) -> Result<String, String> {
         return Err(format!("{had}: the snapshots are ptrace_scope 1's"));
     }
     let ns = if m.tier == "offline" && m.ns { "-ns" } else { "" };
-    Ok(format!("refused_linux_{}{ns}", m.tier))
+    if m.user && !ns.is_empty() {
+        return Err("offline with namespaces as a user: no snapshot of its words yet".into());
+    }
+    let user = if m.user { "-user" } else { "" };
+    Ok(format!("refused_linux_{}{ns}{user}", m.tier))
 }
 
 #[test]
 fn a_linux_table_is_held_against_a_snapshot_only_where_its_words_are_the_snapshots() {
-    let vm = Machine { tier: "host", ns: false, arch: "x86_64", abi: 7, yama: Some(1) };
+    let vm = Machine { tier: "host", ns: false, arch: "x86_64", abi: 7, yama: Some(1), user: false };
     assert_eq!(snapshot_for(&vm).as_deref(), Ok("refused_linux_host"));
     let own = Machine { tier: "own", ns: true, ..vm };
     assert_eq!(snapshot_for(&own).as_deref(), Ok("refused_linux_own"));
+    // (a user's: some calls the system's to refuse first, and in own the names sealed — another table)
+    for (m, name) in [(own, "refused_linux_own-user"), (vm, "refused_linux_host-user")] {
+        assert_eq!(snapshot_for(&Machine { user: true, ..m }).as_deref(), Ok(name));
+    }
     // (offline with namespaces has its own network, other calls refused in other ways: another table)
     for (ns, name) in [(false, "refused_linux_offline"), (true, "refused_linux_offline-ns")] {
         let offline = Machine { tier: "offline", ns, ..vm };
         assert_eq!(snapshot_for(&offline).as_deref(), Ok(name));
     }
+    let offline_user = Machine { tier: "offline", ns: false, user: true, ..vm };
+    assert_eq!(snapshot_for(&offline_user).as_deref(), Ok("refused_linux_offline-user"));
+    let got = snapshot_for(&Machine { ns: true, ..offline_user });
+    assert!(got.as_ref().is_err_and(|e| e.contains("as a user")), "offline-ns as a user: {got:?}");
     // Each of what the words depend on, off the VM's alone: no snapshot, and the why names it
     let off = [
         (Machine { tier: "host partial", abi: 2, ..vm }, "partial"),

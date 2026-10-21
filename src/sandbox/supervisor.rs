@@ -55,6 +55,9 @@ use super::{Denial, Policy};
 
 mod attrs;
 
+#[cfg(test)]
+pub(super) use attrs::in_group;
+
 /// A call's answer: what it returns, or the errno it fails with.
 type Answer = Result<i64, i32>;
 
@@ -361,7 +364,7 @@ impl std::ops::Deref for Served {
 
 /// The calls a supervisor answers, as its counts name them.
 pub(super) const KINDS: [&str; 9] =
-    ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "pty", "mode or times"];
+    ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "pty", "attributes"];
 
 fn kind(nr: i32) -> usize {
     match nr as libc::c_long {

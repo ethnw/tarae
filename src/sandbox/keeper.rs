@@ -5542,59 +5542,55 @@ mod tests {
             unsafe { libc::close(fd) };
         }
 
-        // 7. ownership calls: refused in every tier
+        // 7. Owner calls: let only where they change nothing (each id -1 or the file's own) and the run may write,
+        // as a mode is; a real change of owner or group refused everywhere, the project's files too
         let (uid, gid) = unsafe { (libc::getuid() as libc::c_long, libc::getgid() as libc::c_long) };
-        check("fchown outside", raw(libc::SYS_fchown, [fd_outside, uid, gid, 0, 0, 0]), eperm);
-        check("fchown inside", raw(libc::SYS_fchown, [fd_inside, uid, gid, 0, 0, 0]), eperm);
-        check(
-            "fchownat outside",
-            raw(libc::SYS_fchownat, [at, c_outside.as_ptr() as _, uid, gid, 0, 0]),
-            eperm,
-        );
-        check(
-            "fchownat inside",
-            raw(libc::SYS_fchownat, [at, c_inside.as_ptr() as _, uid, gid, 0, 0]),
-            eperm,
-        );
-        check(
-            "fchownat empty outside",
-            raw(
-                libc::SYS_fchownat,
-                [fd_outside, c_empty.as_ptr() as _, uid, gid, libc::AT_EMPTY_PATH as _, 0],
-            ),
-            eperm,
-        );
-        check(
-            "fchownat empty inside",
-            raw(
-                libc::SYS_fchownat,
-                [fd_inside, c_empty.as_ptr() as _, uid, gid, libc::AT_EMPTY_PATH as _, 0],
-            ),
-            eperm,
-        );
-        check(
-            "fchownat link to outside followed",
-            raw(libc::SYS_fchownat, [at, c_link_outside.as_ptr() as _, uid, gid, 0, 0]),
-            eperm,
-        );
-        check(
-            "fchownat link to outside nofollow",
-            raw(
-                libc::SYS_fchownat,
-                [at, c_link_outside.as_ptr() as _, uid, gid, libc::AT_SYMLINK_NOFOLLOW as _, 0],
-            ),
-            eperm,
-        );
-        #[cfg(target_arch = "x86_64")]
-        {
-            check("chown outside", raw(libc::SYS_chown, [c_outside.as_ptr() as _, uid, gid, 0, 0, 0]), eperm);
-            check("chown inside", raw(libc::SYS_chown, [c_inside.as_ptr() as _, uid, gid, 0, 0, 0]), eperm);
-            check(
-                "lchown outside",
-                raw(libc::SYS_lchown, [c_outside.as_ptr() as _, uid, gid, 0, 0, 0]),
-                eperm,
-            );
-            check("lchown inside", raw(libc::SYS_lchown, [c_inside.as_ptr() as _, uid, gid, 0, 0, 0]), eperm);
+        let (other_uid, other_gid, none) = (uid + 1, gid + 1, u32::MAX as libc::c_long);
+        let empty = libc::AT_EMPTY_PATH as libc::c_long;
+        let nofollow = libc::AT_SYMLINK_NOFOLLOW as libc::c_long;
+        let (out_, in_) = (c_outside.as_ptr() as libc::c_long, c_inside.as_ptr() as libc::c_long);
+        let (link_out, blank) = (c_link_outside.as_ptr() as libc::c_long, c_empty.as_ptr() as libc::c_long);
+        for (what, nr, args, want) in [
+            ("fchown outside", libc::SYS_fchown, [fd_outside, uid, gid, 0, 0, 0], eperm),
+            ("fchown inside", libc::SYS_fchown, [fd_inside, uid, gid, 0, 0, 0], ok),
+            ("fchown inside, -1 -1", libc::SYS_fchown, [fd_inside, none, none, 0, 0, 0], ok),
+            ("fchown inside, another uid", libc::SYS_fchown, [fd_inside, other_uid, none, 0, 0, 0], eperm),
+            ("fchown inside, another group", libc::SYS_fchown, [fd_inside, none, other_gid, 0, 0, 0], eperm),
+            ("fchownat outside", libc::SYS_fchownat, [at, out_, uid, gid, 0, 0], eperm),
+            ("fchownat inside", libc::SYS_fchownat, [at, in_, uid, gid, 0, 0], ok),
+            ("fchownat inside, another group", libc::SYS_fchownat, [at, in_, none, other_gid, 0, 0], eperm),
+            ("fchownat empty outside", libc::SYS_fchownat, [fd_outside, blank, uid, gid, empty, 0], eperm),
+            ("fchownat empty inside", libc::SYS_fchownat, [fd_inside, blank, uid, gid, empty, 0], ok),
+            ("fchownat link to outside followed", libc::SYS_fchownat, [at, link_out, uid, gid, 0, 0], eperm),
+            ("fchownat the link itself", libc::SYS_fchownat, [at, link_out, uid, gid, nofollow, 0], ok),
+            #[cfg(target_arch = "x86_64")]
+            ("chown outside", libc::SYS_chown, [out_, uid, gid, 0, 0, 0], eperm),
+            #[cfg(target_arch = "x86_64")]
+            ("chown inside", libc::SYS_chown, [in_, uid, gid, 0, 0, 0], ok),
+            #[cfg(target_arch = "x86_64")]
+            ("chown inside, another uid", libc::SYS_chown, [in_, other_uid, gid, 0, 0, 0], eperm),
+            #[cfg(target_arch = "x86_64")]
+            ("lchown outside", libc::SYS_lchown, [out_, uid, gid, 0, 0, 0], eperm),
+            #[cfg(target_arch = "x86_64")]
+            ("lchown inside", libc::SYS_lchown, [in_, uid, gid, 0, 0, 0], ok),
+        ] {
+            check(what, raw(nr, args), want);
+        }
+        // (what `rsync -a` asks on the way, by `cp -a` — no rsync in the test image: the owner and group the file
+        // has, done. Only as root: a user's `cp -a` goes on past a refused owner call, so only root's fails where
+        // those are refused — the rows above hold a user's. Not `install -m`: coreutils sets that mode as an ACL, and
+        // extended attributes are refused in every tier — D-h)
+        // SAFETY: a plain call.
+        if unsafe { libc::geteuid() } == 0 {
+            match std::process::Command::new("cp").args(["-a", inside, "copied"]).output() {
+                Ok(out) if out.status.success() => {}
+                out => wrong.borrow_mut().push(format!(
+                    "cp -a in the project: {:?} {}",
+                    out.as_ref().map(|o| o.status),
+                    out.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default()
+                )),
+            }
+            let _ = std::fs::remove_file("copied");
         }
 
         let _ = std::fs::remove_file(inside);
@@ -9126,7 +9122,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             let own = ended(run_id).expect("the run's supervisor ended");
-            let attrs = super::super::supervisor::KINDS.iter().position(|k| *k == "mode or times").unwrap();
+            let attrs = super::super::supervisor::KINDS.iter().position(|k| *k == "attributes").unwrap();
             assert!(
                 own.calls[attrs] > 0 && own.threads >= own.calls[attrs],
                 "tier {tier}: its mode and times calls not each on a thread of its own: {}",
@@ -9155,6 +9151,19 @@ mod tests {
                 refused.iter().all(|d| d.plain().starts_with("changing ")),
                 "tier {tier}: denials must say 'changing …': {refused:?}"
             );
+            // (a real owner change in the project: said where only the sandbox refuses it — root's, and a user's own
+            // file to a group of theirs; another uid, or a group not theirs, is a user's kernel's own EPERM, unsaid)
+            // SAFETY: plain calls.
+            let (root_run, gid) = unsafe { (libc::geteuid() == 0, libc::getgid()) };
+            let other_group = root_run || super::super::supervisor::in_group(gid.wrapping_add(1));
+            let want = match (root_run, cfg!(target_arch = "x86_64")) {
+                (true, true) => 4,
+                (true, false) => 3,
+                (false, _) => 2 * usize::from(other_group),
+            };
+            let owner_said =
+                refused.iter().filter(|d| d.op == "file-write-owner" && d.target != real_outside).count();
+            assert_eq!(owner_said, want, "tier {tier}: owner changes in the project said: {refused:?}");
             // (6c: a path through /proc, a descriptor's name in /dev or a magic link refused and said, by the words
             // the run gave — its mode and its times each)
             for (ways, was) in [

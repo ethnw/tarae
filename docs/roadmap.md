@@ -168,9 +168,10 @@ The aim is to state what the sandbox guarantees and show that it holds.
    tarae's — the path read once and opened by the kernel from the run's root, decided on tarae's own descriptor and
    changed on it, let only where the run may write (or on a descriptor it holds open for writing, or one that names
    no file); a path through `/proc`, a descriptor's name in `/dev` or a magic link refused and said, never emulated.
-   Owner calls stay refused. Tier offline stays a full tier with mode and times open, said (user decision
-   2026-10-18). Left: an ownership change that changes nothing (`rsync -a`, `install -g` to the primary group) is
-   refused today; nested user namespaces in tier own are a piece of their own.
+   A change of owner or group stays refused; an owner call that changes nothing (each id `-1` or the file's own:
+   `rsync -a`, `cp -a`) is let there as a mode is (sandbox C, 2026-10-19; `install -m`/`-g` still fails: coreutils
+   sets that mode as an ACL). Tier offline stays a full tier with mode and times open, said (user decision
+   2026-10-18). Left: nested user namespaces in tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
 

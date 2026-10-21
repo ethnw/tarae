@@ -228,7 +228,8 @@ enum Attr {
     Refused,
     /// Mode and times: to tarae where served (`supervisor::attrs`), else the run's (offline).
     ModeTimes,
-    /// Owner and group: refused in every mode and tier (user decision D-h: mode and times only served).
+    /// Owner and group: to tarae where served, let only where it changes neither (`supervisor::attrs`: `rsync -a`,
+    /// `cp -a` asking for what the file has); refused where not served (offline) — D-h.
     Owner,
 }
 
@@ -271,9 +272,9 @@ const ATTR_CALLS: &[(&str, libc::c_long, Attr)] = &[
     ("file_setattr", SYS_FILE_SETATTR, Attr::Refused),
 ];
 
-/// Whether call `nr` is one a served filter hands tarae for a file's mode or times (`supervisor::attrs`).
+/// Whether call `nr` is one a served filter hands tarae for a file's mode, times or owner (`supervisor::attrs`).
 pub fn serves_attr(nr: libc::c_long) -> bool {
-    ATTR_CALLS.iter().any(|&(_, n, a)| n == nr && a == Attr::ModeTimes)
+    ATTR_CALLS.iter().any(|&(_, n, a)| n == nr && matches!(a, Attr::ModeTimes | Attr::Owner))
 }
 
 /// The `ioctl`s that set an inode's flags or what acts like them, for its owner — refused in every mode, as the
@@ -288,14 +289,15 @@ const FLAG_IOCTLS: [u32; 8] =
 /// docs list `chmod`, `chown`, `setxattr` and `utime` among what it can't restrict — so the filter takes them
 /// (`ATTR_CALLS`, `FLAG_IOCTLS`).
 /// In served tiers (own, host), mode and times calls go to tarae, which lets them only where the run may write
-/// (`writes_allow`). In unserved tiers (offline), mode and times stay the run's. Owner, extended attributes, and
-/// inode flags are refused in every tier (`EPERM`). Starts and ends on the call's number.
+/// (`writes_allow`), and owner calls too, only where they change nothing. In unserved tiers (offline), mode and times
+/// stay the run's and owner calls are refused. Extended attributes and inode flags are refused in every tier
+/// (`EPERM`). Starts and ends on the call's number.
 fn attr_ops(served: bool) -> Vec<Op> {
     let mut ops: Vec<Op> = Vec::new();
     for &(_, n, a) in ATTR_CALLS {
         match a {
+            Attr::ModeTimes | Attr::Owner if served => ops.push(Op::Is(n as u32, To::Tarae, To::Next)),
             Attr::Refused | Attr::Owner => ops.push(Op::Is(n as u32, To::Refuse, To::Next)),
-            Attr::ModeTimes if served => ops.push(Op::Is(n as u32, To::Tarae, To::Next)),
             Attr::ModeTimes => {}
         }
     }
@@ -960,23 +962,25 @@ mod tests {
                 let run = |nr, args: &[u64]| eval_with(mode, no_userns, arch, nr, args);
                 for &(name, nr, a) in ATTR_CALLS {
                     let want = match a {
+                        Attr::ModeTimes | Attr::Owner if served => tarae,
                         Attr::Refused | Attr::Owner => EPERM,
-                        Attr::ModeTimes if served => tarae,
                         Attr::ModeTimes => ALLOW,
                     };
                     assert_eq!(run(nr, &[3, 0x1000, 0o644]), want, "{mode:?}: {name}");
                 }
-                // (linmeta D-h: ownership changes with realistic uid/gid arguments are refused in every mode and tier)
-                assert_eq!(run(libc::SYS_fchown, &[3, 1000, 1000]), EPERM, "{mode:?}: fchown");
+                // (owner calls with realistic ids: tarae's to decide where served — it lets only what changes nothing —
+                // else refused)
+                let owner = if served { tarae } else { EPERM };
+                assert_eq!(run(libc::SYS_fchown, &[3, 1000, 1000]), owner, "{mode:?}: fchown");
                 assert_eq!(
                     run(libc::SYS_fchownat, &[libc::AT_FDCWD as u64, 0x1000, 1000, 1000, 0]),
-                    EPERM,
+                    owner,
                     "{mode:?}: fchownat"
                 );
                 #[cfg(target_arch = "x86_64")]
                 {
-                    assert_eq!(run(libc::SYS_chown, &[0x1000, 1000, 1000]), EPERM, "{mode:?}: chown");
-                    assert_eq!(run(libc::SYS_lchown, &[0x1000, 1000, 1000]), EPERM, "{mode:?}: lchown");
+                    assert_eq!(run(libc::SYS_chown, &[0x1000, 1000, 1000]), owner, "{mode:?}: chown");
+                    assert_eq!(run(libc::SYS_lchown, &[0x1000, 1000, 1000]), owner, "{mode:?}: lchown");
                 }
                 for c in FLAG_IOCTLS {
                     let c = u64::from(c);
