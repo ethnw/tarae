@@ -1788,7 +1788,8 @@ fn tarae_state_says_the_sandbox() {
     };
     // The first run: its keeper has every namespace (its network by tarae's proxy)
     let own = landlock_run(Ns::session(true, true), true);
-    let line = "tier own · Landlock ABI 8 · loopback its own · network closed · shared nothing";
+    let line = "tier own · Landlock ABI 8 · loopback its own · network closed · attributes mode and times anywhere · \
+                shared nothing";
     watch::sandbox(&mut ed, own.clone());
     let e = events(&mut ed);
     assert_eq!(e.len(), 1, "{e:?}");
@@ -1808,6 +1809,7 @@ fn tarae_state_says_the_sandbox() {
             "by": "landlock", "tier": "own", "abi": 8, "partial": false,
             "namespaces": { "user": true, "net": true, "pid": true, "shm": true, "netns": true },
             "network": { "open": false, "asked": false, "listed": false, "way": "proxy" }, "kept": kept, "shared": [],
+            "attributes": { "mode_times": "anywhere", "owner_xattrs_flags": "never" },
             "why": null, "hint": null, "line": line,
         })
     );

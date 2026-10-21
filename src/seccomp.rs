@@ -104,6 +104,7 @@ fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
     if no_userns {
         ops.extend(userns_ops());
     }
+    ops.extend(attr_ops());
     if served {
         // (`listen`: on a socket tarae put out of the session it would listen on this machine's every address)
         for n in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendmmsg]
@@ -220,6 +221,83 @@ fn userns_ops() -> Vec<Op> {
     ops
 }
 
+/// What the filter does with a call that changes a file's attributes (`ATTR_CALLS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Attr {
+    /// Refused in every mode — a file's owner, extended attributes, inode flags.
+    Refused,
+    /// The run's in every mode, named so the kernel's table is checked whole — a file's mode and times: Landlock has
+    /// no right for them, and tarae doesn't decide them yet (the guarantees say so: `guarantees::ATTRS_SAID`).
+    Open,
+}
+
+/// `setxattrat` and `removexattrat` (Linux 6.13), `file_setattr` (6.17: an inode's flags, as `FS_IOC_FSSETXATTR`) —
+/// one number each on every architecture, not all in libc yet.
+const SYS_SETXATTRAT: libc::c_long = 463;
+const SYS_REMOVEXATTRAT: libc::c_long = 466;
+const SYS_FILE_SETATTR: libc::c_long = 469;
+
+/// Every call that changes a file's attributes, by name (as the kernel's table names it: `the_filter_names_every_
+/// attribute_call_the_kernel_has`) — path and descriptor forms alike: `fchmod` on a file opened for reading needs
+/// its ownership, not write access. The un-`at` ones are x86-64's only.
+const ATTR_CALLS: &[(&str, libc::c_long, Attr)] = &[
+    ("fchmod", libc::SYS_fchmod, Attr::Open),
+    ("fchmodat", libc::SYS_fchmodat, Attr::Open),
+    ("fchmodat2", libc::SYS_fchmodat2, Attr::Open),
+    ("utimensat", libc::SYS_utimensat, Attr::Open),
+    #[cfg(target_arch = "x86_64")]
+    ("chmod", libc::SYS_chmod, Attr::Open),
+    #[cfg(target_arch = "x86_64")]
+    ("utime", libc::SYS_utime, Attr::Open),
+    #[cfg(target_arch = "x86_64")]
+    ("utimes", libc::SYS_utimes, Attr::Open),
+    #[cfg(target_arch = "x86_64")]
+    ("futimesat", libc::SYS_futimesat, Attr::Open),
+    ("fchown", libc::SYS_fchown, Attr::Refused),
+    ("fchownat", libc::SYS_fchownat, Attr::Refused),
+    #[cfg(target_arch = "x86_64")]
+    ("chown", libc::SYS_chown, Attr::Refused),
+    #[cfg(target_arch = "x86_64")]
+    ("lchown", libc::SYS_lchown, Attr::Refused),
+    ("setxattr", libc::SYS_setxattr, Attr::Refused),
+    ("lsetxattr", libc::SYS_lsetxattr, Attr::Refused),
+    ("fsetxattr", libc::SYS_fsetxattr, Attr::Refused),
+    ("removexattr", libc::SYS_removexattr, Attr::Refused),
+    ("lremovexattr", libc::SYS_lremovexattr, Attr::Refused),
+    ("fremovexattr", libc::SYS_fremovexattr, Attr::Refused),
+    ("setxattrat", SYS_SETXATTRAT, Attr::Refused),
+    ("removexattrat", SYS_REMOVEXATTRAT, Attr::Refused),
+    ("file_setattr", SYS_FILE_SETATTR, Attr::Refused),
+];
+
+/// The `ioctl`s that set an inode's flags or what acts like them, for its owner — refused in every mode, as the
+/// owner's calls are: `FS_IOC_SETFLAGS` (`chattr`) and its 32-bit number, `FS_IOC_SETVERSION` (both),
+/// `FS_IOC_FSSETXATTR`, `FS_IOC_ENABLE_VERITY` (a file read-only for good), `FS_IOC_SET_ENCRYPTION_POLICY` (an
+/// empty folder's), btrfs's `BTRFS_IOC_SUBVOL_SETFLAGS` (a subvolume read-only). (A request is an `unsigned
+/// int`: the low half is all the kernel reads.)
+const FLAG_IOCTLS: [u32; 8] =
+    [0x4008_6602, 0x4004_6602, 0x4008_7602, 0x4004_7602, 0x401c_5820, 0x4080_6685, 0x800c_6613, 0x4008_941a];
+
+/// A file's attributes (linmeta, `target/sb/linmeta-design.md`): Landlock has no right for them — the kernel's
+/// docs list `chmod`, `chown`, `setxattr` and `utime` among what it can't restrict — so the filter takes them
+/// (`ATTR_CALLS`, `FLAG_IOCTLS`). Owner, extended attributes, inode flags: refused, the project's files too
+/// (builds don't change them; `cp -p`, `tar` and Python's `copystat` go on without). Mode and times: the run's, in
+/// every mode — said (`guarantees`). Starts and ends on the call's number.
+fn attr_ops() -> Vec<Op> {
+    let mut ops: Vec<Op> = ATTR_CALLS
+        .iter()
+        .filter(|&&(_, _, a)| a == Attr::Refused)
+        .map(|&(_, n, _)| Op::Is(n as u32, To::Refuse, To::Next))
+        .collect();
+    ops.extend([
+        Op::Is(libc::SYS_ioctl as u32, To::Next, To::Skip(FLAG_IOCTLS.len() + 2)),
+        Op::Load(arg_low(1)),
+    ]);
+    ops.extend(FLAG_IOCTLS.map(|c| Op::Is(c, To::Refuse, To::Next)));
+    ops.push(Op::Load(NR)); // (back to the call's number for the next block)
+    ops
+}
+
 /// What runs outside the sandbox for Claude or a plugin gets (`spawn::Acts`, Q4): only no new user namespace —
 /// every other call as without a filter, sockets and all (another ABI's calls aside, as in every filter here).
 fn outside_ops(arch: u32) -> Vec<Op> {
@@ -245,7 +323,8 @@ fn assemble(ops: &[Op]) -> Vec<libc::sock_filter> {
             To::Missing => n + 2,
             To::Tarae => n + 3,
         };
-        (target - i - 1) as u8
+        // (classic BPF jumps a byte at most: a longer program would land elsewhere)
+        u8::try_from(target - i - 1).expect("a jump of at most 255")
     };
     let op = |code: u32, k: u32, jt: u8, jf: u8| libc::sock_filter { code: code as u16, jt, jf, k };
     let mut prog: Vec<libc::sock_filter> = ops
@@ -856,5 +935,171 @@ mod tests {
         }
         assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), tarae, "an address");
         assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0, 0]), allow, "none");
+    }
+
+    /// linmeta: a file's owner, extended attributes and flags are refused in every mode — the flag `ioctl`s
+    /// whatever the request's high half, no other `ioctl`; its mode and times are the run's in every mode; the
+    /// blocks after still see the call's number.
+    #[test]
+    fn a_files_owner_xattrs_and_flags_are_refused_in_every_mode() {
+        let arch = ARCH.unwrap();
+        for mode in [Mode::Plain, Mode::Served, Mode::Routed, Mode::OwnNetwork] {
+            for no_userns in [false, true] {
+                let run = |nr, args: &[u64]| eval_with(mode, no_userns, arch, nr, args);
+                for &(name, nr, a) in ATTR_CALLS {
+                    let want = match a {
+                        Attr::Refused => EPERM,
+                        Attr::Open => ALLOW,
+                    };
+                    assert_eq!(run(nr, &[3, 0x1000, 0o644]), want, "{mode:?}: {name}");
+                }
+                for c in FLAG_IOCTLS {
+                    let c = u64::from(c);
+                    assert_eq!(run(libc::SYS_ioctl, &[3, c, 0x1000]), EPERM, "{mode:?}: {c:#x}");
+                    assert_eq!(run(libc::SYS_ioctl, &[3, c | 7 << 32, 0x1000]), EPERM, "high half");
+                }
+                for other in [libc::TIOCGWINSZ, libc::TCGETS, libc::FIONREAD, 0x8008_6601] {
+                    assert_eq!(
+                        run(libc::SYS_ioctl, &[3, other]),
+                        ALLOW,
+                        "{mode:?}: {other:#x} (GETFLAGS too)"
+                    );
+                }
+                assert_eq!(run(libc::SYS_read, &[3]), ALLOW);
+                assert_eq!(run(libc::SYS_socket, &[libc::AF_PACKET as u64]), EPERM, "the socket block");
+                assert_eq!(
+                    run(libc::SYS_unshare, &[libc::CLONE_NEWUSER as u64]),
+                    if no_userns { EPERM } else { ALLOW }
+                );
+            }
+        }
+    }
+
+    /// The kernel's own table of calls (its headers, `#define __NR_<name> <number>`), where this system has them.
+    fn kernels_calls() -> Vec<(String, i64)> {
+        // (x86-64 has a table of its own; aarch64's is the generic one)
+        #[cfg(target_arch = "x86_64")]
+        let headers = ["/usr/include/x86_64-linux-gnu/asm/unistd_64.h", "/usr/include/asm/unistd_64.h"];
+        #[cfg(not(target_arch = "x86_64"))]
+        let headers = ["/usr/include/asm-generic/unistd.h"];
+        let mut calls = vec![];
+        for h in headers {
+            for line in std::fs::read_to_string(h).unwrap_or_default().lines() {
+                let mut words = line.split_whitespace();
+                if let (Some("#define"), Some(name), Some(n)) = (words.next(), words.next(), words.next())
+                    && let (Some(name), Ok(n)) = (name.strip_prefix("__NR_"), n.parse())
+                {
+                    calls.push((name.to_string(), n));
+                }
+            }
+        }
+        calls
+    }
+
+    /// Test 3: every call in the kernel's table that changes a file's mode, times, owner, extended attributes or
+    /// flags is in `ATTR_CALLS` with the kernel's number — a kernel's new one fails here before it passes a run —
+    /// and every other match only reads them (`getxattr`, `listxattr`, `file_getattr` …). No headers: skipped.
+    #[test]
+    fn the_filter_names_every_attribute_call_the_kernel_has() {
+        let calls = kernels_calls();
+        if calls.is_empty() {
+            return eprintln!("the_filter_names_every_attribute_call_the_kernel_has: no kernel headers here");
+        }
+        let changes = |n: &str| {
+            ["chmod", "chown", "utime", "xattr"].iter().any(|w| n.contains(w))
+                || n.starts_with("file_") && n.ends_with("attr")
+        };
+        let reads = |n: &str| ["getxattr", "listxattr", "file_getattr"].iter().any(|w| n.contains(w));
+        let mut wrong = vec![];
+        for (name, n) in calls.iter().filter(|(name, _)| changes(name) && !reads(name)) {
+            match ATTR_CALLS.iter().find(|(named, ..)| named == name) {
+                None => wrong.push(format!("{name} ({n}): not in the filter")),
+                Some((_, nr, _)) if nr != n => {
+                    wrong.push(format!("{name}: the filter's {nr}, the kernel's {n}"))
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        assert!(calls.iter().any(|(name, _)| name == "fchmodat"), "the table was read: {}", calls.len());
+    }
+
+    /// Test 2's rows for what's refused outright: each call that changes a file's owner, extended attributes or
+    /// flags, raw (no libc fallback), on a file of the test's own — `EPERM` on a filtered thread; without the
+    /// filter, whatever the kernel says (done, unsupported, missing), never `EPERM`.
+    #[test]
+    fn owner_xattr_and_flag_calls_are_refused_on_a_filtered_thread() {
+        let dir = temp("attrs");
+        let f = dir.join("f");
+        std::fs::write(&f, "marker\n").unwrap();
+        let unfiltered = attr_calls(&f);
+        let filtered_ = filtered({
+            let f = f.clone();
+            move || attr_calls(&f)
+        });
+        for ((name, before), (_, after)) in unfiltered.iter().zip(&filtered_) {
+            assert_ne!(*before, Err(libc::EPERM), "{name}: refused without the filter");
+            assert_eq!(*after, Err(libc::EPERM), "{name}: under the filter");
+        }
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "marker\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The raw calls of `owner_xattr_and_flag_calls_are_refused_on_a_filtered_thread` on `f`, each Ok or its errno.
+    fn attr_calls(f: &std::path::Path) -> Vec<(&'static str, Result<(), i32>)> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(f.as_os_str().as_bytes()).unwrap();
+        let file = std::fs::File::open(f).unwrap();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&file) as libc::c_long;
+        let (p, name, value) = (path.as_ptr() as libc::c_long, c"user.tarae".as_ptr() as libc::c_long, c"x");
+        let v = value.as_ptr() as libc::c_long;
+        let acl_access = c"system.posix_acl_access".as_ptr() as libc::c_long;
+        let acl_default = c"system.posix_acl_default".as_ptr() as libc::c_long;
+        // SAFETY: getgid has no preconditions.
+        let gid = unsafe { libc::getgid() } as libc::c_long;
+        let at = libc::AT_FDCWD as libc::c_long;
+        // (`struct xattr_args`: the value's address, its size, flags — 16 bytes; `struct file_attr`: 24 zeroes;
+        // what an `ioctl` reads: zeroes)
+        let xattr_args: [u64; 2] = [v as u64, 1];
+        let zeroes = [0u8; 128];
+        let (xa, z) = (xattr_args.as_ptr() as libc::c_long, zeroes.as_ptr() as libc::c_long);
+        let mut calls: Vec<(&'static str, libc::c_long, [libc::c_long; 5])> = vec![
+            ("fchown", libc::SYS_fchown, [fd, -1, gid, 0, 0]),
+            ("fchownat", libc::SYS_fchownat, [at, p, -1, gid, 0]),
+            ("setxattr", libc::SYS_setxattr, [p, name, v, 1, 0]),
+            // (an ACL — `setfacl`'s way: its access and default lists are extended attributes on Linux)
+            ("an access ACL", libc::SYS_setxattr, [p, acl_access, v, 1, 0]),
+            ("a default ACL", libc::SYS_setxattr, [p, acl_default, v, 1, 0]),
+            ("lsetxattr", libc::SYS_lsetxattr, [p, name, v, 1, 0]),
+            ("fsetxattr", libc::SYS_fsetxattr, [fd, name, v, 1, 0]),
+            ("removexattr", libc::SYS_removexattr, [p, name, 0, 0, 0]),
+            ("lremovexattr", libc::SYS_lremovexattr, [p, name, 0, 0, 0]),
+            ("fremovexattr", libc::SYS_fremovexattr, [fd, name, 0, 0, 0]),
+            ("setxattrat", SYS_SETXATTRAT, [at, p, 0, name, xa]),
+            ("removexattrat", SYS_REMOVEXATTRAT, [at, p, 0, name, 0]),
+            ("file_setattr", SYS_FILE_SETATTR, [at, p, z, 24, 0]),
+        ];
+        #[cfg(target_arch = "x86_64")]
+        calls.extend([
+            ("chown", libc::SYS_chown, [p, -1, gid, 0, 0]),
+            ("lchown", libc::SYS_lchown, [p, -1, gid, 0, 0]),
+        ]);
+        for c in FLAG_IOCTLS {
+            calls.push(("a flag ioctl", libc::SYS_ioctl, [fd, c as libc::c_long, z, 0, 0]));
+        }
+        let said = calls
+            .iter()
+            .map(|&(what, nr, a)| {
+                // SAFETY: each call's arguments point at what lives through it: the path, the names, the value,
+                // the zeroes; a flag ioctl reads at most 128 bytes.
+                let r = unsafe { libc::syscall(nr, a[0], a[1], a[2], a[3], a[4]) };
+                (
+                    what,
+                    if r < 0 { Err(io::Error::last_os_error().raw_os_error().unwrap_or(0)) } else { Ok(()) },
+                )
+            })
+            .collect();
+        drop(file);
+        said
     }
 }

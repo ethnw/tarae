@@ -212,6 +212,10 @@
       "root": "tarae-uistate-main",
       "sandbox": {
         "abi": 8,
+        "attributes": {
+          "mode_times": "anywhere",
+          "owner_xattrs_flags": "never"
+        },
         "by": "landlock",
         "hint": null,
         "kept": [
@@ -227,7 +231,7 @@
             "part": "loopback"
           }
         ],
-        "line": "tier offline · Landlock ABI 8 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals",
+        "line": "tier offline · Landlock ABI 8 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals",
         "namespaces": {
           "net": false,
           "netns": false,
@@ -270,6 +274,10 @@
       "root": "tarae-uistate-golden",
       "sandbox": {
         "abi": null,
+        "attributes": {
+          "mode_times": "where-writes",
+          "owner_xattrs_flags": "where-writes"
+        },
         "by": "seatbelt",
         "hint": null,
         "kept": [

@@ -308,6 +308,13 @@ const PROCESSES_SAID: &str = " Here a command sees this system's processes — a
 const MAC_SHARED: &str = " Here a command shares POSIX shared memory with other sessions' commands and the user's \
      other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.";
 
+/// What a Landlock run may change of a file's attributes, every tier (linmeta, D-h): Landlock has no right for them, so
+/// tarae's filter refuses a file's owner, extended attributes and flags outright (`seccomp::ATTR_CALLS`); its mode and
+/// times are the run's (tier offline stays a full tier with this said: user decision 2026-10-18).
+const ATTRS_SAID: &str = " Here a command can change the mode and times of any file of the user's it can name — \
+     never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — \
+     in the project neither.";
+
 /// Where a Seatbelt policy opens this machine's ports: what listens on them is reached whoever's it is (step 8, user
 /// decision 9: Linux refuses another session's listener there, macOS's sandbox can't tell whose one is).
 const MAC_PORTS: &str = " What listens on this machine's ports it opens is reached whoever's it is — another tarae \
@@ -511,6 +518,10 @@ impl Guarantees {
             (false, true, _) => format!("hosts listed, others asked, {network}"),
         };
         v.push(("network", network));
+        // (the panel leaves it to the report and the state: a screen element of its own waits for its screenshot)
+        if let (false, Some(a)) = (short, self.attrs_brief()) {
+            v.push(("attributes", a.to_string()));
+        }
         let shared: Vec<&str> = self.shared().into_iter().map(|p| self.name(p)).collect();
         v.push(("shared", if shared.is_empty() { "nothing".into() } else { shared.join(", ") }));
         v
@@ -561,7 +572,7 @@ impl Guarantees {
             "network": {
                 "open": self.network && !self.asks, "asked": self.asks, "listed": self.listed, "way": self.way.key()
             },
-            "kept": parts(true), "shared": parts(false),
+            "kept": parts(true), "shared": parts(false), "attributes": self.attrs_json(),
             "why": self.why, "hint": self.hint.as_ref().map(|h| &h.said), "line": self.line(),
         })
     }
@@ -624,9 +635,38 @@ impl Guarantees {
     }
 
     /// What Claude's run report says of it, after the rules, once a conversation and again when it changes (9b,
-    /// decision 11 and N2): the sentence, then what's shared in the report's words.
+    /// decision 11 and N2): the sentence, then what's shared in the report's words, then what it may change of a
+    /// file's attributes.
     pub fn told(&self) -> String {
-        format!("{}{}", self.sentence(), self.shared_said())
+        format!("{}{}{}", self.sentence(), self.shared_said(), self.attrs_said())
+    }
+
+    /// What a run may change of a file's attributes, in the report's words (linmeta): Landlock's, every tier
+    /// (`ATTRS_SAID`); nothing for Seatbelt, whose `file-write-mode`, `-times`, `-owner`, `-flags`, `-xattr` and
+    /// `-acl` are `file-write*`'s — where it writes, as its files.
+    pub fn attrs_said(&self) -> &'static str {
+        match self.by {
+            By::Landlock { .. } => ATTRS_SAID,
+            By::Seatbelt => "",
+        }
+    }
+
+    /// The same on the state line — None for Seatbelt, as above.
+    fn attrs_brief(&self) -> Option<&'static str> {
+        match self.by {
+            By::Landlock { .. } => Some("mode and times anywhere"),
+            By::Seatbelt => None,
+        }
+    }
+
+    /// `tarae state`'s `attributes`: where a run may change a file's mode and times (`where-writes`, `anywhere`), and
+    /// its owner, extended attributes and flags (`where-writes`, `never`).
+    fn attrs_json(&self) -> serde_json::Value {
+        let (mode_times, owner_xattrs_flags) = match self.by {
+            By::Landlock { .. } => ("anywhere", "never"),
+            By::Seatbelt => ("where-writes", "where-writes"),
+        };
+        serde_json::json!({ "mode_times": mode_times, "owner_xattrs_flags": owner_xattrs_flags })
     }
 
     /// What its runs share, in the report's words (said after the sentence: `told`): Landlock below

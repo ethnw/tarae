@@ -10241,6 +10241,99 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// linmeta: a file outside a run's write places keeps its mode, times, group, flags, extended attributes and ACL —
+    /// changed by path, through a descriptor the run opened for reading, or by that descriptor's `/dev/fd` name (the
+    /// profile lets a run write `/dev/fd`: Seatbelt judges the file it leads to) — and so does a protected name in
+    /// the project (a hook made executable runs later, outside); a file of the project's takes them all. Seatbelt's
+    /// `file-write-mode`, `-times`, `-owner`, `-flags`, `-xattr` and `-acl` are `file-write*`'s, allowed only where
+    /// writes are (`target/sb/linmeta-design.md`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_run_changes_no_attribute_of_a_file_outside_its_write_places() {
+        use std::os::macos::fs::MetadataExt as _;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if skipped_inside("a_run_changes_no_attribute_of_a_file_outside_its_write_places") {
+            return;
+        }
+        let t = profile_path(&crate::scratch::Scratch::new("sb-attrs").into_path());
+        let (root, outside) = (t.join("project"), t.join("outside"));
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let p = key_policy(&root);
+        let (mine, theirs) = (root.join("f"), outside.join("f"));
+        assert!(!p.writes_allow(&theirs) && !p.writes_allow(&hook) && p.writes_allow(&mine));
+        let fresh = |f: &Path| {
+            let _ = std::fs::remove_file(f);
+            std::fs::write(f, "marker\n").unwrap();
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800);
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(then).unwrap();
+        };
+        let state = |f: &Path| {
+            let m = std::fs::metadata(f).unwrap();
+            let out = Command::new("/usr/bin/xattr").args(["-p", "tarae.marker"]).arg(f).output().unwrap();
+            let text = std::fs::read_to_string(f).unwrap();
+            // (`ls -le`: a line of its own for each entry of the file's ACL)
+            let acl = Command::new("/bin/ls").arg("-le").arg(f).output().unwrap();
+            let acl = String::from_utf8_lossy(&acl.stdout).lines().count() > 1;
+            let marked = out.status.success();
+            (m.permissions().mode() & 0o7777, m.mtime(), m.gid(), m.st_flags(), marked, acl, text)
+        };
+        // (another of the user's groups: what an unprivileged chown can change)
+        fresh(&mine);
+        let gid = std::fs::metadata(&mine).unwrap().gid();
+        let mut groups = vec![0 as libc::gid_t; 64];
+        // SAFETY: a buffer of 64.
+        let n = unsafe { libc::getgroups(64, groups.as_mut_ptr()) };
+        let g = groups[..n.max(0) as usize].iter().find(|&&o| o != gid).copied().expect("a second group");
+        // (each a script, `{f}` the file's path, quoted)
+        let perl = |call: &str| {
+            format!(
+                "/usr/bin/perl -e 'open(my $h, \"<\", $ARGV[0]) or die; print \"opened\"; {call} or die \"$!\\n\"' {{f}}"
+            )
+        };
+        let tries = [
+            ("mode", "chmod 755 {f}".to_string()),
+            ("mode, a descriptor", perl("chmod(0755, $h)")),
+            // (a descriptor opened for reading, by its `/dev/fd` name — which the profile lets a run write: Seatbelt
+            // judges the file it leads to)
+            ("mode, /dev/fd", "exec 3< {f} && echo opened && chmod 755 /dev/fd/3".to_string()),
+            // (not `touch -t`: macOS's needs more than `file-write-times`, refused without the fix too)
+            ("times", "/usr/bin/perl -e 'utime(1, 42, $ARGV[0]) or die \"$!\\n\"' {f}".to_string()),
+            ("times, a descriptor", perl("utime(1, 42, $h)")),
+            (
+                "times, /dev/fd",
+                "exec 3< {f} && echo opened && /usr/bin/perl -e 'utime(1, 42, \"/dev/fd/3\") or die \"$!\\n\"'"
+                    .to_string(),
+            ),
+            ("group", format!("chown :{g} {{f}}")),
+            ("group, a descriptor", perl(&format!("chown(-1, {g}, $h)"))),
+            ("flags", "chflags nodump {f}".to_string()),
+            ("xattr", "/usr/bin/xattr -w tarae.marker x {f}".to_string()),
+            // (`file-write-acl`: an entry added to the file's ACL)
+            ("ACL", "chmod +a 'everyone deny write' {f}".to_string()),
+        ];
+        let mut wrong = vec![];
+        for (what, line) in &tries {
+            for (f, kept) in [(&theirs, true), (&hook, true), (&mine, false)] {
+                fresh(f);
+                let before = state(f);
+                let (ok, out, err) = sh_under(&p, &root, &line.replace("{f}", &format!("'{}'", f.display())));
+                let after = state(f);
+                let opened = !what.contains(", ") || out.contains("opened");
+                if !opened || kept == (ok || after != before) {
+                    wrong.push(format!(
+                        "{what} on {}: ran {ok}, {before:?} → {after:?}, {out} {err}",
+                        f.display()
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// For real, where keys are hidden by mounts (7d): the run can't take a mount back — not by unmounting it
     /// (lazily too), remounting it writable, mounting over it, nor from a user and mount namespace it makes itself
     /// (where it holds every capability): it has none in its own, Landlock refuses a confined process every mount

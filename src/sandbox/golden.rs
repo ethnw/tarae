@@ -705,11 +705,12 @@ fn the_guarantees_say_each_tier() {
         let (line, sentence, said) = (g.line(), g.sentence(), g.shared_said());
         out += &format!("══ {label}\nline: {line}\nsentence: {sentence}\n");
         out += &format!(
-            "why: {}\nbrief: {}\nhint: {}\nreport:{}\n",
+            "why: {}\nbrief: {}\nhint: {}\nreport:{}\nattributes:{}\n",
             g.why.as_deref().unwrap_or("—"),
             g.brief.as_deref().unwrap_or("—"),
             g.hint_brief().map_or("—".into(), |b| format!("{b} — {}", g.hint.as_ref().unwrap().said)),
-            if said.is_empty() { " —" } else { &said }
+            if said.is_empty() { " —" } else { &said },
+            if g.attrs_said().is_empty() { " —" } else { g.attrs_said() }
         );
         if g.tier() != tier {
             wrong.push(format!("{label}: tier {:?}", g.tier()));
@@ -734,6 +735,18 @@ fn the_guarantees_say_each_tier() {
         let below_6 = matches!(g.by, super::guarantees::By::Landlock { abi, .. } if abi < 6);
         if said.is_empty() != (want.is_empty() && !below_6) {
             wrong.push(format!("{label}: the report says {said:?} of {want:?}"));
+        }
+        // (linmeta: a file's mode and times open in every Linux tier, said in the line, the report and the state;
+        // Seatbelt's where it writes, said nowhere — as its files)
+        let open = g.tier().is_some();
+        let state = g.json()["attributes"]["mode_times"].clone();
+        if line.contains(" · attributes mode and times anywhere · ") != open
+            || g.attrs_said().contains("any file of the user's it can name") != open
+            || (state == "anywhere") != open
+            || (g.json()["attributes"]["owner_xattrs_flags"] == "never") != open
+        {
+            wrong
+                .push(format!("{label}: a file's attributes said {line:?} · {:?} · {state}", g.attrs_said()));
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");

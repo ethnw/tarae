@@ -1,619 +1,707 @@
 ══ own, tarae's proxy · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback its own · network tarae's proxy · shared files
+line: tier own partial · Landlock ABI 2 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared files
 sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3).
 why: Landlock ABI 2: partial, every run asks
 brief: Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 3
-line: tier own · Landlock ABI 3 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 3 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 4
-line: tier own · Landlock ABI 4 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 4 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 5
-line: tier own · Landlock ABI 5 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 5 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 6
-line: tier own · Landlock ABI 6 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 6 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 7
-line: tier own · Landlock ABI 7 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 7 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 9
-line: tier own · Landlock ABI 9 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 9 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, tarae's proxy · ABI 11
-line: tier own · Landlock ABI 11 · loopback its own · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 11 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback its own · network tarae's proxy · shared files, /dev/shm
+line: tier own partial · Landlock ABI 2 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared files, /dev/shm
 sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3), /dev/shm.
 why: Landlock ABI 2: partial, every run asks
 brief: Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 3
-line: tier own · Landlock ABI 3 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 3 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 4
-line: tier own · Landlock ABI 4 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 4 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 5
-line: tier own · Landlock ABI 5 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 5 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 6
-line: tier own · Landlock ABI 6 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 6 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 7
-line: tier own · Landlock ABI 7 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 7 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 9
-line: tier own · Landlock ABI 9 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 9 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the project in /dev/shm · ABI 11
-line: tier own · Landlock ABI 11 · loopback its own · network tarae's proxy · shared /dev/shm
+line: tier own · Landlock ABI 11 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared /dev/shm
 sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own); shared with them — /dev/shm.
 why: —
 brief: —
 hint: —
 report: Here a command shares this system's /dev/shm with other sessions' commands and the user's other programs: it can read and write the files they keep there.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback its own, without an IPv6 address · network tarae's proxy · shared files
+line: tier own partial · Landlock ABI 2 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared files
 sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — files (any can be emptied: no truncating rule below ABI 3).
 why: Landlock ABI 2: partial, every run asks
 brief: Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 3
-line: tier own · Landlock ABI 3 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 3 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 4
-line: tier own · Landlock ABI 4 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 4 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 5
-line: tier own · Landlock ABI 5 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 5 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 6
-line: tier own · Landlock ABI 6 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 6 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 7
-line: tier own · Landlock ABI 7 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 7 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 9
-line: tier own · Landlock ABI 9 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 9 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, its lo without an IPv6 address · ABI 11
-line: tier own · Landlock ABI 11 · loopback its own, without an IPv6 address · network tarae's proxy · shared nothing
+line: tier own · Landlock ABI 11 · loopback its own, without an IPv6 address · network tarae's proxy · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback its own · network closed · shared files
+line: tier own partial · Landlock ABI 2 · loopback its own · network closed · attributes mode and times anywhere · shared files
 sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3).
 why: Landlock ABI 2: partial, every run asks
 brief: Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 3
-line: tier own · Landlock ABI 3 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 3 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 4
-line: tier own · Landlock ABI 4 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 4 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 5
-line: tier own · Landlock ABI 5 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 5 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 6
-line: tier own · Landlock ABI 6 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 6 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 7
-line: tier own · Landlock ABI 7 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 7 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 9
-line: tier own · Landlock ABI 9 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 9 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own, the network closed · ABI 11
-line: tier own · Landlock ABI 11 · loopback its own · network closed · shared nothing
+line: tier own · Landlock ABI 11 · loopback its own · network closed · attributes mode and times anywhere · shared nothing
 sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: —
 brief: —
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback its own · network tarae's proxy · shared files, processes, signals
+line: tier own partial · Landlock ABI 2 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared files, processes, signals
 sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — System V IPC, /dev/shm, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); Landlock ABI 2: partial, every run asks
 brief: /proc is masked, no PID namespace · Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 3
-line: tier own · Landlock ABI 3 · loopback its own · network tarae's proxy · shared processes, signals
+line: tier own · Landlock ABI 3 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes, signals
 sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 4
-line: tier own · Landlock ABI 4 · loopback its own · network tarae's proxy · shared processes, signals
+line: tier own · Landlock ABI 4 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes, signals
 sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 5
-line: tier own · Landlock ABI 5 · loopback its own · network tarae's proxy · shared processes, signals
+line: tier own · Landlock ABI 5 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes, signals
 sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 6
-line: tier own · Landlock ABI 6 · loopback its own · network tarae's proxy · shared processes
+line: tier own · Landlock ABI 6 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes
 sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 7
-line: tier own · Landlock ABI 7 · loopback its own · network tarae's proxy · shared processes
+line: tier own · Landlock ABI 7 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes
 sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 9
-line: tier own · Landlock ABI 9 · loopback its own · network tarae's proxy · shared processes
+line: tier own · Landlock ABI 9 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes
 sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ own without a PID namespace, tarae's proxy · ABI 11
-line: tier own · Landlock ABI 11 · loopback its own · network tarae's proxy · shared processes
+line: tier own · Landlock ABI 11 · loopback its own · network tarae's proxy · attributes mode and times anywhere · shared processes
 sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 2
-line: tier offline partial · Landlock ABI 2 · loopback its own · network no socket · shared files
+line: tier offline partial · Landlock ABI 2 · loopback its own · network no socket · attributes mode and times anywhere · shared files
 sentence: Offline, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3).
 why: tarae can't serve its calls: Yama's ptrace_scope is 3; Landlock ABI 2: partial, every run asks
 brief: not served: Yama's ptrace_scope is 3 · Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 3
-line: tier offline · Landlock ABI 3 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 3 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 4
-line: tier offline · Landlock ABI 4 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 4 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 5
-line: tier offline · Landlock ABI 5 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 5 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does).
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 6
-line: tier offline · Landlock ABI 6 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 6 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 7
-line: tier offline · Landlock ABI 7 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 7 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 9
-line: tier offline · Landlock ABI 9 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 9 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces · ABI 11
-line: tier offline · Landlock ABI 11 · loopback its own · network no socket · shared nothing
+line: tier offline · Landlock ABI 11 · loopback its own · network no socket · attributes mode and times anywhere · shared nothing
 sentence: Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing.
 why: tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: not served: Yama's ptrace_scope is 3
 hint: —
 report: —
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 2
-line: tier offline partial · Landlock ABI 2 · loopback its own · network no socket · shared files, processes, signals
+line: tier offline partial · Landlock ABI 2 · loopback its own · network no socket · attributes mode and times anywhere · shared files, processes, signals
 sentence: Offline, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — System V IPC, /dev/shm, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3; Landlock ABI 2: partial, every run asks
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3 · Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 3
-line: tier offline · Landlock ABI 3 · loopback its own · network no socket · shared processes, signals
+line: tier offline · Landlock ABI 3 · loopback its own · network no socket · attributes mode and times anywhere · shared processes, signals
 sentence: Offline (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 4
-line: tier offline · Landlock ABI 4 · loopback its own · network no socket · shared processes, signals
+line: tier offline · Landlock ABI 4 · loopback its own · network no socket · attributes mode and times anywhere · shared processes, signals
 sentence: Offline (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 5
-line: tier offline · Landlock ABI 5 · loopback its own · network no socket · shared processes, signals
+line: tier offline · Landlock ABI 5 · loopback its own · network no socket · attributes mode and times anywhere · shared processes, signals
 sentence: Offline (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 6
-line: tier offline · Landlock ABI 6 · loopback its own · network no socket · shared processes
+line: tier offline · Landlock ABI 6 · loopback its own · network no socket · attributes mode and times anywhere · shared processes
 sentence: Offline (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 7
-line: tier offline · Landlock ABI 7 · loopback its own · network no socket · shared processes
+line: tier offline · Landlock ABI 7 · loopback its own · network no socket · attributes mode and times anywhere · shared processes
 sentence: Offline (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 9
-line: tier offline · Landlock ABI 9 · loopback its own · network no socket · shared processes
+line: tier offline · Landlock ABI 9 · loopback its own · network no socket · attributes mode and times anywhere · shared processes
 sentence: Offline (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, the session's namespaces without a PID one · ABI 11
-line: tier offline · Landlock ABI 11 · loopback its own · network no socket · shared processes
+line: tier offline · Landlock ABI 11 · loopback its own · network no socket · attributes mode and times anywhere · shared processes
 sentence: Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority).
 why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: /proc is masked, no PID namespace · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 2
-line: tier host partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared files, processes, signals, System V IPC, /dev/shm
+line: tier host partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared files, processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; Landlock ABI 2: partial, every run asks
 brief: user namespaces are turned off · Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 3
-line: tier host · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, signals, System V IPC, /dev/shm
+line: tier host · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 4
-line: tier host · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, signals, System V IPC, /dev/shm
+line: tier host · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 5
-line: tier host · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, signals, System V IPC, /dev/shm
+line: tier host · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 6
-line: tier host · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 7
-line: tier host · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 9
-line: tier host · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, tarae's proxy · ABI 11
-line: tier host · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0
 brief: user namespaces are turned off
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 2
-line: tier host partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared files, processes, signals, System V IPC, /dev/shm
+line: tier host partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared files, processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction; Landlock ABI 2: partial, every run asks
 brief: AppArmor blocks user namespaces · Landlock ABI 2: partial
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 3
-line: tier host · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, signals, System V IPC, /dev/shm
+line: tier host · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 4
-line: tier host · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, signals, System V IPC, /dev/shm
+line: tier host · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 5
-line: tier host · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, signals, System V IPC, /dev/shm
+line: tier host · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 6
-line: tier host · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 7
-line: tier host · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 9
-line: tier host · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ host, Ubuntu's restriction, no profile · ABI 11
-line: tier host · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · shared processes, System V IPC, /dev/shm
+line: tier host · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm
 sentence: Host namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: Ubuntu's restriction
 brief: AppArmor blocks user namespaces
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier host here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 2
-line: tier offline partial · Landlock ABI 2 · loopback no socket · network no socket · shared files, processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline partial · Landlock ABI 2 · loopback no socket · network no socket · attributes mode and times anywhere · shared files, processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — loopback (no socket); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3; Landlock ABI 2: partial, every run asks
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3 · Landlock ABI 2: partial
 hint: —
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 3
-line: tier offline · Landlock ABI 3 · loopback no socket · network no socket · shared processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 3 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 4
-line: tier offline · Landlock ABI 4 · loopback no socket · network no socket · shared processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 4 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 5
-line: tier offline · Landlock ABI 5 · loopback no socket · network no socket · shared processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 5 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 6
-line: tier offline · Landlock ABI 6 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 6 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 7
-line: tier offline · Landlock ABI 7 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 7 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 9
-line: tier offline · Landlock ABI 9 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 9 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces · ABI 11
-line: tier offline · Landlock ABI 11 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 11 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: user namespaces are turned off · not served: Yama's ptrace_scope is 3
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 2
-line: tier offline partial · Landlock ABI 2 · loopback no socket · network no socket · shared files, processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline partial · Landlock ABI 2 · loopback no socket · network no socket · attributes mode and times anywhere · shared files, processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — loopback (no socket); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3; Landlock ABI 2: partial, every run asks
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3 · Landlock ABI 2: partial
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 3
-line: tier offline · Landlock ABI 3 · loopback no socket · network no socket · shared processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 3 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 4
-line: tier offline · Landlock ABI 4 · loopback no socket · network no socket · shared processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 4 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 5
-line: tier offline · Landlock ABI 5 · loopback no socket · network no socket · shared processes, signals, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 5 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, signals, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 6
-line: tier offline · Landlock ABI 6 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 6 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 7
-line: tier offline · Landlock ABI 7 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 7 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 9
-line: tier offline · Landlock ABI 9 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 9 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ offline, no namespaces, Ubuntu's restriction, no profile · ABI 11
-line: tier offline · Landlock ABI 11 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals
+line: tier offline · Landlock ABI 11 · loopback no socket · network no socket · attributes mode and times anywhere · shared processes, System V IPC, /dev/shm, terminals
 sentence: Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals.
 why: no user namespaces: Ubuntu's restriction; tarae can't serve its calls: Yama's ptrace_scope is 3
 brief: AppArmor blocks user namespaces · not served: Yama's ptrace_scope is 3
 hint: tarae's AppArmor profile would give own namespaces — Claude's commands run in tier offline here (no namespaces of their own): Ubuntu lets a program make user namespaces only through an AppArmor profile that names it, and none names tarae. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands don't: sudo apparmor_parser -r /etc/apparmor.d/tarae
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
+attributes: Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
 ══ Seatbelt, no port open, the network closed
 line: sandbox Seatbelt · loopback none of its ports open · network closed · shared POSIX shared memory
 sentence: Seatbelt: kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open); shared with them — POSIX shared memory.
@@ -621,6 +709,7 @@ why: —
 brief: —
 hint: —
 report: Here a command shares POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.
+attributes: —
 ══ Seatbelt, ports open, the network closed
 line: sandbox Seatbelt · loopback the ports it opens, whoever's · network closed · shared POSIX shared memory, loopback
 sentence: Seatbelt: kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V shared memory; shared with them — POSIX shared memory, loopback (the ports it opens, whoever's).
@@ -628,6 +717,7 @@ why: —
 brief: —
 hint: —
 report: Here a command shares POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is. What listens on this machine's ports it opens is reached whoever's it is — another tarae session's commands' too: macOS's sandbox can't tell whose a listener is.
+attributes: —
 ══ Seatbelt, no port open, the network open
 line: sandbox Seatbelt · loopback none of its ports open · network tarae's proxy · shared POSIX shared memory
 sentence: Seatbelt: kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open); shared with them — POSIX shared memory.
@@ -635,6 +725,7 @@ why: —
 brief: —
 hint: —
 report: Here a command shares POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.
+attributes: —
 ══ Seatbelt, ports and the network open
 line: sandbox Seatbelt · loopback the ports it opens, whoever's · network tarae's proxy · shared POSIX shared memory, loopback
 sentence: Seatbelt: kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V shared memory; shared with them — POSIX shared memory, loopback (the ports it opens, whoever's).
@@ -642,6 +733,7 @@ why: —
 brief: —
 hint: —
 report: Here a command shares POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is. What listens on this machine's ports it opens is reached whoever's it is — another tarae session's commands' too: macOS's sandbox can't tell whose a listener is.
+attributes: —
 ══ the network open, hosts listed (Seatbelt)
 line: sandbox Seatbelt · loopback none of its ports open · network hosts listed, others asked, tarae's proxy · shared POSIX shared memory
 sentence: Seatbelt: kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open); shared with them — POSIX shared memory.
@@ -649,3 +741,4 @@ why: —
 brief: —
 hint: —
 report: Here a command shares POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.
+attributes: —
