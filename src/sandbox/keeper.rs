@@ -95,6 +95,9 @@ struct State {
     /// Tests: what its held runs' pidfds' fdinfo reads as, instead of `/proc`'s.
     #[cfg(test)]
     fdinfo: Option<&'static str>,
+    /// Tests: how long tarae waits before it numbers a held run (a slow reader thread, made sure).
+    #[cfg(test)]
+    number_after: Option<std::time::Duration>,
     /// Tests: how its runs ended, as it said (`Exited`), whether tarae still waited on them or not.
     #[cfg(test)]
     exits: Vec<i32>,
@@ -505,6 +508,10 @@ impl Keeper {
         #[cfg(test)]
         if let Some(info) = s.fdinfo {
             return pid_in_fdinfo(info);
+        }
+        #[cfg(test)]
+        if let Some(d) = s.number_after {
+            std::thread::sleep(d);
         }
         pid_of(pidfd)
     }
@@ -1767,7 +1774,9 @@ fn own_usage() -> (u64, u64) {
 /// served run's memory through `/proc/<tid>/mem`, which a non-dumpable process refuses without a namespace of
 /// tarae's), a session of its own, its stdio, its folder, its name (what Landlock's audit names), every signal
 /// unblocked, its Landlock rules, its seccomp filter — served, put on by a helper thread and its listener sent to
-/// tarae (`hand_over`), one byte back; held, one byte once tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno) and in its stderr,
+/// tarae (`hand_over`), one byte back — then the exec. Held, it waits first for its byte, sent once tarae knows its
+/// pid: one that failed before it could be gone, reaped, when tarae read its pidfd — its start an error ("it ended
+/// before it started") where its own failure, on its stderr, was the answer. A failure on the way is written on `error` (step, errno) and in its stderr,
 /// and it exits 127.
 ///
 /// Nothing here allocates or frees: after a fork of a process that may have more than one thread (a test's keeper
@@ -1821,6 +1830,13 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
                 fail(Step::Request, errno());
             }
         }
+        // (held: its byte before anything that can fail — the served one comes only after `hand_over`, so this is it)
+        if run.held {
+            let Some(handoff) = fds.get(4) else { fail(Step::Request, libc::EINVAL) };
+            if let Err(e) = byte_from(handoff.as_raw_fd()) {
+                fail(Step::Handoff, e);
+            }
+        }
         if libc::chdir(exec.cwd.as_ptr()) != 0 {
             fail(Step::Chdir, errno());
         }
@@ -1854,21 +1870,11 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
             Err(e) => fail(Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
         },
     };
-    // (a byte once tarae has its listener, served; one once tarae knows its pid, held — in either order)
-    let bytes = run.served() as usize + run.held as usize;
-    if bytes > 0 {
+    // (served: a byte once tarae has its listener)
+    if run.served() {
         let Some(handoff) = handoff else { fail(Step::Request, libc::EINVAL) };
-        let mut back = [0u8; 2];
-        let mut got = 0;
-        while got < bytes {
-            // SAFETY: a read into a buffer we own, within it.
-            let n = unsafe { libc::read(handoff.as_raw_fd(), back[got..].as_mut_ptr().cast(), bytes - got) };
-            match n {
-                n if n > 0 => got += n as usize,
-                0 => fail(Step::Handoff, libc::EPIPE),
-                _ if errno() == libc::EINTR => {}
-                _ => fail(Step::Handoff, errno()),
-            }
+        if let Err(e) = byte_from(handoff.as_raw_fd()) {
+            fail(Step::Handoff, e);
         }
     }
     drop(listener);
@@ -1881,6 +1887,21 @@ fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: R
     // SAFETY: the program, argv and envp are NUL-terminated arrays of strings `exec` holds.
     unsafe { libc::execve(exec.program.as_ptr(), exec.argv_p.as_ptr(), exec.envp_p.as_ptr()) };
     fail(Step::Exec, errno())
+}
+
+/// A byte from tarae on `handoff`, in a run's child (a raw read: nothing allocates) — else the errno (`EPIPE`: tarae's
+/// end closed).
+fn byte_from(handoff: RawFd) -> Result<(), i32> {
+    let mut back = [0u8; 1];
+    loop {
+        // SAFETY: a read into a buffer we own, within it.
+        match unsafe { libc::read(handoff, back.as_mut_ptr().cast(), 1) } {
+            1 => return Ok(()),
+            0 => return Err(libc::EPIPE),
+            _ if errno() == libc::EINTR => {}
+            _ => return Err(errno()),
+        }
+    }
 }
 
 /// What a run's child needs made — its strings as `chdir`, `prctl` and `execve` take them, its seccomp program —
@@ -7859,6 +7880,9 @@ mod tests {
         let missing = std::env::temp_dir().join(format!("tarae-noalloc-{}-missing", std::process::id()));
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "true"]).current_dir(&missing);
+        // (tarae slow to number it, held: its failing first had it gone, reaped, before its pid was read — its
+        // start then "it ended before it started"; it waits for its byte first)
+        lock(&k.state).number_after = Some(std::time::Duration::from_millis(200));
         let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
         let mut err = String::new();
         io::Read::read_to_string(&mut s.spawned.stderr.unwrap(), &mut err).unwrap();

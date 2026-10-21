@@ -1151,6 +1151,7 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "`TARAE_KEEPER=1`: the test binary starts as the keeper",
     ),
     ("src/sandbox/keeper.rs", "in fn number: if let Some(info) = s.fdinfo {", HOOK),
+    ("src/sandbox/keeper.rs", "in fn number: if let Some(d) = s.number_after {", HOOK),
     ("src/sandbox/keeper.rs", "in fn of: leak", SEAM),
     ("src/sandbox/keeper.rs", "in fn ready: if let Some(began) = slow {", HOOK),
     ("src/sandbox/keeper.rs", "in fn ready: slow", HOOK),

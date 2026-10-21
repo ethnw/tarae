@@ -6157,6 +6157,38 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// No unit test starts a real language server (taplo fetched its schema catalog from www.schemastore.org in
+    /// a sandboxed `cargo test`): a file of every language, its project's markers there, with the default config
+    /// — whatever is installed here — gets none; and a pack's server started anyway is refused, the error naming
+    /// the fake to configure.
+    #[test]
+    fn no_unit_test_starts_a_real_language_server() {
+        let scratch = crate::scratch::Scratch::new("lsp-no-real");
+        let dir = scratch.to_path_buf();
+        let langs = &crate::languages::get().langs;
+        for marker in langs.iter().flat_map(|l| &l.needs_project) {
+            std::fs::write(dir.join(marker), "").ok();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        let mut opened = 0;
+        for (i, l) in langs.iter().filter(|l| !l.lsp.is_empty()).enumerate() {
+            let Some(ext) = l.extensions.first() else { continue };
+            let file = dir.join(format!("f{i}.{ext}"));
+            std::fs::write(&file, "\n").unwrap();
+            ed.open(&file).unwrap();
+            opened += 1;
+        }
+        assert!(opened > 10, "a file of each language: {opened}");
+        let started: Vec<&str> = ed.lsp.clients.iter().map(|c| c.name.as_str()).collect();
+        assert!(started.is_empty(), "real servers started: {started:?}");
+        assert!(ed.lsp.failed.is_empty(), "real servers tried: {:?}", ed.lsp.failed);
+        let taplo = crate::lsp::default_spec("taplo").expect("the toml pack's");
+        assert!(ed.lsp_start(&taplo, std::slice::from_ref(&dir), false).is_none());
+        let why = ed.lsp.failed.get("taplo").cloned().unwrap_or_default();
+        assert!(why.contains("[lsp.taplo] command = \"sh\""), "{why}");
+        assert!(ed.lsp.clients.is_empty());
+    }
+
     /// A language whose server isn't installed: a faint dot, no toast (the log says what was tried).
     #[test]
     fn server_not_installed() {

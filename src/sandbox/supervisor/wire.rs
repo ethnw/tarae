@@ -175,11 +175,12 @@ pub(super) fn netlink_reads(data: &[u8]) -> Result<(), String> {
 /// control data — built by tarae: only the descriptors it passes (`SCM_RIGHTS`), taken as tarae's own
 /// (`Caller::fd`, held in `fds` until it's sent), passing on what the run holds. Every other control message is refused (`Unsent::Control`):
 /// credentials (`SCM_CREDENTIALS`) tarae can't speak for, and no other type goes on as the run's bytes.
-pub(super) struct Msg {
+/// (`F`: tarae's descriptors — a test's are numbers only, `check::Number`.)
+pub(super) struct Msg<F = OwnedFd> {
     pub(super) name: Option<Vec<u8>>,
     pub(super) data: Vec<u8>,
     pub(super) control: Vec<u8>,
-    pub(super) fds: Vec<OwnedFd>,
+    pub(super) fds: Vec<F>,
 }
 
 /// Why a message isn't sent: the errno the caller gets — or a control message of a type tarae doesn't pass on
@@ -222,12 +223,12 @@ pub(super) fn named(level: i32, kind: i32) -> String {
 /// `SEND_MAX` `EMSGSIZE`, nothing of it read; then the buffers in order, up to `SEND_MAX`. Its control as the kernel
 /// takes it (`____sys_sendmsg`): read wherever `msg_control` points when it has a length, a null pointer too —
 /// `EFAULT` where nothing is mapped there (V2-4).
-pub(super) fn read_msg<M: Mem>(
+pub(super) fn read_msg<M: Mem, F: AsRawFd>(
     m: &M,
-    mut pass: impl FnMut(i32) -> Result<OwnedFd, i32>,
+    mut pass: impl FnMut(i32) -> Result<F, i32>,
     at: u64,
     datagram: bool,
-) -> Result<Msg, Unsent> {
+) -> Result<Msg<F>, Unsent> {
     let h = m.read(at, MSGHDR)?;
     let word = |o: usize| u64::from_ne_bytes(h[o..o + 8].try_into().unwrap_or_default());
     let (name_at, name_len) =

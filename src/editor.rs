@@ -7510,7 +7510,6 @@ mod tests {
     #[test]
     fn stopping_claudes_command_stops_its_containers() {
         use serde_json::json;
-        use std::os::unix::fs::PermissionsExt;
         let scratch = crate::scratch::Scratch::new("run-containers");
         let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("bin")).unwrap();
@@ -7532,8 +7531,7 @@ mod tests {
              '%s\\t%s\\n' '{prefix}-checks' '2026-10-08 21:17:03 +0900 KST'\nexit 0\n",
             asked.display()
         );
-        std::fs::write(dir.join("bin/docker"), script).unwrap();
-        std::fs::set_permissions(dir.join("bin/docker"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::write_script(&dir.join("bin/docker"), &script);
         // (the run as tarae started it — the engine its line named — its programs found on the stand-in's PATH)
         let r = ed.session.task_run.as_mut().unwrap();
         r.containers.as_mut().unwrap().find_on(dir.join("bin").as_os_str());

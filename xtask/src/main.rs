@@ -59,8 +59,8 @@ fn main() {
         Some("vendor-grammars") => vendor_grammars(),
         Some("shot") => shot::run(&args[1..]),
         Some("perf") => perf::run(&args[1..]),
-        // (`prune`: the target volumes no checkout uses; `--all`: every volume and image of the repository's —
-        // linux.rs)
+        // (`prune`: the target volumes no checkout uses, and landed checkouts' with `--yes`; `--all`: every volume
+        // and image of the repository's — linux.rs)
         Some("linux") if args.get(1).is_some_and(|a| a == "prune") => linux::prune_cmd(&args[2..]),
         Some("linux") => linux::run(&args[1..]),
         Some("deb") => deb::run(&args[1..]),

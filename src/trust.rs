@@ -290,13 +290,24 @@ impl Store {
     }
 }
 
-/// Keeps an answer (on a worker — read, change, write; the file is tiny).
+/// Keeps an answer (on a worker — read, change, write; the file is tiny) — under the lock beside it: two answers
+/// kept side by side (two cards answered at once, two taraes) each read what the other hadn't written yet, and
+/// the later write lost the other's (`a_change_answered_before_restarts_claude_without_a_card` on Linux: the
+/// card's `n` and the test's own answer).
 pub fn record(path: PathBuf, file: PathBuf, hash: Digest, trusted: bool) -> Result<(), String> {
-    let mut store = Store::read(Some(&path));
-    store.answer(&file, hash, trusted);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    // (beside it: the file itself is replaced by each write, a new inode, so it can't hold one)
+    let lock = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).truncate(false).write(true).mode(0o600);
+        o.open(path.with_extension("lock")).map_err(|e| e.to_string())?
+    };
+    lock.lock().map_err(|e| e.to_string())?;
+    let mut store = Store::read(Some(&path));
+    store.answer(&file, hash, trusted);
     let body = store.to_json();
     crate::disk::write_atomic(&path, |w| std::io::Write::write_all(w, body.as_bytes()))
         .map_err(|e| e.to_string())
@@ -431,6 +442,33 @@ mod tests {
         record(path.clone(), file.clone(), v(0xab), false).unwrap();
         assert_eq!(Store::read(Some(&path)).state(&file, v(0xab)), State::Ignored);
         assert_eq!(Store::read(Some(&dir.join("none.json"))), Store::default());
+    }
+
+    /// Answers kept side by side are all kept: each read-change-write under the lock beside the file — without
+    /// it, one read what another hadn't written yet and the later write lost the other's answer.
+    #[test]
+    fn answers_kept_at_once_are_all_kept() {
+        let scratch = crate::scratch::Scratch::new("trust-at-once");
+        let path = scratch.join("trust.json");
+        let file = |t: u8, i: u8| PathBuf::from(format!("/tarae-test-{t}-{i}/.tarae.toml"));
+        let threads: Vec<_> = (0..4u8)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..25u8 {
+                        record(path.clone(), file(t, i), v(i), true).unwrap();
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        let s = Store::read(Some(&path));
+        let lost: Vec<PathBuf> = (0..4u8)
+            .flat_map(|t| (0..25u8).map(move |i| (t, i)))
+            .filter(|&(t, i)| s.state(&file(t, i), v(i)) != State::Trusted)
+            .map(|(t, i)| file(t, i))
+            .collect();
+        assert!(lost.is_empty(), "{} of 100 answers lost: {lost:?}", lost.len());
     }
 
     /// A file answered before its folder is made, named through a link (as `/tmp` is `/private/tmp`), is

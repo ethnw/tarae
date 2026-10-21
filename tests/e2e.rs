@@ -1056,10 +1056,25 @@ fn counting_features_wakes_nothing_and_is_written_at_the_end() {
             break;
         }
     }
-    let (frames, before) = (t.frames(), t.usage());
+    let (frames, before, was, threads) = (t.frames(), t.usage(), t.screen(), t.threads());
     std::thread::sleep(std::time::Duration::from_secs(2));
     let (drawn, used) = (t.frames() - frames, t.usage() - before);
-    assert!(drawn == 0 && used.switches < 30, "counting: {drawn} frames, {used:?} in 2 s");
+    // (on failure: what woke — each thread's share — and which rows a late frame changed)
+    let now = t.screen();
+    let changed: Vec<String> = was
+        .rows
+        .iter()
+        .zip(&now.rows)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, (a, b))| format!("row {i}: {a:?}\n    → {b:?}"))
+        .collect();
+    assert!(
+        drawn == 0 && used.switches < 30,
+        "counting: {drawn} frames, {used:?} in 2 s — woke:\n{}\nchanged:\n{}\n{now}",
+        woke(&threads, &t.threads()),
+        changed.join("\n")
+    );
     let path = sb.state().join("features.json");
     assert!(!path.exists(), "nothing written yet — no timer of its own");
     let said: serde_json::Value = serde_json::from_str(&t.state(&["--features", "--json"])).unwrap();
@@ -1102,9 +1117,10 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
                 break;
             }
         }
-        let (frames, before, was) = (t.frames(), t.usage(), t.screen());
+        let (frames, before, was, threads) = (t.frames(), t.usage(), t.screen(), t.threads());
         std::thread::sleep(std::time::Duration::from_secs(2));
         let (drawn, used) = (t.frames() - frames, t.usage() - before);
+        let woke = woke(&threads, &t.threads());
         // (a frame drawn: which rows it changed — what landed late)
         let now = t.screen();
         let changed: Vec<String> = was
@@ -1118,7 +1134,7 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
         // (a wake is a few switches: 14 a second came to ~100 in 2 s; at rest it's under 10)
         assert!(
             drawn == 0 && used.switches < 30,
-            "{what}: {drawn} frames, {used:?} in 2 s — changed:\n{}\n{now}",
+            "{what}: {drawn} frames, {used:?} in 2 s — woke:\n{woke}\nchanged:\n{}\n{now}",
             changed.join("\n")
         );
     };

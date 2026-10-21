@@ -291,10 +291,10 @@ pub fn language_id(lang: &str) -> &str {
 /// full path.
 pub fn find_server(lang: &str, config: &LspConfig) -> Option<ServerSpec> {
     let all = candidates(lang, config);
-    if let Some(s) = all.iter().find(|s| on_path(&s.command)) {
+    if let Some(s) = all.iter().find(|s| findable(s, config)) {
         return Some(s.clone());
     }
-    all.into_iter().filter(|s| !s.command.contains('/')).find_map(|mut s| {
+    all.into_iter().filter(|s| !s.command.contains('/') && test_named(s, config)).find_map(|mut s| {
         s.command = crate::packs::installed_at(&s.command)?.display().to_string();
         Some(s)
     })
@@ -315,8 +315,35 @@ pub fn also_servers(lang: &str, config: &LspConfig) -> (Vec<ServerSpec>, Vec<Str
     let (on, off): (Vec<ServerSpec>, Vec<ServerSpec>) = also_names(lang, config)
         .into_iter()
         .filter_map(|n| config.servers.get(&n).cloned().or_else(|| default_spec(&n)))
-        .partition(|s| on_path(&s.command));
+        .partition(|s| findable(s, config));
     (on, off.into_iter().map(|s| s.name).collect())
+}
+
+/// A server that may start: on PATH — and, in tests, one the test's own config names (`test_named`).
+fn findable(s: &ServerSpec, config: &LspConfig) -> bool {
+    test_named(s, config) && on_path(&s.command)
+}
+
+/// Tests find only the servers their config names (a fake: `[lsp.<name>] command = "sh"`), never a pack's
+/// installed here — taplo fetched its schema catalog from the network, rust-analyzer runs cargo — as CI, with
+/// none installed, always found. (`Client::start` refuses a pack's program whatever names it.)
+fn test_named(s: &ServerSpec, config: &LspConfig) -> bool {
+    !cfg!(test) || config.servers.contains_key(&s.name)
+}
+
+/// Tests: a pack server's own program is never started, whatever config names it (`test_named` keeps them from
+/// being found) — the error says what to configure instead.
+#[cfg(test)]
+fn refused_in_tests(spec: &ServerSpec) -> Option<String> {
+    let program = |c: &str| Path::new(c).file_name().map(std::ffi::OsStr::to_os_string);
+    let packs = &crate::languages::get().servers;
+    packs.iter().any(|s| program(&s.command) == program(&spec.command)).then(|| {
+        format!(
+            "a unit test starts no real language server ({}: it may reach the network) — give the test a fake: \
+             [lsp.{}] command = \"sh\", args = [\"-c\", \"cat > /dev/null\"]",
+            spec.command, spec.name
+        )
+    })
 }
 
 /// The names of the servers that start beside the main one for `lang` (`[lang.<lang>] also`, else its
@@ -821,6 +848,10 @@ impl Client {
         events: crate::event::Tx,
     ) -> Result<Client, String> {
         let root = roots.first().ok_or("no folder")?.as_path();
+        #[cfg(test)]
+        if let Some(why) = refused_in_tests(spec) {
+            return Err(why);
+        }
         // (the descriptor limit tarae started with — what it builds and runs inherits it: `nofile`)
         let mut child = crate::nofile::command(&spec.command, Some(root))
             .args(&spec.args)

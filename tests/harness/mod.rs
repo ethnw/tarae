@@ -594,6 +594,11 @@ impl Term {
         usage(self.child.id())
     }
 
+    /// What each of tarae's threads has done so far (`threads`) — two of them apart say which woke (`woke`).
+    pub fn threads(&self) -> Vec<Thread> {
+        threads(self.child.id())
+    }
+
     /// tarae's process id — for a look at it from outside (`heap`, `vmmap`).
     pub fn pid(&self) -> u32 {
         self.child.id()
@@ -881,6 +886,91 @@ impl std::ops::Sub for Usage {
             footprint: self.footprint,
         }
     }
+}
+
+/// One thread of a process: its id, its name, and what it's done so far — context switches on Linux, CPU time
+/// in µs on macOS (its thread info counts no switches).
+#[derive(Clone, Debug)]
+pub struct Thread {
+    pub id: u64,
+    pub name: String,
+    pub done: u64,
+}
+
+/// What `Thread.done` counts here.
+pub const THREAD_DONE: &str = if cfg!(target_os = "macos") { "µs of CPU" } else { "switches" };
+
+/// The threads that did something between `before` and `after` (new ones too), busiest first, a line each —
+/// for an idle test's failure: what woke.
+pub fn woke(before: &[Thread], after: &[Thread]) -> String {
+    let mut did: Vec<(u64, String)> = after
+        .iter()
+        .filter_map(|t| {
+            let was = before.iter().find(|b| b.id == t.id).map_or(0, |b| b.done);
+            let n = t.done.saturating_sub(was);
+            (n > 0).then(|| (n, format!("{} ({})", t.name, t.id)))
+        })
+        .collect();
+    did.sort_by_key(|d| std::cmp::Reverse(d.0));
+    let lines: Vec<String> = did.iter().map(|(n, t)| format!("  {t}: {n} {THREAD_DONE}")).collect();
+    match lines.is_empty() {
+        true => "  no thread did anything".into(),
+        false => lines.join("\n"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // (libc's mach_timebase_info)
+pub fn threads(pid: u32) -> Vec<Thread> {
+    // (sys/proc_info.h's — not in libc)
+    const PROC_PIDLISTTHREADS: libc::c_int = 6;
+    let mut ids = vec![0u64; 1024];
+    // SAFETY: a buffer of the size given, which the call only fills in; then plain out-structs the same way.
+    unsafe {
+        let size = (ids.len() * 8) as libc::c_int;
+        let n = libc::proc_pidinfo(pid as i32, PROC_PIDLISTTHREADS, 0, ids.as_mut_ptr().cast(), size);
+        ids.truncate(n.max(0) as usize / 8);
+        let mut tb = libc::mach_timebase_info { numer: 0, denom: 0 };
+        libc::mach_timebase_info(&mut tb);
+        ids.iter()
+            .filter_map(|&id| {
+                let mut info: libc::proc_threadinfo = std::mem::zeroed();
+                let size = std::mem::size_of::<libc::proc_threadinfo>() as libc::c_int;
+                let got = libc::proc_pidinfo(
+                    pid as i32,
+                    libc::PROC_PIDTHREADINFO,
+                    id,
+                    (&raw mut info).cast(),
+                    size,
+                );
+                (got == size).then(|| {
+                    let name =
+                        std::ffi::CStr::from_ptr(info.pth_name.as_ptr()).to_string_lossy().into_owned();
+                    let ticks = (info.pth_user_time + info.pth_system_time) as u128;
+                    let micros = ticks * tb.numer as u128 / tb.denom.max(1) as u128 / 1000;
+                    Thread { id, name, done: micros as u64 }
+                })
+            })
+            .collect()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn threads(pid: u32) -> Vec<Thread> {
+    let tasks = fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten();
+    tasks
+        .filter_map(|task| {
+            let id = task.file_name().to_str()?.parse().ok()?;
+            let name = fs::read_to_string(task.path().join("comm")).ok()?.trim().to_string();
+            let status = fs::read_to_string(task.path().join("status")).ok()?;
+            let done = status
+                .lines()
+                .filter(|l| l.contains("ctxt_switches"))
+                .filter_map(|l| l.split_whitespace().last()?.parse::<u64>().ok())
+                .sum();
+            Some(Thread { id, name, done })
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]

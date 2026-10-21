@@ -97,17 +97,29 @@ pub(crate) fn rights(fds: &[i32]) -> Vec<u8> {
     cmsg(SOL_SOCKET, SCM_RIGHTS, &fds.iter().flat_map(|f| f.to_ne_bytes()).collect::<Vec<u8>>())
 }
 
-/// The run's descriptors a test passes (`Served::passed` stands in): `0..8` are, each a new descriptor of tarae's
-/// (one of `/dev/null`); any other `EBADF`.
-pub(crate) fn passer(numbers: &mut Vec<(i32, i32)>) -> impl FnMut(i32) -> Result<OwnedFd, i32> + '_ {
-    let null = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+/// A descriptor of tarae's as a test hands it out: its number only, no descriptor held — a test passing hundreds
+/// (`past_scm_max_fd_descriptors_none_more_is_taken`: 253, then 200 more) held real ones, and beside every other
+/// test's the binary ran out of them (EMFILE, once in a `--userns` run).
+#[derive(Debug, PartialEq)]
+pub(crate) struct Number(i32);
+
+impl AsRawFd for Number {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.0
+    }
+}
+
+/// The run's descriptors a test passes (`Served::passed` stands in): `0..8` are, each a new number of tarae's
+/// (from 1000 on, `Number`); any other `EBADF`.
+pub(crate) fn passer(numbers: &mut Vec<(i32, i32)>) -> impl FnMut(i32) -> Result<Number, i32> + '_ {
+    let mut next = 1000;
     move |theirs| {
         if !(0..8).contains(&theirs) {
             return Err(libc::EBADF);
         }
-        let ours = null.try_clone().map_err(|_| libc::EMFILE)?;
-        numbers.push((theirs, ours.as_raw_fd()));
-        Ok(ours)
+        next += 1;
+        numbers.push((theirs, next));
+        Ok(Number(next))
     }
 }
 
@@ -312,7 +324,7 @@ pub(crate) fn kernel(m: &Fake, at: u64, datagram: bool) -> (Vec<(u64, usize)>, R
 fn apart(
     m: &Fake,
     at: u64,
-    got: &Result<Msg, Unsent>,
+    got: &Result<Msg<Number>, Unsent>,
     kernel: &Result<Read, Refused>,
 ) -> Option<&'static str> {
     let h = m.peek(at, MSGHDR).ok()?;

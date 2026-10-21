@@ -55,6 +55,23 @@ impl Scratch {
     }
 }
 
+/// A test's script at `path`, executable — written by a child `sh`, never opened for writing by the test binary:
+/// Linux won't exec a file any process holds open for writing, and every child another test forks holds a copy of
+/// this process's descriptors until its own exec (ETXTBSY: `stopping_claudes_command_stops_its_containers` once,
+/// its stand-in `docker` busy, the engine never asked). A child's own descriptors no fork of ours copies.
+pub fn write_script(path: &Path, text: &str) {
+    use std::io::Write as _;
+    let mut sh = std::process::Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("/bin/sh");
+    sh.stdin.take().expect("its stdin").write_all(text.as_bytes()).expect("the script to sh");
+    let status = sh.wait().expect("sh");
+    assert!(status.success(), "{} not written: {status}", path.display());
+}
+
 impl std::ops::Deref for Scratch {
     type Target = Path;
     fn deref(&self) -> &Path {

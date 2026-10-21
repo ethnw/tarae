@@ -18,7 +18,9 @@
 //! build (its e2e ran another's `target/debug/tarae`). Each run drops this machine's volumes whose checkout is
 //! gone — its whole repository deleted too (`prunable`); `cargo xtask linux prune` does that now, and drops
 //! the old shared `tarae-target-<pin>` too — tarae's `session.ended` runs it when a session's checkout is
-//! removed. "This machine" is tarae's own id for it (`machine_id`: random, made once in tarae's data folder,
+//! removed. It lists the targets of checkouts that landed too (`landed`: nothing changed, the branch in the
+//! main branch — sessions brought in but not ended held 34 GB of colima's 30 GB disk, 2026-10-17), dropped only
+//! with `--yes`, each said. "This machine" is tarae's own id for it (`machine_id`: random, made once in tarae's data folder,
 //! copied into the repository's git folder) — a Docker other machines use too (`DOCKER_HOST`) holds their
 //! checkouts' targets, whose paths aren't here: another id's volume is never judged.
 //!
@@ -1155,8 +1157,9 @@ fn say_sizes(disk: Option<Disk>) {
     }
 }
 
-/// `cargo xtask linux prune [--mine]`: the target volumes no checkout uses, the old shared one too.
-pub fn prune(mine: bool) -> Result<()> {
+/// `cargo xtask linux prune [--yes] [--mine]`: the target volumes no checkout uses, the old shared one too — and
+/// those of checkouts that landed (`landed`), listed, dropped only with `--yes`.
+pub fn prune(mine: bool, yes: bool) -> Result<()> {
     if let Err(why) = reachable(&mut Command::new("docker")) {
         println!("{}", skipped(&why));
         return Ok(());
@@ -1165,7 +1168,35 @@ pub fn prune(mine: bool) -> Result<()> {
     let local = judged_local(mine);
     let (listed, gone) = prune_volumes(machine.as_deref().ok(), local.is_ok(), true);
     if gone.is_empty() {
-        println!("no target volume to drop — each of this machine's is a checkout's that's there");
+        println!("no gone checkout's target volume to drop");
+    }
+    let (landed, untold) =
+        landed_targets(&listed, machine.as_deref().ok(), local.is_ok(), &gone, &root(), landed);
+    for line in untold {
+        println!("{line}");
+    }
+    if !landed.is_empty() {
+        println!(
+            "{} the target volumes of checkouts that landed:",
+            if yes { "dropping" } else { "would drop" }
+        );
+        for (name, checkout, why) in &landed {
+            println!("  volume {name}  ({checkout} — {why})");
+        }
+        match yes {
+            false => println!(
+                "run again with --yes to drop these {} — a checkout's next run builds again",
+                landed.len()
+            ),
+            true => {
+                for (name, checkout, _) in &landed {
+                    match Command::new("docker").args(["volume", "rm", name]).output() {
+                        Ok(o) if o.status.success() => eprintln!("dropped {name} ({checkout} landed)"),
+                        _ => eprintln!("kept {name} for now: Docker didn't drop it (a run using it?)"),
+                    }
+                }
+            }
+        }
     }
     let notes = prune_notes(
         &listed,
@@ -1349,20 +1380,119 @@ fn prune_all_with(
     Ok(())
 }
 
-/// `cargo xtask linux prune [--all [--yes]] [--mine]` — `--mine`: this Docker's volumes without a machine id
-/// (and the images) are this machine's (`local`); `--yes`: `--all` drops what it lists.
+/// `cargo xtask linux prune [--all] [--yes] [--mine]` — `--mine`: this Docker's volumes without a machine id
+/// (and the images) are this machine's (`local`); `--yes`: what it lists is dropped (`--all`'s, or the landed
+/// checkouts' targets).
 pub fn prune_cmd(args: &[String]) -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask linux prune [--all [--yes]] [--mine]";
-    let has = |f: &str| args.iter().any(|a| a == f);
-    if args.iter().any(|a| !["--all", "--yes", "--mine"].contains(&a.as_str()))
-        || (has("--yes") && !has("--all"))
-    {
+    let (all, yes, mine) = prune_args(args)?;
+    match all {
+        true => prune_all(yes, mine),
+        false => prune(mine, yes),
+    }
+}
+
+/// `prune_cmd`'s words: `--all`, `--yes`, `--mine` — any other a usage error.
+fn prune_args(args: &[String]) -> std::result::Result<(bool, bool, bool), String> {
+    const USAGE: &str = "usage: cargo xtask linux prune [--all] [--yes] [--mine]";
+    if args.iter().any(|a| !["--all", "--yes", "--mine"].contains(&a.as_str())) {
         return Err(USAGE.into());
     }
-    match has("--all") {
-        true => prune_all(has("--yes"), has("--mine")),
-        false => prune(has("--mine")),
+    let has = |f: &str| args.iter().any(|a| a == f);
+    Ok((has("--all"), has("--yes"), has("--mine")))
+}
+
+/// A checkout whose work is all in its base: its target volume is only a build to make again.
+#[derive(Debug, PartialEq)]
+enum Landed {
+    /// Landed: why, in words (`s1 is in main, nothing changed`)
+    In(String),
+    /// Not: work of its own there, or the base's own checkout
+    Not,
+    /// Can't tell (git couldn't read it — tarae's sandbox reads no sibling checkout): kept, said why
+    Unknown(String),
+}
+
+/// Whether `checkout` landed, as `:session-end` reads nothing to lose (`worktree::Ending::quiet`): nothing
+/// changed (`git status`, untracked files too) and its HEAD in the base — the repository's main branch, as
+/// tarae's sessions find it (`origin/HEAD`'s, else `main`, else `master`). The base's own checkout never (its
+/// target is the base's); a squash merge's branch reads as not landed (its commits aren't the base's).
+fn landed(checkout: &Path) -> Landed {
+    // (read only: no optional locks — status would refresh the index — and no fsmonitor started)
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["-c", "core.fsmonitor=false"])
+            .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    let text = |args: &[&str]| match git(args) {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("git failed").to_string()),
+        Err(e) => Err(format!("git: {e}")),
+    };
+    let local = |b: &str| text(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{b}")]).is_ok();
+    let remote = text(&["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .ok()
+        .and_then(|r| r.strip_prefix("origin/").map(str::to_string));
+    let Some(base) = remote.into_iter().chain(["main".into(), "master".into()]).find(|b| local(b)) else {
+        return Landed::Unknown("no main branch there (origin/HEAD's, main or master)".into());
+    };
+    let branch = text(&["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    if branch.as_deref() == Some(base.as_str()) {
+        return Landed::Not;
     }
+    match text(&["status", "--porcelain", "--untracked-files=all"]) {
+        Ok(s) if !s.is_empty() => return Landed::Not,
+        Ok(_) => {}
+        Err(why) => return Landed::Unknown(why),
+    }
+    match git(&["merge-base", "--is-ancestor", "HEAD", &format!("refs/heads/{base}")])
+        .map(|o| o.status.code())
+    {
+        Ok(Some(0)) => {
+            let of = branch.unwrap_or_else(|| "its HEAD".into());
+            Landed::In(format!("{of} is in {base}, nothing changed"))
+        }
+        Ok(Some(1)) => Landed::Not,
+        Ok(_) => Landed::Unknown(format!("git merge-base couldn't compare it with {base}")),
+        Err(e) => Landed::Unknown(format!("git: {e}")),
+    }
+}
+
+/// The target volumes of checkouts that landed (`landed`): this machine's, as `prunable` judges whose, their
+/// checkout there, not dropped already (`gone`), never the checkout running this (`this`). Each (name, checkout,
+/// why it landed) — and a line for each checkout it couldn't tell of (kept).
+fn landed_targets(
+    volumes: &[Volume],
+    ours: Option<&str>,
+    local: bool,
+    gone: &[String],
+    this: &Path,
+    landed: impl Fn(&Path) -> Landed,
+) -> (Vec<(String, String, String)>, Vec<String>) {
+    let (mut found, mut untold) = (Vec::new(), Vec::new());
+    for v in volumes {
+        let judged = match whose(v, ours) {
+            Whose::Ours => true,
+            Whose::NoId => local,
+            Whose::Other => false,
+        };
+        let at = Path::new(&v.checkout);
+        if !judged || v.checkout.is_empty() || gone.contains(&v.name) || at == this {
+            continue;
+        }
+        match landed(at) {
+            Landed::In(why) => found.push((v.name.clone(), v.checkout.clone(), why)),
+            Landed::Not => {}
+            Landed::Unknown(why) => {
+                untold.push(format!("kept {}: can't tell whether {} landed ({why})", v.name, v.checkout))
+            }
+        }
+    }
+    (found, untold)
 }
 
 /// Whether a volume's checkout is there — or can't be told: only a folder that's surely not there is gone. A
@@ -2239,6 +2369,97 @@ mod tests {
     /// `prune --all` only lists — what it would drop and how much — unless `--yes`: no `docker volume rm` or
     /// `image rm` runs without it (the reviewer: it dropped right after printing, tens of GB with no chance to
     /// stop). A stand-in `docker` here answers and writes down what it's asked.
+    /// `prune` offers the targets of checkouts that landed: this machine's (one without an id with `--mine`),
+    /// never another machine's, the checkout running it, nor one dropped as gone; one it can't tell of is kept, said.
+    #[test]
+    fn landed_checkouts_targets_are_offered_and_only_ours() {
+        let v = |name: &str, checkout: &str, machine: &str| Volume {
+            name: name.into(),
+            checkout: checkout.into(),
+            machine: machine.into(),
+        };
+        let volumes = [
+            v("tarae-target-1-a", "/w/landed", "m1"),
+            v("tarae-target-1-b", "/w/working", "m1"),
+            v("tarae-target-1-c", "/w/unread", "m1"),
+            v("tarae-target-1-d", "/w/landed", "other"),
+            v("tarae-target-1-e", "/w/landed-no-id", ""),
+            v("tarae-target-1-f", "/w/this", "m1"),
+            v("tarae-target-1-g", "/w/gone", "m1"),
+            v("tarae-target-1.99", "", ""),
+        ];
+        let landed = |p: &Path| match p.to_str().unwrap() {
+            "/w/landed" | "/w/landed-no-id" | "/w/this" | "/w/gone" => Landed::In("s is in main".into()),
+            "/w/unread" => Landed::Unknown("Operation not permitted".into()),
+            _ => Landed::Not,
+        };
+        let gone = ["tarae-target-1-g".to_string()];
+        let names = |local: bool| {
+            let (found, untold) =
+                landed_targets(&volumes, Some("m1"), local, &gone, Path::new("/w/this"), landed);
+            (found.into_iter().map(|f| f.0).collect::<Vec<_>>(), untold)
+        };
+        let (found, untold) = names(false);
+        assert_eq!(
+            found,
+            ["tarae-target-1-a"],
+            "ours, landed — not another machine's, this checkout's, a gone one's"
+        );
+        assert_eq!(
+            untold,
+            ["kept tarae-target-1-c: can't tell whether /w/unread landed (Operation not permitted)"]
+        );
+        assert_eq!(names(true).0, ["tarae-target-1-a", "tarae-target-1-e"], "--mine: one without an id too");
+    }
+
+    /// `landed` on a real repository of the test's own (never this one): a branch with nothing of its own, and one
+    /// merged, landed; one with a commit, or a file not committed, not; the base's own checkout never.
+    #[test]
+    fn a_checkout_landed_when_its_work_is_all_in_main() {
+        let dir = std::env::temp_dir().join(format!(
+            "tarae-xtask-landed-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        // (made new — never one that's there, cleared)
+        std::fs::create_dir(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let main = dir.join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let wt = |name: &str| {
+            let at = dir.join(name);
+            git(&main, &["worktree", "add", "-q", "-b", name, at.to_str().unwrap()]);
+            at
+        };
+        let (fresh, merged, ahead, dirty) = (wt("fresh"), wt("merged"), wt("ahead"), wt("dirty"));
+        git(&merged, &["commit", "-q", "--allow-empty", "-m", "merged's"]);
+        git(&main, &["merge", "-q", "--ff-only", "merged"]);
+        git(&ahead, &["commit", "-q", "--allow-empty", "-m", "its own"]);
+        std::fs::write(dirty.join("notes.md"), "not committed\n").unwrap();
+        assert_eq!(landed(&fresh), Landed::In("fresh is in main, nothing changed".into()));
+        assert_eq!(landed(&merged), Landed::In("merged is in main, nothing changed".into()));
+        assert_eq!(landed(&ahead), Landed::Not, "a commit of its own");
+        assert_eq!(landed(&dirty), Landed::Not, "a file not committed");
+        assert_eq!(landed(&main), Landed::Not, "the base's own checkout");
+        assert!(matches!(landed(&dir.join("none")), Landed::Unknown(_)), "no checkout there");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn prune_all_drops_nothing_without_yes() {
         use std::os::unix::fs::PermissionsExt;
@@ -2270,7 +2491,9 @@ mod tests {
             "{a}"
         );
         assert_eq!(drops(&a), 2, "{a}");
-        assert!(prune_cmd(&["--yes".to_string()]).unwrap_err().starts_with("usage:"), "--yes alone");
+        let args = |a: &[&str]| prune_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(args(&["--yes"]), Ok((false, true, false)), "--yes alone: the landed checkouts' targets");
+        assert!(args(&["--yes", "--force"]).unwrap_err().starts_with("usage:"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
